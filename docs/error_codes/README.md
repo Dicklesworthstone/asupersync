@@ -45,6 +45,9 @@ lands.
 | ASUP-E402 | live | lab-replay | [Futurelock detected](./ASUP-E402.md) |
 | ASUP-E403 | live | lab-replay | [Lab seed nondeterminism](./ASUP-E403.md) |
 | ASUP-E501 | reserved | net-http | [HTTP deadline exhausted](./ASUP-E501.md) |
+| ASUP-E502 | live | net-http | [Web handler panic recovered](./ASUP-E502.md) |
+| ASUP-E701 | live | distributed-remote | [ATP command not implemented](./ASUP-E701.md) |
+| ASUP-E702 | live | distributed-remote | [ATP transfer listener bind failed](./ASUP-E702.md) |
 | ASUP-E901 | live | config-build | [Config invalid](./ASUP-E901.md) |
 | ASUP-E902 | live | config-build | [Semantic lint ambient determinism](./ASUP-E902.md) |
 | ASUP-E903 | live | config-build | [Semantic lint await holding resource](./ASUP-E903.md) |

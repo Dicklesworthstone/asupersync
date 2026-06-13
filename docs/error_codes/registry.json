@@ -526,6 +526,67 @@
       "source_refs": []
     },
     {
+      "code": "ASUP-E502",
+      "name": "web-handler-panic-recovered",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A web handler panicked; CatchPanicMiddleware recovered it into a 500 response.",
+      "probable_causes": [
+        "A handler or extractor hit an unwrap/expect or index out of bounds on request data.",
+        "Application logic panicked on an unexpected state instead of returning an error response."
+      ],
+      "remediation": [
+        "Find the panic message and backtrace in the server log line tagged [ASUP-E502]; the client response intentionally omits details.",
+        "Fix the handler to return an error Response (4xx/5xx) for the failing input instead of panicking.",
+        "Keep CatchPanicMiddleware (or Router::layer(CatchPanicLayer::new())) outermost so panics cannot tear down the connection or worker."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E502.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "src/web/middleware.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E701",
+      "name": "atp-not-implemented",
+      "area": "distributed-remote",
+      "status": "live",
+      "summary": "An ATP CLI command without a real wired implementation was invoked and failed closed.",
+      "probable_causes": [
+        "The invoked ATP subcommand has no transport or daemon backing yet.",
+        "The operation needs durable transfer state from a running atpd that the CLI cannot query yet."
+      ],
+      "remediation": [
+        "Use atp send / atp serve (or the standalone atp binary) for real verified transfers.",
+        "Use --dry-run where supported to preview plans without claiming execution."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E701.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "src/bin/asupersync.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E702",
+      "name": "atp-transfer-listener-bind-failed",
+      "area": "distributed-remote",
+      "status": "live",
+      "summary": "atpd could not bind its configured transfer port and refused to start.",
+      "probable_causes": [
+        "Another process already holds the configured transfer port.",
+        "The bind address is not local to this host or needs privileges."
+      ],
+      "remediation": [
+        "Stop the conflicting listener or pick another port with atpd start --bind.",
+        "Verify the address belongs to a local interface and is unprivileged."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E702.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "src/bin/atpd.rs"
+      ]
+    },
+    {
       "code": "ASUP-E901",
       "name": "config-invalid",
       "area": "config-build",

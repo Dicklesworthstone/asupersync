@@ -884,6 +884,10 @@ fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+// Retained for unit-test coverage of the chunking contract; the fake progress
+// loops that consumed this were removed (br-asupersync-qk02uw). Real transfer
+// progress streaming is a follow-up on the transport.
+#[allow(dead_code)]
 fn progress_chunks(total_bytes: u64) -> Vec<u64> {
     if total_bytes == 0 {
         return vec![0];
@@ -1265,6 +1269,10 @@ impl Outputtable for AtpMirrorResultOutput {
     }
 }
 
+// Retained as the output contract for daemon-backed share tokens; `atp share`
+// fails closed until a daemon can actually serve a minted code
+// (br-asupersync-qk02uw).
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpShareOutput {
     source: String,
@@ -1281,6 +1289,7 @@ struct AtpShareOutput {
     revocation_url: Option<String>,
 }
 
+#[allow(dead_code)]
 impl AtpShareOutput {
     fn new(args: &AtpShareArgs, share_code: String) -> Self {
         let revocation_url = if args.revocable {
@@ -1315,6 +1324,9 @@ impl AtpShareOutput {
     }
 }
 
+// Retained as the output contract for a future real pairing handshake;
+// `atp pair` fails closed today (br-asupersync-qk02uw).
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpPairOutput {
     command: String,
@@ -1327,6 +1339,7 @@ struct AtpPairOutput {
     transcript_binding: Option<String>,
 }
 
+#[allow(dead_code)]
 impl AtpPairOutput {
     fn initiate(
         session_id: String,
@@ -1648,12 +1661,17 @@ impl Outputtable for AtpServeOutput {
     }
 }
 
+// The four AtpInbox*Output structs below are retained as the output contract
+// for a daemon-backed staged inbox; `atp inbox` fails closed today
+// (br-asupersync-qk02uw).
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpInboxListOutput {
     transfers: Vec<String>,
     count: usize,
 }
 
+#[allow(dead_code)]
 impl AtpInboxListOutput {
     fn new(transfers: Vec<String>) -> Self {
         let count = transfers.len();
@@ -1679,6 +1697,7 @@ impl Outputtable for AtpInboxListOutput {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpInboxAcceptOutput {
     transfer_id: String,
@@ -1686,6 +1705,7 @@ struct AtpInboxAcceptOutput {
     status: String,
 }
 
+#[allow(dead_code)]
 impl AtpInboxAcceptOutput {
     fn new(transfer_id: &str, destination: &str) -> Self {
         Self {
@@ -1709,6 +1729,7 @@ impl Outputtable for AtpInboxAcceptOutput {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpInboxRejectOutput {
     transfer_id: String,
@@ -1716,6 +1737,7 @@ struct AtpInboxRejectOutput {
     status: String,
 }
 
+#[allow(dead_code)]
 impl AtpInboxRejectOutput {
     fn new(transfer_id: &str, reason: &str) -> Self {
         Self {
@@ -1739,11 +1761,13 @@ impl Outputtable for AtpInboxRejectOutput {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpInboxClearOutput {
     cleared_count: usize,
 }
 
+#[allow(dead_code)]
 impl AtpInboxClearOutput {
     fn new(cleared_count: usize) -> Self {
         Self { cleared_count }
@@ -1828,6 +1852,9 @@ impl Outputtable for AtpCancelOutput {
 
 // Progress and explain structures for ATP-I3
 
+// Retained for unit-test coverage of the progress format; the fake sleep-loop
+// progress streams that constructed this were removed (br-asupersync-qk02uw).
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpProgressUpdate {
     transfer_id: String,
@@ -1843,6 +1870,7 @@ struct AtpProgressUpdate {
     timestamp_micros: u64,
 }
 
+#[allow(dead_code)]
 impl AtpProgressUpdate {
     fn new(transfer_id: &str, object_name: &str, received: u64, total: u64) -> Self {
         let now = std::time::SystemTime::now()
@@ -1899,10 +1927,9 @@ impl Outputtable for AtpProgressUpdate {
         };
 
         format!(
-            "{} {}: {} [{}/{}] ({}%) {}",
+            "{} {}: [{}/{}] ({}%) {}",
             self.stage,
             self.object_name,
-            format_bytes(self.bytes_received),
             format_bytes(self.bytes_received),
             format_bytes(self.total_bytes),
             percentage,
@@ -1911,6 +1938,11 @@ impl Outputtable for AtpProgressUpdate {
     }
 }
 
+// AtpExplainReport and the Atp*Decisions structs below carried HARDCODED
+// example numbers (QUIC, 15ms RTT, 0.1% loss) that were never measured; the
+// CLI no longer emits them. Retained as the report shape for real decision
+// telemetry once the transport records it (br-asupersync-qk02uw).
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpExplainReport {
     transfer_id: String,
@@ -1921,6 +1953,7 @@ struct AtpExplainReport {
     timestamp_micros: u64,
 }
 
+#[allow(dead_code)]
 impl AtpExplainReport {
     fn new(transfer_id: &str) -> Self {
         let now = std::time::SystemTime::now()
@@ -1968,6 +2001,7 @@ struct AtpPathDecisions {
     migration_count: u32,
 }
 
+#[allow(dead_code)]
 impl AtpPathDecisions {
     fn new() -> Self {
         Self {
@@ -1993,6 +2027,7 @@ impl AtpPathDecisions {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpSchedulerDecisions {
     active_streams: u16,
@@ -2002,6 +2037,7 @@ struct AtpSchedulerDecisions {
     priority_adjustments: u32,
 }
 
+#[allow(dead_code)]
 impl AtpSchedulerDecisions {
     fn new() -> Self {
         Self {
@@ -2023,6 +2059,7 @@ impl AtpSchedulerDecisions {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpRepairDecisions {
     repair_mode: String,
@@ -2031,6 +2068,7 @@ struct AtpRepairDecisions {
     repair_bandwidth_used: u64,
 }
 
+#[allow(dead_code)]
 impl AtpRepairDecisions {
     fn new() -> Self {
         Self {
@@ -2049,6 +2087,7 @@ impl AtpRepairDecisions {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, serde::Serialize)]
 struct AtpDiskDecisions {
     write_lag_micros: u64,
@@ -2057,6 +2096,7 @@ struct AtpDiskDecisions {
     fsync_policy: String,
 }
 
+#[allow(dead_code)]
 impl AtpDiskDecisions {
     fn new() -> Self {
         Self {
@@ -3868,7 +3908,11 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
     let existing_destination_paths = scan_existing_paths(&destination_root)?;
     let storage_evidence = get_storage_evidence(&destination_root)?;
     let make_input = |consent_source| ReceivePreflightInput {
-        sender_identity: "peer-alpha".to_string(),
+        // `atp get` in v1 is a LOCAL receive-policy preflight: the transfer
+        // reference is a local path and no peer is contacted. The sender label
+        // is an explicit preview placeholder, not a real peer identity (the
+        // old "peer-alpha" value read like real provenance; br-asupersync-qk02uw).
+        sender_identity: "local-preflight-preview".to_string(),
         grant_id: None,
         capability_scope: Some("transfer-scope".to_string()),
         manifest_root: &manifest_root,
@@ -3940,40 +3984,13 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
         }
     }
 
-    // Show explain report if requested
-    if args.explain {
-        let explain_report = AtpExplainReport::new(&args.transfer_id);
-        output
-            .write(&explain_report)
-            .map_err(output_write_error("ATP get explain report"))?;
-    }
-
-    // Show progress updates if requested
-    if args.progress {
-        let total_bytes = plan.object_graph_summary.expected_bytes;
-        for chunk in progress_chunks(total_bytes) {
-            let progress =
-                AtpProgressUpdate::new(&args.transfer_id, &plan.manifest_root, chunk, total_bytes);
-            output
-                .write(&progress)
-                .map_err(output_write_error("ATP get progress"))?;
-
-            if chunk < total_bytes {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-        }
-    }
-
-    let msg = AtpGetStatusMessage::new(&format!(
-        "Prepared transfer {} for destination {}",
-        args.transfer_id,
-        destination_root.display()
-    ));
-    output
-        .write(&msg)
-        .map_err(output_write_error("ATP get execution message"))?;
-
-    Ok(())
+    // Plan evaluation is real (local policy/preflight machinery), but actually
+    // pulling a transfer by id requires daemon-tracked transfer state that is
+    // not wired in v1. The old path printed fabricated progress chunks behind
+    // thread::sleep and claimed the transfer was "prepared" while moving
+    // nothing (br-asupersync-qk02uw). Fail closed after reporting the decision;
+    // use --dry-run for the honest plan preview.
+    atp_not_implemented("get")
 }
 
 fn build_cli_receive_plan(input: ReceivePreflightInput<'_>) -> Result<ReceivePlan, CliError> {
@@ -4500,17 +4517,18 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
             .write(&payload)
             .map_err(output_write_error("ATP send plan"))?;
     } else {
+        // `--explain` used to print an AtpExplainReport of hardcoded QUIC/RTT/
+        // loss numbers that were never measured. Emitting fabricated telemetry
+        // next to a real transfer is misleading; fail closed before touching
+        // the network until real decision reporting is wired.
+        if args.explain {
+            return atp_not_implemented("send --explain");
+        }
+
         // Real ATP-over-TCP transfer (br-asupersync-qk02uw). This moves actual
         // verified bytes to the peer and fails closed on an unreachable target
         // or a receiver integrity rejection — no simulated progress.
         let report = run_real_atp_send(&args.source, &args.target)?;
-
-        if args.explain {
-            let explain_report = AtpExplainReport::new(&report.transfer_id);
-            output
-                .write(&explain_report)
-                .map_err(output_write_error("ATP send explain report"))?;
-        }
 
         let payload = AtpSendResultOutput::from_report(&args.source, &args.target, &report);
         output
@@ -4550,8 +4568,6 @@ fn atp_mirror(args: &AtpMirrorArgs, output: &mut Output) -> Result<(), CliError>
 }
 
 fn atp_share(args: &AtpShareArgs, output: &mut Output) -> Result<(), CliError> {
-    use sha2::{Digest, Sha256};
-
     // Validate source path exists
     if !args.source.exists() {
         return Err(
@@ -4573,41 +4589,29 @@ fn atp_share(args: &AtpShareArgs, output: &mut Output) -> Result<(), CliError> {
         }
     }
 
-    // Generate share code with enhanced metadata
-    let mut hasher = Sha256::new();
-    hasher.update(args.source.to_string_lossy().as_bytes());
-    hasher.update(args.expires_seconds.to_be_bytes());
-    hasher.update(args.capabilities.join(",").as_bytes());
-    let hash = hasher.finalize();
-
-    let capability_flags = args.capabilities.join(",");
-    let share_code = format!(
-        "atp://share/{:x}/caps:{}/exp:{}/pol:{}",
-        u64::from_be_bytes([
-            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]
-        ]),
-        capability_flags,
-        args.expires_seconds,
-        args.policy
-    );
-
-    let payload = AtpShareOutput::new(args, share_code);
-    output
-        .write(&payload)
-        .map_err(output_write_error("ATP share code"))?;
-    Ok(())
+    let _ = output;
+    // The old implementation minted `atp://share/...` codes from a local hash.
+    // Nothing anywhere can redeem such a code (`atp send` rejects non-host:port
+    // targets and no daemon serves shares), so emitting one fabricates a
+    // capability grant that does not exist. Fail closed until share tokens are
+    // backed by a daemon that can actually serve them.
+    atp_not_implemented("share")
 }
 
 fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
+    // The old implementation fabricated the entire pairing ceremony locally:
+    // session ids and tokens were hashes of the wall clock, `confirm` accepted
+    // any three-word phrase without contacting any peer, and `list` always
+    // printed an empty table. That is security theater — no key exchange, no
+    // peer, no session state. Fail closed until pairing is backed by a real
+    // daemon handshake (br-asupersync-qk02uw).
+    let _ = output;
     match &args.command {
         AtpPairCommand::Initiate {
-            peer_hint,
             confirmation_method,
-            timeout_seconds,
+            ..
         } => {
-            use sha2::{Digest, Sha256};
-
-            // Validate confirmation method
+            // Keep argument validation so usage errors stay precise.
             if !["visual", "audio", "manual"].contains(&confirmation_method.as_str()) {
                 return Err(
                     CliError::new("invalid_argument", "Invalid confirmation method")
@@ -4618,64 +4622,9 @@ fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
                         .exit_code(ExitCode::USER_ERROR),
                 );
             }
-
-            // Generate session ID
-            let mut hasher = Sha256::new();
-            hasher.update(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-                    .to_be_bytes(),
-            );
-            if let Some(hint) = peer_hint {
-                hasher.update(hint.as_bytes());
-            }
-            let hash = hasher.finalize();
-            let session_id = format!(
-                "pair_{:x}",
-                u64::from_be_bytes([
-                    hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]
-                ])
-            );
-
-            // Generate pairing token
-            let pairing_token = format!(
-                "atp://pair/{}/method:{}/timeout:{}",
-                session_id, confirmation_method, timeout_seconds
-            );
-
-            // Generate human-readable confirmation phrase
-            let confirmation_phrases = [
-                "Ocean Blue Mountain",
-                "Forest Green Valley",
-                "Desert Red Sunset",
-                "Arctic White Snow",
-                "Tropical Gold Beach",
-                "Urban Silver Skyline",
-                "Rural Purple Meadow",
-                "Cosmic Black Void",
-                "Rainbow Crystal Cave",
-            ];
-            let phrase_index = (hash[8] as usize) % confirmation_phrases.len();
-            let confirmation_phrase = confirmation_phrases[phrase_index].to_string();
-
-            let payload = AtpPairOutput::initiate(
-                session_id,
-                pairing_token,
-                confirmation_phrase,
-                *timeout_seconds,
-            );
-            output
-                .write(&payload)
-                .map_err(output_write_error("ATP pairing initiation"))?;
+            atp_not_implemented("pair initiate")
         }
-
-        AtpPairCommand::Confirm {
-            pairing_token,
-            confirmation_phrase,
-        } => {
-            // Validate pairing token format
+        AtpPairCommand::Confirm { pairing_token, .. } => {
             if !pairing_token.starts_with("atp://pair/") {
                 return Err(
                     CliError::new("invalid_argument", "Invalid pairing token format")
@@ -4683,42 +4632,9 @@ fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
                         .exit_code(ExitCode::USER_ERROR),
                 );
             }
-
-            // Extract session ID from token
-            let session_id = pairing_token
-                .strip_prefix("atp://pair/")
-                .and_then(|s| s.split('/').next())
-                .unwrap_or("unknown");
-
-            // Validate confirmation phrase (simplified validation)
-            if confirmation_phrase.split_whitespace().count() != 3 {
-                return Err(CliError::new(
-                    "invalid_argument",
-                    "Invalid confirmation phrase format",
-                )
-                .detail("Confirmation phrase must be three words")
-                .exit_code(ExitCode::USER_ERROR));
-            }
-
-            // Generate peer ID from successful confirmation
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(session_id.as_bytes());
-            hasher.update(confirmation_phrase.as_bytes());
-            let hash = hasher.finalize();
-            let peer_id = format!(
-                "peer_{:x}",
-                u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
-            );
-
-            let payload = AtpPairOutput::confirm(peer_id);
-            output
-                .write(&payload)
-                .map_err(output_write_error("ATP pairing confirmation"))?;
+            atp_not_implemented("pair confirm")
         }
-
         AtpPairCommand::Cancel { session_id } => {
-            // Validate session ID format
             if !session_id.starts_with("pair_") {
                 return Err(
                     CliError::new("invalid_argument", "Invalid session ID format")
@@ -4726,23 +4642,10 @@ fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
                         .exit_code(ExitCode::USER_ERROR),
                 );
             }
-
-            let payload = AtpPairOutput::cancel(session_id.clone());
-            output
-                .write(&payload)
-                .map_err(output_write_error("ATP pairing cancellation"))?;
+            atp_not_implemented("pair cancel")
         }
-
-        AtpPairCommand::List { detailed: _ } => {
-            let active_sessions = Vec::new();
-            let payload = AtpPairOutput::list(active_sessions);
-            output
-                .write(&payload)
-                .map_err(output_write_error("ATP pairing list"))?;
-        }
+        AtpPairCommand::List { .. } => atp_not_implemented("pair list"),
     }
-
-    Ok(())
 }
 
 fn atp_seed(args: &AtpSeedArgs, output: &mut Output) -> Result<(), CliError> {
@@ -4886,54 +4789,31 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
 fn atp_not_implemented(command: &str) -> Result<(), CliError> {
     Err(CliError::new(
         "atp_not_implemented",
-        "This ATP command is not yet implemented",
+        "[ASUP-E701] This ATP command is not yet implemented",
     )
     .detail(format!(
         "`atp {command}` is not wired to a real implementation in v1 and will not be faked. \
          Use `atp send <src> <host:port>` and `atp serve --listen <addr>` (or the standalone \
-         `atp` binary) for real transfers; daemon-backed inbox/resume/status need a running atpd."
+         `atp` binary) for real transfers; daemon-backed inbox/resume/status need a running atpd. \
+         See docs/error_codes/ASUP-E701.md."
     ))
     .exit_code(ExitCode::USER_ERROR))
 }
 
 fn atp_inbox(args: &AtpInboxArgs, output: &mut Output) -> Result<(), CliError> {
+    // The old implementation always printed an empty list, "accepted",
+    // "rejected", or "cleared 0" without consulting any inbox state — there is
+    // no daemon connection here. Transfers received by `atp serve` / atpd are
+    // committed directly under `<data-dir>/inbox` on disk; a staged
+    // accept/reject inbox does not exist yet. Fail closed rather than report
+    // fabricated inbox activity (br-asupersync-qk02uw).
+    let _ = output;
     match &args.command {
-        AtpInboxCommand::List => {
-            let payload = AtpInboxListOutput::new(vec![]);
-            output
-                .write(&payload)
-                .map_err(output_write_error("ATP inbox list"))?;
-        }
-        AtpInboxCommand::Accept {
-            transfer_id,
-            destination,
-        } => {
-            let dest_path = destination
-                .as_ref()
-                .map_or_else(|| ".".to_string(), |p| p.display().to_string());
-            let payload = AtpInboxAcceptOutput::new(transfer_id, &dest_path);
-            output
-                .write(&payload)
-                .map_err(output_write_error("ATP inbox accept"))?;
-        }
-        AtpInboxCommand::Reject {
-            transfer_id,
-            reason,
-        } => {
-            let reject_reason = reason.as_deref().unwrap_or("rejected by user");
-            let payload = AtpInboxRejectOutput::new(transfer_id, reject_reason);
-            output
-                .write(&payload)
-                .map_err(output_write_error("ATP inbox reject"))?;
-        }
-        AtpInboxCommand::Clear => {
-            let payload = AtpInboxClearOutput::new(0);
-            output
-                .write(&payload)
-                .map_err(output_write_error("ATP inbox clear"))?;
-        }
+        AtpInboxCommand::List => atp_not_implemented("inbox list"),
+        AtpInboxCommand::Accept { .. } => atp_not_implemented("inbox accept"),
+        AtpInboxCommand::Reject { .. } => atp_not_implemented("inbox reject"),
+        AtpInboxCommand::Clear => atp_not_implemented("inbox clear"),
     }
-    Ok(())
 }
 
 fn atp_resume(_args: &AtpResumeArgs, _output: &mut Output) -> Result<(), CliError> {
@@ -15924,8 +15804,10 @@ lab:
             explain: false,
         };
 
-        let result = atp_get(&args, &mut output);
-        assert!(result.is_ok(), "quarantine policy should succeed");
+        // The plan decision is reported honestly, but executing a pull is not
+        // wired in v1, so the command must fail closed afterwards.
+        let err = atp_get(&args, &mut output).expect_err("get execution must fail closed");
+        assert_eq!(err.error_type, "atp_not_implemented");
 
         output.flush().expect("flush output");
         let output_str = capture.contents();
@@ -16264,7 +16146,7 @@ lab:
     }
 
     #[test]
-    fn atp_share_generates_share_code() {
+    fn atp_share_fails_closed_until_share_tokens_are_real() {
         use std::fs;
 
         // Create a temporary test file
@@ -16285,14 +16167,37 @@ lab:
             revocable: false,
         };
 
-        atp_share(&args, &mut output).expect("atp share should work");
+        // Nothing can redeem a locally minted share code; the command must not
+        // fabricate one (br-asupersync-qk02uw).
+        let err = atp_share(&args, &mut output).expect_err("atp share must fail closed");
+        assert_eq!(err.error_type, "atp_not_implemented");
 
         // Clean up test file
         let _ = fs::remove_file(test_file);
     }
 
     #[test]
-    fn atp_pair_initiate_works() {
+    fn atp_share_still_validates_capabilities_before_failing_closed() {
+        let mut output = Output::new(OutputFormat::JsonPretty);
+        let args = AtpShareArgs {
+            source: PathBuf::from("Cargo.toml"),
+            expires_seconds: 3600,
+            max_downloads: 1,
+            policy: "peers-only".to_string(),
+            capabilities: vec!["teleport".to_string()],
+            quota_bytes: 0,
+            peer_id: None,
+            destination_policy: "auto".to_string(),
+            single_use: false,
+            revocable: false,
+        };
+
+        let err = atp_share(&args, &mut output).expect_err("invalid capability must error");
+        assert_eq!(err.error_type, "invalid_argument");
+    }
+
+    #[test]
+    fn atp_pair_initiate_fails_closed() {
         let mut output = Output::new(OutputFormat::JsonPretty);
         let args = AtpPairArgs {
             command: AtpPairCommand::Initiate {
@@ -16302,11 +16207,14 @@ lab:
             },
         };
 
-        atp_pair(&args, &mut output).expect("atp pair initiate should work");
+        // Pairing was pure security theater (locally fabricated session ids and
+        // confirmation phrases, no peer contact); it must fail closed.
+        let err = atp_pair(&args, &mut output).expect_err("pair initiate must fail closed");
+        assert_eq!(err.error_type, "atp_not_implemented");
     }
 
     #[test]
-    fn atp_pair_confirm_works() {
+    fn atp_pair_confirm_fails_closed() {
         let mut output = Output::new(OutputFormat::JsonPretty);
         let args = AtpPairArgs {
             command: AtpPairCommand::Confirm {
@@ -16316,21 +16224,23 @@ lab:
             },
         };
 
-        atp_pair(&args, &mut output).expect("atp pair confirm should work");
+        let err = atp_pair(&args, &mut output).expect_err("pair confirm must fail closed");
+        assert_eq!(err.error_type, "atp_not_implemented");
     }
 
     #[test]
-    fn atp_pair_list_works() {
+    fn atp_pair_list_fails_closed() {
         let mut output = Output::new(OutputFormat::JsonPretty);
         let args = AtpPairArgs {
             command: AtpPairCommand::List { detailed: false },
         };
 
-        atp_pair(&args, &mut output).expect("atp pair list should work");
+        let err = atp_pair(&args, &mut output).expect_err("pair list must fail closed");
+        assert_eq!(err.error_type, "atp_not_implemented");
     }
 
     #[test]
-    fn atp_seed_works() {
+    fn atp_seed_fails_closed() {
         use std::fs;
 
         // Create a temporary test file
@@ -16349,14 +16259,17 @@ lab:
             verify_integrity: true,
         };
 
-        atp_seed(&args, &mut output).expect("atp seed should work");
+        // Content seeding needs a running atpd cache/relay; reporting content
+        // as seeded without one is fabrication.
+        let err = atp_seed(&args, &mut output).expect_err("atp seed must fail closed");
+        assert_eq!(err.error_type, "atp_not_implemented");
 
         // Clean up test file
         let _ = fs::remove_file(test_file);
     }
 
     #[test]
-    fn atp_send_with_progress_and_explain_works() {
+    fn atp_send_explain_fails_closed_before_touching_the_network() {
         let mut output = Output::new(OutputFormat::JsonPretty);
         let args = AtpSendArgs {
             source: PathBuf::from("Cargo.toml"),
@@ -16369,7 +16282,11 @@ lab:
             explain: true,
         };
 
-        atp_send(&args, &mut output).expect("atp send with progress and explain should work");
+        // --explain used to print hardcoded QUIC/RTT/loss numbers; until real
+        // decision reporting exists it must fail closed, and it must do so
+        // before any resolution/connection attempt (this target is bogus).
+        let err = atp_send(&args, &mut output).expect_err("send --explain must fail closed");
+        assert_eq!(err.error_type, "atp_not_implemented");
     }
 
     #[test]
@@ -16400,12 +16317,13 @@ lab:
 
     #[test]
     fn atp_progress_update_formatting_works() {
-        let progress = AtpProgressUpdate::new("test_123", "file.dat", 512000, 1024000);
+        // 512 KiB of 1 MiB — binary units, received printed once, then total.
+        let progress = AtpProgressUpdate::new("test_123", "file.dat", 524_288, 1_048_576);
         let human_output = progress.human_format();
 
         assert!(human_output.contains("receiving"));
         assert!(human_output.contains("file.dat"));
-        assert!(human_output.contains("500.0 KB"));
+        assert!(human_output.contains("512.0 KB"));
         assert!(human_output.contains("1.0 MB"));
         assert!(human_output.contains("50%"));
     }
@@ -16517,7 +16435,7 @@ lab:
     }
 
     #[test]
-    fn atp_transfer_status_output_works() {
+    fn atp_transfer_status_fails_closed_without_daemon_state() {
         let mut output = Output::new(OutputFormat::JsonPretty);
         let args = AtpTransferStatusArgs {
             transfer_id: None,
@@ -16526,6 +16444,10 @@ lab:
             interval_seconds: 2,
         };
 
-        atp_transfer_status(&args, &mut output).expect("atp transfer status should work");
+        // There is no daemon connection to query, so printing an (always
+        // empty) transfer list would be fabricated status.
+        let err =
+            atp_transfer_status(&args, &mut output).expect_err("transfer status must fail closed");
+        assert_eq!(err.error_type, "atp_not_implemented");
     }
 }

@@ -533,11 +533,45 @@ impl DiagnosticsEndpoint {
     }
 }
 
+/// Live transfer counters shared between the ATP transfer accept loop and the
+/// diagnostics endpoint, so diagnostics report what the daemon actually did
+/// rather than a static config echo (br-asupersync-qk02uw).
+#[derive(Debug, Default)]
+struct TransferStats {
+    committed: std::sync::atomic::AtomicU64,
+    failed: std::sync::atomic::AtomicU64,
+    bytes_received: std::sync::atomic::AtomicU64,
+}
+
+impl TransferStats {
+    fn record_committed(&self, bytes: u64) {
+        self.committed.fetch_add(1, Ordering::Relaxed);
+        self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn record_failed(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "transfers_committed": self.committed.load(Ordering::Relaxed),
+            "transfers_failed": self.failed.load(Ordering::Relaxed),
+            "bytes_received_total": self.bytes_received.load(Ordering::Relaxed),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DaemonHealthSnapshot {
     status: &'static str,
     peer_id: String,
+    /// Configured transfer bind address.
     bind_addr: SocketAddr,
+    /// Address the transfer listener is actually bound to. The daemon fails to
+    /// start if this socket cannot be bound, so a serving daemon always reports
+    /// a real listening address here.
+    transfer_listener_addr: SocketAddr,
     data_dir: PathBuf,
     cache_dir: PathBuf,
     max_concurrent_transfers: u32,
@@ -553,6 +587,7 @@ impl DaemonHealthSnapshot {
         state: &AtpdState,
         identity: &DurablePeerIdentity,
         service_order: &[AtpdChildRole],
+        transfer_listener_addr: SocketAddr,
         started_at_micros: u64,
         reload_count: u64,
     ) -> Self {
@@ -560,6 +595,7 @@ impl DaemonHealthSnapshot {
             status: "running",
             peer_id: identity.peer_id_hex(),
             bind_addr: state.config.network.bind_addr,
+            transfer_listener_addr,
             data_dir: state.config.storage.data_dir.clone(),
             cache_dir: state.config.storage.cache_dir.clone(),
             max_concurrent_transfers: state.config.transfers.max_concurrent,
@@ -905,6 +941,7 @@ fn install_signal_listener() -> Result<mpsc::Receiver<DaemonSignal>> {
 fn start_diagnostics_endpoint(
     addr: SocketAddr,
     snapshot: Arc<Mutex<DaemonHealthSnapshot>>,
+    transfer_stats: Arc<TransferStats>,
 ) -> Result<DiagnosticsEndpoint> {
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
@@ -917,7 +954,9 @@ fn start_diagnostics_endpoint(
         while !thread_shutdown.load(Ordering::Acquire) {
             match listener.accept() {
                 Ok((stream, _peer_addr)) => {
-                    if let Err(err) = serve_diagnostics_connection(stream, &thread_snapshot) {
+                    if let Err(err) =
+                        serve_diagnostics_connection(stream, &thread_snapshot, &transfer_stats)
+                    {
                         warn!("diagnostics endpoint connection failed: {}", err);
                     }
                 }
@@ -942,6 +981,7 @@ fn start_diagnostics_endpoint(
 fn serve_diagnostics_connection(
     mut stream: TcpStream,
     snapshot: &Arc<Mutex<DaemonHealthSnapshot>>,
+    transfer_stats: &TransferStats,
 ) -> Result<()> {
     let mut request = [0u8; 1024];
     let _ = stream.read(&mut request);
@@ -949,7 +989,15 @@ fn serve_diagnostics_connection(
     let snapshot = snapshot
         .lock()
         .map_err(|_| cli_error("diagnostics snapshot mutex poisoned"))?;
-    let body = serde_json::to_vec_pretty(&*snapshot)?;
+    // Merge live transfer counters at request time so diagnostics report real
+    // observed activity, not a stale config echo.
+    let mut body_value = serde_json::to_value(&*snapshot)?;
+    if let (serde_json::Value::Object(map), serde_json::Value::Object(stats)) =
+        (&mut body_value, transfer_stats.as_json())
+    {
+        map.insert("transfers".to_string(), serde_json::Value::Object(stats));
+    }
+    let body = serde_json::to_vec_pretty(&body_value)?;
     let header = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
@@ -1039,7 +1087,10 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
         .build()?;
     let runtime_handle = runtime.handle().clone();
 
-    info!("ATP daemon started on {}", config.network.bind_addr);
+    info!(
+        "ATP daemon starting; transfer port {} (bound during service startup)",
+        config.network.bind_addr
+    );
     info!("Data directory: {}", config.storage.data_dir.display());
     info!("Cache directory: {}", config.storage.cache_dir.display());
     info!(
@@ -1103,7 +1154,13 @@ async fn run_daemon_service(
     // diagnostics endpoint bound a socket, so no transfer could ever arrive.
     // This spawns the genuine ATP-over-TCP accept loop, writing verified
     // transfers into the daemon's inbox.
-    {
+    //
+    // Fail-closed startup contract: the daemon refuses to start when the
+    // transfer port cannot be bound. A transfer daemon that is not listening
+    // for transfers must not run "healthy", and diagnostics must never claim a
+    // bind address that no socket backs.
+    let transfer_stats = Arc::new(TransferStats::default());
+    let transfer_listener_addr = {
         use asupersync::net::TcpListener as AsupTcpListener;
         use asupersync::net::atp::transport_tcp::{TransferConfig, serve};
 
@@ -1111,20 +1168,33 @@ async fn run_daemon_service(
         let inbox_dir = config.storage.data_dir.join("inbox");
         let max_bytes = config.transfers.max_transfer_size;
         let peer_label = identity.peer_id_hex();
+        let stats = Arc::clone(&transfer_stats);
+        let (bind_tx, bind_rx) = mpsc::channel::<std::result::Result<SocketAddr, String>>();
         // Detached for the daemon's lifetime; the process exits on shutdown.
         let _transfer_listener = runtime_handle.spawn(async move {
             let Some(cx) = asupersync::cx::Cx::current() else {
-                warn!("ATP transfer listener: no capability context available");
+                let _ = bind_tx.send(Err(
+                    "no capability context available for the transfer listener".to_string(),
+                ));
                 return;
             };
             let listener = match AsupTcpListener::bind(bind_addr).await {
                 Ok(listener) => listener,
                 Err(err) => {
-                    warn!("ATP transfer listener failed to bind {bind_addr}: {err}");
+                    let _ = bind_tx.send(Err(format!("bind {bind_addr}: {err}")));
                     return;
                 }
             };
-            info!(bind_addr = %bind_addr, "ATP transfer listener bound and accepting");
+            let local_addr = match listener.local_addr() {
+                Ok(addr) => addr,
+                Err(err) => {
+                    let _ =
+                        bind_tx.send(Err(format!("local_addr after binding {bind_addr}: {err}")));
+                    return;
+                }
+            };
+            let _ = bind_tx.send(Ok(local_addr));
+            info!(bind_addr = %local_addr, "ATP transfer listener bound and accepting");
             let cfg = TransferConfig {
                 max_transfer_bytes: max_bytes,
                 ..TransferConfig::default()
@@ -1136,13 +1206,19 @@ async fn run_daemon_service(
                 cfg,
                 peer_label,
                 |outcome| match outcome {
-                    Ok(report) => info!(
-                        transfer_id = %report.transfer_id,
-                        bytes = report.bytes_received,
-                        files = report.files,
-                        "ATP transfer committed to inbox"
-                    ),
-                    Err(err) => warn!("ATP transfer failed: {err}"),
+                    Ok(report) => {
+                        stats.record_committed(report.bytes_received);
+                        info!(
+                            transfer_id = %report.transfer_id,
+                            bytes = report.bytes_received,
+                            files = report.files,
+                            "ATP transfer committed to inbox"
+                        );
+                    }
+                    Err(err) => {
+                        stats.record_failed();
+                        warn!("ATP transfer failed: {err}");
+                    }
                 },
             )
             .await;
@@ -1150,7 +1226,19 @@ async fn run_daemon_service(
                 warn!("ATP transfer listener stopped: {err}");
             }
         });
-    }
+
+        bind_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| {
+                cli_error("[ASUP-E702] ATP transfer listener did not report bind status within 10s")
+            })?
+            .map_err(|err| {
+                cli_error(format!(
+                    "[ASUP-E702] ATP transfer listener failed to bind: {err}; refusing to \
+                     start a transfer daemon that cannot accept transfers"
+                ))
+            })?
+    };
 
     info!(
         peer_id = identity.peer_id_hex(),
@@ -1172,6 +1260,7 @@ async fn run_daemon_service(
         &daemon_state,
         &identity,
         &compiled_app.start_order,
+        transfer_listener_addr,
         started_at_micros,
         reload_count,
     )));
@@ -1180,7 +1269,11 @@ async fn run_daemon_service(
     {
         match daemon_state.config.diagnostics.metrics_bind {
             Some(addr) => {
-                let endpoint = start_diagnostics_endpoint(addr, Arc::clone(&health_snapshot))?;
+                let endpoint = start_diagnostics_endpoint(
+                    addr,
+                    Arc::clone(&health_snapshot),
+                    Arc::clone(&transfer_stats),
+                )?;
                 info!(
                     bind_addr = %endpoint.local_addr,
                     "ATP daemon diagnostics endpoint started"
@@ -1210,6 +1303,14 @@ async fn run_daemon_service(
                 let reloaded = load_daemon_config(&config_path)?;
                 prepare_daemon_directories(&reloaded)?;
                 let reloaded_identity = load_identity_store(&identity_store_path(&reloaded))?;
+                if reloaded.network.bind_addr != config.network.bind_addr {
+                    warn!(
+                        configured = %reloaded.network.bind_addr,
+                        listening = %transfer_listener_addr,
+                        "bind_addr changed in reloaded config; the transfer listener keeps \
+                         its current socket — restart the daemon to rebind"
+                    );
+                }
                 config = reloaded;
                 daemon_state.config = config.clone();
                 reload_count = reload_count.saturating_add(1);
@@ -1220,6 +1321,7 @@ async fn run_daemon_service(
                         &daemon_state,
                         &reloaded_identity,
                         &compiled_app.start_order,
+                        transfer_listener_addr,
                         started_at_micros,
                         reload_count,
                     );
