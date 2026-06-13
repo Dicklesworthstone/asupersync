@@ -97,6 +97,12 @@ verification summary marks `verified_still_failing=true`, and the emitted repro
 summary marks `budget_exhausted=true`. This satisfies the CLI's no-hang
 contract without claiming fixed-point minimality.
 
+The human CLI projection mirrors the same verification summary before printing
+repro details or issue details. In particular, blocked/no-repro package
+minimization must print `Emitted repro: no` and
+`Verified still failing: no`; operators should not need `--json` to see the
+fail-closed status.
+
 ### Dimension 3: Geodesic Normalization Correctness
 
 Normalized traces must be valid linear extensions with reduced switch cost:

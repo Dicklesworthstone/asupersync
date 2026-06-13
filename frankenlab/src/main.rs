@@ -668,6 +668,10 @@ fn incident_verdict_tag(verdict: IncidentReplayMinimizationVerdict) -> &'static 
     }
 }
 
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
 fn format_incident_minimize_result(report: &MinimizeIncidentReplayPackageReport) -> String {
     let verdict = incident_verdict_tag(report.outcome.verdict);
     let mut lines = vec![
@@ -676,6 +680,48 @@ fn format_incident_minimize_result(report: &MinimizeIncidentReplayPackageReport)
             report.package_id, verdict
         ),
         format!("Shrink steps: {}", report.outcome.steps.len()),
+        format!(
+            "Emitted repro: {}",
+            yes_no(report.verification.status.emitted_repro)
+        ),
+        format!(
+            "Verified still failing: {}",
+            yes_no(report.verification.status.verified_still_failing)
+        ),
+        format!(
+            "Oracle stable: {}",
+            yes_no(report.verification.status.oracle_stable)
+        ),
+        format!(
+            "Required source roles present: {}",
+            yes_no(
+                report
+                    .verification
+                    .required_evidence
+                    .required_source_roles_present,
+            )
+        ),
+        format!(
+            "Required trace fingerprint present: {}",
+            yes_no(
+                report
+                    .verification
+                    .required_evidence
+                    .required_trace_fingerprint_present,
+            )
+        ),
+        format!(
+            "Retained source count: {}",
+            report.verification.retained_source_count
+        ),
+        format!(
+            "Retained feature flag count: {}",
+            report.verification.retained_feature_flag_count
+        ),
+        format!(
+            "Budget exhausted: {}",
+            yes_no(report.verification.budget_exhausted)
+        ),
     ];
 
     if let Some(repro) = &report.outcome.repro {
@@ -691,18 +737,6 @@ fn format_incident_minimize_result(report: &MinimizeIncidentReplayPackageReport)
         lines.push(format!(
             "Removed feature flags: {:?}",
             repro.removed_feature_flags
-        ));
-        lines.push(format!(
-            "Budget exhausted: {}",
-            repro.summary.budget_exhausted
-        ));
-        lines.push(format!(
-            "Verified still failing: {}",
-            if report.verification.status.verified_still_failing {
-                "yes"
-            } else {
-                "no"
-            }
         ));
     } else {
         lines.push(format!("Issues: {}", report.outcome.issues.len()));
@@ -1293,6 +1327,27 @@ mod tests {
     }
 
     #[test]
+    fn incident_replay_package_human_output_prints_verification_status() {
+        let package = synthetic_incident_replay_package();
+        let report = minimize_incident_replay_package_report(
+            Path::new("synthetic-incident-package.json"),
+            &package,
+            8,
+        );
+        let output = format_incident_minimize_result(&report);
+
+        assert!(output.contains("Emitted repro: yes"));
+        assert!(output.contains("Verified still failing: yes"));
+        assert!(output.contains("Oracle stable: yes"));
+        assert!(output.contains("Required source roles present: yes"));
+        assert!(output.contains("Required trace fingerprint present: yes"));
+        assert!(output.contains("Retained source count: 1"));
+        assert!(output.contains("Retained feature flag count: 0"));
+        assert!(output.contains("Budget exhausted: no"));
+        assert!(output.contains("Replay units: 3 -> 1"));
+    }
+
+    #[test]
     fn incident_replay_package_verification_fails_closed_without_repro() {
         let package = synthetic_incident_replay_package();
         let oracle = IncidentReplayOracle {
@@ -1325,6 +1380,45 @@ mod tests {
         assert_eq!(verification.retained_source_count, 0);
         assert_eq!(verification.retained_feature_flag_count, 0);
         assert!(!verification.budget_exhausted);
+    }
+
+    #[test]
+    fn incident_replay_package_human_output_fails_closed_without_repro() {
+        let package = synthetic_incident_replay_package();
+        let oracle = IncidentReplayOracle {
+            kind: IncidentOracleKind::Panic,
+            expected_signal: "missing-required-source".to_string(),
+            stable: true,
+            required_source_roles: vec![IncidentReplaySourceRole::SupportBundle],
+            required_trace_fingerprint: Some("missing-fingerprint".to_string()),
+        };
+        let config = IncidentReplayMinimizationConfig {
+            step_budget: 8,
+            shrink_feature_flags: true,
+        };
+        let outcome = minimize_incident_replay_package(&package, oracle.clone(), config);
+        let verification = verify_incident_replay_package_repro(&oracle, &outcome);
+        let report = MinimizeIncidentReplayPackageReport {
+            schema_version: 1,
+            input_kind: "incident_replay_package_json",
+            minimized_surface: "replay_package_sources",
+            package: "synthetic-incident-package.json".to_string(),
+            package_id: package.package_id,
+            oracle,
+            config,
+            verification,
+            outcome,
+        };
+        let output = format_incident_minimize_result(&report);
+
+        assert!(output.contains("Emitted repro: no"));
+        assert!(output.contains("Verified still failing: no"));
+        assert!(output.contains("Required source roles present: no"));
+        assert!(output.contains("Required trace fingerprint present: no"));
+        assert!(output.contains("Retained source count: 0"));
+        assert!(output.contains("Retained feature flag count: 0"));
+        assert!(output.contains("Issues: "));
+        assert!(!output.contains("Replay units:"));
     }
 
     #[test]
