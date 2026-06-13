@@ -72,6 +72,17 @@ report fields first:
   to the migration playbook
 - `operator_report.residual_risks`: rows that still need manual design review
 
+<!-- MIGRATION-RECIPE-COMPILER:INTEGRATION-LINK -->
+
+### Migration Recipe Compiler
+
+Use `docs/migration_recipe_compiler.md` when planner findings need to become an
+agent-readable implementation checklist. The checked contract at
+`artifacts/migration_recipe_compiler_v1.json` maps Tokio, hyper, tonic, axum,
+tower, and reqwest concepts to native Asupersync modules, proof lanes, compat
+boundary policy, and no-destructive-edit rules. It is not an auto-porting
+codemod; unresolved findings stay as owner beads or residual-risk rows.
+
 Fixture recipes:
 
 | Project shape | Planner scenario | Expected report path |

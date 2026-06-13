@@ -1,0 +1,477 @@
+{
+  "schema_version": "migration-recipe-compiler-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.13",
+  "artifact_path": "artifacts/migration_recipe_compiler_v1.json",
+  "compiler_id": "migration_recipe_compiler",
+  "purpose": "Read-only contract that compiles migration readiness planner findings into self-contained implementation checklists for agents and operators.",
+  "source_of_truth": {
+    "artifact": "artifacts/migration_recipe_compiler_v1.json",
+    "docs": "docs/migration_recipe_compiler.md",
+    "integration_docs": "docs/integration.md",
+    "contract_test": "tests/migration_recipe_compiler_contract.rs",
+    "planner_script": "scripts/migration_readiness_planner.py",
+    "planner_signoff": "artifacts/migration_readiness_planner_signoff_v1.json"
+  },
+  "docs_markers": [
+    "MIGRATION-RECIPE-COMPILER:SOURCE",
+    "MIGRATION-RECIPE-COMPILER:SCHEMA",
+    "MIGRATION-RECIPE-COMPILER:CHECKLIST",
+    "MIGRATION-RECIPE-COMPILER:NO-DESTRUCTIVE-EDITS",
+    "MIGRATION-RECIPE-COMPILER:NO-CLAIMS"
+  ],
+  "integration_docs_markers": [
+    "MIGRATION-RECIPE-COMPILER:INTEGRATION-LINK"
+  ],
+  "required_source_concepts": [
+    "axum_router",
+    "hyper_server_client",
+    "reqwest_client",
+    "tokio_fs_process_signal",
+    "tokio_io_traits",
+    "tokio_mpsc",
+    "tokio_select",
+    "tokio_spawn",
+    "tokio_time",
+    "tonic_transport",
+    "tower_layers"
+  ],
+  "required_recipe_fields": [
+    "recipe_id",
+    "planner_findings",
+    "source_concepts",
+    "asupersync_modules",
+    "pattern_changes",
+    "proof_lanes",
+    "compat_boundary_policy",
+    "generated_checklist",
+    "no_destructive_edits",
+    "no_auto_codemod",
+    "no_claims"
+  ],
+  "required_fixture_ids": [
+    "native-clean",
+    "tokio-http-service",
+    "mixed-compat-boundary",
+    "feature-gated-tokio-edge",
+    "blocked-ambient-authority-service",
+    "malformed-workspace"
+  ],
+  "no_destructive_edit_policy": {
+    "planner_mutates_scanned_project": false,
+    "compiler_mutates_scanned_project": false,
+    "auto_codemod_allowed": false,
+    "destructive_commands_allowed": false,
+    "allowed_outputs": [
+      "checklist",
+      "recipe",
+      "proof_plan",
+      "manual_review_queue"
+    ],
+    "forbidden_commands": [
+      "git reset --hard",
+      "git clean -fd",
+      "rm -rf",
+      "git worktree add",
+      "git branch "
+    ],
+    "required_boundary": "Recipes may tell an agent what to inspect and change manually, but they must not rewrite source files, create branches, create worktrees, delete files, or claim automated migration success."
+  },
+  "fixture_projects": [
+    {
+      "fixture_id": "native-clean",
+      "planner_scenario": "native-clean",
+      "expected_recipe_mode": "confirm-native-boundary",
+      "expected_verdict": "ready",
+      "checklist_focus": "prove the core crate remains tokio-free and keep compat crates out of the default runtime graph"
+    },
+    {
+      "fixture_id": "tokio-http-service",
+      "planner_scenario": "tokio-http-service",
+      "expected_recipe_mode": "quarantine-and-recipe",
+      "expected_verdict": "needs_quarantine",
+      "checklist_focus": "route axum, hyper, tower, tonic, and request client findings into native web/grpc/service modules or explicit compat boundaries"
+    },
+    {
+      "fixture_id": "mixed-compat-boundary",
+      "planner_scenario": "mixed-compat-boundary",
+      "expected_recipe_mode": "compat-boundary-review",
+      "expected_verdict": "needs_quarantine",
+      "checklist_focus": "keep hard Tokio dependencies inside asupersync-tokio-compat or another named edge adapter"
+    },
+    {
+      "fixture_id": "feature-gated-tokio-edge",
+      "planner_scenario": "feature-gated-tokio-edge",
+      "expected_recipe_mode": "feature-graph-proof",
+      "expected_verdict": "needs_quarantine",
+      "checklist_focus": "separate default, metrics, fuzz, and workspace proof commands before changing dependency edges"
+    },
+    {
+      "fixture_id": "blocked-ambient-authority-service",
+      "planner_scenario": "blocked-ambient-authority-service",
+      "expected_recipe_mode": "manual-design-review",
+      "expected_verdict": "blocked",
+      "checklist_focus": "thread Cx and explicit capabilities before any runtime replacement work"
+    },
+    {
+      "fixture_id": "malformed-workspace",
+      "planner_scenario": "malformed-workspace",
+      "expected_recipe_mode": "fail-closed",
+      "expected_verdict": "blocked",
+      "checklist_focus": "repair manifest readability before claiming migration readiness"
+    }
+  ],
+  "concept_catalog": [
+    {
+      "concept_id": "tokio_spawn",
+      "planner_markers": [
+        "tokio::spawn",
+        "JoinHandle",
+        "spawn_blocking"
+      ],
+      "target_modules": [
+        "src/cx/",
+        "src/runtime/",
+        "src/combinator/"
+      ],
+      "recipe_guidance": "Replace orphan spawn sites with region-owned scope work and explicit Cx flow."
+    },
+    {
+      "concept_id": "tokio_select",
+      "planner_markers": [
+        "tokio::select!",
+        "futures::select!"
+      ],
+      "target_modules": [
+        "src/combinator/race.rs",
+        "src/combinator/join.rs",
+        "src/cancel/"
+      ],
+      "recipe_guidance": "Use race/join patterns that cancel and drain losers before the region closes."
+    },
+    {
+      "concept_id": "tokio_mpsc",
+      "planner_markers": [
+        "tokio::sync::mpsc",
+        "tokio::sync::oneshot",
+        "broadcast"
+      ],
+      "target_modules": [
+        "src/channel/",
+        "src/sync/"
+      ],
+      "recipe_guidance": "Map sends to reserve/send or cancel-aware primitives so obligations cannot leak on cancellation."
+    },
+    {
+      "concept_id": "tokio_time",
+      "planner_markers": [
+        "tokio::time::sleep",
+        "tokio::time::timeout",
+        "Interval"
+      ],
+      "target_modules": [
+        "src/time/",
+        "src/runtime/scheduler/",
+        "src/lab/"
+      ],
+      "recipe_guidance": "Route timers through runtime or lab-time surfaces and keep timeout losers cancel-drained."
+    },
+    {
+      "concept_id": "tokio_io_traits",
+      "planner_markers": [
+        "tokio::io::AsyncRead",
+        "tokio::io::AsyncWrite",
+        "tokio_util::codec"
+      ],
+      "target_modules": [
+        "src/io/",
+        "src/codec/",
+        "docs/tokio_migration_cookbooks.md"
+      ],
+      "recipe_guidance": "Prefer native I/O and codec traits; use adapters only where a third-party edge requires them."
+    },
+    {
+      "concept_id": "tokio_fs_process_signal",
+      "planner_markers": [
+        "tokio::fs",
+        "tokio::process",
+        "tokio::signal"
+      ],
+      "target_modules": [
+        "src/fs/",
+        "src/process/",
+        "src/signal/",
+        "docs/tokio_fs_process_signal_migration_playbook.md"
+      ],
+      "recipe_guidance": "Preserve process cleanup, signal registration, and filesystem atomicity boundaries explicitly."
+    },
+    {
+      "concept_id": "hyper_server_client",
+      "planner_markers": [
+        "hyper::Server",
+        "hyper::Client",
+        "hyper_util"
+      ],
+      "target_modules": [
+        "src/http/",
+        "asupersync-tokio-compat/",
+        "docs/integration.md"
+      ],
+      "recipe_guidance": "Use native HTTP where possible; otherwise keep hyper runtime traits behind the compat boundary."
+    },
+    {
+      "concept_id": "tonic_transport",
+      "planner_markers": [
+        "tonic::transport",
+        "tonic::server",
+        "tonic::client"
+      ],
+      "target_modules": [
+        "src/grpc/",
+        "src/http/",
+        "asupersync-tokio-compat/"
+      ],
+      "recipe_guidance": "Move owned gRPC surfaces to native modules and quarantine tonic transport behind adapters when necessary."
+    },
+    {
+      "concept_id": "axum_router",
+      "planner_markers": [
+        "axum::Router",
+        "axum::extract",
+        "axum::middleware"
+      ],
+      "target_modules": [
+        "src/web/",
+        "src/service/",
+        "docs/tokio_web_grpc_migration_runbook.md"
+      ],
+      "recipe_guidance": "Convert route ownership, request state, and extractors to explicit Cx-aware web/service surfaces."
+    },
+    {
+      "concept_id": "tower_layers",
+      "planner_markers": [
+        "tower::Service",
+        "tower::Layer",
+        "tower_http"
+      ],
+      "target_modules": [
+        "src/service/",
+        "asupersync-tokio-compat/"
+      ],
+      "recipe_guidance": "Keep middleware stacks at named native service or compat boundaries and record which layers remain bridge-only."
+    },
+    {
+      "concept_id": "reqwest_client",
+      "planner_markers": [
+        "reqwest::Client",
+        "hyper_rustls",
+        "native_tls"
+      ],
+      "target_modules": [
+        "src/http/",
+        "src/net/",
+        "asupersync-tokio-compat/"
+      ],
+      "recipe_guidance": "Prefer native HTTP client surfaces; quarantine reqwest-style clients behind the compat bridge when ownership is external."
+    }
+  ],
+  "proof_lanes": [
+    {
+      "lane_id": "migration-recipe-compiler-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_recipe_compiler_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test migration_recipe_compiler_contract --no-default-features -- --nocapture",
+      "covers": [
+        "artifact schema",
+        "recipe field completeness",
+        "fixture coverage",
+        "docs markers",
+        "no destructive edit policy"
+      ],
+      "does_not_cover": [
+        "broad workspace health",
+        "migration correctness for an external project",
+        "live RCH fleet availability",
+        "automatic source rewrite safety"
+      ]
+    },
+    {
+      "lane_id": "default-production-tokio-tree",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_default cargo tree -e normal -p asupersync -i tokio",
+      "covers": [
+        "default production no-tokio graph"
+      ],
+      "does_not_cover": [
+        "compat crate graph",
+        "workspace dev-dependencies"
+      ]
+    },
+    {
+      "lane_id": "migration-readiness-planner-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_readiness_planner cargo test -p asupersync --test migration_readiness_planner_contract -- --nocapture",
+      "covers": [
+        "planner fixture semantics"
+      ],
+      "does_not_cover": [
+        "manual implementation checklist completion"
+      ]
+    }
+  ],
+  "compiled_recipe_examples": [
+    {
+      "recipe_id": "planner-to-native-scope",
+      "planner_findings": [
+        "tokio_spawn",
+        "tokio_select",
+        "tokio_time",
+        "tokio_mpsc"
+      ],
+      "source_concepts": [
+        "tokio_spawn",
+        "tokio_select",
+        "tokio_time",
+        "tokio_mpsc"
+      ],
+      "asupersync_modules": [
+        "src/cx/",
+        "src/runtime/",
+        "src/channel/",
+        "src/combinator/",
+        "src/time/"
+      ],
+      "pattern_changes": [
+        "thread &Cx into entry points before replacing runtime calls",
+        "replace detached spawn sites with region-owned scope work",
+        "replace select losers with cancel-and-drain race or timeout patterns",
+        "replace channel send sites with reserve/send or explicit abort handling"
+      ],
+      "proof_lanes": [
+        "migration-recipe-compiler-contract",
+        "default-production-tokio-tree"
+      ],
+      "compat_boundary_policy": "No compat boundary is accepted for owned application concurrency primitives.",
+      "generated_checklist": [
+        "inventory spawn/select/channel/time findings from the planner report",
+        "assign each finding to an owning region and explicit Cx source",
+        "port one owned surface manually and add deterministic lab coverage for loser drain or no obligation leaks",
+        "run the listed proof lanes through RCH",
+        "record unresolved findings as owner beads instead of marking them migrated"
+      ],
+      "no_destructive_edits": true,
+      "no_auto_codemod": true,
+      "no_claims": [
+        "does not prove the external project is fully migrated",
+        "does not permit branch creation, worktree creation, deletion, or automated rewriting"
+      ]
+    },
+    {
+      "recipe_id": "planner-to-web-grpc-compat-boundary",
+      "planner_findings": [
+        "axum_router",
+        "hyper_server_client",
+        "tower_layers",
+        "tonic_transport",
+        "reqwest_client"
+      ],
+      "source_concepts": [
+        "axum_router",
+        "hyper_server_client",
+        "tower_layers",
+        "tonic_transport",
+        "reqwest_client"
+      ],
+      "asupersync_modules": [
+        "src/web/",
+        "src/http/",
+        "src/grpc/",
+        "src/service/",
+        "asupersync-tokio-compat/"
+      ],
+      "pattern_changes": [
+        "move owned handlers and request state to native web or service modules first",
+        "use hyper/tower/tonic compat adapters only for third-party edges that cannot be retired yet",
+        "write the compat boundary name and owner into the generated checklist",
+        "keep no-tokio core crate proof lanes separate from satellite compat proof lanes"
+      ],
+      "proof_lanes": [
+        "migration-recipe-compiler-contract",
+        "default-production-tokio-tree",
+        "migration-readiness-planner-contract"
+      ],
+      "compat_boundary_policy": "Compat is acceptable only at a named edge adapter with explicit Cx ownership and a residual-risk row.",
+      "generated_checklist": [
+        "classify each web/grpc/client finding as owned-native, third-party-compat, or blocked-design-review",
+        "map owned-native findings to src/web, src/http, src/grpc, or src/service",
+        "map third-party-compat findings to asupersync-tokio-compat feature gates",
+        "run no-tokio production graph checks after each boundary change",
+        "document any remaining compat rows in the operator report"
+      ],
+      "no_destructive_edits": true,
+      "no_auto_codemod": true,
+      "no_claims": [
+        "does not claim parity with axum, hyper, tonic, tower, or reqwest APIs",
+        "does not make asupersync-tokio-compat part of the core runtime graph"
+      ]
+    },
+    {
+      "recipe_id": "planner-to-io-fs-process-signal",
+      "planner_findings": [
+        "tokio_io_traits",
+        "tokio_fs_process_signal"
+      ],
+      "source_concepts": [
+        "tokio_io_traits",
+        "tokio_fs_process_signal"
+      ],
+      "asupersync_modules": [
+        "src/io/",
+        "src/codec/",
+        "src/fs/",
+        "src/process/",
+        "src/signal/"
+      ],
+      "pattern_changes": [
+        "preserve codec frame boundaries and cancellation checkpoints",
+        "keep filesystem atomicity and symlink behavior in the platform matrix",
+        "make process cleanup and signal registration explicit in the checklist",
+        "route unsupported host surfaces to skip or blocked rows instead of green support"
+      ],
+      "proof_lanes": [
+        "migration-recipe-compiler-contract",
+        "default-production-tokio-tree"
+      ],
+      "compat_boundary_policy": "Adapter use is deferred until a concrete third-party trait boundary is named.",
+      "generated_checklist": [
+        "split I/O trait findings from fs/process/signal findings",
+        "attach each finding to its cookbook or playbook evidence path",
+        "port the smallest owned surface manually",
+        "add deterministic tests for cancellation, cleanup, or host-specific skip behavior",
+        "leave unsupported host behavior as an explicit no-claim row"
+      ],
+      "no_destructive_edits": true,
+      "no_auto_codemod": true,
+      "no_claims": [
+        "does not prove cross-platform filesystem or signal parity",
+        "does not replace the platform capability matrix"
+      ]
+    }
+  ],
+  "source_paths": [
+    "docs/integration.md",
+    "docs/migration_recipe_compiler.md",
+    "docs/tokio_migration_cookbooks.md",
+    "docs/tokio_web_grpc_migration_runbook.md",
+    "docs/tokio_fs_process_signal_migration_playbook.md",
+    "scripts/migration_readiness_planner.py",
+    "artifacts/migration_readiness_planner_signoff_v1.json",
+    "artifacts/proof_lane_manifest_v1.json",
+    "tests/migration_recipe_compiler_contract.rs"
+  ],
+  "validation": {
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_recipe_compiler_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test migration_recipe_compiler_contract --no-default-features -- --nocapture",
+    "no_local_cargo_fallback": true
+  },
+  "no_claims": [
+    "This contract does not compile or modify an external project.",
+    "This contract does not prove broad workspace health, release readiness, runtime correctness, performance, or live RCH fleet availability.",
+    "This contract does not authorize deleting files, creating branches, creating worktrees, or running automated codemods.",
+    "This contract does not claim that any particular third-party migration is complete without project-specific planner output and proof lanes."
+  ]
+}
