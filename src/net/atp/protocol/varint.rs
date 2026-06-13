@@ -104,33 +104,22 @@ impl VarInt {
         }
 
         let value = match length {
-            1 => {
-                let _ = buf.split_to(1); // Consume the byte
-                (first_byte & prefix) as u64
-            }
-            2 => {
-                let bytes = buf.split_to(2);
-                let val = u16::from_be_bytes([bytes[0], bytes[1]]) & 0x3FFF;
-                val as u64
-            }
-            4 => {
-                let bytes = buf.split_to(4);
-                let val = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) & 0x3FFFFFFF;
-                val as u64
-            }
+            1 => (first_byte & prefix) as u64,
+            2 => (u16::from_be_bytes([buf[0], buf[1]]) & 0x3FFF) as u64,
+            4 => (u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) & 0x3FFFFFFF) as u64,
             8 => {
-                let bytes = buf.split_to(8);
                 u64::from_be_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
                 ]) & 0x3FFFFFFFFFFFFFFF
             }
             _ => unreachable!(),
         };
 
-        if value > VARINT_MAX {
+        if value > VARINT_MAX || VarInt(value).encoded_len() != length {
             return AtpOutcome::protocol_error(ProtocolError::InvalidVarInt);
         }
 
+        let _ = buf.split_to(length);
         Outcome::Ok(Some(VarInt(value)))
     }
 
@@ -261,6 +250,23 @@ mod tests {
     fn test_varint_too_large() {
         assert!(VarInt::new(VARINT_MAX + 1).is_err());
         assert!(VarInt::new(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn test_varint_rejects_non_canonical_encodings() {
+        let cases: &[&[u8]] = &[
+            &[0x40, 0x00],                                     // 0 encoded in two bytes
+            &[0x80, 0x00, 0x00, 0x3f],                         // 63 encoded in four bytes
+            &[0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00], // 16384 encoded in eight bytes
+        ];
+
+        for &encoded in cases {
+            let mut buf = BytesMut::from(encoded);
+            let before = buf.clone();
+
+            assert!(VarInt::decode(&mut buf).is_err());
+            assert_eq!(buf, before);
+        }
     }
 
     #[test]

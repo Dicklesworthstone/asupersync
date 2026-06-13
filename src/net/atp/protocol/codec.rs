@@ -10,7 +10,7 @@ use crate::net::atp::protocol::frames::{
     MAX_FRAME_SIZE, MAX_HEADER_SIZE, ProtocolVersion,
 };
 use crate::net::atp::protocol::outcome::AtpOutcome;
-use crate::net::atp::protocol::varint::VarInt;
+use crate::net::atp::protocol::varint::{VarInt, VarIntError};
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::io;
@@ -65,6 +65,63 @@ impl AtpFrameCodec {
         self.decode_state = DecodeState::Header;
     }
 
+    fn checked_frame_size(header: &FrameHeader, payload_len: u64) -> Result<u64, FrameError> {
+        let payload_len = usize::try_from(payload_len)
+            .map_err(|_| FrameError::InvalidFormat("Payload length too large".to_string()))?;
+        let total_size = header
+            .encoded_len()
+            .checked_add(payload_len)
+            .ok_or_else(|| FrameError::InvalidFormat("Frame size overflow".to_string()))?;
+        u64::try_from(total_size)
+            .map_err(|_| FrameError::InvalidFormat("Frame size too large".to_string()))
+    }
+
+    fn validate_frame_for_encoding(&self, frame: &Frame) -> Result<u64, FrameError> {
+        let declared_payload_len = frame.header.payload_length.value();
+        let actual_payload_len = u64::try_from(frame.payload.len())
+            .map_err(|_| FrameError::InvalidFormat("Payload length too large".to_string()))?;
+        if declared_payload_len != actual_payload_len {
+            return Err(FrameError::InvalidFormat(format!(
+                "Payload length mismatch: header declares {declared_payload_len}, payload has {actual_payload_len}",
+            )));
+        }
+
+        let extension_count = u64::try_from(frame.header.extensions.len())
+            .map_err(|_| FrameError::InvalidFormat("Extension count too large".to_string()))?;
+        if extension_count > MAX_EXTENSION_COUNT {
+            return Err(FrameError::InvalidFormat(format!(
+                "Extension count {extension_count} exceeds maximum {MAX_EXTENSION_COUNT}",
+            )));
+        }
+
+        for ext_data in frame.header.extensions.values() {
+            let ext_len = u64::try_from(ext_data.len())
+                .map_err(|_| FrameError::InvalidFormat("Extension length too large".to_string()))?;
+            if ext_len > MAX_EXTENSION_SIZE {
+                return Err(FrameError::ExtensionTooLarge { size: ext_len });
+            }
+        }
+
+        let header_size = u64::try_from(frame.header.encoded_len())
+            .map_err(|_| FrameError::InvalidFormat("Header size too large".to_string()))?;
+        if header_size > MAX_HEADER_SIZE {
+            return Err(FrameError::FrameTooLarge {
+                size: header_size,
+                max: MAX_HEADER_SIZE,
+            });
+        }
+
+        let total_size = Self::checked_frame_size(&frame.header, declared_payload_len)?;
+        if total_size > self.max_frame_size {
+            return Err(FrameError::FrameTooLarge {
+                size: total_size,
+                max: self.max_frame_size,
+            });
+        }
+
+        Ok(total_size)
+    }
+
     /// Decode frame header from buffer (zero-copy optimization)
     fn decode_header(buf: &mut BytesMut) -> Result<Option<FrameHeader>, FrameError> {
         // First pass: check if we have enough bytes for complete header without consuming
@@ -72,22 +129,26 @@ impl AtpFrameCodec {
         let mut cursor = 0;
 
         // Helper to try parsing varint at cursor position
-        let try_parse_varint = |buf: &[u8], pos: &mut usize| -> Option<VarInt> {
-            if *pos >= buf.len() {
-                return None;
-            }
+        let try_parse_varint =
+            |buf: &[u8], pos: &mut usize| -> Result<Option<VarInt>, FrameError> {
+                if *pos >= buf.len() {
+                    return Ok(None);
+                }
 
-            let mut temp = BytesMut::from(&buf[*pos..]);
-            if let Outcome::Ok(Some(varint)) = VarInt::decode(&mut temp) {
-                *pos += (buf.len() - *pos) - temp.len();
-                Some(varint)
-            } else {
-                None
-            }
-        };
+                let mut temp = BytesMut::from(&buf[*pos..]);
+                match VarInt::decode(&mut temp) {
+                    Outcome::Ok(Some(varint)) => {
+                        *pos += (buf.len() - *pos) - temp.len();
+                        Ok(Some(varint))
+                    }
+                    Outcome::Ok(None) => Ok(None),
+                    Outcome::Err(_) => Err(FrameError::VarInt(VarIntError::InvalidEncoding)),
+                    Outcome::Cancelled(_) | Outcome::Panicked(_) => Err(FrameError::UnexpectedEof),
+                }
+            };
 
         // Parse version
-        let Some(version_varint) = try_parse_varint(buf, &mut cursor) else {
+        let Some(version_varint) = try_parse_varint(buf, &mut cursor)? else {
             return Ok(None); // Need more data
         };
         let version_value = u32::try_from(version_varint.value())
@@ -98,13 +159,13 @@ impl AtpFrameCodec {
         }
 
         // Parse frame type
-        let Some(frame_type_varint) = try_parse_varint(buf, &mut cursor) else {
+        let Some(frame_type_varint) = try_parse_varint(buf, &mut cursor)? else {
             return Ok(None); // Need more data
         };
         let frame_type = FrameType::from_varint(frame_type_varint)?;
 
         // Parse payload length
-        let Some(payload_length) = try_parse_varint(buf, &mut cursor) else {
+        let Some(payload_length) = try_parse_varint(buf, &mut cursor)? else {
             return Ok(None); // Need more data
         };
         if payload_length.value() > MAX_FRAME_SIZE {
@@ -115,7 +176,7 @@ impl AtpFrameCodec {
         }
 
         // Parse extension count
-        let Some(extension_count) = try_parse_varint(buf, &mut cursor) else {
+        let Some(extension_count) = try_parse_varint(buf, &mut cursor)? else {
             return Ok(None); // Need more data
         };
         if extension_count.value() > MAX_EXTENSION_COUNT {
@@ -127,14 +188,14 @@ impl AtpFrameCodec {
         // Parse extensions
         let mut extensions = HashMap::new();
         for _ in 0..extension_count.value() {
-            let Some(ext_id_varint) = try_parse_varint(buf, &mut cursor) else {
+            let Some(ext_id_varint) = try_parse_varint(buf, &mut cursor)? else {
                 return Ok(None); // Need more data
             };
             let ext_id = u16::try_from(ext_id_varint.value()).map_err(|_| {
                 FrameError::InvalidFormat("Extension ID too large for u16".to_string())
             })?;
 
-            let Some(ext_len) = try_parse_varint(buf, &mut cursor) else {
+            let Some(ext_len) = try_parse_varint(buf, &mut cursor)? else {
                 return Ok(None); // Need more data
             };
 
@@ -150,6 +211,13 @@ impl AtpFrameCodec {
             let end_pos = cursor.checked_add(ext_len_usize).ok_or_else(|| {
                 FrameError::InvalidFormat("Extension bounds overflow".to_string())
             })?;
+
+            if end_pos > MAX_HEADER_SIZE as usize {
+                return Err(FrameError::FrameTooLarge {
+                    size: end_pos as u64,
+                    max: MAX_HEADER_SIZE,
+                });
+            }
 
             if end_pos > buf.len() {
                 return Ok(None); // Need more data
@@ -198,6 +266,14 @@ impl Decoder for AtpFrameCodec {
                     match Self::decode_header(src)? {
                         Some(header) => {
                             let payload_len = header.payload_length.value();
+                            let total_size = Self::checked_frame_size(&header, payload_len)?;
+                            if total_size > self.max_frame_size {
+                                return Err(FrameError::FrameTooLarge {
+                                    size: total_size,
+                                    max: self.max_frame_size,
+                                });
+                            }
+
                             if payload_len == 0 {
                                 // Empty payload frame
                                 let frame = Frame {
@@ -254,14 +330,8 @@ impl Encoder<Frame> for AtpFrameCodec {
     type Error = FrameError;
 
     fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        // Validate frame size
-        let total_size = frame.encoded_len();
-        if total_size as u64 > self.max_frame_size {
-            return Err(FrameError::FrameTooLarge {
-                size: total_size as u64,
-                max: self.max_frame_size,
-            });
-        }
+        let total_size = usize::try_from(self.validate_frame_for_encoding(&frame)?)
+            .map_err(|_| FrameError::InvalidFormat("Frame size too large".to_string()))?;
 
         // Ensure we have enough capacity
         dst.reserve(total_size);
@@ -415,6 +485,71 @@ mod tests {
         let result = codec.encode(large_frame, &mut buf);
 
         assert!(matches!(result, Err(FrameError::FrameTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_decode_honors_custom_frame_size_limit() {
+        let frame = Frame::new(ProtocolVersion::V0, FrameType::ObjectData, vec![0u8; 80]).unwrap();
+
+        let mut encoded = BytesMut::new();
+        AtpFrameCodec::new().encode(frame, &mut encoded).unwrap();
+
+        let max_frame_size = u64::try_from(encoded.len() - 1).unwrap();
+        let mut decoder = AtpFrameCodec::with_max_frame_size(max_frame_size);
+        let result = decoder.decode(&mut encoded);
+
+        assert!(matches!(result, Err(FrameError::FrameTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_encode_rejects_payload_length_mismatch() {
+        let mut codec = AtpFrameCodec::new();
+        let mut frame = Frame::new(ProtocolVersion::V0, FrameType::ObjectData, vec![1, 2]).unwrap();
+        frame.header.payload_length = VarInt::new(1).unwrap();
+
+        let mut buf = BytesMut::new();
+        let result = codec.encode(frame, &mut buf);
+
+        assert!(matches!(result, Err(FrameError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_encode_rejects_extension_limit_violations() {
+        let mut codec = AtpFrameCodec::new();
+        let mut oversized_ext =
+            Frame::new(ProtocolVersion::V0, FrameType::Capabilities, Vec::new()).unwrap();
+        oversized_ext
+            .header
+            .extensions
+            .insert(1, vec![0u8; (MAX_EXTENSION_SIZE + 1) as usize]);
+
+        let mut buf = BytesMut::new();
+        let result = codec.encode(oversized_ext, &mut buf);
+        assert!(matches!(result, Err(FrameError::ExtensionTooLarge { .. })));
+
+        let mut too_many_ext =
+            Frame::new(ProtocolVersion::V0, FrameType::Capabilities, Vec::new()).unwrap();
+        for ext_id in 0..=MAX_EXTENSION_COUNT {
+            too_many_ext
+                .header
+                .extensions
+                .insert(ext_id as u16, Vec::new());
+        }
+
+        let result = codec.encode(too_many_ext, &mut buf);
+        assert!(matches!(result, Err(FrameError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_invalid_varint_encoding_is_not_treated_as_partial_header() {
+        let mut buf = BytesMut::from(&[0x40, 0x00][..]); // non-canonical zero version
+        let mut codec = AtpFrameCodec::new();
+        let result = codec.decode(&mut buf);
+
+        assert!(matches!(
+            result,
+            Err(FrameError::VarInt(VarIntError::InvalidEncoding))
+        ));
     }
 
     #[test]
