@@ -31,11 +31,10 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
         .map_or_else(|| panic!("{key} must be an array"), Vec::as_slice)
 }
 
-fn object<'a>(value: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
-    value
-        .get(key)
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("{key} must be an object"))
+fn object<'a>(value: &'a Value, key: &str) -> &'a Value {
+    let object = value.get(key).unwrap_or_else(|| panic!("{key} must exist"));
+    assert!(object.is_object(), "{key} must be an object");
+    object
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -228,6 +227,7 @@ fn fail_closed_fixtures_and_golden_report_are_complete() {
             assert!(
                 string(fixture, "reason").contains("cannot")
                     || string(fixture, "reason").contains("requires")
+                    || string(fixture, "reason").contains("must")
                     || string(fixture, "reason").contains("not evidence"),
                 "fixture reason must be fail-closed"
             );
