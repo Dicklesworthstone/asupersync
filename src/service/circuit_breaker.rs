@@ -697,6 +697,13 @@ mod tests {
             Poll::Ready(Err(CircuitBreakerError::Open { .. }))
         );
         crate::assert_with_log!(rejected_open, "open rejection", true, rejected_open);
+        let metrics_after_rejection = service.metrics();
+        crate::assert_with_log!(
+            metrics_after_rejection.total_rejected == 1,
+            "open rejection counted",
+            1,
+            metrics_after_rejection.total_rejected
+        );
         crate::assert_with_log!(
             service.inner().calls() == calls_after_open,
             "open rejection did not call inner",
