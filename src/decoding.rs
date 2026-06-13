@@ -822,6 +822,12 @@ fn decode_block(
             SymbolKind::Repair => {
                 let (columns, coefficients) = match decoder.repair_equation(symbol.esi()) {
                     Ok(equation) => equation,
+                    Err(SystematicError::RepairEsiBelowK { esi, k }) => {
+                        return Err(DecodingError::InconsistentMetadata {
+                            sbn: plan.sbn,
+                            details: format!("repair esi {esi} < first repair esi {k}"),
+                        });
+                    }
                     Err(SystematicError::EsiOverflow { esi, padding_delta }) => {
                         return Err(DecodingError::InconsistentMetadata {
                             sbn: plan.sbn,

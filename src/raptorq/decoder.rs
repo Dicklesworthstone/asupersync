@@ -5085,6 +5085,7 @@ mod tests {
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let params = decoder.params();
         let upper = params.w + params.p;
+        let repair_start = k as u32;
         let context = rfc_eq_context(
             "RQ-B2-DECODER-EQ-BOUNDS-001",
             seed,
@@ -5093,7 +5094,7 @@ mod tests {
             "none",
             "index_bounds",
         );
-        for esi in 0..32u32 {
+        for esi in repair_start..repair_start + 32 {
             let (cols, coefs) = decoder
                 .repair_equation_rfc6330(esi)
                 .unwrap_or_else(|| panic!("{context} missing equation for esi={esi}"));
@@ -5119,7 +5120,7 @@ mod tests {
         let params = decoder.params();
         let w = params.w;
         let mut saw_pi = false;
-        for esi in 0..128u32 {
+        for esi in (k as u32)..(k as u32 + 128) {
             let (cols, _) = decoder
                 .repair_equation_rfc6330(esi)
                 .unwrap_or_else(|| panic!("missing RFC 6330 equation for esi={esi}"));
@@ -5150,7 +5151,7 @@ mod tests {
         for (scenario_id, k, symbol_size, seed) in scenarios {
             let decoder = InactivationDecoder::new(k, symbol_size, seed);
             let params = SystematicParams::for_source_block(k, symbol_size);
-            for esi in 0..64u32 {
+            for esi in (k as u32)..(k as u32 + 64) {
                 let decoder_eq = decoder.repair_equation_rfc6330(esi);
                 let shared_eq = params.rfc_repair_equation(esi).ok();
                 let context = rfc_eq_context(
