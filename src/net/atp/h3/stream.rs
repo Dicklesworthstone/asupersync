@@ -156,7 +156,8 @@ impl AtpH3Stream {
     /// Get the next chunk of data to send.
     pub fn next_send_data(&mut self) -> Option<Vec<u8>> {
         let data = self.send_queue.pop_front();
-        if data.is_some() {
+        if let Some(ref chunk) = data {
+            self.bytes_sent = self.bytes_sent.saturating_add(chunk.len() as u64);
             self.update_activity();
         }
         data
@@ -181,7 +182,13 @@ impl AtpH3Stream {
             )));
         }
 
-        if self.recv_buffer.len() + data.len() > self.max_buffer_size {
+        let new_buffer_len = self
+            .recv_buffer
+            .len()
+            .checked_add(data.len())
+            .ok_or_else(|| AtpH3Error::Stream("Receive buffer size overflow".to_string()))?;
+
+        if new_buffer_len > self.max_buffer_size {
             return Err(AtpH3Error::Stream(
                 "Receive buffer full - apply backpressure".to_string(),
             ));
@@ -391,11 +398,13 @@ mod tests {
         assert!(stream.send(b"hello").is_ok());
         assert!(stream.has_pending_send());
         assert_eq!(stream.send_queue_len(), 1);
+        assert_eq!(stream.stats().bytes_sent, 0);
 
         // Get data to send
         let data = stream.next_send_data().unwrap();
         assert_eq!(data, b"hello");
         assert!(!stream.has_pending_send());
+        assert_eq!(stream.stats().bytes_sent, 5);
 
         // Receive data
         assert!(stream.receive(b"world").is_ok());

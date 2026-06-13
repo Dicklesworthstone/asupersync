@@ -119,7 +119,10 @@ impl H3Session {
         }
 
         let stream_id = self.next_stream_id;
-        self.next_stream_id += 4; // WebTransport bidirectional streams use every 4th ID
+        self.next_stream_id = self
+            .next_stream_id
+            .checked_add(4)
+            .ok_or_else(|| AtpH3Error::Session("Stream ID space exhausted".to_string()))?;
 
         let stream = AtpH3Stream::new(stream_id, direction);
         self.streams.insert(stream_id, stream);
@@ -409,6 +412,21 @@ mod tests {
                 .create_stream(StreamDirection::Bidirectional)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn test_stream_id_overflow_is_rejected() {
+        let config = test_config();
+        let mut session = H3Session::new("test-session".to_string(), &config).unwrap();
+        session.activate().unwrap();
+        session.next_stream_id = u64::MAX - 3;
+
+        let err = session
+            .create_stream(StreamDirection::Bidirectional)
+            .expect_err("overflowing stream id should fail");
+
+        assert!(err.to_string().contains("Stream ID space exhausted"));
+        assert_eq!(session.stream_count(), 0);
     }
 
     #[test]

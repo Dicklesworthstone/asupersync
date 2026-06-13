@@ -226,16 +226,20 @@ impl AtpH3Adapter {
 
     /// Create a new H3 session.
     pub fn create_session(&mut self, session_id: String) -> AtpH3Result<&mut H3Session> {
-        if self.sessions.len() >= self.config.max_streams as usize {
-            return Err(AtpH3Error::Session("Maximum sessions exceeded".to_string()));
-        }
+        let at_capacity = self.sessions.len() >= self.config.max_streams as usize;
 
-        let session = H3Session::new(session_id.clone(), &self.config)?;
         match self.sessions.entry(session_id) {
-            Entry::Vacant(entry) => Ok(entry.insert(session)),
-            Entry::Occupied(mut entry) => {
-                entry.insert(session);
-                Ok(entry.into_mut())
+            Entry::Occupied(entry) => Err(AtpH3Error::Session(format!(
+                "Session {} already exists",
+                entry.key()
+            ))),
+            Entry::Vacant(entry) => {
+                if at_capacity {
+                    return Err(AtpH3Error::Session("Maximum sessions exceeded".to_string()));
+                }
+
+                let session = H3Session::new(entry.key().clone(), &self.config)?;
+                Ok(entry.insert(session))
             }
         }
     }
@@ -420,5 +424,19 @@ mod tests {
 
         assert_eq!(session.session_id(), session_id);
         assert!(adapter.get_session("test-session-entry").is_some());
+    }
+
+    #[test]
+    fn test_duplicate_session_id_is_rejected() {
+        let mut adapter = AtpH3Adapter::new(AdapterConfig::default());
+        let session_id = "test-session-duplicate".to_string();
+
+        assert!(adapter.create_session(session_id.clone()).is_ok());
+
+        let err = adapter
+            .create_session(session_id)
+            .expect_err("duplicate session id should fail");
+        assert!(err.to_string().contains("already exists"));
+        assert_eq!(adapter.stats().active_sessions, 1);
     }
 }

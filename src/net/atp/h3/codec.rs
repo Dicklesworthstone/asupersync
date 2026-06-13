@@ -145,14 +145,6 @@ impl H3FrameCodec {
             length_bytes[3],
         ]) as usize;
 
-        if data.len() < 5 + length {
-            return Err(AtpH3Error::Codec(format!(
-                "Frame truncated: expected {} bytes, got {}",
-                5 + length,
-                data.len()
-            )));
-        }
-
         if length > self.max_frame_size {
             return Err(AtpH3Error::Codec(format!(
                 "Frame too large: {} bytes exceeds maximum {}",
@@ -160,8 +152,20 @@ impl H3FrameCodec {
             )));
         }
 
+        let frame_len = 5usize
+            .checked_add(length)
+            .ok_or_else(|| AtpH3Error::Codec("Frame length overflow".to_string()))?;
+
+        if data.len() < frame_len {
+            return Err(AtpH3Error::Codec(format!(
+                "Frame truncated: expected {} bytes, got {}",
+                frame_len,
+                data.len()
+            )));
+        }
+
         // Extract ATP frame payload
-        let atp_payload = &data[5..5 + length];
+        let atp_payload = &data[5..frame_len];
 
         // Deserialize ATP frame
         self.deserialize_atp_frame(atp_payload, wt_frame_type.to_atp_frame_type())
@@ -309,6 +313,18 @@ mod tests {
         // Truncated frame
         let truncated_frame = vec![0x01, 0x00, 0x00, 0x00, 0x10]; // Claims 16 bytes but only has header
         assert!(codec.decode_atp_frame(&truncated_frame).is_err());
+    }
+
+    #[test]
+    fn test_oversized_declared_length_rejected_before_payload_read() {
+        let codec = H3FrameCodec::with_max_frame_size(4);
+        let oversized_frame = vec![0x01, 0x00, 0x00, 0x00, 0x05];
+
+        let err = codec
+            .decode_atp_frame(&oversized_frame)
+            .expect_err("oversized declared length should fail");
+
+        assert!(matches!(err, AtpH3Error::Codec(message) if message.contains("Frame too large")));
     }
 
     #[test]
