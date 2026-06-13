@@ -751,22 +751,35 @@ pub async fn send_path(
         entries: manifest_entries,
     };
 
-    let stream = TcpStream::connect(addr).await?;
+    let stream =
+        with_transport_timeout(cx, config.idle_timeout, "connect", TcpStream::connect(addr))
+            .await?;
     let peer = stream.peer_addr().unwrap_or(addr);
     let mut transport = FrameTransport::new(stream);
 
     // Handshake.
-    transport
-        .send(&json_frame(
-            FrameType::Handshake,
-            &Hello {
-                protocol: ATP_TCP_PROTOCOL,
-                role: "sender".to_string(),
-                peer_id: peer_id.to_string(),
-            },
-        )?)
-        .await?;
-    let ack_frame = transport.recv().await?;
+    let hello = json_frame(
+        FrameType::Handshake,
+        &Hello {
+            protocol: ATP_TCP_PROTOCOL,
+            role: "sender".to_string(),
+            peer_id: peer_id.to_string(),
+        },
+    )?;
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send handshake",
+        transport.send(&hello),
+    )
+    .await?;
+    let ack_frame = with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "receive handshake ack",
+        transport.recv(),
+    )
+    .await?;
     if ack_frame.frame_type() != FrameType::HandshakeAck {
         return Err(TransportError::Unexpected {
             got: ack_frame.frame_type(),
@@ -781,9 +794,14 @@ pub async fn send_path(
     }
 
     // Manifest.
-    transport
-        .send(&json_frame(FrameType::ObjectManifest, &manifest)?)
-        .await?;
+    let manifest_frame = json_frame(FrameType::ObjectManifest, &manifest)?;
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send manifest",
+        transport.send(&manifest_frame),
+    )
+    .await?;
 
     // Bulk data, entry by entry.
     for (i, (_, bytes)) in entries.iter().enumerate() {
@@ -791,19 +809,30 @@ pub async fn send_path(
         let index = u32::try_from(i).unwrap_or(u32::MAX);
         let mut offset: u64 = 0;
         for chunk in bytes.chunks(config.chunk_size.max(1)) {
-            transport.send(&data_frame(index, offset, chunk)?).await?;
+            let frame = data_frame(index, offset, chunk)?;
+            with_transport_timeout(
+                cx,
+                config.idle_timeout,
+                "send data frame",
+                transport.send(&frame),
+            )
+            .await?;
             offset += chunk.len() as u64;
         }
     }
 
     // Completion + receipt.
-    transport
-        .send(
-            &Frame::empty(FrameType::ObjectComplete)
-                .map_err(|e| TransportError::Frame(e.to_string()))?,
-        )
-        .await?;
-    let receipt_frame = transport.recv().await?;
+    let complete = Frame::empty(FrameType::ObjectComplete)
+        .map_err(|e| TransportError::Frame(e.to_string()))?;
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send complete",
+        transport.send(&complete),
+    )
+    .await?;
+    let receipt_frame =
+        with_transport_timeout(cx, config.idle_timeout, "receive proof", transport.recv()).await?;
     if receipt_frame.frame_type() != FrameType::Proof {
         return Err(TransportError::Unexpected {
             got: receipt_frame.frame_type(),
@@ -812,9 +841,14 @@ pub async fn send_path(
     }
     let receipt: ReceiveReceipt = parse_json(&receipt_frame)?;
 
-    let _ = transport
-        .send(&Frame::empty(FrameType::Close).map_err(|e| TransportError::Frame(e.to_string()))?)
-        .await;
+    let close = Frame::empty(FrameType::Close).map_err(|e| TransportError::Frame(e.to_string()))?;
+    let _ = with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send close",
+        transport.send(&close),
+    )
+    .await;
 
     if !receipt.committed {
         return Err(TransportError::Integrity(
@@ -1349,6 +1383,26 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("receive frame"));
         assert!(rendered.contains("60s"));
+    }
+
+    #[test]
+    fn send_path_rejects_zero_idle_timeout_before_connecting() {
+        let cx = Cx::for_testing();
+        let cfg = TransferConfig {
+            idle_timeout: Duration::ZERO,
+            ..TransferConfig::default()
+        };
+        let addr = "127.0.0.1:9".parse().unwrap();
+        let result =
+            futures_lite::future::block_on(send_path(&cx, addr, Path::new(file!()), cfg, "sender"));
+
+        assert!(matches!(
+            result,
+            Err(TransportError::Timeout {
+                operation: "connect",
+                timeout,
+            }) if timeout.is_zero()
+        ));
     }
 
     #[test]
