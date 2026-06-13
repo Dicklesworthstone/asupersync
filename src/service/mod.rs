@@ -17,6 +17,7 @@
 
 pub mod buffer;
 mod builder;
+pub mod circuit_breaker;
 pub mod concurrency_limit;
 pub mod discover;
 pub mod filter;
@@ -33,6 +34,9 @@ pub mod timeout;
 
 pub use buffer::{Buffer, BufferError, BufferLayer};
 pub use builder::ServiceBuilder;
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerError, CircuitBreakerFuture, CircuitBreakerLayer,
+};
 pub use concurrency_limit::{ConcurrencyLimit, ConcurrencyLimitError, ConcurrencyLimitLayer};
 pub use discover::{
     Change, Discover, DnsDiscoveryConfig, DnsDiscoveryError, DnsServiceDiscovery, StaticList,

@@ -1,11 +1,13 @@
 //! Builder for composing service layers.
 
+use super::circuit_breaker::CircuitBreakerLayer;
 use super::concurrency_limit::ConcurrencyLimitLayer;
 use super::load_shed::LoadShedLayer;
 use super::rate_limit::RateLimitLayer;
 use super::retry::RetryLayer;
 use super::timeout::TimeoutLayer;
 use super::{Identity, Layer, Stack};
+use crate::combinator::circuit_breaker::CircuitBreakerPolicy;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -123,6 +125,19 @@ impl<L> ServiceBuilder<L> {
         semaphore: Arc<crate::sync::Semaphore>,
     ) -> ServiceBuilder<Stack<L, ConcurrencyLimitLayer>> {
         self.layer(ConcurrencyLimitLayer::with_semaphore(semaphore))
+    }
+
+    /// Adds a circuit-breaker layer.
+    ///
+    /// Requests are admitted while the breaker is closed. A burst of failures
+    /// opens the breaker, subsequent calls are rejected until the open duration
+    /// elapses, and then half-open probes decide whether to close or reopen it.
+    #[must_use]
+    pub fn circuit_breaker(
+        self,
+        policy: CircuitBreakerPolicy,
+    ) -> ServiceBuilder<Stack<L, CircuitBreakerLayer>> {
+        self.layer(CircuitBreakerLayer::new(policy))
     }
 
     /// Adds a rate limiting layer.
@@ -252,6 +267,12 @@ mod tests {
     fn test_concurrency_limit_with_semaphore() {
         let sem = Arc::new(crate::sync::Semaphore::new(5));
         let builder = ServiceBuilder::new().concurrency_limit_with_semaphore(sem);
+        let _ = builder.layer_ref();
+    }
+
+    #[test]
+    fn test_circuit_breaker_convenience() {
+        let builder = ServiceBuilder::new().circuit_breaker(CircuitBreakerPolicy::default());
         let _ = builder.layer_ref();
     }
 
