@@ -81,9 +81,132 @@
 //!     ep.recv(&cx).await.unwrap();
 //! }
 //! ```
+//!
+//! # Obligation Protocol Facade
+//!
+//! The [`obligation`] submodule is the public facade for the obligation-backed
+//! typestate protocols shipped in [`crate::obligation::session_types`]. Keep
+//! the two surfaces distinct:
+//!
+//! | Use this surface | When |
+//! | --- | --- |
+//! | [`channel`] plus [`Endpoint`] | You need a general binary session channel for an application protocol. |
+//! | [`obligation::send_permit`] | You are proving the two-phase reserve/send-or-abort protocol. |
+//! | [`obligation::lease`] | You are proving acquire/renew/release resource ownership. |
+//! | [`obligation::two_phase`] | You are proving reserve/commit-or-abort effects. |
+//! | [`crate::obligation::choreography`] | You need a global choreography DSL; code generation remains an obligation-module surface. |
+//!
+//! The obligation facade is not exported through a prelude. Session protocols
+//! encode linear state transitions, so callers should import the exact protocol
+//! they are driving.
+//!
+//! The API surface map already records the root [`crate::session`] module as the
+//! public entry point; these protocol modules are nested under that entry.
+//!
+//! Choreography disposition: [`crate::obligation::choreography`] remains an
+//! experimental obligation-module surface. The global-protocol builder is useful
+//! for documenting and validating choreographies, but the projection/codegen
+//! path is still separate from this facade, so it is intentionally not re-exported
+//! as `session::obligation::*`.
+//!
+//! Negative-space compile-fail examples live alongside the implementation in
+//! [`crate::obligation::session_types`]. They prove that out-of-order sends,
+//! premature closes, and late aborts fail at compile time.
+//!
+//! SendPermit commit path:
+//!
+//! ```
+//! use asupersync::session::obligation::{Branch, Selected, send_permit};
+//!
+//! let (sender, receiver) = send_permit::new_session::<u64>(100);
+//!
+//! let sender = sender.send(send_permit::ReserveMsg);
+//! let sender = sender.select_left();
+//! let sender = sender.send(42);
+//! let sender_proof = sender.close();
+//!
+//! let (_, receiver) = receiver.recv(send_permit::ReserveMsg);
+//! let receiver_proof = match receiver.offer(Branch::Left) {
+//!     Selected::Left(channel) => {
+//!         let (value, channel) = channel.recv(42);
+//!         assert_eq!(value, 42);
+//!         channel.close()
+//!     }
+//!     Selected::Right(_) => panic!("expected send branch"),
+//! };
+//!
+//! assert_eq!(sender_proof.channel_id, receiver_proof.channel_id);
+//! ```
+//!
+//! Lease release path:
+//!
+//! ```
+//! use asupersync::session::obligation::{Branch, Selected, lease};
+//!
+//! let (holder, resource) = lease::new_session(200);
+//!
+//! let holder = holder.send(lease::AcquireMsg);
+//! let holder = holder.select_right();
+//! let holder = holder.send(lease::ReleaseMsg);
+//! let holder_proof = holder.close();
+//!
+//! let (_, resource) = resource.recv(lease::AcquireMsg);
+//! let resource_proof = match resource.offer(Branch::Right) {
+//!     Selected::Right(channel) => {
+//!         let (_, channel) = channel.recv(lease::ReleaseMsg);
+//!         channel.close()
+//!     }
+//!     Selected::Left(_) => panic!("expected release branch"),
+//! };
+//!
+//! assert_eq!(holder_proof.channel_id, resource_proof.channel_id);
+//! ```
+//!
+//! Two-phase commit path:
+//!
+//! ```
+//! use asupersync::record::ObligationKind;
+//! use asupersync::session::obligation::{Branch, Selected, two_phase};
+//!
+//! let kind = ObligationKind::IoOp;
+//! let (initiator, executor) = two_phase::new_session(300, kind);
+//! let reserve = two_phase::ReserveMsg { kind };
+//!
+//! let initiator = initiator.send(reserve.clone());
+//! let initiator = initiator.select_left();
+//! let initiator = initiator.send(two_phase::CommitMsg);
+//! let initiator_proof = initiator.close();
+//!
+//! let (received, executor) = executor.recv(reserve);
+//! assert_eq!(received.kind, kind);
+//! let executor_proof = match executor.offer(Branch::Left) {
+//!     Selected::Left(channel) => {
+//!         let (_, channel) = channel.recv(two_phase::CommitMsg);
+//!         channel.close()
+//!     }
+//!     Selected::Right(_) => panic!("expected commit branch"),
+//! };
+//!
+//! assert_eq!(initiator_proof.obligation_kind, executor_proof.obligation_kind);
+//! ```
 
 use crate::types::outcome::Outcome;
 use std::marker::PhantomData;
+
+/// Public facade for obligation-backed session protocols.
+///
+/// This module re-exports the shipped obligation typestate protocols from
+/// [`crate::obligation::session_types`] under `asupersync::session` so users can
+/// discover the general binary session API and the obligation-specific
+/// protocols from one public module.
+pub mod obligation {
+    pub use crate::obligation::session_types::{
+        Branch, Chan, End, Initiator, Offer, Rec, Recv, Responder, Select, Selected, Send,
+        SessionError, SessionProof, SessionProtocolAdoptionSpec, TracingContract,
+        TransportBridgeContract, Var, delegation, lease, new_transport_pair, send_permit,
+        session_protocol_adoption_specs, silent_session_consume_count, two_phase,
+    };
+}
 
 // ---------- Core session type building blocks ----------
 
