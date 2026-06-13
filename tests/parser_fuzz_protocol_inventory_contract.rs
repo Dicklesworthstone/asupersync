@@ -49,8 +49,7 @@ fn inventory() -> Value {
 fn as_array<'a>(value: &'a Value, context: &str) -> &'a [Value] {
     value
         .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_else(|| panic!("{context} must be an array"))
+        .map_or_else(|| panic!("{context} must be an array"), Vec::as_slice)
 }
 
 fn as_str<'a>(value: &'a Value, context: &str) -> &'a str {

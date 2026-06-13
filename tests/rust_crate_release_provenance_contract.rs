@@ -101,14 +101,14 @@ fn nested_value<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
 }
 
 fn string_set(value: &Value, key: &str) -> Result<BTreeSet<String>, String> {
-    Ok(array(value, key)?
+    array(value, key)?
         .iter()
         .map(|item| {
             item.as_str()
                 .ok_or_else(|| format!("{key} entries must be strings"))
                 .map(ToOwned::to_owned)
         })
-        .collect::<Result<BTreeSet<_>, _>>()?)
+        .collect::<Result<BTreeSet<_>, _>>()
 }
 
 fn sha256_hex(relative: &str) -> String {
