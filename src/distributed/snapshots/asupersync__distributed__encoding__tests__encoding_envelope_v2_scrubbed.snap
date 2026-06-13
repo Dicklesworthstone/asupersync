@@ -1,25 +1,36 @@
 ---
 source: src/distributed/encoding.rs
-assertion_line: 1332
+assertion_line: 1745
 expression: "serde_json::json!({\n    \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"base\", &base),\n    \"extension\":\n    scrub_encoded_state_envelope_for_snapshot_test(\"extension\", &extension),\n})"
 ---
 {
   "base": {
     "envelope": {
       "encoded_at_nanos": 77000000000,
-      "original_size": 89,
-      "redundancy_factor": "1.500",
+      "original_size": 133,
+      "redundancy_factor": "1.333",
       "repair_count": 1,
-      "source_count": 2
+      "source_count": 3
+    },
+    "layout_decision": {
+      "configured_max_source_blocks": 1,
+      "configured_min_repair_symbols": 1,
+      "effective_min_repair_symbols": 1,
+      "effective_source_blocks": 1,
+      "path_quality": null,
+      "policy_id": "static-block-layout-v1",
+      "reason_id": "path-quality-unknown",
+      "repair_multiplier_permille": 1000,
+      "requested_source_blocks": 1
     },
     "name": "base",
     "params": {
-      "min_symbols_for_decode": 2,
+      "min_symbols_for_decode": 3,
       "object_id": "ObjectId(00000000000000000000000000000010)",
-      "object_size": 89,
+      "object_size": 133,
       "source_blocks": 1,
       "symbol_size": 48,
-      "symbols_per_block": 2
+      "symbols_per_block": 3
     },
     "roundtrip_snapshot": {
       "budget": {
@@ -68,6 +79,13 @@ expression: "serde_json::json!({\n    \"base\": scrub_encoded_state_envelope_for
       },
       {
         "esi": 2,
+        "kind": "source",
+        "len": 48,
+        "preview_hex": "00 00 00 00 00 00 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 3,
         "kind": "repair",
         "len": 48,
         "preview_hex": "53 4e a6 50 02 01 00 00",
@@ -78,19 +96,30 @@ expression: "serde_json::json!({\n    \"base\": scrub_encoded_state_envelope_for
   "extension": {
     "envelope": {
       "encoded_at_nanos": 88000000000,
-      "original_size": 166,
-      "redundancy_factor": "1.286",
+      "original_size": 210,
+      "redundancy_factor": "1.222",
       "repair_count": 2,
-      "source_count": 7
+      "source_count": 9
+    },
+    "layout_decision": {
+      "configured_max_source_blocks": 2,
+      "configured_min_repair_symbols": 2,
+      "effective_min_repair_symbols": 2,
+      "effective_source_blocks": 2,
+      "path_quality": null,
+      "policy_id": "static-block-layout-v1",
+      "reason_id": "path-quality-unknown",
+      "repair_multiplier_permille": 1000,
+      "requested_source_blocks": 2
     },
     "name": "extension",
     "params": {
-      "min_symbols_for_decode": 7,
+      "min_symbols_for_decode": 9,
       "object_id": "ObjectId(00000000000000000000000000000020)",
-      "object_size": 166,
+      "object_size": 210,
       "source_blocks": 2,
       "symbol_size": 24,
-      "symbols_per_block": 4
+      "symbols_per_block": 5
     },
     "roundtrip_snapshot": {
       "budget": {
@@ -161,56 +190,70 @@ expression: "serde_json::json!({\n    \"base\": scrub_encoded_state_envelope_for
         "esi": 1,
         "kind": "source",
         "len": 24,
-        "preview_hex": "00 00 00 00 00 00 07 00",
+        "preview_hex": "00 00 00 00 00 00 08 00",
         "sbn": 0
       },
       {
         "esi": 2,
         "kind": "source",
         "len": 24,
-        "preview_hex": "00 00 03 00 00 00 00 00",
+        "preview_hex": "00 00 02 00 00 00 00 00",
         "sbn": 0
       },
       {
         "esi": 3,
         "kind": "source",
         "len": 24,
-        "preview_hex": "00 00 08 00 00 00 00 00",
+        "preview_hex": "04 00 00 00 02 00 00 00",
         "sbn": 0
       },
       {
         "esi": 4,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 01 00 00 00 05 00",
+        "sbn": 0
+      },
+      {
+        "esi": 5,
         "kind": "repair",
         "len": 24,
-        "preview_hex": "53 4e 04 50 02 07 8f 00",
+        "preview_hex": "3a 4e 97 50 b8 07 97 00",
         "sbn": 0
       },
       {
         "esi": 0,
         "kind": "source",
         "len": 24,
-        "preview_hex": "a0 db 21 5d 00 00 00 01",
+        "preview_hex": "01 22 00 00 00 00 00 00",
         "sbn": 1
       },
       {
         "esi": 1,
         "kind": "source",
         "len": 24,
-        "preview_hex": "00 00 74 69 6d 65 6f 75",
+        "preview_hex": "78 74 65 6e 73 69 6f 6e",
         "sbn": 1
       },
       {
         "esi": 2,
         "kind": "source",
         "len": 24,
-        "preview_hex": "6c 64 73 01 02 00 00 00",
+        "preview_hex": "06 00 00 00 de ad be ef",
         "sbn": 1
       },
       {
         "esi": 3,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 00 00 00 00 00 00",
+        "sbn": 1
+      },
+      {
+        "esi": 4,
         "kind": "repair",
         "len": 24,
-        "preview_hex": "d1 ee 8a 99 e8 92 2a 45",
+        "preview_hex": "41 81 92 cd fd 9b ec 1f",
         "sbn": 1
       }
     ]

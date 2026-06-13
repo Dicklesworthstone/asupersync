@@ -414,6 +414,7 @@ mod tests {
             repair_count: 2,
             original_size: 1000,
             encoded_at: Time::ZERO,
+            layout_decision: Default::default(),
         }
     }
 
@@ -426,6 +427,7 @@ mod tests {
             repair_count: 2,
             original_size: 1536,
             encoded_at: Time::ZERO,
+            layout_decision: Default::default(),
         };
         let security = authorized_security_context(&replicas);
         let assignments =

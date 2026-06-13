@@ -28,6 +28,8 @@ pub struct EncodingConfig {
     pub max_source_blocks: u16,
     /// Repair symbol overhead factor (e.g., 1.2 = 20% overhead).
     pub repair_overhead: f32,
+    /// Optional replayable path-quality snapshot for adaptive block layout.
+    pub path_quality: Option<PathQualitySnapshot>,
 }
 
 impl Default for EncodingConfig {
@@ -37,7 +39,100 @@ impl Default for EncodingConfig {
             min_repair_symbols: 4,
             max_source_blocks: 1,
             repair_overhead: 1.2,
+            path_quality: None,
         }
+    }
+}
+
+/// Stable policy identifier for the adaptive path-quality layout table.
+pub const ADAPTIVE_BLOCK_LAYOUT_POLICY_ID: &str = "adaptive-block-layout-v1";
+
+/// Stable policy identifier for the default static layout path.
+pub const STATIC_BLOCK_LAYOUT_POLICY_ID: &str = "static-block-layout-v1";
+
+/// Replayable quality snapshot used to derive adaptive RaptorQ block layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathQualitySnapshot {
+    /// Round-trip-time EWMA in milliseconds.
+    pub rtt_ewma_ms: u32,
+    /// Packet-loss EWMA in permille, clamped to `0..=1000`.
+    pub loss_ewma_permille: u16,
+    /// Observed reorder depth in symbols.
+    pub reorder_depth: u16,
+}
+
+impl PathQualitySnapshot {
+    /// Creates a new bounded path-quality snapshot.
+    #[must_use]
+    pub fn new(rtt_ewma_ms: u32, loss_ewma_permille: u16, reorder_depth: u16) -> Self {
+        Self {
+            rtt_ewma_ms,
+            loss_ewma_permille: loss_ewma_permille.min(1000),
+            reorder_depth,
+        }
+    }
+
+    /// Creates a path-quality snapshot from a floating-point loss rate.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn from_loss_rate(rtt_ewma_ms: u32, loss_rate: f64, reorder_depth: u16) -> Self {
+        let bounded = if loss_rate.is_finite() {
+            loss_rate.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        Self::new(
+            rtt_ewma_ms,
+            (bounded * 1000.0).round() as u16,
+            reorder_depth,
+        )
+    }
+}
+
+/// Deterministic telemetry for the block-layout choice used by one encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodingLayoutDecision {
+    /// Stable policy identifier.
+    pub policy_id: &'static str,
+    /// Stable reason identifier for the selected policy row.
+    pub reason_id: &'static str,
+    /// Optional path-quality input; `None` means static fallback.
+    pub path_quality: Option<PathQualitySnapshot>,
+    /// Maximum source blocks configured by the caller.
+    pub configured_max_source_blocks: u16,
+    /// Source blocks requested by the selected policy before object-size clipping.
+    pub requested_source_blocks: u16,
+    /// Source blocks actually used after object-size clipping.
+    pub effective_source_blocks: u16,
+    /// Minimum repair symbols configured by the caller.
+    pub configured_min_repair_symbols: u16,
+    /// Minimum repair symbols used after adaptive overhead selection.
+    pub effective_min_repair_symbols: u16,
+    /// Repair multiplier from the selected policy row, in permille.
+    pub repair_multiplier_permille: u16,
+}
+
+impl EncodingLayoutDecision {
+    /// Static-layout decision used when no path quality is available.
+    #[must_use]
+    pub const fn static_config(max_source_blocks: u16, min_repair_symbols: u16) -> Self {
+        Self {
+            policy_id: STATIC_BLOCK_LAYOUT_POLICY_ID,
+            reason_id: "path-quality-unknown",
+            path_quality: None,
+            configured_max_source_blocks: max_source_blocks,
+            requested_source_blocks: max_source_blocks,
+            effective_source_blocks: max_source_blocks,
+            configured_min_repair_symbols: min_repair_symbols,
+            effective_min_repair_symbols: min_repair_symbols,
+            repair_multiplier_permille: 1000,
+        }
+    }
+}
+
+impl Default for EncodingLayoutDecision {
+    fn default() -> Self {
+        Self::static_config(1, 0)
     }
 }
 
@@ -86,17 +181,19 @@ impl StateEncoder {
             return Err(EncodingError::EmptyData);
         }
 
+        let mut layout_decision = derive_layout_decision(&self.config, data.len())?;
         let layout = derive_block_layout(
             data.len(),
             self.config.symbol_size,
-            self.config.max_source_blocks,
+            layout_decision.effective_source_blocks,
         )?;
+        layout_decision.effective_source_blocks = layout.source_blocks;
         let params = self.calculate_params(data.len(), object_id, layout)?;
         let mut symbols = Vec::new();
         let mut total_source = 0usize;
         let mut total_repair = 0usize;
         let repair_distribution = distribute_repairs(
-            usize::from(self.config.min_repair_symbols),
+            usize::from(layout_decision.effective_min_repair_symbols),
             usize::from(layout.source_blocks),
         );
 
@@ -141,6 +238,7 @@ impl StateEncoder {
             repair_count,
             original_size: data.len(),
             encoded_at,
+            layout_decision,
         })
     }
 
@@ -378,6 +476,8 @@ pub struct EncodedState {
     pub original_size: usize,
     /// Encoding timestamp.
     pub encoded_at: Time,
+    /// Replayable block-layout decision used for this encoding.
+    pub layout_decision: EncodingLayoutDecision,
 }
 
 impl EncodedState {
@@ -486,27 +586,66 @@ struct BlockLayout {
     symbols_per_block: u16,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AdaptiveBlockLayoutPolicyRow {
+    max_loss_permille: u16,
+    max_rtt_ms: u32,
+    max_reorder_depth: u16,
+    source_block_divisor: u16,
+    repair_multiplier_permille: u16,
+    reason_id: &'static str,
+}
+
+const ADAPTIVE_BLOCK_LAYOUT_POLICY: [AdaptiveBlockLayoutPolicyRow; 5] = [
+    AdaptiveBlockLayoutPolicyRow {
+        max_loss_permille: 10,
+        max_rtt_ms: 50,
+        max_reorder_depth: 1,
+        source_block_divisor: 1,
+        repair_multiplier_permille: 1000,
+        reason_id: "clean-low-rtt",
+    },
+    AdaptiveBlockLayoutPolicyRow {
+        max_loss_permille: 10,
+        max_rtt_ms: u32::MAX,
+        max_reorder_depth: 2,
+        source_block_divisor: 2,
+        repair_multiplier_permille: 1100,
+        reason_id: "clean-high-rtt",
+    },
+    AdaptiveBlockLayoutPolicyRow {
+        max_loss_permille: 50,
+        max_rtt_ms: u32::MAX,
+        max_reorder_depth: 8,
+        source_block_divisor: 2,
+        repair_multiplier_permille: 1250,
+        reason_id: "moderate-loss",
+    },
+    AdaptiveBlockLayoutPolicyRow {
+        max_loss_permille: 150,
+        max_rtt_ms: u32::MAX,
+        max_reorder_depth: 16,
+        source_block_divisor: 4,
+        repair_multiplier_permille: 1750,
+        reason_id: "lossy",
+    },
+    AdaptiveBlockLayoutPolicyRow {
+        max_loss_permille: u16::MAX,
+        max_rtt_ms: u32::MAX,
+        max_reorder_depth: u16::MAX,
+        source_block_divisor: 8,
+        repair_multiplier_permille: 2500,
+        reason_id: "severe-loss-or-reorder",
+    },
+];
+
 fn derive_block_layout(
     data_size: usize,
     symbol_size: u16,
     max_source_blocks: u16,
 ) -> Result<BlockLayout, EncodingError> {
-    if data_size == 0 {
-        return Err(EncodingError::EmptyData);
-    }
-    if symbol_size == 0 {
-        return Err(EncodingError::InvalidConfig {
-            reason: "symbol_size must be non-zero".to_string(),
-        });
-    }
-    if max_source_blocks == 0 {
-        return Err(EncodingError::InvalidConfig {
-            reason: "max_source_blocks must be non-zero".to_string(),
-        });
-    }
-
+    let total_symbols = total_symbols_for_layout(data_size, symbol_size, max_source_blocks)?;
     let symbol_size = usize::from(symbol_size);
-    let total_symbols = data_size.div_ceil(symbol_size);
     let requested_blocks = usize::from(max_source_blocks).min(total_symbols.max(1));
     let symbols_per_block = total_symbols.div_ceil(requested_blocks);
     let max_block_size = symbols_per_block
@@ -530,6 +669,100 @@ fn derive_block_layout(
         max_block_size,
         source_blocks,
         symbols_per_block,
+    })
+}
+
+fn derive_layout_decision(
+    config: &EncodingConfig,
+    data_size: usize,
+) -> Result<EncodingLayoutDecision, EncodingError> {
+    total_symbols_for_layout(data_size, config.symbol_size, config.max_source_blocks)?;
+
+    let Some(path_quality) = config.path_quality else {
+        return Ok(EncodingLayoutDecision::static_config(
+            config.max_source_blocks,
+            config.min_repair_symbols,
+        ));
+    };
+
+    let policy = select_adaptive_layout_policy(path_quality);
+    let requested_blocks = usize::from(config.max_source_blocks)
+        .div_ceil(usize::from(policy.source_block_divisor))
+        .max(1);
+    let requested_blocks_u16 =
+        u16::try_from(requested_blocks).map_err(|_| EncodingError::SymbolCountOverflow {
+            field: "source_blocks",
+            value: requested_blocks,
+            max: usize::from(u16::MAX),
+        })?;
+    let effective_repairs =
+        adaptive_repair_symbols(config.min_repair_symbols, policy.repair_multiplier_permille)?;
+
+    Ok(EncodingLayoutDecision {
+        policy_id: ADAPTIVE_BLOCK_LAYOUT_POLICY_ID,
+        reason_id: policy.reason_id,
+        path_quality: Some(path_quality),
+        configured_max_source_blocks: config.max_source_blocks,
+        requested_source_blocks: requested_blocks_u16,
+        effective_source_blocks: requested_blocks_u16,
+        configured_min_repair_symbols: config.min_repair_symbols,
+        effective_min_repair_symbols: effective_repairs,
+        repair_multiplier_permille: policy.repair_multiplier_permille,
+    })
+}
+
+fn total_symbols_for_layout(
+    data_size: usize,
+    symbol_size: u16,
+    max_source_blocks: u16,
+) -> Result<usize, EncodingError> {
+    if data_size == 0 {
+        return Err(EncodingError::EmptyData);
+    }
+    if symbol_size == 0 {
+        return Err(EncodingError::InvalidConfig {
+            reason: "symbol_size must be non-zero".to_string(),
+        });
+    }
+    if max_source_blocks == 0 {
+        return Err(EncodingError::InvalidConfig {
+            reason: "max_source_blocks must be non-zero".to_string(),
+        });
+    }
+
+    Ok(data_size.div_ceil(usize::from(symbol_size)))
+}
+
+fn select_adaptive_layout_policy(
+    path_quality: PathQualitySnapshot,
+) -> AdaptiveBlockLayoutPolicyRow {
+    ADAPTIVE_BLOCK_LAYOUT_POLICY
+        .iter()
+        .copied()
+        .find(|row| {
+            path_quality.loss_ewma_permille <= row.max_loss_permille
+                && path_quality.rtt_ewma_ms <= row.max_rtt_ms
+                && path_quality.reorder_depth <= row.max_reorder_depth
+        })
+        .expect("adaptive block layout policy has a catch-all row")
+}
+
+fn adaptive_repair_symbols(
+    configured_min_repair_symbols: u16,
+    repair_multiplier_permille: u16,
+) -> Result<u16, EncodingError> {
+    if repair_multiplier_permille <= 1000 {
+        return Ok(configured_min_repair_symbols);
+    }
+
+    let base = usize::from(configured_min_repair_symbols).max(1);
+    let adjusted = base
+        .saturating_mul(usize::from(repair_multiplier_permille))
+        .div_ceil(1000);
+    u16::try_from(adjusted).map_err(|_| EncodingError::SymbolCountOverflow {
+        field: "min_repair_symbols",
+        value: adjusted,
+        max: usize::from(u16::MAX),
     })
 }
 
@@ -720,6 +953,21 @@ mod tests {
                 "encoded_at_nanos": encoded.encoded_at.as_nanos(),
                 "redundancy_factor": format!("{:.3}", encoded.redundancy_factor()),
             },
+            "layout_decision": {
+                "policy_id": encoded.layout_decision.policy_id,
+                "reason_id": encoded.layout_decision.reason_id,
+                "configured_max_source_blocks": encoded.layout_decision.configured_max_source_blocks,
+                "requested_source_blocks": encoded.layout_decision.requested_source_blocks,
+                "effective_source_blocks": encoded.layout_decision.effective_source_blocks,
+                "configured_min_repair_symbols": encoded.layout_decision.configured_min_repair_symbols,
+                "effective_min_repair_symbols": encoded.layout_decision.effective_min_repair_symbols,
+                "repair_multiplier_permille": encoded.layout_decision.repair_multiplier_permille,
+                "path_quality": encoded.layout_decision.path_quality.map(|quality| serde_json::json!({
+                    "rtt_ewma_ms": quality.rtt_ewma_ms,
+                    "loss_ewma_permille": quality.loss_ewma_permille,
+                    "reorder_depth": quality.reorder_depth,
+                })),
+            },
             "symbols": encoded.symbols.iter().map(|symbol| {
                 let preview_len = symbol.len().min(8);
                 let preview = symbol.data()[..preview_len]
@@ -765,6 +1013,99 @@ mod tests {
                     "repair distribution must stay balanced, got {repairs:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn path_quality_from_loss_rate_clamps_and_quantizes() {
+        assert_eq!(
+            PathQualitySnapshot::from_loss_rate(12, 0.057, 3),
+            PathQualitySnapshot::new(12, 57, 3)
+        );
+        assert_eq!(
+            PathQualitySnapshot::from_loss_rate(12, 9.0, 3).loss_ewma_permille,
+            1000
+        );
+        assert_eq!(
+            PathQualitySnapshot::from_loss_rate(12, f64::NAN, 3).loss_ewma_permille,
+            1000
+        );
+    }
+
+    #[test]
+    fn unknown_path_quality_keeps_static_layout_decision() {
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 4,
+            max_source_blocks: 8,
+            ..Default::default()
+        };
+        let mut encoder = StateEncoder::new(config, DetRng::new(42));
+
+        let encoded = encoder
+            .encode(&create_large_snapshot(4_096), Time::ZERO)
+            .unwrap();
+
+        assert_eq!(
+            encoded.layout_decision.policy_id,
+            STATIC_BLOCK_LAYOUT_POLICY_ID
+        );
+        assert_eq!(encoded.layout_decision.reason_id, "path-quality-unknown");
+        assert_eq!(encoded.layout_decision.effective_source_blocks, 8);
+        assert_eq!(encoded.layout_decision.effective_min_repair_symbols, 4);
+    }
+
+    #[test]
+    fn lossy_path_quality_uses_larger_blocks_and_more_repairs() {
+        let config = EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 4,
+            max_source_blocks: 8,
+            path_quality: Some(PathQualitySnapshot::new(120, 150, 4)),
+            ..Default::default()
+        };
+        let mut encoder = StateEncoder::new(config, DetRng::new(42));
+
+        let encoded = encoder
+            .encode(&create_large_snapshot(4_096), Time::ZERO)
+            .unwrap();
+
+        assert_eq!(
+            encoded.layout_decision.policy_id,
+            ADAPTIVE_BLOCK_LAYOUT_POLICY_ID
+        );
+        assert_eq!(encoded.layout_decision.reason_id, "lossy");
+        assert_eq!(encoded.layout_decision.configured_max_source_blocks, 8);
+        assert_eq!(encoded.layout_decision.requested_source_blocks, 2);
+        assert_eq!(encoded.params.source_blocks, 2);
+        assert_eq!(encoded.layout_decision.effective_min_repair_symbols, 7);
+        assert_eq!(encoded.repair_count, 7);
+    }
+
+    #[test]
+    fn adaptive_policy_overhead_is_monotone_with_loss() {
+        let qualities = [
+            PathQualitySnapshot::new(20, 0, 0),
+            PathQualitySnapshot::new(20, 10, 1),
+            PathQualitySnapshot::new(20, 50, 2),
+            PathQualitySnapshot::new(20, 150, 4),
+            PathQualitySnapshot::new(20, 250, 4),
+        ];
+        let mut previous_multiplier = 0;
+        let mut previous_divisor = 0;
+
+        for quality in qualities {
+            let row = select_adaptive_layout_policy(quality);
+            assert!(
+                row.repair_multiplier_permille >= previous_multiplier,
+                "lossier quality should not reduce repair overhead"
+            );
+            assert!(
+                row.source_block_divisor >= previous_divisor,
+                "lossier quality should not request smaller extended blocks"
+            );
+            previous_multiplier = row.repair_multiplier_permille;
+            previous_divisor = row.source_block_divisor;
         }
     }
 
@@ -998,6 +1339,7 @@ mod tests {
             repair_count: encoded.repair_count,
             original_size: encoded.original_size,
             encoded_at: encoded.encoded_at,
+            layout_decision: Default::default(),
         };
 
         let err = encoder
@@ -1037,6 +1379,7 @@ mod tests {
             repair_count: encoded.repair_count,
             original_size: encoded.original_size,
             encoded_at: encoded.encoded_at,
+            layout_decision: Default::default(),
         };
 
         let err = encoder
@@ -1355,6 +1698,7 @@ mod tests {
             repair_count: u16::MAX,
             original_size: 0,
             encoded_at: Time::ZERO,
+            layout_decision: Default::default(),
         };
 
         let redundancy = encoded.redundancy_factor();

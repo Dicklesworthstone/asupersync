@@ -44,7 +44,10 @@ pub use distribution::{
     DistributionConfig, DistributionMetrics, DistributionResult, ReplicaAck, ReplicaFailure,
     SymbolDistributor,
 };
-pub use encoding::{EncodedState, EncodingConfig, EncodingError, StateEncoder};
+pub use encoding::{
+    ADAPTIVE_BLOCK_LAYOUT_POLICY_ID, EncodedState, EncodingConfig, EncodingError,
+    EncodingLayoutDecision, PathQualitySnapshot, STATIC_BLOCK_LAYOUT_POLICY_ID, StateEncoder,
+};
 pub use recovery::{
     CollectedSymbol, CollectionConsistency, CollectionMetrics, RecoveryCollector, RecoveryConfig,
     RecoveryDecodingConfig, RecoveryOrchestrator, RecoveryPhase, RecoveryProgress, RecoveryResult,
