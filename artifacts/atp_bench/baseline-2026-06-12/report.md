@@ -58,3 +58,32 @@ is the apples-to-apples row; `rsync-ssh` is the realistic-usage row.
 
 - Measured transfers: 54; bit-for-bit SHA-256 verified: 54.
 - Zero verification failures.
+
+---
+
+## Addendum: ATP-RQ (RaptorQ/UDP) transport — cross-machine status (2026-06-13)
+
+The RaptorQ-over-UDP transport (`--transport rq`, `br-asupersync-mixdaw`) is
+**loopback-proven** (5/5 e2e incl. 1-in-7 loss recovery) but is **not yet
+viable cross-machine**, so it is excluded from the comparison table above. Fleet
+bring-up (hz1 → vmi1156319, 93 ms RTT) surfaced two precise, reproducible bugs:
+
+1. **Multi-block param mismatch** (`asupersync-c8m8ha`): any entry spanning >1
+   source block fails at `set_object_params` (reproduced in-process). Single-block
+   coding is correct (K=64 and K=512 in-process roundtrips pass).
+2. **Single-block network convergence** (`asupersync-ro853b`): a K=512 transfer
+   decodes in-process but not over the real path — round 0's 589 symbols all
+   arrive (zero loss) yet the block never decodes, accumulating 2637+ accepted
+   symbols before failing closed after 17 feedback rounds. The same symbol set
+   decodes in-process, so the defect is in the network feed/protocol path (a
+   `feed_symbol` reconstruction subtlety and/or the `ObjectComplete`-vs-in-flight
+   -UDP race), not the coding layer.
+
+Honest posture: ATP-RQ **fails closed** (no corruption, no hang, no fake
+success) — it never reports a transfer it did not complete. The fixes are
+well-scoped (multi-block param alignment; a two-task receiver that decouples UDP
+drain from CPU-bound decode + a grace-drain after `ObjectComplete`). The
+adaptive layer (`docs/atp_rq_adaptive_design.md`) would additionally pick small,
+fast-decoding blocks on real paths. Until those land, **atp-tcp is the working
+ATP transport** and the comparison above stands: atp-tcp wins on small/medium
+files, trails plaintext rsyncd on bulk.
