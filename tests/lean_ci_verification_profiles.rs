@@ -10,6 +10,8 @@ const PROFILES_JSON: &str = include_str!("../formal/lean/coverage/ci_verificatio
 const MANIFEST_SCHEMA_JSON: &str =
     include_str!("../formal/lean/coverage/lean_full_repro_bundle_manifest.schema.json");
 const CI_WORKFLOW_YML: &str = include_str!("../.github/workflows/ci.yml");
+const GOVERNANCE_DECISIONS_JSONL: &str =
+    include_str!("../formal/lean/coverage/ci_governance_decisions.jsonl");
 
 fn load_beads_jsonl() -> Option<String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -685,6 +687,10 @@ fn ci_governance_policy_defines_cadence_and_decision_record_contract() {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl")),
         "governance decision log path must be jsonl for append-only governance history"
     );
+    assert_eq!(
+        decision_log_path, "formal/lean/coverage/ci_governance_decisions.jsonl",
+        "governance decision log path must point at the checked append-only log"
+    );
 
     let reviews = governance_policy
         .get("reviews")
@@ -866,6 +872,181 @@ fn ci_governance_policy_defines_cadence_and_decision_record_contract() {
         allowed_dependency_change_types.contains("add")
             && allowed_dependency_change_types.contains("remove"),
         "allowed_dependency_change_types must include add/remove"
+    );
+
+    let decision_records = GOVERNANCE_DECISIONS_JSONL
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("decision record must parse"))
+        .collect::<Vec<_>>();
+    assert!(
+        !decision_records.is_empty(),
+        "governance decision log must contain at least one record"
+    );
+
+    let known_bead_ids = known_bead_ids();
+    let mut decision_review_ids = BTreeSet::new();
+    let mut links_governance_bead = false;
+    let mut has_bead_status_change = false;
+    for decision in &decision_records {
+        let decision = decision
+            .as_object()
+            .expect("governance decision record must be an object");
+        for required in &required_fields {
+            assert!(
+                decision.contains_key(*required),
+                "governance decision record must include {required}"
+            );
+        }
+
+        let review_id = decision
+            .get("review_id")
+            .and_then(Value::as_str)
+            .expect("decision review_id must be a string");
+        assert!(
+            review_ids.contains(review_id),
+            "decision review_id must be declared in governance_policy.reviews"
+        );
+        decision_review_ids.insert(review_id.to_string());
+
+        for required_text_field in ["decision_id", "taken_at_utc", "summary", "rationale"] {
+            let value = decision
+                .get(required_text_field)
+                .and_then(Value::as_str)
+                .expect("decision text fields must be strings");
+            assert!(
+                !value.trim().is_empty(),
+                "decision {required_text_field} must be non-empty"
+            );
+        }
+
+        let participants = decision
+            .get("participants")
+            .and_then(Value::as_array)
+            .expect("decision participants must be an array");
+        assert!(
+            !participants.is_empty(),
+            "decision participants must be non-empty"
+        );
+
+        let linked_bead_ids = decision
+            .get("linked_bead_ids")
+            .and_then(Value::as_array)
+            .expect("decision linked_bead_ids must be an array");
+        assert!(
+            !linked_bead_ids.is_empty(),
+            "decision linked_bead_ids must be non-empty"
+        );
+        for linked_bead_id in linked_bead_ids {
+            let linked_bead_id = linked_bead_id
+                .as_str()
+                .expect("linked_bead_ids entries must be strings");
+            assert!(
+                !linked_bead_id.trim().is_empty(),
+                "linked bead id must be non-empty"
+            );
+            links_governance_bead |= linked_bead_id == "bd-3gnw9";
+            if let Some(known_bead_ids) = &known_bead_ids {
+                assert!(
+                    known_bead_ids.contains(linked_bead_id),
+                    "linked bead id {linked_bead_id} must exist in .beads"
+                );
+            }
+        }
+
+        let linked_artifact_paths = decision
+            .get("linked_artifact_paths")
+            .and_then(Value::as_array)
+            .expect("decision linked_artifact_paths must be an array");
+        assert!(
+            !linked_artifact_paths.is_empty(),
+            "decision linked_artifact_paths must be non-empty"
+        );
+        for linked_artifact_path in linked_artifact_paths {
+            let linked_artifact_path = linked_artifact_path
+                .as_str()
+                .expect("linked_artifact_paths entries must be strings");
+            assert!(
+                linked_artifact_path.starts_with("formal/lean/coverage/")
+                    || linked_artifact_path.starts_with("tests/"),
+                "linked artifact path must reference a checked governance artifact"
+            );
+        }
+
+        let temporary = decision
+            .get("temporary")
+            .and_then(Value::as_bool)
+            .expect("decision temporary must be boolean");
+        if temporary {
+            let expires_at_utc = decision
+                .get("expires_at_utc")
+                .and_then(Value::as_str)
+                .expect("temporary decisions must have an expiry string");
+            assert!(
+                !expires_at_utc.trim().is_empty(),
+                "temporary decision expiry must be non-empty"
+            );
+        } else {
+            assert!(
+                decision.contains_key("expires_at_utc"),
+                "permanent decisions must still carry expires_at_utc as an explicit field"
+            );
+        }
+
+        let bead_status_changes = decision
+            .get("bead_status_changes")
+            .and_then(Value::as_array)
+            .expect("decision bead_status_changes must be an array");
+        for bead_status_change in bead_status_changes {
+            has_bead_status_change = true;
+            let bead_status_change = bead_status_change
+                .as_object()
+                .expect("bead_status_changes entries must be objects");
+            for required in &bead_status_change_required_fields {
+                assert!(
+                    bead_status_change.contains_key(*required),
+                    "bead_status_change must include {required}"
+                );
+            }
+        }
+
+        let dependency_changes = decision
+            .get("dependency_changes")
+            .and_then(Value::as_array)
+            .expect("decision dependency_changes must be an array");
+        for dependency_change in dependency_changes {
+            let dependency_change = dependency_change
+                .as_object()
+                .expect("dependency_changes entries must be objects");
+            for required in &dependency_change_required_fields {
+                assert!(
+                    dependency_change.contains_key(*required),
+                    "dependency_change must include {required}"
+                );
+            }
+            let change_type = dependency_change
+                .get("change_type")
+                .and_then(Value::as_str)
+                .expect("dependency change_type must be a string");
+            assert!(
+                allowed_dependency_change_types.contains(change_type),
+                "dependency change_type must be declared in allowed_dependency_change_types"
+            );
+        }
+    }
+    for required_review in ["weekly-proof-health", "phase-exit-signoff"] {
+        assert!(
+            decision_review_ids.contains(required_review),
+            "decision log must include a {required_review} record"
+        );
+    }
+    assert!(
+        links_governance_bead,
+        "decision log must link the governance bead"
+    );
+    assert!(
+        has_bead_status_change,
+        "decision log must record at least one bead status change"
     );
 }
 

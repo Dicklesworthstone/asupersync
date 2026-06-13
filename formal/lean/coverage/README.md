@@ -258,6 +258,10 @@ Retention policy is also enforced from `ci_verification_profiles.json`:
 - decision-record template with required fields, temporary-decision expiry semantics, and
   dependency change type constraints
 
+`ci_governance_decisions.jsonl` is the append-only decision log for these reviews. Each record
+links the review outcome to bead IDs, evidence artifacts, rationale, expiry semantics for
+temporary decisions, and any bead status or dependency changes produced by the review.
+
 CI failure payload generation consumes this policy so triage artifacts include governance context
 and explicit `br` update/dependency command templates for operational follow-through.
 
