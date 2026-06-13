@@ -128,6 +128,7 @@ jobs:
     if: ${{ !contains(needs.plan.outputs.tag, '-') }}
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      RUST_CRATE_PROVENANCE_DIR: artifacts/release_provenance/rust-crates
     steps:
       - uses: actions/checkout@v4
         with:
@@ -147,41 +148,50 @@ jobs:
           fi
           echo "Version verified: $cargo_version"
 
-      - name: Dry run independent release crates
+      - name: Prepare Rust crate provenance directory
         run: |
-          set -e
+          set -euo pipefail
+          mkdir -p "$RUST_CRATE_PROVENANCE_DIR/records" "$RUST_CRATE_PROVENANCE_DIR/logs"
+          cargo metadata --no-deps --format-version 1 \
+            > "$RUST_CRATE_PROVENANCE_DIR/cargo-metadata.json"
 
-          cargo_with_target_dir() {
+      - name: Publish crates to crates.io
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUST_CRATE_PROVENANCE_DIR/records" "$RUST_CRATE_PROVENANCE_DIR/logs"
+          metadata_path="$RUST_CRATE_PROVENANCE_DIR/cargo-metadata.json"
+          if [[ ! -s "$metadata_path" ]]; then
+            cargo metadata --no-deps --format-version 1 > "$metadata_path"
+          fi
+
+          sha256_prefixed() {
+            local path="$1"
+            local digest
+            digest="$(sha256sum "$path" | awk '{print $1}')"
+            echo "sha256:${digest}"
+          }
+
+          cargo_dry_run_with_target_dir() {
             local target_dir="$1"
             shift
             local rch_bin="${RCH_BIN:-$HOME/.local/bin/rch}"
             if [[ -x "$rch_bin" ]]; then
               "$rch_bin" exec -- env CARGO_TARGET_DIR="$target_dir" "$@"
             else
-              echo "rch unavailable on this runner; running cargo locally for: $*" >&2
+              echo "rch unavailable on this GitHub runner; running dry-run locally with isolated CARGO_TARGET_DIR for: $*" >&2
               env CARGO_TARGET_DIR="$target_dir" "$@"
             fi
           }
 
-          dry_run_package() {
+          package_surface_field() {
             local crate="$1"
-            local target_name="${crate//-/_}"
-            cargo_with_target_dir "/tmp/rch_target_publish_dry_run_${target_name}" \
-              cargo publish -p "$crate" --dry-run --locked
+            local field="$2"
+            jq -r --arg crate "$crate" --arg field "$field" \
+              '.published_crate_surface[] | select(.package == $crate) | .[$field]' \
+              artifacts/rust_crate_release_provenance_contract_v1.json
           }
 
-          dry_run_package franken-kernel
-          dry_run_package franken-evidence
-          dry_run_package asupersync-macros
-
-      - name: Publish crates to crates.io
-        run: |
-          set -e
-          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
-            echo "CARGO_REGISTRY_TOKEN not configured; skipping crates.io publish"
-            exit 0
-          fi
-          
           wait_for_version() {
             local crate="$1"
             local version="$2"
@@ -198,9 +208,15 @@ jobs:
 
           package_version() {
             local crate="$1"
-            cargo metadata --no-deps --format-version 1 \
-              | jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version' \
+            jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version' "$metadata_path" \
               | head -n 1
+          }
+
+          package_license() {
+            local crate="$1"
+            jq -r --arg crate "$crate" \
+              '.packages[] | select(.name == $crate) | .license // "NOASSERTION"' \
+              "$metadata_path" | head -n 1
           }
 
           version_is_published() {
@@ -209,9 +225,197 @@ jobs:
             cargo search "$crate" --limit 1 | grep -q "^$crate = \"$version\""
           }
 
+          write_release_provenance_record() {
+            local crate="$1"
+            local version="$2"
+            local release_status="$3"
+            local dry_run_status="$4"
+            local package_file="$5"
+            local package_sha="$6"
+            local publish_visibility="$7"
+            local published="$8"
+            local record_suffix="$9"
+            local target_name="${crate//-/_}"
+            local publish_order manifest_path role license cargo_toml_sha root_cargo_toml_sha cargo_lock_sha
+            local dry_run_log record_path timestamp
+
+            publish_order="$(package_surface_field "$crate" publish_order)"
+            manifest_path="$(package_surface_field "$crate" manifest_path)"
+            role="$(package_surface_field "$crate" role)"
+            license="$(package_license "$crate")"
+            cargo_toml_sha="$(sha256_prefixed "$manifest_path")"
+            root_cargo_toml_sha="$(sha256_prefixed Cargo.toml)"
+            cargo_lock_sha="$(sha256_prefixed Cargo.lock)"
+            dry_run_log="$RUST_CRATE_PROVENANCE_DIR/logs/${publish_order}-${target_name}-dry-run.log"
+            record_path="$RUST_CRATE_PROVENANCE_DIR/records/${publish_order}-${target_name}-${record_suffix}.json"
+            timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            jq -n \
+              --arg record_id "${crate}-${version}-${record_suffix}" \
+              --arg git_head "$GITHUB_SHA" \
+              --arg tag "${{ needs.plan.outputs.tag }}" \
+              --arg crate "$crate" \
+              --arg version "$version" \
+              --arg manifest_path "$manifest_path" \
+              --arg publish_order "$publish_order" \
+              --arg role "$role" \
+              --arg license "$license" \
+              --arg cargo_lock_sha "$cargo_lock_sha" \
+              --arg cargo_toml_sha "$cargo_toml_sha" \
+              --arg root_cargo_toml_sha "$root_cargo_toml_sha" \
+              --arg metadata_path "$metadata_path" \
+              --arg dry_run_status "$dry_run_status" \
+              --arg dry_run_log "$dry_run_log" \
+              --arg timestamp "$timestamp" \
+              --arg package_file "$package_file" \
+              --arg package_sha "$package_sha" \
+              --arg release_status "$release_status" \
+              --arg publish_visibility "$publish_visibility" \
+              --argjson published "$published" \
+              '{
+                schema_version: "rust-crate-release-provenance-record-v1",
+                record_id: $record_id,
+                status: "github_actions_release",
+                git_head: $git_head,
+                tag: $tag,
+                package: {
+                  name: $crate,
+                  version: $version,
+                  manifest_path: $manifest_path,
+                  publish_order: ($publish_order | tonumber),
+                  role: $role,
+                  license: $license
+                },
+                digests: {
+                  cargo_lock_sha256: $cargo_lock_sha,
+                  cargo_toml_sha256: $cargo_toml_sha,
+                  root_cargo_toml_sha256: $root_cargo_toml_sha
+                },
+                cargo_metadata_snapshot: {
+                  command: "cargo metadata --no-deps --format-version 1",
+                  artifact: $metadata_path
+                },
+                dependency_license_sbom: {
+                  snapshot_kind: "workflow-minimal",
+                  source: "cargo metadata package license fields",
+                  rows: [{
+                    name: $crate,
+                    version: $version,
+                    license: $license,
+                    relationship: "published_package"
+                  }]
+                },
+                dry_run_command: {
+                  executor: "github_actions",
+                  command: ("cargo publish -p " + $crate + " --dry-run --locked"),
+                  requires_remote_for_direct_main: false,
+                  github_runner_behavior: "Uses rch only when RCH_BIN is present; otherwise the GitHub-hosted runner executes cargo locally with isolated CARGO_TARGET_DIR.",
+                  credentials_redacted: true
+                },
+                dry_run_outcome: {
+                  status: $dry_run_status,
+                  log_artifact: $dry_run_log,
+                  timestamp: $timestamp
+                },
+                package_tarball_sha256: {
+                  sha256: (if $package_sha == "" then null else $package_sha end),
+                  source: (if $package_file == "" then "not_applicable" else $package_file end),
+                  fixture_only: false
+                },
+                publish_command: {
+                  command: ("cargo publish -p " + $crate + " --locked"),
+                  credentials_redacted: true,
+                  not_executed_in_fixture: false
+                },
+                publish_outcome: {
+                  status: $release_status,
+                  published: $published
+                },
+                crates_io_visibility_check: {
+                  status: $publish_visibility,
+                  expected_package: $crate,
+                  expected_version: $version
+                },
+                integrity_manifest: {
+                  path: "artifacts/release_provenance/rust-crates/integrity_manifest.json",
+                  sha256: null,
+                  sha256_status: "recorded_in_companion_manifest"
+                },
+                no_claim_boundaries: [
+                  "does_not_prove_release_readiness",
+                  "does_not_prove_runtime_correctness",
+                  "does_not_prove_workspace_health",
+                  "does_not_prove_security_audit_completion",
+                  "does_not_prove_npm_or_wasm_provenance"
+                ]
+              }' > "$record_path"
+
+            jq empty "$record_path"
+            echo "$record_path"
+          }
+
+          validate_release_provenance_record() {
+            local record_path="$1"
+            local crate="$2"
+            local version="$3"
+            local package_sha="$4"
+            jq -e \
+              --arg crate "$crate" \
+              --arg version "$version" \
+              --arg package_sha "$package_sha" \
+              '.schema_version == "rust-crate-release-provenance-record-v1"
+               and .package.name == $crate
+               and .package.version == $version
+               and .dry_run_outcome.status == "passed"
+               and .publish_outcome.status == "dry_run_only"
+               and .package_tarball_sha256.sha256 == $package_sha
+               and (.no_claim_boundaries | index("does_not_prove_release_readiness") != null)' \
+              "$record_path" > /dev/null
+          }
+
+          generate_release_provenance_manifest() {
+            local manifest_path="$RUST_CRATE_PROVENANCE_DIR/integrity_manifest.json"
+            find "$RUST_CRATE_PROVENANCE_DIR" -type f ! -name integrity_manifest.json | sort \
+              | while IFS= read -r path; do
+                  jq -n \
+                    --arg path "$path" \
+                    --arg sha "$(sha256_prefixed "$path")" \
+                    '{path: $path, sha256: $sha, role: "rust_crate_release_provenance"}'
+                done \
+              | jq -s '{
+                  schema_version: "rust-crate-release-provenance-integrity-manifest-v1",
+                  self_hash_excluded: true,
+                  entries: .
+                }' > "$manifest_path"
+            jq empty "$manifest_path"
+          }
+
+          crates=(
+            franken-kernel
+            franken-evidence
+            franken-decision
+            asupersync-macros
+            asupersync
+            asupersync-conformance
+            frankenlab
+            asupersync-browser-core
+            asupersync-tokio-compat
+          )
+
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "CARGO_REGISTRY_TOKEN not configured; recording structured no-op provenance"
+            for crate in "${crates[@]}"; do
+              version="$(package_version "$crate")"
+              write_release_provenance_record "$crate" "$version" "skipped_token_absent" \
+                "not_run_token_absent" "" "" "not_checked_token_absent" false "skipped-token"
+            done
+            generate_release_provenance_manifest
+            exit 0
+          fi
+
           publish_if_needed() {
             local crate="$1"
-            local version
+            local version target_name package_target_dir package_file package_sha dry_run_target_dir dry_run_log record_path
             version="$(package_version "$crate")"
             if [[ -z "$version" || "$version" = "null" ]]; then
               echo "Could not resolve package version for $crate"
@@ -219,34 +423,67 @@ jobs:
             fi
             if version_is_published "$crate" "$version"; then
               echo "$crate $version already published"
+              write_release_provenance_record "$crate" "$version" "already_published_noop" \
+                "not_run_already_published" "" "" "visible_before_publish" false "already-published"
               return 0
             fi
+
+            target_name="${crate//-/_}"
+            package_target_dir="/tmp/rch_target_publish_package_${target_name}"
+            dry_run_target_dir="/tmp/rch_target_publish_dry_run_${target_name}"
+            echo "Packaging $crate $version for provenance..."
+            env CARGO_TARGET_DIR="$package_target_dir" cargo package -p "$crate" --locked
+            package_file="$package_target_dir/package/${crate}-${version}.crate"
+            if [[ ! -s "$package_file" ]]; then
+              echo "Missing package artifact for $crate at $package_file"
+              exit 1
+            fi
+            package_sha="$(sha256_prefixed "$package_file")"
+
             echo "Dry-running $crate $version..."
-            cargo publish -p "$crate" --dry-run --locked
+            dry_run_log="$RUST_CRATE_PROVENANCE_DIR/logs/$(package_surface_field "$crate" publish_order)-${target_name}-dry-run.log"
+            if ! cargo_dry_run_with_target_dir "$dry_run_target_dir" \
+              cargo publish -p "$crate" --dry-run --locked > "$dry_run_log" 2>&1; then
+              cat "$dry_run_log"
+              exit 1
+            fi
+            record_path="$(write_release_provenance_record "$crate" "$version" "dry_run_only" \
+              "passed" "$package_file" "$package_sha" "not_checked_before_publish" false "prepublish")"
+            validate_release_provenance_record "$record_path" "$crate" "$version" "$package_sha"
+
             echo "Publishing $crate $version..."
             cargo publish -p "$crate" --locked || {
               if version_is_published "$crate" "$version"; then
                 echo "$crate $version already published"
+                write_release_provenance_record "$crate" "$version" "already_published_noop" \
+                  "passed" "$package_file" "$package_sha" "visible_after_publish_race" false "already-published"
               else
                 exit 1
               fi
             }
             wait_for_version "$crate" "$version"
+            write_release_provenance_record "$crate" "$version" "published" \
+              "passed" "$package_file" "$package_sha" "visible_after_publish" true "published"
           }
 
-          publish_if_needed franken-kernel
-          publish_if_needed franken-evidence
-          publish_if_needed franken-decision
-          publish_if_needed asupersync-macros
-          publish_if_needed asupersync
-          publish_if_needed asupersync-conformance
-          publish_if_needed frankenlab
-          publish_if_needed asupersync-browser-core
-          publish_if_needed asupersync-tokio-compat
+          for crate in "${crates[@]}"; do
+            publish_if_needed "$crate"
+          done
+          generate_release_provenance_manifest
+
+      - name: Upload Rust crate release provenance
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-crate-release-provenance
+          path: artifacts/release_provenance/rust-crates/
 
       - name: Summary
         run: |
           echo "## Crates.io Publish" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Rust crate release provenance is uploaded separately as the rust-crate-release-provenance artifact." >> $GITHUB_STEP_SUMMARY
+          echo "WASM and npm provenance remain separate workflow surfaces." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           if [[ -n "${CARGO_REGISTRY_TOKEN:-}" ]]; then
             echo "Published asupersync v${{ needs.plan.outputs.version }} plus supporting workspace crates and satellite crates to crates.io" >> $GITHUB_STEP_SUMMARY

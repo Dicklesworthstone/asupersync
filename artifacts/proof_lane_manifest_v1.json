@@ -2295,7 +2295,7 @@
       "guarantee_ids": [
         "rust-crate-release-provenance-contract"
       ],
-      "covers": "Rust crates.io release-provenance contract schema, publish-workflow crate surface, fixture dry-run/already-published semantics, companion integrity hashes, manifest/status rows, and no-claim boundaries stay aligned.",
+      "covers": "Rust crates.io release-provenance contract schema, publish-workflow crate surface, fail-closed prepublish provenance gate, fixture dry-run/already-published semantics, companion integrity hashes, manifest/status rows, and no-claim boundaries stay aligned.",
       "explicit_not_covered": "Does not perform cargo publish, does not run cargo publish --dry-run, does not prove release readiness, does not prove runtime correctness, does not prove broad workspace health, does not prove live crates.io publication, and does not prove real package tarball integrity for fixture rows.",
       "expected_signal": "rust_crate_release_provenance_contract tests pass",
       "source_paths": [
@@ -2310,10 +2310,11 @@
       ],
       "common_unrelated_blockers": [
         "publish workflow crate list drift",
+        "publish workflow provenance gate drift",
         "fixture digest or companion manifest drift",
         "manifest/status mapping drift"
       ],
-      "escalation_notes": "Use this lane only for Rust crate release-provenance metadata and fixture validation. It cannot be cited as release readiness, live publish evidence, broad workspace health, runtime correctness, or real package tarball integrity proof.",
+      "escalation_notes": "Use this lane only for Rust crate release-provenance metadata, fixture validation, and publish-workflow provenance gate drift detection. It cannot be cited as release readiness, live publish evidence, broad workspace health, runtime correctness, or real package tarball integrity proof.",
       "proof_reuse_policy": {
         "cache_hits_allowed": true,
         "allowed_claim_scopes": [
@@ -2685,7 +2686,7 @@
     },
     {
       "guarantee_id": "rust-crate-release-provenance-contract",
-      "description": "Rust crate release-provenance artifact schema, publish-workflow crate surface, fixture outcomes, integrity hashes, proof manifest/status rows, and overclaim boundaries have a canonical verifier command.",
+      "description": "Rust crate release-provenance artifact schema, publish-workflow crate surface, fail-closed prepublish provenance gate, fixture outcomes, integrity hashes, proof manifest/status rows, and overclaim boundaries have a canonical verifier command.",
       "lane_ids": [
         "rust-crate-release-provenance-contract"
       ]

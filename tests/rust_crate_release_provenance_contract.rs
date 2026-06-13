@@ -133,14 +133,32 @@ fn assert_prefixed_sha256(value: &str, context: &str) -> Result<(), String> {
 fn workflow_publish_packages() -> Vec<String> {
     let workflow = read_repo_file(PUBLISH_WORKFLOW_PATH);
     let mut packages = Vec::new();
+    let mut in_crates_array = false;
     for line in workflow.lines() {
         let trimmed = line.trim();
+        if trimmed == "crates=(" {
+            in_crates_array = true;
+            continue;
+        }
+        if in_crates_array {
+            if trimmed == ")" {
+                in_crates_array = false;
+                continue;
+            }
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                packages.push(trimmed.trim_matches('"').to_string());
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("publish_if_needed ") {
             let package = rest
                 .split_whitespace()
                 .next()
-                .expect("publish_if_needed package");
-            packages.push(package.to_string());
+                .expect("publish_if_needed package")
+                .trim_matches('"');
+            if !package.contains('$') {
+                packages.push(package.to_string());
+            }
         }
     }
     assert!(
@@ -148,6 +166,28 @@ fn workflow_publish_packages() -> Vec<String> {
         "publish workflow must expose publish_if_needed package calls"
     );
     packages
+}
+
+fn workflow_function_body<'a>(workflow: &'a str, function_name: &str) -> &'a str {
+    let start_marker = format!("{function_name}() {{");
+    let start = workflow
+        .find(&start_marker)
+        .unwrap_or_else(|| panic!("workflow missing function {function_name}"));
+    let rest = &workflow[start..];
+    let end = rest
+        .find("\n          }\n")
+        .unwrap_or_else(|| panic!("workflow function {function_name} missing closing brace"));
+    &rest[..end]
+}
+
+fn assert_contains_ordered(haystack: &str, needles: &[&str], context: &str) {
+    let mut offset = 0;
+    for needle in needles {
+        let Some(found) = haystack[offset..].find(needle) else {
+            panic!("{context}: missing ordered marker {needle}");
+        };
+        offset += found + needle.len();
+    }
 }
 
 fn cargo_package_name(manifest_path: &str) -> String {
@@ -549,6 +589,74 @@ fn published_crate_surface_tracks_publish_workflow_order() {
 fn companion_integrity_manifest_hashes_live_artifacts() {
     let contract = json(CONTRACT_PATH);
     validate_integrity_manifest(&contract).unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn publish_workflow_records_and_validates_provenance_before_live_publish() {
+    let workflow = read_repo_file(PUBLISH_WORKFLOW_PATH);
+    for marker in [
+        "RUST_CRATE_PROVENANCE_DIR: artifacts/release_provenance/rust-crates",
+        "write_release_provenance_record()",
+        "validate_release_provenance_record()",
+        "generate_release_provenance_manifest()",
+        "Upload Rust crate release provenance",
+        "rust-crate-release-provenance",
+        "WASM and npm provenance remain separate workflow surfaces.",
+    ] {
+        assert!(
+            workflow.contains(marker),
+            "publish workflow missing provenance gate marker {marker}"
+        );
+    }
+
+    let publish_body = workflow_function_body(&workflow, "publish_if_needed");
+    assert_contains_ordered(
+        publish_body,
+        &[
+            "version_is_published \"$crate\" \"$version\"",
+            "write_release_provenance_record \"$crate\" \"$version\" \"already_published_noop\"",
+        ],
+        "already-published branch must record a structured no-op",
+    );
+    assert_contains_ordered(
+        publish_body,
+        &[
+            "env CARGO_TARGET_DIR=\"$package_target_dir\" cargo package -p \"$crate\" --locked",
+            "package_sha=\"$(sha256_prefixed \"$package_file\")\"",
+            "cargo_dry_run_with_target_dir \"$dry_run_target_dir\"",
+            "cargo publish -p \"$crate\" --dry-run --locked",
+            "write_release_provenance_record \"$crate\" \"$version\" \"dry_run_only\"",
+            "validate_release_provenance_record \"$record_path\" \"$crate\" \"$version\" \"$package_sha\"",
+            "cargo publish -p \"$crate\" --locked",
+            "wait_for_version \"$crate\" \"$version\"",
+            "write_release_provenance_record \"$crate\" \"$version\" \"published\"",
+        ],
+        "prepublish provenance must be validated before live cargo publish",
+    );
+
+    let validation_body = workflow_function_body(&workflow, "validate_release_provenance_record");
+    for marker in [
+        ".dry_run_outcome.status == \"passed\"",
+        ".publish_outcome.status == \"dry_run_only\"",
+        ".package_tarball_sha256.sha256 == $package_sha",
+        "does_not_prove_release_readiness",
+    ] {
+        assert!(
+            validation_body.contains(marker),
+            "validation gate missing fail-closed marker {marker}"
+        );
+    }
+
+    assert!(
+        workflow.contains("\"skipped_token_absent\"")
+            && workflow.contains("\"not_run_token_absent\""),
+        "missing token path must emit structured skip provenance"
+    );
+    assert!(
+        workflow.contains("cargo_dry_run_with_target_dir")
+            && workflow.contains("isolated CARGO_TARGET_DIR"),
+        "GitHub runner dry-run behavior must document isolated target dirs and rch fallback"
+    );
 }
 
 #[test]
