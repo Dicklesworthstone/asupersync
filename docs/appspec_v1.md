@@ -31,6 +31,43 @@ The current A1 contract intentionally does not start tasks or allocate regions.
 It gives the compiler a deterministic input shape with enough authority metadata
 to reject hidden effects before runtime wiring exists.
 
+## Compiler Plan
+
+`AppSpecV1::compiler_plan()` lowers a validated manifest into a deterministic
+plan for the runtime compiler. The plan contains:
+
+- the application name and root supervision group;
+- supervision groups and their restart policies;
+- one child-factory requirement for every route, actor, and background job;
+- route bindings, background-job triggers, budget names, SLO hook names, and
+  required capability declarations;
+- observability sink wiring requirements;
+- no-claim boundaries for handler resolution and runtime correctness.
+
+Child names are stable and explicit:
+
+```text
+<service>.route.<route>
+<service>.actor.<actor>
+<service>.job.<job>
+```
+
+For example, the `payments` sample route named `readiness` in service `api`
+compiles to the child-factory key `api.route.readiness`.
+
+`AppSpecV1::compile_with_child_specs(...)` is the first runtime bridge. It
+accepts caller-supplied `ChildSpec` factories keyed by those compiled child
+names, verifies that every required child is present and no extra child is
+smuggled in, and then returns the existing builder-style `AppSpec`. The bridge
+currently supports a single root supervision group; manifests with topology that
+cannot be represented by the current builder fail closed instead of being
+partially lowered.
+
+The compiler does not resolve a string such as `crate::payments::ready` into a
+function pointer. Rust code must provide the actual `ChildSpec` start factory,
+which keeps runtime setup inspectable and prevents hidden global registries or
+ambient handler lookup.
+
 ## No Ambient Authority
 
 Every route, actor, background job, and observability sink has a required
@@ -98,7 +135,8 @@ every field means before it can safely run an application.
 
 AppSpec v1 does not claim that:
 
-- a manifest can already compile into a running `AppSpec`;
+- a manifest can compile into a running `AppSpec` without explicit child
+  factories;
 - handlers, actors, or jobs named in the manifest exist;
 - any handler is cancel-correct;
 - every possible runtime capability is represented forever;

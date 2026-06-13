@@ -35,7 +35,7 @@ use crate::supervision::{
 };
 use crate::types::{Budget, CancelKind, CancelReason, RegionId, TaskId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::task::{Context, Poll, Waker};
 
 /// Schema discriminator for the declarative AppSpec v1 contract.
@@ -164,6 +164,320 @@ impl AppSpecV1 {
         }
 
         Ok(())
+    }
+
+    /// Build the deterministic compiler plan for this declarative manifest.
+    ///
+    /// The plan is pure data. It names every route, actor, background job, and
+    /// observability sink the runtime compiler must wire, but it does not try to
+    /// resolve handler strings into Rust functions.
+    pub fn compiler_plan(&self) -> Result<AppSpecV1CompilerPlan, AppSpecV1CompileError> {
+        self.validate().map_err(AppSpecV1CompileError::Validation)?;
+
+        let services = self
+            .services
+            .iter()
+            .map(|service| (service.name.as_str(), service))
+            .collect::<BTreeMap<_, _>>();
+        let root_group = self
+            .supervision
+            .groups
+            .iter()
+            .find(|group| group.name == self.supervision.root_group)
+            .expect("validate ensures root group exists");
+
+        let mut service_groups = Vec::with_capacity(self.supervision.groups.len());
+        let mut children = Vec::new();
+        for group in &self.supervision.groups {
+            service_groups.push(AppSpecV1CompiledGroup {
+                name: group.name.clone(),
+                services: group.services.clone(),
+                restart_policy: group.restart_policy.clone(),
+            });
+
+            for service_name in &group.services {
+                let service = services
+                    .get(service_name.as_str())
+                    .expect("validate ensures group service exists");
+                children.extend(service.routes.iter().map(|route| AppSpecV1CompiledChild {
+                    name: format!("{}.route.{}", service.name, route.name),
+                    service: service.name.clone(),
+                    group: group.name.clone(),
+                    kind: AppSpecV1WorkUnitKind::Route,
+                    entrypoint: route.handler.clone(),
+                    budget: route.budget.clone().or_else(|| service.budget.clone()),
+                    slo_hook: route.slo_hook.clone(),
+                    route: Some(AppSpecV1RouteBinding {
+                        method: route.method.clone(),
+                        path: route.path.clone(),
+                    }),
+                    trigger: None,
+                    required_capabilities: route.required_capabilities.clone(),
+                }));
+                children.extend(service.actors.iter().map(|actor| AppSpecV1CompiledChild {
+                    name: format!("{}.actor.{}", service.name, actor.name),
+                    service: service.name.clone(),
+                    group: group.name.clone(),
+                    kind: AppSpecV1WorkUnitKind::Actor,
+                    entrypoint: actor.entrypoint.clone(),
+                    budget: actor.budget.clone().or_else(|| service.budget.clone()),
+                    slo_hook: None,
+                    route: None,
+                    trigger: None,
+                    required_capabilities: actor.required_capabilities.clone(),
+                }));
+                children.extend(
+                    service
+                        .background_jobs
+                        .iter()
+                        .map(|job| AppSpecV1CompiledChild {
+                            name: format!("{}.job.{}", service.name, job.name),
+                            service: service.name.clone(),
+                            group: group.name.clone(),
+                            kind: AppSpecV1WorkUnitKind::BackgroundJob,
+                            entrypoint: job.entrypoint.clone(),
+                            budget: job.budget.clone().or_else(|| service.budget.clone()),
+                            slo_hook: job.slo_hook.clone(),
+                            route: None,
+                            trigger: Some(job.trigger.clone()),
+                            required_capabilities: job.required_capabilities.clone(),
+                        }),
+                );
+            }
+        }
+
+        Ok(AppSpecV1CompilerPlan {
+            app_name: self.name.clone(),
+            root_group: root_group.name.clone(),
+            root_restart_policy: root_group.restart_policy.clone(),
+            service_groups,
+            children,
+            observability_sinks: self
+                .observability
+                .iter()
+                .map(|sink| AppSpecV1CompiledObservabilitySink {
+                    name: sink.name.clone(),
+                    kind: sink.kind.clone(),
+                    required_capabilities: sink.required_capabilities.clone(),
+                })
+                .collect(),
+            budgets: self.budgets.clone(),
+            no_claim_boundaries: vec![
+                "Does not resolve handler symbols into Rust functions.".to_string(),
+                "Does not start runtime tasks without caller-supplied ChildSpec factories."
+                    .to_string(),
+                "Does not prove handler cancel-correctness or region quiescence.".to_string(),
+            ],
+        })
+    }
+
+    /// Lower this manifest into the existing builder-style [`AppSpec`].
+    ///
+    /// Callers must supply one explicit [`ChildSpec`] per compiled work unit.
+    /// The compiler checks names and ordering, then leaves task startup logic in
+    /// those caller-provided factories instead of inventing hidden global wiring.
+    pub fn compile_with_child_specs<I>(self, children: I) -> Result<AppSpec, AppSpecV1CompileError>
+    where
+        I: IntoIterator<Item = ChildSpec>,
+    {
+        let plan = self.compiler_plan()?;
+        if plan.service_groups.len() != 1 {
+            return Err(AppSpecV1CompileError::UnsupportedRuntimeMapping {
+                reason: "builder AppSpec v1 lowering supports exactly one supervision group",
+            });
+        }
+        let restart_policy = runtime_restart_policy(&plan.root_restart_policy)?;
+
+        let mut provided = BTreeMap::new();
+        for child in children {
+            let name = child.name.as_str().to_string();
+            if provided.insert(name.clone(), child).is_some() {
+                return Err(AppSpecV1CompileError::DuplicateChildSpec { name });
+            }
+        }
+
+        let expected_names = plan
+            .children
+            .iter()
+            .map(|child| child.name.as_str())
+            .collect::<BTreeSet<_>>();
+        if let Some(unexpected) = provided
+            .keys()
+            .find(|name| !expected_names.contains(name.as_str()))
+            .cloned()
+        {
+            return Err(AppSpecV1CompileError::UnexpectedChildSpec { name: unexpected });
+        }
+
+        let mut app = AppSpec::new(plan.app_name).with_restart_policy(restart_policy);
+        for child in &plan.children {
+            let child_spec = provided.remove(&child.name).ok_or_else(|| {
+                AppSpecV1CompileError::MissingChildSpec {
+                    name: child.name.clone(),
+                }
+            })?;
+            app = app.child(child_spec);
+        }
+
+        Ok(app)
+    }
+}
+
+/// Deterministic compiler projection for an [`AppSpecV1`] manifest.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AppSpecV1CompilerPlan {
+    /// Application name copied to the builder-style [`AppSpec`].
+    pub app_name: String,
+    /// Root supervision group chosen by the manifest.
+    pub root_group: String,
+    /// Restart policy declared by the root group.
+    pub root_restart_policy: AppRestartPolicyV1,
+    /// Declared supervision groups in manifest order.
+    pub service_groups: Vec<AppSpecV1CompiledGroup>,
+    /// Work units requiring caller-supplied child factories.
+    pub children: Vec<AppSpecV1CompiledChild>,
+    /// Observability sinks that must be wired by the caller/runtime layer.
+    pub observability_sinks: Vec<AppSpecV1CompiledObservabilitySink>,
+    /// Budget declarations available to the caller-provided child factories.
+    pub budgets: Vec<AppBudgetSpecV1>,
+    /// Explicit scope limits for this compiler stage.
+    pub no_claim_boundaries: Vec<String>,
+}
+
+/// Compiled supervision group metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AppSpecV1CompiledGroup {
+    /// Group name.
+    pub name: String,
+    /// Services assigned to the group.
+    pub services: Vec<String>,
+    /// Group restart policy.
+    pub restart_policy: AppRestartPolicyV1,
+}
+
+/// Kind of runtime work unit extracted from the manifest.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppSpecV1WorkUnitKind {
+    /// Route handler work unit.
+    Route,
+    /// Long-lived actor work unit.
+    Actor,
+    /// Background job work unit.
+    BackgroundJob,
+}
+
+/// Compiled child-factory requirement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AppSpecV1CompiledChild {
+    /// Stable child name used by the builder and supplied [`ChildSpec`].
+    pub name: String,
+    /// Owning service name.
+    pub service: String,
+    /// Owning supervision group.
+    pub group: String,
+    /// Work unit kind.
+    pub kind: AppSpecV1WorkUnitKind,
+    /// Handler, actor, or job symbol from the manifest.
+    pub entrypoint: String,
+    /// Effective budget name, if any.
+    pub budget: Option<String>,
+    /// SLO hook name, if any.
+    pub slo_hook: Option<String>,
+    /// Route binding for route work units.
+    pub route: Option<AppSpecV1RouteBinding>,
+    /// Trigger binding for background-job work units.
+    pub trigger: Option<AppJobTriggerV1>,
+    /// Authority requirements for the work unit.
+    pub required_capabilities: AppRequiredCapabilitiesV1,
+}
+
+/// Route-specific compiler binding.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AppSpecV1RouteBinding {
+    /// HTTP method.
+    pub method: AppRouteMethodV1,
+    /// Absolute route path.
+    pub path: String,
+}
+
+/// Compiled observability sink requirement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AppSpecV1CompiledObservabilitySink {
+    /// Sink name.
+    pub name: String,
+    /// Sink kind.
+    pub kind: AppObservabilitySinkKindV1,
+    /// Authority requirements for the sink.
+    pub required_capabilities: AppRequiredCapabilitiesV1,
+}
+
+/// Error lowering declarative AppSpec v1 data into runtime builder inputs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppSpecV1CompileError {
+    /// Manifest validation failed before compilation.
+    Validation(AppSpecV1ValidationError),
+    /// The caller supplied two child factories with the same name.
+    DuplicateChildSpec {
+        /// Duplicate child name.
+        name: String,
+    },
+    /// The manifest requires a child factory the caller did not supply.
+    MissingChildSpec {
+        /// Missing child name.
+        name: String,
+    },
+    /// The caller supplied a child factory that no manifest work unit needs.
+    UnexpectedChildSpec {
+        /// Unexpected child name.
+        name: String,
+    },
+    /// The manifest uses a topology not yet representable by builder `AppSpec`.
+    UnsupportedRuntimeMapping {
+        /// Stable reason string.
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Display for AppSpecV1CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(error) => write!(f, "AppSpec v1 validation failed: {error}"),
+            Self::DuplicateChildSpec { name } => {
+                write!(f, "duplicate AppSpec v1 child factory {name:?}")
+            }
+            Self::MissingChildSpec { name } => {
+                write!(f, "missing AppSpec v1 child factory {name:?}")
+            }
+            Self::UnexpectedChildSpec { name } => {
+                write!(f, "unexpected AppSpec v1 child factory {name:?}")
+            }
+            Self::UnsupportedRuntimeMapping { reason } => write!(f, "{reason}"),
+        }
+    }
+}
+
+impl std::error::Error for AppSpecV1CompileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Validation(error) => Some(error),
+            Self::DuplicateChildSpec { .. }
+            | Self::MissingChildSpec { .. }
+            | Self::UnexpectedChildSpec { .. }
+            | Self::UnsupportedRuntimeMapping { .. } => None,
+        }
+    }
+}
+
+fn runtime_restart_policy(
+    policy: &AppRestartPolicyV1,
+) -> Result<RestartPolicy, AppSpecV1CompileError> {
+    match policy {
+        AppRestartPolicyV1::OneForOne => Ok(RestartPolicy::OneForOne),
+        AppRestartPolicyV1::OneForAll => Ok(RestartPolicy::OneForAll),
+        AppRestartPolicyV1::Stop => Err(AppSpecV1CompileError::UnsupportedRuntimeMapping {
+            reason: "stop-on-child-failure groups need a dedicated runtime policy before lowering",
+        }),
     }
 }
 
@@ -1975,6 +2289,114 @@ mod tests {
             );
         }
         crate::test_complete!("appspec_v1_schema_artifact_matches_runtime_contract");
+    }
+
+    #[test]
+    fn appspec_v1_compiler_plan_is_deterministic_and_explicit() {
+        init_test("appspec_v1_compiler_plan_is_deterministic_and_explicit");
+        let spec = appspec_v1_sample();
+        let plan = spec.compiler_plan().expect("compiler plan builds");
+        let second = appspec_v1_sample()
+            .compiler_plan()
+            .expect("second compiler plan builds");
+
+        assert_eq!(plan, second, "compiler plan must be deterministic");
+        assert_eq!(plan.app_name, "payments");
+        assert_eq!(plan.root_group, "root");
+        assert_eq!(plan.root_restart_policy, AppRestartPolicyV1::OneForOne);
+        assert_eq!(
+            plan.children
+                .iter()
+                .map(|child| child.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "api.route.readiness",
+                "api.actor.cache_warmer",
+                "api.job.sweeper"
+            ]
+        );
+        assert_eq!(plan.children[0].kind, AppSpecV1WorkUnitKind::Route);
+        assert_eq!(
+            plan.children[0].route,
+            Some(AppSpecV1RouteBinding {
+                method: AppRouteMethodV1::Get,
+                path: "/ready".to_string(),
+            })
+        );
+        assert_eq!(plan.children[2].kind, AppSpecV1WorkUnitKind::BackgroundJob);
+        assert!(
+            matches!(
+                plan.children[2].trigger,
+                Some(AppJobTriggerV1::Interval { every_ms: 1000 })
+            ),
+            "background job trigger should be preserved"
+        );
+        assert_eq!(plan.observability_sinks.len(), 1);
+        assert!(
+            plan.no_claim_boundaries
+                .iter()
+                .any(|claim| claim.contains("Does not resolve handler symbols")),
+            "compiler plan must carry no-claim boundaries"
+        );
+        crate::test_complete!("appspec_v1_compiler_plan_is_deterministic_and_explicit");
+    }
+
+    #[test]
+    fn appspec_v1_compile_requires_explicit_child_factories() {
+        init_test("appspec_v1_compile_requires_explicit_child_factories");
+        let err = appspec_v1_sample()
+            .compile_with_child_specs(Vec::new())
+            .expect_err("missing child factories reject");
+        assert!(
+            matches!(
+                err,
+                AppSpecV1CompileError::MissingChildSpec { ref name }
+                    if name == "api.route.readiness"
+            ),
+            "unexpected compile error: {err:?}"
+        );
+
+        let unexpected = appspec_v1_sample()
+            .compile_with_child_specs(vec![make_child("api.route.readiness"), make_child("extra")])
+            .expect_err("unexpected child factory rejects");
+        assert!(
+            matches!(
+                unexpected,
+                AppSpecV1CompileError::UnexpectedChildSpec { ref name } if name == "extra"
+            ),
+            "unexpected compile error: {unexpected:?}"
+        );
+        crate::test_complete!("appspec_v1_compile_requires_explicit_child_factories");
+    }
+
+    #[test]
+    fn appspec_v1_compile_lowers_to_existing_builder() {
+        init_test("appspec_v1_compile_lowers_to_existing_builder");
+        let app = appspec_v1_sample()
+            .compile_with_child_specs(vec![
+                make_child("api.route.readiness"),
+                make_child("api.actor.cache_warmer"),
+                make_child("api.job.sweeper"),
+            ])
+            .expect("explicit factories lower to AppSpec");
+
+        let compiled = app.compile().expect("lowered AppSpec compiles");
+        assert_eq!(compiled.name(), "payments");
+        assert_eq!(
+            compiled
+                .compiled_supervisor()
+                .children
+                .iter()
+                .map(|child| child.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "api.route.readiness",
+                "api.actor.cache_warmer",
+                "api.job.sweeper"
+            ]
+        );
+        assert_eq!(compiled.compiled_supervisor().start_order.len(), 3);
+        crate::test_complete!("appspec_v1_compile_lowers_to_existing_builder");
     }
 
     #[test]
