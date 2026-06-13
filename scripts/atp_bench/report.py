@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Aggregate atp_bench results.jsonl into a markdown report (br-asupersync-iiz6jk).
+
+Usage: report.py results.jsonl [conditions.json] > report.md
+
+Warmup runs (run == 0) are listed but excluded from aggregates. Failed
+verifications are never dropped; they fail the row loudly.
+"""
+
+import json
+import statistics
+import sys
+from collections import defaultdict
+
+
+def fmt_bytes(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+    conditions = {}
+    if len(sys.argv) > 2:
+        conditions = json.load(open(sys.argv[2]))
+
+    print("# ATP vs rsync — real-internet benchmark report\n")
+    if conditions:
+        print(f"- **Date**: {conditions.get('date')}")
+        print(f"- **Sender → Receiver**: `{conditions.get('sender')}` → `{conditions.get('receiver')}` (open internet)")
+        print(f"- **RTT**: {conditions.get('rtt')}")
+        print(f"- **Cores**: sender {conditions.get('sender_cores')}, receiver {conditions.get('receiver_cores')}")
+        print(f"- **Runs per cell**: {conditions.get('runs')} measured + 1 warmup (warmup excluded from aggregates)\n")
+    print("Note: the current `atp` TCP transport is plaintext, so `rsyncd` (plaintext)\n"
+          "is the apples-to-apples row; `rsync-ssh` is the realistic-usage row.\n")
+
+    # Group measured runs.
+    groups = defaultdict(list)
+    fails = []
+    for r in rows:
+        if not r.get("verify_ok"):
+            fails.append(r)
+        if r["run"] == 0:
+            continue
+        groups[(r["payload"], r["tool"])].append(r)
+
+    payloads = []
+    tools = []
+    for (p, t) in groups:
+        if p not in payloads:
+            payloads.append(p)
+        if t not in tools:
+            tools.append(t)
+
+    print("## Wall clock / throughput (mean of measured runs)\n")
+    print("| Payload | Size | " + " | ".join(f"{t} wall (s) | {t} MB/s" for t in tools) + " |")
+    print("|---" * (2 + 2 * len(tools)) + "|")
+    for p in payloads:
+        size = None
+        cells = []
+        for t in tools:
+            runs = groups.get((p, t), [])
+            walls = [r["sender"]["wall_s"] for r in runs
+                     if r["sender"]["wall_s"] is not None and r.get("verify_ok")]
+            if runs and size is None:
+                size = runs[0]["sender"]["bytes"]
+            if walls:
+                mean_wall = statistics.mean(walls)
+                mbps = (size / 1048576) / mean_wall if mean_wall > 0 else 0
+                spread = f" ±{statistics.stdev(walls):.2f}" if len(walls) > 1 else ""
+                cells.append(f"{mean_wall:.2f}{spread} | {mbps:.1f}")
+            else:
+                cells.append("FAIL | —")
+        print(f"| {p} | {fmt_bytes(size or 0)} | " + " | ".join(cells) + " |")
+
+    print("\n## Resources (mean of measured runs)\n")
+    print("| Payload | Tool | Sender peak RSS | Recv peak RSS | Sender CPU s (u+s) | "
+          "Cycles (G) | Instr (G) | Avg core util % | Peak load1 (recv) |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    for p in payloads:
+        for t in tools:
+            runs = [r for r in groups.get((p, t), []) if r.get("verify_ok")]
+            if not runs:
+                print(f"| {p} | {t} | FAILED VERIFY OR NO RUNS | | | | | | |")
+                continue
+
+            def mean_of(path, scale=1.0):
+                vals = []
+                for r in runs:
+                    v = r
+                    for k in path:
+                        v = v.get(k) if isinstance(v, dict) else None
+                        if v is None:
+                            break
+                    if isinstance(v, (int, float)):
+                        vals.append(v / scale)
+                return statistics.mean(vals) if vals else None
+
+            s_rss = mean_of(["sender", "max_rss_kb"], 1024)
+            r_rss_t = mean_of(["receiver_time", "max_rss_kb"], 1024)
+            r_rss_s = mean_of(["receiver_sampler", "peak_rss_kb"], 1024)
+            r_rss = r_rss_t if r_rss_t else r_rss_s
+            cpu_u = mean_of(["sender", "user_s"]) or 0
+            cpu_s = mean_of(["sender", "sys_s"]) or 0
+            cyc = mean_of(["sender", "cycles"], 1e9)
+            ins = mean_of(["sender", "instructions"], 1e9)
+            util = mean_of(["sender", "avg_core_util_pct"])
+            load = mean_of(["receiver_sampler", "peak_load1"])
+
+            def cell(value, fmt):
+                return fmt.format(value) if value is not None else "—"
+
+            print(f"| {p} | {t} "
+                  f"| {cell(s_rss, '{:.0f} MB')} "
+                  f"| {cell(r_rss, '{:.0f} MB')} "
+                  f"| {cpu_u + cpu_s:.2f} "
+                  f"| {cell(cyc, '{:.2f}')} "
+                  f"| {cell(ins, '{:.2f}')} "
+                  f"| {cell(util, '{:.0f}')} "
+                  f"| {cell(load, '{:.2f}')} |")
+
+    print("\n## Speedup (rsync wall / atp wall; >1 means atp is faster)\n")
+    atp_tools = [t for t in tools if t.startswith("atp")]
+    rsync_tools = [t for t in tools if not t.startswith("atp")]
+    if atp_tools and rsync_tools:
+        print("| Payload | " + " | ".join(f"{a} vs {r}" for a in atp_tools for r in rsync_tools) + " |")
+        print("|---" * (1 + len(atp_tools) * len(rsync_tools)) + "|")
+        for p in payloads:
+            cells = []
+            for a in atp_tools:
+                for r in rsync_tools:
+                    wa = [x["sender"]["wall_s"] for x in groups.get((p, a), []) if x.get("verify_ok")]
+                    wr = [x["sender"]["wall_s"] for x in groups.get((p, r), []) if x.get("verify_ok")]
+                    if wa and wr:
+                        cells.append(f"{statistics.mean(wr) / statistics.mean(wa):.2f}x")
+                    else:
+                        cells.append("—")
+            print(f"| {p} | " + " | ".join(cells) + " |")
+
+    print("\n## Verification\n")
+    total = len([r for r in rows if r["run"] != 0])
+    ok = len([r for r in rows if r["run"] != 0 and r.get("verify_ok")])
+    print(f"- Measured transfers: {total}; bit-for-bit SHA-256 verified: {ok}.")
+    if fails:
+        print(f"- **{len(fails)} runs FAILED verification or transfer** (including warmups):")
+        for f in fails:
+            print(f"  - {f['tool']} / {f['payload']} run {f['run']}: "
+                  f"status={f['sender'].get('status')} stderr: {f['sender'].get('stderr_head', '')[:200]}")
+    else:
+        print("- Zero verification failures.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
