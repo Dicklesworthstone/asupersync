@@ -1,0 +1,39 @@
+{
+  "schema_version": "rust-crate-release-provenance-integrity-manifest-v1",
+  "primary_bead": "asupersync-release-provenance-core-crates-jpts8n.2",
+  "source_contract": "artifacts/rust_crate_release_provenance_contract_v1.json",
+  "generated_at": "2026-06-13T05:49:00Z",
+  "self_hash_excluded": true,
+  "artifact_status": "r2_contract_index",
+  "entries": [
+    {
+      "path": "artifacts/rust_crate_release_provenance_contract_v1.json",
+      "sha256": "sha256:cd6c3a037dcf518fd78db126f9990b468f51e13b58fdc9598ddbc7577048b443",
+      "role": "machine_readable_contract",
+      "citeability": "contract_fixture"
+    },
+    {
+      "path": "docs/rust_crate_release_provenance_artifacts.md",
+      "sha256": "sha256:d5f7f87c31c3eece5407cdf1e4ae5549720ab121383207ab740e7fba39366b96",
+      "role": "operator_report",
+      "citeability": "operator_guidance"
+    },
+    {
+      "path": "docs/rust_crate_release_provenance_policy.md",
+      "sha256": "sha256:bfe8508f895684832348ff86912cb8846dbb4865160d5457ff42469304924e1e",
+      "role": "policy_baseline",
+      "citeability": "release_surface_inventory"
+    }
+  ],
+  "non_destructive_supersession": {
+    "old_manifests_are_retained": true,
+    "successor_manifest_required_when_superseded": true
+  },
+  "no_claim_boundaries": [
+    "does_not_prove_release_readiness",
+    "does_not_prove_runtime_correctness",
+    "does_not_prove_workspace_health",
+    "does_not_prove_live_crates_io_publication",
+    "does_not_prove_real_tarball_integrity"
+  ]
+}

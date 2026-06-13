@@ -1,0 +1,396 @@
+{
+  "schema_version": "rust-crate-release-provenance-contract-v1",
+  "contract_id": "rust-crate-release-provenance-contract-v1",
+  "primary_bead": "asupersync-release-provenance-core-crates-jpts8n.2",
+  "source_policy": "docs/rust_crate_release_provenance_policy.md",
+  "publish_workflow": ".github/workflows/publish.yml",
+  "integrity_manifest": {
+    "path": "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+    "covers": [
+      "artifacts/rust_crate_release_provenance_contract_v1.json",
+      "docs/rust_crate_release_provenance_artifacts.md",
+      "docs/rust_crate_release_provenance_policy.md"
+    ],
+    "self_hash_excluded": true
+  },
+  "generated_at": "2026-06-13T05:46:00Z",
+  "git_head_fixture": "fb13abf8c1e27199efda2bdc93de72c4481c198d",
+  "artifact_status": "fixture_contract",
+  "citeability": {
+    "class": "contract_fixture",
+    "may_cite_for": [
+      "required Rust crate release provenance fields",
+      "published crate surface inventory",
+      "fixture examples for dry-run-only and already-published outcomes",
+      "non-destructive artifact supersession semantics"
+    ],
+    "must_not_cite_for": [
+      "release readiness",
+      "actual crates.io publication",
+      "runtime correctness",
+      "workspace health",
+      "security audit completion",
+      "real package tarball integrity"
+    ]
+  },
+  "published_crate_surface": [
+    {
+      "publish_order": 1,
+      "package": "franken-kernel",
+      "manifest_path": "franken_kernel/Cargo.toml",
+      "role": "FrankenSuite support"
+    },
+    {
+      "publish_order": 2,
+      "package": "franken-evidence",
+      "manifest_path": "franken_evidence/Cargo.toml",
+      "role": "FrankenSuite support"
+    },
+    {
+      "publish_order": 3,
+      "package": "franken-decision",
+      "manifest_path": "franken_decision/Cargo.toml",
+      "role": "FrankenSuite support"
+    },
+    {
+      "publish_order": 4,
+      "package": "asupersync-macros",
+      "manifest_path": "asupersync-macros/Cargo.toml",
+      "role": "proc macro"
+    },
+    {
+      "publish_order": 5,
+      "package": "asupersync",
+      "manifest_path": "Cargo.toml",
+      "role": "runtime core"
+    },
+    {
+      "publish_order": 6,
+      "package": "asupersync-conformance",
+      "manifest_path": "conformance/Cargo.toml",
+      "role": "conformance"
+    },
+    {
+      "publish_order": 7,
+      "package": "frankenlab",
+      "manifest_path": "frankenlab/Cargo.toml",
+      "role": "deterministic testing harness"
+    },
+    {
+      "publish_order": 8,
+      "package": "asupersync-browser-core",
+      "manifest_path": "asupersync-browser-core/Cargo.toml",
+      "role": "browser boundary"
+    },
+    {
+      "publish_order": 9,
+      "package": "asupersync-tokio-compat",
+      "manifest_path": "asupersync-tokio-compat/Cargo.toml",
+      "role": "compat satellite"
+    }
+  ],
+  "required_record_fields": [
+    "schema_version",
+    "record_id",
+    "status",
+    "git_head",
+    "tag",
+    "package",
+    "digests.cargo_lock_sha256",
+    "digests.cargo_toml_sha256",
+    "digests.root_cargo_toml_sha256",
+    "cargo_metadata_snapshot",
+    "dependency_license_sbom",
+    "dry_run_command",
+    "dry_run_outcome",
+    "package_tarball_sha256",
+    "publish_command",
+    "publish_outcome",
+    "crates_io_visibility_check",
+    "integrity_manifest",
+    "no_claim_boundaries"
+  ],
+  "status_vocabulary": {
+    "dry_run_only": "Dry-run/package evidence exists, but no live publish outcome is claimed.",
+    "published": "Live publish completed and crates.io visibility was checked.",
+    "already_published_noop": "The requested package version was already visible, so publish was skipped as an idempotent no-op.",
+    "skipped_token_absent": "Publish was skipped because CARGO_REGISTRY_TOKEN was absent.",
+    "superseded": "This record is retained for audit but points at a successor record.",
+    "fixture_only": "Contract fixture data, not a live release artifact."
+  },
+  "fixture_records": [
+    {
+      "schema_version": "rust-crate-release-provenance-record-v1",
+      "record_id": "fixture-asupersync-0.3.4-dry-run",
+      "status": "fixture_only",
+      "release_mode_fixture": "dry_run_only",
+      "git_head": "fb13abf8c1e27199efda2bdc93de72c4481c198d",
+      "tag": "v0.3.4",
+      "package": {
+        "name": "asupersync",
+        "version": "0.3.4",
+        "manifest_path": "Cargo.toml",
+        "publish_order": 5,
+        "role": "runtime core",
+        "edition": "2024",
+        "license": "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+      },
+      "digests": {
+        "cargo_lock_sha256": "sha256:5db3839856794bc0d69157e89013b5f710229cbdd1db36306c7f8780b9d94da7",
+        "cargo_toml_sha256": "sha256:310f482b95b212603cfb7b58480cc423ef13f2e74279dc67efb3d87e7b4ee9a1",
+        "root_cargo_toml_sha256": "sha256:310f482b95b212603cfb7b58480cc423ef13f2e74279dc67efb3d87e7b4ee9a1"
+      },
+      "cargo_metadata_snapshot": {
+        "command": "cargo metadata --no-deps --format-version 1",
+        "workspace_root": "/data/projects/asupersync",
+        "selected_package": {
+          "name": "asupersync",
+          "version": "0.3.4",
+          "repository": "https://github.com/Dicklesworthstone/asupersync"
+        }
+      },
+      "dependency_license_sbom": {
+        "snapshot_kind": "fixture-minimal",
+        "source": "Cargo.lock plus package metadata",
+        "rows": [
+          {
+            "name": "asupersync",
+            "version": "0.3.4",
+            "license": "LicenseRef-MIT-OpenAI-Anthropic-Rider",
+            "relationship": "root_package"
+          }
+        ]
+      },
+      "dry_run_command": {
+        "executor": "github_actions_or_rch",
+        "command": "cargo publish -p asupersync --dry-run --locked",
+        "requires_remote_for_direct_main": true,
+        "credentials_redacted": true
+      },
+      "dry_run_outcome": {
+        "status": "not_run_fixture",
+        "log_artifact": "artifacts/release_provenance/fixtures/asupersync-dry-run.log",
+        "timestamp": "2026-06-13T05:46:00Z"
+      },
+      "package_tarball_sha256": {
+        "sha256": "sha256:ff36758b6eb27df9279dafee6b57e1781ff725ad39fa27492b1b54393dea6519",
+        "source": "fixture string: fixture:asupersync:0.3.4:dry-run-tarball",
+        "fixture_only": true
+      },
+      "publish_command": {
+        "command": "cargo publish -p asupersync --locked",
+        "credentials_redacted": true,
+        "not_executed_in_fixture": true
+      },
+      "publish_outcome": {
+        "status": "dry_run_only",
+        "published": false
+      },
+      "crates_io_visibility_check": {
+        "status": "not_applicable_for_fixture",
+        "expected_package": "asupersync",
+        "expected_version": "0.3.4"
+      },
+      "integrity_manifest": {
+        "path": "artifacts/rust_crate_release_provenance_contract_v1.json",
+        "sha256": "sha256:75f95c8d930cd8d6eb3205c633ae8bc0b2c3d2235a75549ba0a8652165bb914c",
+        "fixture_only": true
+      },
+      "supersession": {
+        "status": "current_fixture",
+        "successor_record_id": null
+      },
+      "no_claim_boundaries": [
+        "does_not_prove_release_readiness",
+        "does_not_prove_runtime_correctness",
+        "does_not_prove_workspace_health",
+        "does_not_prove_live_crates_io_publication",
+        "does_not_prove_real_tarball_integrity"
+      ]
+    },
+    {
+      "schema_version": "rust-crate-release-provenance-record-v1",
+      "record_id": "fixture-franken-kernel-0.3.4-already-published",
+      "status": "fixture_only",
+      "release_mode_fixture": "already_published_noop",
+      "git_head": "fb13abf8c1e27199efda2bdc93de72c4481c198d",
+      "tag": "v0.3.4",
+      "package": {
+        "name": "franken-kernel",
+        "version": "0.3.4",
+        "manifest_path": "franken_kernel/Cargo.toml",
+        "publish_order": 1,
+        "role": "FrankenSuite support",
+        "edition": "2024",
+        "license": "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+      },
+      "digests": {
+        "cargo_lock_sha256": "sha256:5db3839856794bc0d69157e89013b5f710229cbdd1db36306c7f8780b9d94da7",
+        "cargo_toml_sha256": "sha256:1aac7f487e8ed362cb0f35988ca208da7788e51125ad8088c030bcd1f226f2bb",
+        "root_cargo_toml_sha256": "sha256:310f482b95b212603cfb7b58480cc423ef13f2e74279dc67efb3d87e7b4ee9a1"
+      },
+      "cargo_metadata_snapshot": {
+        "command": "cargo metadata --no-deps --format-version 1",
+        "workspace_root": "/data/projects/asupersync",
+        "selected_package": {
+          "name": "franken-kernel",
+          "version": "0.3.4",
+          "repository": "https://github.com/Dicklesworthstone/asupersync"
+        }
+      },
+      "dependency_license_sbom": {
+        "snapshot_kind": "fixture-minimal",
+        "source": "Cargo.lock plus package metadata",
+        "rows": [
+          {
+            "name": "franken-kernel",
+            "version": "0.3.4",
+            "license": "LicenseRef-MIT-OpenAI-Anthropic-Rider",
+            "relationship": "support_package"
+          }
+        ]
+      },
+      "dry_run_command": {
+        "executor": "github_actions_or_rch",
+        "command": "cargo publish -p franken-kernel --dry-run --locked",
+        "requires_remote_for_direct_main": true,
+        "credentials_redacted": true
+      },
+      "dry_run_outcome": {
+        "status": "not_run_fixture",
+        "log_artifact": "artifacts/release_provenance/fixtures/franken-kernel-dry-run.log",
+        "timestamp": "2026-06-13T05:46:00Z"
+      },
+      "package_tarball_sha256": {
+        "sha256": "sha256:5f2d0c6cfdba2a19abb262911d4b3764ad8d06dcbb84d91625c8f23798554962",
+        "source": "fixture string: fixture:franken-kernel:0.3.4:already-published-tarball",
+        "fixture_only": true
+      },
+      "publish_command": {
+        "command": "cargo publish -p franken-kernel --locked",
+        "credentials_redacted": true,
+        "not_executed_in_fixture": true
+      },
+      "publish_outcome": {
+        "status": "already_published_noop",
+        "published": false
+      },
+      "crates_io_visibility_check": {
+        "status": "fixture_visible",
+        "expected_package": "franken-kernel",
+        "expected_version": "0.3.4"
+      },
+      "integrity_manifest": {
+        "path": "artifacts/rust_crate_release_provenance_contract_v1.json",
+        "sha256": "sha256:75f95c8d930cd8d6eb3205c633ae8bc0b2c3d2235a75549ba0a8652165bb914c",
+        "fixture_only": true
+      },
+      "supersession": {
+        "status": "current_fixture",
+        "successor_record_id": null
+      },
+      "no_claim_boundaries": [
+        "does_not_prove_release_readiness",
+        "does_not_prove_runtime_correctness",
+        "does_not_prove_workspace_health",
+        "does_not_prove_live_crates_io_publication",
+        "does_not_prove_real_tarball_integrity"
+      ]
+    },
+    {
+      "schema_version": "rust-crate-release-provenance-record-v1",
+      "record_id": "fixture-asupersync-tokio-compat-0.3.4-dry-run",
+      "status": "fixture_only",
+      "release_mode_fixture": "dry_run_only",
+      "git_head": "fb13abf8c1e27199efda2bdc93de72c4481c198d",
+      "tag": "v0.3.4",
+      "package": {
+        "name": "asupersync-tokio-compat",
+        "version": "0.3.4",
+        "manifest_path": "asupersync-tokio-compat/Cargo.toml",
+        "publish_order": 9,
+        "role": "compat satellite",
+        "edition": "2024",
+        "license": "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+      },
+      "digests": {
+        "cargo_lock_sha256": "sha256:5db3839856794bc0d69157e89013b5f710229cbdd1db36306c7f8780b9d94da7",
+        "cargo_toml_sha256": "sha256:539011d1dbadfbcfd67df83777ce886a5686a3fbce11b60244bbcdbc8dfd985b",
+        "root_cargo_toml_sha256": "sha256:310f482b95b212603cfb7b58480cc423ef13f2e74279dc67efb3d87e7b4ee9a1"
+      },
+      "cargo_metadata_snapshot": {
+        "command": "cargo metadata --no-deps --format-version 1",
+        "workspace_root": "/data/projects/asupersync",
+        "selected_package": {
+          "name": "asupersync-tokio-compat",
+          "version": "0.3.4",
+          "repository": "https://github.com/Dicklesworthstone/asupersync"
+        }
+      },
+      "dependency_license_sbom": {
+        "snapshot_kind": "fixture-minimal",
+        "source": "Cargo.lock plus package metadata",
+        "rows": [
+          {
+            "name": "asupersync-tokio-compat",
+            "version": "0.3.4",
+            "license": "LicenseRef-MIT-OpenAI-Anthropic-Rider",
+            "relationship": "satellite_package"
+          }
+        ]
+      },
+      "dry_run_command": {
+        "executor": "github_actions_or_rch",
+        "command": "cargo publish -p asupersync-tokio-compat --dry-run --locked",
+        "requires_remote_for_direct_main": true,
+        "credentials_redacted": true
+      },
+      "dry_run_outcome": {
+        "status": "not_run_fixture",
+        "log_artifact": "artifacts/release_provenance/fixtures/asupersync-tokio-compat-dry-run.log",
+        "timestamp": "2026-06-13T05:46:00Z"
+      },
+      "package_tarball_sha256": {
+        "sha256": "sha256:8120a2686176531a95b763417e5e49fd5d880d2da2cfad7c9f57be5bf9a190dc",
+        "source": "fixture string: fixture:asupersync-tokio-compat:0.3.4:dry-run-tarball",
+        "fixture_only": true
+      },
+      "publish_command": {
+        "command": "cargo publish -p asupersync-tokio-compat --locked",
+        "credentials_redacted": true,
+        "not_executed_in_fixture": true
+      },
+      "publish_outcome": {
+        "status": "dry_run_only",
+        "published": false
+      },
+      "crates_io_visibility_check": {
+        "status": "not_applicable_for_fixture",
+        "expected_package": "asupersync-tokio-compat",
+        "expected_version": "0.3.4"
+      },
+      "integrity_manifest": {
+        "path": "artifacts/rust_crate_release_provenance_contract_v1.json",
+        "sha256": "sha256:75f95c8d930cd8d6eb3205c633ae8bc0b2c3d2235a75549ba0a8652165bb914c",
+        "fixture_only": true
+      },
+      "supersession": {
+        "status": "current_fixture",
+        "successor_record_id": null
+      },
+      "no_claim_boundaries": [
+        "does_not_prove_release_readiness",
+        "does_not_prove_runtime_correctness",
+        "does_not_prove_workspace_health",
+        "does_not_prove_live_crates_io_publication",
+        "does_not_prove_real_tarball_integrity"
+      ]
+    }
+  ],
+  "non_destructive_artifact_policy": {
+    "old_records_are_never_deleted": true,
+    "superseded_records_remain_citeable_as_history_only": true,
+    "successor_record_id_required_when_status_is_superseded": true,
+    "target_directory_outputs_are_ephemeral_unless_promoted_to_artifacts": true
+  }
+}
