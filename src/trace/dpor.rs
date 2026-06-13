@@ -279,6 +279,40 @@ impl RaceDetector {
 }
 
 /// Detect happens-before races in a trace.
+///
+/// The returned races are deterministic for a fixed trace and are emitted in
+/// trace-index order. Same-task pairs are treated as ordered by
+/// happens-before and are not reported.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::trace::{TraceEvent, detect_hb_races};
+/// use asupersync::types::{CancelReason, RegionId, TaskId, Time};
+///
+/// let region = RegionId::new_for_test(1, 0);
+/// let events = [
+///     TraceEvent::cancel_request(
+///         1,
+///         Time::ZERO,
+///         TaskId::new_for_test(1, 0),
+///         region,
+///         CancelReason::user("left"),
+///     ),
+///     TraceEvent::cancel_request(
+///         2,
+///         Time::ZERO,
+///         TaskId::new_for_test(2, 0),
+///         region,
+///         CancelReason::user("right"),
+///     ),
+/// ];
+///
+/// let report = detect_hb_races(&events);
+/// assert_eq!(report.race_count(), 1);
+/// assert_eq!(report.races[0].race.earlier, 0);
+/// assert_eq!(report.races[0].race.later, 1);
+/// ```
 #[must_use]
 pub fn detect_hb_races(events: &[TraceEvent]) -> RaceReport {
     RaceDetector::from_trace(events).into_report()
@@ -326,6 +360,26 @@ fn conflicting_resource(
 /// O(n³) in the worst case (for each pair, check all intermediaries).
 /// For typical traces this is acceptable; large traces can use the
 /// seed-sweep explorer instead.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::trace::{TraceEvent, detect_races, racing_events};
+/// use asupersync::types::{RegionId, TaskId, Time};
+///
+/// let task = TaskId::new_for_test(7, 0);
+/// let region = RegionId::new_for_test(1, 0);
+/// let events = [
+///     TraceEvent::spawn(1, Time::ZERO, task, region),
+///     TraceEvent::complete(2, Time::ZERO, task, region),
+/// ];
+///
+/// let analysis = detect_races(&events);
+/// assert_eq!(analysis.race_count(), 1);
+/// assert_eq!(analysis.races[0].earlier, 0);
+/// assert_eq!(analysis.races[0].later, 1);
+/// assert_eq!(racing_events(&events), vec![0, 1]);
+/// ```
 #[must_use]
 pub fn detect_races(events: &[TraceEvent]) -> RaceAnalysis {
     let n = events.len();

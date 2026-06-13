@@ -138,6 +138,39 @@ fn detect_races_is_deterministic() {
     }
 }
 
+#[test]
+fn detect_races_reports_pairs_and_backtracks_in_stable_order() {
+    let z = Time::ZERO;
+    let trace = vec![
+        TraceEvent::spawn(1, z, tid(1), rid(1)),
+        TraceEvent::poll(2, z, tid(1), rid(1)),
+        TraceEvent::complete(3, z, tid(1), rid(1)),
+    ];
+
+    let analysis = detect_races(&trace);
+    let pairs: Vec<(usize, usize)> = analysis
+        .races
+        .iter()
+        .map(|race| (race.earlier, race.later))
+        .collect();
+    let mut sorted = pairs.clone();
+    sorted.sort_unstable();
+
+    assert_eq!(pairs, sorted, "race pairs must be trace-index ordered");
+    assert_eq!(
+        analysis
+            .backtrack_points
+            .iter()
+            .map(|point| (point.race.earlier, point.race.later, point.divergence_index))
+            .collect::<Vec<_>>(),
+        pairs
+            .iter()
+            .map(|(earlier, later)| (*earlier, *later, *earlier))
+            .collect::<Vec<_>>(),
+        "backtrack points must preserve race order and diverge at the earlier event",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // detect_hb_races — the cross-task contract
 // ---------------------------------------------------------------------------
@@ -178,6 +211,29 @@ fn a_pure_same_task_trace_has_no_hb_races() {
     assert!(detect_hb_races(&trace).is_race_free());
     // ...while the immediate detector does see the same-task dependencies.
     assert!(detect_races(&trace).race_count() >= 1);
+}
+
+#[test]
+fn hb_races_are_reported_in_stable_trace_order() {
+    let z = Time::ZERO;
+    let reason = CancelReason::user("shared-region");
+    let trace = vec![
+        TraceEvent::cancel_request(1, z, tid(1), rid(1), reason.clone()),
+        TraceEvent::cancel_request(2, z, tid(2), rid(1), reason.clone()),
+        TraceEvent::cancel_request(3, z, tid(3), rid(1), reason),
+    ];
+
+    let report = detect_hb_races(&trace);
+    let pairs: Vec<(usize, usize)> = report
+        .races
+        .iter()
+        .map(|race| (race.race.earlier, race.race.later))
+        .collect();
+    let mut sorted = pairs.clone();
+    sorted.sort_unstable();
+
+    assert_eq!(pairs, sorted, "HB race pairs must be trace-index ordered");
+    assert_eq!(pairs, vec![(0, 1), (0, 2), (1, 2)]);
 }
 
 // ---------------------------------------------------------------------------

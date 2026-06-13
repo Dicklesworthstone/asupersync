@@ -17,6 +17,26 @@
 //! Future phases will add backtrack-point analysis and sleep sets for
 //! targeted exploration (true DPOR), but seed-sweep already catches many
 //! concurrency bugs by varying the scheduler's RNG.
+//!
+//! # Public API
+//!
+//! The explorer types are ordinary public runtime-test helpers. Construct them
+//! with an [`ExplorerConfig`], run a closure under lab runtimes, then inspect
+//! deterministic coverage fields such as total runs, equivalence classes,
+//! novelty histograms, unexplored seeds, and DPOR race counters.
+//!
+//! ```
+//! use asupersync::lab::{DporExplorer, ExplorerConfig, ScheduleExplorer};
+//!
+//! let config = ExplorerConfig::new(7, 3).worker_count(2).max_steps(1_000);
+//! let baseline = ScheduleExplorer::new(config.clone());
+//! assert_eq!(baseline.coverage().total_runs, 0);
+//!
+//! let dpor = DporExplorer::new(config);
+//! let metrics = dpor.dpor_coverage();
+//! assert_eq!(metrics.base.total_runs, 0);
+//! assert_eq!(metrics.total_races, 0);
+//! ```
 
 use crate::lab::config::LabConfig;
 use crate::lab::runtime::{InvariantViolation, LabRuntime};
