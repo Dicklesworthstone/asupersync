@@ -49,6 +49,11 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+/// Adaptive block-size / overhead / fan-out optimizer (opt-in; see
+/// `docs/atp_rq_adaptive_design.md`). The default transport path does not
+/// consult it — it is a pure, deterministic side-module today.
+pub mod adaptive;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
