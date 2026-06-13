@@ -33,7 +33,7 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::types::Time;
@@ -313,12 +313,38 @@ struct PoolInner<C> {
     /// Total connections (idle + checked out).
     total: usize,
     closed: bool,
+    /// Async acquisition waiters ordered by arrival. The synchronous pool
+    /// leaves this empty because it has no `Cx` budget/cancellation surface.
+    waiters: VecDeque<Arc<AsyncPoolWaiter>>,
     /// br-asupersync-qydi3j: Per-client connection count tracking.
     /// Maps client_id -> count of active connections for that client.
     client_connections: HashMap<String, usize>,
     /// br-asupersync-mlojr9: Per-client retry attempt tracking.
     /// Maps client_id -> (current_attempts, last_retry_time).
     client_retry_state: HashMap<String, (u32, Time)>,
+}
+
+struct AsyncPoolWaiter {
+    notify: crate::sync::Notify,
+    ready: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+impl AsyncPoolWaiter {
+    fn new() -> Self {
+        Self {
+            notify: crate::sync::Notify::new(),
+            ready: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+        }
+    }
+}
+
+enum AsyncAcquireStep<C> {
+    Wait,
+    Idle(IdleConnection<C>),
+    Create,
+    Discard(C),
 }
 
 // ─── DbPool ─────────────────────────────────────────────────────────────────
@@ -519,6 +545,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 idle: VecDeque::new(),
                 total: 0,
                 closed: false,
+                waiters: VecDeque::new(),
                 client_connections: HashMap::new(), // br-asupersync-qydi3j
                 client_retry_state: HashMap::new(), // br-asupersync-mlojr9
             }),
@@ -1703,6 +1730,7 @@ impl<M: AsyncConnectionManager> Drop for AsyncValidationGuard<'_, M> {
         if let Some(conn) = self.conn.take() {
             let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
+            self.pool.wake_next_async_pool_waiter_locked(&mut inner);
             drop(inner);
             self.pool
                 .stats
@@ -1723,6 +1751,7 @@ impl<M: AsyncConnectionManager> Drop for AsyncCreationGuard<'_, M> {
         if !self.disarmed {
             let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
+            self.pool.wake_next_async_pool_waiter_locked(&mut inner);
         }
     }
 }
@@ -1737,6 +1766,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 idle: VecDeque::new(),
                 total: 0,
                 closed: false,
+                waiters: VecDeque::new(),
                 // br-asupersync-80525g: Validation bypass fix - add client tracking to async pool
                 client_connections: HashMap::new(),
                 client_retry_state: HashMap::new(),
@@ -1778,6 +1808,147 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
     }
 
+    fn async_pool_capacity_available_locked(&self, inner: &PoolInner<M::Connection>) -> bool {
+        !inner.idle.is_empty() || inner.total < self.config.max_size
+    }
+
+    fn prune_cancelled_async_pool_waiters_locked(&self, inner: &mut PoolInner<M::Connection>) {
+        while inner
+            .waiters
+            .front()
+            .is_some_and(|waiter| waiter.cancelled.load(Ordering::Acquire))
+        {
+            inner.waiters.pop_front();
+        }
+    }
+
+    fn async_pool_caller_has_turn_locked(
+        &self,
+        inner: &mut PoolInner<M::Connection>,
+        waiter: Option<&Arc<AsyncPoolWaiter>>,
+    ) -> bool {
+        self.prune_cancelled_async_pool_waiters_locked(inner);
+
+        match waiter {
+            Some(waiter) => inner.waiters.front().is_some_and(|front| {
+                Arc::ptr_eq(front, waiter) && waiter.ready.load(Ordering::Acquire)
+            }),
+            None => inner.waiters.is_empty(),
+        }
+    }
+
+    fn remove_async_pool_waiter_locked(
+        &self,
+        inner: &mut PoolInner<M::Connection>,
+        waiter: &Arc<AsyncPoolWaiter>,
+    ) {
+        if let Some(position) = inner
+            .waiters
+            .iter()
+            .position(|queued| Arc::ptr_eq(queued, waiter))
+        {
+            inner.waiters.remove(position);
+        }
+    }
+
+    fn complete_async_pool_turn_locked(
+        &self,
+        inner: &mut PoolInner<M::Connection>,
+        waiter: Option<&Arc<AsyncPoolWaiter>>,
+    ) {
+        if let Some(waiter) = waiter {
+            self.remove_async_pool_waiter_locked(inner, waiter);
+        }
+        self.wake_next_async_pool_waiter_locked(inner);
+    }
+
+    fn wake_next_async_pool_waiter_locked(&self, inner: &mut PoolInner<M::Connection>) {
+        self.prune_cancelled_async_pool_waiters_locked(inner);
+
+        if inner.closed {
+            self.wake_all_async_pool_waiters_locked(inner);
+            return;
+        }
+
+        if !self.async_pool_capacity_available_locked(inner) {
+            return;
+        }
+
+        if let Some(waiter) = inner.waiters.front() {
+            let already_ready = waiter.ready.swap(true, Ordering::AcqRel);
+            if !already_ready {
+                waiter.notify.notify_one();
+            }
+        }
+    }
+
+    fn wake_all_async_pool_waiters_locked(&self, inner: &mut PoolInner<M::Connection>) {
+        for waiter in inner.waiters.drain(..) {
+            waiter.ready.store(true, Ordering::Release);
+            waiter.notify.notify_one();
+        }
+    }
+
+    fn cancel_async_pool_waiter(&self, waiter: &Arc<AsyncPoolWaiter>) {
+        waiter.cancelled.store(true, Ordering::Release);
+        let mut inner = self.inner.lock();
+        self.remove_async_pool_waiter_locked(&mut inner, waiter);
+        self.wake_next_async_pool_waiter_locked(&mut inner);
+    }
+
+    async fn wait_for_async_pool_turn(
+        &self,
+        cx: &Cx,
+        waiter_slot: &mut Option<Arc<AsyncPoolWaiter>>,
+    ) -> Result<(), DbPoolError<M::Error>> {
+        const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+        if self.config.max_size == 0 {
+            return Err(DbPoolError::Full);
+        }
+        let deadline = cx.now() + self.config.connection_timeout;
+
+        let waiter = if let Some(waiter) = waiter_slot.as_ref() {
+            Arc::clone(waiter)
+        } else {
+            let waiter = Arc::new(AsyncPoolWaiter::new());
+            let mut inner = self.inner.lock();
+            if inner.closed {
+                return Err(DbPoolError::Closed);
+            }
+            inner.waiters.push_back(Arc::clone(&waiter));
+            self.wake_next_async_pool_waiter_locked(&mut inner);
+            *waiter_slot = Some(Arc::clone(&waiter));
+            waiter
+        };
+
+        loop {
+            if cx.checkpoint().is_err() {
+                self.cancel_async_pool_waiter(&waiter);
+                waiter_slot.take();
+                return Err(DbPoolError::Timeout);
+            }
+            if self.is_closed() {
+                self.cancel_async_pool_waiter(&waiter);
+                waiter_slot.take();
+                return Err(DbPoolError::Closed);
+            }
+            if waiter.ready.load(Ordering::Acquire) {
+                return Ok(());
+            }
+
+            let remaining = Duration::from_nanos(deadline.duration_since(cx.now()));
+            if remaining.is_zero() {
+                self.cancel_async_pool_waiter(&waiter);
+                waiter_slot.take();
+                self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                return Err(DbPoolError::Timeout);
+            }
+            let chunk = remaining.min(CANCEL_POLL_INTERVAL);
+            let _ = crate::time::timeout(cx.now(), chunk, waiter.notify.notified()).await;
+        }
+    }
+
     async fn sleep_retry_backoff(&self, cx: &Cx, mut duration: Duration) -> bool {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -1802,20 +1973,70 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         &self,
         cx: &Cx,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        let mut waiter = None;
+
         loop {
             if cx.checkpoint().is_err() {
                 return Err(DbPoolError::Timeout);
             }
 
-            let candidate = {
+            let step = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
                     return Err(DbPoolError::Closed);
                 }
-                inner.idle.pop_front()
+
+                if !self.async_pool_caller_has_turn_locked(&mut inner, waiter.as_ref()) {
+                    AsyncAcquireStep::Wait
+                } else if let Some(idle) = inner.idle.pop_front() {
+                    let granted_waiter = waiter.take();
+                    self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                    AsyncAcquireStep::Idle(idle)
+                } else if inner.total >= self.config.max_size {
+                    AsyncAcquireStep::Wait
+                } else {
+                    inner.total += 1;
+                    let granted_waiter = waiter.take();
+                    self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                    AsyncAcquireStep::Create
+                }
             };
 
-            if let Some(idle) = candidate {
+            let idle = match step {
+                AsyncAcquireStep::Wait => {
+                    self.wait_for_async_pool_turn(cx, &mut waiter).await?;
+                    continue;
+                }
+                AsyncAcquireStep::Idle(idle) => idle,
+                AsyncAcquireStep::Create => {
+                    let mut creation_guard = AsyncCreationGuard {
+                        pool: self,
+                        disarmed: false,
+                    };
+
+                    match self.manager.connect(cx).await {
+                        Outcome::Ok(conn) => {
+                            if cx.checkpoint().is_err() {
+                                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                                self.manager.disconnect(conn);
+                                return Err(DbPoolError::Timeout);
+                            }
+                            creation_guard.disarmed = true;
+                            self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
+                            return self.finish_async_checkout(conn, cx.now());
+                        }
+                        Outcome::Err(e) => return Err(DbPoolError::Connect(e)),
+                        Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                            return Err(DbPoolError::Timeout);
+                        }
+                    }
+                }
+                AsyncAcquireStep::Discard(_) => {
+                    unreachable!("anonymous async get never pre-discards")
+                }
+            };
+
+            {
                 // br-asupersync-w3g9kb: async path uses cx.now() so
                 // eviction decisions follow the runtime's logical
                 // clock (deterministic in the lab runtime).
@@ -1827,6 +2048,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     {
                         let mut inner = self.inner.lock();
                         inner.total = inner.total.saturating_sub(1);
+                        self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                     self.manager.disconnect(idle.conn);
@@ -1839,6 +2061,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     {
                         let mut inner = self.inner.lock();
                         inner.total = inner.total.saturating_sub(1);
+                        self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                     eprintln!(
@@ -1876,52 +2099,6 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
                 return self.finish_async_checkout(idle.conn, idle.created_at);
             }
-
-            {
-                let mut inner = self.inner.lock();
-                // br-asupersync-2buqek: check `closed` AND `total >=
-                // max_size` in the same critical section as the
-                // `total += 1` increment. Pre-fix the closed check
-                // happened later in finish_async_checkout, after the
-                // lock had been released for the manager.connect()
-                // round-trip. If pool.close() ran during that window
-                // it drained `inner.total` once for our slot, then
-                // finish_async_checkout decremented it AGAIN on the
-                // closed-detect path — double-decrement, drifting
-                // the reservation count below the real connection
-                // count and oversubscribing the pool on subsequent
-                // get() calls. Atomically refusing the increment
-                // when closed is set closes the door.
-                if inner.closed {
-                    return Err(DbPoolError::Closed);
-                }
-                if inner.total >= self.config.max_size {
-                    return Err(DbPoolError::Full);
-                }
-                inner.total += 1;
-            }
-
-            let mut creation_guard = AsyncCreationGuard {
-                pool: self,
-                disarmed: false,
-            };
-
-            match self.manager.connect(cx).await {
-                Outcome::Ok(conn) => {
-                    if cx.checkpoint().is_err() {
-                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                        self.manager.disconnect(conn);
-                        return Err(DbPoolError::Timeout);
-                    }
-                    creation_guard.disarmed = true;
-                    self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    return self.finish_async_checkout(conn, cx.now());
-                }
-                Outcome::Err(e) => return Err(DbPoolError::Connect(e)),
-                Outcome::Cancelled(_) | Outcome::Panicked(_) => {
-                    return Err(DbPoolError::Timeout);
-                }
-            }
         }
     }
 
@@ -1944,12 +2121,14 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
 
         let client_id_owned = client_id.to_string();
+        let mut waiter = None;
+
         loop {
             if cx.checkpoint().is_err() {
                 return Err(DbPoolError::Timeout);
             }
 
-            let candidate = {
+            let step = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
                     return Err(DbPoolError::Closed);
@@ -1967,44 +2146,137 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
                 }
 
-                // Try to get an idle connection with authentication state validation
-                let mut candidate = inner.idle.pop_front();
-                if let Some(ref idle) = candidate {
-                    if self.config.validate_authentication_state {
-                        // Authentication state validation: check for cross-user reuse
-                        match &idle.authenticated_for {
-                            Some(auth_client) if auth_client != &client_id_owned => {
-                                // SECURITY: Connection authenticated for different client - must not reuse
-                                eprintln!(
-                                    "SECURITY: Async pool discarding connection authenticated for '{}' requested by '{}'",
-                                    auth_client, client_id_owned
-                                );
-                                candidate = None; // Force discard and creation of new connection
+                if !self.async_pool_caller_has_turn_locked(&mut inner, waiter.as_ref()) {
+                    AsyncAcquireStep::Wait
+                } else {
+                    // Try to get an idle connection with authentication state validation.
+                    let mut discard = None;
+                    let mut candidate = inner.idle.pop_front();
+                    if let Some(idle) = candidate.take() {
+                        if self.config.validate_authentication_state {
+                            // Authentication state validation: check for cross-user reuse.
+                            match &idle.authenticated_for {
+                                Some(auth_client) if auth_client != &client_id_owned => {
+                                    // SECURITY: Connection authenticated for different client - must not reuse.
+                                    eprintln!(
+                                        "SECURITY: Async pool discarding connection authenticated for '{}' requested by '{}'",
+                                        auth_client, client_id_owned
+                                    );
+                                    inner.total = inner.total.saturating_sub(1);
+                                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                                    discard = Some(idle.conn);
+                                }
+                                _ => {
+                                    // Clean connection or same client - safe to reuse.
+                                    candidate = Some(idle);
+                                }
                             }
-                            _ => {
-                                // Clean connection or same client - safe to reuse
+                        } else {
+                            // Authentication validation disabled - reuse any connection.
+                            candidate = Some(idle);
+                        }
+                    }
+
+                    if let Some(conn) = discard {
+                        AsyncAcquireStep::Discard(conn)
+                    } else if let Some(idle) = candidate {
+                        let granted_waiter = waiter.take();
+                        self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                        *inner
+                            .client_connections
+                            .entry(client_id_owned.clone())
+                            .or_insert(0) += 1;
+                        AsyncAcquireStep::Idle(idle)
+                    } else if inner.total >= self.config.max_size {
+                        AsyncAcquireStep::Wait
+                    } else {
+                        inner.total += 1;
+                        let granted_waiter = waiter.take();
+                        self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
+                        *inner
+                            .client_connections
+                            .entry(client_id_owned.clone())
+                            .or_insert(0) += 1;
+                        AsyncAcquireStep::Create
+                    }
+                }
+            };
+
+            let idle = match step {
+                AsyncAcquireStep::Wait => {
+                    self.wait_for_async_pool_turn(cx, &mut waiter).await?;
+                    continue;
+                }
+                AsyncAcquireStep::Idle(idle) => idle,
+                AsyncAcquireStep::Create => {
+                    let mut creation_guard = AsyncCreationGuard {
+                        pool: self,
+                        disarmed: false,
+                    };
+
+                    match self.manager.connect(cx).await {
+                        Outcome::Ok(conn) => {
+                            if cx.checkpoint().is_err() {
+                                // Decrement client count since we're cancelling
+                                let mut inner = self.inner.lock();
+                                if let Some(count) =
+                                    inner.client_connections.get_mut(&client_id_owned)
+                                {
+                                    *count = count.saturating_sub(1);
+                                    if *count == 0 {
+                                        inner.client_connections.remove(&client_id_owned);
+                                    }
+                                }
+                                drop(inner);
+                                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                                self.manager.disconnect(conn);
+                                return Err(DbPoolError::Timeout);
                             }
+                            creation_guard.disarmed = true;
+                            self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .total_acquisitions
+                                .fetch_add(1, Ordering::Relaxed);
+                            return Ok(AsyncPooledConnection {
+                                conn: Some(conn),
+                                pool: self,
+                                created_at: cx.now(),
+                                client_id: Some(client_id_owned),
+                            });
+                        }
+                        Outcome::Err(e) => {
+                            // Decrement client count since creation failed.
+                            let mut inner = self.inner.lock();
+                            if let Some(count) = inner.client_connections.get_mut(&client_id_owned)
+                            {
+                                *count = count.saturating_sub(1);
+                                if *count == 0 {
+                                    inner.client_connections.remove(&client_id_owned);
+                                }
+                            }
+                            return Err(DbPoolError::Connect(e));
+                        }
+                        Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                            // Decrement client count on cancellation/panic.
+                            let mut inner = self.inner.lock();
+                            if let Some(count) = inner.client_connections.get_mut(&client_id_owned)
+                            {
+                                *count = count.saturating_sub(1);
+                                if *count == 0 {
+                                    inner.client_connections.remove(&client_id_owned);
+                                }
+                            }
+                            return Err(DbPoolError::Timeout);
                         }
                     }
                 }
-
-                if candidate.is_none() {
-                    if inner.total >= self.config.max_size {
-                        return Err(DbPoolError::Full);
-                    }
-                    inner.total += 1;
+                AsyncAcquireStep::Discard(conn) => {
+                    self.manager.disconnect(conn);
+                    continue;
                 }
-
-                // br-asupersync-80525g: Increment client connection count for async pool
-                *inner
-                    .client_connections
-                    .entry(client_id_owned.clone())
-                    .or_insert(0) += 1;
-
-                candidate
             };
 
-            if let Some(idle) = candidate {
+            {
                 let now = cx.now();
                 let is_expired = idle.is_expired(&self.config, now);
                 let is_stale = idle.is_idle_too_long(&self.config, now);
@@ -2020,6 +2292,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             }
                         }
                         inner.total = inner.total.saturating_sub(1);
+                        self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                     self.manager.disconnect(idle.conn);
@@ -2086,6 +2359,8 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                         inner.client_connections.remove(&client_id_owned);
                                     }
                                 }
+                                inner.total = inner.total.saturating_sub(1);
+                                self.wake_next_async_pool_waiter_locked(&mut inner);
                                 drop(inner);
                                 self.stats
                                     .total_validation_failures
@@ -2114,6 +2389,8 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                             inner.client_connections.remove(&client_id_owned);
                                         }
                                     }
+                                    inner.total = inner.total.saturating_sub(1);
+                                    self.wake_next_async_pool_waiter_locked(&mut inner);
                                     drop(inner);
                                     self.stats
                                         .total_validation_failures
@@ -2148,64 +2425,6 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     created_at: idle.created_at,
                     client_id: Some(client_id_owned.clone()),
                 });
-            }
-
-            // Create new connection
-            let mut creation_guard = AsyncCreationGuard {
-                pool: self,
-                disarmed: false,
-            };
-
-            match self.manager.connect(cx).await {
-                Outcome::Ok(conn) => {
-                    if cx.checkpoint().is_err() {
-                        // Decrement client count since we're cancelling
-                        let mut inner = self.inner.lock();
-                        if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
-                            *count = count.saturating_sub(1);
-                            if *count == 0 {
-                                inner.client_connections.remove(&client_id_owned);
-                            }
-                        }
-                        drop(inner);
-                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                        self.manager.disconnect(conn);
-                        return Err(DbPoolError::Timeout);
-                    }
-                    creation_guard.disarmed = true;
-                    self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.stats
-                        .total_acquisitions
-                        .fetch_add(1, Ordering::Relaxed);
-                    return Ok(AsyncPooledConnection {
-                        conn: Some(conn),
-                        pool: self,
-                        created_at: cx.now(),
-                        client_id: Some(client_id_owned),
-                    });
-                }
-                Outcome::Err(e) => {
-                    // Decrement client count since creation failed
-                    let mut inner = self.inner.lock();
-                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
-                        *count = count.saturating_sub(1);
-                        if *count == 0 {
-                            inner.client_connections.remove(&client_id_owned);
-                        }
-                    }
-                    return Err(DbPoolError::Connect(e));
-                }
-                Outcome::Cancelled(_) | Outcome::Panicked(_) => {
-                    // Decrement client count on cancellation/panic
-                    let mut inner = self.inner.lock();
-                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
-                        *count = count.saturating_sub(1);
-                        if *count == 0 {
-                            inner.client_connections.remove(&client_id_owned);
-                        }
-                    }
-                    return Err(DbPoolError::Timeout);
-                }
             }
         }
     }
@@ -2317,6 +2536,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     // br-asupersync-80525g: Validation bypass fix - track authentication state
                     authenticated_for,
                 });
+                self.wake_next_async_pool_waiter_locked(&mut inner);
                 None
             }
         };
@@ -2332,6 +2552,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         {
             let mut inner = self.inner.lock();
             inner.total = inner.total.saturating_sub(1);
+            self.wake_next_async_pool_waiter_locked(&mut inner);
 
             // br-asupersync-80525g: Update client connection count on discard
             if let Some(ref client) = client_id {
@@ -2356,6 +2577,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         let idle: Vec<_> = inner.idle.drain(..).collect();
         let drained = idle.len();
         inner.total = inner.total.saturating_sub(drained);
+        self.wake_all_async_pool_waiters_locked(&mut inner);
         if drained > 0 {
             self.stats
                 .total_discards
@@ -2536,6 +2758,10 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
                             );
                         }
                     }
+                } else {
+                    let mut inner = self.pool.inner.lock();
+                    inner.total = inner.total.saturating_sub(1);
+                    self.pool.wake_next_async_pool_waiter_locked(&mut inner);
                 }
             }
         }
@@ -3290,6 +3516,144 @@ mod tests {
         );
 
         crate::test_complete!("async_pool_contention_retries_under_lab_runtime");
+    }
+
+    #[test]
+    fn async_get_waits_for_returned_capacity_without_retry() {
+        init_test("async_get_waits_for_returned_capacity_without_retry");
+        let pool = Arc::new(AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+        ));
+        let cx = Cx::for_testing();
+        let holder = block_on(pool.get(&cx)).expect("holder acquires the only slot");
+        let holder_id = holder.id;
+        let waiter_started = Arc::new(AtomicBool::new(false));
+        let waiter_finished = Arc::new(AtomicBool::new(false));
+
+        let waiter_pool = Arc::clone(&pool);
+        let waiter_started_thread = Arc::clone(&waiter_started);
+        let waiter_finished_thread = Arc::clone(&waiter_finished);
+        let waiter = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            waiter_started_thread.store(true, Ordering::SeqCst);
+            let lease = block_on(waiter_pool.get(&cx))
+                .expect("direct async get should wait for returned capacity");
+            let waiter_id = lease.id;
+            lease.return_to_pool();
+            waiter_finished_thread.store(true, Ordering::SeqCst);
+            waiter_id
+        });
+
+        while !waiter_started.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(
+            !waiter_finished.load(Ordering::SeqCst),
+            "direct async get should not fail fast or acquire while the only slot is held"
+        );
+
+        holder.return_to_pool();
+        let waiter_id = waiter.join().expect("waiter thread should not panic");
+        assert_eq!(
+            holder_id, waiter_id,
+            "direct waiter should reuse the returned connection"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(stats.total_creates, 1);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active, 0);
+        crate::test_complete!("async_get_waits_for_returned_capacity_without_retry");
+    }
+
+    #[test]
+    fn async_get_waiter_queue_admits_direct_waiters_fifo() {
+        init_test("async_get_waiter_queue_admits_direct_waiters_fifo");
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum Event {
+            Started(u8),
+            Acquired(u8),
+        }
+
+        let pool = Arc::new(AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+        ));
+        let holder_cx = Cx::for_testing();
+        let holder = block_on(pool.get(&holder_cx)).expect("holder acquires the only slot");
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+
+        let first_pool = Arc::clone(&pool);
+        let first_events = events_tx.clone();
+        let first = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            first_events.send(Event::Started(1)).expect("send start");
+            let lease = block_on(first_pool.get(&cx)).expect("first waiter acquires");
+            first_events
+                .send(Event::Acquired(1))
+                .expect("send acquisition");
+            release_first_rx.recv().expect("first release signal");
+            lease.return_to_pool();
+        });
+
+        assert_eq!(
+            events_rx
+                .recv_timeout(Duration::from_millis(500))
+                .expect("first waiter starts"),
+            Event::Started(1)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+
+        let second_pool = Arc::clone(&pool);
+        let second_events = events_tx.clone();
+        let second = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            second_events.send(Event::Started(2)).expect("send start");
+            let lease = block_on(second_pool.get(&cx)).expect("second waiter acquires");
+            second_events
+                .send(Event::Acquired(2))
+                .expect("send acquisition");
+            lease.return_to_pool();
+        });
+
+        assert_eq!(
+            events_rx
+                .recv_timeout(Duration::from_millis(500))
+                .expect("second waiter starts"),
+            Event::Started(2)
+        );
+
+        holder.return_to_pool();
+        assert_eq!(
+            events_rx
+                .recv_timeout(Duration::from_millis(500))
+                .expect("first waiter acquires after holder returns"),
+            Event::Acquired(1)
+        );
+        assert!(
+            events_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "second waiter must not acquire while the first waiter still holds the slot"
+        );
+
+        release_first_tx.send(()).expect("release first waiter");
+        assert_eq!(
+            events_rx
+                .recv_timeout(Duration::from_millis(500))
+                .expect("second waiter acquires after first returns"),
+            Event::Acquired(2)
+        );
+
+        first.join().expect("first waiter thread should finish");
+        second.join().expect("second waiter thread should finish");
+        let stats = pool.stats();
+        assert_eq!(stats.total_creates, 1);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active, 0);
+        crate::test_complete!("async_get_waiter_queue_admits_direct_waiters_fifo");
     }
 
     #[test]
