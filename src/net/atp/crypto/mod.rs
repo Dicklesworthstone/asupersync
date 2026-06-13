@@ -180,7 +180,10 @@ impl EncryptionEngine {
 
         // Validate transform order if specified
         if let Some(order) = transform_order {
-            Self::validate_transform_position(order)?;
+            Self::validate_transform_position(
+                order,
+                !matches!(policy.algorithm, EncryptionAlgorithm::None),
+            )?;
         }
 
         // Validate key material
@@ -294,6 +297,8 @@ impl EncryptionEngine {
     }
 
     fn validate_metadata_shape(metadata: &EncryptionMetadata) -> Result<(), EncryptionError> {
+        EncryptionPolicyEngine::validate_key_derivation(&metadata.key_derivation)?;
+
         match metadata.algorithm {
             EncryptionAlgorithm::None => {
                 if !metadata.iv.is_empty() {
@@ -349,49 +354,58 @@ impl EncryptionEngine {
     /// Validate transform position in the transform order.
     fn validate_transform_position(
         transform_order: &TransformOrder,
+        has_encryption: bool,
     ) -> Result<(), EncryptionError> {
         let encryption_pos = transform_order
             .transforms
             .iter()
             .position(|&t| t == TransformType::Encryption);
 
-        if let Some(pos) = encryption_pos {
-            // Encryption should come after compression and chunking
-            if let Some(comp_pos) = transform_order
-                .transforms
-                .iter()
-                .position(|&t| t == TransformType::Compression)
-            {
-                if pos <= comp_pos {
-                    return Err(EncryptionError::TransformOrderViolation(
-                        "encryption must come after compression".to_string(),
-                    ));
-                }
-            }
+        if has_encryption != encryption_pos.is_some() {
+            return Err(EncryptionError::TransformOrderViolation(
+                "encryption presence doesn't match transform order".to_string(),
+            ));
+        }
 
-            if let Some(chunk_pos) = transform_order
-                .transforms
-                .iter()
-                .position(|&t| t == TransformType::Chunking)
-            {
-                if pos <= chunk_pos {
-                    return Err(EncryptionError::TransformOrderViolation(
-                        "encryption must come after chunking".to_string(),
-                    ));
-                }
-            }
+        let Some(pos) = encryption_pos else {
+            return Ok(());
+        };
 
-            // Encryption should come before error correction
-            if let Some(ec_pos) = transform_order
-                .transforms
-                .iter()
-                .position(|&t| t == TransformType::ErrorCorrection)
-            {
-                if pos >= ec_pos {
-                    return Err(EncryptionError::TransformOrderViolation(
-                        "encryption must come before error correction".to_string(),
-                    ));
-                }
+        // Encryption should come after compression and chunking
+        if let Some(comp_pos) = transform_order
+            .transforms
+            .iter()
+            .position(|&t| t == TransformType::Compression)
+        {
+            if pos <= comp_pos {
+                return Err(EncryptionError::TransformOrderViolation(
+                    "encryption must come after compression".to_string(),
+                ));
+            }
+        }
+
+        if let Some(chunk_pos) = transform_order
+            .transforms
+            .iter()
+            .position(|&t| t == TransformType::Chunking)
+        {
+            if pos <= chunk_pos {
+                return Err(EncryptionError::TransformOrderViolation(
+                    "encryption must come after chunking".to_string(),
+                ));
+            }
+        }
+
+        // Encryption should come before error correction
+        if let Some(ec_pos) = transform_order
+            .transforms
+            .iter()
+            .position(|&t| t == TransformType::ErrorCorrection)
+        {
+            if pos >= ec_pos {
+                return Err(EncryptionError::TransformOrderViolation(
+                    "encryption must come before error correction".to_string(),
+                ));
             }
         }
 
@@ -633,6 +647,55 @@ mod tests {
         );
 
         assert!(matches!(result, Err(EncryptionError::PolicyViolation(_))));
+    }
+
+    #[test]
+    fn encrypt_rejects_transform_order_that_omits_encryption() {
+        use crate::atp::manifest::{
+            HashPoint, PrivacyLevel, VerificationBoundary, VerificationLevel,
+        };
+
+        let key_material = KeyMaterial::new(
+            vec![1u8; 32],
+            "test-key".to_string(),
+            1,
+            KeyDerivation {
+                kdf: KeyDerivationFunction::Direct,
+                salt: vec![],
+                iterations: None,
+            },
+        );
+        let policy = EncryptionPolicy {
+            algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
+            key_derivation: key_material.derivation.clone(),
+            apply_to_kinds: vec![ObjectKind::FileObject],
+            encrypt_metadata: false,
+        };
+        let transform_order = TransformOrder {
+            transforms: vec![TransformType::Chunking],
+            hash_point: HashPoint::Plaintext,
+            verification_boundary: VerificationBoundary {
+                relay_verifiable: VerificationLevel::TransferIntegrity,
+                mailbox_verifiable: VerificationLevel::TransferIntegrity,
+                e2e_verification_required: true,
+                privacy_level: PrivacyLevel::MetadataVisible,
+            },
+        };
+
+        let result = EncryptionEngine::encrypt(
+            b"declared transform order must include encryption",
+            ObjectKind::FileObject,
+            &policy,
+            None,
+            &key_material,
+            Some(&transform_order),
+        );
+
+        assert!(matches!(
+            result,
+            Err(EncryptionError::TransformOrderViolation(message))
+                if message.contains("presence")
+        ));
     }
 
     #[test]
@@ -879,6 +942,31 @@ mod tests {
 
             assert!(matches!(err, EncryptionError::InvalidMetadata(_)));
         }
+    }
+
+    #[test]
+    fn decrypt_rejects_malformed_metadata_key_derivation() {
+        let malformed_derivation = KeyDerivation {
+            kdf: KeyDerivationFunction::Direct,
+            salt: b"direct-kdf-must-not-carry-salt".to_vec(),
+            iterations: None,
+        };
+        let key_material = KeyMaterial::new(
+            vec![],
+            "malformed-metadata-key".to_string(),
+            1,
+            malformed_derivation.clone(),
+        );
+        let metadata = EncryptionMetadata {
+            algorithm: EncryptionAlgorithm::None,
+            iv: vec![],
+            auth_tag: vec![],
+            key_derivation: malformed_derivation,
+        };
+
+        let err = EncryptionEngine::decrypt(b"plaintext", &metadata, &key_material).unwrap_err();
+
+        assert!(matches!(err, EncryptionError::KeyDerivationFailed(_)));
     }
 
     #[test]

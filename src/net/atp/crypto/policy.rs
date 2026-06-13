@@ -92,7 +92,7 @@ impl EncryptionPolicyEngine {
     }
 
     /// Validate key derivation parameters.
-    fn validate_key_derivation(kd: &KeyDerivation) -> Result<(), EncryptionError> {
+    pub(super) fn validate_key_derivation(kd: &KeyDerivation) -> Result<(), EncryptionError> {
         match kd.kdf {
             KeyDerivationFunction::Direct => {
                 if !kd.salt.is_empty() {
