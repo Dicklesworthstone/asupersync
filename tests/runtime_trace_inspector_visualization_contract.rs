@@ -32,11 +32,12 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
         .map_or_else(|| panic!("{key} must be an array"), Vec::as_slice)
 }
 
-fn object<'a>(value: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
-    value
-        .get(key)
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("{key} must be an object"))
+fn object<'a>(value: &'a Value, key: &str) -> &'a Value {
+    let child = value.get(key).unwrap_or_else(|| panic!("{key} must exist"));
+    child
+        .as_object()
+        .unwrap_or_else(|| panic!("{key} must be an object"));
+    child
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -195,7 +196,7 @@ fn input_schema_covers_trace_inspector_scheduler_and_evidence_inputs() {
         "ordering policy must use logical time"
     );
     assert!(
-        string(input_schema, "clock_policy").contains("cannot reorder"),
+        string(input_schema, "clock_policy").contains("must not reorder"),
         "wall clock must not reorder visual rows"
     );
 
