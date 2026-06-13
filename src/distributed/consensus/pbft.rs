@@ -15,6 +15,17 @@
 //! 3. **Commit**: Replicas commit to executing the ordered requests
 //!
 //! View changes occur when the primary is suspected of being faulty.
+//!
+//! # Experimental — not Byzantine-fault-tolerant yet
+//!
+//! This implementation is **experimental and incomplete**. The normal-case
+//! three-phase path (pre-prepare/prepare/commit) is implemented, but
+//! view-change/new-view handling is **not** (the handlers fail closed rather
+//! than silently succeed), and there is no message authentication, no
+//! watermark/checkpoint stability, and no log pruning. As a result it does
+//! **not** provide liveness under primary failure or safety against a
+//! Byzantine primary. Do not rely on it for fault tolerance. Tracked by
+//! `asupersync-v8mszr`.
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
@@ -579,6 +590,13 @@ impl<T: PbftTransport> PbftNode<T> {
     }
 
     /// Handle view change message.
+    ///
+    /// **Not implemented.** A correct PBFT view-change requires validated
+    /// view-change certificates, watermark/checkpoint stability, and new-view
+    /// construction. Until that lands this returns an explicit error rather
+    /// than silently succeeding — a silent `Ok(())` here would let a caller
+    /// believe primary-failure recovery occurred when it did not. See the
+    /// experimental warning on [`PbftConsensus`].
     async fn handle_view_change(
         &self,
         _cx: &Cx,
@@ -586,12 +604,16 @@ impl<T: PbftTransport> PbftNode<T> {
         _replica_id: ReplicaId,
         _certificates: Vec<MessageCertificate>,
     ) -> Result<()> {
-        // View change implementation is complex and omitted for brevity
-        // A full implementation would handle view changes for fault tolerance
-        Ok(())
+        Err(Error::new(ErrorKind::InvalidStateTransition).with_message(
+            "PBFT view-change is not implemented (experimental consensus; no Byzantine \
+             fault tolerance under primary failure)",
+        ))
     }
 
     /// Handle new view message.
+    ///
+    /// **Not implemented** — see [`Self::handle_view_change`]. Fails closed
+    /// rather than pretending to install a new view.
     async fn handle_new_view(
         &self,
         _cx: &Cx,
@@ -599,8 +621,10 @@ impl<T: PbftTransport> PbftNode<T> {
         _view_change_msgs: Vec<PbftMessage>,
         _preprepare_msgs: Vec<PbftMessage>,
     ) -> Result<()> {
-        // New view implementation is complex and omitted for brevity
-        Ok(())
+        Err(Error::new(ErrorKind::InvalidStateTransition).with_message(
+            "PBFT new-view is not implemented (experimental consensus; no Byzantine \
+             fault tolerance under primary failure)",
+        ))
     }
 }
 

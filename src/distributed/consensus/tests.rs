@@ -165,6 +165,52 @@ fn test_request_submission() {
     assert!(true);
 }
 
+/// Drive a future that resolves without yielding (the view-change/new-view
+/// handlers return immediately).
+fn poll_ready<F: std::future::Future>(fut: F) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    match fut.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(value) => value,
+        std::task::Poll::Pending => panic!("handler unexpectedly pended"),
+    }
+}
+
+#[test]
+fn view_change_and_new_view_fail_closed_until_implemented() {
+    // PBFT view-change/new-view are not implemented (asupersync-v8mszr). They
+    // must FAIL rather than silently return Ok, so a caller never believes
+    // primary-failure recovery happened when it did not.
+    let node = PbftNode::new(
+        ReplicaId::new("0".to_string()),
+        PbftConfig::new(4, 1).unwrap(),
+        MockTransport::new(),
+    )
+    .unwrap();
+    let cx = Cx::for_testing();
+
+    let view_change = PbftMessage::ViewChange {
+        new_view: ViewNumber::new(1),
+        replica_id: ReplicaId::new("1".to_string()),
+        certificates: Vec::new(),
+    };
+    assert!(
+        poll_ready(node.process_message(&cx, view_change)).is_err(),
+        "view-change must fail closed, not silently succeed"
+    );
+
+    let new_view = PbftMessage::NewView {
+        view: ViewNumber::new(1),
+        view_change_msgs: Vec::new(),
+        preprepare_msgs: Vec::new(),
+    };
+    assert!(
+        poll_ready(node.process_message(&cx, new_view)).is_err(),
+        "new-view must fail closed, not silently succeed"
+    );
+}
+
 #[test]
 fn test_mock_transport_message_tracking_helpers() {
     let transport = MockTransport::new();
