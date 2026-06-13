@@ -6708,6 +6708,90 @@ mod tests {
         assert!(conn.inner.needs_rollback);
     }
 
+    #[test]
+    fn three_deep_savepoints_rollback_innermost_keeps_outer_mysql_transaction_clean() {
+        use crate::database::transaction::MySqlSavepoint;
+
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        init_test("mysql_three_deep_savepoints_rollback_innermost");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.status_flags = SERVER_STATUS_IN_TRANS;
+        let cx = Cx::for_testing();
+
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            for expected in [
+                "SAVEPOINT sp1",
+                "SAVEPOINT sp2",
+                "SAVEPOINT sp3",
+                "ROLLBACK TO SAVEPOINT sp3",
+                "RELEASE SAVEPOINT sp3",
+                "RELEASE SAVEPOINT sp2",
+                "RELEASE SAVEPOINT sp1",
+            ] {
+                let sql = command_sql(&read_client_command(&mut peer));
+                assert_eq!(sql, expected);
+                write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
+            }
+        });
+
+        run(async {
+            let mut tx = MySqlTransaction {
+                conn: &mut conn,
+                finished: false,
+                isolation_level: None,
+                read_only: false,
+                obligation: None,
+            };
+
+            let mut sp1 = match MySqlSavepoint::new(&mut tx, &cx, "sp1").await {
+                Outcome::Ok(savepoint) => savepoint,
+                other => panic!("expected sp1 savepoint, got {other:?}"),
+            };
+            let mut sp2 = match MySqlSavepoint::new(sp1.transaction(), &cx, "sp2").await {
+                Outcome::Ok(savepoint) => savepoint,
+                other => panic!("expected sp2 savepoint, got {other:?}"),
+            };
+            let sp3 = match MySqlSavepoint::new(sp2.transaction(), &cx, "sp3").await {
+                Outcome::Ok(savepoint) => savepoint,
+                other => panic!("expected sp3 savepoint, got {other:?}"),
+            };
+
+            match sp3.rollback(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("expected sp3 rollback, got {other:?}"),
+            }
+            match sp2.release(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("expected sp2 release, got {other:?}"),
+            }
+            match sp1.release(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("expected sp1 release, got {other:?}"),
+            }
+
+            tx.finished = true;
+        });
+
+        server.join().expect("mysql server thread should finish");
+        assert_eq!(
+            conn.inner.status_flags & SERVER_STATUS_IN_TRANS,
+            SERVER_STATUS_IN_TRANS,
+            "outer transaction must remain open after inner savepoint rollback"
+        );
+        assert!(
+            !conn.inner.needs_rollback,
+            "released savepoints must not poison the mysql transaction"
+        );
+        assert!(
+            !conn.inner.closed,
+            "completed savepoint exchanges must leave the mysql connection open"
+        );
+    }
+
     // ─── transaction-as-obligation (br-asupersync-server-stack-hardening-eeexl1.5) ───
 
     #[test]

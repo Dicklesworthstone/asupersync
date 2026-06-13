@@ -10443,6 +10443,91 @@ mod tests {
     }
 
     #[test]
+    fn three_deep_savepoints_rollback_innermost_keeps_outer_postgres_transaction_clean() {
+        use crate::database::transaction::PgSavepoint;
+
+        init_test("postgres_three_deep_savepoints_rollback_innermost");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.transaction_status = b'T';
+        let cx = Cx::for_testing();
+
+        let io_thread = std::thread::spawn(move || {
+            for (needle, tag) in [
+                (b"SAVEPOINT sp1".as_slice(), b"SAVEPOINT\0".as_slice()),
+                (b"SAVEPOINT sp2".as_slice(), b"SAVEPOINT\0".as_slice()),
+                (b"SAVEPOINT sp3".as_slice(), b"SAVEPOINT\0".as_slice()),
+                (
+                    b"ROLLBACK TO SAVEPOINT sp3".as_slice(),
+                    b"ROLLBACK\0".as_slice(),
+                ),
+                (b"RELEASE SAVEPOINT sp3".as_slice(), b"RELEASE\0".as_slice()),
+                (b"RELEASE SAVEPOINT sp2".as_slice(), b"RELEASE\0".as_slice()),
+                (b"RELEASE SAVEPOINT sp1".as_slice(), b"RELEASE\0".as_slice()),
+            ] {
+                let _ = read_until_contains(&mut peer, needle);
+                std::io::Write::write_all(&mut peer, &backend_message(b'C', tag))
+                    .expect("write savepoint CommandComplete");
+                std::io::Write::write_all(&mut peer, &ready_for_query(b'T'))
+                    .expect("write savepoint ReadyForQuery");
+            }
+        });
+
+        run(async {
+            let mut tx = PgTransaction {
+                conn: &mut conn,
+                finished: false,
+                isolation_level: None,
+                read_only: false,
+                obligation: None,
+            };
+
+            let mut sp1 = match PgSavepoint::new(&mut tx, &cx, "sp1").await {
+                Outcome::Ok(savepoint) => savepoint,
+                other => panic!("expected sp1 savepoint, got {other:?}"),
+            };
+            let mut sp2 = match PgSavepoint::new(sp1.transaction(), &cx, "sp2").await {
+                Outcome::Ok(savepoint) => savepoint,
+                other => panic!("expected sp2 savepoint, got {other:?}"),
+            };
+            let sp3 = match PgSavepoint::new(sp2.transaction(), &cx, "sp3").await {
+                Outcome::Ok(savepoint) => savepoint,
+                other => panic!("expected sp3 savepoint, got {other:?}"),
+            };
+
+            match sp3.rollback(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("expected sp3 rollback, got {other:?}"),
+            }
+            match sp2.release(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("expected sp2 release, got {other:?}"),
+            }
+            match sp1.release(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("expected sp1 release, got {other:?}"),
+            }
+
+            tx.finished = true;
+        });
+
+        io_thread
+            .join()
+            .expect("postgres savepoint peer thread should finish cleanly");
+        assert_eq!(
+            conn.inner.transaction_status, b'T',
+            "outer transaction must remain open after inner savepoint rollback"
+        );
+        assert!(
+            !conn.inner.needs_rollback,
+            "released savepoints must not poison the postgres transaction"
+        );
+        assert!(
+            !conn.inner.needs_discard,
+            "released savepoints must not force postgres pool discard"
+        );
+    }
+
+    #[test]
     fn ensure_no_orphaned_transaction_maps_cancellation_to_outcome() {
         let mut conn = make_test_connection();
         conn.inner.needs_rollback = true;
