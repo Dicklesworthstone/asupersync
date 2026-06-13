@@ -479,6 +479,85 @@ fn ci_profile_runtime_order_and_bead_links_are_valid() {
 }
 
 #[test]
+fn ci_profiles_include_track4_refinement_conformance_stage() {
+    let profiles: Value = serde_json::from_str(PROFILES_JSON).expect("profiles json must parse");
+    let entries = profiles
+        .get("profiles")
+        .and_then(Value::as_array)
+        .expect("profiles must be an array");
+
+    for profile_name in ["frontier", "full"] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(profile_name))
+            .unwrap_or_else(|| panic!("{profile_name} profile must exist"));
+
+        let commands = entry
+            .get("commands")
+            .and_then(Value::as_array)
+            .expect("commands must be an array")
+            .iter()
+            .map(|value| value.as_str().expect("commands must be strings"))
+            .collect::<BTreeSet<_>>();
+        for command in [
+            "cargo test --test runtime_state_refinement_map",
+            "cargo test --test refinement_conformance",
+        ] {
+            assert!(
+                commands.contains(command),
+                "{profile_name} profile must run {command}"
+            );
+        }
+
+        let artifacts = entry
+            .get("output_artifacts")
+            .and_then(Value::as_array)
+            .expect("output_artifacts must be an array")
+            .iter()
+            .map(|value| value.as_str().expect("output_artifacts must be strings"))
+            .collect::<BTreeSet<_>>();
+        for artifact in [
+            "formal/lean/coverage/runtime_state_refinement_map.json",
+            "formal/lean/coverage/refinement_conformance_report_v1.json",
+        ] {
+            assert!(
+                artifacts.contains(artifact),
+                "{profile_name} profile must retain {artifact}"
+            );
+        }
+
+        let determinism_guards = entry
+            .get("determinism_guards")
+            .and_then(Value::as_array)
+            .expect("determinism_guards must be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            determinism_guards.contains("trace normalization")
+                || determinism_guards.contains("mismatch payloads include mapping row IDs"),
+            "{profile_name} profile must document deterministic conformance failure surface"
+        );
+    }
+
+    let promotion_policy = profiles
+        .get("promotion_policy")
+        .and_then(Value::as_object)
+        .expect("promotion_policy must be object");
+    assert!(
+        promotion_policy
+            .get("conformance_stage_rule")
+            .and_then(Value::as_str)
+            .is_some_and(|rule| {
+                rule.contains("runtime_state_refinement_map")
+                    && rule.contains("refinement_conformance")
+            }),
+        "promotion_policy.conformance_stage_rule must name both Track-4 conformance tests"
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn ci_profile_waiver_policy_enforces_expiry_and_closure_paths() {
     let profiles: Value = serde_json::from_str(PROFILES_JSON).expect("profiles json must parse");
@@ -1132,6 +1211,8 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
         "decision_record_required_fields",
         "run_lean_profile_command",
         "Unsupported Lean profile command",
+        "cargo test --test runtime_state_refinement_map",
+        "cargo test --test refinement_conformance",
         "ubs --only=rust --diff .",
         "steps.lean_full_contract.outputs.manifest_schema_path",
         "steps.lean_full_contract.outputs.frontier_snapshot_path",

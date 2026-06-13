@@ -662,6 +662,9 @@ fn runtime_state_refinement_map_conformance_harness_contract_is_complete() {
     for field in [
         "harness_id",
         "scenario_id",
+        "mapping_row_ids",
+        "theorem_ids",
+        "mismatch_class",
         "first_divergence_index",
         "expected_signature",
         "observed_signature",
@@ -890,6 +893,28 @@ fn runtime_state_refinement_map_conformance_harness_contract_is_complete() {
         assert!(
             seen_profiles.contains(profile),
             "ci_consumers must define profile {profile}"
+        );
+    }
+
+    let required_profile_commands = contract
+        .get("required_profile_commands")
+        .and_then(Value::as_array)
+        .expect("required_profile_commands must be an array");
+    let required_profile_commands = required_profile_commands
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("required_profile_commands values must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    for command in [
+        "cargo test --test runtime_state_refinement_map",
+        "cargo test --test refinement_conformance",
+    ] {
+        assert!(
+            required_profile_commands.contains(command),
+            "required_profile_commands must include {command}"
         );
     }
 }

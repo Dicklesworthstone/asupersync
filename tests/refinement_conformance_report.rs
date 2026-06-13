@@ -1,7 +1,7 @@
 //! Deterministic refinement conformance report contract checks (bd-1psg4).
 
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const REPORT_JSON: &str =
     include_str!("../formal/lean/coverage/refinement_conformance_report_v1.json");
@@ -259,6 +259,55 @@ fn report_tests_and_signoff_ids_match_runtime_state_contract() {
     assert_eq!(
         report_check_ids, contract_check_ids,
         "signoff checklist IDs must match runtime_state_refinement_map contract"
+    );
+
+    let report_pass_criteria = as_array(
+        report_obj
+            .get("signoff_checklist")
+            .expect("signoff_checklist required"),
+        "signoff_checklist",
+    )
+    .iter()
+    .map(|item| {
+        (
+            as_str(
+                item.get("check_id")
+                    .expect("signoff checklist check_id required"),
+                "signoff_checklist[].check_id",
+            ),
+            as_str(
+                item.get("pass_criteria")
+                    .expect("signoff checklist pass_criteria required"),
+                "signoff_checklist[].pass_criteria",
+            ),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+    let contract_pass_criteria = as_array(
+        map_contract
+            .get("signoff_checklist")
+            .expect("contract signoff_checklist required"),
+        "contract.signoff_checklist",
+    )
+    .iter()
+    .map(|item| {
+        (
+            as_str(
+                item.get("check_id")
+                    .expect("contract signoff checklist check_id required"),
+                "contract.signoff_checklist[].check_id",
+            ),
+            as_str(
+                item.get("pass_criteria")
+                    .expect("contract signoff checklist pass_criteria required"),
+                "contract.signoff_checklist[].pass_criteria",
+            ),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        report_pass_criteria, contract_pass_criteria,
+        "signoff checklist pass criteria must match runtime_state_refinement_map contract"
     );
 }
 

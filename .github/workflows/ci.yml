@@ -883,6 +883,12 @@ jobs:
               "cargo test --test lean_baseline_report")
                 run_rch_cargo lean_baseline_report test --test lean_baseline_report
                 ;;
+              "cargo test --test runtime_state_refinement_map")
+                run_rch_cargo runtime_state_refinement_map test --test runtime_state_refinement_map
+                ;;
+              "cargo test --test refinement_conformance")
+                run_rch_cargo refinement_conformance test --test refinement_conformance
+                ;;
               "ubs --only=rust --diff .")
                 ubs --only=rust --diff .
                 ;;
@@ -1265,6 +1271,12 @@ jobs:
                 ;;
               "cargo test --test lean_baseline_report")
                 run_rch_cargo lean_baseline_report test --test lean_baseline_report
+                ;;
+              "cargo test --test runtime_state_refinement_map")
+                run_rch_cargo runtime_state_refinement_map test --test runtime_state_refinement_map
+                ;;
+              "cargo test --test refinement_conformance")
+                run_rch_cargo refinement_conformance test --test refinement_conformance
                 ;;
               "ubs --only=rust --diff .")
                 ubs --only=rust --diff .

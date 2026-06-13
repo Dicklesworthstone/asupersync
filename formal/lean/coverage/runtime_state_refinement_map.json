@@ -209,6 +209,9 @@
     "mismatch_payload_fields": [
       "harness_id",
       "scenario_id",
+      "mapping_row_ids",
+      "theorem_ids",
+      "mismatch_class",
       "first_divergence_index",
       "expected_signature",
       "observed_signature",
@@ -295,6 +298,10 @@
         ],
         "triage_route_reference": "code-first"
       }
+    ],
+    "required_profile_commands": [
+      "cargo test --test runtime_state_refinement_map",
+      "cargo test --test refinement_conformance"
     ]
   },
   "cross_entity_liveness_contract": {
@@ -541,7 +548,7 @@
           "tests/refinement_conformance.rs",
           "tests/runtime_state_refinement_map.rs"
         ],
-        "pass_criteria": "No untriaged mismatches; diagnostics include route candidates and recommended route."
+        "pass_criteria": "No untriaged mismatches; diagnostics include mapping row IDs, theorem IDs, mismatch class, route candidates, and recommended route."
       },
       {
         "check_id": "check.governance_record_linked",

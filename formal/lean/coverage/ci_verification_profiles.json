@@ -113,7 +113,8 @@
       "entry_conditions": [
         "Nightly CI run",
         "Any PR touching Track-2/Track-3 Lean frontier files",
-        "Any PR adjusting gap_risk_sequencing_plan.json priorities or edges"
+        "Any PR adjusting gap_risk_sequencing_plan.json priorities or edges",
+        "Any PR touching Track-4 refinement map, conformance harness, or refinement report artifacts"
       ],
       "expected_runtime_seconds": {
         "target": 420,
@@ -127,24 +128,31 @@
         "cargo test --test lean_preservation_constructor_total",
         "cargo test --test lean_gap_risk_sequencing_plan",
         "cargo test --test lean_invariant_status_inventory",
-        "cargo test --test lean_baseline_report"
+        "cargo test --test lean_baseline_report",
+        "cargo test --test runtime_state_refinement_map",
+        "cargo test --test refinement_conformance"
       ],
       "output_artifacts": [
         "formal/lean/coverage/gap_risk_sequencing_plan.json",
         "formal/lean/coverage/invariant_status_inventory.json",
         "formal/lean/coverage/baseline_report_v1.json",
-        "formal/lean/coverage/baseline_report_v1.md"
+        "formal/lean/coverage/baseline_report_v1.md",
+        "formal/lean/coverage/runtime_state_refinement_map.json",
+        "formal/lean/coverage/refinement_conformance_report_v1.json"
       ],
       "determinism_guards": [
         "Scoring formula remains deterministic: priority_score = 2*product_risk + unblock_potential - implementation_effort.",
-        "Critical path and dependency edges must be acyclic and replayable."
+        "Critical path and dependency edges must be acyclic and replayable.",
+        "Refinement conformance traces use virtual-time lab seeds and trace normalization before fingerprint comparison."
       ],
       "comparison_keys": [
         "profile_name",
         "git_commit",
         "artifact_hashes_sha256",
         "gap_priority_order",
-        "critical_path"
+        "critical_path",
+        "runtime_state_refinement_map.conformance_harness_contract",
+        "refinement_conformance_report.mismatch_trend"
       ],
       "ownership": {
         "primary_bead": "bd-rook4",
@@ -179,6 +187,8 @@
         "cargo fmt --check",
         "cargo check --all-targets",
         "cargo clippy --all-targets -- -D warnings",
+        "cargo test --test runtime_state_refinement_map",
+        "cargo test --test refinement_conformance",
         "cargo test",
         "ubs --only=rust --diff ."
       ],
@@ -191,11 +201,14 @@
         "formal/lean/coverage/invariant_status_inventory.json",
         "formal/lean/coverage/gap_risk_sequencing_plan.json",
         "formal/lean/coverage/baseline_report_v1.json",
-        "formal/lean/coverage/baseline_report_v1.md"
+        "formal/lean/coverage/baseline_report_v1.md",
+        "formal/lean/coverage/runtime_state_refinement_map.json",
+        "formal/lean/coverage/refinement_conformance_report_v1.json"
       ],
       "determinism_guards": [
         "All artifact hashes are captured and compared against previous successful full run.",
-        "Profile outputs are normalized to commit-scoped deterministic keys."
+        "Profile outputs are normalized to commit-scoped deterministic keys.",
+        "Refinement conformance mismatch payloads include mapping row IDs, theorem IDs, mismatch class, and routing candidates."
       ],
       "comparison_keys": [
         "profile_name",
@@ -204,7 +217,9 @@
         "theorem_count",
         "step_constructor_coverage.summary",
         "invariant_status.summary",
-        "gap_priority_order"
+        "gap_priority_order",
+        "runtime_state_refinement_map.conformance_harness_contract",
+        "refinement_conformance_report.mismatch_trend"
       ],
       "ownership": {
         "primary_bead": "bd-rook4",
@@ -364,6 +379,7 @@
   "promotion_policy": {
     "smoke_to_frontier": "Frontier is required when smoke detects coverage drift or when gap sequencing artifacts change.",
     "frontier_to_full": "Full is required for merge/release and any ontology/status taxonomy change.",
+    "conformance_stage_rule": "Track-4 refinement map or conformance harness changes require frontier/full profile execution of runtime_state_refinement_map and refinement_conformance before signoff.",
     "fallback_rule": "Any deterministic mismatch in comparison_keys escalates directly to full profile and triage routing."
   }
 }

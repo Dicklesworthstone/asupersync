@@ -66,7 +66,7 @@
         "tests/refinement_conformance.rs",
         "tests/runtime_state_refinement_map.rs"
       ],
-      "pass_criteria": "No untriaged mismatches; diagnostics include route candidates and recommended route."
+      "pass_criteria": "No untriaged mismatches; diagnostics include mapping row IDs, theorem IDs, mismatch class, route candidates, and recommended route."
     },
     {
       "check_id": "check.governance_record_linked",
