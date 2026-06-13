@@ -66,7 +66,7 @@ pub use postgres::{
 #[cfg(feature = "mysql")]
 pub use mysql::{
     MySqlColumn, MySqlConnectOptions, MySqlConnection, MySqlConnectionManager, MySqlError,
-    MySqlRow, MySqlTransaction, MySqlValue, SslMode as MySqlSslMode,
+    MySqlPreparedCacheStats, MySqlRow, MySqlTransaction, MySqlValue, SslMode as MySqlSslMode,
     column_type as mysql_column_type,
 };
 

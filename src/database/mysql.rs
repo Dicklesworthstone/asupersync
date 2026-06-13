@@ -35,7 +35,7 @@ use crate::net::TcpStream;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::security::SecretString;
 use crate::types::{CancelReason, Outcome};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::io;
 use std::pin::Pin;
@@ -341,6 +341,13 @@ const MAX_PACKET_SIZE: u32 = 16 * 1024 * 1024 - 1; // 16_777_215
 /// Default maximum number of rows returned from a single result set.
 /// Prevents unbounded memory growth from runaway SELECTs.
 const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
+/// Default cap on the per-connection MySQL prepared-statement cache.
+///
+/// br-asupersync-server-stack-hardening-eeexl1.5: protocol-level prepared
+/// statements are server resources scoped to a physical connection. Keeping
+/// this cache bounded prevents cumulative `prepare()` calls from growing
+/// server-side statement state without limit.
+pub const DEFAULT_MAX_PREPARED_STATEMENTS: usize = 256;
 /// Guard against corrupted or malicious servers sending enormous column counts.
 const MAX_COLUMN_COUNT: u64 = 16_384;
 /// Practical limit for reassembled multi-packet payloads.
@@ -1642,6 +1649,8 @@ struct MySqlConnectionInner {
     /// handoff so handles from a prior checkout fail closed before any
     /// wire I/O.
     prepared_statement_epoch: u64,
+    /// Bounded LRU cache of server-side prepared statements.
+    prepared_cache: MySqlPreparedStatementCache,
     /// br-asupersync-22i5tn: set to `true` for the duration of any
     /// public method that issues a query/exec command and clears on
     /// completion (success, error, or cancellation). When the OUTER
@@ -1892,6 +1901,7 @@ impl MySqlConnection {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -4057,6 +4067,13 @@ impl MySqlConnection {
         self.inner.prepared_statement_epoch = self.inner.prepared_statement_epoch.wrapping_add(1);
     }
 
+    /// Returns prepared-statement cache effectiveness counters for this
+    /// connection (br-asupersync-server-stack-hardening-eeexl1.5).
+    #[must_use]
+    pub fn prepared_cache_stats(&self) -> MySqlPreparedCacheStats {
+        self.inner.prepared_cache.stats()
+    }
+
     /// Close the connection.
     pub async fn close(&mut self) -> Result<(), MySqlError> {
         if self.inner.closed {
@@ -4097,6 +4114,14 @@ impl MySqlConnection {
 
         if let Err(e) = self.drain_abandoned_transaction().await {
             return outcome_from_error(e);
+        }
+
+        if let Some(cached) = self.inner.prepared_cache.get_and_touch(
+            sql,
+            self.inner.connection_id,
+            self.inner.prepared_statement_epoch,
+        ) {
+            return Outcome::Ok(cached);
         }
 
         // Build COM_STMT_PREPARE packet
@@ -4222,7 +4247,38 @@ impl MySqlConnection {
             columns,
         };
 
+        let evicted_statement_id = self
+            .inner
+            .prepared_cache
+            .insert_returning_evicted_id(sql.to_string(), stmt.clone());
+        if let Some(statement_id) = evicted_statement_id
+            && let Err(err) = self.close_prepared_statement_id(statement_id).await
+        {
+            return outcome_from_error(err);
+        }
+
         Outcome::Ok(stmt)
+    }
+
+    async fn close_prepared_statement_id(&mut self, statement_id: u32) -> Result<(), MySqlError> {
+        if self.inner.closed {
+            return Err(MySqlError::ConnectionClosed);
+        }
+
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(0);
+        buf.write_byte(command::COM_STMT_CLOSE);
+        buf.write_u32_le(statement_id);
+        let packet = buf.build_packet();
+
+        self.inner.closed = true;
+        if let Err(e) = self.write_all(&packet.bytes).await {
+            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+            return Err(e);
+        }
+        self.inner.sequence = 0;
+        self.inner.closed = false;
+        Ok(())
     }
 
     /// Execute a prepared statement that returns rows.
@@ -5237,7 +5293,7 @@ mod param_flag {
 /// When pooling connections, use [`MySqlConnectionManager`] so prepared
 /// handles are invalidated across pool handoff and cannot leak into a
 /// later logical session on the same physical connection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MySqlStatement {
     /// Server-side statement ID.
     statement_id: u32,
@@ -5290,6 +5346,114 @@ impl MySqlStatement {
     #[must_use]
     pub fn columns(&self) -> &[MySqlColumn] {
         &self.columns
+    }
+}
+
+/// Snapshot of MySQL prepared-statement cache effectiveness counters
+/// (br-asupersync-server-stack-hardening-eeexl1.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MySqlPreparedCacheStats {
+    /// Lookups that found a cached statement.
+    pub hits: u64,
+    /// Lookups that missed and had to prepare on the wire.
+    pub misses: u64,
+    /// Entries removed to keep the cache bounded.
+    pub evictions: u64,
+}
+
+impl MySqlPreparedCacheStats {
+    /// Total lookups (`hits + misses`).
+    #[must_use]
+    pub const fn lookups(&self) -> u64 {
+        self.hits + self.misses
+    }
+
+    /// Cache hit ratio in `[0.0, 1.0]`, or `0.0` when there were no lookups.
+    #[must_use]
+    pub fn hit_ratio(&self) -> f64 {
+        let total = self.lookups();
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
+    }
+}
+
+/// Bounded LRU cache for server-side MySQL prepared statements.
+struct MySqlPreparedStatementCache {
+    entries: HashMap<String, MySqlStatement>,
+    lru: VecDeque<String>,
+    cap: usize,
+    stats: MySqlPreparedCacheStats,
+}
+
+impl MySqlPreparedStatementCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(cap.min(64)),
+            lru: VecDeque::with_capacity(cap.min(64)),
+            cap,
+            stats: MySqlPreparedCacheStats::default(),
+        }
+    }
+
+    fn stats(&self) -> MySqlPreparedCacheStats {
+        self.stats
+    }
+
+    fn get_and_touch(
+        &mut self,
+        sql: &str,
+        owner_connection_id: u32,
+        owner_prepared_statement_epoch: u64,
+    ) -> Option<MySqlStatement> {
+        let Some(mut stmt) = self.entries.get(sql).cloned() else {
+            self.stats.misses += 1;
+            return None;
+        };
+
+        self.stats.hits += 1;
+        stmt.owner_connection_id = owner_connection_id;
+        stmt.owner_prepared_statement_epoch = owner_prepared_statement_epoch;
+        if let Some(pos) = self.lru.iter().position(|key| key == sql) {
+            if let Some(key) = self.lru.remove(pos) {
+                self.lru.push_back(key);
+            }
+        }
+        Some(stmt)
+    }
+
+    fn insert_returning_evicted_id(&mut self, sql: String, stmt: MySqlStatement) -> Option<u32> {
+        if self.cap == 0 {
+            self.stats.evictions += 1;
+            return Some(stmt.statement_id);
+        }
+
+        let mut evicted = None;
+        if let Some(old) = self.entries.remove(&sql) {
+            if let Some(pos) = self.lru.iter().position(|key| key == &sql) {
+                self.lru.remove(pos);
+            }
+            evicted = Some(old.statement_id);
+        } else if self.entries.len() >= self.cap
+            && let Some(victim_sql) = self.lru.pop_front()
+            && let Some(victim_stmt) = self.entries.remove(&victim_sql)
+        {
+            evicted = Some(victim_stmt.statement_id);
+        }
+
+        if evicted.is_some() {
+            self.stats.evictions += 1;
+        }
+        self.lru.push_back(sql.clone());
+        self.entries.insert(sql, stmt);
+        evicted
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -5965,6 +6129,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -6342,6 +6507,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -6371,6 +6537,9 @@ mod tests {
                     needs_rollback: false,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_statement_epoch: 0,
+                    prepared_cache: MySqlPreparedStatementCache::new(
+                        DEFAULT_MAX_PREPARED_STATEMENTS,
+                    ),
                     query_in_flight: std::sync::atomic::AtomicBool::new(false),
                     statement_timeout_override: None,
                     applied_max_execution_time_ms: None,
@@ -6434,6 +6603,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -6481,6 +6651,9 @@ mod tests {
                     needs_rollback: false,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_statement_epoch: 0,
+                    prepared_cache: MySqlPreparedStatementCache::new(
+                        DEFAULT_MAX_PREPARED_STATEMENTS,
+                    ),
                     query_in_flight: std::sync::atomic::AtomicBool::new(false),
                     statement_timeout_override: None,
                     applied_max_execution_time_ms: None,
@@ -7287,6 +7460,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -7374,6 +7548,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8010,6 +8185,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8091,6 +8267,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8300,6 +8477,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8414,6 +8592,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8490,6 +8669,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8522,7 +8702,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_prepare_of_same_sql_hits_wire_each_time() {
+    fn repeated_prepare_of_same_sql_hits_cache_after_first_wire_prepare() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
         let sql = "SELECT ? + ?";
@@ -8533,60 +8713,73 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set read timeout");
 
-            for expected_statement_id in [101_u32, 202_u32] {
-                let mut header = [0_u8; 4];
-                stream.read_exact(&mut header).expect("read prepare header");
-                let payload_len = usize::from(header[0])
-                    | (usize::from(header[1]) << 8)
-                    | (usize::from(header[2]) << 16);
-                let mut payload = vec![0_u8; payload_len];
-                stream
-                    .read_exact(&mut payload)
-                    .expect("read prepare payload");
-                assert_eq!(payload[0], command::COM_STMT_PREPARE);
-                assert_eq!(
-                    std::str::from_utf8(&payload[1..]).expect("prepare sql utf8"),
-                    sql
-                );
+            let mut header = [0_u8; 4];
+            stream.read_exact(&mut header).expect("read prepare header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0_u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read prepare payload");
+            assert_eq!(payload[0], command::COM_STMT_PREPARE);
+            assert_eq!(
+                std::str::from_utf8(&payload[1..]).expect("prepare sql utf8"),
+                sql
+            );
 
-                let mut response = PacketBuffer::new();
-                response.write_byte(0x00);
-                response.write_u32_le(expected_statement_id);
-                response.write_u16_le(0);
-                response.write_u16_le(2);
-                response.write_byte(0x00);
-                response.write_u16_le(0);
+            let mut response = PacketBuffer::new();
+            response.write_byte(0x00);
+            response.write_u32_le(101);
+            response.write_u16_le(0);
+            response.write_u16_le(2);
+            response.write_byte(0x00);
+            response.write_u16_le(0);
 
-                let mut packet = PacketBuffer::new();
-                packet.set_sequence(1);
-                packet.buf = response.buf;
-                let packet = packet.build_packet();
-                stream
-                    .write_all(&packet.bytes)
-                    .expect("write prepare OK response");
+            let mut packet = PacketBuffer::new();
+            packet.set_sequence(1);
+            packet.buf = response.buf;
+            let packet = packet.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write prepare OK response");
 
-                // num_params=2 obligates the server to send the parameter
-                // definitions plus the metadata EOF terminator (capabilities=0
-                // → !CLIENT_DEPRECATE_EOF); without them the client correctly
-                // blocks reading metadata (br-asupersync-uvqpga).
-                for seq in [2_u8, 3] {
-                    let mut param_packet = PacketBuffer::new();
-                    param_packet.set_sequence(seq);
-                    param_packet.buf = column_definition_payload("param");
-                    let param_packet = param_packet.build_packet();
-                    stream
-                        .write_all(&param_packet.bytes)
-                        .expect("write parameter metadata");
-                }
-                let mut eof = PacketBuffer::new();
-                eof.set_sequence(4);
-                eof.buf = eof_packet_payload(0);
-                let eof = eof.build_packet();
+            // num_params=2 obligates the server to send the parameter
+            // definitions plus the metadata EOF terminator (capabilities=0
+            // -> !CLIENT_DEPRECATE_EOF); without them the client correctly
+            // blocks reading metadata (br-asupersync-uvqpga).
+            for seq in [2_u8, 3] {
+                let mut param_packet = PacketBuffer::new();
+                param_packet.set_sequence(seq);
+                param_packet.buf = column_definition_payload("param");
+                let param_packet = param_packet.build_packet();
                 stream
-                    .write_all(&eof.bytes)
-                    .expect("write parameter metadata EOF");
-                stream.flush().expect("flush prepare response");
+                    .write_all(&param_packet.bytes)
+                    .expect("write parameter metadata");
             }
+            let mut eof = PacketBuffer::new();
+            eof.set_sequence(4);
+            eof.buf = eof_packet_payload(0);
+            let eof = eof.build_packet();
+            stream
+                .write_all(&eof.bytes)
+                .expect("write parameter metadata EOF");
+            stream.flush().expect("flush prepare response");
+
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .expect("set short read timeout");
+            let mut unexpected = [0_u8; 4];
+            let err = stream
+                .read_exact(&mut unexpected)
+                .expect_err("second prepare of identical SQL must be a cache hit");
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "expected read timeout proving no second COM_STMT_PREPARE, got {err:?}"
+            );
         });
 
         let stream = run(async {
@@ -8608,6 +8801,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8628,11 +8822,122 @@ mod tests {
 
         server.join().expect("join server");
         assert_eq!(stmt1.statement_id, 101);
-        assert_eq!(stmt2.statement_id, 202);
+        assert_eq!(stmt2.statement_id, 101);
         assert_eq!(stmt1.owner_connection_id(), 55);
         assert_eq!(stmt2.owner_connection_id(), 55);
         assert_eq!(stmt1.param_count(), 2);
         assert_eq!(stmt2.param_count(), 2);
+        assert_eq!(conn.inner.prepared_cache.len(), 1);
+        assert_eq!(
+            conn.prepared_cache_stats(),
+            MySqlPreparedCacheStats {
+                hits: 1,
+                misses: 1,
+                evictions: 0,
+            }
+        );
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn prepared_cache_eviction_sends_stmt_close_for_lru_statement() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            for (sql, statement_id) in [("SELECT 1", 101_u32), ("SELECT 2", 202_u32)] {
+                let mut header = [0_u8; 4];
+                stream.read_exact(&mut header).expect("read prepare header");
+                let payload_len = usize::from(header[0])
+                    | (usize::from(header[1]) << 8)
+                    | (usize::from(header[2]) << 16);
+                let mut payload = vec![0_u8; payload_len];
+                stream
+                    .read_exact(&mut payload)
+                    .expect("read prepare payload");
+                assert_eq!(payload[0], command::COM_STMT_PREPARE);
+                assert_eq!(
+                    std::str::from_utf8(&payload[1..]).expect("prepare sql utf8"),
+                    sql
+                );
+
+                let mut response = PacketBuffer::new();
+                response.write_byte(0x00);
+                response.write_u32_le(statement_id);
+                response.write_u16_le(0);
+                response.write_u16_le(0);
+                response.write_byte(0x00);
+                response.write_u16_le(0);
+
+                let mut packet = PacketBuffer::new();
+                packet.set_sequence(1);
+                packet.buf = response.buf;
+                let packet = packet.build_packet();
+                stream
+                    .write_all(&packet.bytes)
+                    .expect("write prepare OK response");
+                stream.flush().expect("flush prepare response");
+            }
+
+            let close_payload = read_client_command(&mut stream);
+            assert_eq!(close_payload[0], command::COM_STMT_CLOSE);
+            let closed_statement_id = u32::from_le_bytes(
+                close_payload[1..5]
+                    .try_into()
+                    .expect("COM_STMT_CLOSE statement id"),
+            );
+            assert_eq!(closed_statement_id, 101);
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 55,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(1),
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
+            },
+            options: None,
+        };
+        let cx = Cx::for_testing();
+
+        let stmt1 = match run(conn.prepare(&cx, "SELECT 1")) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("expected first prepare OK, got {other:?}"),
+        };
+        let stmt2 = match run(conn.prepare(&cx, "SELECT 2")) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("expected second prepare OK, got {other:?}"),
+        };
+
+        server.join().expect("join server");
+        assert_eq!(stmt1.statement_id, 101);
+        assert_eq!(stmt2.statement_id, 202);
+        assert_eq!(conn.inner.prepared_cache.len(), 1);
+        assert_eq!(conn.prepared_cache_stats().evictions, 1);
+        assert_eq!(conn.inner.sequence, 0);
         assert!(!conn.inner.closed);
     }
 
@@ -8711,6 +9016,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8808,6 +9114,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -8926,6 +9233,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -9117,6 +9425,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -9203,6 +9512,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -9590,6 +9900,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -9847,6 +10158,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,
@@ -9929,6 +10241,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
+                prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 statement_timeout_override: None,
                 applied_max_execution_time_ms: None,

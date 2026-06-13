@@ -10,7 +10,8 @@
 #![cfg(test)]
 
 use super::{
-    Handshake, MySqlConnectOptions, MySqlConnection, MySqlConnectionInner, MySqlError, capability,
+    DEFAULT_MAX_PREPARED_STATEMENTS, Handshake, MySqlConnectOptions, MySqlConnection,
+    MySqlConnectionInner, MySqlError, MySqlPreparedStatementCache, capability,
 };
 use crate::cx::Cx;
 use crate::types::Outcome;
@@ -80,6 +81,7 @@ fn make_test_connection(stream: crate::net::TcpStream, sequence: u8) -> MySqlCon
             needs_rollback: false,
             max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
             prepared_statement_epoch: 0,
+            prepared_cache: MySqlPreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
             query_in_flight: AtomicBool::new(false),
             statement_timeout_override: None,
             applied_max_execution_time_ms: None,
