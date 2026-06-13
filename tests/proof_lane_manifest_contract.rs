@@ -980,6 +980,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "unsafe-boundary-ledger-contract",
         "proof-lane-manifest-contract",
         "rch-topology-preflight-canary",
+        "rust-crate-release-provenance-contract",
     ] {
         assert!(lane_ids.contains(required), "missing lane {required}");
     }
@@ -1253,6 +1254,10 @@ fn every_lane_declares_fail_closed_resource_envelope() {
         ),
         (
             "unsafe-boundary-ledger-contract",
+            "artifact-contract-medium",
+        ),
+        (
+            "rust-crate-release-provenance-contract",
             "artifact-contract-medium",
         ),
         ("rustdoc-api", "documentation-frontier-medium"),

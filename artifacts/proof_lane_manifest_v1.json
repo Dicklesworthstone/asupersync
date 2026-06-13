@@ -501,6 +501,7 @@
     "validation-frontier-final-signoff",
     "doctor-e2e-proof-lane-contract",
     "semantic-lint-proof-lane-contract",
+    "rust-crate-release-provenance-contract",
     "artifact-governance-final-signoff"
   ],
   "lanes": [
@@ -2285,6 +2286,52 @@
       }
     },
     {
+      "lane_id": "rust-crate-release-provenance-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "rust-crate-release-provenance-contract"
+      ],
+      "covers": "Rust crates.io release-provenance contract schema, publish-workflow crate surface, fixture dry-run/already-published semantics, companion integrity hashes, manifest/status rows, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not perform cargo publish, does not run cargo publish --dry-run, does not prove release readiness, does not prove runtime correctness, does not prove broad workspace health, does not prove live crates.io publication, and does not prove real package tarball integrity for fixture rows.",
+      "expected_signal": "rust_crate_release_provenance_contract tests pass",
+      "source_paths": [
+        ".github/workflows/publish.yml",
+        "artifacts/rust_crate_release_provenance_contract_v1.json",
+        "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+        "docs/rust_crate_release_provenance_artifacts.md",
+        "docs/rust_crate_release_provenance_policy.md",
+        "tests/rust_crate_release_provenance_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "publish workflow crate list drift",
+        "fixture digest or companion manifest drift",
+        "manifest/status mapping drift"
+      ],
+      "escalation_notes": "Use this lane only for Rust crate release-provenance metadata and fixture validation. It cannot be cited as release readiness, live publish evidence, broad workspace health, runtime correctness, or real package tarball integrity proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rust-crate-release-provenance-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-crates-io-publication",
+          "real-package-tarball-integrity"
+        ]
+      }
+    },
+    {
       "lane_id": "artifact-governance-final-signoff",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -2634,6 +2681,13 @@
       "description": "semantic-lint-proof-lane-contract is represented by the L4 aggregate semantic-lint verifier with explicit no-claim boundaries.",
       "lane_ids": [
         "semantic-lint-proof-lane-contract"
+      ]
+    },
+    {
+      "guarantee_id": "rust-crate-release-provenance-contract",
+      "description": "Rust crate release-provenance artifact schema, publish-workflow crate surface, fixture outcomes, integrity hashes, proof manifest/status rows, and overclaim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "rust-crate-release-provenance-contract"
       ]
     },
     {

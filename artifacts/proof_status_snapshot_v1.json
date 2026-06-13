@@ -87,6 +87,7 @@
     "browser GA final signoff",
     "validation frontier final signoff",
     "doctor e2e proof lane",
+    "Rust crate release provenance contract",
     "artifact governance final signoff"
   ],
   "claim_categories": [
@@ -852,6 +853,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped validation-frontier signoff: cite it only as the VF7 operator packet tying inventory, stale-progress receipts, downstream-consumer proof, graph budgets, the channel MPSC/select fixture split, proof manifest/status rows, e2e runner commands, deterministic Markdown summary, and no-claim boundaries together. It does not prove broad workspace health, release readiness, runtime correctness, performance improvement, no regression, source correctness outside cited surfaces, live RCH fleet availability, local Cargo fallback approval, tracker closure, or permission to delete files."
+    },
+    {
+      "claim_id": "rust-crate-release-provenance-contract",
+      "category": "Rust crate release provenance contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ],
+        "AGENTS.md": [
+          "Canonical proof-command manifest",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "rust-crate-release-provenance-contract"
+      ],
+      "manifest_lane_ids": [
+        "rust-crate-release-provenance-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped Rust crate release-provenance contract: cite it only for schema shape, workflow crate surface coverage, fixture dry-run/already-published semantics, companion integrity hashes, proof manifest/status rows, and no-claim boundaries. It does not run cargo publish or cargo publish --dry-run, prove release readiness, prove runtime correctness, prove broad workspace health, prove live crates.io publication, or prove real package tarball integrity for fixture rows."
     },
     {
       "claim_id": "artifact-governance-final-signoff",
