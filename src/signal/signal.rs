@@ -26,6 +26,9 @@ use crate::sync::Notify;
 
 use super::SignalKind;
 
+#[cfg(unix)]
+use nix::sys::signal::{SigSet, SigmaskHow, Signal as NixSignal};
+
 /// Error returned when signal handling is unavailable.
 #[derive(Debug, Clone)]
 pub struct SignalError {
@@ -614,6 +617,250 @@ pub fn signal(kind: SignalKind) -> io::Result<Signal> {
     Signal::new(kind).map_err(Into::into)
 }
 
+/// Thread-scoped set of signals used for Unix signal-mask operations.
+///
+/// On Unix, this stores the exact OS signal set returned by `pthread_sigmask`
+/// so a [`SignalMaskGuard`] can restore masks that contain signals outside
+/// Asupersync's portable [`SignalKind`] subset. On unsupported platforms the
+/// set remains inspectable but applying it returns [`io::ErrorKind::Unsupported`].
+#[derive(Clone, Debug)]
+pub struct SignalMask {
+    kinds: Vec<SignalKind>,
+    #[cfg(unix)]
+    inner: SigSet,
+}
+
+impl SignalMask {
+    /// Returns an empty signal mask.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            kinds: Vec::new(),
+            #[cfg(unix)]
+            inner: SigSet::empty(),
+        }
+    }
+
+    /// Builds a signal mask from supported signal kinds.
+    #[must_use]
+    pub fn from_kinds(kinds: impl IntoIterator<Item = SignalKind>) -> Self {
+        let mut mask = Self::empty();
+        for kind in kinds {
+            mask.add(kind);
+        }
+        mask
+    }
+
+    /// Returns the currently blocked signal mask for the calling thread.
+    pub fn current_thread() -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            SigSet::thread_get_mask()
+                .map(Self::from_unix_set)
+                .map_err(Into::into)
+        }
+
+        #[cfg(not(unix))]
+        {
+            Err(unsupported_signal_mask_error())
+        }
+    }
+
+    /// Adds a supported signal kind to this mask.
+    pub fn add(&mut self, kind: SignalKind) {
+        if !self.kinds.contains(&kind) {
+            self.kinds.push(kind);
+        }
+
+        #[cfg(unix)]
+        self.inner.add(nix_signal_for_kind(kind));
+    }
+
+    /// Returns whether this mask contains the supported signal kind.
+    #[must_use]
+    pub fn contains(&self, kind: SignalKind) -> bool {
+        #[cfg(unix)]
+        {
+            self.inner.contains(nix_signal_for_kind(kind))
+        }
+
+        #[cfg(not(unix))]
+        {
+            self.kinds.contains(&kind)
+        }
+    }
+
+    /// Iterates the supported signal kinds present in this mask.
+    pub fn kinds(&self) -> impl Iterator<Item = SignalKind> + '_ {
+        self.kinds.iter().copied()
+    }
+
+    /// Adds this mask to the calling thread's blocked signal set.
+    ///
+    /// The returned guard restores the exact previous mask when dropped. Call
+    /// [`SignalMaskGuard::restore`] to observe restore errors explicitly.
+    pub fn block_current_thread(&self) -> io::Result<SignalMaskGuard> {
+        self.apply_to_current_thread(SignalMaskOperation::Block)
+    }
+
+    /// Removes this mask from the calling thread's blocked signal set.
+    ///
+    /// The returned guard restores the exact previous mask when dropped. Call
+    /// [`SignalMaskGuard::restore`] to observe restore errors explicitly.
+    pub fn unblock_current_thread(&self) -> io::Result<SignalMaskGuard> {
+        self.apply_to_current_thread(SignalMaskOperation::Unblock)
+    }
+
+    /// Replaces the calling thread's blocked signal set with this mask.
+    ///
+    /// The returned guard restores the exact previous mask when dropped. Call
+    /// [`SignalMaskGuard::restore`] to observe restore errors explicitly.
+    pub fn set_current_thread(&self) -> io::Result<SignalMaskGuard> {
+        self.apply_to_current_thread(SignalMaskOperation::Set)
+    }
+
+    fn apply_to_current_thread(
+        &self,
+        operation: SignalMaskOperation,
+    ) -> io::Result<SignalMaskGuard> {
+        #[cfg(unix)]
+        {
+            let how = match operation {
+                SignalMaskOperation::Block => SigmaskHow::SIG_BLOCK,
+                SignalMaskOperation::Unblock => SigmaskHow::SIG_UNBLOCK,
+                SignalMaskOperation::Set => SigmaskHow::SIG_SETMASK,
+            };
+            self.inner
+                .thread_swap_mask(how)
+                .map(Self::from_unix_set)
+                .map(SignalMaskGuard::new)
+                .map_err(Into::into)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = operation;
+            Err(unsupported_signal_mask_error())
+        }
+    }
+
+    #[cfg(unix)]
+    fn restore_current_thread(&self) -> io::Result<()> {
+        self.inner.thread_set_mask().map_err(Into::into)
+    }
+
+    #[cfg(unix)]
+    fn from_unix_set(inner: SigSet) -> Self {
+        let kinds = all_signal_kinds()
+            .into_iter()
+            .filter(|kind| inner.contains(nix_signal_for_kind(*kind)))
+            .collect();
+
+        Self { kinds, inner }
+    }
+}
+
+impl FromIterator<SignalKind> for SignalMask {
+    fn from_iter<T: IntoIterator<Item = SignalKind>>(iter: T) -> Self {
+        Self::from_kinds(iter)
+    }
+}
+
+/// RAII guard that restores a thread signal mask.
+#[derive(Debug)]
+pub struct SignalMaskGuard {
+    previous: Option<SignalMask>,
+}
+
+impl SignalMaskGuard {
+    fn new(previous: SignalMask) -> Self {
+        Self {
+            previous: Some(previous),
+        }
+    }
+
+    /// Returns the mask that will be restored when this guard is dropped.
+    #[must_use]
+    pub fn previous_mask(&self) -> Option<&SignalMask> {
+        self.previous.as_ref()
+    }
+
+    /// Restores the prior thread signal mask now.
+    ///
+    /// Dropping the guard after an explicit restore is a no-op.
+    pub fn restore(mut self) -> io::Result<()> {
+        if let Some(previous) = self.previous.take() {
+            restore_signal_mask(previous)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SignalMaskGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            let _ = restore_signal_mask(previous);
+        }
+    }
+}
+
+/// Blocks supported signals on the current thread until the returned guard is
+/// restored or dropped.
+///
+/// # Errors
+///
+/// Returns an unsupported error outside Unix, or an OS error if updating the
+/// thread signal mask fails.
+pub fn block_current_thread_signals(
+    kinds: impl IntoIterator<Item = SignalKind>,
+) -> io::Result<SignalMaskGuard> {
+    SignalMask::from_kinds(kinds).block_current_thread()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SignalMaskOperation {
+    Block,
+    Unblock,
+    Set,
+}
+
+fn restore_signal_mask(previous: SignalMask) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        previous.restore_current_thread()
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = previous;
+        Err(unsupported_signal_mask_error())
+    }
+}
+
+#[cfg(unix)]
+fn nix_signal_for_kind(kind: SignalKind) -> NixSignal {
+    match kind {
+        SignalKind::Interrupt => NixSignal::SIGINT,
+        SignalKind::Terminate => NixSignal::SIGTERM,
+        SignalKind::Hangup => NixSignal::SIGHUP,
+        SignalKind::Quit => NixSignal::SIGQUIT,
+        SignalKind::User1 => NixSignal::SIGUSR1,
+        SignalKind::User2 => NixSignal::SIGUSR2,
+        SignalKind::Child => NixSignal::SIGCHLD,
+        SignalKind::WindowChange => NixSignal::SIGWINCH,
+        SignalKind::Pipe => NixSignal::SIGPIPE,
+        SignalKind::Alarm => NixSignal::SIGALRM,
+    }
+}
+
+#[cfg(not(unix))]
+fn unsupported_signal_mask_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "thread signal masks are only supported on Unix",
+    )
+}
+
 #[cfg(test)]
 pub fn inject_test_signal(kind: SignalKind) -> io::Result<()> {
     #[cfg(any(unix, windows))]
@@ -887,6 +1134,130 @@ mod tests {
             second
         );
         crate::test_complete!("signal_recv_preserves_multiple_recorded_deliveries");
+    }
+
+    #[test]
+    fn signal_mask_from_kinds_deduplicates_supported_kinds() {
+        init_test("signal_mask_from_kinds_deduplicates_supported_kinds");
+        let mask = SignalMask::from_kinds([
+            SignalKind::user_defined1(),
+            SignalKind::user_defined1(),
+            SignalKind::terminate(),
+        ]);
+        let kinds: Vec<_> = mask.kinds().collect();
+        crate::assert_with_log!(
+            kinds == vec![SignalKind::user_defined1(), SignalKind::terminate()],
+            "deduplicated mask kinds",
+            vec![SignalKind::user_defined1(), SignalKind::terminate()],
+            kinds
+        );
+        crate::assert_with_log!(
+            mask.contains(SignalKind::user_defined1()),
+            "mask contains SIGUSR1",
+            true,
+            mask.contains(SignalKind::user_defined1())
+        );
+        crate::test_complete!("signal_mask_from_kinds_deduplicates_supported_kinds");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_signal_mask_block_guard_restores_prior_mask() {
+        init_test("unix_signal_mask_block_guard_restores_prior_mask");
+        let result = std::thread::spawn(|| -> io::Result<(bool, bool, bool)> {
+            let mask = SignalMask::from_kinds([SignalKind::user_defined1()]);
+            let original = SignalMask::current_thread()?;
+            let originally_blocked = original.contains(SignalKind::user_defined1());
+            let guard = mask.block_current_thread()?;
+            let blocked = SignalMask::current_thread()?.contains(SignalKind::user_defined1());
+            guard.restore()?;
+            let restored = SignalMask::current_thread()?.contains(SignalKind::user_defined1());
+            Ok((originally_blocked, blocked, restored))
+        })
+        .join();
+
+        let (originally_blocked, blocked, restored) = match result {
+            Ok(Ok(values)) => values,
+            Ok(Err(err)) => {
+                let message = format!("signal mask operation failed: {err}");
+                crate::assert_with_log!(false, "signal mask thread completed", "ok", message);
+                crate::test_complete!("unix_signal_mask_block_guard_restores_prior_mask");
+                return;
+            }
+            Err(_) => {
+                crate::assert_with_log!(
+                    false,
+                    "signal mask test thread joined",
+                    "ok",
+                    "thread panicked"
+                );
+                crate::test_complete!("unix_signal_mask_block_guard_restores_prior_mask");
+                return;
+            }
+        };
+
+        crate::assert_with_log!(
+            blocked,
+            "SIGUSR1 blocked while guard is active",
+            true,
+            blocked
+        );
+        crate::assert_with_log!(
+            restored == originally_blocked,
+            "SIGUSR1 restored to original mask state",
+            originally_blocked,
+            restored
+        );
+        crate::test_complete!("unix_signal_mask_block_guard_restores_prior_mask");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_signal_mask_unblock_guard_restores_blocked_mask() {
+        init_test("unix_signal_mask_unblock_guard_restores_blocked_mask");
+        let result = std::thread::spawn(|| -> io::Result<(bool, bool, bool)> {
+            let mask = SignalMask::from_kinds([SignalKind::user_defined2()]);
+            let block_guard = mask.block_current_thread()?;
+            let blocked = SignalMask::current_thread()?.contains(SignalKind::user_defined2());
+            let unblock_guard = mask.unblock_current_thread()?;
+            let unblocked = !SignalMask::current_thread()?.contains(SignalKind::user_defined2());
+            unblock_guard.restore()?;
+            let restored_blocked =
+                SignalMask::current_thread()?.contains(SignalKind::user_defined2());
+            block_guard.restore()?;
+            Ok((blocked, unblocked, restored_blocked))
+        })
+        .join();
+
+        let (blocked, unblocked, restored_blocked) = match result {
+            Ok(Ok(values)) => values,
+            Ok(Err(err)) => {
+                let message = format!("signal mask operation failed: {err}");
+                crate::assert_with_log!(false, "signal mask thread completed", "ok", message);
+                crate::test_complete!("unix_signal_mask_unblock_guard_restores_blocked_mask");
+                return;
+            }
+            Err(_) => {
+                crate::assert_with_log!(
+                    false,
+                    "signal mask test thread joined",
+                    "ok",
+                    "thread panicked"
+                );
+                crate::test_complete!("unix_signal_mask_unblock_guard_restores_blocked_mask");
+                return;
+            }
+        };
+
+        crate::assert_with_log!(blocked, "SIGUSR2 block applied", true, blocked);
+        crate::assert_with_log!(unblocked, "SIGUSR2 unblock applied", true, unblocked);
+        crate::assert_with_log!(
+            restored_blocked,
+            "unblock guard restored blocked mask",
+            true,
+            restored_blocked
+        );
+        crate::test_complete!("unix_signal_mask_unblock_guard_restores_blocked_mask");
     }
 
     #[cfg(unix)]

@@ -460,7 +460,7 @@ web-sys = { version = "0.3", features = [
 polling = "3.11"
 socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
-nix = { version = "0.31", features = ["fs", "poll", "socket", "uio", "user"] }
+nix = { version = "0.31", features = ["fs", "poll", "signal", "socket", "uio", "user"] }
 signal-hook = "0.4"
 aes-gcm = "0.10.3"
 chacha20poly1305 = "0.10.1"

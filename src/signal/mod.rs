@@ -7,6 +7,7 @@
 //!
 //! - [`SignalKind`]: Enumeration of supported signal types
 //! - [`Signal`]: Async stream for receiving supported signals
+//! - [`SignalMask`]: Thread-scoped signal mask management
 //! - [`ctrl_c`]: Cross-platform Ctrl+C handling
 //! - [`ShutdownController`]: Coordinated graceful shutdown
 //! - [`ShutdownReceiver`]: Handle for receiving shutdown notifications
@@ -17,12 +18,14 @@
 //! # Platform Behavior
 //!
 //! Unix signal streams (`signal(...)`) and `ctrl_c()` are supported through a
-//! global signal dispatcher.
+//! global signal dispatcher. Unix builds also expose thread-scoped signal mask
+//! helpers backed by `pthread_sigmask`.
 //!
 //! Windows builds support a subset of process signals (`SIGINT`, `SIGTERM`,
 //! and `SIGBREAK` via `SignalKind::quit()`) through the same async stream API.
-//! Other non-Unix builds expose the same API surface but return unsupported
-//! errors for signal stream creation.
+//! Signal mask helpers expose the same API surface but return unsupported
+//! errors outside Unix. Other non-Unix builds expose the signal stream API
+//! surface but return unsupported errors for signal stream creation.
 //!
 //! The [`ShutdownController`] and graceful shutdown helpers are fully
 //! functional using our sync primitives.
@@ -71,7 +74,9 @@ pub use kind::SignalKind;
 pub use shutdown::{
     ReloadController, ReloadOutcome, ReloadReceiver, ShutdownController, ShutdownReceiver,
 };
-pub use signal::{Signal, SignalError, signal};
+pub use signal::{
+    Signal, SignalError, SignalMask, SignalMaskGuard, block_current_thread_signals, signal,
+};
 
 // Cross-platform helpers for the signal subset supported on Unix and Windows.
 #[cfg(any(unix, windows))]
