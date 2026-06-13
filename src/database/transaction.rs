@@ -1917,6 +1917,124 @@ mod tests {
         crate::test_complete!("with_sqlite_transaction_raw_outer_release_cascades_inner_savepoint");
     }
 
+    /// AC2 (br-asupersync-server-stack-hardening-eeexl1.5): a 3-deep nest of
+    /// typed `SqliteSavepoint`s with a partial `rollback_to` at the innermost.
+    /// The innermost savepoint's work is discarded while the two outer
+    /// savepoints (and the base row) survive to commit. Resolved LIFO
+    /// (innermost first) so no Rust savepoint object outlives its server-side
+    /// savepoint.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn with_sqlite_transaction_three_deep_savepoint_partial_rollback() {
+        init_test("with_sqlite_transaction_three_deep_savepoint_partial_rollback");
+
+        let mut runtime = LabRuntimeTarget::create_runtime(TestConfig::default());
+        LabRuntimeTarget::block_on(&mut runtime, async move {
+            let cx = Cx::current().expect("lab runtime should install a current Cx");
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute(
+                    &cx,
+                    "CREATE TABLE sp_nest_items (id INTEGER PRIMARY KEY, name TEXT)",
+                    &[],
+                )
+                .await
+            {
+                Outcome::Ok(_) => {}
+                other => panic!("schema setup failed: {other:?}"),
+            }
+
+            let tx_outcome = with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                Box::pin(async move {
+                    async fn insert(
+                        tx: &crate::database::sqlite::SqliteTransaction<'_>,
+                        cx: &Cx,
+                        name: &str,
+                    ) -> Outcome<(), SqliteError> {
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO sp_nest_items(name) VALUES (?1)",
+                                &[SqliteValue::Text(name.to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => Outcome::Ok(()),
+                            other => panic!("insert {name} failed: {other:?}"),
+                        }
+                    }
+
+                    // Base row, outside any savepoint.
+                    let _ = insert(tx, cx, "a").await;
+
+                    let sp1 = match SqliteSavepoint::new(tx, cx, "sp1").await {
+                        Outcome::Ok(sp) => sp,
+                        other => panic!("sp1 create failed: {other:?}"),
+                    };
+                    let _ = insert(tx, cx, "b").await;
+
+                    let sp2 = match SqliteSavepoint::new(tx, cx, "sp2").await {
+                        Outcome::Ok(sp) => sp,
+                        other => panic!("sp2 create failed: {other:?}"),
+                    };
+                    let _ = insert(tx, cx, "c").await;
+
+                    let sp3 = match SqliteSavepoint::new(tx, cx, "sp3").await {
+                        Outcome::Ok(sp) => sp,
+                        other => panic!("sp3 create failed: {other:?}"),
+                    };
+                    let _ = insert(tx, cx, "d").await;
+
+                    // Partial rollback at the innermost: "d" is discarded.
+                    match sp3.rollback(cx).await {
+                        Outcome::Ok(()) => {}
+                        other => panic!("sp3 rollback failed: {other:?}"),
+                    }
+                    // Release the two outer savepoints: "b" and "c" survive.
+                    match sp2.release(cx).await {
+                        Outcome::Ok(()) => {}
+                        other => panic!("sp2 release failed: {other:?}"),
+                    }
+                    match sp1.release(cx).await {
+                        Outcome::Ok(()) => {}
+                        other => panic!("sp1 release failed: {other:?}"),
+                    }
+
+                    Outcome::Ok(())
+                })
+            })
+            .await;
+
+            match tx_outcome {
+                Outcome::Ok(()) => {}
+                other => panic!("expected transaction commit, got {other:?}"),
+            }
+
+            let rows = match conn
+                .query(&cx, "SELECT name FROM sp_nest_items ORDER BY id", &[])
+                .await
+            {
+                Outcome::Ok(rows) => rows,
+                other => panic!("query after nested savepoints failed: {other:?}"),
+            };
+            let names = rows
+                .iter()
+                .map(|row| row.get_str("name").expect("name column").to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                names,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                "3-deep partial rollback must keep the base + two outer savepoints and discard the innermost"
+            );
+        });
+
+        crate::test_complete!("with_sqlite_transaction_three_deep_savepoint_partial_rollback");
+    }
+
     #[cfg(feature = "sqlite")]
     #[test]
     fn with_sqlite_transaction_cancelled_savepoint_release_poison_commit() {
