@@ -415,6 +415,31 @@ impl ChunkCache {
             || chunk_identity.capability_scope == requesting_scope
     }
 
+    fn meets_reuse_criteria(
+        &self,
+        chunk_identity: &ChunkIdentity,
+        criteria: &ChunkReuseCriteria,
+    ) -> bool {
+        if chunk_identity.verification.proof_strength < criteria.min_proof_strength {
+            return false;
+        }
+
+        if criteria.require_same_algorithm && chunk_identity.verification.algorithm != "sha256" {
+            return false;
+        }
+
+        let Some(cached_chunk) = self.chunks.get(chunk_identity) else {
+            return false;
+        };
+
+        let Ok(age) = std::time::SystemTime::now().duration_since(cached_chunk.last_accessed)
+        else {
+            return false;
+        };
+
+        age.as_secs() <= criteria.max_age_seconds
+    }
+
     /// Evict least recently used chunk.
     fn evict_least_recently_used(&mut self) {
         let oldest_identity = self
@@ -555,7 +580,7 @@ impl ChunkReuseManager {
         &self,
         transfer_id: &str,
         content_hashes: &[[u8; 32]],
-        _criteria: &ChunkReuseCriteria,
+        criteria: &ChunkReuseCriteria,
     ) -> Vec<ChunkIdentity> {
         let mut reusable = Vec::new();
 
@@ -566,7 +591,9 @@ impl ChunkReuseManager {
         for &hash in content_hashes {
             let similar = self.cache.find_similar_chunks(hash);
             for chunk in similar {
-                if self.cache.can_reuse_chunk(chunk, &requesting_scope) {
+                if self.cache.can_reuse_chunk(chunk, &requesting_scope)
+                    && self.cache.meets_reuse_criteria(chunk, criteria)
+                {
                     reusable.push(chunk.clone());
                 }
             }
@@ -737,5 +764,67 @@ mod active_tests {
         let cache = ChunkCache::new(0);
 
         assert_eq!(cache.get_statistics().utilization, 0.0);
+    }
+
+    #[test]
+    fn reuse_criteria_rejects_low_proof_chunks() {
+        let mut manager = ChunkReuseManager::new();
+        let identity = manager
+            .store_chunk_for_reuse(b"chunk-data", "transfer-a")
+            .unwrap();
+        let strict_criteria = ChunkReuseCriteria {
+            min_proof_strength: ProofStrength::Enhanced,
+            ..criteria()
+        };
+
+        let reusable =
+            manager.find_reusable_chunks("transfer-a", &[identity.content_hash], &strict_criteria);
+
+        assert!(reusable.is_empty());
+    }
+
+    #[test]
+    fn reuse_criteria_rejects_stale_chunks() {
+        let mut manager = ChunkReuseManager::new();
+        let identity = manager
+            .store_chunk_for_reuse(b"chunk-data", "transfer-a")
+            .unwrap();
+        manager
+            .cache
+            .chunks
+            .get_mut(&identity)
+            .unwrap()
+            .last_accessed = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .unwrap();
+        let stale_rejecting_criteria = ChunkReuseCriteria {
+            max_age_seconds: 1,
+            ..criteria()
+        };
+
+        let reusable = manager.find_reusable_chunks(
+            "transfer-a",
+            &[identity.content_hash],
+            &stale_rejecting_criteria,
+        );
+
+        assert!(reusable.is_empty());
+    }
+
+    #[test]
+    fn reuse_criteria_rejects_non_canonical_algorithm_when_required() {
+        let mut manager = ChunkReuseManager::new();
+        let mut identity =
+            ChunkIdentity::from_data(b"chunk-data", "transfer-transfer-a", ProofStrength::Basic);
+        identity.verification.algorithm = "custom-hash".to_string();
+        manager.cache.store_chunk(&identity, b"chunk-data").unwrap();
+        manager
+            .register_transfer_chunk("transfer-a", &identity)
+            .unwrap();
+
+        let reusable =
+            manager.find_reusable_chunks("transfer-a", &[identity.content_hash], &criteria());
+
+        assert!(reusable.is_empty());
     }
 }
