@@ -262,6 +262,7 @@ const fn kind_index(kind: ObligationKind) -> u8 {
         ObligationKind::Lease => 2,
         ObligationKind::IoOp => 3,
         ObligationKind::SemaphorePermit => 4,
+        ObligationKind::Transaction => 5,
     }
 }
 
@@ -273,12 +274,13 @@ const fn kind_index(kind: ObligationKind) -> u8 {
 /// missed SemaphorePermit (kind_index=4) here, causing
 /// index-out-of-bounds panic the moment any Semaphore-using region was
 /// observed by the marking machinery.
-const ALL_KINDS: [ObligationKind; 5] = [
+const ALL_KINDS: [ObligationKind; 6] = [
     ObligationKind::SendPermit,
     ObligationKind::Ack,
     ObligationKind::Lease,
     ObligationKind::IoOp,
     ObligationKind::SemaphorePermit,
+    ObligationKind::Transaction,
 ];
 
 const OBLIGATION_KIND_COUNT: usize = ALL_KINDS.len();

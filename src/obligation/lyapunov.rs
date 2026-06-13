@@ -2646,7 +2646,12 @@ mod tests {
                 ObligationKind::Ack => {
                     pending_acks = pending_acks.saturating_add(1);
                 }
-                ObligationKind::Lease | ObligationKind::SemaphorePermit => {
+                // Transactions are bucketed with leases: both are held-resource
+                // obligations that the Lyapunov potential treats identically for
+                // drift accounting (br-asupersync-server-stack-hardening-eeexl1.5).
+                ObligationKind::Lease
+                | ObligationKind::SemaphorePermit
+                | ObligationKind::Transaction => {
                     pending_leases = pending_leases.saturating_add(1);
                 }
                 ObligationKind::IoOp => {

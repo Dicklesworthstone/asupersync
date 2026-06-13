@@ -825,6 +825,23 @@ impl TokenKind for SemaphorePermitKind {
     }
 }
 
+/// Marker type for [`ObligationKind::Transaction`].
+///
+/// A database transaction holds an [`ObligationToken<TransactionKind>`] for its
+/// open lifetime: `commit` consumes it via [`ObligationToken::commit`], while
+/// rollback (explicit or on drop/cancel) consumes it via
+/// [`ObligationToken::abort`]. This makes "an open transaction is an
+/// obligation" structural, mirroring the name-lease pattern in
+/// [`crate::cx::registry`] (br-asupersync-server-stack-hardening-eeexl1.5).
+#[derive(Debug)]
+pub enum TransactionKind {}
+impl sealed::Sealed for TransactionKind {}
+impl TokenKind for TransactionKind {
+    fn obligation_kind() -> ObligationKind {
+        ObligationKind::Transaction
+    }
+}
+
 // ============================================================================
 // ObligationToken<K> — typestate linear token
 // ============================================================================
@@ -2330,6 +2347,8 @@ mod tests {
             (ObligationKind::IoOp, Resolution::Abort),
             (ObligationKind::SemaphorePermit, Resolution::Commit),
             (ObligationKind::SemaphorePermit, Resolution::Abort),
+            (ObligationKind::Transaction, Resolution::Commit),
+            (ObligationKind::Transaction, Resolution::Abort),
         ];
         let mut pass = true;
         for (k, r) in cases {

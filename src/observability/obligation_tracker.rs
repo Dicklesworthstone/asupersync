@@ -603,6 +603,7 @@ fn obligation_kind_name(kind: ObligationKind) -> String {
         ObligationKind::Lease => "Lease".to_string(),
         ObligationKind::IoOp => "IoOp".to_string(),
         ObligationKind::SemaphorePermit => "SemaphorePermit".to_string(),
+        ObligationKind::Transaction => "Transaction".to_string(),
     }
 }
 

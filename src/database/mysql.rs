@@ -32,6 +32,7 @@
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
+use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::security::SecretString;
 use crate::types::{CancelReason, Outcome};
 use std::collections::BTreeMap;
@@ -3819,11 +3820,15 @@ impl MySqlConnection {
             .execute_unchecked_internal(cx, "START TRANSACTION")
             .await
         {
+            // Reserve the obligation only after START TRANSACTION succeeds:
+            // an ObligationToken is a drop bomb, so reserving before a fallible
+            // begin would panic on the error/cancel paths.
             Outcome::Ok(_) => Outcome::Ok(MySqlTransaction {
                 conn: self,
                 finished: false,
                 isolation_level: None,
                 read_only: false,
+                obligation: reserve_transaction_obligation(cx),
             }),
             Outcome::Err(e) => outcome_from_error(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
@@ -3911,12 +3916,16 @@ impl MySqlConnection {
         };
 
         match IsolationLevel::from_server_string(&observed_level) {
-            Some(parsed) if parsed == level => Outcome::Ok(MySqlTransaction {
-                conn: self,
-                finished: false,
-                isolation_level: Some(level),
-                read_only,
-            }),
+            Some(parsed) if parsed == level => {
+                let obligation = reserve_transaction_obligation(cx);
+                Outcome::Ok(MySqlTransaction {
+                    conn: self,
+                    finished: false,
+                    isolation_level: Some(level),
+                    read_only,
+                    obligation,
+                })
+            }
             _ => {
                 // Mismatch — roll back the in-flight transaction
                 // before returning so the connection is clean.
@@ -5355,6 +5364,28 @@ pub struct MySqlTransaction<'a> {
     isolation_level: Option<IsolationLevel>,
     /// br-asupersync-rsifm3 — `true` iff opened READ ONLY.
     read_only: bool,
+    /// br-asupersync-server-stack-hardening-eeexl1.5 — the open transaction's
+    /// obligation. Reserved at `begin` when running inside a non-root region;
+    /// `commit` consumes it via `commit()`, while rollback (explicit or on
+    /// drop/cancel) consumes it via `abort()`. `None` at the root region
+    /// (obligations must be non-root, ASUP-E103) — still rolled back via
+    /// poison-on-drop, just not obligation-tracked.
+    obligation: Option<ObligationToken<TransactionKind>>,
+}
+
+/// Reserve a transaction obligation scoped to the caller's current region.
+///
+/// Returns `None` at the root region: obligations must be scoped to a
+/// non-root structured-concurrency region (ASUP-E103), so a transaction begun
+/// outside any child region is intentionally not obligation-tracked. It still
+/// rolls back on drop via the connection poison flag.
+fn reserve_transaction_obligation(cx: &Cx) -> Option<ObligationToken<TransactionKind>> {
+    let region = cx.region_id();
+    if region.as_u64() == 0 {
+        None
+    } else {
+        Some(ObligationToken::reserve("db-transaction:mysql", region))
+    }
 }
 
 impl MySqlTransaction<'_> {
@@ -5390,6 +5421,10 @@ impl MySqlTransaction<'_> {
         match self.conn.execute_unchecked_internal(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
+                // The transaction truly committed: discharge the obligation.
+                if let Some(token) = self.obligation.take() {
+                    let _ = token.commit();
+                }
                 Outcome::Ok(())
             }
             Outcome::Err(e) => outcome_from_error(e),
@@ -5406,6 +5441,10 @@ impl MySqlTransaction<'_> {
         match self.conn.execute_unchecked_internal(cx, "ROLLBACK").await {
             Outcome::Ok(_) => {
                 self.finished = true;
+                // Explicit rollback: abort the obligation.
+                if let Some(token) = self.obligation.take() {
+                    let _ = token.abort();
+                }
                 Outcome::Ok(())
             }
             Outcome::Err(e) => outcome_from_error(e),
@@ -5513,6 +5552,12 @@ impl MySqlTransaction<'_> {
 
 impl Drop for MySqlTransaction<'_> {
     fn drop(&mut self) {
+        // Resolve the obligation first: a transaction dropped without an
+        // explicit commit rolls back, so abort() is the correct discharge and
+        // it disarms the token's own leak panic.
+        if let Some(token) = self.obligation.take() {
+            let _ = token.abort();
+        }
         if !self.finished {
             // Mark the connection so the next command will issue an implicit
             // ROLLBACK before proceeding. We cannot await inside Drop, so
@@ -6461,6 +6506,7 @@ mod tests {
                 finished: false,
                 isolation_level: None,
                 read_only: false,
+                obligation: None,
             };
             tx.commit(&cx).await
         });
@@ -6480,12 +6526,63 @@ mod tests {
                 finished: false,
                 isolation_level: None,
                 read_only: false,
+                obligation: None,
             };
             tx.rollback(&cx).await
         });
 
         assert_user_cancelled(outcome);
         assert!(conn.inner.needs_rollback);
+    }
+
+    // ─── transaction-as-obligation (br-asupersync-server-stack-hardening-eeexl1.5) ───
+
+    #[test]
+    fn reserve_transaction_obligation_skips_root_region() {
+        let non_root = Cx::for_testing();
+        let token = reserve_transaction_obligation(&non_root);
+        assert!(
+            token.is_some(),
+            "non-root transaction must be obligation-tracked"
+        );
+        if let Some(token) = token {
+            let _ = token.abort();
+        }
+
+        let root = Cx::new(
+            crate::RegionId::new_for_test(0, 0),
+            crate::TaskId::new_for_test(0, 0),
+            crate::Budget::INFINITE,
+        );
+        assert!(
+            reserve_transaction_obligation(&root).is_none(),
+            "root-region transaction is not obligation-tracked (ASUP-E103)"
+        );
+    }
+
+    #[test]
+    fn dropped_transaction_with_obligation_aborts_cleanly_and_poisons() {
+        let mut conn = make_test_connection();
+        let cx = Cx::for_testing();
+        {
+            let tx = MySqlTransaction {
+                conn: &mut conn,
+                finished: false,
+                isolation_level: None,
+                read_only: false,
+                obligation: reserve_transaction_obligation(&cx),
+            };
+            assert!(
+                tx.obligation.is_some(),
+                "for_testing cx is non-root, so the obligation must be reserved"
+            );
+            // tx drops without commit — Drop must abort the obligation (no
+            // leak panic) and poison the connection.
+        }
+        assert!(
+            conn.inner.needs_rollback,
+            "dropped transaction must poison the connection for rollback"
+        );
     }
 
     #[test]
@@ -7819,6 +7916,7 @@ mod tests {
                 finished: false,
                 isolation_level: Some(IsolationLevel::Serializable),
                 read_only: true,
+                obligation: None,
             };
             assert!(tx.is_read_only(), "transaction must retain READ ONLY mode");
             // A write statement that passes the client-side injection

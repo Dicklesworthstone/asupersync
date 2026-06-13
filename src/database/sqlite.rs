@@ -35,6 +35,7 @@
 
 use crate::channel::mpsc;
 use crate::cx::Cx;
+use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::runtime::blocking_pool::{BlockingPool, BlockingPoolHandle};
 use crate::time::{sleep, wall_now};
 use crate::types::{CancelReason, Outcome};
@@ -1961,6 +1962,7 @@ impl SqliteConnection {
                 Outcome::Ok(SqliteTransaction {
                     conn: self,
                     finished: false,
+                    obligation: reserve_transaction_obligation(cx),
                 })
             }
             Outcome::Err(e) => Outcome::Err(e),
@@ -1981,6 +1983,7 @@ impl SqliteConnection {
                 Outcome::Ok(SqliteTransaction {
                     conn: self,
                     finished: false,
+                    obligation: reserve_transaction_obligation(cx),
                 })
             }
             Outcome::Err(e) => Outcome::Err(e),
@@ -2001,6 +2004,7 @@ impl SqliteConnection {
                 Outcome::Ok(SqliteTransaction {
                     conn: self,
                     finished: false,
+                    obligation: reserve_transaction_obligation(cx),
                 })
             }
             Outcome::Err(e) => Outcome::Err(e),
@@ -2310,6 +2314,28 @@ impl SqliteConnection {
 pub struct SqliteTransaction<'a> {
     conn: &'a SqliteConnection,
     finished: bool,
+    /// br-asupersync-server-stack-hardening-eeexl1.5 — the open transaction's
+    /// obligation. Reserved at `begin` when running inside a non-root region;
+    /// `commit` consumes it via `commit()`, while rollback (explicit or on
+    /// drop/cancel) consumes it via `abort()`. `None` at the root region
+    /// (obligations must be non-root, ASUP-E103) — still rolled back via
+    /// poison-on-drop, just not obligation-tracked.
+    obligation: Option<ObligationToken<TransactionKind>>,
+}
+
+/// Reserve a transaction obligation scoped to the caller's current region.
+///
+/// Returns `None` at the root region: obligations must be scoped to a
+/// non-root structured-concurrency region (ASUP-E103), so a transaction begun
+/// outside any child region is intentionally not obligation-tracked. It still
+/// rolls back on drop via the connection transaction-state poison.
+fn reserve_transaction_obligation(cx: &Cx) -> Option<ObligationToken<TransactionKind>> {
+    let region = cx.region_id();
+    if region.as_u64() == 0 {
+        None
+    } else {
+        Some(ObligationToken::reserve("db-transaction:sqlite", region))
+    }
 }
 
 impl SqliteTransaction<'_> {
@@ -2335,6 +2361,10 @@ impl SqliteTransaction<'_> {
             Outcome::Ok(_) => {
                 *self.conn.transaction_state.lock() = TransactionState::Autocommit;
                 self.finished = true;
+                // The transaction truly committed: discharge the obligation.
+                if let Some(token) = self.obligation.take() {
+                    let _ = token.commit();
+                }
                 Outcome::Ok(())
             }
             Outcome::Err(e) => Outcome::Err(e),
@@ -2356,6 +2386,10 @@ impl SqliteTransaction<'_> {
             Outcome::Ok(_) => {
                 *self.conn.transaction_state.lock() = TransactionState::Autocommit;
                 self.finished = true;
+                // Explicit rollback: abort the obligation.
+                if let Some(token) = self.obligation.take() {
+                    let _ = token.abort();
+                }
                 Outcome::Ok(())
             }
             Outcome::Err(e) => Outcome::Err(e),
@@ -2406,6 +2440,12 @@ impl SqliteTransaction<'_> {
 
 impl Drop for SqliteTransaction<'_> {
     fn drop(&mut self) {
+        // Resolve the obligation first: a transaction dropped without an
+        // explicit commit rolls back, so abort() is the correct discharge and
+        // it disarms the token's own leak panic.
+        if let Some(token) = self.obligation.take() {
+            let _ = token.abort();
+        }
         if !self.finished {
             self.poison_for_rollback();
         }
@@ -6396,5 +6436,90 @@ mod tests {
                 "{{\"recommendation\":\"FILE_BEAD\",\"reason\":\"30min_deadline_insufficient\",\"estimated_effort\":\"2-4_hours\",\"same_pattern_as\":\"MySQL/PostgreSQL but blocking_pool_architecture\"}}"
             );
         }
+    }
+
+    // ─── transaction-as-obligation (br-asupersync-server-stack-hardening-eeexl1.5) ───
+
+    #[test]
+    fn reserve_transaction_obligation_skips_root_region() {
+        let non_root = Cx::for_testing();
+        let token = reserve_transaction_obligation(&non_root);
+        assert!(
+            token.is_some(),
+            "non-root transaction must be obligation-tracked"
+        );
+        if let Some(token) = token {
+            let _ = token.abort();
+        }
+
+        let root = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            Budget::INFINITE,
+        );
+        assert!(
+            reserve_transaction_obligation(&root).is_none(),
+            "root-region transaction is not obligation-tracked (ASUP-E103)"
+        );
+    }
+
+    #[test]
+    fn dropped_transaction_with_obligation_aborts_and_poisons() {
+        // A real in-memory SQLite transaction dropped without commit must
+        // abort its obligation cleanly (no leak panic) and leave the
+        // connection in NeedsRollback.
+        let cx = Cx::for_testing();
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            {
+                let tx = match conn.begin(&cx).await {
+                    Outcome::Ok(tx) => tx,
+                    Outcome::Err(e) => panic!("begin failed: {e}"),
+                    Outcome::Cancelled(r) => panic!("begin cancelled: {r:?}"),
+                    Outcome::Panicked(p) => panic!("begin panicked: {p:?}"),
+                };
+                assert!(
+                    tx.obligation.is_some(),
+                    "for_testing cx is non-root, so the obligation must be reserved"
+                );
+                // tx drops here without commit.
+            }
+            assert_eq!(
+                *conn.transaction_state.lock(),
+                TransactionState::NeedsRollback,
+                "dropped transaction must poison the connection for rollback"
+            );
+        });
+    }
+
+    #[test]
+    fn committed_transaction_discharges_obligation_without_leak() {
+        let cx = Cx::for_testing();
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            let tx = match conn.begin(&cx).await {
+                Outcome::Ok(tx) => tx,
+                Outcome::Err(e) => panic!("begin failed: {e}"),
+                Outcome::Cancelled(r) => panic!("begin cancelled: {r:?}"),
+                Outcome::Panicked(p) => panic!("begin panicked: {p:?}"),
+            };
+            match tx.commit(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("commit failed: {other:?}"),
+            }
+            // The committed transaction discharged its obligation (no leak
+            // panic) and returned the connection to autocommit.
+            assert_eq!(
+                *conn.transaction_state.lock(),
+                TransactionState::Autocommit,
+                "committed transaction must return to autocommit"
+            );
+        });
     }
 }

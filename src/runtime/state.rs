@@ -5511,6 +5511,8 @@ pub enum ObligationKindSnapshot {
     IoOp,
     /// Semaphore permit.
     SemaphorePermit,
+    /// Open database transaction.
+    Transaction,
 }
 
 impl From<ObligationKind> for ObligationKindSnapshot {
@@ -5521,6 +5523,7 @@ impl From<ObligationKind> for ObligationKindSnapshot {
             ObligationKind::Lease => Self::Lease,
             ObligationKind::IoOp => Self::IoOp,
             ObligationKind::SemaphorePermit => Self::SemaphorePermit,
+            ObligationKind::Transaction => Self::Transaction,
         }
     }
 }

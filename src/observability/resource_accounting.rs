@@ -48,7 +48,7 @@ use crate::record::region::AdmissionKind;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Number of [`ObligationKind`] variants.
-const OBLIGATION_KIND_COUNT: usize = 5;
+const OBLIGATION_KIND_COUNT: usize = 6;
 /// Number of [`AdmissionKind`] variants.
 const ADMISSION_KIND_COUNT: usize = 4;
 
@@ -60,6 +60,7 @@ const fn obligation_index(kind: ObligationKind) -> usize {
         ObligationKind::Lease => 2,
         ObligationKind::IoOp => 3,
         ObligationKind::SemaphorePermit => 4,
+        ObligationKind::Transaction => 5,
     }
 }
 
@@ -80,6 +81,7 @@ const ALL_OBLIGATION_KINDS: [ObligationKind; OBLIGATION_KIND_COUNT] = [
     ObligationKind::Lease,
     ObligationKind::IoOp,
     ObligationKind::SemaphorePermit,
+    ObligationKind::Transaction,
 ];
 
 /// All admission kinds for iteration.

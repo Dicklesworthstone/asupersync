@@ -62,6 +62,14 @@ pub enum ObligationKind {
     IoOp,
     /// A semaphore permit that must be released.
     SemaphorePermit,
+    /// An open database transaction that must be committed or rolled back.
+    ///
+    /// The flagship application of the obligation model outside channels
+    /// (br-asupersync-server-stack-hardening-eeexl1.5): an open transaction is
+    /// a tracked, typed obligation, so a transaction dropped or cancelled
+    /// without an explicit `commit` deterministically rolls back during drain
+    /// rather than lingering.
+    Transaction,
 }
 
 impl ObligationKind {
@@ -75,6 +83,7 @@ impl ObligationKind {
             Self::Lease => "lease",
             Self::IoOp => "io_op",
             Self::SemaphorePermit => "semaphore_permit",
+            Self::Transaction => "transaction",
         }
     }
 }

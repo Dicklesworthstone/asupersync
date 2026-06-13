@@ -42,6 +42,7 @@
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
+use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::security::SecretString;
 #[cfg(feature = "tls")]
 use crate::tls::{Certificate, TlsConnector, TlsConnectorBuilder, TlsStream};
@@ -4934,11 +4935,16 @@ impl PgConnection {
     /// Begin a transaction.
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<PgTransaction<'_>, PgError> {
         match self.execute_unchecked(cx, "BEGIN").await {
+            // Reserve the obligation ONLY after BEGIN succeeds: an
+            // ObligationToken is a drop bomb, so reserving it before a fallible
+            // BEGIN would panic on the error/cancel paths (token dropped
+            // unconsumed). The transaction now owns it for its whole lifetime.
             Outcome::Ok(_) => Outcome::Ok(PgTransaction {
                 conn: self,
                 finished: false,
                 isolation_level: None,
                 read_only: false,
+                obligation: reserve_transaction_obligation(cx),
             }),
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
@@ -5018,12 +5024,16 @@ impl PgConnection {
         };
 
         match IsolationLevel::from_server_string(&observed_level) {
-            Some(parsed) if parsed == level => Outcome::Ok(PgTransaction {
-                conn: self,
-                finished: false,
-                isolation_level: Some(level),
-                read_only,
-            }),
+            Some(parsed) if parsed == level => {
+                let obligation = reserve_transaction_obligation(cx);
+                Outcome::Ok(PgTransaction {
+                    conn: self,
+                    finished: false,
+                    isolation_level: Some(level),
+                    read_only,
+                    obligation,
+                })
+            }
             _ => {
                 self.rollback_isolated_begin_or_mark(cx).await;
                 Outcome::Err(PgError::IsolationLevelMismatch {
@@ -7736,6 +7746,28 @@ pub struct PgTransaction<'a> {
     isolation_level: Option<IsolationLevel>,
     /// br-asupersync-rsifm3 — `true` iff opened READ ONLY.
     read_only: bool,
+    /// br-asupersync-server-stack-hardening-eeexl1.5 — the open transaction's
+    /// obligation. Reserved at `begin` when running inside a non-root region;
+    /// `commit` consumes it via `commit()`, while rollback (explicit or on
+    /// drop/cancel) consumes it via `abort()`. `None` when begun at the root
+    /// region (obligations must be non-root, ASUP-E103) — such a transaction
+    /// is still rolled back via poison-on-drop, just not obligation-tracked.
+    obligation: Option<ObligationToken<TransactionKind>>,
+}
+
+/// Reserve a transaction obligation scoped to the caller's current region.
+///
+/// Returns `None` at the root region: obligations must be scoped to a
+/// structured-concurrency child region (ASUP-E103), so a transaction begun
+/// outside any child region is intentionally not obligation-tracked. It still
+/// rolls back on drop via the connection poison flags.
+fn reserve_transaction_obligation(cx: &Cx) -> Option<ObligationToken<TransactionKind>> {
+    let region = cx.region_id();
+    if region.as_u64() == 0 {
+        None
+    } else {
+        Some(ObligationToken::reserve("db-transaction:postgres", region))
+    }
 }
 
 impl PgTransaction<'_> {
@@ -7780,6 +7812,13 @@ impl PgTransaction<'_> {
         match self.conn.execute_unchecked(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
+                // The transaction truly committed: discharge the obligation
+                // with commit(). On any non-Ok arm we leave the token in place
+                // so Drop aborts it, matching the rollback the connection
+                // poison will perform.
+                if let Some(token) = self.obligation.take() {
+                    let _ = token.commit();
+                }
                 Outcome::Ok(())
             }
             Outcome::Err(e) => {
@@ -7799,6 +7838,10 @@ impl PgTransaction<'_> {
         match self.conn.execute_unchecked(cx, "ROLLBACK").await {
             Outcome::Ok(_) => {
                 self.finished = true;
+                // Explicit rollback: abort the obligation.
+                if let Some(token) = self.obligation.take() {
+                    let _ = token.abort();
+                }
                 Outcome::Ok(())
             }
             Outcome::Err(e) => {
@@ -7896,6 +7939,13 @@ impl Drop for PgTransaction<'_> {
     /// connection without a pool round-trip still get the inline
     /// ROLLBACK fast path.
     fn drop(&mut self) {
+        // Resolve the obligation first: a transaction dropped without an
+        // explicit commit rolls back, so abort() is the correct discharge.
+        // This also disarms the token's own leak panic. Aborting an
+        // already-taken (committed/rolled-back) obligation is a no-op.
+        if let Some(token) = self.obligation.take() {
+            let _ = token.abort();
+        }
         if !self.finished {
             self.poison_for_rollback();
         }
@@ -10257,6 +10307,7 @@ mod tests {
                 finished: false,
                 isolation_level: Some(IsolationLevel::Serializable),
                 read_only: false,
+                obligation: None,
             };
             tx.commit(&cx).await
         });
@@ -10303,6 +10354,7 @@ mod tests {
                 finished: false,
                 isolation_level: None,
                 read_only: false,
+                obligation: None,
             };
             tx.commit(&cx).await
         });
@@ -10322,6 +10374,7 @@ mod tests {
                 finished: false,
                 isolation_level: None,
                 read_only: false,
+                obligation: None,
             };
             tx.rollback(&cx).await
         });
@@ -18678,6 +18731,112 @@ mod tests {
             subscription_recovery_transparent: bool,
             fails_closed_on_resubscribe_failure: bool,
         }
+    }
+
+    // ─── transaction-as-obligation (br-asupersync-server-stack-hardening-eeexl1.5) ───
+
+    #[test]
+    fn reserve_transaction_obligation_skips_root_region() {
+        // A non-root region (for_testing has generation 1) reserves a token.
+        let non_root = Cx::for_testing();
+        let token = reserve_transaction_obligation(&non_root);
+        assert!(
+            token.is_some(),
+            "a transaction begun inside a non-root region must be obligation-tracked"
+        );
+        // Discharge the reserved token so its drop bomb does not fire.
+        if let Some(token) = token {
+            let _ = token.abort();
+        }
+
+        // The root region (index 0, generation 0) must NOT reserve: obligations
+        // are forbidden in the root region (ASUP-E103).
+        let root = Cx::new(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+        );
+        assert!(
+            reserve_transaction_obligation(&root).is_none(),
+            "a transaction begun at the root region is not obligation-tracked"
+        );
+    }
+
+    #[test]
+    fn dropped_transaction_with_obligation_aborts_cleanly_and_poisons() {
+        // A transaction holding an obligation that is dropped WITHOUT an
+        // explicit commit must: (a) discharge the obligation via abort (no
+        // leak panic / drop bomb), and (b) poison the connection for rollback.
+        let mut conn = make_test_connection();
+        let cx = Cx::for_testing();
+        {
+            let tx = PgTransaction {
+                conn: &mut conn,
+                finished: false,
+                isolation_level: None,
+                read_only: false,
+                obligation: reserve_transaction_obligation(&cx),
+            };
+            assert!(
+                tx.obligation.is_some(),
+                "for_testing cx is non-root, so the obligation must be reserved"
+            );
+            // tx drops here without commit/rollback — Drop must abort the
+            // obligation (no panic) and poison the connection.
+        }
+        assert!(
+            conn.inner.needs_rollback,
+            "dropped transaction must mark the connection for inline rollback"
+        );
+        assert!(
+            conn.inner.needs_discard,
+            "dropped transaction must poison pool reuse"
+        );
+    }
+
+    #[test]
+    fn committed_transaction_discharges_obligation_without_leak() {
+        // A transaction whose COMMIT succeeds discharges the obligation via
+        // commit(). We exercise the real begin -> commit wire path; the test
+        // passing (no obligation drop-bomb panic) proves the discharge.
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let responder = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"BEGIN");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"BEGIN\0"))
+                .expect("write BEGIN complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'T'))
+                .expect("write BEGIN ready");
+            let _ = read_until_contains(&mut peer, b"COMMIT");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"COMMIT\0"))
+                .expect("write COMMIT complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("write COMMIT ready");
+        });
+
+        let tx = match run(conn.begin(&cx)) {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => panic!("expected successful BEGIN, got error: {e}"),
+            Outcome::Cancelled(r) => panic!("expected successful BEGIN, got cancel: {r:?}"),
+            Outcome::Panicked(p) => panic!("expected successful BEGIN, got panic: {p:?}"),
+        };
+        match run(tx.commit(&cx)) {
+            Outcome::Ok(()) => {}
+            other => panic!("expected successful COMMIT, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("peer responder should exit cleanly");
+
+        assert_eq!(
+            conn.inner.transaction_status, b'I',
+            "committed transaction should leave the connection idle"
+        );
+        assert!(
+            !conn.inner.needs_rollback,
+            "a committed transaction must not poison the connection"
+        );
     }
 }
 

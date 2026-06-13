@@ -94,7 +94,7 @@ pub struct ObligationCreateArgs {
 
 /// Number of variants in [`ObligationKind`] — sized at compile time so we can
 /// stash per-kind counters in a fixed array without boxing.
-const OBLIGATION_KIND_COUNT: usize = 5;
+const OBLIGATION_KIND_COUNT: usize = 6;
 
 /// Encapsulates the obligation arena for resource tracking operations.
 ///
@@ -152,6 +152,7 @@ const fn kind_index(kind: ObligationKind) -> usize {
         ObligationKind::Lease => 2,
         ObligationKind::IoOp => 3,
         ObligationKind::SemaphorePermit => 4,
+        ObligationKind::Transaction => 5,
     }
 }
 
