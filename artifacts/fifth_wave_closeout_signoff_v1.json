@@ -1,0 +1,529 @@
+{
+  "schema_version": "fifth-wave-closeout-signoff-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.16",
+  "parent_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun",
+  "purpose": "Deterministic closeout packet for the fifth-wave idea-wizard top-five and next-ten owner beads. The packet fails closed while child owner beads remain open or proof-blocked.",
+  "artifact_path": "artifacts/fifth_wave_closeout_signoff_v1.json",
+  "docs_path": "docs/fifth_wave_closeout_signoff.md",
+  "contract_test": "tests/fifth_wave_closeout_signoff_contract.rs",
+  "docs_markers": [
+    "FIFTH-WAVE-CLOSEOUT:SOURCE",
+    "FIFTH-WAVE-CLOSEOUT:INVENTORY",
+    "FIFTH-WAVE-CLOSEOUT:DECISIONS",
+    "FIFTH-WAVE-CLOSEOUT:BLOCKERS",
+    "FIFTH-WAVE-CLOSEOUT:VALIDATION",
+    "FIFTH-WAVE-CLOSEOUT:NO-CLAIMS"
+  ],
+  "source_of_truth": {
+    "artifact": "artifacts/fifth_wave_closeout_signoff_v1.json",
+    "docs": "docs/fifth_wave_closeout_signoff.md",
+    "contract_test": "tests/fifth_wave_closeout_signoff_contract.rs",
+    "tracker_parent": "asupersync-idea-wizard-fifth-wave-3gaiun",
+    "tracker_closeout": "asupersync-idea-wizard-fifth-wave-3gaiun.16"
+  },
+  "inventory_generation": {
+    "manual_status_table_accepted": false,
+    "generated_from": [
+      {
+        "source": "tracker-parent",
+        "command": "br show asupersync-idea-wizard-fifth-wave-3gaiun --json",
+        "covers": [
+          "parent status",
+          "top-five child IDs",
+          "next-ten child IDs"
+        ]
+      },
+      {
+        "source": "tracker-closeout",
+        "command": "br show asupersync-idea-wizard-fifth-wave-3gaiun.16 --json",
+        "covers": [
+          "closeout acceptance",
+          "blocking dependencies"
+        ]
+      },
+      {
+        "source": "tracker-children",
+        "command": "br show asupersync-idea-wizard-fifth-wave-3gaiun.{1..15} --json",
+        "covers": [
+          "owner status",
+          "current blocker comments",
+          "close reasons"
+        ]
+      },
+      {
+        "source": "checked-repo-surfaces",
+        "command": "rg --files artifacts docs tests | rg 'fifth_wave|reference_app_gallery|runtime_trace_inspector|semantic|state_snapshot|platform|parser_fuzz|authority_flow|migration_recipe|closeout_verifier|doctor|browser|lab_live|appspec'",
+        "covers": [
+          "live artifact paths",
+          "live docs paths",
+          "live contract paths"
+        ]
+      }
+    ],
+    "fail_closed_policy": [
+      "missing owner bead blocks closeout",
+      "multiple conflicting owner beads block closeout",
+      "closed owner without proof or evidence references blocks closeout",
+      "open or in-progress owner without current blocker and next step blocks closeout",
+      "broad readiness claim without a manifest, status, or scoped artifact reference blocks closeout"
+    ]
+  },
+  "decision_status_catalog": [
+    {
+      "decision": "implemented",
+      "meaning": "Owner bead is closed and cites checked evidence."
+    },
+    {
+      "decision": "still-open",
+      "meaning": "Owner bead remains open or in progress with an explicit blocker or next step."
+    },
+    {
+      "decision": "merged-into-owner",
+      "meaning": "The idea is represented by another stable owner bead."
+    },
+    {
+      "decision": "deferred",
+      "meaning": "The idea is intentionally left for future work with a stable owner."
+    },
+    {
+      "decision": "rejected",
+      "meaning": "The idea is intentionally not being pursued."
+    }
+  ],
+  "top_five_decisions": [
+    {
+      "idea_id": "top-01-doctor-operator-cli",
+      "title": "Runtime doctor CLI and remediation evidence loop",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.1",
+      "tracker_status": "closed",
+      "decision": "implemented",
+      "proof_refs": [
+        "tests/doctor_e2e_proof_lane_contract.rs",
+        "docs/doctor_e2e_harness_contract.md",
+        "docs/doctor_cli_packaging_contract.md"
+      ],
+      "evidence_refs": [
+        "tests/doctor_e2e_proof_lane_contract.rs",
+        "docs/doctor_diagnostics_report_contract.md",
+        "docs/doctor_remediation_recipe_contract.md"
+      ],
+      "no_claims": [
+        "does not authorize destructive cleanup",
+        "does not approve local Cargo fallback",
+        "does not prove broad workspace health"
+      ]
+    },
+    {
+      "idea_id": "top-02-appspec-service-topology",
+      "title": "Declarative service topology compiler with generated lab proofs",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
+      "tracker_status": "open",
+      "decision": "still-open",
+      "current_blocker": "AppSpec parent remains open with A1/A2 in progress and A3/A4 still open; no clean closeout-ready proof chain exists.",
+      "next_step": "Complete the AppSpec schema/compiler child chain, then land generated fixtures, proof manifest rows, and a production reference journey.",
+      "proof_refs": [
+        "artifacts/appspec_v1_schema.json",
+        "docs/appspec_v1.md"
+      ],
+      "evidence_refs": [
+        "artifacts/appspec_v1_schema.json",
+        "docs/appspec_v1.md",
+        "src/app.rs"
+      ],
+      "no_claims": [
+        "does not prove AppSpec production readiness",
+        "does not prove generated lab fixtures",
+        "does not close the fifth-wave epic"
+      ]
+    },
+    {
+      "idea_id": "top-03-semantic-lint-suite",
+      "title": "Asupersync-specific static lint suite for cancel and obligation footguns",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3",
+      "tracker_status": "closed",
+      "decision": "implemented",
+      "proof_refs": [
+        "artifacts/semantic_lint_rule_inventory_v1.json",
+        "tests/semantic_lint_rule_inventory_contract.rs",
+        "docs/semantic_lint_rule_inventory.md"
+      ],
+      "evidence_refs": [
+        "artifacts/semantic_lint_rule_inventory_v1.json",
+        "tests/semantic_lint_core_tokio_contract.rs",
+        "tests/semantic_lint_await_holding_contract.rs"
+      ],
+      "no_claims": [
+        "does not prove whole-tree absence of every footgun",
+        "does not auto-rewrite code",
+        "does not prove formal correctness"
+      ]
+    },
+    {
+      "idea_id": "top-04-browser-ga-readiness",
+      "title": "Browser Edition GA readiness and consumer compatibility program",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.4",
+      "tracker_status": "closed",
+      "decision": "implemented",
+      "proof_refs": [
+        "artifacts/browser_ga_final_signoff_v1.json",
+        "tests/browser_ga_final_signoff_contract.rs",
+        "docs/browser_ga_final_signoff.md"
+      ],
+      "evidence_refs": [
+        "artifacts/browser_edition_readiness_matrix_v1.json",
+        "artifacts/browser_package_integrity_gate_v1.json",
+        "tests/browser_consumer_compatibility_matrix_contract.rs"
+      ],
+      "no_claims": [
+        "does not claim native/browser parity",
+        "does not promote unsupported browser surfaces",
+        "does not prove all bundlers or browsers"
+      ]
+    },
+    {
+      "idea_id": "top-05-lab-live-differential",
+      "title": "Lab/live differential evidence harness for adapter support claims",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.5",
+      "tracker_status": "closed",
+      "decision": "implemented",
+      "proof_refs": [
+        "artifacts/lab_live_support_claim_report_v1.json",
+        "tests/lab_live_support_claim_report_contract.rs",
+        "docs/lab_live_support_claim_report.md"
+      ],
+      "evidence_refs": [
+        "artifacts/lab_live_differential_scenario_contract_v1.json",
+        "artifacts/lab_live_v2_filesystem_runner_v1.json",
+        "tests/lab_live_differential_contract.rs"
+      ],
+      "no_claims": [
+        "does not certify all live adapters",
+        "does not count skipped platforms as supported",
+        "does not replace conformance suites"
+      ]
+    }
+  ],
+  "next_ten_decisions": [
+    {
+      "idea_id": "next-01-authority-flow-graph",
+      "title": "Authority-flow graph for Cx capabilities and ambient-effect denial",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.6",
+      "tracker_status": "in_progress",
+      "decision": "still-open",
+      "current_blocker": "Implementation is landed, but the focused RCH contract has only reached pre-execution refusal; no remote pass exists.",
+      "next_step": "Retry the remote-only cx_authority_flow_graph_contract lane and close only after a clean pass.",
+      "proof_refs": [
+        "artifacts/cx_authority_flow_graph_v1.json",
+        "tests/cx_authority_flow_graph_contract.rs",
+        "docs/cx_authority_flow_graph.md"
+      ],
+      "evidence_refs": [
+        "artifacts/cx_authority_flow_graph_v1.json",
+        "src/cx/cx.rs",
+        "src/cx/mod.rs"
+      ],
+      "no_claims": [
+        "does not prove static whole-program security",
+        "does not prove all ambient effects are absent",
+        "does not authorize closing without remote proof"
+      ]
+    },
+    {
+      "idea_id": "next-02-docs-claim-freshness",
+      "title": "README and docs claim freshness gate",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.7",
+      "tracker_status": "closed",
+      "decision": "implemented",
+      "proof_refs": [
+        "tests/readme_claim_freshness_contract.rs",
+        "tests/fixtures/readme_claim_freshness/stale_README.md",
+        "tests/fixtures/readme_claim_freshness/stale_proof_README.md"
+      ],
+      "evidence_refs": [
+        "tests/readme_claim_freshness_contract.rs",
+        "tests/fixtures/readme_claim_freshness/stale_doc_marker_expected.json",
+        "tests/fixtures/readme_claim_freshness/stale_proof_evidence_expected.json"
+      ],
+      "no_claims": [
+        "does not prove all docs are current",
+        "does not approve stronger claims without evidence",
+        "does not prove release readiness"
+      ]
+    },
+    {
+      "idea_id": "next-03-reference-app-gallery",
+      "title": "Production reference-app gallery with proof-backed journeys",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.8",
+      "tracker_status": "in_progress",
+      "decision": "still-open",
+      "current_blocker": "Reference gallery artifact/doc/contract is landed, but RCH refused the focused contract before execution.",
+      "next_step": "Retry reference_app_gallery_contract with RCH_REQUIRE_REMOTE=1 after RCH admission clears.",
+      "proof_refs": [
+        "artifacts/reference_app_gallery_v1.json",
+        "tests/reference_app_gallery_contract.rs",
+        "docs/reference_app_gallery.md"
+      ],
+      "evidence_refs": [
+        "artifacts/reference_app_gallery_v1.json",
+        "tests/http_e2e.rs",
+        "tests/e2e_websocket.rs"
+      ],
+      "no_claims": [
+        "does not create production reference apps",
+        "does not turn blocked adapter rows into passing coverage",
+        "does not prove production deployment readiness"
+      ]
+    },
+    {
+      "idea_id": "next-04-runtime-trace-inspector",
+      "title": "Runtime trace flamechart and inspector visualization",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.9",
+      "tracker_status": "in_progress",
+      "decision": "still-open",
+      "current_blocker": "Trace inspector artifact/doc/contract is landed, but its admitted RCH run exited 130 after cancellation before a test result.",
+      "next_step": "Retry runtime_trace_inspector_visualization_contract remotely and close only after a clean pass.",
+      "proof_refs": [
+        "artifacts/runtime_trace_inspector_visualization_v1.json",
+        "tests/runtime_trace_inspector_visualization_contract.rs",
+        "docs/runtime_trace_inspector_visualization.md"
+      ],
+      "evidence_refs": [
+        "artifacts/runtime_trace_inspector_visualization_v1.json",
+        "src/observability/task_inspector.rs",
+        "src/bin/asupersync.rs"
+      ],
+      "no_claims": [
+        "does not prove runtime correctness",
+        "does not ship a production debug-server route",
+        "does not prove screenshot coverage"
+      ]
+    },
+    {
+      "idea_id": "next-05-parser-fuzz-coverage",
+      "title": "Parser fuzz coverage debt scanner for wire protocols",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.10",
+      "tracker_status": "in_progress",
+      "decision": "still-open",
+      "current_blocker": "Parser fuzz inventory is landed, but focused RCH contract attempts became heartbeat-fresh/progress-stale and were cancelled before a pass.",
+      "next_step": "Retry parser_fuzz_protocol_inventory_contract remotely, preserving --no-default-features scoping.",
+      "proof_refs": [
+        "artifacts/parser_fuzz_protocol_inventory_v1.json",
+        "tests/parser_fuzz_protocol_inventory_contract.rs",
+        "docs/parser_fuzz_protocol_inventory.md"
+      ],
+      "evidence_refs": [
+        "artifacts/parser_fuzz_protocol_inventory_v1.json",
+        "tests/parser_fuzz_coverage_registry_contract.rs",
+        "fuzz/Cargo.toml"
+      ],
+      "no_claims": [
+        "does not prove fuzz coverage completeness",
+        "does not generate new fuzz targets",
+        "does not bypass semantic oracles"
+      ]
+    },
+    {
+      "idea_id": "next-06-release-closeout-verifier",
+      "title": "Release closeout verifier for main, master mirror, beads, mail, and proof claims",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.11",
+      "tracker_status": "closed",
+      "decision": "implemented",
+      "proof_refs": [
+        "tests/closeout_verifier_contract.rs",
+        "tests/fixtures/closeout_verifier/clean_closeout.json",
+        "tests/fixtures/closeout_verifier/missing_master_sync.json"
+      ],
+      "evidence_refs": [
+        "tests/closeout_verifier_contract.rs",
+        "tests/fixtures/closeout_verifier/bare_cargo_validation.json",
+        "tests/fixtures/closeout_verifier/missing_remote_required_validation.json"
+      ],
+      "no_claims": [
+        "does not replace human review",
+        "does not delete files or branches",
+        "does not prove all proof artifacts are fresh"
+      ]
+    },
+    {
+      "idea_id": "next-07-platform-capability-matrix",
+      "title": "Cross-platform capability matrix for reactors, fs, process, signal, and browser hosts",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.12",
+      "tracker_status": "in_progress",
+      "decision": "still-open",
+      "current_blocker": "Platform matrix artifact/doc/contract is landed, but RCH proof attempts were refused or cancelled before a remote pass.",
+      "next_step": "Retry platform_capability_matrix_contract remotely with --no-default-features.",
+      "proof_refs": [
+        "artifacts/platform_capability_matrix_v1.json",
+        "tests/platform_capability_matrix_contract.rs",
+        "docs/platform_capability_matrix.md"
+      ],
+      "evidence_refs": [
+        "artifacts/platform_capability_matrix_v1.json",
+        "docs/platform_capability_matrix.md",
+        "tests/platform_capability_matrix_contract.rs"
+      ],
+      "no_claims": [
+        "does not count skipped features as supported",
+        "does not prove all platform behavior",
+        "does not prove optional feature health"
+      ]
+    },
+    {
+      "idea_id": "next-08-migration-recipe-compiler",
+      "title": "Migration recipe compiler from planner findings to implementation checklists",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.13",
+      "tracker_status": "closed",
+      "decision": "implemented",
+      "proof_refs": [
+        "artifacts/migration_recipe_compiler_v1.json",
+        "tests/migration_recipe_compiler_contract.rs",
+        "docs/migration_recipe_compiler.md"
+      ],
+      "evidence_refs": [
+        "artifacts/migration_recipe_compiler_v1.json",
+        "docs/integration.md",
+        "tests/migration_recipe_compiler_contract.rs"
+      ],
+      "no_claims": [
+        "does not auto-port code",
+        "does not approve destructive edits",
+        "does not prove migration completeness"
+      ]
+    },
+    {
+      "idea_id": "next-09-semantic-evidence-bundles",
+      "title": "Semantic evidence bundles for public guarantees",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.14",
+      "tracker_status": "in_progress",
+      "decision": "still-open",
+      "current_blocker": "Semantic evidence bundle artifacts/docs/contracts are landed, but RCH proof attempts were refused or cancelled before a pass.",
+      "next_step": "Retry semantic_evidence_bundles_contract and semantic_evidence_bundle_contract remotely; close only after focused proof is green or an explicit reviewer accepts an equivalent RCH proof.",
+      "proof_refs": [
+        "artifacts/semantic_evidence_bundles_v1.json",
+        "artifacts/public_guarantee_semantic_evidence_bundles_v1.json",
+        "tests/semantic_evidence_bundles_contract.rs"
+      ],
+      "evidence_refs": [
+        "artifacts/semantic_evidence_bundles_v1.json",
+        "artifacts/public_guarantee_semantic_evidence_bundles_v1.json",
+        "docs/semantic_evidence_bundles.md"
+      ],
+      "no_claims": [
+        "does not prove every public guarantee",
+        "does not prove broad runtime correctness",
+        "does not approve stale proof reuse"
+      ]
+    },
+    {
+      "idea_id": "next-10-state-snapshot-live-upgrade",
+      "title": "State snapshot and live-upgrade readiness track",
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.15",
+      "tracker_status": "in_progress",
+      "decision": "still-open",
+      "current_blocker": "State snapshot readiness artifact/doc/contract is landed, but focused RCH proof was refused before execution.",
+      "next_step": "Retry state_snapshot_live_upgrade_readiness_contract remotely after RCH admission clears.",
+      "proof_refs": [
+        "artifacts/state_snapshot_live_upgrade_readiness_v1.json",
+        "tests/state_snapshot_live_upgrade_readiness_contract.rs",
+        "docs/state_snapshot_live_upgrade_readiness.md"
+      ],
+      "evidence_refs": [
+        "artifacts/state_snapshot_live_upgrade_readiness_v1.json",
+        "docs/state_snapshot_live_upgrade_readiness.md",
+        "tests/state_snapshot_live_upgrade_readiness_contract.rs"
+      ],
+      "no_claims": [
+        "does not prove production live upgrade",
+        "does not prove arbitrary hot code reload",
+        "does not prove all runtime surfaces are snapshot-safe"
+      ]
+    }
+  ],
+  "blocking_children": [
+    {
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
+      "tracker_status": "open",
+      "reason": "AppSpec child chain is incomplete."
+    },
+    {
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.6",
+      "tracker_status": "in_progress",
+      "reason": "Authority-flow contract lacks a clean remote RCH pass."
+    },
+    {
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.8",
+      "tracker_status": "in_progress",
+      "reason": "Reference app gallery contract lacks a clean remote RCH pass."
+    },
+    {
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.9",
+      "tracker_status": "in_progress",
+      "reason": "Trace inspector contract lacks a clean remote RCH pass."
+    },
+    {
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.10",
+      "tracker_status": "in_progress",
+      "reason": "Parser fuzz inventory contract lacks a clean remote RCH pass."
+    },
+    {
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.12",
+      "tracker_status": "in_progress",
+      "reason": "Platform capability matrix contract lacks a clean remote RCH pass."
+    },
+    {
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.14",
+      "tracker_status": "in_progress",
+      "reason": "Semantic evidence bundle contracts lack a clean remote RCH pass."
+    },
+    {
+      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.15",
+      "tracker_status": "in_progress",
+      "reason": "State snapshot readiness contract lacks a clean remote RCH pass."
+    }
+  ],
+  "closeout_verdict": {
+    "status": "blocked",
+    "cannot_close_epic": true,
+    "summary": "The fifth-wave epic cannot close because eight owner beads remain open or proof-blocked. This packet is a deterministic handoff and fail-closed overlap audit, not a release or epic-completion signoff.",
+    "required_before_close": [
+      "all blocking child owner beads closed or explicitly deferred with reviewer acceptance",
+      "focused RCH proofs completed remotely or documented as accepted equivalent RCH evidence",
+      "final tracker comment records remaining blockers or closure basis",
+      "Agent Mail handoff records remaining blockers or closure basis"
+    ]
+  },
+  "handoff_record": {
+    "final_tracker_comment_required": true,
+    "agent_mail_handoff_required": true,
+    "primary_recipient": "DarkStream",
+    "must_include": [
+      "commit hash",
+      "RCH proof result or refusal",
+      "remaining blocking child IDs",
+      "explicit no local Cargo fallback statement",
+      "whether the fifth-wave epic can close"
+    ]
+  },
+  "validation": {
+    "lane_id": "fifth-wave-closeout-signoff-contract",
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_closeout_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_closeout_signoff_contract --no-default-features -- --nocapture",
+    "no_local_cargo_fallback": true,
+    "local_non_cargo_checks": [
+      "jq empty artifacts/fifth_wave_closeout_signoff_v1.json",
+      "rustfmt --edition 2024 --check tests/fifth_wave_closeout_signoff_contract.rs",
+      "git diff --check -- artifacts/fifth_wave_closeout_signoff_v1.json docs/fifth_wave_closeout_signoff.md tests/fifth_wave_closeout_signoff_contract.rs"
+    ]
+  },
+  "no_claims": [
+    "does not prove release readiness",
+    "does not prove broad workspace health",
+    "does not prove runtime correctness",
+    "does not prove performance improvement",
+    "does not prove child owner beads passed their focused contracts",
+    "does not prove live RCH fleet availability",
+    "does not approve local Cargo fallback",
+    "does not close the fifth-wave epic",
+    "does not authorize deleting files",
+    "does not create duplicate implementation beads"
+  ]
+}
