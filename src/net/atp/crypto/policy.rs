@@ -6,8 +6,9 @@
 use super::EncryptionError;
 use crate::atp::manifest::{
     EncryptionAlgorithm, EncryptionDomain, EncryptionPolicy, KeyDerivation, KeyDerivationFunction,
-    ObjectKind, PrivacyLevel,
+    PrivacyLevel,
 };
+use crate::atp::object::ObjectKind;
 use std::collections::BTreeMap;
 
 /// Policy-driven encryption decision engine.
@@ -23,7 +24,7 @@ impl EncryptionPolicyEngine {
                 salt: b"atp-default-salt-32-bytes-long!!".to_vec(),
                 iterations: None,
             },
-            apply_to_kinds: vec![ObjectKind::FileObject, ObjectKind::ContentAddressedBlob],
+            apply_to_kinds: vec![ObjectKind::FileObject, ObjectKind::DatasetObject],
             encrypt_metadata: false,
         }
     }
@@ -53,9 +54,9 @@ impl EncryptionPolicyEngine {
             },
             apply_to_kinds: vec![
                 ObjectKind::FileObject,
-                ObjectKind::ContentAddressedBlob,
+                ObjectKind::DatasetObject,
                 ObjectKind::StreamObject,
-                ObjectKind::Directory,
+                ObjectKind::DirectoryObject,
             ],
             encrypt_metadata: true,
         }
@@ -125,7 +126,7 @@ impl EncryptionPolicyEngine {
                     ));
                 }
                 let iterations = kd.iterations.unwrap_or(0);
-                if iterations < 1 || iterations > 1_000_000 {
+                if !(1..=1_000_000).contains(&iterations) {
                     return Err(EncryptionError::KeyDerivationFailed(
                         "Argon2id iterations must be 1-1,000,000".to_string(),
                     ));
@@ -238,6 +239,11 @@ impl EncryptionPolicyEngine {
                         "size-visible privacy level requires encryption".to_string(),
                     ));
                 }
+                if !policy.encrypt_metadata {
+                    return Err(EncryptionError::MetadataLeakage(
+                        "size-visible privacy requires metadata encryption".to_string(),
+                    ));
+                }
             }
             PrivacyLevel::FullPrivacy => {
                 if !has_encryption {
@@ -331,7 +337,7 @@ mod tests {
         ));
         assert!(EncryptionPolicyEngine::should_encrypt(
             &policy,
-            ObjectKind::Directory,
+            ObjectKind::DirectoryObject,
         ));
     }
 
@@ -375,6 +381,7 @@ mod tests {
     #[test]
     fn test_privacy_level_validation() {
         let encrypted_policy = EncryptionPolicyEngine::default_policy();
+        let metadata_encrypted_policy = EncryptionPolicyEngine::high_security_policy();
         let disabled_policy = EncryptionPolicyEngine::disabled_policy();
 
         // Public privacy with encryption should fail
@@ -392,17 +399,41 @@ mod tests {
             Err(EncryptionError::PrivacyViolation(_))
         ));
 
+        // Size-visible privacy hides metadata while still exposing size.
+        assert!(matches!(
+            EncryptionPolicyEngine::validate_privacy_level(
+                &encrypted_policy,
+                PrivacyLevel::SizeVisible
+            ),
+            Err(EncryptionError::MetadataLeakage(_))
+        ));
+
         // Valid combinations
-        assert!(EncryptionPolicyEngine::validate_privacy_level(
-            &disabled_policy,
-            PrivacyLevel::Public
-        )
-        .is_ok());
-        assert!(EncryptionPolicyEngine::validate_privacy_level(
-            &encrypted_policy,
-            PrivacyLevel::MetadataVisible
-        )
-        .is_ok());
+        assert!(
+            EncryptionPolicyEngine::validate_privacy_level(&disabled_policy, PrivacyLevel::Public)
+                .is_ok()
+        );
+        assert!(
+            EncryptionPolicyEngine::validate_privacy_level(
+                &encrypted_policy,
+                PrivacyLevel::MetadataVisible
+            )
+            .is_ok()
+        );
+        assert!(
+            EncryptionPolicyEngine::validate_privacy_level(
+                &metadata_encrypted_policy,
+                PrivacyLevel::SizeVisible
+            )
+            .is_ok()
+        );
+        assert!(
+            EncryptionPolicyEngine::validate_privacy_level(
+                &metadata_encrypted_policy,
+                PrivacyLevel::FullPrivacy
+            )
+            .is_ok()
+        );
     }
 
     #[test]

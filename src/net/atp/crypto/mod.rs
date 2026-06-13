@@ -13,9 +13,9 @@
 
 use crate::atp::manifest::{
     EncryptionAlgorithm, EncryptionDomain, EncryptionMetadata, EncryptionPolicy, KeyDerivation,
-    KeyDerivationFunction, ObjectKind, PrivacyLevel, TransformOrder, TransformType,
+    TransformOrder, TransformType,
 };
-use std::collections::BTreeMap;
+use crate::atp::object::ObjectKind;
 
 pub mod policy;
 
@@ -163,6 +163,9 @@ impl EncryptionEngine {
         key_material: &KeyMaterial,
         transform_order: Option<&TransformOrder>,
     ) -> Result<EncryptionResult, EncryptionError> {
+        // Validate the policy before any passthrough or domain decision can use it.
+        EncryptionPolicyEngine::validate_policy(policy)?;
+
         // Validate encryption is allowed for this object kind
         if !policy.apply_to_kinds.contains(&object_kind) {
             return Err(EncryptionError::PolicyViolation(format!(
@@ -182,6 +185,7 @@ impl EncryptionEngine {
 
         // Validate key material
         key_material.validate_for_algorithm(policy.algorithm)?;
+        Self::validate_key_derivation_match(policy, key_material)?;
 
         // Compute plaintext hash before encryption
         let plaintext_hash = Self::compute_hash(data);
@@ -222,6 +226,9 @@ impl EncryptionEngine {
         metadata: &EncryptionMetadata,
         key_material: &KeyMaterial,
     ) -> Result<DecryptionResult, EncryptionError> {
+        // Reject malformed metadata before trusting the declared algorithm.
+        Self::validate_metadata_shape(metadata)?;
+
         // Validate key material
         key_material.validate_for_algorithm(metadata.algorithm)?;
 
@@ -268,6 +275,72 @@ impl EncryptionEngine {
                 "KDF {:?} not allowed in domain {}",
                 policy.key_derivation.kdf, domain.domain_id
             )));
+        }
+
+        Ok(())
+    }
+
+    fn validate_key_derivation_match(
+        policy: &EncryptionPolicy,
+        key_material: &KeyMaterial,
+    ) -> Result<(), EncryptionError> {
+        if key_material.derivation != policy.key_derivation {
+            return Err(EncryptionError::KeyDerivationFailed(
+                "key material derivation does not match encryption policy".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_metadata_shape(metadata: &EncryptionMetadata) -> Result<(), EncryptionError> {
+        match metadata.algorithm {
+            EncryptionAlgorithm::None => {
+                if !metadata.iv.is_empty() {
+                    return Err(EncryptionError::InvalidMetadata(format!(
+                        "none algorithm must not carry an IV, got {} bytes",
+                        metadata.iv.len(),
+                    )));
+                }
+                if !metadata.auth_tag.is_empty() {
+                    return Err(EncryptionError::InvalidMetadata(format!(
+                        "none algorithm must not carry an auth tag, got {} bytes",
+                        metadata.auth_tag.len(),
+                    )));
+                }
+            }
+            EncryptionAlgorithm::ChaCha20Poly1305 => {
+                if metadata.iv.len() != Self::CHACHA20POLY1305_NONCE_LEN {
+                    return Err(EncryptionError::InvalidMetadata(format!(
+                        "ChaCha20-Poly1305 nonce must be {} bytes, got {}",
+                        Self::CHACHA20POLY1305_NONCE_LEN,
+                        metadata.iv.len(),
+                    )));
+                }
+                if metadata.auth_tag.len() != Self::CHACHA20POLY1305_TAG_LEN {
+                    return Err(EncryptionError::InvalidMetadata(format!(
+                        "ChaCha20-Poly1305 auth tag must be {} bytes, got {}",
+                        Self::CHACHA20POLY1305_TAG_LEN,
+                        metadata.auth_tag.len(),
+                    )));
+                }
+            }
+            EncryptionAlgorithm::Aes256Gcm => {
+                if metadata.iv.len() != Self::AES256GCM_NONCE_LEN {
+                    return Err(EncryptionError::InvalidMetadata(format!(
+                        "AES-256-GCM nonce must be {} bytes, got {}",
+                        Self::AES256GCM_NONCE_LEN,
+                        metadata.iv.len(),
+                    )));
+                }
+                if metadata.auth_tag.len() != Self::AES256GCM_TAG_LEN {
+                    return Err(EncryptionError::InvalidMetadata(format!(
+                        "AES-256-GCM auth tag must be {} bytes, got {}",
+                        Self::AES256GCM_TAG_LEN,
+                        metadata.auth_tag.len(),
+                    )));
+                }
+            }
         }
 
         Ok(())
@@ -326,11 +399,13 @@ impl EncryptionEngine {
     }
 
     /// Generate secure random IV/nonce.
-    fn generate_iv(size: usize) -> Vec<u8> {
-        use rand::RngCore;
+    fn generate_iv(size: usize) -> Result<Vec<u8>, EncryptionError> {
+        crate::util::check_ambient_entropy("atp-crypto-nonce");
         let mut iv = vec![0u8; size];
-        rand::thread_rng().fill_bytes(&mut iv);
-        iv
+        getrandom::fill(&mut iv).map_err(|err| {
+            EncryptionError::EncryptionFailed(format!("OS entropy unavailable for nonce: {err}"))
+        })?;
+        Ok(iv)
     }
 
     /// Compute SHA-256 hash.
@@ -351,7 +426,7 @@ impl EncryptionEngine {
         let cipher = ChaCha20Poly1305::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
-        let nonce_bytes = Self::generate_iv(Self::CHACHA20POLY1305_NONCE_LEN);
+        let nonce_bytes = Self::generate_iv(Self::CHACHA20POLY1305_NONCE_LEN)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let mut buffer = plaintext.to_vec();
@@ -380,21 +455,6 @@ impl EncryptionEngine {
         let cipher = ChaCha20Poly1305::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
 
-        if metadata.iv.len() != Self::CHACHA20POLY1305_NONCE_LEN {
-            return Err(EncryptionError::InvalidMetadata(format!(
-                "ChaCha20-Poly1305 nonce must be {} bytes, got {}",
-                Self::CHACHA20POLY1305_NONCE_LEN,
-                metadata.iv.len(),
-            )));
-        }
-        if metadata.auth_tag.len() != Self::CHACHA20POLY1305_TAG_LEN {
-            return Err(EncryptionError::InvalidMetadata(format!(
-                "ChaCha20-Poly1305 auth tag must be {} bytes, got {}",
-                Self::CHACHA20POLY1305_TAG_LEN,
-                metadata.auth_tag.len(),
-            )));
-        }
-
         let nonce = Nonce::from_slice(&metadata.iv);
         let tag = Tag::from_slice(&metadata.auth_tag);
 
@@ -416,7 +476,7 @@ impl EncryptionEngine {
         let cipher = Aes256Gcm::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
-        let nonce_bytes = Self::generate_iv(Self::AES256GCM_NONCE_LEN);
+        let nonce_bytes = Self::generate_iv(Self::AES256GCM_NONCE_LEN)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let mut buffer = plaintext.to_vec();
@@ -446,21 +506,6 @@ impl EncryptionEngine {
         let cipher = Aes256Gcm::new_from_slice(&key_material.key)
             .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
 
-        if metadata.iv.len() != Self::AES256GCM_NONCE_LEN {
-            return Err(EncryptionError::InvalidMetadata(format!(
-                "AES-256-GCM nonce must be {} bytes, got {}",
-                Self::AES256GCM_NONCE_LEN,
-                metadata.iv.len(),
-            )));
-        }
-        if metadata.auth_tag.len() != Self::AES256GCM_TAG_LEN {
-            return Err(EncryptionError::InvalidMetadata(format!(
-                "AES-256-GCM auth tag must be {} bytes, got {}",
-                Self::AES256GCM_TAG_LEN,
-                metadata.auth_tag.len(),
-            )));
-        }
-
         let nonce = Nonce::from_slice(&metadata.iv);
         let tag = Tag::from_slice(&metadata.auth_tag);
 
@@ -475,6 +520,7 @@ impl EncryptionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::manifest::KeyDerivationFunction;
 
     #[test]
     fn test_key_material_validation() {
@@ -487,12 +533,16 @@ mod tests {
 
         let key_material = KeyMaterial::new(key, "test-key".to_string(), 1, derivation);
 
-        assert!(key_material
-            .validate_for_algorithm(EncryptionAlgorithm::ChaCha20Poly1305)
-            .is_ok());
-        assert!(key_material
-            .validate_for_algorithm(EncryptionAlgorithm::Aes256Gcm)
-            .is_ok());
+        assert!(
+            key_material
+                .validate_for_algorithm(EncryptionAlgorithm::ChaCha20Poly1305)
+                .is_ok()
+        );
+        assert!(
+            key_material
+                .validate_for_algorithm(EncryptionAlgorithm::Aes256Gcm)
+                .is_ok()
+        );
 
         // Wrong key size
         let bad_key_material = KeyMaterial::new(
@@ -510,6 +560,79 @@ mod tests {
             bad_key_material.validate_for_algorithm(EncryptionAlgorithm::ChaCha20Poly1305),
             Err(EncryptionError::InvalidKey(_))
         ));
+    }
+
+    #[test]
+    fn encrypt_rejects_key_derivation_that_differs_from_policy() {
+        let test_data = b"policy derivation must match actual key material";
+        let key_material = KeyMaterial::new(
+            vec![1u8; 32],
+            "test-key".to_string(),
+            1,
+            KeyDerivation {
+                kdf: KeyDerivationFunction::Direct,
+                salt: vec![],
+                iterations: None,
+            },
+        );
+
+        let policy = EncryptionPolicy {
+            algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
+            key_derivation: KeyDerivation {
+                kdf: KeyDerivationFunction::HkdfSha256,
+                salt: b"policy-salt".to_vec(),
+                iterations: None,
+            },
+            apply_to_kinds: vec![ObjectKind::FileObject],
+            encrypt_metadata: false,
+        };
+
+        let result = EncryptionEngine::encrypt(
+            test_data,
+            ObjectKind::FileObject,
+            &policy,
+            Some(&EncryptionPolicyEngine::relay_privacy_domain()),
+            &key_material,
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(EncryptionError::KeyDerivationFailed(message))
+                if message.contains("key material derivation")
+        ));
+    }
+
+    #[test]
+    fn encrypt_rejects_invalid_none_policy_before_passthrough() {
+        let key_material = KeyMaterial::new(
+            vec![],
+            "no-encryption-key".to_string(),
+            1,
+            KeyDerivation {
+                kdf: KeyDerivationFunction::Direct,
+                salt: vec![],
+                iterations: None,
+            },
+        );
+
+        let invalid_policy = EncryptionPolicy {
+            algorithm: EncryptionAlgorithm::None,
+            key_derivation: key_material.derivation.clone(),
+            apply_to_kinds: vec![ObjectKind::FileObject],
+            encrypt_metadata: false,
+        };
+
+        let result = EncryptionEngine::encrypt(
+            b"must not silently pass through",
+            ObjectKind::FileObject,
+            &invalid_policy,
+            None,
+            &key_material,
+            None,
+        );
+
+        assert!(matches!(result, Err(EncryptionError::PolicyViolation(_))));
     }
 
     #[test]
@@ -723,6 +846,42 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_rejects_none_metadata_with_iv_or_auth_tag() {
+        let key_material = KeyMaterial::new(
+            vec![],
+            "no-encryption-key".to_string(),
+            1,
+            KeyDerivation {
+                kdf: KeyDerivationFunction::Direct,
+                salt: vec![],
+                iterations: None,
+            },
+        );
+        let valid_none_metadata = EncryptionMetadata {
+            algorithm: EncryptionAlgorithm::None,
+            iv: vec![],
+            auth_tag: vec![],
+            key_derivation: key_material.derivation.clone(),
+        };
+
+        for invalid_metadata in [
+            EncryptionMetadata {
+                iv: vec![1],
+                ..valid_none_metadata.clone()
+            },
+            EncryptionMetadata {
+                auth_tag: vec![1],
+                ..valid_none_metadata
+            },
+        ] {
+            let err = EncryptionEngine::decrypt(b"plaintext", &invalid_metadata, &key_material)
+                .unwrap_err();
+
+            assert!(matches!(err, EncryptionError::InvalidMetadata(_)));
+        }
+    }
+
+    #[test]
     fn test_encryption_disabled_for_wrong_object_kind() {
         let test_data = b"Hello, world!";
         let key_material = KeyMaterial::new(
@@ -745,7 +904,7 @@ mod tests {
 
         let result = EncryptionEngine::encrypt(
             test_data,
-            ObjectKind::Directory, // Not in apply_to_kinds
+            ObjectKind::DirectoryObject, // Not in apply_to_kinds
             &policy,
             None,
             &key_material,

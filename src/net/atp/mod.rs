@@ -16,6 +16,7 @@
 //! - Cx-first APIs with explicit capability boundaries
 
 pub mod chunk;
+pub mod crypto;
 pub mod datagram;
 pub mod discovery;
 pub mod handshake;
