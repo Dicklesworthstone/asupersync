@@ -37,5 +37,4 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_targe
 ```
 
 This lane validates the artifact shape, target registration, fixture references,
-non-claim boundaries, and remote-only validation command. It does not run
-cargo-fuzz.
+non-claim boundaries, and remote-only validation command. It does not run cargo-fuzz.
