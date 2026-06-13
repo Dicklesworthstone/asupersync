@@ -516,6 +516,12 @@ layer, not comprehensive `tokio::fs` parity or a fully region-native filesystem
 driver. The crash-safe ATP disk writer, platform doctor, sparse-write, journal,
 resume, and verifier work remains tracked by the ATP-D beads.
 
+The broader host-support policy is captured by the checked
+[`Platform Capability Matrix`](./docs/platform_capability_matrix.md), which
+keeps supported, feature-gated, partial, unsupported, and not-applicable rows
+separate so skipped or unsupported surfaces are never counted as green support
+evidence.
+
 If you do need Tokio-locked dependencies at the boundary, use the migration
 playbook in [`docs/integration.md`](./docs/integration.md#tokio-migration-playbook).
 That guide maps the live `asupersync-tokio-compat` entrypoints to common

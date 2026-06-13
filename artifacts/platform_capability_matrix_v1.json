@@ -1,0 +1,784 @@
+{
+  "schema_version": "platform-capability-matrix-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.12",
+  "artifact_path": "artifacts/platform_capability_matrix_v1.json",
+  "matrix_id": "platform_capability_matrix",
+  "source_of_truth": {
+    "artifact": "artifacts/platform_capability_matrix_v1.json",
+    "docs": "docs/platform_capability_matrix.md",
+    "contract_test": "tests/platform_capability_matrix_contract.rs"
+  },
+  "required_platform_ids": [
+    "linux",
+    "macos_bsd",
+    "windows",
+    "browser"
+  ],
+  "required_capability_ids": [
+    "reactor_readiness",
+    "io_uring_reactor",
+    "filesystem_basic_ops",
+    "filesystem_symlink_sparse",
+    "process_management",
+    "signal_streams",
+    "tls_roots",
+    "browser_host_apis",
+    "toolchain_target"
+  ],
+  "required_families": [
+    "browser",
+    "filesystem",
+    "process",
+    "reactor",
+    "signal",
+    "tls",
+    "toolchain"
+  ],
+  "platforms": [
+    {
+      "platform_id": "linux",
+      "host_role": "native",
+      "cfg": "target_os = \"linux\"",
+      "notes": "Linux native runtime surface with epoll, optional io_uring, filesystem, process, signal, and TLS feature lanes."
+    },
+    {
+      "platform_id": "macos_bsd",
+      "host_role": "native",
+      "cfg": "target_os in macos/freebsd/openbsd/netbsd/dragonfly",
+      "notes": "BSD-family native runtime surface with kqueue readiness and Unix filesystem, process, and signal semantics."
+    },
+    {
+      "platform_id": "windows",
+      "host_role": "native",
+      "cfg": "target_os = \"windows\"",
+      "notes": "Windows native runtime surface with IOCP readiness and a narrower process and signal surface."
+    },
+    {
+      "platform_id": "browser",
+      "host_role": "wasm_host",
+      "cfg": "target_arch = \"wasm32\" plus explicit browser host package",
+      "notes": "Browser host boundary. Host APIs are explicit capabilities, not direct native OS parity."
+    }
+  ],
+  "status_catalog": [
+    {
+      "status": "supported",
+      "counts_as_supported": true,
+      "allows_pass": true,
+      "meaning": "The capability is part of the admitted platform contract when its cited proof lane is fresh."
+    },
+    {
+      "status": "feature_gated",
+      "counts_as_supported": false,
+      "allows_pass": false,
+      "meaning": "The capability requires an explicit feature, package, or host lane and cannot count as supported in the base platform matrix."
+    },
+    {
+      "status": "partial",
+      "counts_as_supported": false,
+      "allows_pass": false,
+      "meaning": "The platform exposes a narrower or policy-restricted subset. It must render as partial or skip until a narrower claim is made."
+    },
+    {
+      "status": "unsupported",
+      "counts_as_supported": false,
+      "allows_pass": false,
+      "meaning": "The platform does not provide this capability."
+    },
+    {
+      "status": "not_applicable",
+      "counts_as_supported": false,
+      "allows_pass": false,
+      "meaning": "The capability belongs to another host role and must not be promoted into this platform."
+    }
+  ],
+  "decision_policy": {
+    "skip_is_supported": false,
+    "unsupported_is_supported": false,
+    "partial_is_supported": false,
+    "feature_gated_requires_feature_lane": true,
+    "required_runtime_verdicts": [
+      "pass",
+      "fail",
+      "skip"
+    ],
+    "required_no_claim_boundary": "Only status=supported rows may include a pass verdict. Feature-gated, partial, unsupported, and not-applicable rows are retained as skip or fail evidence and never count as supported."
+  },
+  "capabilities": [
+    {
+      "capability_id": "reactor_readiness",
+      "family": "reactor",
+      "description": "Readiness notification backend used by runtime I/O registration.",
+      "source_paths": [
+        "src/runtime/reactor/mod.rs",
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs",
+        "src/runtime/reactor/browser.rs"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/runtime/reactor/mod.rs",
+            "src/runtime/reactor/epoll.rs"
+          ],
+          "notes": "Linux exports EpollReactor as the always-available native readiness backend."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/runtime/reactor/mod.rs",
+            "src/runtime/reactor/kqueue.rs"
+          ],
+          "notes": "BSD-family targets export KqueueReactor through cfg-gated reactor modules."
+        },
+        {
+          "platform_id": "windows",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/runtime/reactor/mod.rs",
+            "src/runtime/reactor/windows.rs"
+          ],
+          "notes": "Windows exports IocpReactor through the cfg-gated reactor module."
+        },
+        {
+          "platform_id": "browser",
+          "status": "partial",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/runtime/reactor/mod.rs",
+            "src/runtime/reactor/browser.rs"
+          ],
+          "notes": "BrowserReactor is an event-loop host boundary and is not native file-descriptor readiness parity."
+        }
+      ],
+      "no_claims": [
+        "does not prove scheduler fairness",
+        "does not prove kernel readiness parity across all OS versions"
+      ]
+    },
+    {
+      "capability_id": "io_uring_reactor",
+      "family": "reactor",
+      "description": "Linux io_uring readiness acceleration.",
+      "source_paths": [
+        "src/runtime/reactor/io_uring.rs",
+        "src/runtime/reactor/mod.rs",
+        "Cargo.toml"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "feature_gated",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/runtime/reactor/io_uring.rs",
+            "Cargo.toml"
+          ],
+          "notes": "The io-uring feature admits the Linux path; the base matrix does not count it as supported without the feature-specific proof lane."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "unsupported",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/runtime/reactor/io_uring.rs"
+          ],
+          "notes": "io_uring is Linux-specific."
+        },
+        {
+          "platform_id": "windows",
+          "status": "unsupported",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/runtime/reactor/io_uring.rs",
+            "src/runtime/reactor/windows.rs"
+          ],
+          "notes": "Windows uses IOCP, not io_uring."
+        },
+        {
+          "platform_id": "browser",
+          "status": "unsupported",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/runtime/reactor/io_uring.rs",
+            "src/runtime/reactor/browser.rs"
+          ],
+          "notes": "Browser hosts do not expose io_uring."
+        }
+      ],
+      "no_claims": [
+        "does not certify io_uring performance",
+        "does not make io_uring available outside Linux feature lanes"
+      ]
+    },
+    {
+      "capability_id": "filesystem_basic_ops",
+      "family": "filesystem",
+      "description": "File, directory, metadata, and path operations surfaced by the runtime filesystem modules.",
+      "source_paths": [
+        "src/fs/mod.rs",
+        "src/fs/file.rs",
+        "src/fs/dir.rs",
+        "src/fs/metadata.rs",
+        "src/fs/path_ops.rs",
+        "src/io/browser_storage.rs"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/fs/mod.rs",
+            "src/fs/platform.rs"
+          ],
+          "notes": "Native filesystem operations are admitted; ATP-specific policy still relies on per-host probes."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/fs/mod.rs",
+            "src/fs/platform.rs"
+          ],
+          "notes": "Native filesystem operations are admitted with platform policy differences tracked separately."
+        },
+        {
+          "platform_id": "windows",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/fs/mod.rs",
+            "src/fs/platform.rs"
+          ],
+          "notes": "Native filesystem operations are admitted with Windows path and durability policy differences."
+        },
+        {
+          "platform_id": "browser",
+          "status": "partial",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/io/browser_storage.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser storage adapters are explicit host APIs and are not native filesystem parity."
+        }
+      ],
+      "no_claims": [
+        "does not prove durability semantics for every filesystem",
+        "does not treat browser storage as native filesystem support"
+      ]
+    },
+    {
+      "capability_id": "filesystem_symlink_sparse",
+      "family": "filesystem",
+      "description": "Symlink, sparse-file, preallocation, and final-rename policy surfaces.",
+      "source_paths": [
+        "src/fs/platform.rs",
+        "docs/tokio_fs_process_signal_parity_matrix.json",
+        "docs/tokio_fs_process_signal_migration_playbook.json"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "partial",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/fs/platform.rs",
+            "docs/tokio_fs_process_signal_parity_matrix.json"
+          ],
+          "notes": "ATP probes must decide sparse, preallocation, symlink, and durability behavior for the concrete host."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "partial",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/fs/platform.rs",
+            "docs/tokio_fs_process_signal_migration_playbook.json"
+          ],
+          "notes": "BSD-family filesystems require host-specific symlink and durability policy."
+        },
+        {
+          "platform_id": "windows",
+          "status": "partial",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/fs/platform.rs",
+            "docs/tokio_fs_process_signal_parity_matrix.json"
+          ],
+          "notes": "Windows path, symlink privilege, sparse, and rename semantics require conservative policy."
+        },
+        {
+          "platform_id": "browser",
+          "status": "unsupported",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/io/browser_storage.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser host storage does not expose native symlink or sparse-file behavior."
+        }
+      ],
+      "no_claims": [
+        "does not mark sparse or symlink behavior supported from target family alone",
+        "does not replace ATP host probes"
+      ]
+    },
+    {
+      "capability_id": "process_management",
+      "family": "process",
+      "description": "Child process spawning, wait, pipes, process groups, and cancellation cleanup.",
+      "source_paths": [
+        "src/process.rs",
+        "docs/tokio_fs_process_signal_parity_matrix.md"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/process.rs",
+            "docs/tokio_fs_process_signal_parity_matrix.md"
+          ],
+          "notes": "Unix process spawning and nonblocking pipe integration are admitted."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/process.rs",
+            "docs/tokio_fs_process_signal_parity_matrix.md"
+          ],
+          "notes": "Unix process spawning and nonblocking pipe integration are admitted."
+        },
+        {
+          "platform_id": "windows",
+          "status": "partial",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/process.rs",
+            "docs/tokio_fs_process_signal_parity_matrix.json"
+          ],
+          "notes": "Windows process support is narrower and requires explicit per-surface proof before pass."
+        },
+        {
+          "platform_id": "browser",
+          "status": "unsupported",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/process.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser hosts do not expose child process management."
+        }
+      ],
+      "no_claims": [
+        "does not prove process-group semantics for every native OS",
+        "does not expose child processes in browser hosts"
+      ]
+    },
+    {
+      "capability_id": "signal_streams",
+      "family": "signal",
+      "description": "Async signal streams, Ctrl+C, and graceful shutdown helpers.",
+      "source_paths": [
+        "src/signal/mod.rs",
+        "src/signal/signal.rs",
+        "src/signal/ctrl_c.rs",
+        "src/signal/graceful.rs"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/signal/mod.rs",
+            "src/signal/signal.rs"
+          ],
+          "notes": "Unix signal streams and Ctrl+C are admitted."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/signal/mod.rs",
+            "src/signal/signal.rs"
+          ],
+          "notes": "Unix signal streams and Ctrl+C are admitted."
+        },
+        {
+          "platform_id": "windows",
+          "status": "partial",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/signal/mod.rs",
+            "src/signal/kind.rs"
+          ],
+          "notes": "Windows supports a subset through SIGINT, SIGTERM, and SIGBREAK mappings."
+        },
+        {
+          "platform_id": "browser",
+          "status": "unsupported",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/signal/mod.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser hosts do not expose POSIX or Windows process signals."
+        }
+      ],
+      "no_claims": [
+        "does not prove delivery ordering for every signal kind",
+        "does not treat unsupported browser signals as skipped pass evidence"
+      ]
+    },
+    {
+      "capability_id": "tls_roots",
+      "family": "tls",
+      "description": "TLS connector, acceptor, and root-store options.",
+      "source_paths": [
+        "src/tls/mod.rs",
+        "src/tls/connector.rs",
+        "src/tls/acceptor.rs",
+        "Cargo.toml"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "feature_gated",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/tls/mod.rs",
+            "Cargo.toml"
+          ],
+          "notes": "rustls support requires the tls feature and explicit root-store selection."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "feature_gated",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/tls/mod.rs",
+            "Cargo.toml"
+          ],
+          "notes": "rustls support requires the tls feature and explicit root-store selection."
+        },
+        {
+          "platform_id": "windows",
+          "status": "feature_gated",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/tls/mod.rs",
+            "Cargo.toml"
+          ],
+          "notes": "rustls support requires the tls feature and explicit root-store selection."
+        },
+        {
+          "platform_id": "browser",
+          "status": "not_applicable",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/io/browser_stream.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser TLS is owned by the host fetch/WebSocket stack, not the rustls runtime feature."
+        }
+      ],
+      "no_claims": [
+        "does not certify certificate store freshness",
+        "does not claim browser rustls support"
+      ]
+    },
+    {
+      "capability_id": "browser_host_apis",
+      "family": "browser",
+      "description": "Fetch, WebSocket, storage, entropy, time, and host API capabilities exposed by browser packages.",
+      "source_paths": [
+        "src/io/cap.rs",
+        "src/io/browser_stream.rs",
+        "src/io/browser_storage.rs",
+        "asupersync-browser-core/src/lib.rs",
+        "docs/WASM.md"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "not_applicable",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/io/cap.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser host APIs are not native Linux APIs."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "not_applicable",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/io/cap.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser host APIs are not native BSD-family APIs."
+        },
+        {
+          "platform_id": "windows",
+          "status": "not_applicable",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/io/cap.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser host APIs are not native Windows APIs."
+        },
+        {
+          "platform_id": "browser",
+          "status": "feature_gated",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "src/io/cap.rs",
+            "src/io/browser_stream.rs",
+            "src/io/browser_storage.rs",
+            "asupersync-browser-core/src/lib.rs",
+            "docs/WASM.md"
+          ],
+          "notes": "Browser host APIs require the explicit wasm/browser package and fresh host-fixture evidence."
+        }
+      ],
+      "no_claims": [
+        "does not promote browser APIs into native OS capabilities",
+        "does not certify every browser or bundler without browser-specific evidence"
+      ]
+    },
+    {
+      "capability_id": "toolchain_target",
+      "family": "toolchain",
+      "description": "Rust 2024 nightly toolchain and target/package constraints needed before platform rows can run.",
+      "source_paths": [
+        "rust-toolchain.toml",
+        "Cargo.toml",
+        "asupersync-browser-core/Cargo.toml"
+      ],
+      "platform_support": [
+        {
+          "platform_id": "linux",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "rust-toolchain.toml",
+            "Cargo.toml"
+          ],
+          "notes": "Linux native targets use the workspace Rust 2024 nightly Cargo toolchain."
+        },
+        {
+          "platform_id": "macos_bsd",
+          "status": "supported",
+          "counts_as_supported": true,
+          "runtime_verdicts": [
+            "pass",
+            "fail"
+          ],
+          "evidence_refs": [
+            "rust-toolchain.toml",
+            "Cargo.toml"
+          ],
+          "notes": "BSD-family native targets use the workspace Rust 2024 nightly Cargo toolchain."
+        },
+        {
+          "platform_id": "windows",
+          "status": "partial",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "rust-toolchain.toml",
+            "Cargo.toml"
+          ],
+          "notes": "Windows target support exists but must keep Windows-specific completeness proof separate from native Unix proof."
+        },
+        {
+          "platform_id": "browser",
+          "status": "feature_gated",
+          "counts_as_supported": false,
+          "runtime_verdicts": [
+            "skip",
+            "fail"
+          ],
+          "evidence_refs": [
+            "rust-toolchain.toml",
+            "asupersync-browser-core/Cargo.toml"
+          ],
+          "notes": "Browser support requires wasm target/package lanes and cannot be inferred from native Cargo checks."
+        }
+      ],
+      "no_claims": [
+        "does not prove cross-compilation for every target triple",
+        "does not treat skipped target checks as supported"
+      ]
+    }
+  ],
+  "docs_markers": [
+    "PLATFORM-CAPABILITY-MATRIX:SOURCE",
+    "PLATFORM-CAPABILITY-MATRIX:STATUS-POLICY",
+    "PLATFORM-CAPABILITY-MATRIX:NO-CLAIMS"
+  ],
+  "validation": {
+    "contract_test": "tests/platform_capability_matrix_contract.rs",
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_platform_capability_matrix CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test platform_capability_matrix_contract -- --nocapture",
+    "no_local_cargo_fallback": true
+  },
+  "no_claims": [
+    "does not prove broad workspace health",
+    "does not prove release readiness",
+    "does not certify live RCH fleet availability",
+    "does not count feature-gated, partial, unsupported, or not-applicable rows as supported",
+    "does not replace per-platform e2e proof lanes or ATP host probes"
+  ]
+}
