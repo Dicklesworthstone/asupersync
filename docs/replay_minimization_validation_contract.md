@@ -83,13 +83,19 @@ found a repro.
 Package minimization uses a stable JSON report projection:
 `schema_version`, `input_kind=incident_replay_package_json`,
 `minimized_surface=replay_package_sources`, the package identifier, the
-deterministic oracle, the effective shrink config, and the full
-`IncidentReplayMinimizationReport`. Budget exhaustion is still a repro-bearing
-best-so-far result when the crashpack-preservation oracle remains true: the
-report verdict is `budget_exhausted`, the issue list names
-`config.step_budget`, the shrink log includes a non-accepted budget step, and
-the emitted repro summary marks `budget_exhausted=true`. This satisfies the
-CLI's no-hang contract without claiming fixed-point minimality.
+deterministic oracle, the effective shrink config, an explicit verification
+summary, and the full `IncidentReplayMinimizationReport`. The verification
+summary records whether a repro was emitted, whether the stable oracle is still
+preserved, whether required source roles and trace fingerprints remain present,
+retained source/feature-flag counts, and whether the run exhausted its budget.
+No-repro outcomes fail closed with `verified_still_failing=false` rather than
+borrowing truth from the input package. Budget exhaustion is still a
+repro-bearing best-so-far result when the crashpack-preservation oracle remains
+true: the report verdict is `budget_exhausted`, the issue list names
+`config.step_budget`, the shrink log includes a non-accepted budget step, the
+verification summary marks `verified_still_failing=true`, and the emitted repro
+summary marks `budget_exhausted=true`. This satisfies the CLI's no-hang
+contract without claiming fixed-point minimality.
 
 ### Dimension 3: Geodesic Normalization Correctness
 

@@ -397,7 +397,32 @@ struct MinimizeIncidentReplayPackageReport {
     package_id: String,
     oracle: IncidentReplayOracle,
     config: IncidentReplayMinimizationConfig,
+    verification: IncidentReplayPackageVerification,
     outcome: IncidentReplayMinimizationReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IncidentReplayPackageVerification {
+    #[serde(flatten)]
+    status: IncidentReplayPackageVerificationStatus,
+    #[serde(flatten)]
+    required_evidence: IncidentReplayPackageRequiredEvidence,
+    retained_source_count: usize,
+    retained_feature_flag_count: usize,
+    budget_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IncidentReplayPackageVerificationStatus {
+    emitted_repro: bool,
+    verified_still_failing: bool,
+    oracle_stable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IncidentReplayPackageRequiredEvidence {
+    required_source_roles_present: bool,
+    required_trace_fingerprint_present: bool,
 }
 
 fn parse_minimize_input(path: &Path, raw: &str) -> Result<MinimizeInput, String> {
@@ -560,6 +585,7 @@ fn minimize_incident_replay_package_report(
         shrink_feature_flags: true,
     };
     let outcome = minimize_incident_replay_package(package, oracle.clone(), config);
+    let verification = verify_incident_replay_package_repro(&oracle, &outcome);
 
     MinimizeIncidentReplayPackageReport {
         schema_version: 1,
@@ -569,7 +595,66 @@ fn minimize_incident_replay_package_report(
         package_id: package.package_id.clone(),
         oracle,
         config,
+        verification,
         outcome,
+    }
+}
+
+fn verify_incident_replay_package_repro(
+    oracle: &IncidentReplayOracle,
+    outcome: &IncidentReplayMinimizationReport,
+) -> IncidentReplayPackageVerification {
+    let Some(repro) = &outcome.repro else {
+        return IncidentReplayPackageVerification {
+            status: IncidentReplayPackageVerificationStatus {
+                emitted_repro: false,
+                verified_still_failing: false,
+                oracle_stable: oracle.stable,
+            },
+            required_evidence: IncidentReplayPackageRequiredEvidence {
+                required_source_roles_present: false,
+                required_trace_fingerprint_present: false,
+            },
+            retained_source_count: 0,
+            retained_feature_flag_count: 0,
+            budget_exhausted: outcome.contains_issue(
+                asupersync::trace::IncidentReplayMinimizationIssueKind::BudgetExhausted,
+            ),
+        };
+    };
+
+    let required_source_roles_present = oracle.required_source_roles.iter().all(|role| {
+        repro
+            .retained_sources
+            .iter()
+            .any(|source| source.role == *role)
+    });
+    let required_trace_fingerprint_present =
+        oracle
+            .required_trace_fingerprint
+            .as_ref()
+            .is_none_or(|required| {
+                repro
+                    .retained_sources
+                    .iter()
+                    .any(|source| source.trace_fingerprint.as_ref() == Some(required))
+            });
+    let verified_still_failing =
+        oracle.stable && required_source_roles_present && required_trace_fingerprint_present;
+
+    IncidentReplayPackageVerification {
+        status: IncidentReplayPackageVerificationStatus {
+            emitted_repro: true,
+            verified_still_failing,
+            oracle_stable: oracle.stable,
+        },
+        required_evidence: IncidentReplayPackageRequiredEvidence {
+            required_source_roles_present,
+            required_trace_fingerprint_present,
+        },
+        retained_source_count: repro.retained_sources.len(),
+        retained_feature_flag_count: repro.retained_feature_flags.len(),
+        budget_exhausted: repro.summary.budget_exhausted,
     }
 }
 
@@ -610,6 +695,14 @@ fn format_incident_minimize_result(report: &MinimizeIncidentReplayPackageReport)
         lines.push(format!(
             "Budget exhausted: {}",
             repro.summary.budget_exhausted
+        ));
+        lines.push(format!(
+            "Verified still failing: {}",
+            if report.verification.status.verified_still_failing {
+                "yes"
+            } else {
+                "no"
+            }
         ));
     } else {
         lines.push(format!("Issues: {}", report.outcome.issues.len()));
@@ -1138,6 +1231,17 @@ mod tests {
             "crashpack_replay_source_preserved"
         );
         assert_eq!(value["config"]["step_budget"], 8);
+        assert_eq!(value["verification"]["emitted_repro"], true);
+        assert_eq!(value["verification"]["verified_still_failing"], true);
+        assert_eq!(value["verification"]["oracle_stable"], true);
+        assert_eq!(value["verification"]["required_source_roles_present"], true);
+        assert_eq!(
+            value["verification"]["required_trace_fingerprint_present"],
+            true
+        );
+        assert_eq!(value["verification"]["retained_source_count"], 1);
+        assert_eq!(value["verification"]["retained_feature_flag_count"], 0);
+        assert_eq!(value["verification"]["budget_exhausted"], false);
         assert_eq!(value["outcome"]["verdict"], "minimized");
         assert_eq!(
             value["outcome"]["repro"]["retained_sources"][0]["source_id"],
@@ -1167,10 +1271,60 @@ mod tests {
             step.kind == IncidentReplayShrinkStepKind::BudgetExhausted && !step.accepted
         }));
         assert!(repro.summary.budget_exhausted);
+        assert!(report.verification.status.emitted_repro);
+        assert!(report.verification.status.verified_still_failing);
+        assert!(
+            report
+                .verification
+                .required_evidence
+                .required_source_roles_present
+        );
+        assert!(
+            report
+                .verification
+                .required_evidence
+                .required_trace_fingerprint_present
+        );
+        assert!(report.verification.budget_exhausted);
         assert_eq!(repro.retained_sources.len(), 1);
         assert_eq!(repro.retained_sources[0].source_id, "crashpack-main");
         assert_eq!(repro.removed_source_ids, ["trace-log-main"]);
         assert_eq!(repro.retained_feature_flags, ["extra-diagnostics"]);
+    }
+
+    #[test]
+    fn incident_replay_package_verification_fails_closed_without_repro() {
+        let package = synthetic_incident_replay_package();
+        let oracle = IncidentReplayOracle {
+            kind: IncidentOracleKind::Panic,
+            expected_signal: "missing-required-source".to_string(),
+            stable: true,
+            required_source_roles: vec![IncidentReplaySourceRole::SupportBundle],
+            required_trace_fingerprint: Some("missing-fingerprint".to_string()),
+        };
+        let outcome = minimize_incident_replay_package(
+            &package,
+            oracle.clone(),
+            IncidentReplayMinimizationConfig {
+                step_budget: 8,
+                shrink_feature_flags: true,
+            },
+        );
+        let verification = verify_incident_replay_package_repro(&oracle, &outcome);
+
+        assert!(!outcome.has_repro());
+        assert!(!verification.status.emitted_repro);
+        assert!(!verification.status.verified_still_failing);
+        assert!(verification.status.oracle_stable);
+        assert!(!verification.required_evidence.required_source_roles_present);
+        assert!(
+            !verification
+                .required_evidence
+                .required_trace_fingerprint_present
+        );
+        assert_eq!(verification.retained_source_count, 0);
+        assert_eq!(verification.retained_feature_flag_count, 0);
+        assert!(!verification.budget_exhausted);
     }
 
     #[test]
