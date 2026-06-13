@@ -25,11 +25,13 @@ use std::hint::black_box;
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
+use asupersync::obligation::ledger::ObligationLedger;
 use asupersync::record::task::TaskRecord;
+use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue};
 use asupersync::sync::ContendedMutex;
-use asupersync::types::{Budget, CancelKind, CancelReason, RegionId, TaskId, Time};
+use asupersync::types::{Budget, CancelKind, CancelReason, ObligationId, RegionId, TaskId, Time};
 use std::sync::Arc;
 
 // =============================================================================
@@ -57,6 +59,47 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
 
 fn local_queue(max_task_id: u32) -> LocalQueue {
     LocalQueue::new(setup_runtime_state(max_task_id))
+}
+
+fn setup_obligation_ledger_with_probe(count: u32) -> (ObligationLedger, ObligationId) {
+    let mut ledger = ObligationLedger::new();
+    let mut probe_id = None;
+
+    for i in 0..count {
+        let kind = match i % 3 {
+            0 => ObligationKind::SendPermit,
+            1 => ObligationKind::Ack,
+            _ => ObligationKind::Lease,
+        };
+        let acquired_at = Time::from_nanos(u64::from(i) + 1);
+        let token = ledger.acquire(kind, task(i % 8), region(), acquired_at);
+        probe_id.get_or_insert_with(|| token.id());
+
+        match i % 4 {
+            0 => {
+                ledger.commit(token, Time::from_nanos(u64::from(i) + 10_000));
+            }
+            1 => {
+                ledger.abort(
+                    token,
+                    Time::from_nanos(u64::from(i) + 10_000),
+                    ObligationAbortReason::Explicit,
+                );
+            }
+            _ => {
+                let _pending = token;
+            }
+        }
+    }
+
+    (
+        ledger,
+        probe_id.expect("obligation benchmark fixture must create at least one obligation"),
+    )
+}
+
+fn setup_obligation_ledger(count: u32) -> ObligationLedger {
+    setup_obligation_ledger_with_probe(count).0
 }
 
 // =============================================================================
@@ -501,6 +544,129 @@ fn bench_budget_check(c: &mut Criterion) {
 }
 
 // =============================================================================
+// 6. OBLIGATION QUERY SNAPSHOTS
+// =============================================================================
+
+#[allow(clippy::too_many_lines)]
+fn bench_obligation_query(c: &mut Criterion) {
+    let mut group = c.benchmark_group("methodology/obligation_query");
+
+    group.bench_function("acquire_pending", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            ObligationLedger::new,
+            |mut ledger| {
+                let token = ledger.acquire(
+                    ObligationKind::Lease,
+                    task(0),
+                    region(),
+                    Time::from_nanos(1),
+                );
+                black_box(token.id())
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("acquire_commit", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            ObligationLedger::new,
+            |mut ledger| {
+                let token = ledger.acquire(
+                    ObligationKind::Lease,
+                    task(0),
+                    region(),
+                    Time::from_nanos(1),
+                );
+                black_box(ledger.commit(token, Time::from_nanos(2)))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("acquire_abort", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            ObligationLedger::new,
+            |mut ledger| {
+                let token = ledger.acquire(
+                    ObligationKind::Lease,
+                    task(0),
+                    region(),
+                    Time::from_nanos(1),
+                );
+                black_box(ledger.abort(token, Time::from_nanos(2), ObligationAbortReason::Explicit))
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    for &count in &[16u32, 256, 4096] {
+        group.throughput(Throughput::Elements(u64::from(count)));
+
+        group.bench_with_input(
+            BenchmarkId::new("counts_for_region", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || setup_obligation_ledger(count),
+                    |ledger| black_box(ledger.counts_for_region(region())),
+                    BatchSize::LargeInput,
+                )
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("counts_for_task", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || setup_obligation_ledger(count),
+                    |ledger| black_box(ledger.counts_for_task(task(0))),
+                    BatchSize::LargeInput,
+                )
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("counts_for_kind", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || setup_obligation_ledger(count),
+                    |ledger| black_box(ledger.counts_for_kind(ObligationKind::Lease)),
+                    BatchSize::LargeInput,
+                )
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("obligation_state", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || setup_obligation_ledger_with_probe(count),
+                    |(ledger, probe_id)| black_box(ledger.obligation_state(probe_id)),
+                    BatchSize::LargeInput,
+                )
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("audit_region", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || setup_obligation_ledger(count),
+                    |ledger| black_box(ledger.audit_region(region(), Time::from_nanos(20_000))),
+                    BatchSize::LargeInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -511,6 +677,7 @@ criterion_group!(
     bench_channel_send_recv,
     bench_cx_capability_check,
     bench_budget_check,
+    bench_obligation_query,
 );
 
 criterion_main!(benches);
