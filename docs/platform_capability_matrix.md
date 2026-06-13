@@ -56,7 +56,7 @@ docs paths, and carries a nonempty no-claim boundary.
 Use the remote-only proof lane declared in the artifact:
 
 ```bash
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_platform_capability_matrix" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test platform_capability_matrix_contract -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_platform_capability_matrix" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test platform_capability_matrix_contract --no-default-features -- --nocapture
 ```
 
 Local Cargo fallback is not evidence for this contract.

@@ -771,7 +771,7 @@
   ],
   "validation": {
     "contract_test": "tests/platform_capability_matrix_contract.rs",
-    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_platform_capability_matrix CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test platform_capability_matrix_contract -- --nocapture",
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_platform_capability_matrix CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test platform_capability_matrix_contract --no-default-features -- --nocapture",
     "no_local_cargo_fallback": true
   },
   "no_claims": [

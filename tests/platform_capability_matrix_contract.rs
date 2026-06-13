@@ -163,6 +163,10 @@ fn matrix_declares_sources_policy_and_docs_markers() {
     assert!(
         command.contains("cargo test -p asupersync --test platform_capability_matrix_contract")
     );
+    assert!(
+        command.contains("--no-default-features"),
+        "contract proof lane must stay scoped away from optional runtime features"
+    );
     assert_eq!(
         validation
             .get("no_local_cargo_fallback")
