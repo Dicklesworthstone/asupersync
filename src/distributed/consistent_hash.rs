@@ -37,6 +37,93 @@ impl std::fmt::Display for ConsistentHashError {
 
 impl std::error::Error for ConsistentHashError {}
 
+/// Configuration for bounded-load consistent-hash lookups.
+///
+/// The limit is computed as:
+///
+/// ```text
+/// ceil(((total_load + 1) / node_count) * (1 + epsilon_per_mille / 1000))
+/// ```
+///
+/// where `total_load` is the caller-visible load before assigning the current
+/// key. `epsilon_per_mille = 0` gives the strictest bound; higher values allow
+/// bounded skew in exchange for fewer fallback walks away from the primary
+/// vnode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedLoadConfig {
+    epsilon_per_mille: u16,
+}
+
+impl BoundedLoadConfig {
+    /// Strict bounded-load routing: no intentional skew beyond the ceiling of
+    /// the current mean load.
+    pub const STRICT: Self = Self {
+        epsilon_per_mille: 0,
+    };
+
+    /// Create a bounded-load configuration.
+    #[inline]
+    #[must_use]
+    pub const fn new(epsilon_per_mille: u16) -> Self {
+        Self { epsilon_per_mille }
+    }
+
+    /// Return the allowed skew above mean, expressed in per-mille.
+    #[inline]
+    #[must_use]
+    pub const fn epsilon_per_mille(self) -> u16 {
+        self.epsilon_per_mille
+    }
+
+    /// Compute the inclusive per-node load limit after assigning one more key.
+    #[must_use]
+    pub fn load_limit(self, total_load: u64, node_count: usize) -> u64 {
+        if node_count == 0 {
+            return 0;
+        }
+
+        let total_after_assignment = u128::from(total_load).saturating_add(1);
+        let skew_per_mille = u128::from(1000_u16.saturating_add(self.epsilon_per_mille));
+        let denominator = (node_count as u128).saturating_mul(1000);
+        let numerator = total_after_assignment.saturating_mul(skew_per_mille);
+        let limit = ceil_div_u128(numerator, denominator).max(1);
+        u64::try_from(limit).unwrap_or(u64::MAX)
+    }
+}
+
+/// Whether a bounded-load lookup used the primary vnode or a fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundedLoadFallback {
+    /// The primary vnode was below the configured load cap.
+    Primary,
+    /// The lookup walked forward on the ring and selected another node under
+    /// the cap.
+    RingWalk,
+    /// Every node was at or over the computed cap, so the deterministic
+    /// least-loaded node was selected. This keeps routing total and observable
+    /// when callers pass externally skewed load snapshots.
+    LeastLoaded,
+}
+
+/// Full receipt for a bounded-load consistent-hash lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedLoadDecision<'a> {
+    /// Node selected by the ordinary consistent-hash lookup before load checks.
+    pub primary_node: &'a str,
+    /// Node selected after bounded-load fallback, if any.
+    pub selected_node: &'a str,
+    /// Load observed for `selected_node` before assigning the current key.
+    pub selected_load: u64,
+    /// Inclusive per-node cap computed for this lookup.
+    pub load_limit: u64,
+    /// Total caller-visible load before assigning the current key.
+    pub total_load: u64,
+    /// Number of unique nodes available in the ring.
+    pub node_count: usize,
+    /// Fallback path used for the decision.
+    pub fallback: BoundedLoadFallback,
+}
+
 /// A consistent hash ring with virtual nodes.
 ///
 /// br-asupersync-rnybb1: vnode placement is salted with a per-ring
@@ -211,10 +298,117 @@ impl HashRing {
         Some(self.ring[idx].node_id.as_str())
     }
 
+    /// Returns the node responsible for a key, capped by caller-supplied load.
+    ///
+    /// This is the bounded-loads variant of consistent hashing: choose the
+    /// ordinary primary node while it is below the configured cap, otherwise
+    /// walk the ring in vnode order to the first unique node below the cap.
+    /// The existing [`Self::node_for_key`] path remains the unbounded variant.
+    pub fn bounded_node_for_key<K, Load>(
+        &self,
+        key: &K,
+        total_load: u64,
+        config: BoundedLoadConfig,
+        load: Load,
+    ) -> Option<BoundedLoadDecision<'_>>
+    where
+        K: Hash,
+        Load: Fn(&str) -> u64,
+    {
+        if self.ring.is_empty() {
+            return None;
+        }
+
+        let key_hash = hash_value(self.seed, key);
+        let start_idx = self.ring.partition_point(|vn| vn.hash < key_hash);
+        let start_idx = if start_idx == self.ring.len() {
+            0
+        } else {
+            start_idx
+        };
+        let load_limit = config.load_limit(total_load, self.nodes.len());
+
+        let mut seen_nodes = BTreeSet::new();
+        let mut primary_node = None;
+        let mut least_loaded = None::<(&str, u64)>;
+
+        for offset in 0..self.ring.len() {
+            let vnode_idx = (start_idx + offset) % self.ring.len();
+            let node = self.ring[vnode_idx].node_id.as_str();
+            if !seen_nodes.insert(node) {
+                continue;
+            }
+
+            let node_load = load(node);
+            if primary_node.is_none() {
+                primary_node = Some((node, node_load));
+            }
+            if least_loaded.is_none_or(|(best_node, best_load)| {
+                node_load < best_load || (node_load == best_load && node < best_node)
+            }) {
+                least_loaded = Some((node, node_load));
+            }
+
+            if node_load < load_limit {
+                let (primary, _) = primary_node.expect("first unique vnode sets primary");
+                return Some(BoundedLoadDecision {
+                    primary_node: primary,
+                    selected_node: node,
+                    selected_load: node_load,
+                    load_limit,
+                    total_load,
+                    node_count: self.nodes.len(),
+                    fallback: if offset == 0 {
+                        BoundedLoadFallback::Primary
+                    } else {
+                        BoundedLoadFallback::RingWalk
+                    },
+                });
+            }
+        }
+
+        let (primary, _) = primary_node.expect("non-empty ring has a primary node");
+        let (selected, selected_load) =
+            least_loaded.expect("non-empty ring has a least-loaded node");
+        Some(BoundedLoadDecision {
+            primary_node: primary,
+            selected_node: selected,
+            selected_load,
+            load_limit,
+            total_load,
+            node_count: self.nodes.len(),
+            fallback: BoundedLoadFallback::LeastLoaded,
+        })
+    }
+
+    /// Convenience wrapper around [`Self::bounded_node_for_key`] when callers
+    /// only need the selected node identifier.
+    pub fn node_for_key_bounded_load<K, Load>(
+        &self,
+        key: &K,
+        total_load: u64,
+        config: BoundedLoadConfig,
+        load: Load,
+    ) -> Option<&str>
+    where
+        K: Hash,
+        Load: Fn(&str) -> u64,
+    {
+        self.bounded_node_for_key(key, total_load, config, load)
+            .map(|decision| decision.selected_node)
+    }
+
     /// Returns node identifiers in deterministic sorted order.
     pub fn nodes(&self) -> impl Iterator<Item = &str> {
         self.nodes.iter().map(String::as_str)
     }
+}
+
+fn ceil_div_u128(numerator: u128, denominator: u128) -> u128 {
+    if denominator == 0 {
+        return 0;
+    }
+    numerator.div_ceil(denominator)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -948,6 +1142,130 @@ mod tests {
         )
         .expect("winner");
         assert_eq!(first.0, second.0);
+    }
+
+    #[test]
+    fn bounded_load_primary_fast_path_when_under_limit() {
+        let mut ring = HashRing::new(16, 0xB0A_u64);
+        for node in ["node-a", "node-b", "node-c"] {
+            assert!(ring.add_node(node));
+        }
+
+        let key = "session:42";
+        let primary = ring.node_for_key(&key).expect("primary node");
+        let decision = ring
+            .bounded_node_for_key(&key, 0, BoundedLoadConfig::STRICT, |_| 0)
+            .expect("bounded decision");
+
+        assert_eq!(decision.primary_node, primary);
+        assert_eq!(decision.selected_node, primary);
+        assert_eq!(decision.selected_load, 0);
+        assert_eq!(decision.load_limit, 1);
+        assert_eq!(decision.fallback, BoundedLoadFallback::Primary);
+    }
+
+    #[test]
+    fn bounded_load_caps_hot_key_skew_with_ring_walks() {
+        let mut ring = HashRing::new(64, 0xB0A_D10AD_u64);
+        for node in ["node-a", "node-b", "node-c", "node-d"] {
+            assert!(ring.add_node(node));
+        }
+
+        let config = BoundedLoadConfig::STRICT;
+        let mut loads = std::collections::BTreeMap::<String, u64>::new();
+        let mut total_load = 0_u64;
+        let mut ring_walks = 0_u64;
+
+        for _ in 0..10_000 {
+            let decision = ring
+                .bounded_node_for_key(&"hot-key", total_load, config, |node| {
+                    loads.get(node).copied().unwrap_or(0)
+                })
+                .expect("bounded decision");
+            if decision.fallback == BoundedLoadFallback::RingWalk {
+                ring_walks += 1;
+            }
+
+            *loads.entry(decision.selected_node.to_owned()).or_insert(0) += 1;
+            total_load += 1;
+
+            let limit = config.load_limit(total_load, ring.node_count());
+            for (node, load) in &loads {
+                assert!(
+                    *load <= limit,
+                    "node {node} exceeded strict bounded-load cap: load={load} limit={limit}"
+                );
+            }
+        }
+
+        assert!(
+            ring_walks > 0,
+            "hot-key workload should force bounded-load ring walks"
+        );
+        let min_load = loads.values().copied().min().expect("loads");
+        let max_load = loads.values().copied().max().expect("loads");
+        assert!(
+            max_load - min_load <= 1,
+            "strict bounded-load assignment should end nearly balanced: {loads:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_load_assignments_are_replay_deterministic() {
+        fn run_once() -> Vec<String> {
+            let mut ring = HashRing::new(32, 0xD15A_5516_u64);
+            for node in ["alpha", "beta", "delta", "gamma"] {
+                assert!(ring.add_node(node));
+            }
+
+            let config = BoundedLoadConfig::new(250);
+            let mut loads = std::collections::BTreeMap::<String, u64>::new();
+            let mut total_load = 0_u64;
+            let mut decisions = Vec::new();
+
+            for key in (0..2048_u64).map(|idx| format!("tenant-hot-key-{}", idx % 17)) {
+                let selected = ring
+                    .node_for_key_bounded_load(&key, total_load, config, |node| {
+                        loads.get(node).copied().unwrap_or(0)
+                    })
+                    .expect("bounded selected node")
+                    .to_owned();
+                *loads.entry(selected.clone()).or_insert(0) += 1;
+                total_load += 1;
+                decisions.push(selected);
+            }
+
+            decisions
+        }
+
+        assert_eq!(run_once(), run_once());
+    }
+
+    #[test]
+    fn bounded_load_falls_back_to_least_loaded_when_external_loads_exceed_cap() {
+        let mut ring = HashRing::new(8, 0xB0A_FA11_u64);
+        for node in ["node-a", "node-b", "node-c"] {
+            assert!(ring.add_node(node));
+        }
+
+        let loads = std::collections::BTreeMap::from([
+            ("node-a", 1_000_u64),
+            ("node-b", 900_u64),
+            ("node-c", 900_u64),
+        ]);
+        let total_load = 1_u64;
+        let decision = ring
+            .bounded_node_for_key(
+                &"skewed-external-snapshot",
+                total_load,
+                BoundedLoadConfig::STRICT,
+                |node| loads.get(node).copied().unwrap_or(0),
+            )
+            .expect("bounded decision");
+
+        assert_eq!(decision.selected_node, "node-b");
+        assert_eq!(decision.selected_load, 900);
+        assert_eq!(decision.fallback, BoundedLoadFallback::LeastLoaded);
     }
 
     #[test]

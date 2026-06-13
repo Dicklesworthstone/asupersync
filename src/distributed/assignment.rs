@@ -6,7 +6,9 @@
 use crate::record::distributed_region::ReplicaInfo;
 use crate::security::SecurityContext;
 use crate::types::symbol::Symbol;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::consistent_hash::{BoundedLoadConfig, HashRing};
 
 // ---------------------------------------------------------------------------
 // AssignmentStrategy
@@ -24,6 +26,17 @@ pub enum AssignmentStrategy {
     /// Symbols are distributed once, biased toward replicas with lower current
     /// `symbol_count`.
     Weighted,
+    /// Symbols are assigned through a salted consistent-hash ring, but the
+    /// selected replica is capped by projected load. Existing unbounded
+    /// consistent-hash behavior is preserved elsewhere; this is an opt-in
+    /// routing strategy for skew-sensitive symbol placement.
+    BoundedLoad {
+        /// Allowed skew above the mean, expressed in per-mille.
+        epsilon_per_mille: u16,
+        /// Deterministic hash salt. Production callers should supply a
+        /// deployment-specific seed; tests and lab runs use fixed values.
+        seed: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +112,16 @@ impl SymbolAssigner {
                 Self::assign_minimum_k(symbols, &authorized_replicas, k)
             }
             AssignmentStrategy::Weighted => Self::assign_weighted(symbols, &authorized_replicas, k),
+            AssignmentStrategy::BoundedLoad {
+                epsilon_per_mille,
+                seed,
+            } => Self::assign_bounded_load(
+                symbols,
+                &authorized_replicas,
+                k,
+                BoundedLoadConfig::new(epsilon_per_mille),
+                seed,
+            ),
         }
     }
 
@@ -227,6 +250,64 @@ impl SymbolAssigner {
 
             assignments[best_idx].push(symbol_idx);
             assigned_counts[best_idx] += 1;
+        }
+
+        replicas
+            .iter()
+            .enumerate()
+            .map(|(replica_idx, replica)| {
+                ReplicaAssignment::from_indices(
+                    replica,
+                    assignments[replica_idx].clone(),
+                    k as usize,
+                )
+            })
+            .collect()
+    }
+
+    /// Bounded-load consistent hashing: stable primary placement with
+    /// deterministic fallback routing when a replica is at the configured cap.
+    fn assign_bounded_load(
+        symbols: &[Symbol],
+        replicas: &[&ReplicaInfo],
+        k: u16,
+        config: BoundedLoadConfig,
+        seed: u64,
+    ) -> Vec<ReplicaAssignment> {
+        let mut ring = HashRing::new(64, seed);
+        let mut replica_index_by_id = BTreeMap::new();
+        let mut projected_load_by_id = BTreeMap::new();
+
+        for (idx, replica) in replicas.iter().enumerate() {
+            ring.add_node(replica.id.clone());
+            replica_index_by_id.insert(replica.id.as_str(), idx);
+            projected_load_by_id.insert(replica.id.clone(), u64::from(replica.symbol_count));
+        }
+
+        let existing_total_load = projected_load_by_id
+            .values()
+            .copied()
+            .fold(0_u64, u64::saturating_add);
+        let mut assigned_load = 0_u64;
+        let mut assignments: Vec<Vec<usize>> = vec![Vec::new(); replicas.len()];
+
+        for (symbol_idx, _) in symbols.iter().enumerate() {
+            let total_load = existing_total_load.saturating_add(assigned_load);
+            let selected_node = ring
+                .node_for_key_bounded_load(&symbol_idx, total_load, config, |node| {
+                    projected_load_by_id.get(node).copied().unwrap_or(0)
+                })
+                .expect("non-empty replica set should produce a bounded-load node");
+            let replica_idx = *replica_index_by_id
+                .get(selected_node)
+                .expect("selected node must correspond to an authorized replica");
+
+            assignments[replica_idx].push(symbol_idx);
+            let load = projected_load_by_id
+                .get_mut(selected_node)
+                .expect("selected node load must exist");
+            *load = load.saturating_add(1);
+            assigned_load = assigned_load.saturating_add(1);
         }
 
         replicas
@@ -529,6 +610,80 @@ mod tests {
             .collect();
         assigned_once.sort_unstable();
         assert_eq!(assigned_once, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn bounded_load_balances_equal_replicas_with_strict_cap() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::BoundedLoad {
+            epsilon_per_mille: 0,
+            seed: 0xB0A_u64,
+        });
+        let symbols = create_test_symbols(1_000);
+        let replicas = create_test_replicas_with_symbol_counts(&[0, 0, 0, 0]);
+
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 1);
+        let counts: Vec<_> = assignments
+            .iter()
+            .map(|assignment| assignment.symbol_indices.len())
+            .collect();
+        let min = counts.iter().copied().min().expect("counts");
+        let max = counts.iter().copied().max().expect("counts");
+
+        assert_eq!(counts.iter().sum::<usize>(), symbols.len());
+        assert!(
+            max - min <= 1,
+            "strict bounded-load assignment should keep equal replicas within one symbol: {counts:?}"
+        );
+
+        let mut assigned_once: Vec<_> = assignments
+            .iter()
+            .flat_map(|assignment| assignment.symbol_indices.iter().copied())
+            .collect();
+        assigned_once.sort_unstable();
+        assert_eq!(assigned_once, (0..symbols.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn bounded_load_avoids_heavily_loaded_replica_until_projection_catches_up() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::BoundedLoad {
+            epsilon_per_mille: 0,
+            seed: 0xB0A_51A5_u64,
+        });
+        let symbols = create_test_symbols(16);
+        let replicas = create_test_replicas_with_symbol_counts(&[0, 0, 10_000]);
+
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 1);
+
+        assert!(
+            assignments[2].symbol_indices.is_empty(),
+            "overloaded replica should receive no new symbols in this bounded-load slice"
+        );
+        assert_eq!(
+            assignments
+                .iter()
+                .map(|assignment| assignment.symbol_indices.len())
+                .sum::<usize>(),
+            symbols.len()
+        );
+    }
+
+    #[test]
+    fn bounded_load_assignment_is_deterministic_across_calls() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::BoundedLoad {
+            epsilon_per_mille: 250,
+            seed: 0xB0A_D37E_u64,
+        });
+        let symbols = create_test_symbols(257);
+        let replicas = create_test_replicas_with_symbol_counts(&[3, 5, 11, 17]);
+
+        let baseline = assigner.assign_authorized(&symbols, &replicas, 13);
+        for _ in 0..8 {
+            assert_eq!(
+                assigner.assign_authorized(&symbols, &replicas, 13),
+                baseline,
+                "bounded-load assignment must replay identically"
+            );
+        }
     }
 
     #[test]
@@ -885,6 +1040,10 @@ mod tests {
             AssignmentStrategy::Striped,
             AssignmentStrategy::MinimumK,
             AssignmentStrategy::Weighted,
+            AssignmentStrategy::BoundedLoad {
+                epsilon_per_mille: 0,
+                seed: 0xB0A_u64,
+            },
         ] {
             let plan = SymbolAssigner::new(strategy).assign_authorized(&symbols, &replicas, 4);
             assert_eq!(
@@ -955,6 +1114,27 @@ mod tests {
                     assert_eq!(
                         assigned_once, expected_all_indices,
                         "weighted assignment must assign every symbol exactly once"
+                    );
+                }
+                AssignmentStrategy::BoundedLoad { .. } => {
+                    let mut assigned_once: Vec<_> = plan
+                        .iter()
+                        .flat_map(|assignment| assignment.symbol_indices.iter().copied())
+                        .collect();
+                    assigned_once.sort_unstable();
+                    assert_eq!(
+                        assigned_once, expected_all_indices,
+                        "bounded-load assignment must assign every symbol exactly once"
+                    );
+                    let counts: Vec<_> = plan
+                        .iter()
+                        .map(|assignment| assignment.symbol_indices.len())
+                        .collect();
+                    let min = counts.iter().copied().min().expect("counts");
+                    let max = counts.iter().copied().max().expect("counts");
+                    assert!(
+                        max - min <= 1,
+                        "strict bounded-load assignment should balance this fixture: {counts:?}"
                     );
                 }
             }

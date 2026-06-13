@@ -1426,6 +1426,10 @@ mod tests {
             AssignmentStrategy::Striped,
             AssignmentStrategy::MinimumK,
             AssignmentStrategy::Weighted,
+            AssignmentStrategy::BoundedLoad {
+                epsilon_per_mille: 0,
+                seed: 42,
+            },
         ];
 
         for (i, strategy) in strategies.iter().enumerate() {

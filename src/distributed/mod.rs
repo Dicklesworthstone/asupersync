@@ -39,7 +39,7 @@ pub use consensus::{
     ConsensusBatch, ConsensusError, ConsensusRequest, ConsensusResponse, MessageDigest, PbftConfig,
     PbftConsensus, PbftNode, PbftState, PhaseKind, ReplicaId, SequenceNumber, ViewNumber,
 };
-pub use consistent_hash::HashRing;
+pub use consistent_hash::{BoundedLoadConfig, BoundedLoadDecision, BoundedLoadFallback, HashRing};
 pub use distribution::{
     DistributionConfig, DistributionMetrics, DistributionResult, ReplicaAck, ReplicaFailure,
     SymbolDistributor,
