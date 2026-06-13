@@ -79,3 +79,27 @@ The bundle carries reproducible command pointers:
 2. Bundle regeneration command (`build_semantic_evidence_bundle.sh --report ...`)
 
 This keeps SEM-09.3 readiness evaluation reproducible across CI and local runs.
+
+## Public Guarantee Bundles
+
+`artifacts/public_guarantee_semantic_evidence_bundles_v1.json` defines the
+`public-guarantee-semantic-evidence-bundles-v1` layer for user-facing runtime
+guarantees. It is a mapping artifact, not a fresh proof receipt. Each bundle
+pairs one public claim with semantic sources, manifest proof lanes, fixtures,
+conformance rows, freshness policy, failure-mode examples, README linking
+rules, and explicit no-claim boundaries.
+
+The required public guarantee IDs are:
+
+- `no-orphan-tasks`
+- `race-loser-drain`
+- `no-obligation-leaks`
+- `cancel-safe-send`
+- `deterministic-replay`
+- `default-production-no-tokio`
+
+Fresh proof still requires the exact manifest lane to run through
+remote-required RCH, or an approved cache hit under
+`artifacts/proof_status_snapshot_v1.json`. `rerun-required`,
+`stale-evidence`, `blocked`, `no-win`, and `unsupported` are fail-closed states;
+they are not proof shortcuts.

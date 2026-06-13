@@ -1,0 +1,560 @@
+{
+  "schema_version": "public-guarantee-semantic-evidence-bundles-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.14",
+  "created_date": "2026-06-13",
+  "description": "Public guarantee semantic evidence bundles that map user-facing runtime guarantees to scoped proof lanes, fixtures, freshness rules, failure examples, and no-claim boundaries.",
+  "source_of_truth": {
+    "artifact": "artifacts/public_guarantee_semantic_evidence_bundles_v1.json",
+    "docs": "docs/semantic_evidence_bundle.md#public-guarantee-bundles",
+    "contract_test": "tests/semantic_evidence_bundle_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "readme": "README.md#formal-semantics-and-lean-checked-core-invariants"
+  },
+  "bundle_contract": {
+    "required_public_guarantee_ids": [
+      "no-orphan-tasks",
+      "race-loser-drain",
+      "no-obligation-leaks",
+      "cancel-safe-send",
+      "deterministic-replay",
+      "default-production-no-tokio"
+    ],
+    "required_fields_per_bundle": [
+      "guarantee_id",
+      "public_claim",
+      "claim_scope",
+      "semantic_sources",
+      "proof_lanes",
+      "fixtures",
+      "conformance_rows",
+      "artifact_freshness",
+      "failure_mode_examples",
+      "no_claim_boundaries",
+      "readme_links"
+    ],
+    "live_proof_rule": "A bundle is citeable as fresh proof only after every required lane for the intended claim scope has a fresh remote-required RCH pass or an approved cache hit recorded by the proof evidence policy. Mapped green dashboard status alone is not fresh proof."
+  },
+  "freshness_policy": {
+    "accepted_statuses": [
+      "fresh-rch-pass",
+      "approved-cache-hit"
+    ],
+    "fail_closed_statuses": [
+      "rerun-required",
+      "stale-evidence",
+      "blocked",
+      "no-win",
+      "unsupported"
+    ],
+    "status_catalog_source": "artifacts/proof_status_snapshot_v1.json#proof_evidence_status_catalog",
+    "rejection_fixture_paths": [
+      "tests/fixtures/proof_artifact_freshness_receipt/missing_command.json",
+      "tests/fixtures/proof_artifact_freshness_receipt/stale_head.json",
+      "tests/fixtures/proof_artifact_freshness_receipt/missing_remote_required_command.json",
+      "tests/fixtures/proof_artifact_freshness_receipt/missing_remote_route_evidence.json",
+      "tests/fixtures/durable_rch_proof_receipt/local_fallback_marker.json",
+      "tests/fixtures/durable_rch_proof_receipt/unsupported_broad_claim.json"
+    ]
+  },
+  "bundles": [
+    {
+      "guarantee_id": "no-orphan-tasks",
+      "public_claim": "Every spawned task is owned by exactly one region, and close cannot treat orphaned child work as complete.",
+      "claim_scope": "Lean-checked core invariant plus runtime lib-test frontier for the core model. This does not cover every adapter, protocol backend, distributed transport path, or future feature profile.",
+      "semantic_sources": [
+        {
+          "path": "formal/lean/coverage/invariant_status_inventory.json",
+          "invariant_id": "inv.structured_concurrency.single_owner"
+        },
+        {
+          "path": "artifacts/formal_proof_posture_contract_v1.json",
+          "tier": "lean_checked_core_invariants"
+        },
+        {
+          "path": "asupersync_v4_formal_semantics.md",
+          "topic": "Task and region ownership semantics"
+        }
+      ],
+      "proof_lanes": [
+        {
+          "lane_id": "formal-lean-build",
+          "manifest_guarantee_id": "formal-lean-core-invariants",
+          "proof_status_claim_id": "structured-concurrency-invariants",
+          "expected_evidence_status": "rerun-required"
+        },
+        {
+          "lane_id": "lib-tests",
+          "manifest_guarantee_id": "lib-test-frontier",
+          "proof_status_claim_id": "cancellation-oracle-suite",
+          "expected_evidence_status": "rerun-required"
+        }
+      ],
+      "fixtures": [
+        {
+          "path": "tests/region_lifecycle_conformance.rs",
+          "evidence_role": "region lifecycle executable frontier"
+        },
+        {
+          "path": "tests/close_quiescence_regression.rs",
+          "evidence_role": "close/quiescence regression frontier"
+        },
+        {
+          "path": "tests/formal_proof_posture_contract.rs",
+          "evidence_role": "formal posture artifact contract"
+        }
+      ],
+      "conformance_rows": [
+        {
+          "path": "formal/lean/coverage/invariant_status_inventory.json",
+          "row_id": "inv.structured_concurrency.single_owner"
+        },
+        {
+          "path": "README.md",
+          "marker": "structured concurrency single-owner"
+        }
+      ],
+      "artifact_freshness": {
+        "status": "rerun-required",
+        "required_action": "Rerun formal-lean-build and the touched runtime frontier lane through remote-required RCH before citing this as fresh proof."
+      },
+      "failure_mode_examples": [
+        {
+          "path": "tests/fixtures/proof_artifact_freshness_receipt/missing_head.json",
+          "failure_mode": "missing source/head freshness"
+        },
+        {
+          "path": "tests/fixtures/durable_rch_proof_receipt/stale_head.json",
+          "failure_mode": "stale proof receipt"
+        }
+      ],
+      "no_claim_boundaries": [
+        "Does not prove every adapter or protocol implementation is orphan-free.",
+        "Does not prove release readiness or broad workspace health.",
+        "Does not permit local Cargo fallback for remote-required proof lanes."
+      ],
+      "readme_links": [
+        {
+          "path": "README.md",
+          "marker": "Public guarantee semantic evidence bundles"
+        }
+      ]
+    },
+    {
+      "guarantee_id": "race-loser-drain",
+      "public_claim": "Race losers are cancelled and drained before the winning branch is treated as safely complete.",
+      "claim_scope": "Core invariant, oracle, conformance, and semantic-lint frontier evidence for race-loser drain. This is not a proof for unrelated combinator rewrites or adapter-specific races.",
+      "semantic_sources": [
+        {
+          "path": "formal/lean/coverage/invariant_status_inventory.json",
+          "invariant_id": "inv.race.losers_drained"
+        },
+        {
+          "path": "docs/semantic_lint_drop_race_loser_rule.md",
+          "topic": "semantic lint loser-drain rule"
+        },
+        {
+          "path": "artifacts/semantic_lint_drop_race_loser_rule_contract_v1.json",
+          "topic": "drop-race-loser lint contract"
+        }
+      ],
+      "proof_lanes": [
+        {
+          "lane_id": "formal-lean-build",
+          "manifest_guarantee_id": "formal-lean-core-invariants",
+          "proof_status_claim_id": "structured-concurrency-invariants",
+          "expected_evidence_status": "rerun-required"
+        },
+        {
+          "lane_id": "lib-tests",
+          "manifest_guarantee_id": "lib-test-frontier",
+          "proof_status_claim_id": "cancellation-oracle-suite",
+          "expected_evidence_status": "rerun-required"
+        }
+      ],
+      "fixtures": [
+        {
+          "path": "tests/cancel_obligation_invariants.rs",
+          "evidence_role": "combined cancel/obligation/loser drain oracle tests"
+        },
+        {
+          "path": "tests/conformance/race_loser_drain_metamorphic.rs",
+          "evidence_role": "metamorphic conformance row"
+        },
+        {
+          "path": "tests/e2e/combinator/cancel_correctness/loser_drain.rs",
+          "evidence_role": "E2E loser drain fixture"
+        }
+      ],
+      "conformance_rows": [
+        {
+          "path": "tests/conformance/race_loser_drain_metamorphic.rs",
+          "row_id": "race_loser_drain_metamorphic"
+        },
+        {
+          "path": "tests/metamorphic/race_loser_drain.rs",
+          "row_id": "race_loser_drain"
+        }
+      ],
+      "artifact_freshness": {
+        "status": "rerun-required",
+        "required_action": "Rerun the formal, lib-test, or semantic-lint lane that matches the touched source surface before citing fresh loser-drain proof."
+      },
+      "failure_mode_examples": [
+        {
+          "path": "tests/fixtures/proof_artifact_freshness_receipt/dirty_surface_overlap.json",
+          "failure_mode": "dirty touched surface requires rerun"
+        },
+        {
+          "path": "tests/fixtures/durable_rch_proof_receipt/missing_claim_boundaries_section.json",
+          "failure_mode": "missing no-claim boundaries"
+        }
+      ],
+      "no_claim_boundaries": [
+        "Does not prove every future combinator law rewrite preserves drain behavior.",
+        "Does not prove adapter-specific hedging or network cancellation without lane-specific evidence.",
+        "Does not turn semantic-lint evidence into runtime behavioral proof by itself."
+      ],
+      "readme_links": [
+        {
+          "path": "README.md",
+          "marker": "Public guarantee semantic evidence bundles"
+        }
+      ]
+    },
+    {
+      "guarantee_id": "no-obligation-leaks",
+      "public_claim": "Permits, acks, leases, and reply obligations must be committed, aborted, or explicitly surfaced before close is considered safe.",
+      "claim_scope": "Core invariant plus obligation oracle/conformance frontier evidence. This does not prove arbitrary distributed recovery, WAN transport, or every adapter-level lease protocol.",
+      "semantic_sources": [
+        {
+          "path": "formal/lean/coverage/invariant_status_inventory.json",
+          "invariant_id": "inv.obligation.no_leaks"
+        },
+        {
+          "path": "docs/runtime_obligation_trace_e2e.md",
+          "topic": "obligation trace evidence"
+        },
+        {
+          "path": "src/obligation/eprocess.rs",
+          "topic": "obligation leak monitor"
+        }
+      ],
+      "proof_lanes": [
+        {
+          "lane_id": "formal-lean-build",
+          "manifest_guarantee_id": "formal-lean-core-invariants",
+          "proof_status_claim_id": "structured-concurrency-invariants",
+          "expected_evidence_status": "rerun-required"
+        },
+        {
+          "lane_id": "lib-tests",
+          "manifest_guarantee_id": "lib-test-frontier",
+          "proof_status_claim_id": "cancellation-oracle-suite",
+          "expected_evidence_status": "rerun-required"
+        }
+      ],
+      "fixtures": [
+        {
+          "path": "tests/cancel_obligation_invariants.rs",
+          "evidence_role": "obligation leak oracle"
+        },
+        {
+          "path": "tests/obligation_lifecycle_e2e.rs",
+          "evidence_role": "obligation lifecycle E2E"
+        },
+        {
+          "path": "tests/conformance/obligation_invariants/no_leak_tests/obligation_lifecycle.rs",
+          "evidence_role": "no-leak invariant conformance"
+        }
+      ],
+      "conformance_rows": [
+        {
+          "path": "tests/conformance/no_leak_invariant/COVERAGE.md",
+          "row_id": "no_leak_invariant"
+        },
+        {
+          "path": "tests/conformance/obligation_invariants/mod.rs",
+          "row_id": "obligation_invariants"
+        }
+      ],
+      "artifact_freshness": {
+        "status": "rerun-required",
+        "required_action": "Rerun formal-lean-build plus the focused runtime lane covering changed obligation surfaces before citing fresh no-leak proof."
+      },
+      "failure_mode_examples": [
+        {
+          "path": "tests/fixtures/proof_artifact_freshness_receipt/exact_filter_zero_tests.json",
+          "failure_mode": "zero-test proof is rejected"
+        },
+        {
+          "path": "tests/fixtures/durable_rch_proof_receipt/local_fallback_marker.json",
+          "failure_mode": "local fallback proof receipt is rejected"
+        }
+      ],
+      "no_claim_boundaries": [
+        "Does not prove every distributed transport or persistence adapter resolves obligations.",
+        "Does not prove absence of futurelock without the matching futurelock or lab evidence lane.",
+        "Does not replace source-surface-specific RCH proof after obligation code changes."
+      ],
+      "readme_links": [
+        {
+          "path": "README.md",
+          "marker": "Public guarantee semantic evidence bundles"
+        }
+      ]
+    },
+    {
+      "guarantee_id": "cancel-safe-send",
+      "public_claim": "Channel send paths use two-phase reserve/send so cancellation before commit does not lose a value or leak a permit.",
+      "claim_scope": "MPSC/select public runner, downstream consumer fixture, and runtime frontier evidence for the channel surfaces listed here. This does not prove every protocol adapter using channels.",
+      "semantic_sources": [
+        {
+          "path": "src/channel/mpsc.rs",
+          "topic": "two-phase MPSC reserve/send"
+        },
+        {
+          "path": "examples/channel_mpsc_select_e2e.rs",
+          "topic": "public channel MPSC/select runner"
+        },
+        {
+          "path": "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "topic": "external public API fixture"
+        }
+      ],
+      "proof_lanes": [
+        {
+          "lane_id": "channel-mpsc-select-e2e-public-run",
+          "manifest_guarantee_id": "channel-mpsc-select-e2e-public-run",
+          "proof_status_claim_id": "validation-frontier-final-signoff",
+          "expected_evidence_status": "rerun-required"
+        },
+        {
+          "lane_id": "downstream-consumer-channel-profile-run",
+          "manifest_guarantee_id": "downstream-consumer-channel-public-api",
+          "proof_status_claim_id": "downstream-consumer-public-api-proof",
+          "expected_evidence_status": "rerun-required"
+        },
+        {
+          "lane_id": "lib-tests",
+          "manifest_guarantee_id": "lib-test-frontier",
+          "proof_status_claim_id": "cancellation-oracle-suite",
+          "expected_evidence_status": "rerun-required"
+        }
+      ],
+      "fixtures": [
+        {
+          "path": "src/real_channel_mpsc_combinator_select_integration_e2e_tests.rs",
+          "evidence_role": "public runner implementation"
+        },
+        {
+          "path": "src/bin/channel_mpsc_select_e2e.rs",
+          "evidence_role": "focused executable lane"
+        },
+        {
+          "path": "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs",
+          "evidence_role": "external downstream consumer fixture"
+        }
+      ],
+      "conformance_rows": [
+        {
+          "path": "tests/conformance/channel_cancel_correctness/lib.rs",
+          "row_id": "channel_cancel_correctness"
+        },
+        {
+          "path": "tests/channel_conformance.rs",
+          "row_id": "channel_conformance"
+        }
+      ],
+      "artifact_freshness": {
+        "status": "rerun-required",
+        "required_action": "Rerun the channel MPSC/select public runner or downstream consumer lane after channel, example, or fixture changes."
+      },
+      "failure_mode_examples": [
+        {
+          "path": "tests/fixtures/proof_artifact_freshness_receipt/missing_remote_required_command.json",
+          "failure_mode": "proof command omits remote-required RCH envelope"
+        },
+        {
+          "path": "tests/fixtures/proof_artifact_freshness_receipt/missing_touched_files.json",
+          "failure_mode": "receipt lacks source-surface coverage"
+        }
+      ],
+      "no_claim_boundaries": [
+        "Does not prove all channel families or all protocol adapters are cancel-safe.",
+        "Does not prove default production no-Tokio behavior.",
+        "Does not prove broad workspace health or release readiness."
+      ],
+      "readme_links": [
+        {
+          "path": "README.md",
+          "marker": "Public guarantee semantic evidence bundles"
+        }
+      ]
+    },
+    {
+      "guarantee_id": "deterministic-replay",
+      "public_claim": "Lab and replay artifacts make selected concurrency scenarios reproducible under stable seeds and recorded traces.",
+      "claim_scope": "Replay corpus, lab determinism, and trace-replay fixtures named here. Current dashboard evidence for the fourth-wave replay corpus is blocked and must not be cited as fresh proof until rerun.",
+      "semantic_sources": [
+        {
+          "path": "docs/replay-debugging.md",
+          "topic": "operator replay workflow"
+        },
+        {
+          "path": "artifacts/fifth_wave_cancellation_storm_replay_corpus_v1.json",
+          "topic": "fifth-wave replay corpus"
+        },
+        {
+          "path": "tests/fixtures/atp_autotune_replay_corpus/corpus.json",
+          "topic": "replay corpus fixture"
+        }
+      ],
+      "proof_lanes": [
+        {
+          "lane_id": "fourth-wave-swarm-replay-corpus",
+          "manifest_guarantee_id": "fourth-wave-swarm-replay-corpus",
+          "proof_status_claim_id": "fourth-wave-swarm-replay-corpus",
+          "expected_evidence_status": "blocked"
+        },
+        {
+          "lane_id": "lib-tests",
+          "manifest_guarantee_id": "lib-test-frontier",
+          "proof_status_claim_id": "cancellation-oracle-suite",
+          "expected_evidence_status": "rerun-required"
+        }
+      ],
+      "fixtures": [
+        {
+          "path": "tests/conformance/trace_replay_idempotency_metamorphic.rs",
+          "evidence_role": "trace replay idempotency conformance"
+        },
+        {
+          "path": "tests/replay_e2e_suite.rs",
+          "evidence_role": "replay E2E suite"
+        },
+        {
+          "path": "tests/swarm_workload_scenario_corpus_contract.rs",
+          "evidence_role": "fourth-wave replay corpus contract"
+        }
+      ],
+      "conformance_rows": [
+        {
+          "path": "tests/metamorphic/trace_replay.rs",
+          "row_id": "trace_replay"
+        },
+        {
+          "path": "src/lab_determinism_conformance_tests.rs",
+          "row_id": "lab_determinism"
+        }
+      ],
+      "artifact_freshness": {
+        "status": "blocked",
+        "required_action": "Resolve the exact fourth-wave replay corpus blocker or rerun the matching remote-required manifest lane before citing fresh deterministic replay proof."
+      },
+      "failure_mode_examples": [
+        {
+          "path": "tests/fixtures/crashpack_to_repro/proof_runner_blocker.json",
+          "failure_mode": "proof runner blocker"
+        },
+        {
+          "path": "tests/fixtures/proof_artifact_freshness_receipt/superseded_head.json",
+          "failure_mode": "superseded source head"
+        }
+      ],
+      "no_claim_boundaries": [
+        "Does not prove live host throughput or scheduler performance.",
+        "Does not prove every scenario is replayable unless it is in the named corpus or runner.",
+        "Does not override a blocked proof-status row."
+      ],
+      "readme_links": [
+        {
+          "path": "README.md",
+          "marker": "Public guarantee semantic evidence bundles"
+        }
+      ]
+    },
+    {
+      "guarantee_id": "default-production-no-tokio",
+      "public_claim": "The default production asupersync runtime crate normal dependency graph has no Tokio edge.",
+      "claim_scope": "Default and downstream default normal dependency graph lanes only. Workspace, full-feature, dev/test, satellite, and fuzz graphs are scoped audit or quarantine surfaces, not production proof.",
+      "semantic_sources": [
+        {
+          "path": "artifacts/no_tokio_feature_boundary_contract_v1.json",
+          "topic": "no-Tokio boundary contract"
+        },
+        {
+          "path": "tests/no_tokio_feature_boundary_contract.rs",
+          "topic": "no-Tokio contract verifier"
+        },
+        {
+          "path": "Cargo.toml",
+          "topic": "feature graph source"
+        }
+      ],
+      "proof_lanes": [
+        {
+          "lane_id": "default-production-tokio-tree",
+          "manifest_guarantee_id": "default-production-tokio-free",
+          "proof_status_claim_id": "no-tokio-production-graph",
+          "expected_evidence_status": "rerun-required"
+        },
+        {
+          "lane_id": "downstream-consumer-default-tokio-tree",
+          "manifest_guarantee_id": "downstream-consumer-default-tokio-free",
+          "proof_status_claim_id": "downstream-consumer-public-api-proof",
+          "expected_evidence_status": "rerun-required"
+        }
+      ],
+      "fixtures": [
+        {
+          "path": "tests/no_tokio_feature_boundary_contract.rs",
+          "evidence_role": "feature boundary verifier"
+        },
+        {
+          "path": "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "evidence_role": "external downstream default graph fixture"
+        },
+        {
+          "path": "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs",
+          "evidence_role": "default downstream consumer"
+        }
+      ],
+      "conformance_rows": [
+        {
+          "path": "artifacts/no_tokio_feature_boundary_contract_v1.json",
+          "row_id": "default-production"
+        },
+        {
+          "path": "artifacts/proof_lane_manifest_v1.json",
+          "row_id": "default-production-tokio-free"
+        }
+      ],
+      "artifact_freshness": {
+        "status": "rerun-required",
+        "required_action": "Rerun default-production-tokio-tree after dependency or feature graph changes before citing fresh no-Tokio production proof."
+      },
+      "failure_mode_examples": [
+        {
+          "path": "tests/fixtures/proof_artifact_freshness_receipt/missing_remote_route_evidence.json",
+          "failure_mode": "missing RCH provenance"
+        },
+        {
+          "path": "tests/fixtures/durable_rch_proof_receipt/unsupported_broad_claim.json",
+          "failure_mode": "broad claim unsupported by focused lane"
+        }
+      ],
+      "no_claim_boundaries": [
+        "Does not prove workspace, full-feature, dev/test, satellite, or fuzz graphs are Tokio-free.",
+        "Does not prove metrics unless the metrics-production lane is also cited.",
+        "Does not prove runtime behavioral correctness."
+      ],
+      "readme_links": [
+        {
+          "path": "README.md",
+          "marker": "Public guarantee semantic evidence bundles"
+        }
+      ]
+    }
+  ]
+}

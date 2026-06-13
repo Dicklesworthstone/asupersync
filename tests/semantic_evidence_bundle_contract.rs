@@ -3,6 +3,7 @@
 //! Validates deterministic schema, rule traceability, and owner-bead mapping
 //! for missing evidence entries.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,11 +16,70 @@ const REPORT_FIXTURE: &str = "verification_report_sample.json";
 const MATRIX_FIXTURE: &str = "semantic_verification_matrix_sample.md";
 const GATES_FIXTURE: &str = "semantic_readiness_gates_sample.md";
 const EXPECTED_FIXTURE: &str = "verification_report_sample_expected.json";
+const PUBLIC_BUNDLE_ARTIFACT: &str = "artifacts/public_guarantee_semantic_evidence_bundles_v1.json";
+const PROOF_LANE_MANIFEST: &str = "artifacts/proof_lane_manifest_v1.json";
+const PROOF_STATUS_SNAPSHOT: &str = "artifacts/proof_status_snapshot_v1.json";
+const README_PATH: &str = "README.md";
+const SEMANTIC_BUNDLE_DOC: &str = "docs/semantic_evidence_bundle.md";
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(FIXTURE_DIR)
         .join(name)
+}
+
+fn repo_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+fn repo_json(relative: &str) -> Value {
+    let raw = std::fs::read_to_string(repo_path(relative))
+        .unwrap_or_else(|error| panic!("{relative}: {error}"));
+    serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {relative}: {error}"))
+}
+
+fn repo_text(relative: &str) -> String {
+    std::fs::read_to_string(repo_path(relative))
+        .unwrap_or_else(|error| panic!("{relative}: {error}"))
+}
+
+fn path_without_fragment(path: &str) -> &str {
+    path.split_once('#').map_or(path, |(file, _)| file)
+}
+
+fn assert_repo_reference_exists(label: &str, path: &str) {
+    let file_path = path_without_fragment(path);
+    assert!(
+        repo_path(file_path).exists(),
+        "{label} must point at an existing repo path: {path}"
+    );
+}
+
+fn string_set(value: &Value, label: &str) -> BTreeSet<String> {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} must be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("{label} entries must be strings"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn field_string<'a>(value: &'a Value, field: &str, label: &str) -> &'a str {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{label}.{field} must be a string"))
+}
+
+fn object_array<'a>(value: &'a Value, field: &str, label: &str) -> &'a [Value] {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{label}.{field} must be an array"))
 }
 
 fn unique_output_path() -> PathBuf {
@@ -256,5 +316,248 @@ fn runner_gaps_and_rerun_contract_are_present() {
             .filter_map(Value::as_str)
             .any(|cmd| cmd.contains("build_semantic_evidence_bundle.sh")),
         "bundle must include bundle rerun command"
+    );
+}
+
+#[test]
+fn public_guarantee_bundle_covers_required_guarantees_and_paths() {
+    let artifact = repo_json(PUBLIC_BUNDLE_ARTIFACT);
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some("public-guarantee-semantic-evidence-bundles-v1")
+    );
+    assert_eq!(
+        artifact["bead_id"].as_str(),
+        Some("asupersync-idea-wizard-fifth-wave-3gaiun.14")
+    );
+
+    let source_of_truth = artifact["source_of_truth"]
+        .as_object()
+        .expect("source_of_truth must be an object");
+    for (field, value) in source_of_truth {
+        assert_repo_reference_exists(
+            &format!("source_of_truth.{field}"),
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("source_of_truth.{field} must be a string")),
+        );
+    }
+
+    let required_guarantees = string_set(
+        &artifact["bundle_contract"]["required_public_guarantee_ids"],
+        "required_public_guarantee_ids",
+    );
+    let required_fields = string_set(
+        &artifact["bundle_contract"]["required_fields_per_bundle"],
+        "required_fields_per_bundle",
+    );
+    let bundles = artifact["bundles"]
+        .as_array()
+        .expect("bundles must be an array");
+    let actual_guarantees = bundles
+        .iter()
+        .map(|bundle| field_string(bundle, "guarantee_id", "bundle").to_string())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        actual_guarantees, required_guarantees,
+        "public guarantee bundle set must match the declared required set"
+    );
+
+    let manifest = repo_json(PROOF_LANE_MANIFEST);
+    let manifest_lanes = object_array(&manifest, "lanes", "proof lane manifest")
+        .iter()
+        .map(|lane| field_string(lane, "lane_id", "manifest lane").to_string())
+        .collect::<BTreeSet<_>>();
+    let manifest_guarantees = object_array(&manifest, "guarantees", "proof lane manifest")
+        .iter()
+        .map(|guarantee| field_string(guarantee, "guarantee_id", "manifest guarantee").to_string())
+        .collect::<BTreeSet<_>>();
+
+    let status_snapshot = repo_json(PROOF_STATUS_SNAPSHOT);
+    let status_claims = object_array(
+        &status_snapshot,
+        "claim_categories",
+        "proof status snapshot",
+    )
+    .iter()
+    .map(|claim| field_string(claim, "claim_id", "proof status claim").to_string())
+    .collect::<BTreeSet<_>>();
+    let evidence_statuses = object_array(
+        &status_snapshot,
+        "proof_evidence_status_catalog",
+        "proof status snapshot",
+    )
+    .iter()
+    .map(|status| field_string(status, "status", "proof evidence status").to_string())
+    .collect::<BTreeSet<_>>();
+
+    for bundle in bundles {
+        let guarantee_id = field_string(bundle, "guarantee_id", "bundle");
+        for field in &required_fields {
+            assert!(
+                bundle.get(field).is_some(),
+                "{guarantee_id} must include required field {field}"
+            );
+        }
+
+        for field in [
+            "semantic_sources",
+            "proof_lanes",
+            "fixtures",
+            "conformance_rows",
+            "failure_mode_examples",
+            "no_claim_boundaries",
+            "readme_links",
+        ] {
+            assert!(
+                !object_array(bundle, field, guarantee_id).is_empty(),
+                "{guarantee_id}.{field} must not be empty"
+            );
+        }
+
+        for lane in object_array(bundle, "proof_lanes", guarantee_id) {
+            let lane_id = field_string(lane, "lane_id", guarantee_id);
+            assert!(
+                manifest_lanes.contains(lane_id),
+                "{guarantee_id} references unknown manifest lane {lane_id}"
+            );
+
+            let manifest_guarantee_id = field_string(lane, "manifest_guarantee_id", guarantee_id);
+            assert!(
+                manifest_guarantees.contains(manifest_guarantee_id),
+                "{guarantee_id} references unknown manifest guarantee {manifest_guarantee_id}"
+            );
+
+            let proof_status_claim_id = field_string(lane, "proof_status_claim_id", guarantee_id);
+            assert!(
+                status_claims.contains(proof_status_claim_id),
+                "{guarantee_id} references unknown proof-status claim {proof_status_claim_id}"
+            );
+
+            let expected_evidence_status =
+                field_string(lane, "expected_evidence_status", guarantee_id);
+            assert!(
+                evidence_statuses.contains(expected_evidence_status),
+                "{guarantee_id} uses unknown evidence status {expected_evidence_status}"
+            );
+        }
+
+        for field in [
+            "semantic_sources",
+            "fixtures",
+            "conformance_rows",
+            "failure_mode_examples",
+            "readme_links",
+        ] {
+            for row in object_array(bundle, field, guarantee_id) {
+                assert_repo_reference_exists(
+                    &format!("{guarantee_id}.{field}"),
+                    field_string(row, "path", guarantee_id),
+                );
+            }
+        }
+
+        let no_claims = object_array(bundle, "no_claim_boundaries", guarantee_id);
+        assert!(
+            no_claims.iter().any(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Does not "))
+            }),
+            "{guarantee_id} must keep explicit no-claim boundary language"
+        );
+    }
+}
+
+#[test]
+fn public_guarantee_bundle_links_docs_and_fail_closed_fixtures() {
+    let artifact = repo_json(PUBLIC_BUNDLE_ARTIFACT);
+    let status_snapshot = repo_json(PROOF_STATUS_SNAPSHOT);
+    let evidence_statuses = object_array(
+        &status_snapshot,
+        "proof_evidence_status_catalog",
+        "proof status snapshot",
+    )
+    .iter()
+    .map(|status| field_string(status, "status", "proof evidence status").to_string())
+    .collect::<BTreeSet<_>>();
+
+    let freshness = artifact["freshness_policy"]
+        .as_object()
+        .expect("freshness_policy must be an object");
+    assert_eq!(
+        freshness
+            .get("status_catalog_source")
+            .and_then(Value::as_str),
+        Some("artifacts/proof_status_snapshot_v1.json#proof_evidence_status_catalog")
+    );
+
+    let accepted = string_set(
+        freshness
+            .get("accepted_statuses")
+            .expect("accepted_statuses"),
+        "accepted_statuses",
+    );
+    assert_eq!(
+        accepted,
+        BTreeSet::from([
+            "approved-cache-hit".to_string(),
+            "fresh-rch-pass".to_string()
+        ])
+    );
+
+    let fail_closed = string_set(
+        freshness
+            .get("fail_closed_statuses")
+            .expect("fail_closed_statuses"),
+        "fail_closed_statuses",
+    );
+    for status in &fail_closed {
+        assert!(
+            evidence_statuses.contains(status),
+            "fail-closed status {status} must exist in proof status catalog"
+        );
+    }
+    for required in ["rerun-required", "stale-evidence", "blocked", "unsupported"] {
+        assert!(
+            fail_closed.contains(required),
+            "freshness policy must fail closed for {required}"
+        );
+    }
+
+    for path in freshness
+        .get("rejection_fixture_paths")
+        .and_then(Value::as_array)
+        .expect("rejection_fixture_paths must be an array")
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .expect("rejection_fixture_paths entries must be strings")
+        })
+    {
+        assert_repo_reference_exists("freshness_policy.rejection_fixture_paths", path);
+    }
+
+    let readme = repo_text(README_PATH);
+    let docs = repo_text(SEMANTIC_BUNDLE_DOC);
+    for required in [
+        PUBLIC_BUNDLE_ARTIFACT,
+        "Public guarantee semantic evidence bundles",
+        "no-orphan-tasks",
+        "race-loser-drain",
+        "no-obligation-leaks",
+        "cancel-safe-send",
+        "deterministic-replay",
+        "default-production-no-tokio",
+    ] {
+        assert!(
+            readme.contains(required) || docs.contains(required),
+            "README or semantic evidence docs must mention {required}"
+        );
+    }
+    assert!(
+        docs.contains("public-guarantee-semantic-evidence-bundles-v1"),
+        "semantic evidence docs must name the public guarantee bundle schema"
     );
 }
