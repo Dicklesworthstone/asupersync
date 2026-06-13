@@ -1,10 +1,11 @@
 //! TCP socket configuration.
 
 use crate::net::tcp::listener::TcpListener;
-use crate::net::tcp::stream::TcpStream;
+use crate::net::tcp::stream::{KeepaliveConfig, TcpStream};
 use parking_lot::Mutex;
 use std::io;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 /// A TCP socket used for configuring options before connect/listen.
 #[derive(Debug)]
@@ -23,6 +24,8 @@ struct TcpSocketState {
     family: TcpSocketFamily,
     bound: Option<SocketAddr>,
     reuseaddr: bool,
+    nodelay: Option<bool>,
+    keepalive: KeepaliveConfig,
     #[cfg(unix)]
     reuseport: bool,
 }
@@ -36,6 +39,8 @@ impl TcpSocket {
                 family: TcpSocketFamily::V4,
                 bound: None,
                 reuseaddr: false,
+                nodelay: None,
+                keepalive: KeepaliveConfig::Default,
                 #[cfg(unix)]
                 reuseport: false,
             }),
@@ -50,6 +55,8 @@ impl TcpSocket {
                 family: TcpSocketFamily::V6,
                 bound: None,
                 reuseaddr: false,
+                nodelay: None,
+                keepalive: KeepaliveConfig::Default,
                 #[cfg(unix)]
                 reuseport: false,
             }),
@@ -59,6 +66,22 @@ impl TcpSocket {
     /// Sets the SO_REUSEADDR option on this socket.
     pub fn set_reuseaddr(&self, reuseaddr: bool) -> io::Result<()> {
         self.state.lock().reuseaddr = reuseaddr;
+        Ok(())
+    }
+
+    /// Enables or disables TCP_NODELAY for sockets created from this handle.
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        self.state.lock().nodelay = Some(nodelay);
+        Ok(())
+    }
+
+    /// Configures TCP keepalive for sockets created from this handle.
+    ///
+    /// Pass `Some(duration)` to enable keepalive with the requested idle time,
+    /// or `None` to explicitly disable keepalive.
+    pub fn set_keepalive(&self, keepalive: Option<Duration>) -> io::Result<()> {
+        self.state.lock().keepalive =
+            keepalive.map_or(KeepaliveConfig::Disabled, KeepaliveConfig::Enabled);
         Ok(())
     }
 
@@ -122,6 +145,7 @@ impl TcpSocket {
                 socket.set_reuse_port(true)?;
             }
 
+            apply_socket_options(&socket, &state)?;
             socket.bind(&socket2::SockAddr::from(addr))?;
             socket.listen(i32::try_from(backlog).unwrap_or(i32::MAX))?;
             socket.set_nonblocking(true)?;
@@ -166,6 +190,7 @@ impl TcpSocket {
                 socket.set_reuse_port(true)?;
             }
 
+            apply_socket_options(&socket, &state)?;
             if let Some(bound) = state.bound {
                 socket.bind(&socket2::SockAddr::from(bound))?;
             }
@@ -174,6 +199,24 @@ impl TcpSocket {
             TcpStream::connect_from_socket(socket, addr).await
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_socket_options(socket: &socket2::Socket, state: &TcpSocketState) -> io::Result<()> {
+    if let Some(nodelay) = state.nodelay {
+        socket.set_tcp_nodelay(nodelay)?;
+    }
+
+    match state.keepalive {
+        KeepaliveConfig::Enabled(duration) => {
+            let params = socket2::TcpKeepalive::new().with_time(duration);
+            socket.set_tcp_keepalive(&params)?;
+        }
+        KeepaliveConfig::Disabled => socket.set_keepalive(false)?,
+        KeepaliveConfig::Default => {}
+    }
+
+    Ok(())
 }
 
 fn family_matches(family: TcpSocketFamily, addr: SocketAddr) -> bool {
@@ -288,6 +331,75 @@ mod tests {
         let addr = listener.local_addr().expect("local_addr");
         crate::assert_with_log!(addr.port() > 0, "bound port", true, addr.port() > 0);
         crate::test_complete!("test_listen_with_reuseaddr");
+    }
+
+    #[test]
+    fn test_socket_records_tcp_convenience_options() {
+        init_test("test_socket_records_tcp_convenience_options");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+
+        socket.set_nodelay(true).expect("set nodelay");
+        socket
+            .set_keepalive(Some(Duration::from_secs(42)))
+            .expect("set keepalive");
+
+        let state = socket.state.lock();
+        crate::assert_with_log!(
+            state.nodelay == Some(true),
+            "nodelay state",
+            Some(true),
+            state.nodelay
+        );
+        crate::assert_with_log!(
+            state.keepalive == KeepaliveConfig::Enabled(Duration::from_secs(42)),
+            "keepalive state",
+            KeepaliveConfig::Enabled(Duration::from_secs(42)),
+            state.keepalive
+        );
+        crate::test_complete!("test_socket_records_tcp_convenience_options");
+    }
+
+    #[test]
+    fn test_connect_applies_nodelay_and_keepalive_options() {
+        init_test("test_connect_applies_nodelay_and_keepalive_options");
+        let listener = net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept().expect("accept");
+            let _ = tx.send(());
+        });
+
+        futures_lite::future::block_on(async {
+            let socket = TcpSocket::new_v4().expect("new_v4");
+            socket.set_nodelay(true).expect("set nodelay");
+            socket
+                .set_keepalive(Some(Duration::from_secs(30)))
+                .expect("set keepalive");
+
+            let stream = socket.connect(addr).await.expect("connect");
+            let std_stream = stream.try_as_std().expect("std tcp stream");
+            crate::assert_with_log!(
+                std_stream.nodelay().expect("read nodelay"),
+                "connected stream nodelay",
+                true,
+                std_stream.nodelay().expect("read nodelay")
+            );
+
+            let sock = socket2::SockRef::from(std_stream);
+            crate::assert_with_log!(
+                sock.keepalive().expect("read keepalive"),
+                "connected stream keepalive",
+                true,
+                sock.keepalive().expect("read keepalive")
+            );
+        });
+
+        let accepted = rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        crate::assert_with_log!(accepted, "accepted connection", true, accepted);
+        handle.join().expect("join accept thread");
+        crate::test_complete!("test_connect_applies_nodelay_and_keepalive_options");
     }
 
     #[cfg(unix)]
