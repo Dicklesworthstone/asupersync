@@ -40,6 +40,7 @@
 //! [`Cx`]: crate::cx::Cx
 
 use crate::cx::Cx;
+use crate::database::transaction::trace_database_transaction;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
@@ -4983,21 +4984,34 @@ impl PgConnection {
 
     /// Begin a transaction.
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<PgTransaction<'_>, PgError> {
+        trace_database_transaction(cx, "postgres", "begin", "start");
         match self.execute_unchecked(cx, "BEGIN").await {
             // Reserve the obligation ONLY after BEGIN succeeds: an
             // ObligationToken is a drop bomb, so reserving it before a fallible
             // BEGIN would panic on the error/cancel paths (token dropped
             // unconsumed). The transaction now owns it for its whole lifetime.
-            Outcome::Ok(_) => Outcome::Ok(PgTransaction {
-                conn: self,
-                finished: false,
-                isolation_level: None,
-                read_only: false,
-                obligation: reserve_transaction_obligation(cx),
-            }),
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Ok(_) => {
+                trace_database_transaction(cx, "postgres", "begin", "ok");
+                Outcome::Ok(PgTransaction {
+                    conn: self,
+                    finished: false,
+                    isolation_level: None,
+                    read_only: false,
+                    obligation: reserve_transaction_obligation(cx),
+                })
+            }
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "postgres", "begin", "err");
+                Outcome::Err(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "postgres", "begin", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "postgres", "begin", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
@@ -5019,17 +5033,28 @@ impl PgConnection {
         level: IsolationLevel,
         read_only: bool,
     ) -> Outcome<PgTransaction<'_>, PgError> {
+        trace_database_transaction(cx, "postgres", "begin_with_isolation", "start");
         let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
         let sql = format!("BEGIN ISOLATION LEVEL {level} {access_mode}");
         match self.execute_unchecked(cx, &sql).await {
             Outcome::Ok(_) => {}
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "postgres", "begin_with_isolation", "err");
+                return Outcome::Err(e);
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "postgres", "begin_with_isolation", "cancelled");
+                return Outcome::Cancelled(r);
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "postgres", "begin_with_isolation", "panicked");
+                return Outcome::Panicked(p);
+            }
         }
 
         if cx.checkpoint().is_err() {
             self.rollback_isolated_begin_or_mark(cx).await;
+            trace_database_transaction(cx, "postgres", "begin_with_isolation", "cancelled");
             return Outcome::Cancelled(cancelled_reason(cx));
         }
 
@@ -5052,6 +5077,7 @@ impl PgConnection {
                 Some(s) => s,
                 None => {
                     self.rollback_isolated_begin_or_mark(cx).await;
+                    trace_database_transaction(cx, "postgres", "begin_with_isolation", "err");
                     return Outcome::Err(PgError::IsolationLevelMismatch {
                         requested: level,
                         observed: String::new(),
@@ -5060,14 +5086,17 @@ impl PgConnection {
             },
             Outcome::Err(e) => {
                 self.rollback_isolated_begin_or_mark(cx).await;
+                trace_database_transaction(cx, "postgres", "begin_with_isolation", "err");
                 return Outcome::Err(e);
             }
             Outcome::Cancelled(r) => {
                 self.rollback_isolated_begin_or_mark(cx).await;
+                trace_database_transaction(cx, "postgres", "begin_with_isolation", "cancelled");
                 return Outcome::Cancelled(r);
             }
             Outcome::Panicked(p) => {
                 self.rollback_isolated_begin_or_mark(cx).await;
+                trace_database_transaction(cx, "postgres", "begin_with_isolation", "panicked");
                 return Outcome::Panicked(p);
             }
         };
@@ -5075,6 +5104,7 @@ impl PgConnection {
         match IsolationLevel::from_server_string(&observed_level) {
             Some(parsed) if parsed == level => {
                 let obligation = reserve_transaction_obligation(cx);
+                trace_database_transaction(cx, "postgres", "begin_with_isolation", "ok");
                 Outcome::Ok(PgTransaction {
                     conn: self,
                     finished: false,
@@ -5085,6 +5115,7 @@ impl PgConnection {
             }
             _ => {
                 self.rollback_isolated_begin_or_mark(cx).await;
+                trace_database_transaction(cx, "postgres", "begin_with_isolation", "err");
                 Outcome::Err(PgError::IsolationLevelMismatch {
                     requested: level,
                     observed: observed_level,
@@ -7866,8 +7897,10 @@ impl PgTransaction<'_> {
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), PgError> {
         if self.finished {
+            trace_database_transaction(cx, "postgres", "commit", "already_finished");
             return Outcome::Err(PgError::TransactionFinished);
         }
+        trace_database_transaction(cx, "postgres", "commit", "start");
         match self.conn.execute_unchecked(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
@@ -7878,22 +7911,32 @@ impl PgTransaction<'_> {
                 if let Some(token) = self.obligation.take() {
                     let _ = token.commit();
                 }
+                trace_database_transaction(cx, "postgres", "commit", "ok");
                 Outcome::Ok(())
             }
             Outcome::Err(e) => {
                 self.mark_finished_if_server_closed_transaction(&e);
+                trace_database_transaction(cx, "postgres", "commit", "err");
                 Outcome::Err(e)
             }
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "postgres", "commit", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "postgres", "commit", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
     /// Rollback the transaction.
     pub async fn rollback(mut self, cx: &Cx) -> Outcome<(), PgError> {
         if self.finished {
+            trace_database_transaction(cx, "postgres", "rollback", "already_finished");
             return Outcome::Err(PgError::TransactionFinished);
         }
+        trace_database_transaction(cx, "postgres", "rollback", "start");
         match self.conn.execute_unchecked(cx, "ROLLBACK").await {
             Outcome::Ok(_) => {
                 self.finished = true;
@@ -7901,14 +7944,22 @@ impl PgTransaction<'_> {
                 if let Some(token) = self.obligation.take() {
                     let _ = token.abort();
                 }
+                trace_database_transaction(cx, "postgres", "rollback", "ok");
                 Outcome::Ok(())
             }
             Outcome::Err(e) => {
                 self.mark_finished_if_server_closed_transaction(&e);
+                trace_database_transaction(cx, "postgres", "rollback", "err");
                 Outcome::Err(e)
             }
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "postgres", "rollback", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "postgres", "rollback", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 

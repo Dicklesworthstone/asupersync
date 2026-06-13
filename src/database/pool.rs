@@ -1663,6 +1663,25 @@ impl<M: ConnectionManager> fmt::Debug for PooledConnection<'_, M> {
 use crate::cx::Cx;
 use crate::types::Outcome;
 
+fn trace_async_pool_event(
+    cx: &Cx,
+    operation: &'static str,
+    outcome: &'static str,
+    client_scope: &'static str,
+) {
+    cx.trace_with_fields(
+        "database.pool.lifecycle",
+        &[
+            ("component", "database"),
+            ("resource", "pool"),
+            ("pool_kind", "async"),
+            ("operation", operation),
+            ("outcome", outcome),
+            ("client_scope", client_scope),
+        ],
+    );
+}
+
 /// Async connection manager for database backends whose `connect` and
 /// `is_valid` operations are asynchronous and require a [`Cx`].
 ///
@@ -1921,10 +1940,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         &self,
         cx: &Cx,
         waiter_slot: &mut Option<Arc<AsyncPoolWaiter>>,
+        client_scope: &'static str,
     ) -> Result<(), DbPoolError<M::Error>> {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
         if self.config.max_size == 0 {
+            trace_async_pool_event(cx, "wait", "full", client_scope);
             return Err(DbPoolError::Full);
         }
         let deadline = cx.now() + self.config.connection_timeout;
@@ -1940,6 +1961,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             inner.waiters.push_back(Arc::clone(&waiter));
             self.wake_next_async_pool_waiter_locked(&mut inner);
             *waiter_slot = Some(Arc::clone(&waiter));
+            trace_async_pool_event(cx, "wait", "queued", client_scope);
             waiter
         };
 
@@ -1947,14 +1969,17 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             if cx.checkpoint().is_err() {
                 self.cancel_async_pool_waiter(&waiter);
                 waiter_slot.take();
+                trace_async_pool_event(cx, "wait", "cancelled", client_scope);
                 return Err(DbPoolError::Timeout);
             }
             if self.is_closed() {
                 self.cancel_async_pool_waiter(&waiter);
                 waiter_slot.take();
+                trace_async_pool_event(cx, "wait", "closed", client_scope);
                 return Err(DbPoolError::Closed);
             }
             if waiter.ready.load(Ordering::Acquire) {
+                trace_async_pool_event(cx, "wait", "ready", client_scope);
                 return Ok(());
             }
 
@@ -1963,6 +1988,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 self.cancel_async_pool_waiter(&waiter);
                 waiter_slot.take();
                 self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                trace_async_pool_event(cx, "wait", "timeout", client_scope);
                 return Err(DbPoolError::Timeout);
             }
             let chunk = remaining.min(CANCEL_POLL_INTERVAL);
@@ -1994,16 +2020,19 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         &self,
         cx: &Cx,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        trace_async_pool_event(cx, "acquire", "start", "anonymous");
         let mut waiter = None;
 
         loop {
             if cx.checkpoint().is_err() {
+                trace_async_pool_event(cx, "acquire", "cancelled", "anonymous");
                 return Err(DbPoolError::Timeout);
             }
 
             let step = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
+                    trace_async_pool_event(cx, "acquire", "closed", "anonymous");
                     return Err(DbPoolError::Closed);
                 }
 
@@ -2025,11 +2054,13 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
             let idle = match step {
                 AsyncAcquireStep::Wait => {
-                    self.wait_for_async_pool_turn(cx, &mut waiter).await?;
+                    self.wait_for_async_pool_turn(cx, &mut waiter, "anonymous")
+                        .await?;
                     continue;
                 }
                 AsyncAcquireStep::Idle(idle) => idle,
                 AsyncAcquireStep::Create => {
+                    trace_async_pool_event(cx, "create", "start", "anonymous");
                     let mut creation_guard = AsyncCreationGuard {
                         pool: self,
                         disarmed: false,
@@ -2040,14 +2071,25 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             if cx.checkpoint().is_err() {
                                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                                 self.manager.disconnect(conn);
+                                trace_async_pool_event(
+                                    cx,
+                                    "create",
+                                    "cancelled_after_connect",
+                                    "anonymous",
+                                );
                                 return Err(DbPoolError::Timeout);
                             }
                             creation_guard.disarmed = true;
                             self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
+                            trace_async_pool_event(cx, "acquire", "ok_created", "anonymous");
                             return self.finish_async_checkout(conn, cx.now());
                         }
-                        Outcome::Err(e) => return Err(DbPoolError::Connect(e)),
+                        Outcome::Err(e) => {
+                            trace_async_pool_event(cx, "create", "err", "anonymous");
+                            return Err(DbPoolError::Connect(e));
+                        }
                         Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                            trace_async_pool_event(cx, "create", "cancelled", "anonymous");
                             return Err(DbPoolError::Timeout);
                         }
                     }
@@ -2072,6 +2114,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    trace_async_pool_event(
+                        cx,
+                        "idle_discard",
+                        if is_expired { "expired" } else { "stale" },
+                        "anonymous",
+                    );
                     self.manager.disconnect(idle.conn);
                     continue;
                 }
@@ -2085,6 +2133,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    trace_async_pool_event(cx, "idle_discard", "authentication_state", "anonymous");
                     crate::tracing_compat::warn!(
                         event = "async_database_pool_authentication_state_discard",
                         requested_by = "anonymous",
@@ -2106,6 +2155,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         .await;
 
                     if cx.checkpoint().is_err() {
+                        trace_async_pool_event(cx, "validation", "cancelled", "anonymous");
                         return Err(DbPoolError::Timeout);
                     }
 
@@ -2113,13 +2163,16 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         self.stats
                             .total_validation_failures
                             .fetch_add(1, Ordering::Relaxed);
+                        trace_async_pool_event(cx, "validation", "failed", "anonymous");
                         continue;
                     }
 
                     let conn = guard.conn.take().unwrap();
+                    trace_async_pool_event(cx, "acquire", "ok_idle", "anonymous");
                     return self.finish_async_checkout(conn, idle.created_at);
                 }
 
+                trace_async_pool_event(cx, "acquire", "ok_idle", "anonymous");
                 return self.finish_async_checkout(idle.conn, idle.created_at);
             }
         }
@@ -2135,6 +2188,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         cx: &Cx,
         client_id: &str,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        trace_async_pool_event(cx, "acquire", "start", "client");
         // If client quotas are disabled, delegate to regular get()
         if !self.config.enforce_client_quotas {
             return self.get(cx).await.map(|mut conn| {
@@ -2148,12 +2202,14 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
         loop {
             if cx.checkpoint().is_err() {
+                trace_async_pool_event(cx, "acquire", "cancelled", "client");
                 return Err(DbPoolError::Timeout);
             }
 
             let step = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
+                    trace_async_pool_event(cx, "acquire", "closed", "client");
                     return Err(DbPoolError::Closed);
                 }
 
@@ -2165,6 +2221,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         .copied()
                         .unwrap_or(0);
                     if current_count >= max_per_client {
+                        trace_async_pool_event(cx, "acquire", "client_quota_exceeded", "client");
                         return Err(DbPoolError::ClientQuotaExceeded(client_id_owned));
                     }
                 }
@@ -2229,11 +2286,13 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
             let idle = match step {
                 AsyncAcquireStep::Wait => {
-                    self.wait_for_async_pool_turn(cx, &mut waiter).await?;
+                    self.wait_for_async_pool_turn(cx, &mut waiter, "client")
+                        .await?;
                     continue;
                 }
                 AsyncAcquireStep::Idle(idle) => idle,
                 AsyncAcquireStep::Create => {
+                    trace_async_pool_event(cx, "create", "start", "client");
                     let mut creation_guard = AsyncCreationGuard {
                         pool: self,
                         disarmed: false,
@@ -2255,6 +2314,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                 drop(inner);
                                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                                 self.manager.disconnect(conn);
+                                trace_async_pool_event(
+                                    cx,
+                                    "create",
+                                    "cancelled_after_connect",
+                                    "client",
+                                );
                                 return Err(DbPoolError::Timeout);
                             }
                             creation_guard.disarmed = true;
@@ -2262,6 +2327,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             self.stats
                                 .total_acquisitions
                                 .fetch_add(1, Ordering::Relaxed);
+                            trace_async_pool_event(cx, "acquire", "ok_created", "client");
                             return Ok(AsyncPooledConnection {
                                 conn: Some(conn),
                                 pool: self,
@@ -2279,6 +2345,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                     inner.client_connections.remove(&client_id_owned);
                                 }
                             }
+                            trace_async_pool_event(cx, "create", "err", "client");
                             return Err(DbPoolError::Connect(e));
                         }
                         Outcome::Cancelled(_) | Outcome::Panicked(_) => {
@@ -2291,11 +2358,13 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                     inner.client_connections.remove(&client_id_owned);
                                 }
                             }
+                            trace_async_pool_event(cx, "create", "cancelled", "client");
                             return Err(DbPoolError::Timeout);
                         }
                     }
                 }
                 AsyncAcquireStep::Discard(conn) => {
+                    trace_async_pool_event(cx, "idle_discard", "authentication_state", "client");
                     self.manager.disconnect(conn);
                     continue;
                 }
@@ -2320,6 +2389,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    trace_async_pool_event(
+                        cx,
+                        "idle_discard",
+                        if is_expired { "expired" } else { "stale" },
+                        "client",
+                    );
                     self.manager.disconnect(idle.conn);
                     continue;
                 }
@@ -2344,6 +2419,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                 inner.client_connections.remove(&client_id_owned);
                             }
                         }
+                        trace_async_pool_event(cx, "validation", "cancelled", "client");
                         return Err(DbPoolError::Timeout);
                     }
 
@@ -2362,6 +2438,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         self.stats
                             .total_validation_failures
                             .fetch_add(1, Ordering::Relaxed);
+                        trace_async_pool_event(cx, "validation", "failed", "client");
                         continue;
                     }
 
@@ -2391,6 +2468,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                     .total_validation_failures
                                     .fetch_add(1, Ordering::Relaxed);
                                 self.manager.disconnect(valid_conn);
+                                trace_async_pool_event(
+                                    cx,
+                                    "validation",
+                                    "authentication_mismatch",
+                                    "client",
+                                );
                                 return Err(DbPoolError::AuthenticationMismatch {
                                     expected: expected_client.clone(),
                                     found: current_client.clone(),
@@ -2421,6 +2504,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                         .total_validation_failures
                                         .fetch_add(1, Ordering::Relaxed);
                                     self.manager.disconnect(valid_conn);
+                                    trace_async_pool_event(
+                                        cx,
+                                        "validation",
+                                        "authentication_clear_failed",
+                                        "client",
+                                    );
                                     continue;
                                 }
                             }
@@ -2433,6 +2522,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     self.stats
                         .total_acquisitions
                         .fetch_add(1, Ordering::Relaxed);
+                    trace_async_pool_event(cx, "acquire", "ok_idle", "client");
                     return Ok(AsyncPooledConnection {
                         conn: Some(valid_conn),
                         pool: self,
@@ -2444,6 +2534,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 self.stats
                     .total_acquisitions
                     .fetch_add(1, Ordering::Relaxed);
+                trace_async_pool_event(cx, "acquire", "ok_idle", "client");
                 return Ok(AsyncPooledConnection {
                     conn: Some(idle.conn),
                     pool: self,
@@ -2821,6 +2912,7 @@ mod tests {
     )]
     use super::*;
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+    use crate::observability::{LogCollector, LogEntry, LogLevel};
     use crate::runtime::yield_now;
     use crate::types::Budget;
     use futures_lite::future::block_on;
@@ -2987,6 +3079,60 @@ mod tests {
         fn disconnect(&self, _conn: Self::Connection) {
             self.disconnects.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    fn has_pool_lifecycle_entry(
+        entries: &[LogEntry],
+        operation: &str,
+        outcome: &str,
+        client_scope: &str,
+    ) -> bool {
+        entries.iter().any(|entry| {
+            entry.message() == "database.pool.lifecycle"
+                && entry.get_field("component") == Some("database")
+                && entry.get_field("resource") == Some("pool")
+                && entry.get_field("pool_kind") == Some("async")
+                && entry.get_field("operation") == Some(operation)
+                && entry.get_field("outcome") == Some(outcome)
+                && entry.get_field("client_scope") == Some(client_scope)
+        })
+    }
+
+    #[test]
+    fn async_get_records_structured_pool_lifecycle_traces() {
+        init_test("async_get_records_structured_pool_lifecycle_traces");
+        let cx = Cx::for_testing();
+        let collector = LogCollector::new(32).with_min_level(LogLevel::Trace);
+        cx.set_log_collector(collector.clone());
+        let pool = AsyncDbPool::new(AsyncTestManager::new(), DbPoolConfig::with_max_size(1));
+
+        {
+            let first = block_on(pool.get(&cx)).expect("first checkout creates");
+            assert_eq!(first.id, 1);
+        }
+        {
+            let second = block_on(pool.get(&cx)).expect("second checkout reuses idle");
+            assert_eq!(second.id, 1);
+        }
+
+        let entries = collector.peek();
+        assert!(
+            has_pool_lifecycle_entry(&entries, "acquire", "start", "anonymous"),
+            "acquire start trace missing from {entries:?}"
+        );
+        assert!(
+            has_pool_lifecycle_entry(&entries, "create", "start", "anonymous"),
+            "create start trace missing from {entries:?}"
+        );
+        assert!(
+            has_pool_lifecycle_entry(&entries, "acquire", "ok_created", "anonymous"),
+            "created checkout trace missing from {entries:?}"
+        );
+        assert!(
+            has_pool_lifecycle_entry(&entries, "acquire", "ok_idle", "anonymous"),
+            "idle checkout trace missing from {entries:?}"
+        );
+        crate::test_complete!("async_get_records_structured_pool_lifecycle_traces");
     }
 
     struct SlowAsyncTestManager {

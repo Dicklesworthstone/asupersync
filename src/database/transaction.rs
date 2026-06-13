@@ -136,6 +136,25 @@ fn cancelled_reason(cx: &Cx) -> CancelReason {
     cx.cancel_reason().unwrap_or_default()
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql", test))]
+pub(crate) fn trace_database_transaction(
+    cx: &Cx,
+    backend: &'static str,
+    operation: &'static str,
+    outcome: &'static str,
+) {
+    cx.trace_with_fields(
+        "database.transaction.lifecycle",
+        &[
+            ("component", "database"),
+            ("resource", "transaction"),
+            ("backend", backend),
+            ("operation", operation),
+            ("outcome", outcome),
+        ],
+    );
+}
+
 async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> {
     if delay.is_zero() {
         cx.checkpoint().map_err(|_| cancelled_reason(cx))?;
@@ -927,6 +946,7 @@ mod tests {
     use crate::cx::Cx;
     #[cfg(feature = "sqlite")]
     use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteValue};
+    use crate::observability::{LogCollector, LogLevel};
     use std::task::{Context, Poll, Waker};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -939,6 +959,26 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn trace_database_transaction_records_structured_fields() {
+        init_test("trace_database_transaction_records_structured_fields");
+        let cx = Cx::for_testing();
+        let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+        cx.set_log_collector(collector.clone());
+
+        trace_database_transaction(&cx, "postgres", "commit", "ok");
+
+        let entries = collector.peek();
+        let entry = entries.first().expect("transaction trace entry");
+        assert_eq!(entry.message(), "database.transaction.lifecycle");
+        assert_eq!(entry.get_field("component"), Some("database"));
+        assert_eq!(entry.get_field("resource"), Some("transaction"));
+        assert_eq!(entry.get_field("backend"), Some("postgres"));
+        assert_eq!(entry.get_field("operation"), Some("commit"));
+        assert_eq!(entry.get_field("outcome"), Some("ok"));
+        crate::test_complete!("trace_database_transaction_records_structured_fields");
     }
 
     #[test]

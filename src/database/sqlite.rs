@@ -35,6 +35,7 @@
 
 use crate::channel::mpsc;
 use crate::cx::Cx;
+use crate::database::transaction::trace_database_transaction;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::runtime::blocking_pool::{BlockingPool, BlockingPoolHandle};
 use crate::time::{sleep, wall_now};
@@ -1956,18 +1957,29 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
+        trace_database_transaction(cx, "sqlite", "begin", "start");
         match self.execute_unchecked(cx, "BEGIN", &[]).await {
             Outcome::Ok(_) => {
                 *self.transaction_state.lock() = TransactionState::InTransaction;
+                trace_database_transaction(cx, "sqlite", "begin", "ok");
                 Outcome::Ok(SqliteTransaction {
                     conn: self,
                     finished: false,
                     obligation: reserve_transaction_obligation(cx),
                 })
             }
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "sqlite", "begin", "err");
+                Outcome::Err(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "sqlite", "begin", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "sqlite", "begin", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
@@ -1977,18 +1989,29 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin_immediate(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
+        trace_database_transaction(cx, "sqlite", "begin_immediate", "start");
         match self.execute_unchecked(cx, "BEGIN IMMEDIATE", &[]).await {
             Outcome::Ok(_) => {
                 *self.transaction_state.lock() = TransactionState::InTransaction;
+                trace_database_transaction(cx, "sqlite", "begin_immediate", "ok");
                 Outcome::Ok(SqliteTransaction {
                     conn: self,
                     finished: false,
                     obligation: reserve_transaction_obligation(cx),
                 })
             }
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "sqlite", "begin_immediate", "err");
+                Outcome::Err(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "sqlite", "begin_immediate", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "sqlite", "begin_immediate", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
@@ -1998,18 +2021,29 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin_exclusive(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
+        trace_database_transaction(cx, "sqlite", "begin_exclusive", "start");
         match self.execute_unchecked(cx, "BEGIN EXCLUSIVE", &[]).await {
             Outcome::Ok(_) => {
                 *self.transaction_state.lock() = TransactionState::InTransaction;
+                trace_database_transaction(cx, "sqlite", "begin_exclusive", "ok");
                 Outcome::Ok(SqliteTransaction {
                     conn: self,
                     finished: false,
                     obligation: reserve_transaction_obligation(cx),
                 })
             }
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "sqlite", "begin_exclusive", "err");
+                Outcome::Err(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "sqlite", "begin_exclusive", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "sqlite", "begin_exclusive", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
@@ -2355,8 +2389,10 @@ impl SqliteTransaction<'_> {
     /// This operation checks for cancellation before starting.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), SqliteError> {
         if self.finished {
+            trace_database_transaction(cx, "sqlite", "commit", "already_finished");
             return Outcome::Err(SqliteError::TransactionFinished);
         }
+        trace_database_transaction(cx, "sqlite", "commit", "start");
         match self.conn.execute_unchecked(cx, "COMMIT", &[]).await {
             Outcome::Ok(_) => {
                 *self.conn.transaction_state.lock() = TransactionState::Autocommit;
@@ -2365,11 +2401,21 @@ impl SqliteTransaction<'_> {
                 if let Some(token) = self.obligation.take() {
                     let _ = token.commit();
                 }
+                trace_database_transaction(cx, "sqlite", "commit", "ok");
                 Outcome::Ok(())
             }
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "sqlite", "commit", "err");
+                Outcome::Err(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "sqlite", "commit", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "sqlite", "commit", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
@@ -2380,8 +2426,10 @@ impl SqliteTransaction<'_> {
     /// This operation checks for cancellation before starting.
     pub async fn rollback(mut self, cx: &Cx) -> Outcome<(), SqliteError> {
         if self.finished {
+            trace_database_transaction(cx, "sqlite", "rollback", "already_finished");
             return Outcome::Err(SqliteError::TransactionFinished);
         }
+        trace_database_transaction(cx, "sqlite", "rollback", "start");
         match self.conn.execute_unchecked(cx, "ROLLBACK", &[]).await {
             Outcome::Ok(_) => {
                 *self.conn.transaction_state.lock() = TransactionState::Autocommit;
@@ -2390,11 +2438,21 @@ impl SqliteTransaction<'_> {
                 if let Some(token) = self.obligation.take() {
                     let _ = token.abort();
                 }
+                trace_database_transaction(cx, "sqlite", "rollback", "ok");
                 Outcome::Ok(())
             }
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "sqlite", "rollback", "err");
+                Outcome::Err(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "sqlite", "rollback", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "sqlite", "rollback", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 

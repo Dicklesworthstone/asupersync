@@ -30,6 +30,7 @@
 //! [`Cx`]: crate::cx::Cx
 
 use crate::cx::Cx;
+use crate::database::transaction::trace_database_transaction;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
@@ -3826,6 +3827,7 @@ impl MySqlConnection {
 
     /// Begin a transaction.
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<MySqlTransaction<'_>, MySqlError> {
+        trace_database_transaction(cx, "mysql", "begin", "start");
         match self
             .execute_unchecked_internal(cx, "START TRANSACTION")
             .await
@@ -3833,16 +3835,28 @@ impl MySqlConnection {
             // Reserve the obligation only after START TRANSACTION succeeds:
             // an ObligationToken is a drop bomb, so reserving before a fallible
             // begin would panic on the error/cancel paths.
-            Outcome::Ok(_) => Outcome::Ok(MySqlTransaction {
-                conn: self,
-                finished: false,
-                isolation_level: None,
-                read_only: false,
-                obligation: reserve_transaction_obligation(cx),
-            }),
-            Outcome::Err(e) => outcome_from_error(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Ok(_) => {
+                trace_database_transaction(cx, "mysql", "begin", "ok");
+                Outcome::Ok(MySqlTransaction {
+                    conn: self,
+                    finished: false,
+                    isolation_level: None,
+                    read_only: false,
+                    obligation: reserve_transaction_obligation(cx),
+                })
+            }
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "mysql", "begin", "err");
+                outcome_from_error(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "mysql", "begin", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "mysql", "begin", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
@@ -3865,20 +3879,39 @@ impl MySqlConnection {
         level: IsolationLevel,
         read_only: bool,
     ) -> Outcome<MySqlTransaction<'_>, MySqlError> {
+        trace_database_transaction(cx, "mysql", "begin_with_isolation", "start");
         let set_sql = format!("SET TRANSACTION ISOLATION LEVEL {level}");
         match self.execute_unchecked_internal(cx, &set_sql).await {
             Outcome::Ok(_) => {}
-            Outcome::Err(e) => return outcome_from_error(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "err");
+                return outcome_from_error(e);
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "cancelled");
+                return Outcome::Cancelled(r);
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "panicked");
+                return Outcome::Panicked(p);
+            }
         }
         let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
         let start_sql = format!("START TRANSACTION {access_mode}");
         match self.execute_unchecked_internal(cx, &start_sql).await {
             Outcome::Ok(_) => {}
-            Outcome::Err(e) => return outcome_from_error(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "err");
+                return outcome_from_error(e);
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "cancelled");
+                return Outcome::Cancelled(r);
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "panicked");
+                return Outcome::Panicked(p);
+            }
         }
 
         // br-asupersync-dvgvcu — verify the server actually applied
@@ -3905,6 +3938,7 @@ impl MySqlConnection {
                     // observed value so the caller sees the silent
                     // failure mode.
                     self.rollback_isolated_begin_or_mark(cx).await;
+                    trace_database_transaction(cx, "mysql", "begin_with_isolation", "err");
                     return Outcome::Err(MySqlError::IsolationLevelMismatch {
                         requested: level,
                         observed: String::new(),
@@ -3913,14 +3947,17 @@ impl MySqlConnection {
             },
             Outcome::Err(e) => {
                 self.rollback_isolated_begin_or_mark(cx).await;
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "err");
                 return outcome_from_error(e);
             }
             Outcome::Cancelled(r) => {
                 self.rollback_isolated_begin_or_mark(cx).await;
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "cancelled");
                 return Outcome::Cancelled(r);
             }
             Outcome::Panicked(p) => {
                 self.rollback_isolated_begin_or_mark(cx).await;
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "panicked");
                 return Outcome::Panicked(p);
             }
         };
@@ -3928,6 +3965,7 @@ impl MySqlConnection {
         match IsolationLevel::from_server_string(&observed_level) {
             Some(parsed) if parsed == level => {
                 let obligation = reserve_transaction_obligation(cx);
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "ok");
                 Outcome::Ok(MySqlTransaction {
                     conn: self,
                     finished: false,
@@ -3940,6 +3978,7 @@ impl MySqlConnection {
                 // Mismatch — roll back the in-flight transaction
                 // before returning so the connection is clean.
                 self.rollback_isolated_begin_or_mark(cx).await;
+                trace_database_transaction(cx, "mysql", "begin_with_isolation", "err");
                 Outcome::Err(MySqlError::IsolationLevelMismatch {
                     requested: level,
                     observed: observed_level,
@@ -5580,8 +5619,10 @@ impl MySqlTransaction<'_> {
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if self.finished {
+            trace_database_transaction(cx, "mysql", "commit", "already_finished");
             return Outcome::Err(MySqlError::TransactionFinished);
         }
+        trace_database_transaction(cx, "mysql", "commit", "start");
         match self.conn.execute_unchecked_internal(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
@@ -5589,19 +5630,31 @@ impl MySqlTransaction<'_> {
                 if let Some(token) = self.obligation.take() {
                     let _ = token.commit();
                 }
+                trace_database_transaction(cx, "mysql", "commit", "ok");
                 Outcome::Ok(())
             }
-            Outcome::Err(e) => outcome_from_error(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "mysql", "commit", "err");
+                outcome_from_error(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "mysql", "commit", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "mysql", "commit", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
     /// Rollback the transaction.
     pub async fn rollback(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if self.finished {
+            trace_database_transaction(cx, "mysql", "rollback", "already_finished");
             return Outcome::Err(MySqlError::TransactionFinished);
         }
+        trace_database_transaction(cx, "mysql", "rollback", "start");
         match self.conn.execute_unchecked_internal(cx, "ROLLBACK").await {
             Outcome::Ok(_) => {
                 self.finished = true;
@@ -5609,11 +5662,21 @@ impl MySqlTransaction<'_> {
                 if let Some(token) = self.obligation.take() {
                     let _ = token.abort();
                 }
+                trace_database_transaction(cx, "mysql", "rollback", "ok");
                 Outcome::Ok(())
             }
-            Outcome::Err(e) => outcome_from_error(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            Outcome::Err(e) => {
+                trace_database_transaction(cx, "mysql", "rollback", "err");
+                outcome_from_error(e)
+            }
+            Outcome::Cancelled(r) => {
+                trace_database_transaction(cx, "mysql", "rollback", "cancelled");
+                Outcome::Cancelled(r)
+            }
+            Outcome::Panicked(p) => {
+                trace_database_transaction(cx, "mysql", "rollback", "panicked");
+                Outcome::Panicked(p)
+            }
         }
     }
 
