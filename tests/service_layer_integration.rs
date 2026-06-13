@@ -15,21 +15,25 @@ mod asupersync {
     pub use ::asupersync::*;
 }
 
-use asupersync::service::Layer;
 use asupersync::service::buffer::BufferLayer;
 use asupersync::service::discover::{
-    Change, Discover, DnsDiscoveryConfig, DnsServiceDiscovery, StaticList,
+    ActiveHealthConfig, ActiveHealthDiscovery, Change, Discover, DnsDiscoveryConfig,
+    DnsServiceDiscovery, HealthProbeKind, ProbeBackoff, ProbeOutcome, StaticList,
 };
 use asupersync::service::filter::{Filter, FilterError, FilterLayer};
 use asupersync::service::hedge::{Hedge, HedgeConfig, HedgeLayer};
 use asupersync::service::load_balance::{
-    LoadBalancer, PowerOfTwoChoices, RoundRobin, Strategy, Weighted,
+    LoadBalancer, PowerOfTwoChoices, RoundRobin, SlowStartConfig, Strategy, Weighted,
 };
 use asupersync::service::reconnect::{MakeService, Reconnect, ReconnectLayer};
 use asupersync::service::steer::{Steer, SteerError};
-use std::collections::{HashSet, VecDeque};
+use asupersync::service::{Layer, Service};
+use asupersync::types::Time;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 fn init_test(name: &str) {
@@ -489,6 +493,111 @@ fn load_balancer_dynamic_backends() {
     assert_eq!(lb.len(), 2);
 
     asupersync::test_complete!("load_balancer_dynamic_backends");
+}
+
+#[test]
+fn load_balancer_slow_starts_recovered_active_health_backend() {
+    init_test("load_balancer_slow_starts_recovered_active_health_backend");
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct ReadyBackend {
+        id: u32,
+    }
+
+    impl Service<u32> for ReadyBackend {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            std::future::ready(Ok(self.id))
+        }
+    }
+
+    let backend_a = ReadyBackend { id: 10 };
+    let backend_b = ReadyBackend { id: 20 };
+    let outcomes = Arc::new(Mutex::new(HashMap::from([
+        (
+            backend_a.clone(),
+            VecDeque::from([ProbeOutcome::Healthy, ProbeOutcome::Healthy]),
+        ),
+        (
+            backend_b.clone(),
+            VecDeque::from([ProbeOutcome::Unhealthy, ProbeOutcome::Healthy]),
+        ),
+    ])));
+    let outcomes_for_probe = Arc::clone(&outcomes);
+    let discovery = ActiveHealthDiscovery::new(
+        StaticList::new(vec![backend_a.clone(), backend_b.clone()]),
+        ActiveHealthConfig::new(HealthProbeKind::Tcp)
+            .probe_interval(Duration::ZERO)
+            .failure_backoff(ProbeBackoff::new(Duration::ZERO, Duration::ZERO)),
+        move |endpoint: &ReadyBackend, kind: &HealthProbeKind| {
+            assert_eq!(kind, &HealthProbeKind::Tcp);
+            outcomes_for_probe
+                .lock()
+                .expect("probe script lock poisoned")
+                .get_mut(endpoint)
+                .expect("endpoint should have a probe script")
+                .pop_front()
+                .expect("endpoint probe script exhausted")
+        },
+    );
+    let clock = Arc::new(AtomicU64::new(0));
+    let clock_for_slow_start = Arc::clone(&clock);
+    let lb = LoadBalancer::empty(RoundRobin::new()).with_slow_start(
+        SlowStartConfig::new(Duration::from_secs(1)).with_time_getter(move || {
+            Time::from_nanos(clock_for_slow_start.load(Ordering::SeqCst))
+        }),
+    );
+
+    lb.update_from_discover(&discovery)
+        .expect("first active-health update should apply");
+    assert_eq!(lb.len(), 1);
+
+    lb.update_from_discover(&discovery)
+        .expect("recovered active-health update should apply");
+    assert_eq!(lb.len(), 2);
+
+    let call = || {
+        futures_lite::future::block_on(
+            lb.call_balanced(1)
+                .expect("load balancer should find a dispatchable backend"),
+        )
+        .expect("backend should respond")
+    };
+
+    let early: Vec<_> = (0..4).map(|_| call()).collect();
+    assert_eq!(
+        early,
+        vec![10, 10, 10, 10],
+        "a just-recovered backend starts at zero traffic share while a warm backend exists"
+    );
+
+    clock.store(Time::from_millis(500).as_nanos(), Ordering::SeqCst);
+    let half_ramp: Vec<_> = (0..8).map(|_| call()).collect();
+    assert_eq!(
+        half_ramp.iter().filter(|&&response| response == 20).count(),
+        2,
+        "halfway through the window the recovered backend should receive half of its normal round-robin opportunities"
+    );
+
+    clock.store(Time::from_secs(1).as_nanos(), Ordering::SeqCst);
+    let fully_warm: Vec<_> = (0..8).map(|_| call()).collect();
+    assert_eq!(
+        fully_warm
+            .iter()
+            .filter(|&&response| response == 20)
+            .count(),
+        4,
+        "after the window the recovered backend should receive its full round-robin share"
+    );
+
+    asupersync::test_complete!("load_balancer_slow_starts_recovered_active_health_backend");
 }
 
 #[test]

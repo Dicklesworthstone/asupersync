@@ -11,6 +11,7 @@
 //! Load balancers can be paired with a [`Discover`](super::Discover) instance
 //! to dynamically add and remove backends as the topology changes.
 
+use crate::types::Time;
 use parking_lot::Mutex;
 use std::fmt;
 use std::future::Future;
@@ -70,6 +71,160 @@ where
     backends
         .iter()
         .any(|backend| backend_matches_service(backend, expected))
+}
+
+fn duration_to_nanos(duration: std::time::Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
+}
+
+type SlowStartTimeGetter = Arc<dyn Fn() -> Time + Send + Sync + 'static>;
+
+/// Configuration for gradually re-admitting newly inserted backends.
+#[derive(Clone)]
+pub struct SlowStartConfig {
+    window: std::time::Duration,
+    time_getter: SlowStartTimeGetter,
+}
+
+impl SlowStartConfig {
+    /// Create a slow-start configuration with a wall-clock time source.
+    #[must_use]
+    pub fn new(window: std::time::Duration) -> Self {
+        Self {
+            window,
+            time_getter: Arc::new(wall_clock_now),
+        }
+    }
+
+    /// Set a deterministic time source.
+    #[must_use]
+    pub fn with_time_getter<F>(mut self, time_getter: F) -> Self
+    where
+        F: Fn() -> Time + Send + Sync + 'static,
+    {
+        self.time_getter = Arc::new(time_getter);
+        self
+    }
+
+    /// Returns the configured ramp window.
+    #[must_use]
+    pub const fn window(&self) -> std::time::Duration {
+        self.window
+    }
+
+    fn window_nanos(&self) -> u64 {
+        duration_to_nanos(self.window)
+    }
+
+    fn now_nanos(&self) -> u64 {
+        (self.time_getter)().as_nanos()
+    }
+}
+
+impl fmt::Debug for SlowStartConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SlowStartConfig")
+            .field("window", &self.window)
+            .field("time_getter", &"<fn>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SlowStartView {
+    now_nanos: u64,
+    window_nanos: u64,
+}
+
+#[derive(Debug)]
+struct SlowStartGate {
+    activated_at_nanos: AtomicU64,
+    attempts: AtomicU64,
+    accepted: AtomicU64,
+    warm: AtomicBool,
+}
+
+impl SlowStartGate {
+    fn warm() -> Self {
+        Self {
+            activated_at_nanos: AtomicU64::new(0),
+            attempts: AtomicU64::new(0),
+            accepted: AtomicU64::new(0),
+            warm: AtomicBool::new(true),
+        }
+    }
+
+    fn start(&self, now_nanos: u64) {
+        self.activated_at_nanos.store(now_nanos, Ordering::Relaxed);
+        self.attempts.store(0, Ordering::Relaxed);
+        self.accepted.store(0, Ordering::Relaxed);
+        self.warm.store(false, Ordering::Relaxed);
+    }
+
+    fn mark_warm(&self) {
+        self.warm.store(true, Ordering::Relaxed);
+    }
+
+    fn is_unrestricted(&self, view: SlowStartView) -> bool {
+        if self.warm.load(Ordering::Relaxed) {
+            return true;
+        }
+
+        if self.elapsed_nanos(view) >= view.window_nanos {
+            self.mark_warm();
+            return true;
+        }
+
+        false
+    }
+
+    fn permits(&self, view: SlowStartView) -> bool {
+        if self.is_unrestricted(view) {
+            return true;
+        }
+
+        let elapsed = self.elapsed_nanos(view);
+        if elapsed == 0 {
+            return false;
+        }
+
+        let attempt = self.attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        let allowance = ramp_allowance(attempt, elapsed, view.window_nanos);
+
+        loop {
+            let accepted = self.accepted.load(Ordering::Relaxed);
+            if allowance <= accepted {
+                return false;
+            }
+
+            if self
+                .accepted
+                .compare_exchange_weak(
+                    accepted,
+                    accepted.saturating_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn elapsed_nanos(&self, view: SlowStartView) -> u64 {
+        let activated_at = self.activated_at_nanos.load(Ordering::Relaxed);
+        view.now_nanos.saturating_sub(activated_at)
+    }
+}
+
+fn ramp_allowance(attempt: u64, elapsed_nanos: u64, window_nanos: u64) -> u64 {
+    let allowance = (u128::from(attempt) * u128::from(elapsed_nanos)) / u128::from(window_nanos);
+    u64::try_from(allowance).unwrap_or(u64::MAX)
 }
 
 // ─── Load metric ──────────────────────────────────────────────────────────
@@ -664,6 +819,7 @@ impl<E: std::error::Error + 'static> std::error::Error for LoadBalanceError<E> {
 pub struct LoadBalancer<S, T: Strategy> {
     backends: Mutex<Vec<Arc<Backend<S>>>>,
     strategy: T,
+    slow_start: Option<SlowStartConfig>,
 }
 
 struct Backend<S> {
@@ -671,6 +827,7 @@ struct Backend<S> {
     load: Arc<LoadMetric>,
     probe_waker: Waker,
     probe_woke: Arc<AtomicBool>,
+    slow_start: SlowStartGate,
 }
 
 impl<S> Backend<S> {
@@ -681,6 +838,7 @@ impl<S> Backend<S> {
             load: Arc::new(LoadMetric::new()),
             probe_waker,
             probe_woke,
+            slow_start: SlowStartGate::warm(),
         }
     }
 }
@@ -707,6 +865,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
         Self {
             backends: Mutex::new(backends),
             strategy,
+            slow_start: None,
         }
     }
 
@@ -717,14 +876,35 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
         Self {
             backends: Mutex::new(Vec::new()),
             strategy,
+            slow_start: None,
         }
+    }
+
+    /// Enable slow-start for subsequently inserted backends.
+    ///
+    /// Backends that already exist when this method is called are treated as
+    /// warm. New or recovered backends ramp from zero traffic share to their
+    /// normal strategy share across the configured window.
+    #[must_use]
+    pub fn with_slow_start(mut self, config: SlowStartConfig) -> Self {
+        for backend in self.backends.lock().iter() {
+            backend.slow_start.mark_warm();
+        }
+        self.slow_start = Some(config);
+        self
+    }
+
+    /// Get the slow-start configuration, if enabled.
+    #[must_use]
+    pub fn slow_start(&self) -> Option<&SlowStartConfig> {
+        self.slow_start.as_ref()
     }
 
     /// Add a backend service.
     pub fn push(&self, service: S) {
         let mut backends = self.backends.lock();
         let index = backends.len();
-        backends.push(Arc::new(Backend::new(service)));
+        backends.push(self.new_inserted_backend(service, index > 0));
         drop(backends);
         self.strategy.on_backend_inserted(index);
     }
@@ -749,6 +929,39 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     #[must_use]
     pub fn strategy(&self) -> &T {
         &self.strategy
+    }
+
+    fn new_inserted_backend(&self, service: S, should_ramp: bool) -> Arc<Backend<S>> {
+        let backend = Arc::new(Backend::new(service));
+        let Some(config) = self.slow_start.as_ref().filter(|_| should_ramp) else {
+            return backend;
+        };
+
+        let window_nanos = config.window_nanos();
+        if window_nanos == 0 {
+            backend.slow_start.mark_warm();
+        } else {
+            backend.slow_start.start(config.now_nanos());
+        }
+        backend
+    }
+
+    fn slow_start_view(&self, backends: &[Arc<Backend<S>>]) -> Option<SlowStartView> {
+        let config = self.slow_start.as_ref()?;
+        let window_nanos = config.window_nanos();
+        if window_nanos == 0 {
+            return None;
+        }
+
+        let view = SlowStartView {
+            now_nanos: config.now_nanos(),
+            window_nanos,
+        };
+        let has_unrestricted_backend = backends
+            .iter()
+            .any(|backend| backend.slow_start.is_unrestricted(view));
+
+        has_unrestricted_backend.then_some(view)
     }
 }
 
@@ -789,6 +1002,7 @@ where
         let endpoints = discover.endpoints();
 
         let mut backends = self.backends.lock();
+        let initial_snapshot = backends.is_empty();
         for change in changes {
             match change {
                 Change::Insert(service) => {
@@ -797,7 +1011,7 @@ where
                     }
 
                     let index = backends.len();
-                    backends.push(Arc::new(Backend::new(service)));
+                    backends.push(self.new_inserted_backend(service, !initial_snapshot));
                     self.strategy.on_backend_inserted(index);
                 }
                 Change::Remove(service) => {
@@ -832,7 +1046,7 @@ where
             }
 
             let index = backends.len();
-            backends.push(Arc::new(Backend::new(service.clone())));
+            backends.push(self.new_inserted_backend(service.clone(), !initial_snapshot));
             self.strategy.on_backend_inserted(index);
         }
 
@@ -894,6 +1108,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
 
         let loads: Vec<u64> = backends.iter().map(|b| b.load.load()).collect();
         let backend_handles = backends.clone();
+        let slow_start_view = self.slow_start_view(&backend_handles);
         let idx = self
             .strategy
             .pick(&loads)
@@ -924,6 +1139,9 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
                 continue;
             }
             let backend = &backend_handles[candidate_idx];
+            if slow_start_view.is_some_and(|view| !backend.slow_start.permits(view)) {
+                continue;
+            }
             let mut svc = backend.service.lock();
 
             let (mut readiness, woke_during_poll) = poll_service_ready_once::<S, Request>(
@@ -2750,6 +2968,101 @@ mod tests {
         crate::test_complete!(
             "lb_update_from_active_health_discovery_skips_unhealthy_and_readds_recovered"
         );
+    }
+
+    #[test]
+    fn lb_active_health_recovery_slow_starts_readded_backend() {
+        init_test("lb_active_health_recovery_slow_starts_readded_backend");
+        let backend_a = OrderedReadyService::new(10);
+        let backend_b = OrderedReadyService::new(20);
+        let outcomes = Arc::new(Mutex::new(HashMap::from([
+            (
+                backend_a.clone(),
+                VecDeque::from([
+                    super::super::discover::ProbeOutcome::Healthy,
+                    super::super::discover::ProbeOutcome::Healthy,
+                ]),
+            ),
+            (
+                backend_b.clone(),
+                VecDeque::from([
+                    super::super::discover::ProbeOutcome::Unhealthy,
+                    super::super::discover::ProbeOutcome::Healthy,
+                ]),
+            ),
+        ])));
+        let outcomes_for_probe = Arc::clone(&outcomes);
+        let discover = super::super::discover::ActiveHealthDiscovery::new(
+            super::super::discover::StaticList::new(vec![backend_a.clone(), backend_b.clone()]),
+            super::super::discover::ActiveHealthConfig::new(
+                super::super::discover::HealthProbeKind::Tcp,
+            )
+            .probe_interval(Duration::ZERO)
+            .failure_backoff(super::super::discover::ProbeBackoff::new(
+                Duration::ZERO,
+                Duration::ZERO,
+            )),
+            move |endpoint: &OrderedReadyService,
+                  kind: &super::super::discover::HealthProbeKind| {
+                assert_eq!(kind, &super::super::discover::HealthProbeKind::Tcp);
+                outcomes_for_probe
+                    .lock()
+                    .get_mut(endpoint)
+                    .expect("endpoint should have a probe script")
+                    .pop_front()
+                    .expect("endpoint probe script exhausted")
+            },
+        );
+        let clock = Arc::new(AtomicU64::new(0));
+        let clock_for_slow_start = Arc::clone(&clock);
+        let lb = LoadBalancer::empty(RoundRobin::new()).with_slow_start(
+            SlowStartConfig::new(Duration::from_secs(1)).with_time_getter(move || {
+                Time::from_nanos(clock_for_slow_start.load(Ordering::SeqCst))
+            }),
+        );
+
+        lb.update_from_discover(&discover)
+            .expect("first active-health update should apply");
+        assert_eq!(lb.len(), 1);
+
+        lb.update_from_discover(&discover)
+            .expect("recovered active-health update should apply");
+        assert_eq!(lb.len(), 2);
+
+        let call = || {
+            futures_lite::future::block_on(
+                lb.call_balanced(1)
+                    .expect("load balancer should find a dispatchable backend"),
+            )
+            .expect("backend should respond")
+        };
+
+        let early: Vec<_> = (0..4).map(|_| call()).collect();
+        assert_eq!(
+            early,
+            vec![10, 10, 10, 10],
+            "a just-recovered backend starts at zero traffic share while a warm backend exists"
+        );
+
+        clock.store(Time::from_millis(500).as_nanos(), Ordering::SeqCst);
+        let half_ramp: Vec<_> = (0..8).map(|_| call()).collect();
+        assert_eq!(
+            half_ramp.iter().filter(|&&response| response == 20).count(),
+            2,
+            "halfway through the window the recovered backend should receive half of its normal round-robin opportunities"
+        );
+
+        clock.store(Time::from_secs(1).as_nanos(), Ordering::SeqCst);
+        let fully_warm: Vec<_> = (0..8).map(|_| call()).collect();
+        assert_eq!(
+            fully_warm
+                .iter()
+                .filter(|&&response| response == 20)
+                .count(),
+            4,
+            "after the window the recovered backend should receive its full round-robin share"
+        );
+        crate::test_complete!("lb_active_health_recovery_slow_starts_readded_backend");
     }
 
     #[test]
