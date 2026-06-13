@@ -63,6 +63,57 @@ rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/p
 | `RQ-G1-E2E-RANDOM-HIGHLOSS` | Deterministic E2E conformance | high repair density, random loss | High-loss decode resilience | `decode_success`, `median_ns` |
 | `RQ-G1-E2E-BURST-LATE` | Deterministic E2E conformance | burst loss (late window) | Burst-loss recovery behavior | `decode_success`, `median_ns` |
 
+## Adaptive Block Layout Tuning Guidance (`asupersync-raptorq-leverage-3bb2pl.3`)
+
+The distributed encoder now records an `EncodingLayoutDecision` for every
+snapshot encoding. Unknown path quality intentionally stays on
+`static-block-layout-v1`; adaptive behavior is opt-in through a replayable
+`PathQualitySnapshot` carried by `EncodingConfig::path_quality` or
+`DistributionConfig::encoding_path_quality`.
+
+Current policy table:
+
+| Reason ID | Path-quality bound | Requested source-block divisor | Repair multiplier | Operator interpretation |
+|---|---|---:|---:|---|
+| `clean-low-rtt` | loss `<=10` permille, RTT `<=50ms`, reorder `<=1` | `1` | `1.00x` | Preserve configured block count and latency floor. |
+| `clean-high-rtt` | loss `<=10` permille, any RTT, reorder `<=2` | `2` | `1.10x` | Trade a little decode latency for fewer block-level control turns. |
+| `moderate-loss` | loss `<=50` permille, any RTT, reorder `<=8` | `2` | `1.25x` | Keep larger extended blocks and add enough repairs to cover ordinary loss. |
+| `lossy` | loss `<=150` permille, any RTT, reorder `<=16` | `4` | `1.75x` | Bias toward fewer, larger blocks because retransmit/control latency dominates. |
+| `severe-loss-or-reorder` | catch-all | `8` | `2.50x` | Fail conservative on extreme or malformed quality snapshots. |
+
+Tuning rules:
+
+- Treat `loss_ewma_permille` as the primary monotone axis: worse loss must not
+  reduce repair overhead or request smaller extended blocks.
+- Treat RTT and reorder as tie-breakers, not proof of loss. High RTT moves clean
+  paths to larger blocks because waiting on block-level control is expensive;
+  it does not by itself justify the high-loss repair multipliers.
+- Keep `path-quality-unknown` as the production-safe fallback. If the transport
+  cannot produce a replayable snapshot, the encoder must preserve the configured
+  static layout.
+- Compare adaptive-vs-static completion by same-seed runs over the same object
+  size and symbol size. Directional claims should report
+  `policy_id`, `reason_id`, `path_quality`, `requested_source_blocks`,
+  `effective_source_blocks`, `effective_min_repair_symbols`, replica-ack
+  completion time, and the artifact path.
+- Do not treat this table as a throughput benchmark by itself. The current unit
+  proof covers deterministic policy selection and telemetry; loss-matrix E2E
+  evidence and benchmark evidence remain separate acceptance surfaces for the
+  bead.
+
+Galaxy-brain card: the policy is an expected-completion-time heuristic, not a
+raw decode-throughput heuristic. In clean low-RTT cells, extra repairs and
+larger extended blocks mostly add encode/decode work and can delay first
+delivery. In lossy or high-control-latency cells, splitting into many small
+blocks increases the chance that at least one block waits on scarce repairs or
+another control turn. The table therefore moves in one direction only:
+loss/reorder pressure increases repair margin, and loss/RTT/reorder pressure
+reduces requested source-block count so each block has a larger recovery
+envelope. The no-win boundary is explicit: if future same-seed loss-matrix
+evidence shows a row regresses clean-cell completion or fails to improve lossy
+cells, update the table with a new policy id rather than silently changing
+`adaptive-block-layout-v1`.
+
 ## Draft Budget Sheet (G1)
 
 Budget source: `baseline_current.json` and phase0 throughput logs listed above. Values below are draft guardrails for CI profile wiring and should be recalibrated with a refreshed post-D7 corpus.
