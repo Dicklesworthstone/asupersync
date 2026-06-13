@@ -15,8 +15,26 @@ use std::cell::RefCell;
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 const LOCK_ORDER_VIOLATION_CODE: &str = "ASUP-E205";
+
+/// Stable reason emitted when a lock name maps to the rank hierarchy.
+pub const LOCK_ORDER_REASON_RANKED: &str = "ranked-lock";
+/// Stable reason emitted for the default intentionally-unranked primitive name.
+pub const LOCK_ORDER_REASON_DEFAULT_UNRANKED: &str = "allowed-default-unranked-lock";
+/// Stable reason emitted for the legacy unified runtime-state lock.
+pub const LOCK_ORDER_REASON_LEGACY_RUNTIME_STATE: &str = "allowed-legacy-runtime-state-lock";
+/// Stable reason emitted for the ATP-local transfer registry lock.
+pub const LOCK_ORDER_REASON_ATP_REGISTRY: &str = "allowed-atp-transfer-registry-lock";
+/// Stable reason emitted for the ATP in-memory object-store lock.
+pub const LOCK_ORDER_REASON_ATP_OBJECT_STORE: &str = "allowed-atp-object-store-lock";
+/// Stable reason emitted for the epoch-GC rate limiter lock.
+pub const LOCK_ORDER_REASON_EPOCH_GC_RATE_LIMITER: &str = "allowed-epoch-gc-rate-limiter-lock";
+/// Stable reason emitted for the service-adapter wrapper lock.
+pub const LOCK_ORDER_REASON_SERVICE_ADAPTER: &str = "allowed-service-adapter-lock";
+/// Stable reason emitted for lock-order test helper locks.
+pub const LOCK_ORDER_REASON_TEST_HELPER: &str = "allowed-lock-order-test-helper";
+/// Stable reason emitted when a lock name has no rank and no explicit allowance.
+pub const LOCK_ORDER_REASON_UNKNOWN_RANK: &str = "denied-unknown-lock-rank";
 
 /// Lock rank categories following the asupersync hierarchy.
 /// Lower numeric values must be acquired before higher values.
@@ -54,6 +72,32 @@ pub enum LockModule {
     Io,
     /// Other/unknown modules
     Other,
+}
+
+/// Fail-closed lock-name policy used by production `lock-metrics` callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockNamePolicy {
+    /// The lock is covered by the rank hierarchy and should be enforced.
+    Ranked {
+        /// Rank inferred from the lock name.
+        rank: LockRank,
+        /// Module inferred from the lock name.
+        module: LockModule,
+    },
+    /// The lock is intentionally outside the rank hierarchy.
+    AllowedUnranked {
+        /// Module inferred from the lock name.
+        module: LockModule,
+        /// Stable reason string documenting the allowance.
+        reason: &'static str,
+    },
+    /// The lock has no known rank and no documented allowance.
+    DeniedUnknown {
+        /// Module inferred from the lock name.
+        module: LockModule,
+        /// Stable reason string suitable for diagnostics.
+        reason: &'static str,
+    },
 }
 
 /// One deterministic lock-order edge observed by the atlas.
@@ -186,6 +230,146 @@ impl LockRank {
             LockRank::Tasks => "Tasks",
             LockRank::Obligations => "Obligations",
         }
+    }
+}
+
+impl LockNamePolicy {
+    /// Return true when this policy should participate in rank enforcement.
+    #[must_use]
+    pub const fn is_ranked(self) -> bool {
+        matches!(self, LockNamePolicy::Ranked { .. })
+    }
+
+    /// Return true when this policy rejects the lock name.
+    #[must_use]
+    pub const fn is_denied(self) -> bool {
+        matches!(self, LockNamePolicy::DeniedUnknown { .. })
+    }
+
+    /// Return the rank when the lock is covered by the hierarchy.
+    #[must_use]
+    pub const fn rank(self) -> Option<LockRank> {
+        match self {
+            LockNamePolicy::Ranked { rank, .. } => Some(rank),
+            LockNamePolicy::AllowedUnranked { .. } | LockNamePolicy::DeniedUnknown { .. } => None,
+        }
+    }
+
+    /// Return the inferred module for this lock name.
+    #[must_use]
+    pub const fn module(self) -> LockModule {
+        match self {
+            LockNamePolicy::Ranked { module, .. }
+            | LockNamePolicy::AllowedUnranked { module, .. }
+            | LockNamePolicy::DeniedUnknown { module, .. } => module,
+        }
+    }
+
+    /// Return the stable machine-readable reason for this policy.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            LockNamePolicy::Ranked { .. } => LOCK_ORDER_REASON_RANKED,
+            LockNamePolicy::AllowedUnranked { reason, .. }
+            | LockNamePolicy::DeniedUnknown { reason, .. } => reason,
+        }
+    }
+}
+
+/// Classify a lock name using the production lock-order policy.
+///
+/// This is stricter than [`LockRank::from_name`]. `from_name` remains the
+/// low-level prefix classifier used by existing lock wrappers; this policy adds
+/// the L2 explicit allow/deny decision so callers that need fail-closed
+/// behavior can reject undocumented unknown names with a stable reason.
+#[must_use]
+pub fn classify_lock_name(name: &str) -> LockNamePolicy {
+    let module = LockModule::from_name(name);
+    if let Some(rank) = LockRank::from_name(name) {
+        return LockNamePolicy::Ranked { rank, module };
+    }
+
+    if let Some(reason) = allowed_unranked_reason(name) {
+        LockNamePolicy::AllowedUnranked { module, reason }
+    } else {
+        LockNamePolicy::DeniedUnknown {
+            module,
+            reason: LOCK_ORDER_REASON_UNKNOWN_RANK,
+        }
+    }
+}
+
+/// Enforce the documented lock-name policy.
+///
+/// Ranked locks and explicitly allowed unranked locks are returned to the
+/// caller. Undocumented unknown names fail closed with a stable reason string.
+#[inline]
+#[track_caller]
+pub fn enforce_lock_name_policy(lock_name: &str) -> LockNamePolicy {
+    let policy = classify_lock_name(lock_name);
+    assert!(
+        !policy.is_denied(),
+        "[{}] LOCK ORDER POLICY: lock '{}' is not covered by automatic rank enforcement; reason={}",
+        LOCK_ORDER_VIOLATION_CODE,
+        lock_name,
+        policy.reason()
+    );
+    policy
+}
+
+/// Return the rank used by lock wrappers for a lock name.
+///
+/// Default builds preserve the historical low-level classifier. When
+/// `lock-metrics` is enabled, the same constructor path applies the documented
+/// allow/deny policy and fails closed on undocumented unknown names.
+#[must_use]
+#[inline]
+pub fn rank_for_lock_name(lock_name: &str) -> Option<LockRank> {
+    #[cfg(feature = "lock-metrics")]
+    {
+        enforce_lock_name_policy(lock_name).rank()
+    }
+
+    #[cfg(not(feature = "lock-metrics"))]
+    {
+        LockRank::from_name(lock_name)
+    }
+}
+
+/// Require a lock name to be covered by the rank hierarchy.
+///
+/// This helper is intentionally separate from current lock constructors. It
+/// gives production `lock-metrics` paths a fail-closed API while preserving the
+/// legacy unranked constructors until each call site has an explicit policy
+/// migration.
+#[inline]
+#[track_caller]
+pub fn require_ranked_lock_name(lock_name: &str) -> (LockRank, LockModule) {
+    match enforce_lock_name_policy(lock_name) {
+        LockNamePolicy::Ranked { rank, module } => (rank, module),
+        policy => panic!(
+            "[{}] LOCK ORDER POLICY: lock '{}' is not covered by automatic rank enforcement; reason={}",
+            LOCK_ORDER_VIOLATION_CODE,
+            lock_name,
+            policy.reason()
+        ),
+    }
+}
+
+fn allowed_unranked_reason(name: &str) -> Option<&'static str> {
+    match name {
+        "unknown" => Some(LOCK_ORDER_REASON_DEFAULT_UNRANKED),
+        "runtime_state"
+        | "metamorphic.runtime_state"
+        | "ws_fairness.runtime_state"
+        | "test_runtime_state"
+        | "test_state" => Some(LOCK_ORDER_REASON_LEGACY_RUNTIME_STATE),
+        "atp_transfer_registry" => Some(LOCK_ORDER_REASON_ATP_REGISTRY),
+        "atp_memory_object_store" => Some(LOCK_ORDER_REASON_ATP_OBJECT_STORE),
+        "epoch_gc.last_advance" => Some(LOCK_ORDER_REASON_EPOCH_GC_RATE_LIMITER),
+        "service_adapter" => Some(LOCK_ORDER_REASON_SERVICE_ADAPTER),
+        "test_abandon_read" | "test_abandon_write" => Some(LOCK_ORDER_REASON_TEST_HELPER),
+        _ => None,
     }
 }
 
@@ -620,6 +804,137 @@ mod tests {
             Some(LockRank::Obligations)
         );
         assert_eq!(LockRank::from_name("unknown_lock"), None);
+    }
+
+    #[test]
+    fn lock_name_policy_marks_ranked_locks_as_enforced() {
+        let policy = classify_lock_name("tasks_queue");
+
+        assert_eq!(
+            policy,
+            LockNamePolicy::Ranked {
+                rank: LockRank::Tasks,
+                module: LockModule::Other,
+            }
+        );
+        assert!(policy.is_ranked());
+        assert!(!policy.is_denied());
+        assert_eq!(policy.rank(), Some(LockRank::Tasks));
+        assert_eq!(policy.module(), LockModule::Other);
+        assert_eq!(policy.reason(), LOCK_ORDER_REASON_RANKED);
+    }
+
+    #[test]
+    fn lock_name_policy_documents_allowed_unranked_locks() {
+        for (name, reason) in [
+            ("unknown", LOCK_ORDER_REASON_DEFAULT_UNRANKED),
+            ("runtime_state", LOCK_ORDER_REASON_LEGACY_RUNTIME_STATE),
+            (
+                "metamorphic.runtime_state",
+                LOCK_ORDER_REASON_LEGACY_RUNTIME_STATE,
+            ),
+            ("test_state", LOCK_ORDER_REASON_LEGACY_RUNTIME_STATE),
+            ("atp_transfer_registry", LOCK_ORDER_REASON_ATP_REGISTRY),
+            (
+                "epoch_gc.last_advance",
+                LOCK_ORDER_REASON_EPOCH_GC_RATE_LIMITER,
+            ),
+            ("service_adapter", LOCK_ORDER_REASON_SERVICE_ADAPTER),
+            (
+                "atp_memory_object_store",
+                LOCK_ORDER_REASON_ATP_OBJECT_STORE,
+            ),
+            ("test_abandon_read", LOCK_ORDER_REASON_TEST_HELPER),
+        ] {
+            let policy = classify_lock_name(name);
+            assert!(
+                matches!(policy, LockNamePolicy::AllowedUnranked { .. }),
+                "{name} should be an explicitly allowed unranked lock"
+            );
+            assert!(!policy.is_ranked());
+            assert!(!policy.is_denied());
+            assert_eq!(policy.rank(), None);
+            assert_eq!(policy.reason(), reason);
+        }
+    }
+
+    #[test]
+    fn lock_name_policy_denies_undocumented_unknown_locks() {
+        let policy = classify_lock_name("side_table_without_rank");
+
+        assert_eq!(
+            policy,
+            LockNamePolicy::DeniedUnknown {
+                module: LockModule::Other,
+                reason: LOCK_ORDER_REASON_UNKNOWN_RANK,
+            }
+        );
+        assert!(!policy.is_ranked());
+        assert!(policy.is_denied());
+        assert_eq!(policy.rank(), None);
+        assert_eq!(policy.reason(), LOCK_ORDER_REASON_UNKNOWN_RANK);
+    }
+
+    #[test]
+    fn require_ranked_lock_name_returns_rank_and_module_for_known_locks() {
+        assert_eq!(
+            require_ranked_lock_name("obligation_tracker"),
+            (LockRank::Obligations, LockModule::Obligation)
+        );
+    }
+
+    #[test]
+    fn enforce_lock_name_policy_allows_documented_unranked_locks() {
+        let policy = enforce_lock_name_policy("runtime_state");
+
+        assert_eq!(
+            policy,
+            LockNamePolicy::AllowedUnranked {
+                module: LockModule::Runtime,
+                reason: LOCK_ORDER_REASON_LEGACY_RUNTIME_STATE,
+            }
+        );
+    }
+
+    #[test]
+    fn rank_for_lock_name_preserves_ranked_results() {
+        assert_eq!(rank_for_lock_name("regions_table"), Some(LockRank::Regions));
+    }
+
+    #[test]
+    fn enforce_lock_name_policy_panics_with_stable_reason_for_unknown_lock() {
+        let panic = std::panic::catch_unwind(|| {
+            let _ = enforce_lock_name_policy("side_table_without_rank");
+        })
+        .expect_err("undocumented unknown lock should fail closed");
+        let message = panic_payload_to_string(panic);
+
+        assert!(
+            message.starts_with("[ASUP-E205]"),
+            "policy panic should start with ASUP-E205 token: {message}"
+        );
+        assert!(
+            message.contains(LOCK_ORDER_REASON_UNKNOWN_RANK),
+            "policy panic should include stable reason: {message}"
+        );
+    }
+
+    #[test]
+    fn require_ranked_lock_name_panics_with_stable_reason_for_unknown_lock() {
+        let panic = std::panic::catch_unwind(|| {
+            let _ = require_ranked_lock_name("side_table_without_rank");
+        })
+        .expect_err("undocumented unknown lock should fail closed");
+        let message = panic_payload_to_string(panic);
+
+        assert!(
+            message.starts_with("[ASUP-E205]"),
+            "policy panic should start with ASUP-E205 token: {message}"
+        );
+        assert!(
+            message.contains(LOCK_ORDER_REASON_UNKNOWN_RANK),
+            "policy panic should include stable reason: {message}"
+        );
     }
 
     #[test]
