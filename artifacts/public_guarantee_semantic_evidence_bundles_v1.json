@@ -50,7 +50,7 @@
     "status_catalog_source": "artifacts/proof_status_snapshot_v1.json#proof_evidence_status_catalog",
     "rejection_fixture_paths": [
       "tests/fixtures/proof_artifact_freshness_receipt/missing_command.json",
-      "tests/fixtures/proof_artifact_freshness_receipt/stale_head_artifact.json",
+      "tests/fixtures/proof_artifact_freshness_receipt/superseded_head.json",
       "tests/fixtures/proof_artifact_freshness_receipt/missing_remote_required_command.json",
       "tests/fixtures/proof_artifact_freshness_receipt/missing_remote_route_evidence.json",
       "tests/fixtures/durable_rch_proof_receipt/local_fallback_marker.json",
