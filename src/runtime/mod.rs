@@ -123,6 +123,7 @@
 pub mod blocking_pool;
 pub mod builder;
 pub mod cache;
+pub mod changepoint;
 pub mod config;
 pub mod deadline_monitor;
 #[cfg(test)]
@@ -191,6 +192,11 @@ pub use builder::{
 pub use cache::{
     ArtifactCache, ArtifactCacheConfig, ArtifactMemoryPressureSnapshot, ArtifactMetadata,
     CacheStatistics, EvictionPolicy,
+};
+pub use changepoint::{
+    ChangeDirection, ChangePointDetection, ChangePointDetectorKind, ChangePointSnapshot,
+    CusumConfig, CusumDetector, MetricSample, PageHinkleyConfig, PageHinkleyDetector,
+    RuntimeMetricSeries,
 };
 pub use config::{BlockingPoolConfig, RuntimeConfig, TraceStorageBudget, TraceStorageProfile};
 pub use deadline_monitor::{
