@@ -200,6 +200,10 @@ impl PrioritizedFrame {
             QuicFrame::HandshakeDone => 1, // Just type
         }
     }
+
+    fn encoded_size(&self) -> Result<usize, QuicFrameError> {
+        encoded_frame_size(&self.frame)
+    }
 }
 
 /// Packet assembler that coalesces frames within constraints
@@ -254,8 +258,13 @@ impl PacketAssembler {
         }
 
         let available_budget = self.constraints.available_packet_budget();
-        if available_budget < 4 {
-            // Not enough budget for even a minimal frame
+        if available_budget == 0 {
+            return Ok(None);
+        }
+
+        if self.constraints.packet_number_space == PacketNumberSpace::Initial
+            && available_budget < MIN_INITIAL_PACKET_SIZE
+        {
             return Ok(None);
         }
 
@@ -264,27 +273,16 @@ impl PacketAssembler {
         let mut frames_added = 0;
 
         // Try to fit frames in priority order
-        while let Some(frame) = self.highest_priority_frame() {
-            let estimated_size = frame.estimated_size();
-
-            // Check if frame fits in remaining budget
-            if used_budget + estimated_size > available_budget {
-                break;
-            }
-
-            // Check packet number space compatibility
-            if !is_frame_allowed_in_space(&frame.frame, self.constraints.packet_number_space) {
-                // Remove incompatible frame and continue
-                self.pop_highest_priority_frame();
-                continue;
-            }
-
-            // Add frame to packet
-            let frame = match self.pop_highest_priority_frame() {
-                Some(frame) => frame,
-                None => break, // No more frames available
-            };
-            used_budget += estimated_size;
+        while let Some((frame, encoded_size)) = self.take_next_frame_for_packet(
+            available_budget.saturating_sub(used_budget),
+            self.constraints.packet_number_space,
+        )? {
+            used_budget = used_budget.checked_add(encoded_size).ok_or(
+                PacketAssemblyError::PacketTooLarge {
+                    size: usize::MAX,
+                    max: available_budget,
+                },
+            )?;
 
             if frame.ack_eliciting {
                 packet.ack_eliciting = true;
@@ -306,19 +304,25 @@ impl PacketAssembler {
             return Ok(None);
         }
 
-        // Add padding if needed for anti-amplification
-        if self.constraints.packet_number_space == PacketNumberSpace::Initial
-            && packet.estimated_size() < MIN_INITIAL_PACKET_SIZE
-        {
-            let padding_needed = MIN_INITIAL_PACKET_SIZE - packet.estimated_size();
-            if used_budget + padding_needed <= available_budget {
-                packet.frames.push(QuicFrame::Padding {
-                    length: padding_needed,
-                });
-            }
+        packet.calculate_size()?;
+        if packet.size > available_budget {
+            return Err(PacketAssemblyError::PacketTooLarge {
+                size: packet.size,
+                max: available_budget,
+            });
         }
 
-        packet.calculate_size();
+        // Add padding if needed for anti-amplification
+        if self.constraints.packet_number_space == PacketNumberSpace::Initial
+            && packet.size < MIN_INITIAL_PACKET_SIZE
+        {
+            let padding_needed = MIN_INITIAL_PACKET_SIZE - packet.size;
+            packet.frames.push(QuicFrame::Padding {
+                length: padding_needed,
+            });
+            packet.size = MIN_INITIAL_PACKET_SIZE;
+        }
+
         Ok(Some(packet))
     }
 
@@ -333,21 +337,54 @@ impl PacketAssembler {
         self.pending_frame_count
     }
 
-    fn highest_priority_frame(&self) -> Option<&PrioritizedFrame> {
-        self.pending_frames
-            .last_key_value()
-            .and_then(|(_priority, frames)| frames.front())
-    }
-
-    fn pop_highest_priority_frame(&mut self) -> Option<PrioritizedFrame> {
-        let priority = *self.pending_frames.last_key_value()?.0;
-        let frames = self.pending_frames.get_mut(&priority)?;
-        let frame = frames.pop_front()?;
-        self.pending_frame_count -= 1;
-        if frames.is_empty() {
-            self.pending_frames.remove(&priority);
+    fn take_next_frame_for_packet(
+        &mut self,
+        remaining_budget: usize,
+        space: PacketNumberSpace,
+    ) -> Result<Option<(PrioritizedFrame, usize)>, PacketAssemblyError> {
+        if remaining_budget == 0 {
+            return Ok(None);
         }
-        Some(frame)
+
+        let priorities: Vec<_> = self.pending_frames.keys().rev().copied().collect();
+        for priority in priorities {
+            let Some(frame) = self
+                .pending_frames
+                .get(&priority)
+                .and_then(|frames| frames.front())
+            else {
+                continue;
+            };
+
+            if !is_frame_allowed_in_space(&frame.frame, space) {
+                continue;
+            }
+
+            if frame.estimated_size() > remaining_budget {
+                continue;
+            }
+
+            let encoded_size = frame.encoded_size()?;
+            if encoded_size > remaining_budget {
+                continue;
+            }
+
+            let Some(frames) = self.pending_frames.get_mut(&priority) else {
+                continue;
+            };
+            let Some(frame) = frames.pop_front() else {
+                continue;
+            };
+
+            self.pending_frame_count -= 1;
+            if frames.is_empty() {
+                self.pending_frames.remove(&priority);
+            }
+
+            return Ok(Some((frame, encoded_size)));
+        }
+
+        Ok(None)
     }
 }
 
@@ -390,22 +427,25 @@ impl AssembledPacket {
     }
 
     /// Calculate packet size
-    fn calculate_size(&mut self) {
-        self.size = self
-            .frames
-            .iter()
-            .map(|frame| {
-                let mut temp_buf = BytesMut::new();
-                let _ = frame.encode(&mut temp_buf);
-                temp_buf.len()
-            })
-            .sum();
+    fn calculate_size(&mut self) -> Result<(), QuicFrameError> {
+        let mut size = 0;
+        for frame in &self.frames {
+            size += encoded_frame_size(frame)?;
+        }
+        self.size = size;
+        Ok(())
     }
 
     /// Get estimated size
     pub fn estimated_size(&self) -> usize {
         self.size
     }
+}
+
+fn encoded_frame_size(frame: &QuicFrame) -> Result<usize, QuicFrameError> {
+    let mut temp_buf = BytesMut::new();
+    frame.encode(&mut temp_buf)?;
+    Ok(temp_buf.len())
 }
 
 /// Check if frame is allowed in the given packet number space
@@ -497,7 +537,11 @@ mod tests {
 
     #[test]
     fn test_packet_assembly() {
-        let mut assembler = PacketAssembler::new(PacketConstraints::new());
+        let mut assembler = PacketAssembler::new(
+            PacketConstraints::new()
+                .with_packet_number_space(PacketNumberSpace::ApplicationData)
+                .without_anti_amplification(),
+        );
 
         // Add some frames
         assembler.add_quic_frame(QuicFrame::Ping);
@@ -508,6 +552,7 @@ mod tests {
         let packet = assembler.assemble_packet().unwrap().unwrap();
         assert_eq!(packet.frames.len(), 2);
         assert!(packet.ack_eliciting);
+        assert_eq!(assembler.pending_frame_count(), 0);
     }
 
     #[test]
@@ -577,6 +622,51 @@ mod tests {
         assert_eq!(non_padding_frames.len(), 2);
         assert!(matches!(non_padding_frames[0], QuicFrame::Crypto { .. })); // Higher priority
         assert!(matches!(non_padding_frames[1], QuicFrame::Ping));
+        assert_eq!(assembler.pending_frame_count(), 1);
+
+        assembler.set_constraints(
+            PacketConstraints::new()
+                .with_packet_number_space(PacketNumberSpace::ApplicationData)
+                .without_anti_amplification(),
+        );
+        let app_packet = assembler.assemble_packet().unwrap().unwrap();
+        assert!(matches!(app_packet.frames[0], QuicFrame::Stream { .. }));
+        assert_eq!(assembler.pending_frame_count(), 0);
+    }
+
+    #[test]
+    fn test_oversized_high_priority_frame_does_not_block_lower_priority_frame() {
+        let mut assembler = PacketAssembler::new(
+            PacketConstraints::new()
+                .with_packet_number_space(PacketNumberSpace::ApplicationData)
+                .without_anti_amplification(),
+        );
+
+        assembler.add_frame(
+            PrioritizedFrame::new(QuicFrame::Padding {
+                length: DEFAULT_IPV4_MTU,
+            })
+            .with_priority(250),
+        );
+        assembler.add_frame(PrioritizedFrame::new(QuicFrame::Ping));
+
+        let packet = assembler.assemble_packet().unwrap().unwrap();
+        assert_eq!(packet.frames, vec![QuicFrame::Ping]);
+        assert_eq!(assembler.pending_frame_count(), 1);
+    }
+
+    #[test]
+    fn test_initial_packet_waits_for_padding_budget_without_dropping_frame() {
+        let mut assembler = PacketAssembler::new(
+            PacketConstraints::new()
+                .with_congestion_window(MIN_INITIAL_PACKET_SIZE - 1)
+                .with_mtu(2000),
+        );
+
+        assembler.add_quic_frame(QuicFrame::Ping);
+
+        assert!(assembler.assemble_packet().unwrap().is_none());
+        assert_eq!(assembler.pending_frame_count(), 1);
     }
 
     #[test]
@@ -597,6 +687,6 @@ mod tests {
             .iter()
             .any(|f| matches!(f, QuicFrame::Padding { .. }));
         assert!(has_padding);
-        assert!(packet.estimated_size() >= MIN_INITIAL_PACKET_SIZE);
+        assert_eq!(packet.estimated_size(), MIN_INITIAL_PACKET_SIZE);
     }
 }
