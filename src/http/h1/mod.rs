@@ -33,7 +33,8 @@ pub use codec::{Http1Codec, HttpError};
 #[cfg(test)]
 pub use codec::parse_header_line_test as parse_header_line;
 pub use http_client::{
-    ClientError, HttpClient, HttpClientBuilder, HttpClientConfig, ParsedUrl, RedirectPolicy,
+    ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, ParsedUrl,
+    RedirectPolicy, Scheme,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use listener::{Http1Listener, Http1ListenerConfig};

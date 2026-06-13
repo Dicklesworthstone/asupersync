@@ -734,6 +734,161 @@ impl HttpClientConfig {
     }
 }
 
+/// Fluent, client-bound request builder for [`HttpClient`].
+///
+/// The builder only accumulates per-request options. [`send`](Self::send)
+/// delegates to the same request path as [`HttpClient::request`] and
+/// [`HttpClient::request_with_timeout`], so redirects, pooling, cookies,
+/// proxy routing, and cancellation semantics stay centralized.
+#[must_use = "client request builders do nothing unless sent"]
+#[derive(Clone)]
+pub struct ClientRequestBuilder<'a> {
+    client: &'a HttpClient,
+    method: Method,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    timeout: Option<std::time::Duration>,
+}
+
+impl std::fmt::Debug for ClientRequestBuilder<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientRequestBuilder")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &self.headers)
+            .field("body_len", &self.body.len())
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> ClientRequestBuilder<'a> {
+    fn new(client: &'a HttpClient, method: Method, url: impl Into<String>) -> Self {
+        Self {
+            client,
+            method,
+            url: url.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout: None,
+        }
+    }
+
+    /// Set the HTTP method.
+    #[must_use]
+    pub fn method(mut self, method: Method) -> Self {
+        self.method = method;
+        self
+    }
+
+    /// Set the absolute request URL.
+    #[must_use]
+    pub fn url(mut self, url: impl Into<String>) -> Self {
+        self.url = url.into();
+        self
+    }
+
+    /// Add a request header.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Add multiple request headers.
+    #[must_use]
+    pub fn headers<I, N, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (N, V)>,
+        N: Into<String>,
+        V: Into<String>,
+    {
+        self.headers.extend(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
+        self
+    }
+
+    /// Set request body bytes.
+    #[must_use]
+    pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    /// Set a JSON body and add `Content-Type: application/json`.
+    pub fn json<T: serde::Serialize>(mut self, value: &T) -> Result<Self, serde_json::Error> {
+        self.body = serde_json::to_vec(value)?;
+        self.headers
+            .push(("Content-Type".to_owned(), "application/json".to_owned()));
+        Ok(self)
+    }
+
+    /// Set a multipart form-data body and content type.
+    #[must_use]
+    pub fn multipart(mut self, form: &MultipartForm) -> Self {
+        self.body = form.to_body();
+        self.headers
+            .push(("Content-Type".to_owned(), form.content_type_header()));
+        self
+    }
+
+    /// Set `Authorization: Bearer <token>`.
+    #[must_use]
+    pub fn bearer_auth(self, token: impl AsRef<str>) -> Self {
+        self.header("Authorization", format!("Bearer {}", token.as_ref()))
+    }
+
+    /// Set `Authorization: Basic <credentials>`.
+    #[must_use]
+    pub fn basic_auth(self, username: impl AsRef<str>, password: Option<&str>) -> Self {
+        let credentials = password.map_or_else(
+            || format!("{}:", username.as_ref()),
+            |pw| format!("{}:{}", username.as_ref(), pw),
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+        self.header("Authorization", format!("Basic {encoded}"))
+    }
+
+    /// Set the `Content-Type` header.
+    #[must_use]
+    pub fn content_type(self, content_type: impl Into<String>) -> Self {
+        self.header("Content-Type", content_type)
+    }
+
+    /// Set the `Accept` header.
+    #[must_use]
+    pub fn accept(self, accept: impl Into<String>) -> Self {
+        self.header("Accept", accept)
+    }
+
+    /// Set a per-call total request timeout.
+    ///
+    /// The timeout is meet-composed with the client's configured timeout and
+    /// the remaining ambient [`Cx`] budget by [`HttpClient::request_with_timeout`].
+    #[must_use]
+    pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Send the request using the bound client.
+    pub async fn send(self, cx: &Cx) -> Result<Response, ClientError> {
+        if let Some(timeout) = self.timeout {
+            self.client
+                .request_with_timeout(cx, self.method, &self.url, self.headers, self.body, timeout)
+                .await
+        } else {
+            self.client
+                .request(cx, self.method, &self.url, self.headers, self.body)
+                .await
+        }
+    }
+}
+
 /// High-level HTTP/1.1 client.
 ///
 /// Provides a simple API for making HTTP requests with automatic connection
@@ -782,6 +937,58 @@ impl HttpClient {
 
     fn pool_now(&self) -> Time {
         (self.config.time_getter)()
+    }
+
+    /// Create a fluent request builder bound to this client.
+    #[must_use]
+    pub fn request_builder(
+        &self,
+        method: Method,
+        url: impl Into<String>,
+    ) -> ClientRequestBuilder<'_> {
+        ClientRequestBuilder::new(self, method, url)
+    }
+
+    /// Create a fluent `GET` request builder.
+    #[must_use]
+    pub fn get_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+        self.request_builder(Method::Get, url)
+    }
+
+    /// Create a fluent `POST` request builder.
+    #[must_use]
+    pub fn post_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+        self.request_builder(Method::Post, url)
+    }
+
+    /// Create a fluent `PUT` request builder.
+    #[must_use]
+    pub fn put_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+        self.request_builder(Method::Put, url)
+    }
+
+    /// Create a fluent `PATCH` request builder.
+    #[must_use]
+    pub fn patch_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+        self.request_builder(Method::Patch, url)
+    }
+
+    /// Create a fluent `DELETE` request builder.
+    #[must_use]
+    pub fn delete_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+        self.request_builder(Method::Delete, url)
+    }
+
+    /// Create a fluent `HEAD` request builder.
+    #[must_use]
+    pub fn head_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+        self.request_builder(Method::Head, url)
+    }
+
+    /// Create a fluent `OPTIONS` request builder.
+    #[must_use]
+    pub fn options_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+        self.request_builder(Method::Options, url)
     }
 
     /// Send a GET request to the given URL.
@@ -3042,6 +3249,86 @@ mod tests {
         let client = HttpClient::new();
         let stats = client.pool_stats();
         assert_eq!(stats.total_connections, 0);
+    }
+
+    #[test]
+    fn client_request_builder_collects_fluent_options() {
+        let client = HttpClient::new();
+        let builder = client
+            .request_builder(Method::Post, "http://example.com/api")
+            .header("X-Trace-Id", "trace-1")
+            .headers([("Accept", "application/json")])
+            .content_type("application/json")
+            .bearer_auth("token-1")
+            .body(b"{\"ok\":true}".to_vec())
+            .timeout(std::time::Duration::from_millis(250));
+
+        assert_eq!(builder.method, Method::Post);
+        assert_eq!(builder.url, "http://example.com/api");
+        assert_eq!(builder.body.as_slice(), b"{\"ok\":true}");
+        assert_eq!(builder.timeout, Some(std::time::Duration::from_millis(250)));
+        assert!(
+            builder
+                .headers
+                .contains(&("X-Trace-Id".to_owned(), "trace-1".to_owned()))
+        );
+        assert!(
+            builder
+                .headers
+                .contains(&("Accept".to_owned(), "application/json".to_owned()))
+        );
+        assert!(
+            builder
+                .headers
+                .contains(&("Content-Type".to_owned(), "application/json".to_owned()))
+        );
+        assert!(
+            builder
+                .headers
+                .contains(&("Authorization".to_owned(), "Bearer token-1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn client_request_builder_json_and_basic_auth_helpers() {
+        let client = HttpClient::new();
+        let builder = client
+            .post_request("http://example.com/api")
+            .json(&serde_json::json!({"ok": true}))
+            .expect("json body should serialize")
+            .basic_auth("alice", Some("secret"));
+
+        assert_eq!(builder.method, Method::Post);
+        assert_eq!(
+            builder.body,
+            serde_json::to_vec(&serde_json::json!({"ok": true})).expect("json body")
+        );
+        assert!(
+            builder
+                .headers
+                .contains(&("Content-Type".to_owned(), "application/json".to_owned()))
+        );
+        assert!(builder.headers.contains(&(
+            "Authorization".to_owned(),
+            "Basic YWxpY2U6c2VjcmV0".to_owned()
+        )));
+    }
+
+    #[test]
+    fn client_request_builder_send_respects_cancelled_cx_before_dialing() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+
+        let client = HttpClient::new();
+        let err = block_on(
+            client
+                .get_request("http://127.0.0.1:1/cancelled")
+                .header("X-Trace-Id", "trace-1")
+                .send(&cx),
+        )
+        .expect_err("cancelled cx should reject before connect");
+
+        assert!(err.is_cancelled());
     }
 
     #[test]

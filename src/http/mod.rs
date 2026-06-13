@@ -48,7 +48,11 @@ pub mod h3_native;
 pub mod pool;
 
 pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
-pub use h1::http_client::HttpClientBuilder;
+pub use h1::{
+    ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, Method,
+    MultipartError, MultipartForm, ParsedUrl, RedirectPolicy, Request, RequestBuilder, Response,
+    ResponseBuilder, Scheme, StatusCode, Version,
+};
 // br-asupersync-um5wbj: H3Error is the public-facing alias for
 // H3NativeError; expose it unconditionally (was previously gated behind
 // `feature = "http3"` while H3NativeError was unconditional, producing
