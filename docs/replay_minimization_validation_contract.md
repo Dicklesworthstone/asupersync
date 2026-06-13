@@ -34,6 +34,29 @@ Delta-debugging and scenario-level minimization must produce strictly smaller tr
 
 Owner: `src/trace/delta_debug.rs`, `src/trace/minimizer.rs`
 
+### Scenario Fault-List Minimization
+
+`frankenlab minimize <scenario.yaml>` reduces the scenario fault list before
+reporting a repro. The CLI keeps participant, lab, network, cancellation, and
+oracle configuration fixed, maps each fault position to a stable synthetic
+`ScenarioElement`, and runs the existing `TraceMinimizer` over that ordered
+surface. Candidate subsets are translated back to fault indices, rerun through
+`ScenarioRunner`, and accepted only when the reduced scenario still fails.
+
+This is an equivalence-class search over the ordered fault schedule rather than
+raw YAML text. For trace-level reducers the same rule applies at the Foata class
+boundary: shrink representatives of the trace equivalence class
+`M(Sigma,I) = Sigma* / equiv_I`, then linearize only after independence has been
+accounted for. That avoids spending budget on permutations that differ only by
+commuting independent events.
+
+The CLI uses a logical minimizer clock for scenario YAML minimization, stable
+index sorting, and deterministic JSON field construction. The same input and
+budget must therefore produce identical minimized indices, reduction ratio, and
+budget-exhaustion flag. Budget exhaustion is fail-closed: the command reports
+the best verified still-failing subset it has found and marks the result
+exhausted instead of claiming a fully minimal repro.
+
 ### Dimension 3: Geodesic Normalization Correctness
 
 Normalized traces must be valid linear extensions with reduced switch cost:

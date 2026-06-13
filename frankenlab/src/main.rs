@@ -716,6 +716,29 @@ mod tests {
     }
 
     #[test]
+    fn minimize_fault_indices_is_deterministic() {
+        let first =
+            minimize_fault_indices(7, 0, |indices| indices.contains(&1) && indices.contains(&5))
+                .expect("full fault set fails");
+        let second =
+            minimize_fault_indices(7, 0, |indices| indices.contains(&1) && indices.contains(&5))
+                .expect("full fault set fails");
+
+        assert_eq!(
+            first.minimized_fault_indices,
+            second.minimized_fault_indices
+        );
+        assert_eq!(first.removed_fault_indices, second.removed_fault_indices);
+        assert_eq!(
+            first.reduction_ratio.to_bits(),
+            second.reduction_ratio.to_bits()
+        );
+        assert_eq!(first.replay_attempts, second.replay_attempts);
+        assert_eq!(first.budget_exhausted, second.budget_exhausted);
+        assert_eq!(first.verified_still_failing, second.verified_still_failing);
+    }
+
+    #[test]
     fn minimize_fault_indices_budget_exhaustion_keeps_verified_result() {
         let outcome = minimize_fault_indices(4, 1, |indices| indices.contains(&2))
             .expect("full fault set fails");
