@@ -111,6 +111,13 @@ fn all_decisions(artifact: &Value) -> Vec<&Value> {
         .collect()
 }
 
+fn decision_by_idea_id<'a>(artifact: &'a Value, idea_id: &str) -> &'a Value {
+    all_decisions(artifact)
+        .into_iter()
+        .find(|row| string(row, "idea_id") == idea_id)
+        .unwrap_or_else(|| panic!("missing decision row {idea_id}"))
+}
+
 #[test]
 fn artifact_docs_and_remote_validation_are_wired() {
     let artifact = artifact();
@@ -304,6 +311,49 @@ fn closeout_verdict_names_current_blockers() {
     assert_eq!(
         blocker_ids, open_owner_ids,
         "blocker list must match non-closed owner rows"
+    );
+}
+
+#[test]
+fn appspec_status_reflects_a2_bridge_landing_without_closing_parent() {
+    let artifact = artifact();
+    let appspec = decision_by_idea_id(&artifact, "top-02-appspec-service-topology");
+    assert_eq!(
+        string(appspec, "owner_bead_id"),
+        "asupersync-idea-wizard-fifth-wave-3gaiun.2"
+    );
+    assert_eq!(string(appspec, "tracker_status"), "open");
+    assert_eq!(string(appspec, "decision"), "still-open");
+
+    let blocker = string(appspec, "current_blocker");
+    for required in [
+        "A1/A2 source is landed",
+        "A2 compiler bridge",
+        "exited 130",
+        "A3/A4 remain open",
+    ] {
+        assert!(
+            blocker.contains(required),
+            "AppSpec blocker must mention {required}: {blocker}"
+        );
+    }
+
+    let next_step = string(appspec, "next_step");
+    for required in [
+        "A2 exact unit proof",
+        "A3 generated fixtures",
+        "A4 production reference journey",
+    ] {
+        assert!(
+            next_step.contains(required),
+            "AppSpec next step must mention {required}: {next_step}"
+        );
+    }
+
+    let evidence_refs = string_set(appspec, "evidence_refs");
+    assert!(
+        evidence_refs.contains("src/app.rs"),
+        "AppSpec A2 source evidence must cite src/app.rs"
     );
 }
 

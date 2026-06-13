@@ -119,8 +119,8 @@
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
       "tracker_status": "open",
       "decision": "still-open",
-      "current_blocker": "AppSpec parent remains open with A1/A2 in progress and A3/A4 still open; no clean closeout-ready proof chain exists.",
-      "next_step": "Complete the AppSpec schema/compiler child chain, then land generated fixtures, proof manifest rows, and a production reference journey.",
+      "current_blocker": "AppSpec A1/A2 source is landed, including the A2 compiler bridge in src/app.rs, but the exact A2 focused RCH unit test exited 130 before a result and A3/A4 remain open; no closeout-ready proof chain exists.",
+      "next_step": "Get the A2 exact unit proof green remotely, then complete the A3 generated fixtures/proof manifest rows and A4 production reference journey before closing the AppSpec parent.",
       "proof_refs": [
         "artifacts/appspec_v1_schema.json",
         "docs/appspec_v1.md"
@@ -443,7 +443,7 @@
     {
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
       "tracker_status": "open",
-      "reason": "AppSpec child chain is incomplete."
+      "reason": "AppSpec parent remains open: A2 bridge source landed with lib-check evidence, but exact focused unit proof is blocked and A3/A4 remain open."
     },
     {
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.6",

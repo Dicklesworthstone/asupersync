@@ -76,7 +76,8 @@ beads remain open or proof-blocked:
 
 Most of the blocked backlog rows now have checked artifacts in-tree. Their
 remaining blocker is remote RCH proof, not local source edits. AppSpec remains
-open because its child implementation chain is incomplete.
+open because the A2 compiler bridge has source and lib-check evidence, but its
+exact focused unit proof is blocked and A3/A4 remain open.
 
 <!-- FIFTH-WAVE-CLOSEOUT:VALIDATION -->
 
