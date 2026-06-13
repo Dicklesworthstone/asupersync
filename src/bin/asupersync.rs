@@ -857,6 +857,10 @@ fn summarize_source_path_inner(
     Ok(())
 }
 
+// Retained as the deterministic transfer-id contract for the not-yet-wired
+// `atp sync`/`mirror` commands (br-asupersync-qk02uw follow-up). Real transfers
+// use `transport_tcp`'s own transfer id.
+#[allow(dead_code)]
 fn stable_transfer_id(prefix: &str, source: &Path, target: &str, summary: &PathSummary) -> String {
     let mut hasher = Sha256::new();
     hash_len_prefixed(&mut hasher, prefix.as_bytes());
@@ -1034,15 +1038,35 @@ struct AtpSendResultOutput {
     target: String,
     transfer_id: String,
     status: String,
+    committed: bool,
+    bytes_sent: u64,
+    files: u32,
+    merkle_root: String,
+    sha_ok: bool,
+    merkle_ok: bool,
 }
 
 impl AtpSendResultOutput {
-    fn new(source: &Path, target: &str, transfer_id: &str) -> Self {
+    fn from_report(
+        source: &Path,
+        target: &str,
+        report: &asupersync::net::atp::transport_tcp::SendReport,
+    ) -> Self {
         Self {
             source: source.display().to_string(),
             target: target.to_string(),
-            transfer_id: transfer_id.to_string(),
-            status: "local_source_indexed".to_string(),
+            transfer_id: report.transfer_id.clone(),
+            status: if report.receipt.committed {
+                "committed".to_string()
+            } else {
+                "rejected".to_string()
+            },
+            committed: report.receipt.committed,
+            bytes_sent: report.bytes_sent,
+            files: report.files,
+            merkle_root: report.merkle_root_hex.clone(),
+            sha_ok: report.receipt.sha_ok,
+            merkle_ok: report.receipt.merkle_ok,
         }
     }
 }
@@ -1054,10 +1078,74 @@ impl Outputtable for AtpSendResultOutput {
 
     fn human_format(&self) -> String {
         format!(
-            "Transfer status:\n  Source: {}\n  Target: {}\n  Transfer ID: {}\n  Status: {}",
-            self.source, self.target, self.transfer_id, self.status
+            "Transfer result:\n  Source: {}\n  Target: {}\n  Transfer ID: {}\n  Status: {}\n  \
+             Bytes: {}\n  Files: {}\n  Merkle root: {}\n  SHA verified: {}\n  Merkle verified: {}",
+            self.source,
+            self.target,
+            self.transfer_id,
+            self.status,
+            self.bytes_sent,
+            self.files,
+            self.merkle_root,
+            self.sha_ok,
+            self.merkle_ok
         )
     }
+}
+
+/// Build a single-shot runtime and perform a real ATP-over-TCP send. The target
+/// must resolve to a `host:port` socket address; anything else fails closed
+/// (no peer-directory / share-token resolution in v1).
+fn run_real_atp_send(
+    source: &Path,
+    target: &str,
+) -> Result<asupersync::net::atp::transport_tcp::SendReport, CliError> {
+    use std::net::ToSocketAddrs;
+
+    let addr = target
+        .to_socket_addrs()
+        .map_err(|err| {
+            CliError::new(
+                "atp_target_unresolved",
+                "ATP send target must be a reachable host:port address",
+            )
+            .detail(format!(
+                "target '{target}' did not resolve: {err}. v1 supports host:port targets only; \
+                 peer-directory and share-token resolution are not yet wired."
+            ))
+            .exit_code(ExitCode::USER_ERROR)
+        })?
+        .next()
+        .ok_or_else(|| {
+            CliError::new(
+                "atp_target_unresolved",
+                "ATP send target resolved to no addresses",
+            )
+            .detail(format!("target '{target}'"))
+            .exit_code(ExitCode::USER_ERROR)
+        })?;
+
+    let runtime = asupersync::runtime::RuntimeBuilder::multi_thread()
+        .build()
+        .map_err(|err| {
+            CliError::new("atp_runtime_error", "Failed to build ATP runtime")
+                .detail(err.to_string())
+        })?;
+    let source = source.to_path_buf();
+    let cfg = asupersync::net::atp::transport_tcp::TransferConfig::default();
+    runtime
+        .block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("ATP send task context");
+            asupersync::net::atp::transport_tcp::send_path(
+                &cx, addr, &source, cfg, "asupersync-cli",
+            )
+            .await
+        }))
+        .map_err(|err| {
+            CliError::new("atp_send_failed", "ATP transfer failed")
+                .detail(err.to_string())
+                .exit_code(ExitCode::USER_ERROR)
+        })
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1095,39 +1183,6 @@ impl Outputtable for AtpSyncPlanOutput {
             self.target,
             self.allow_updates,
             self.changes.join(", ")
-        )
-    }
-}
-
-#[derive(Debug, serde::Serialize)]
-struct AtpSyncResultOutput {
-    source: String,
-    target: String,
-    status: String,
-    files_synced: usize,
-}
-
-impl AtpSyncResultOutput {
-    fn new(source: &Path, target: &str) -> Result<Self, CliError> {
-        let summary = summarize_source_path(source)?;
-        Ok(Self {
-            source: source.display().to_string(),
-            target: target.to_string(),
-            status: "local_source_indexed".to_string(),
-            files_synced: summary.file_count,
-        })
-    }
-}
-
-impl Outputtable for AtpSyncResultOutput {
-    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
-        serde_json::to_value(self)
-    }
-
-    fn human_format(&self) -> String {
-        format!(
-            "Sync completed:\n  Source: {}\n  Target: {}\n  Status: {}\n  Files synced: {}",
-            self.source, self.target, self.status, self.files_synced
         )
     }
 }
@@ -1172,6 +1227,7 @@ impl Outputtable for AtpMirrorPlanOutput {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[allow(dead_code)]
 struct AtpMirrorResultOutput {
     source: String,
     target: String,
@@ -1179,6 +1235,7 @@ struct AtpMirrorResultOutput {
     files_mirrored: usize,
 }
 
+#[allow(dead_code)]
 impl AtpMirrorResultOutput {
     fn new(source: &Path, target: &str) -> Result<Self, CliError> {
         let summary = summarize_source_path(source)?;
@@ -1326,6 +1383,7 @@ impl AtpPairOutput {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[allow(dead_code)]
 struct AtpSeedOutput {
     source: String,
     seed_id: String,
@@ -1341,6 +1399,7 @@ struct AtpSeedOutput {
     estimated_peers: u32,
 }
 
+#[allow(dead_code)]
 impl AtpSeedOutput {
     fn new(args: &AtpSeedArgs) -> Result<Self, CliError> {
         let summary = summarize_source_path(&args.source)?;
@@ -1422,6 +1481,7 @@ impl Outputtable for AtpSeedOutput {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[allow(dead_code)]
 struct AtpWatchOutput {
     source: String,
     target: String,
@@ -1429,6 +1489,7 @@ struct AtpWatchOutput {
     status: String,
 }
 
+#[allow(dead_code)]
 impl AtpWatchOutput {
     fn new(source: &Path, target: &str, debounce_seconds: u32) -> Self {
         Self {
@@ -1696,12 +1757,14 @@ impl Outputtable for AtpInboxClearOutput {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[allow(dead_code)]
 struct AtpResumeOutput {
     transfer_id: String,
     force: bool,
     status: String,
 }
 
+#[allow(dead_code)]
 impl AtpResumeOutput {
     fn new(transfer_id: &str, force: bool) -> Self {
         Self {
@@ -1726,6 +1789,7 @@ impl Outputtable for AtpResumeOutput {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[allow(dead_code)]
 struct AtpCancelOutput {
     transfer_id: String,
     reason: String,
@@ -1733,6 +1797,7 @@ struct AtpCancelOutput {
     status: String,
 }
 
+#[allow(dead_code)]
 impl AtpCancelOutput {
     fn new(transfer_id: &str, reason: &str, force: bool) -> Self {
         Self {
@@ -2026,12 +2091,14 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[allow(dead_code)]
 struct AtpTransferStatusOutput {
     active_transfers: Vec<AtpTransferInfo>,
     total_active: usize,
     daemon_status: String,
 }
 
+#[allow(dead_code)]
 impl AtpTransferStatusOutput {
     fn new(transfers: Vec<AtpTransferInfo>) -> Self {
         let count = transfers.len();
@@ -2109,6 +2176,7 @@ impl AtpTransferInfo {
     }
 }
 
+#[allow(dead_code)]
 fn active_transfers_from_local_state(transfer_id: Option<&str>) -> Vec<AtpTransferInfo> {
     let _ = transfer_id;
     Vec::new()
@@ -4418,48 +4486,27 @@ fn atp_proof(args: &AtpProofArgs, output: &mut Output) -> Result<(), CliError> {
 }
 
 fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
-    let source_summary = summarize_source_path(&args.source)?;
+    // Validate the source exists and is a file/dir before touching the network.
+    let _ = summarize_source_path(&args.source)?;
     if args.dry_run {
         let payload = AtpSendPlanOutput::new(&args.source, &args.target, &args.profile)?;
         output
             .write(&payload)
             .map_err(output_write_error("ATP send plan"))?;
     } else {
-        let transfer_id =
-            stable_transfer_id("transfer", &args.source, &args.target, &source_summary);
+        // Real ATP-over-TCP transfer (br-asupersync-qk02uw). This moves actual
+        // verified bytes to the peer and fails closed on an unreachable target
+        // or a receiver integrity rejection — no simulated progress.
+        let report = run_real_atp_send(&args.source, &args.target)?;
 
-        // Show explain report if requested
         if args.explain {
-            let explain_report = AtpExplainReport::new(&transfer_id);
+            let explain_report = AtpExplainReport::new(&report.transfer_id);
             output
                 .write(&explain_report)
                 .map_err(output_write_error("ATP send explain report"))?;
         }
 
-        // Show progress updates if requested
-        if args.progress {
-            let source_name = args
-                .source
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
-                .to_string_lossy();
-
-            let total_bytes = source_summary.total_bytes;
-            for chunk in progress_chunks(total_bytes) {
-                let progress =
-                    AtpProgressUpdate::new(&transfer_id, &source_name, chunk, total_bytes);
-                output
-                    .write(&progress)
-                    .map_err(output_write_error("ATP send progress"))?;
-
-                if chunk < total_bytes {
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-            }
-        }
-
-        // Final result
-        let payload = AtpSendResultOutput::new(&args.source, &args.target, &transfer_id);
+        let payload = AtpSendResultOutput::from_report(&args.source, &args.target, &report);
         output
             .write(&payload)
             .map_err(output_write_error("ATP send result"))?;
@@ -4468,64 +4515,32 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
 }
 
 fn atp_sync(args: &AtpSyncArgs, output: &mut Output) -> Result<(), CliError> {
-    let source_summary = summarize_source_path(&args.source)?;
+    let _ = summarize_source_path(&args.source)?;
     if args.dry_run {
+        // The dry-run plan is an honest preview and stays available.
         let payload = AtpSyncPlanOutput::new(&args.source, &args.target, args.allow_updates)?;
         output
             .write(&payload)
             .map_err(output_write_error("ATP sync plan"))?;
+        Ok(())
     } else {
-        let transfer_id = stable_transfer_id("sync", &args.source, &args.target, &source_summary);
-
-        if args.explain {
-            let explain_report = AtpExplainReport::new(&transfer_id);
-            output
-                .write(&explain_report)
-                .map_err(output_write_error("ATP sync explain report"))?;
-        }
-
-        if args.progress {
-            let source_name = args
-                .source
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new("directory"))
-                .to_string_lossy();
-
-            let total_bytes = source_summary.total_bytes;
-            for chunk in progress_chunks(total_bytes) {
-                let progress =
-                    AtpProgressUpdate::new(&transfer_id, &source_name, chunk, total_bytes);
-                output
-                    .write(&progress)
-                    .map_err(output_write_error("ATP sync progress"))?;
-
-                if chunk < total_bytes {
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-            }
-        }
-
-        let payload = AtpSyncResultOutput::new(&args.source, &args.target)?;
-        output
-            .write(&payload)
-            .map_err(output_write_error("ATP sync result"))?;
+        // Directory diff/reconcile is not implemented; do not fake a sync.
+        atp_not_implemented("sync")
     }
-    Ok(())
 }
 
 fn atp_mirror(args: &AtpMirrorArgs, output: &mut Output) -> Result<(), CliError> {
     if args.dry_run {
+        // The dry-run plan is an honest preview and stays available.
         let payload = AtpMirrorPlanOutput::new(&args.source, &args.target, args.allow_deletes)?;
         output
             .write(&payload)
             .map_err(output_write_error("ATP mirror plan"))?;
+        Ok(())
     } else {
-        let payload = AtpMirrorResultOutput::new(&args.source, &args.target)?;
-        output
-            .write(&payload)
-            .map_err(output_write_error("ATP mirror result"))?;
+        // Mirror-with-deletes reconcile is not implemented; do not fake it.
+        atp_not_implemented("mirror")
     }
-    Ok(())
 }
 
 fn atp_share(args: &AtpShareArgs, output: &mut Output) -> Result<(), CliError> {
@@ -4775,28 +4790,99 @@ fn atp_seed(args: &AtpSeedArgs, output: &mut Output) -> Result<(), CliError> {
         }
     }
 
-    let payload = AtpSeedOutput::new(args)?;
-    output
-        .write(&payload)
-        .map_err(output_write_error("ATP seed configuration"))?;
-
-    Ok(())
+    let _ = output;
+    // Validation above is a useful pre-check, but content seeding requires a
+    // running atpd cache/relay to register and serve the content; not wired in
+    // v1. Fail closed rather than report content as seeded when it is not.
+    atp_not_implemented("seed")
 }
 
-fn atp_watch(args: &AtpWatchArgs, output: &mut Output) -> Result<(), CliError> {
-    let payload = AtpWatchOutput::new(&args.source, &args.target, args.debounce_seconds);
-    output
-        .write(&payload)
-        .map_err(output_write_error("ATP watch status"))?;
-    Ok(())
+fn atp_watch(_args: &AtpWatchArgs, _output: &mut Output) -> Result<(), CliError> {
+    // Filesystem-watch-and-sync is not implemented; do not pretend to watch.
+    atp_not_implemented("watch")
 }
 
-fn atp_serve(_args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
-    let payload = AtpServeOutput::new("daemon started", "0.0.0.0:8080");
+fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
+    use std::net::ToSocketAddrs;
+
+    // Real ATP-over-TCP receiver (br-asupersync-qk02uw). Previously this printed
+    // "daemon started" and exited without binding anything.
+    let listen = args
+        .listen
+        .to_socket_addrs()
+        .map_err(|err| {
+            CliError::new("atp_listen_invalid", "ATP serve listen address is invalid")
+                .detail(format!("'{}': {err}", args.listen))
+                .exit_code(ExitCode::USER_ERROR)
+        })?
+        .next()
+        .ok_or_else(|| {
+            CliError::new("atp_listen_invalid", "ATP serve listen address resolved to nothing")
+                .detail(args.listen.clone())
+                .exit_code(ExitCode::USER_ERROR)
+        })?;
+    let dest_dir = args.data_dir.join("inbox");
+
+    let payload = AtpServeOutput::new("listening", &listen.to_string());
     output
         .write(&payload)
         .map_err(output_write_error("ATP serve status"))?;
+
+    let runtime = asupersync::runtime::RuntimeBuilder::multi_thread()
+        .build()
+        .map_err(|err| {
+            CliError::new("atp_runtime_error", "Failed to build ATP runtime")
+                .detail(err.to_string())
+        })?;
+    let cfg = asupersync::net::atp::transport_tcp::TransferConfig::default();
+    runtime
+        .block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("ATP serve task context");
+            asupersync::fs::create_dir_all(&dest_dir).await.map_err(|e| e.to_string())?;
+            let listener = asupersync::net::TcpListener::bind(listen)
+                .await
+                .map_err(|e| e.to_string())?;
+            asupersync::net::atp::transport_tcp::serve(
+                &cx,
+                listener,
+                dest_dir,
+                cfg,
+                "asupersync-cli".to_string(),
+                |outcome| {
+                    if let Ok(report) = &outcome {
+                        eprintln!(
+                            "atp: committed transfer {} ({} bytes, {} files)",
+                            report.transfer_id, report.bytes_received, report.files
+                        );
+                    } else if let Err(err) = &outcome {
+                        eprintln!("atp: transfer failed: {err}");
+                    }
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }))
+        .map_err(|err: String| {
+            CliError::new("atp_serve_failed", "ATP serve loop failed").detail(err)
+        })?;
     Ok(())
+}
+
+/// Honest fail-closed handler for ATP CLI commands whose real implementation is
+/// not yet wired in v1. Replaces the prior behavior of printing fabricated
+/// success. Points operators at the working `atp send` / `atp serve` /
+/// standalone `atp` surfaces.
+fn atp_not_implemented(command: &str) -> Result<(), CliError> {
+    Err(CliError::new(
+        "atp_not_implemented",
+        "This ATP command is not yet implemented",
+    )
+    .detail(format!(
+        "`atp {command}` is not wired to a real implementation in v1 and will not be faked. \
+         Use `atp send <src> <host:port>` and `atp serve --listen <addr>` (or the standalone \
+         `atp` binary) for real transfers; daemon-backed inbox/resume/status need a running atpd."
+    ))
+    .exit_code(ExitCode::USER_ERROR))
 }
 
 fn atp_inbox(args: &AtpInboxArgs, output: &mut Output) -> Result<(), CliError> {
@@ -4839,82 +4925,33 @@ fn atp_inbox(args: &AtpInboxArgs, output: &mut Output) -> Result<(), CliError> {
     Ok(())
 }
 
-fn atp_resume(args: &AtpResumeArgs, output: &mut Output) -> Result<(), CliError> {
-    let payload = AtpResumeOutput::new(&args.transfer_id, args.force);
-    output
-        .write(&payload)
-        .map_err(output_write_error("ATP resume"))?;
-    Ok(())
+fn atp_resume(_args: &AtpResumeArgs, _output: &mut Output) -> Result<(), CliError> {
+    // Resuming a transfer requires durable transfer state from a running atpd;
+    // not wired in v1. Fail closed rather than fabricate a resume.
+    atp_not_implemented("resume")
 }
 
-fn atp_cancel(args: &AtpCancelArgs, output: &mut Output) -> Result<(), CliError> {
-    let payload = AtpCancelOutput::new(&args.transfer_id, &args.reason, args.force);
-    output
-        .write(&payload)
-        .map_err(output_write_error("ATP cancel"))?;
-    Ok(())
+fn atp_cancel(_args: &AtpCancelArgs, _output: &mut Output) -> Result<(), CliError> {
+    // Cancelling an in-flight transfer requires daemon-tracked transfer state;
+    // not wired in v1. Fail closed rather than fabricate a cancel.
+    atp_not_implemented("cancel")
 }
 
-fn atp_transfer_status(args: &AtpTransferStatusArgs, output: &mut Output) -> Result<(), CliError> {
-    if args.watch {
-        // Watch mode - continuously update
-        let mut iteration = 0;
-        loop {
-            // Clear screen for watch mode
-            if iteration > 0 {
-                print!("\x1B[2J\x1B[1;1H"); // Clear screen and move cursor to top
-            }
-
-            let transfers = active_transfers_from_local_state(args.transfer_id.as_deref());
-
-            let mut status_output = AtpTransferStatusOutput::new(transfers);
-
-            if args.explain {
-                // Add explain information for each transfer
-                for transfer in &mut status_output.active_transfers {
-                    let explain_report = AtpExplainReport::new(&transfer.transfer_id);
-                    output
-                        .write(&explain_report)
-                        .map_err(output_write_error("ATP transfer status explain"))?;
-                }
-            }
-
-            output
-                .write(&status_output)
-                .map_err(output_write_error("ATP transfer status"))?;
-
-            iteration += 1;
-
-            // Exit if not in watch mode or sleep for interval
-            if !args.watch || iteration >= 5 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(args.interval_seconds));
-        }
-    } else {
-        // One-time status check
-        let transfers = active_transfers_from_local_state(args.transfer_id.as_deref());
-
-        let status_output = AtpTransferStatusOutput::new(transfers);
-
-        if args.explain {
-            for transfer in &status_output.active_transfers {
-                let explain_report = AtpExplainReport::new(&transfer.transfer_id);
-                output
-                    .write(&explain_report)
-                    .map_err(output_write_error("ATP transfer status explain"))?;
-            }
-        }
-
-        output
-            .write(&status_output)
-            .map_err(output_write_error("ATP transfer status"))?;
-    }
-    Ok(())
+fn atp_transfer_status(
+    _args: &AtpTransferStatusArgs,
+    _output: &mut Output,
+) -> Result<(), CliError> {
+    // Live transfer status requires querying a running atpd's state; without it
+    // there is nothing real to report, so fail closed instead of always
+    // printing an empty/synthetic transfer list.
+    atp_not_implemented("transfer-status")
 }
 
 fn atp_bench(args: &AtpBenchArgs, output: &mut Output) -> Result<(), CliError> {
-    // Create output directory if it doesn't exist
+    // NOTE (br-asupersync-qk02uw follow-up): these results are model-derived,
+    // not measured from a real ATP transfer. Tracked for replacement with a
+    // transport-driven benchmark; left intact in this de-facade increment to
+    // avoid orphaning the results machinery.
     if !args.output_dir.exists() {
         std::fs::create_dir_all(&args.output_dir).map_err(|err| {
             CliError::new("io_error", "Failed to create benchmark output directory")
@@ -4935,7 +4972,6 @@ fn atp_bench(args: &AtpBenchArgs, output: &mut Output) -> Result<(), CliError> {
         args.detailed,
     );
 
-    // Write to output directory
     let result_file = args
         .output_dir
         .join(format!("atp_bench_{}.json", args.profile));
@@ -4954,7 +4990,6 @@ fn atp_bench(args: &AtpBenchArgs, output: &mut Output) -> Result<(), CliError> {
             .exit_code(ExitCode::RUNTIME_ERROR)
     })?;
 
-    // Output results
     output
         .write(&final_results)
         .map_err(output_write_error("ATP benchmark results"))?;
