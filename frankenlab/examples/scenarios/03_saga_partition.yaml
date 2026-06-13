@@ -66,8 +66,8 @@ faults:
   - at_ms: 300
     action: clock_skew
     args:
-      target: "participant-8"
-      drift_ms: 50
+      host: "participant-8"
+      skew_ms: 50
   # Heal: restore connectivity at T=800ms
   - at_ms: 800
     action: heal
@@ -88,7 +88,7 @@ faults:
   - at_ms: 850
     action: clock_reset
     args:
-      target: "participant-8"
+      host: "participant-8"
 
 participants:
   - name: coordinator

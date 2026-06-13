@@ -14,7 +14,11 @@
 use asupersync::lab::scenario_runner::{
     ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
 };
+use asupersync::trace::minimizer::LogicalMinimizerClock;
+use asupersync::trace::{ScenarioElement, TraceMinimizer};
 use clap::{ArgAction, Args, Parser, Subcommand};
+use serde::Serialize;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -51,6 +55,9 @@ enum Command {
 
     /// Explore multiple seeds to find invariant violations
     Explore(ExploreArgs),
+
+    /// Minimize a failing scenario by shrinking its fault list
+    Minimize(MinimizeArgs),
 
     /// Run the built-in time-travel demo pipeline
     Demo(DemoArgs),
@@ -90,6 +97,16 @@ struct ExploreArgs {
     /// Starting seed for exploration
     #[arg(long, default_value_t = 0)]
     start_seed: u64,
+}
+
+#[derive(Args, Debug)]
+struct MinimizeArgs {
+    /// Path to the failing scenario YAML file
+    scenario: PathBuf,
+
+    /// Maximum scenario reruns used by the reducer; 0 means unlimited
+    #[arg(long, default_value_t = 128)]
+    max_replays: usize,
 }
 
 #[derive(Args, Debug)]
@@ -160,6 +177,18 @@ fn runner_error_message(err: ScenarioRunnerError) -> String {
 
 fn pretty_json_or<T: serde::Serialize>(value: &T, fallback: &'static str) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| fallback.to_string())
+}
+
+fn scenario_with_fault_indices(
+    scenario: &asupersync::lab::scenario::Scenario,
+    fault_indices: &[usize],
+) -> asupersync::lab::scenario::Scenario {
+    let mut reduced = scenario.clone();
+    reduced.faults = fault_indices
+        .iter()
+        .filter_map(|&index| scenario.faults.get(index).cloned())
+        .collect();
+    reduced
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +346,152 @@ fn cmd_explore(args: ExploreArgs, json: bool) -> Result<(), String> {
             result.failed, result.seeds_explored
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Minimize
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+struct FaultMinimizeOutcome {
+    original_fault_count: usize,
+    minimized_fault_count: usize,
+    removed_fault_count: usize,
+    minimized_fault_indices: Vec<usize>,
+    removed_fault_indices: Vec<usize>,
+    reduction_ratio: f64,
+    replay_attempts: usize,
+    budget_exhausted: bool,
+    verified_still_failing: bool,
+}
+
+fn fault_elements(fault_count: usize) -> Vec<ScenarioElement> {
+    (0..fault_count)
+        .map(|index| ScenarioElement::AdvanceTime {
+            nanos: u64::try_from(index).expect("fault index fits in u64") + 1,
+        })
+        .collect()
+}
+
+fn fault_indices_from_elements(elements: &[ScenarioElement]) -> Vec<usize> {
+    let mut indices: Vec<usize> = elements
+        .iter()
+        .filter_map(|element| match element {
+            ScenarioElement::AdvanceTime { nanos } => nanos
+                .checked_sub(1)
+                .and_then(|index| usize::try_from(index).ok()),
+            _ => None,
+        })
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
+fn minimize_fault_indices(
+    fault_count: usize,
+    max_replays: usize,
+    fails_with_fault_indices: impl FnMut(&[usize]) -> bool,
+) -> Result<FaultMinimizeOutcome, String> {
+    let mut full_indices: Vec<usize> = (0..fault_count).collect();
+    let fails = RefCell::new(fails_with_fault_indices);
+    if !(fails.borrow_mut())(&full_indices) {
+        return Err("scenario does not currently fail; minimization needs a failing input".into());
+    }
+
+    if fault_count == 0 {
+        return Ok(FaultMinimizeOutcome {
+            original_fault_count: 0,
+            minimized_fault_count: 0,
+            removed_fault_count: 0,
+            minimized_fault_indices: Vec::new(),
+            removed_fault_indices: Vec::new(),
+            reduction_ratio: 0.0,
+            replay_attempts: 1,
+            budget_exhausted: false,
+            verified_still_failing: true,
+        });
+    }
+
+    let replay_attempts = Cell::new(0usize);
+    let budget_exhausted = Cell::new(false);
+    let elements = fault_elements(fault_count);
+    let checker = |subset: &[ScenarioElement]| {
+        if max_replays != 0 && replay_attempts.get() >= max_replays {
+            budget_exhausted.set(true);
+            return false;
+        }
+        replay_attempts.set(replay_attempts.get() + 1);
+        let candidate = fault_indices_from_elements(subset);
+        (fails.borrow_mut())(&candidate)
+    };
+
+    let report =
+        TraceMinimizer::minimize_with_clock(&elements, checker, &LogicalMinimizerClock::new());
+
+    let minimized_fault_indices = fault_indices_from_elements(&report.minimized_elements());
+    let verified_still_failing = (fails.borrow_mut())(&minimized_fault_indices);
+    full_indices.retain(|index| !minimized_fault_indices.contains(index));
+
+    Ok(FaultMinimizeOutcome {
+        original_fault_count: fault_count,
+        minimized_fault_count: minimized_fault_indices.len(),
+        removed_fault_count: full_indices.len(),
+        minimized_fault_indices,
+        removed_fault_indices: full_indices,
+        reduction_ratio: report.reduction_ratio,
+        replay_attempts: replay_attempts.get() + 1,
+        budget_exhausted: budget_exhausted.get(),
+        verified_still_failing,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn cmd_minimize(args: MinimizeArgs, json: bool) -> Result<(), String> {
+    let scenario = load_scenario(&args.scenario)?;
+    let outcome = minimize_fault_indices(scenario.faults.len(), args.max_replays, |indices| {
+        let reduced = scenario_with_fault_indices(&scenario, indices);
+        ScenarioRunner::run(&reduced).is_ok_and(|result| !result.passed())
+    })?;
+
+    if !outcome.verified_still_failing {
+        return Err("minimized scenario did not reproduce the original failure".into());
+    }
+
+    if json {
+        let minimized = scenario_with_fault_indices(&scenario, &outcome.minimized_fault_indices);
+        let report = serde_json::json!({
+            "schema_version": 1,
+            "input_kind": "scenario_yaml",
+            "minimized_surface": "faults",
+            "scenario": args.scenario.display().to_string(),
+            "scenario_id": scenario.id,
+            "outcome": outcome,
+            "minimized_scenario": minimized,
+        });
+        println!("{}", pretty_json_or(&report, "{}"));
+    } else {
+        println!(
+            "Minimized faults: {} -> {} ({:.1}% reduction)",
+            outcome.original_fault_count,
+            outcome.minimized_fault_count,
+            outcome.reduction_ratio * 100.0
+        );
+        println!("Kept fault indices: {:?}", outcome.minimized_fault_indices);
+        println!("Removed fault indices: {:?}", outcome.removed_fault_indices);
+        println!(
+            "Replay attempts: {}{}",
+            outcome.replay_attempts,
+            if outcome.budget_exhausted {
+                " (budget exhausted)"
+            } else {
+                ""
+            }
+        );
+        println!("Verified still failing: yes");
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +674,7 @@ fn main() -> ExitCode {
         Command::Validate(args) => cmd_validate(args, cli.json),
         Command::Replay(args) => cmd_replay(args, cli.json),
         Command::Explore(args) => cmd_explore(args, cli.json),
+        Command::Minimize(args) => cmd_minimize(args, cli.json),
         Command::Demo(args) => cmd_demo(args, cli.json),
     };
 
@@ -508,5 +684,52 @@ fn main() -> ExitCode {
             eprintln!("Error: {msg}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fault_index_elements_round_trip_and_sort() {
+        let elements = vec![
+            ScenarioElement::AdvanceTime { nanos: 4 },
+            ScenarioElement::AdvanceTime { nanos: 2 },
+            ScenarioElement::AdvanceTime { nanos: 4 },
+        ];
+
+        assert_eq!(fault_indices_from_elements(&elements), vec![1, 3]);
+    }
+
+    #[test]
+    fn minimize_fault_indices_recovers_required_fault_pair() {
+        let outcome =
+            minimize_fault_indices(6, 0, |indices| indices.contains(&1) && indices.contains(&4))
+                .expect("full fault set fails");
+
+        assert_eq!(outcome.minimized_fault_indices, vec![1, 4]);
+        assert_eq!(outcome.minimized_fault_count, 2);
+        assert_eq!(outcome.removed_fault_count, 4);
+        assert!(outcome.verified_still_failing);
+        assert!(!outcome.budget_exhausted);
+    }
+
+    #[test]
+    fn minimize_fault_indices_budget_exhaustion_keeps_verified_result() {
+        let outcome = minimize_fault_indices(4, 1, |indices| indices.contains(&2))
+            .expect("full fault set fails");
+
+        assert_eq!(outcome.minimized_fault_indices, vec![0, 1, 2, 3]);
+        assert_eq!(outcome.removed_fault_count, 0);
+        assert!(outcome.verified_still_failing);
+        assert!(outcome.budget_exhausted);
+    }
+
+    #[test]
+    fn minimize_fault_indices_rejects_passing_input() {
+        let err = minimize_fault_indices(3, 0, |_| false).expect_err("input must fail");
+
+        assert!(err.contains("does not currently fail"));
     }
 }
