@@ -13,6 +13,7 @@
 //! - [`race!`] - Race multiple futures, returning the first to complete
 //! - [`session_protocol!`] - Generate typestate session protocols
 //! - [`conformance`] - Annotate conformance tests
+//! - [`lab_test`] / [`explore_seeds`] - Run deterministic lab-runtime tests
 //!
 //! # Contract With `asupersync`
 //!
@@ -304,6 +305,35 @@ pub fn conformance(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn lab_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     lab_test::lab_test_impl(attr, item)
+}
+
+/// Runs a deterministic lab-runtime body across a seed sweep.
+///
+/// The body is invoked once per seed with a fresh
+/// [`LabRuntime`](asupersync::lab::LabRuntime). The generated test drains each
+/// run to quiescence, aggregates trace equivalence-class coverage, and reports
+/// failing seeds with replay-friendly reproducer commands.
+///
+/// Supported arguments:
+///
+/// - `base = N` or `base_seed = N` sets the first seed
+/// - `count = N` sets the number of seeds
+/// - `seeds = START..END` uses an exclusive range
+/// - `workers = N` or `worker_count = N` sets the lab worker count
+/// - `max_steps = N` sets the per-seed step limit
+/// - `chaos` enables the light deterministic chaos profile
+///
+/// # Example
+///
+/// ```ignore
+/// #[explore_seeds(seeds = 0..32, workers = 2)]
+/// fn cancellation_matrix(lab: &mut asupersync::lab::LabRuntime) {
+///     // build the per-seed scenario; the macro drains and checks it
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn explore_seeds(attr: TokenStream, item: TokenStream) -> TokenStream {
+    lab_test::explore_seeds_impl(attr, item)
 }
 
 /// Generates typestate-encoded session types from a protocol DSL.

@@ -1,10 +1,11 @@
 #![allow(missing_docs)]
+#![allow(clippy::needless_pass_by_ref_mut, clippy::unused_async)]
 
 use asupersync::cx::Cx;
 use asupersync::lab::LabRuntime;
 use asupersync::record::ObligationKind;
 use asupersync::types::Budget;
-use asupersync_macros::lab_test;
+use asupersync_macros::{explore_seeds, lab_test};
 use std::path::Path;
 use std::process::Command;
 
@@ -32,10 +33,43 @@ async fn async_cx_form_gets_current_cx(cx: &Cx) {
     );
 }
 
+#[explore_seeds(base = 4, count = 3, workers = 2, max_steps = 1_000)]
+fn explore_seed_matrix_uses_requested_config(lab: &mut LabRuntime) {
+    assert!((4..7).contains(&lab.config().seed));
+    assert_eq!(lab.config().worker_count, 2);
+    assert_eq!(lab.config().max_steps, Some(1_000));
+    assert!(lab.has_replay_recording());
+}
+
+#[explore_seeds(seeds = 8..9, chaos)]
+fn explore_seed_matrix_can_enable_light_chaos(lab: &mut LabRuntime) {
+    assert_eq!(lab.config().seed, 8);
+    assert!(lab.has_chaos());
+}
+
 #[should_panic(expected = "seed 3")]
 #[lab_test(seeds = 2..5)]
 fn seed_matrix_failure_reports_seed(lab: &mut LabRuntime) {
     assert_ne!(lab.config().seed, 3, "intentional seed failure");
+}
+
+#[ignore = "called by failing_explore_seeds_panic_includes_seed_and_coverage"]
+#[explore_seeds(base = 20, count = 2)]
+fn ignored_explore_seed_failure_for_summary(lab: &mut LabRuntime) {
+    assert_ne!(lab.config().seed, 21, "intentional explore failure");
+}
+
+#[test]
+fn failing_explore_seeds_panic_includes_seed_and_coverage() {
+    let panic = capture_panic(ignored_explore_seed_failure_for_summary);
+
+    assert!(panic.contains("explore_seeds failed"));
+    assert!(panic.contains("seed 21"));
+    assert!(panic.contains("coverage: total_runs=2"));
+    assert!(panic.contains("unique_classes="));
+    assert!(panic.contains("races_found="));
+    assert!(panic.contains("class_run_counts="));
+    assert!(panic.contains("ASUPERSYNC_LAB_TEST_SEED=21"));
 }
 
 #[should_panic(expected = "obligation leak")]
@@ -54,13 +88,13 @@ fn obligation_leak_fails_after_body(lab: &mut LabRuntime) {
         .schedule(task_id, Budget::INFINITE.priority);
 }
 
-#[ignore]
+#[ignore = "called by failing_lab_test_writes_deterministic_crashpack"]
 #[lab_test(seeds = 11..12)]
 fn ignored_failure_for_deterministic_crashpack(lab: &mut LabRuntime) {
     assert_ne!(lab.config().seed, 11, "deterministic crashpack failure");
 }
 
-#[ignore]
+#[ignore = "called by failing_lab_test_panic_prints_crashpack_and_replay_last_lines"]
 #[lab_test(seeds = 13..14)]
 fn ignored_failure_for_panic_tail(lab: &mut LabRuntime) {
     assert_ne!(lab.config().seed, 13, "panic tail crashpack failure");

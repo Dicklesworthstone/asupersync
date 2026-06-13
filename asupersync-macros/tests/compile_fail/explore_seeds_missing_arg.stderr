@@ -1,0 +1,7 @@
+error: explore_seeds expects exactly one argument: `&mut LabRuntime`
+ --> tests/compile_fail/explore_seeds_missing_arg.rs:3:1
+  |
+3 | #[explore_seeds]
+  | ^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `explore_seeds` (in Nightly builds, run with -Z macro-backtrace for more info)
