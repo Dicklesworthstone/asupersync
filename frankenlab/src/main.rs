@@ -16,7 +16,11 @@ use asupersync::lab::scenario_runner::{
     ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
 };
 use asupersync::trace::minimizer::LogicalMinimizerClock;
-use asupersync::trace::{ScenarioElement, TraceMinimizer};
+use asupersync::trace::{
+    IncidentOracleKind, IncidentReplayMinimizationConfig, IncidentReplayMinimizationReport,
+    IncidentReplayMinimizationVerdict, IncidentReplayOracle, IncidentReplayPackage,
+    IncidentReplaySourceRole, ScenarioElement, TraceMinimizer, minimize_incident_replay_package,
+};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
@@ -102,10 +106,10 @@ struct ExploreArgs {
 
 #[derive(Args, Debug)]
 struct MinimizeArgs {
-    /// Path to the failing scenario YAML file
+    /// Path to a failing scenario YAML file or incident replay package JSON
     scenario: PathBuf,
 
-    /// Maximum scenario reruns used by the reducer; 0 means unlimited
+    /// Maximum scenario reruns or incident shrink steps; 0 means unlimited
     #[arg(long, default_value_t = 128)]
     max_replays: usize,
 }
@@ -133,15 +137,19 @@ enum DemoStage {
 // Scenario loading
 // ---------------------------------------------------------------------------
 
-fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, String> {
-    let yaml =
-        fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-    serde_yaml::from_str(&yaml).map_err(|e| {
+fn parse_scenario(path: &Path, yaml: &str) -> Result<asupersync::lab::scenario::Scenario, String> {
+    serde_yaml::from_str(yaml).map_err(|e| {
         format!(
             "Failed to parse {}: {e}. Hint: check indentation and field names",
             path.display()
         )
     })
+}
+
+fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, String> {
+    let yaml =
+        fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    parse_scenario(path, &yaml)
 }
 
 fn runner_error_message(err: ScenarioRunnerError) -> String {
@@ -374,6 +382,38 @@ struct MinimizeScenarioReport {
     minimized_scenario: Scenario,
 }
 
+#[derive(Debug, Clone)]
+enum MinimizeInput {
+    ScenarioYaml(Scenario),
+    IncidentReplayPackageJson(IncidentReplayPackage),
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MinimizeIncidentReplayPackageReport {
+    schema_version: u32,
+    input_kind: &'static str,
+    minimized_surface: &'static str,
+    package: String,
+    package_id: String,
+    oracle: IncidentReplayOracle,
+    config: IncidentReplayMinimizationConfig,
+    outcome: IncidentReplayMinimizationReport,
+}
+
+fn parse_minimize_input(path: &Path, raw: &str) -> Result<MinimizeInput, String> {
+    if let Ok(package) = serde_json::from_str::<IncidentReplayPackage>(raw) {
+        return Ok(MinimizeInput::IncidentReplayPackageJson(package));
+    }
+
+    parse_scenario(path, raw).map(MinimizeInput::ScenarioYaml)
+}
+
+fn load_minimize_input(path: &Path) -> Result<MinimizeInput, String> {
+    let raw =
+        fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    parse_minimize_input(path, &raw)
+}
+
 fn fault_elements(fault_count: usize) -> Vec<ScenarioElement> {
     (0..fault_count)
         .map(|index| ScenarioElement::AdvanceTime {
@@ -484,11 +524,121 @@ fn minimize_scenario_report(
     })
 }
 
+fn incident_replay_step_budget(max_replays: usize) -> usize {
+    if max_replays == 0 {
+        usize::MAX
+    } else {
+        max_replays
+    }
+}
+
+fn crashpack_replay_oracle(package: &IncidentReplayPackage) -> IncidentReplayOracle {
+    let crashpack_fingerprint = package
+        .sources
+        .iter()
+        .find(|source| source.role == IncidentReplaySourceRole::CrashPack)
+        .and_then(|source| source.trace_fingerprint.clone())
+        .or_else(|| package.canonicalization.trace_fingerprints.first().cloned());
+
+    IncidentReplayOracle {
+        kind: IncidentOracleKind::Panic,
+        expected_signal: "crashpack_replay_source_preserved".to_string(),
+        stable: true,
+        required_source_roles: vec![IncidentReplaySourceRole::CrashPack],
+        required_trace_fingerprint: crashpack_fingerprint,
+    }
+}
+
+fn minimize_incident_replay_package_report(
+    package_path: &Path,
+    package: &IncidentReplayPackage,
+    max_replays: usize,
+) -> MinimizeIncidentReplayPackageReport {
+    let oracle = crashpack_replay_oracle(package);
+    let config = IncidentReplayMinimizationConfig {
+        step_budget: incident_replay_step_budget(max_replays),
+        shrink_feature_flags: true,
+    };
+    let outcome = minimize_incident_replay_package(package, oracle.clone(), config);
+
+    MinimizeIncidentReplayPackageReport {
+        schema_version: 1,
+        input_kind: "incident_replay_package_json",
+        minimized_surface: "replay_package_sources",
+        package: package_path.display().to_string(),
+        package_id: package.package_id.clone(),
+        oracle,
+        config,
+        outcome,
+    }
+}
+
+fn incident_verdict_tag(verdict: IncidentReplayMinimizationVerdict) -> &'static str {
+    match verdict {
+        IncidentReplayMinimizationVerdict::Minimized => "minimized",
+        IncidentReplayMinimizationVerdict::AlreadyMinimal => "already_minimal",
+        IncidentReplayMinimizationVerdict::BudgetExhausted => "budget_exhausted",
+        IncidentReplayMinimizationVerdict::Inconclusive => "inconclusive",
+        IncidentReplayMinimizationVerdict::Blocked => "blocked",
+    }
+}
+
+fn format_incident_minimize_result(report: &MinimizeIncidentReplayPackageReport) -> String {
+    let verdict = incident_verdict_tag(report.outcome.verdict);
+    let mut lines = vec![
+        format!(
+            "Incident replay package: {} [{}]",
+            report.package_id, verdict
+        ),
+        format!("Shrink steps: {}", report.outcome.steps.len()),
+    ];
+
+    if let Some(repro) = &report.outcome.repro {
+        lines.push(format!(
+            "Replay units: {} -> {}",
+            repro.summary.original_units, repro.summary.minimized_units
+        ));
+        lines.push(format!(
+            "Retained sources: {}",
+            repro.retained_sources.len()
+        ));
+        lines.push(format!("Removed sources: {:?}", repro.removed_source_ids));
+        lines.push(format!(
+            "Removed feature flags: {:?}",
+            repro.removed_feature_flags
+        ));
+        lines.push(format!(
+            "Budget exhausted: {}",
+            repro.summary.budget_exhausted
+        ));
+    } else {
+        lines.push(format!("Issues: {}", report.outcome.issues.len()));
+        for issue in &report.outcome.issues {
+            lines.push(format!("  - {}: {}", issue.field, issue.message));
+        }
+    }
+
+    lines.join("\n")
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn cmd_minimize(args: MinimizeArgs, json: bool) -> Result<(), String> {
-    let scenario = load_scenario(&args.scenario)?;
+    let input = load_minimize_input(&args.scenario)?;
+    match input {
+        MinimizeInput::ScenarioYaml(scenario) => cmd_minimize_scenario(&args, json, &scenario),
+        MinimizeInput::IncidentReplayPackageJson(package) => {
+            cmd_minimize_incident_replay_package(&args, json, &package)
+        }
+    }
+}
+
+fn cmd_minimize_scenario(
+    args: &MinimizeArgs,
+    json: bool,
+    scenario: &Scenario,
+) -> Result<(), String> {
     let report =
-        minimize_scenario_report(&args.scenario, &scenario, args.max_replays, |candidate| {
+        minimize_scenario_report(&args.scenario, scenario, args.max_replays, |candidate| {
             ScenarioRunner::run(candidate).is_ok_and(|result| !result.passed())
         })?;
 
@@ -522,6 +672,29 @@ fn cmd_minimize(args: MinimizeArgs, json: bool) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn cmd_minimize_incident_replay_package(
+    args: &MinimizeArgs,
+    json: bool,
+    package: &IncidentReplayPackage,
+) -> Result<(), String> {
+    let report = minimize_incident_replay_package_report(&args.scenario, package, args.max_replays);
+
+    if json {
+        println!("{}", pretty_json_or(&report, "{}"));
+    } else {
+        println!("{}", format_incident_minimize_result(&report));
+    }
+
+    if report.outcome.has_repro() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Incident replay package minimization did not emit a repro: {}",
+            incident_verdict_tag(report.outcome.verdict)
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +894,11 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use asupersync::lab::scenario::{FaultAction, FaultEvent};
+    use asupersync::trace::replay::TraceMetadata;
+    use asupersync::trace::{
+        IncidentCommand, IncidentDeterminism, IncidentProvenance, IncidentReplayCanonicalization,
+        IncidentReplaySource, IncidentSourceKind,
+    };
     use std::collections::BTreeMap;
 
     fn disk_pressure_fault(at_ms: u64, path: &str) -> FaultEvent {
@@ -842,5 +1020,104 @@ mod tests {
         let err = minimize_fault_indices(3, 0, |_| false).expect_err("input must fail");
 
         assert!(err.contains("does not currently fail"));
+    }
+
+    fn synthetic_incident_replay_package() -> IncidentReplayPackage {
+        let crashpack = IncidentReplaySource {
+            source_id: "crashpack-main".to_string(),
+            role: IncidentReplaySourceRole::CrashPack,
+            kind: IncidentSourceKind::CrashPack,
+            artifact_path: Some("artifacts/crashpacks/main.json".to_string()),
+            content_hash: format!("sha256:{}", "a".repeat(64)),
+            content_bytes: 256,
+            trace_fingerprint: Some("trace-fingerprint-main".to_string()),
+            provenance_edge: "capture->crashpack-main".to_string(),
+        };
+        let trace_log = IncidentReplaySource {
+            source_id: "trace-log-main".to_string(),
+            role: IncidentReplaySourceRole::TraceLog,
+            kind: IncidentSourceKind::TraceLog,
+            artifact_path: Some("artifacts/traces/main.json".to_string()),
+            content_hash: format!("sha256:{}", "b".repeat(64)),
+            content_bytes: 512,
+            trace_fingerprint: Some("trace-fingerprint-main".to_string()),
+            provenance_edge: "capture->trace-log-main".to_string(),
+        };
+
+        IncidentReplayPackage {
+            schema_version: asupersync::trace::INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION,
+            package_id: "incident-replay-v1:synthetic".to_string(),
+            bundle_id: "bundle-synthetic".to_string(),
+            bundle_fingerprint: 42,
+            sources: vec![crashpack, trace_log],
+            trace_metadata: TraceMetadata::new(17)
+                .with_config_hash(99)
+                .with_description("synthetic incident replay package"),
+            command: IncidentCommand {
+                program: "rch".to_string(),
+                args: vec!["exec".to_string(), "--".to_string(), "cargo".to_string()],
+                env: Vec::new(),
+                working_dir: ".".to_string(),
+            },
+            determinism: IncidentDeterminism {
+                seed: Some(17),
+                schedule_seed: None,
+                virtual_time_nanos: Some(0),
+                config_hash: "config-hash".to_string(),
+                feature_flags: vec!["extra-diagnostics".to_string()],
+                target_triple: "x86_64-unknown-linux-gnu".to_string(),
+            },
+            provenance: IncidentProvenance {
+                capture_id: "capture-synthetic".to_string(),
+                origin: "unit-test".to_string(),
+                reporter: "frankenlab".to_string(),
+                captured_commit: Some("0123456789abcdef".to_string()),
+                related_bead_id: Some("asupersync-lab-dx-v2-n2v2fi.4".to_string()),
+            },
+            canonicalization: IncidentReplayCanonicalization {
+                source_digest: 1,
+                source_order: vec!["crashpack-main".to_string(), "trace-log-main".to_string()],
+                trace_fingerprints: vec!["trace-fingerprint-main".to_string()],
+                normalization_strategy: "synthetic-unit-fixture".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn minimize_incident_replay_package_keeps_crashpack_source() {
+        let package = synthetic_incident_replay_package();
+        let report = minimize_incident_replay_package_report(
+            Path::new("synthetic-incident-package.json"),
+            &package,
+            0,
+        );
+        let repro = report.outcome.repro.expect("repro emitted");
+
+        assert_eq!(report.input_kind, "incident_replay_package_json");
+        assert_eq!(report.minimized_surface, "replay_package_sources");
+        assert_eq!(
+            report.outcome.verdict,
+            IncidentReplayMinimizationVerdict::Minimized
+        );
+        assert_eq!(repro.retained_sources.len(), 1);
+        assert_eq!(repro.retained_sources[0].source_id, "crashpack-main");
+        assert_eq!(repro.removed_source_ids, ["trace-log-main"]);
+        assert_eq!(repro.removed_feature_flags, ["extra-diagnostics"]);
+        assert!(!repro.summary.budget_exhausted);
+    }
+
+    #[test]
+    fn minimize_input_detects_incident_replay_package_json() {
+        let package = synthetic_incident_replay_package();
+        let json = serde_json::to_string_pretty(&package).expect("package serializes");
+        let parsed = parse_minimize_input(Path::new("synthetic.json"), &json)
+            .expect("incident replay package parses");
+
+        match parsed {
+            MinimizeInput::IncidentReplayPackageJson(parsed_package) => {
+                assert_eq!(parsed_package.package_id, package.package_id);
+            }
+            MinimizeInput::ScenarioYaml(_) => panic!("expected incident replay package input"),
+        }
     }
 }

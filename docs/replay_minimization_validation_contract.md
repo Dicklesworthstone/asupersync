@@ -57,6 +57,29 @@ budget-exhaustion flag. Budget exhaustion is fail-closed: the command reports
 the best verified still-failing subset it has found and marks the result
 exhausted instead of claiming a fully minimal repro.
 
+### Incident Replay Package / Crashpack-Family Minimization
+
+`frankenlab minimize <package.json>` also accepts deterministic incident replay
+package JSON. This is the supported crashpack-family input path for the CLI:
+raw `CrashPack` artifacts remain repro artifacts, while
+`IncidentReplayPackage` is the replay-minimizer-facing envelope that can carry
+crashpack, trace-log, support-bundle, repro-note, and proof-failure sources.
+
+For package JSON, the CLI uses the existing incident replay package minimizer
+with a built-in stable oracle:
+
+- require one retained `crash_pack` replay source;
+- preserve the crashpack trace fingerprint when the package carries one;
+- shrink non-required replay sources before feature flags;
+- report the full `IncidentReplayMinimizationReport` under the
+  `outcome` field.
+
+The `--max-replays` flag maps to the incident minimizer's shrink-step budget
+for this input kind; `0` means unbounded over the finite source and feature-flag
+sets. A package that cannot satisfy the crashpack-preservation oracle emits a
+typed blocked/inconclusive outcome and exits non-zero rather than pretending it
+found a repro.
+
 ### Dimension 3: Geodesic Normalization Correctness
 
 Normalized traces must be valid linear extensions with reduced switch cost:
