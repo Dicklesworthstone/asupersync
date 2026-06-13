@@ -8,6 +8,8 @@ Bead: `asupersync-validation-frontier-v2-b5cjsv.7`
 Canonical machine artifact:
 `artifacts/validation_frontier_signoff_v1.json`.
 
+Focused manifest lane: `validation-frontier-final-signoff`.
+
 The validation frontier exists so agents can tell the difference between a
 focused proof lane, a broad Cargo frontier, and an infrastructure blocker. A
 focused lane that reaches an unrelated compile graph tail is not source-failure
