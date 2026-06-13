@@ -947,8 +947,8 @@ mod conformance {
             );
         }
 
-        // Verify repair symbols match
-        for esi in 0..50u32 {
+        // Verify repair symbols match across the public repair ESI range.
+        for esi in (k as u32)..(k as u32 + 50) {
             assert_eq!(
                 encoder1.repair_symbol(esi),
                 encoder2.repair_symbol(esi),
@@ -1176,8 +1176,8 @@ mod property_tests {
                 );
             }
 
-            // Check repair symbols
-            for esi in 0..20u32 {
+            // Check repair symbols across the public repair ESI range.
+            for esi in (k as u32)..(k as u32 + 20) {
                 assert_eq!(
                     encoder.repair_symbol(esi).len(),
                     symbol_size,
@@ -1525,8 +1525,13 @@ mod property_tests {
             panic!("{context} expected encoder construction to succeed for seed=222")
         });
 
-        let repair1: Vec<Vec<u8>> = (0..10u32).map(|esi| enc1.repair_symbol(esi)).collect();
-        let repair2: Vec<Vec<u8>> = (0..10u32).map(|esi| enc2.repair_symbol(esi)).collect();
+        let repair_start = k as u32;
+        let repair1: Vec<Vec<u8>> = (repair_start..repair_start + 10)
+            .map(|esi| enc1.repair_symbol(esi))
+            .collect();
+        let repair2: Vec<Vec<u8>> = (repair_start..repair_start + 10)
+            .map(|esi| enc2.repair_symbol(esi))
+            .collect();
 
         // The constraint matrix and repair equations are fully determined
         // by the RFC 6330 systematic index table, not by the seed.
@@ -1548,17 +1553,24 @@ mod property_tests {
             let context = failure_context(
                 "RQ-U-DETERMINISM-SEED",
                 seed,
-                &format!("k={k},symbol_size={symbol_size},run={run_idx},esi_range=[0,19]"),
+                &format!(
+                    "k={k},symbol_size={symbol_size},run={run_idx},esi_range=[{},{})",
+                    k,
+                    k + 20
+                ),
                 replay_ref,
             );
             let source = make_source_data(k, symbol_size, seed);
             let encoder = SystematicEncoder::new(&source, symbol_size, seed)
                 .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
 
-            let repairs: Vec<Vec<u8>> = (0..20u32).map(|esi| encoder.repair_symbol(esi)).collect();
+            let repair_start = k as u32;
+            let repairs: Vec<Vec<u8>> = (repair_start..repair_start + 20)
+                .map(|esi| encoder.repair_symbol(esi))
+                .collect();
 
             // All runs should produce identical repairs
-            let expected: Vec<Vec<u8>> = (0..20u32)
+            let expected: Vec<Vec<u8>> = (repair_start..repair_start + 20)
                 .map(|esi| {
                     let enc =
                         SystematicEncoder::new(&source, symbol_size, seed).unwrap_or_else(|| {
@@ -1901,7 +1913,9 @@ mod fuzz {
             let k = 8 + (seed % 8) as usize;
             let symbol_size = 16 + (seed % 32) as usize;
             let context = format!(
-                "scenario_id=RQ-U-DETERMINISM-SEED seed={seed} parameter_set=k={k},symbol_size={symbol_size},esi_range=[0,9] replay_ref={replay_ref}"
+                "scenario_id=RQ-U-DETERMINISM-SEED seed={seed} parameter_set=k={k},symbol_size={symbol_size},esi_range=[{},{}) replay_ref={replay_ref}",
+                k,
+                k + 10
             );
 
             let mut rng = DetRng::new(seed);
@@ -1915,7 +1929,7 @@ mod fuzz {
                 .unwrap_or_else(|| panic!("{context} expected encoder construction to succeed"));
 
             // Verify repair symbols match
-            for esi in 0..10u32 {
+            for esi in (k as u32)..(k as u32 + 10) {
                 assert_eq!(
                     enc1.repair_symbol(esi),
                     enc2.repair_symbol(esi),

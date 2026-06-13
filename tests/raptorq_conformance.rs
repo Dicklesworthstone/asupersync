@@ -498,7 +498,7 @@ fn encoder_deterministic_same_seed() {
         );
     }
 
-    for esi in 0..50u32 {
+    for esi in (k as u32)..(k as u32 + 50) {
         assert_eq!(
             enc1.repair_symbol(esi),
             enc2.repair_symbol(esi),

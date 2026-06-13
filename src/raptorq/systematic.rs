@@ -77,6 +77,13 @@ const SYSTEMATIC_INDEX_TABLE: &[(u32, u16, u16, u8, u32)] =
 /// Error in systematic encoding operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystematicError {
+    /// ESI is in the source-symbol range and cannot name a repair symbol.
+    RepairEsiBelowK {
+        /// The problematic ESI value.
+        esi: u32,
+        /// First valid repair ESI for this source block.
+        k: u32,
+    },
     /// ESI overflow when computing repair ISI.
     EsiOverflow {
         /// The problematic ESI value.
@@ -231,15 +238,23 @@ impl SystematicParams {
         Ok((columns, coefficients))
     }
 
-    fn rfc_repair_indices(&self, esi: u32) -> Result<Vec<usize>, SystematicError> {
+    fn repair_isi_for_esi(&self, esi: u32) -> Result<u32, SystematicError> {
+        let k = u32::try_from(self.k).expect("RFC source block size must fit in u32");
+        if esi < k {
+            return Err(SystematicError::RepairEsiBelowK { esi, k });
+        }
+
         let padding_delta = u32::try_from(self.k_prime - self.k)
             .expect("RFC systematic padding delta must fit in u32");
         // RFC 6330 repair ISI domain starts at K' and extends upward.
         // ESIs near u32::MAX cannot be validly mapped without overflow.
         // Reject instead of wrapping to avoid silent corruption.
-        let repair_isi = esi
-            .checked_add(padding_delta)
-            .ok_or(SystematicError::EsiOverflow { esi, padding_delta })?;
+        esi.checked_add(padding_delta)
+            .ok_or(SystematicError::EsiOverflow { esi, padding_delta })
+    }
+
+    fn rfc_repair_indices(&self, esi: u32) -> Result<Vec<usize>, SystematicError> {
+        let repair_isi = self.repair_isi_for_esi(esi)?;
         Ok(repair_indices_for_esi(self.j, self.w, self.p, repair_isi))
     }
 }
@@ -976,9 +991,28 @@ impl SystematicEncoder {
     ///
     /// ESI values >= K produce repair symbols. The same ESI always
     /// produces the same repair symbol (deterministic).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `esi < K` or if the RFC repair-ISI mapping overflows.
     #[must_use]
     pub fn repair_symbol(&self, esi: u32) -> Vec<u8> {
-        self.repair_symbol_with_degree(esi).0
+        self.try_repair_symbol(esi)
+            .unwrap_or_else(|err| panic!("invalid repair ESI {esi}: {err:?}"))
+    }
+
+    /// Fallible repair-symbol generation for callers that need to surface
+    /// malformed repair ESIs instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystematicError::RepairEsiBelowK`] when `esi` names a source
+    /// symbol and [`SystematicError::EsiOverflow`] when `esi` cannot be mapped
+    /// into the RFC repair-ISI domain without overflow.
+    pub fn try_repair_symbol(&self, esi: u32) -> Result<Vec<u8>, SystematicError> {
+        let mut result = vec![0u8; self.params.symbol_size];
+        self.try_repair_symbol_into_with_degree(esi, &mut result)?;
+        Ok(result)
     }
 
     /// Generate a repair symbol into a caller-provided buffer.
@@ -988,15 +1022,33 @@ impl SystematicEncoder {
     ///
     /// # Panics
     ///
-    /// Panics if `buf.len() < symbol_size`.
+    /// Panics if `buf.len() < symbol_size`, if `esi < K`, or if the RFC
+    /// repair-ISI mapping overflows.
     pub fn repair_symbol_into(&self, esi: u32, buf: &mut [u8]) {
+        self.try_repair_symbol_into(esi, buf)
+            .unwrap_or_else(|err| panic!("invalid repair ESI {esi}: {err:?}"));
+    }
+
+    /// Fallible allocation-free repair-symbol generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystematicError::RepairEsiBelowK`] when `esi` names a source
+    /// symbol and [`SystematicError::EsiOverflow`] when `esi` cannot be mapped
+    /// into the RFC repair-ISI domain without overflow.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf.len() < symbol_size`.
+    pub fn try_repair_symbol_into(&self, esi: u32, buf: &mut [u8]) -> Result<(), SystematicError> {
         assert!(
             buf.len() >= self.params.symbol_size,
             "buf too small: {} < {}",
             buf.len(),
             self.params.symbol_size
         );
-        self.repair_symbol_into_with_degree(esi, buf);
+        self.try_repair_symbol_into_with_degree(esi, buf)?;
+        Ok(())
     }
 
     /// Returns a reference to intermediate symbol `i`.
@@ -1107,7 +1159,18 @@ impl SystematicEncoder {
                     break;
                 }
             };
-            let degree = self.repair_symbol_into_with_degree(esi, &mut buf);
+            let degree = match self.try_repair_symbol_into_with_degree(esi, &mut buf) {
+                Ok(degree) => degree,
+                Err(err) => {
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::warn!(
+                        "repair ESI {esi} cannot be mapped into RFC 6330 repair domain: {err:?}"
+                    );
+                    #[cfg(not(feature = "tracing-integration"))]
+                    let _ = err;
+                    break;
+                }
+            };
             let data = buf[..symbol_size].to_vec();
 
             // Update stats
@@ -1189,24 +1252,18 @@ impl SystematicEncoder {
     }
 
     /// Generate a repair symbol into `buf` using RFC tuple-derived equation terms.
-    ///
-    /// `buf` must be at least `symbol_size` bytes; it is zeroed then filled.
-    fn repair_symbol_into_with_degree(&self, esi: u32, buf: &mut [u8]) -> usize {
+    fn try_repair_symbol_into_with_degree(
+        &self,
+        esi: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, SystematicError> {
         let symbol_size = self.params.symbol_size;
         buf[..symbol_size].fill(0);
-        let padding_delta = u32::try_from(self.params.k_prime - self.params.k)
-            .expect("RFC systematic padding delta must fit in u32");
-        let Some(repair_isi) = esi.checked_add(padding_delta) else {
-            debug_assert!(
-                false,
-                "repair ESI overflowed while mapping to RFC 6330 repair ISI"
-            );
-            return 0;
-        };
+        let repair_isi = self.params.repair_isi_for_esi(esi)?;
 
         let Some(pi_modulus) = next_prime_ge(self.params.p) else {
             debug_assert!(false, "RFC repair PI modulus must fit for encoder params");
-            return 0;
+            return Ok(0);
         };
         let Some(lt_tuple) = try_tuple(
             self.params.j,
@@ -1216,7 +1273,7 @@ impl SystematicEncoder {
             repair_isi,
         ) else {
             debug_assert!(false, "RFC repair tuple must be valid for encoder params");
-            return 0;
+            return Ok(0);
         };
 
         let mut degree = 0usize;
@@ -1252,14 +1309,7 @@ impl SystematicEncoder {
         }
 
         debug_assert_eq!(degree, lt_tuple.d + lt_tuple.d1);
-        degree
-    }
-
-    /// Generate a repair symbol and return both data and degree.
-    fn repair_symbol_with_degree(&self, esi: u32) -> (Vec<u8>, usize) {
-        let mut result = vec![0u8; self.params.symbol_size];
-        let degree = self.repair_symbol_into_with_degree(esi, &mut result);
-        (result, degree)
+        Ok(degree)
     }
 }
 
@@ -1859,6 +1909,22 @@ mod tests {
     }
 
     #[test]
+    fn rfc_repair_equation_rejects_source_esi() {
+        let params = SystematicParams::for_source_block(10, 64);
+        let source_esi = params.k as u32 - 1;
+
+        let result = params.rfc_repair_equation(source_esi);
+        assert_eq!(
+            result,
+            Err(SystematicError::RepairEsiBelowK {
+                esi: source_esi,
+                k: params.k as u32,
+            }),
+            "source ESIs must not be accepted by the repair-equation helper"
+        );
+    }
+
+    #[test]
     fn params_lookup_reports_unsupported_k() {
         let err = SystematicParams::try_for_source_block(56404, 64).unwrap_err();
         assert_eq!(
@@ -2132,8 +2198,8 @@ mod tests {
         let enc1 = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
         let enc2 = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
 
-        // Repair symbols must be identical
-        for esi in 0..10u32 {
+        // Repair symbols must be identical across the public repair ESI range.
+        for esi in (k as u32)..(k as u32 + 10) {
             assert_eq!(
                 enc1.repair_symbol(esi),
                 enc2.repair_symbol(esi),
@@ -2149,14 +2215,33 @@ mod tests {
         let source = make_source_symbols(k, symbol_size);
         let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
 
-        let r0 = enc.repair_symbol(0);
-        let r1 = enc.repair_symbol(1);
-        let r2 = enc.repair_symbol(2);
+        let repair_start = k as u32;
+        let r0 = enc.repair_symbol(repair_start);
+        let r1 = enc.repair_symbol(repair_start + 1);
+        let r2 = enc.repair_symbol(repair_start + 2);
 
         // Very unlikely all three are identical for different ESIs
         assert!(
             r0 != r1 && r1 != r2,
             "repair symbols should generally differ"
+        );
+    }
+
+    #[test]
+    fn repair_symbol_rejects_source_esi() {
+        let k = 8;
+        let symbol_size = 64;
+        let source = make_source_symbols(k, symbol_size);
+        let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+        let source_esi = k as u32 - 1;
+
+        assert_eq!(
+            enc.try_repair_symbol(source_esi),
+            Err(SystematicError::RepairEsiBelowK {
+                esi: source_esi,
+                k: k as u32,
+            }),
+            "direct repair-symbol generation must reject source ESIs"
         );
     }
 
@@ -2318,7 +2403,7 @@ mod tests {
         let symbol_size = 48;
         let source = make_source_symbols(k, symbol_size);
         let enc = SystematicEncoder::new(&source, symbol_size, 77).unwrap();
-        for esi in 0..20u32 {
+        for esi in (k as u32)..(k as u32 + 20) {
             assert_eq!(enc.repair_symbol(esi).len(), symbol_size);
         }
     }
