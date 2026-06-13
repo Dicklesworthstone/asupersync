@@ -1,0 +1,15 @@
+error[E0382]: use of moved value: `tx`
+ --> tests/compile_fail/mysql_transaction_consumes_self.rs:9:13
+  |
+7 | async fn mysql_commit_consumes_self<'a>(tx: MySqlTransaction<'a>, cx: &Cx) {
+  |                                         -- move occurs because `tx` has type `MySqlTransaction<'_>`, which does not implement the `Copy` trait
+8 |     let _ = tx.commit(cx).await;
+  |                ---------- `tx` moved due to this method call
+9 |     let _ = tx.rollback(cx).await;
+  |             ^^ value used here after move
+  |
+note: `MySqlTransaction::<'_>::commit` takes ownership of the receiver `self`, which moves `tx`
+ --> src/database/mysql.rs
+  |
+  |     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
+  |                             ^^^^
