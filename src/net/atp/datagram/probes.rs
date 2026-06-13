@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+const PROBE_CHALLENGE_LEN: usize = 16;
+
 /// Path probe types for different discovery scenarios
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProbeType {
@@ -304,7 +306,12 @@ impl ProbeManager {
         match probe_type {
             ProbeType::Discovery | ProbeType::Validation => {
                 // Add challenge for validation
-                let challenge = (0..16).map(|_| rand::random::<u8>()).collect();
+                let challenge = match Self::generate_challenge(PROBE_CHALLENGE_LEN) {
+                    Outcome::Ok(challenge) => challenge,
+                    Outcome::Err(error) => return Outcome::Err(error),
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+                };
                 probe = probe.with_challenge(challenge);
             }
             ProbeType::Bandwidth => {
@@ -353,6 +360,18 @@ impl ProbeManager {
         Outcome::ok(DatagramFrame::with_length(probe_data))
     }
 
+    fn generate_challenge(size: usize) -> Outcome<Vec<u8>, DatagramError> {
+        crate::util::check_ambient_entropy("atp-datagram-probe-challenge");
+        let mut challenge = vec![0; size];
+
+        match getrandom::fill(&mut challenge) {
+            Ok(()) => Outcome::ok(challenge),
+            Err(error) => Outcome::err(DatagramError::EncodingFailed(format!(
+                "probe challenge entropy: {error}"
+            ))),
+        }
+    }
+
     /// Process incoming probe (request or response)
     pub fn process_probe(&mut self, data: &[u8]) -> Outcome<Option<DatagramFrame>, DatagramError> {
         let probe = match PathProbe::decode(data) {
@@ -376,17 +395,23 @@ impl ProbeManager {
         &mut self,
         response: PathProbe,
     ) -> Outcome<Option<DatagramFrame>, DatagramError> {
-        if let Some((request, _sent_at)) = self.pending_probes.remove(&response.probe_id) {
-            // Calculate RTT
-            if let Some(rtt) = request.calculate_rtt(&response) {
-                let stats = self.path_stats.entry(response.path_id).or_default();
-                stats.update_response_received(rtt);
+        if let Some((request, sent_at)) = self.pending_probes.remove(&response.probe_id) {
+            if !response.is_response
+                || response.probe_type != request.probe_type
+                || response.path_id != request.path_id
+                || response.sequence != request.sequence
+            {
+                return Outcome::ok(None);
+            }
 
-                // Update bandwidth if applicable
-                if response.probe_type == ProbeType::Bandwidth {
-                    if let Some(ref payload) = request.payload {
-                        stats.update_bandwidth(payload.len(), rtt);
-                    }
+            let rtt = Instant::now().saturating_duration_since(sent_at);
+            let stats = self.path_stats.entry(request.path_id).or_default();
+            stats.update_response_received(rtt);
+
+            // Update bandwidth if applicable
+            if request.probe_type == ProbeType::Bandwidth {
+                if let Some(ref payload) = request.payload {
+                    stats.update_bandwidth(payload.len(), rtt);
                 }
             }
         }
@@ -470,24 +495,6 @@ impl ProbeManager {
     }
 }
 
-// Dummy rand implementation for challenge generation
-mod rand {
-    pub fn random<T>() -> T
-    where
-        T: From<u8>,
-    {
-        // Simple PRNG for demo - replace with proper implementation
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEED: AtomicU64 = AtomicU64::new(1);
-        let mut x = SEED.load(Ordering::Relaxed);
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        SEED.store(x, Ordering::Relaxed);
-        T::from((x & 0xFF) as u8)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +540,69 @@ mod tests {
         let stats = manager.get_path_stats(1).unwrap();
         assert_eq!(stats.probes_sent, 1);
         assert_eq!(stats.responses_received, 0);
+    }
+
+    #[test]
+    fn test_validation_probe_carries_entropy_challenge() {
+        let transport = DatagramTransport::default_enabled();
+        let mut manager = ProbeManager::new(transport);
+
+        let frame = manager.create_probe(ProbeType::Validation, 7).unwrap();
+        let probe = PathProbe::decode(frame.payload()).unwrap();
+        let challenge = probe.challenge.expect("validation challenge");
+
+        assert_eq!(challenge.len(), PROBE_CHALLENGE_LEN);
+    }
+
+    #[test]
+    fn test_probe_response_rtt_uses_local_send_instant() {
+        let transport = DatagramTransport::default_enabled();
+        let mut manager = ProbeManager::new(transport);
+        let request = PathProbe::new_request(99, ProbeType::Rtt, 7, 1);
+        let sent_at = Instant::now()
+            .checked_sub(Duration::from_millis(50))
+            .expect("instant subtraction");
+
+        manager
+            .pending_probes
+            .insert(request.probe_id, (request.clone(), sent_at));
+        manager
+            .path_stats
+            .entry(request.path_id)
+            .or_default()
+            .update_probe_sent();
+
+        let mut response = request.new_response();
+        response.timestamp = request.timestamp;
+        manager.handle_probe_response(response).unwrap();
+
+        let stats = manager.get_path_stats(request.path_id).unwrap();
+        assert_eq!(stats.responses_received, 1);
+        assert!(stats.min_rtt_us >= 50_000);
+    }
+
+    #[test]
+    fn test_probe_response_metadata_mismatch_is_ignored() {
+        let transport = DatagramTransport::default_enabled();
+        let mut manager = ProbeManager::new(transport);
+        let request = PathProbe::new_request(100, ProbeType::Rtt, 7, 1);
+
+        manager
+            .pending_probes
+            .insert(request.probe_id, (request.clone(), Instant::now()));
+        manager
+            .path_stats
+            .entry(request.path_id)
+            .or_default()
+            .update_probe_sent();
+
+        let mut response = request.new_response();
+        response.path_id = 8;
+        manager.handle_probe_response(response).unwrap();
+
+        let original_path_stats = manager.get_path_stats(request.path_id).unwrap();
+        assert_eq!(original_path_stats.responses_received, 0);
+        assert!(manager.get_path_stats(8).is_none());
     }
 
     #[test]
