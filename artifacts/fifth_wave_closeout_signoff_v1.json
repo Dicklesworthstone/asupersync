@@ -208,10 +208,8 @@
       "idea_id": "next-01-authority-flow-graph",
       "title": "Authority-flow graph for Cx capabilities and ambient-effect denial",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.6",
-      "tracker_status": "in_progress",
-      "decision": "still-open",
-      "current_blocker": "Implementation is landed, but the focused RCH contract has only reached pre-execution refusal; no remote pass exists.",
-      "next_step": "Retry the remote-only cx_authority_flow_graph_contract lane and close only after a clean pass.",
+      "tracker_status": "closed",
+      "decision": "implemented",
       "proof_refs": [
         "artifacts/cx_authority_flow_graph_v1.json",
         "tests/cx_authority_flow_graph_contract.rs",
@@ -254,10 +252,8 @@
       "idea_id": "next-03-reference-app-gallery",
       "title": "Production reference-app gallery with proof-backed journeys",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.8",
-      "tracker_status": "in_progress",
-      "decision": "still-open",
-      "current_blocker": "Reference gallery artifact/doc/contract is landed, but RCH refused the focused contract before execution.",
-      "next_step": "Retry reference_app_gallery_contract with RCH_REQUIRE_REMOTE=1 after RCH admission clears.",
+      "tracker_status": "closed",
+      "decision": "implemented",
       "proof_refs": [
         "artifacts/reference_app_gallery_v1.json",
         "tests/reference_app_gallery_contract.rs",
@@ -278,10 +274,8 @@
       "idea_id": "next-04-runtime-trace-inspector",
       "title": "Runtime trace flamechart and inspector visualization",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.9",
-      "tracker_status": "in_progress",
-      "decision": "still-open",
-      "current_blocker": "Trace inspector artifact/doc/contract is landed, but its admitted RCH run exited 130 after cancellation before a test result.",
-      "next_step": "Retry runtime_trace_inspector_visualization_contract remotely and close only after a clean pass.",
+      "tracker_status": "closed",
+      "decision": "implemented",
       "proof_refs": [
         "artifacts/runtime_trace_inspector_visualization_v1.json",
         "tests/runtime_trace_inspector_visualization_contract.rs",
@@ -302,10 +296,8 @@
       "idea_id": "next-05-parser-fuzz-coverage",
       "title": "Parser fuzz coverage debt scanner for wire protocols",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.10",
-      "tracker_status": "in_progress",
-      "decision": "still-open",
-      "current_blocker": "Parser fuzz inventory is landed, but focused RCH contract attempts became heartbeat-fresh/progress-stale and were cancelled before a pass.",
-      "next_step": "Retry parser_fuzz_protocol_inventory_contract remotely, preserving --no-default-features scoping.",
+      "tracker_status": "closed",
+      "decision": "implemented",
       "proof_refs": [
         "artifacts/parser_fuzz_protocol_inventory_v1.json",
         "tests/parser_fuzz_protocol_inventory_contract.rs",
@@ -348,10 +340,8 @@
       "idea_id": "next-07-platform-capability-matrix",
       "title": "Cross-platform capability matrix for reactors, fs, process, signal, and browser hosts",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.12",
-      "tracker_status": "in_progress",
-      "decision": "still-open",
-      "current_blocker": "Platform matrix artifact/doc/contract is landed, but RCH proof attempts were refused or cancelled before a remote pass.",
-      "next_step": "Retry platform_capability_matrix_contract remotely with --no-default-features.",
+      "tracker_status": "closed",
+      "decision": "implemented",
       "proof_refs": [
         "artifacts/platform_capability_matrix_v1.json",
         "tests/platform_capability_matrix_contract.rs",
@@ -394,10 +384,8 @@
       "idea_id": "next-09-semantic-evidence-bundles",
       "title": "Semantic evidence bundles for public guarantees",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.14",
-      "tracker_status": "in_progress",
-      "decision": "still-open",
-      "current_blocker": "Semantic evidence bundle artifacts/docs/contracts are landed, but RCH proof attempts were refused or cancelled before a pass.",
-      "next_step": "Retry semantic_evidence_bundles_contract and semantic_evidence_bundle_contract remotely; close only after focused proof is green or an explicit reviewer accepts an equivalent RCH proof.",
+      "tracker_status": "closed",
+      "decision": "implemented",
       "proof_refs": [
         "artifacts/semantic_evidence_bundles_v1.json",
         "artifacts/public_guarantee_semantic_evidence_bundles_v1.json",
@@ -418,10 +406,8 @@
       "idea_id": "next-10-state-snapshot-live-upgrade",
       "title": "State snapshot and live-upgrade readiness track",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.15",
-      "tracker_status": "in_progress",
-      "decision": "still-open",
-      "current_blocker": "State snapshot readiness artifact/doc/contract is landed, but focused RCH proof was refused before execution.",
-      "next_step": "Retry state_snapshot_live_upgrade_readiness_contract remotely after RCH admission clears.",
+      "tracker_status": "closed",
+      "decision": "implemented",
       "proof_refs": [
         "artifacts/state_snapshot_live_upgrade_readiness_v1.json",
         "tests/state_snapshot_live_upgrade_readiness_contract.rs",
@@ -444,47 +430,12 @@
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
       "tracker_status": "open",
       "reason": "AppSpec parent remains open: A2 bridge source landed with lib-check evidence, but exact focused unit proof is blocked and A3/A4 remain open."
-    },
-    {
-      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.6",
-      "tracker_status": "in_progress",
-      "reason": "Authority-flow contract lacks a clean remote RCH pass."
-    },
-    {
-      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.8",
-      "tracker_status": "in_progress",
-      "reason": "Reference app gallery contract lacks a clean remote RCH pass."
-    },
-    {
-      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.9",
-      "tracker_status": "in_progress",
-      "reason": "Trace inspector contract lacks a clean remote RCH pass."
-    },
-    {
-      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.10",
-      "tracker_status": "in_progress",
-      "reason": "Parser fuzz inventory contract lacks a clean remote RCH pass."
-    },
-    {
-      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.12",
-      "tracker_status": "in_progress",
-      "reason": "Platform capability matrix contract lacks a clean remote RCH pass."
-    },
-    {
-      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.14",
-      "tracker_status": "in_progress",
-      "reason": "Semantic evidence bundle contracts lack a clean remote RCH pass."
-    },
-    {
-      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.15",
-      "tracker_status": "in_progress",
-      "reason": "State snapshot readiness contract lacks a clean remote RCH pass."
     }
   ],
   "closeout_verdict": {
     "status": "blocked",
     "cannot_close_epic": true,
-    "summary": "The fifth-wave epic cannot close because eight owner beads remain open or proof-blocked. This packet is a deterministic handoff and fail-closed overlap audit, not a release or epic-completion signoff.",
+    "summary": "The fifth-wave epic cannot close because the AppSpec owner bead remains open. This packet is a deterministic handoff and fail-closed overlap audit, not a release or epic-completion signoff.",
     "required_before_close": [
       "all blocking child owner beads closed or explicitly deferred with reviewer acceptance",
       "focused RCH proofs completed remotely or documented as accepted equivalent RCH evidence",

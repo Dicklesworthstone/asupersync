@@ -7,7 +7,7 @@ for `asupersync-idea-wizard-fifth-wave-3gaiun.16`.
 
 This packet is an overlap audit and handoff artifact for the fifth-wave
 idea-wizard epic. It is intentionally not a success certificate: the parent epic
-still has open and proof-blocked child owner beads.
+still has an open AppSpec child owner bead.
 
 <!-- FIFTH-WAVE-CLOSEOUT:INVENTORY -->
 
@@ -44,16 +44,16 @@ Next-ten owner decisions:
 
 | idea | owner | status | decision |
 |---|---|---|---|
-| authority-flow graph | `asupersync-idea-wizard-fifth-wave-3gaiun.6` | in progress | still open |
+| authority-flow graph | `asupersync-idea-wizard-fifth-wave-3gaiun.6` | closed | implemented |
 | docs claim freshness | `asupersync-idea-wizard-fifth-wave-3gaiun.7` | closed | implemented |
-| production reference-app gallery | `asupersync-idea-wizard-fifth-wave-3gaiun.8` | in progress | still open |
-| runtime trace inspector | `asupersync-idea-wizard-fifth-wave-3gaiun.9` | in progress | still open |
-| parser fuzz coverage | `asupersync-idea-wizard-fifth-wave-3gaiun.10` | in progress | still open |
+| production reference-app gallery | `asupersync-idea-wizard-fifth-wave-3gaiun.8` | closed | implemented |
+| runtime trace inspector | `asupersync-idea-wizard-fifth-wave-3gaiun.9` | closed | implemented |
+| parser fuzz coverage | `asupersync-idea-wizard-fifth-wave-3gaiun.10` | closed | implemented |
 | release closeout verifier | `asupersync-idea-wizard-fifth-wave-3gaiun.11` | closed | implemented |
-| platform capability matrix | `asupersync-idea-wizard-fifth-wave-3gaiun.12` | in progress | still open |
+| platform capability matrix | `asupersync-idea-wizard-fifth-wave-3gaiun.12` | closed | implemented |
 | migration recipe compiler | `asupersync-idea-wizard-fifth-wave-3gaiun.13` | closed | implemented |
-| semantic evidence bundles | `asupersync-idea-wizard-fifth-wave-3gaiun.14` | in progress | still open |
-| state snapshot readiness | `asupersync-idea-wizard-fifth-wave-3gaiun.15` | in progress | still open |
+| semantic evidence bundles | `asupersync-idea-wizard-fifth-wave-3gaiun.14` | closed | implemented |
+| state snapshot readiness | `asupersync-idea-wizard-fifth-wave-3gaiun.15` | closed | implemented |
 
 Each row has proof references, evidence references, and no-claim boundaries in
 the JSON artifact.
@@ -66,18 +66,10 @@ The closeout verdict is blocked. The parent epic cannot close while these owner
 beads remain open or proof-blocked:
 
 - `asupersync-idea-wizard-fifth-wave-3gaiun.2`
-- `asupersync-idea-wizard-fifth-wave-3gaiun.6`
-- `asupersync-idea-wizard-fifth-wave-3gaiun.8`
-- `asupersync-idea-wizard-fifth-wave-3gaiun.9`
-- `asupersync-idea-wizard-fifth-wave-3gaiun.10`
-- `asupersync-idea-wizard-fifth-wave-3gaiun.12`
-- `asupersync-idea-wizard-fifth-wave-3gaiun.14`
-- `asupersync-idea-wizard-fifth-wave-3gaiun.15`
 
-Most of the blocked backlog rows now have checked artifacts in-tree. Their
-remaining blocker is remote RCH proof, not local source edits. AppSpec remains
-open because the A2 compiler bridge has source and lib-check evidence, but its
-exact focused unit proof is blocked and A3/A4 remain open.
+The backlog proof-blocked rows have been closed after focused remote RCH proofs.
+AppSpec remains open because the A2 compiler bridge has source and lib-check
+evidence, but its exact focused unit proof is blocked and A3/A4 remain open.
 
 <!-- FIFTH-WAVE-CLOSEOUT:VALIDATION -->
 

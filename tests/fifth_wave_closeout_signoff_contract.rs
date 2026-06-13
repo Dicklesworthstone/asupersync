@@ -287,19 +287,10 @@ fn closeout_verdict_names_current_blockers() {
         .iter()
         .map(|row| string(row, "owner_bead_id").to_owned())
         .collect::<BTreeSet<_>>();
-    let expected = [
-        "asupersync-idea-wizard-fifth-wave-3gaiun.2",
-        "asupersync-idea-wizard-fifth-wave-3gaiun.6",
-        "asupersync-idea-wizard-fifth-wave-3gaiun.8",
-        "asupersync-idea-wizard-fifth-wave-3gaiun.9",
-        "asupersync-idea-wizard-fifth-wave-3gaiun.10",
-        "asupersync-idea-wizard-fifth-wave-3gaiun.12",
-        "asupersync-idea-wizard-fifth-wave-3gaiun.14",
-        "asupersync-idea-wizard-fifth-wave-3gaiun.15",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<BTreeSet<_>>();
+    let expected = ["asupersync-idea-wizard-fifth-wave-3gaiun.2"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
     assert_eq!(blocker_ids, expected);
 
     let open_owner_ids = all_decisions(&artifact)
