@@ -492,7 +492,11 @@ This map is about capability coverage, not API compatibility. Asupersync intenti
 Web framework status is deliberately bounded. `src/web/` contains a lightweight
 router, typed extractors, response conversion, local `Handler` middleware
 wrappers, request-region helpers, health/static/multipart/session/security
-utilities, and bounded `Sse` / `StreamingSse` surfaces. It is not an
+utilities, and bounded `Sse` / `StreamingSse` surfaces. The SSE lane is
+proof-backed: `Sse` finite bounded batch responses, plus a
+`StreamingSse` pull API carrying a request-region E2E proof and an
+HTTP/1 transport drain proof (`tests/e2e_web.rs` streaming artifact rows).
+It is not an
 axum/warp/tower-http-compatible framework: handlers operate on Asupersync's
 lightweight `Request` / `Response` types, middleware wraps the local `Handler`
 trait rather than Tower layers, async handlers use explicit `Cx`-aware wrappers,

@@ -488,8 +488,11 @@ fn integration_extractor_form() {
         )),
     );
 
-    let req =
-        Request::new("POST", "/login").with_body(Bytes::from_static(b"user=alice&pass=secret"));
+    // br-asupersync-mxqraw: Form default-denies a missing Content-Type with
+    // 415, so the request must declare application/x-www-form-urlencoded.
+    let req = Request::new("POST", "/login")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(Bytes::from_static(b"user=alice&pass=secret"));
     let resp = router.handle(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "logged_in:alice");
@@ -1184,7 +1187,16 @@ fn integration_health_degraded_and_unhealthy() {
     assert_eq!(resp.status, StatusCode::OK);
     let body = std::str::from_utf8(&resp.body).unwrap();
     assert!(body.contains("\"status\":\"degraded\""));
-    assert!(body.contains("high latency"));
+    // br-asupersync-73jd5w: public health probes REDACT check names and
+    // detail messages; only the aggregate status is exposed.
+    assert!(
+        !body.contains("high latency"),
+        "public probe must redact check detail messages"
+    );
+    assert!(
+        !body.contains("cache"),
+        "public probe must redact check names"
+    );
 
     test_complete!("health_degraded");
 }
