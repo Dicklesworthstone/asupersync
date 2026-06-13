@@ -1091,12 +1091,66 @@ async fn run_daemon_service(
     // Initialize daemon state
     let mut daemon_state = AtpdState {
         config: config.clone(),
-        runtime_handle,
+        runtime_handle: runtime_handle.clone(),
         start_time: Time::from_nanos(current_time_nanos_lossy()),
         peer_directory: HashMap::new(),
         active_transfers: HashMap::new(),
         inbox_messages: Vec::new(),
     };
+
+    // Bind the REAL ATP transfer listener (br-asupersync-qk02uw). Previously the
+    // daemon advertised `bind_addr` but never listened on it — only the
+    // diagnostics endpoint bound a socket, so no transfer could ever arrive.
+    // This spawns the genuine ATP-over-TCP accept loop, writing verified
+    // transfers into the daemon's inbox.
+    {
+        use asupersync::net::TcpListener as AsupTcpListener;
+        use asupersync::net::atp::transport_tcp::{TransferConfig, serve};
+
+        let bind_addr = config.network.bind_addr;
+        let inbox_dir = config.storage.data_dir.join("inbox");
+        let max_bytes = config.transfers.max_transfer_size;
+        let peer_label = identity.peer_id_hex();
+        // Detached for the daemon's lifetime; the process exits on shutdown.
+        let _transfer_listener = runtime_handle.spawn(async move {
+            let Some(cx) = asupersync::cx::Cx::current() else {
+                warn!("ATP transfer listener: no capability context available");
+                return;
+            };
+            let listener = match AsupTcpListener::bind(bind_addr).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    warn!("ATP transfer listener failed to bind {bind_addr}: {err}");
+                    return;
+                }
+            };
+            info!(bind_addr = %bind_addr, "ATP transfer listener bound and accepting");
+            let cfg = TransferConfig {
+                max_transfer_bytes: max_bytes,
+                ..TransferConfig::default()
+            };
+            let result = serve(
+                &cx,
+                listener,
+                inbox_dir,
+                cfg,
+                peer_label,
+                |outcome| match outcome {
+                    Ok(report) => info!(
+                        transfer_id = %report.transfer_id,
+                        bytes = report.bytes_received,
+                        files = report.files,
+                        "ATP transfer committed to inbox"
+                    ),
+                    Err(err) => warn!("ATP transfer failed: {err}"),
+                },
+            )
+            .await;
+            if let Err(err) = result {
+                warn!("ATP transfer listener stopped: {err}");
+            }
+        });
+    }
 
     info!(
         peer_id = identity.peer_id_hex(),

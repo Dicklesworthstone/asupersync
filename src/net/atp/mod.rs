@@ -31,6 +31,7 @@ pub mod rendezvous;
 pub mod sdk;
 pub mod streams;
 pub mod stun;
+pub mod transport_tcp;
 
 // Re-export key types for H3 adapter
 pub use protocol::{AtpFrame, FrameType};

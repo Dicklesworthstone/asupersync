@@ -231,6 +231,11 @@ impl DogfoodTestConfig {
 mod tests {
     use super::*;
 
+    // These dogfood tests run on a `current_thread` runtime, so their futures
+    // legitimately need not be `Send`; the nursery `future_not_send` lint is a
+    // false positive here (matches the pattern used by other single-threaded
+    // test modules in this crate).
+    #[allow(clippy::future_not_send)]
     async fn run_dogfood_test<F, Fut>(test_fn: F) -> Result<()>
     where
         F: FnOnce(Cx, DogfoodTestConfig) -> Fut,
@@ -566,7 +571,7 @@ mod script_integration_tests {
     #[test]
     fn test_dogfood_coordinator_dry_run() {
         let output = Command::new("scripts/atp_dogfood_coordinator.sh")
-            .args(&["--dry-run", "build-artifacts"])
+            .args(["--dry-run", "build-artifacts"])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output()
             .expect("Failed to execute dogfood coordinator");

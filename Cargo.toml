@@ -139,6 +139,9 @@ cli = [
     "config-file",
     "tracing-integration",
 ]
+# Enable the small standalone `atp` file-transfer binary. Minimal footprint:
+# only adds clap on top of the always-compiled ATP-over-TCP transport.
+atp-cli = ["dep:clap"]
 # Enable SQLite async wrapper with blocking pool integration.
 sqlite = ["dep:rusqlite", "dep:sqlparser"]
 # Enable PostgreSQL async client with wire protocol.
@@ -272,6 +275,11 @@ path = "scripts/generate_rfc6330_vectors.rs"
 name = "atpd"
 path = "src/bin/atpd.rs"
 required-features = ["atpd-daemon"]
+
+[[bin]]
+name = "atp"
+path = "src/bin/atp.rs"
+required-features = ["atp-cli"]
 
 [[bin]]
 name = "channel_mpsc_select_e2e"
