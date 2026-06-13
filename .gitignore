@@ -135,6 +135,8 @@ artifacts/*
 !artifacts/validation_frontier_inventory_v1.json
 !artifacts/artifact_governance_ledger_v1.json
 !artifacts/memory_residency_inventory_v1.json
+!artifacts/memory_residency_policy_contract_v1.json
+!artifacts/memory_residency_accounting_snapshot_v1.json
 
 # Generated smoke-run output roots. These are retained local evidence, not
 # source artifacts; the committed inventory above records ownership/checksums.

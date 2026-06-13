@@ -138,6 +138,8 @@ pub mod io_driver;
 pub mod io_op;
 /// Proof-carrying decision-plane kernel for runtime controllers.
 pub mod kernel;
+/// Pure opt-in memory-residency recommendation engine.
+pub mod memory_residency;
 pub mod obligation_table;
 pub mod panic_isolation;
 pub mod rch_health;
@@ -207,6 +209,17 @@ pub use epoch_tracker::{
 };
 pub use io_driver::{IoDriver, IoDriverHandle, IoRegistration};
 pub use io_op::IoOp;
+pub use memory_residency::{
+    MEMORY_RESIDENCY_ACCOUNTING_DEBUG_ENDPOINT,
+    MEMORY_RESIDENCY_ACCOUNTING_SNAPSHOT_SCHEMA_VERSION, MEMORY_RESIDENCY_DECISION_SCHEMA_VERSION,
+    MEMORY_RESIDENCY_POLICY_SCHEMA_VERSION, MemoryResidencyAccountingSnapshot,
+    MemoryResidencyAccountingSource, MemoryResidencyAccountingStatus,
+    MemoryResidencyAggregationKind, MemoryResidencyAggregationRow, MemoryResidencyCapacitySnapshot,
+    MemoryResidencyDecision, MemoryResidencyLiveTaskAction, MemoryResidencyNoClaimBoundary,
+    MemoryResidencyPolicy, MemoryResidencyPolicyInput, MemoryResidencyProfile,
+    MemoryResidencyReasonCode, MemoryResidencyRecordPoolCounters, MemoryResidencyTier,
+    MemoryResidencyTierAccountingRow, ProofPackWarmthTelemetry,
+};
 pub use obligation_table::{
     ObligationAbortInfo, ObligationCommitInfo, ObligationLeakInfo, ObligationTable,
 };

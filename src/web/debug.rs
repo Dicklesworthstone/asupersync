@@ -11,6 +11,7 @@
 //!
 //! - `GET /debug` — HTML dashboard with auto-refresh
 //! - `GET /debug/snapshot` — Current runtime snapshot as JSON
+//! - `GET /debug/memory-residency` — Memory-residency accounting snapshot as JSON
 //! - `GET /debug/trace` — Recent trace events as JSON
 //! - `GET /debug/ws` — WebSocket endpoint (upgrade + one-shot JSON push)
 //!
@@ -39,13 +40,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
-use crate::runtime::RuntimeSnapshot;
+use crate::runtime::{MemoryResidencyAccountingSnapshot, RuntimeSnapshot};
 use crate::tracing_compat::info;
 use base64::Engine as _;
 use sha1::{Digest, Sha1};
 
 /// Function that produces a runtime snapshot on demand.
 pub type SnapshotFn = Arc<dyn Fn() -> RuntimeSnapshot + Send + Sync>;
+
+/// Function that produces a memory-residency accounting snapshot on demand.
+pub type MemoryResidencySnapshotFn =
+    Arc<dyn Fn() -> MemoryResidencyAccountingSnapshot + Send + Sync>;
 
 /// Configuration for the debug server.
 #[derive(Debug, Clone)]
@@ -79,6 +84,7 @@ impl Default for DebugServerConfig {
 pub struct DebugServer {
     port: u16,
     snapshot_fn: SnapshotFn,
+    memory_residency_snapshot_fn: MemoryResidencySnapshotFn,
     config: DebugServerConfig,
     running: Arc<AtomicBool>,
     local_addr: Option<SocketAddr>,
@@ -91,6 +97,7 @@ impl DebugServer {
         Self {
             port,
             snapshot_fn,
+            memory_residency_snapshot_fn: Self::default_memory_residency_snapshot_fn(),
             config: DebugServerConfig::default(),
             running: Arc::new(AtomicBool::new(false)),
             local_addr: None,
@@ -103,10 +110,25 @@ impl DebugServer {
         Self {
             port,
             snapshot_fn,
+            memory_residency_snapshot_fn: Self::default_memory_residency_snapshot_fn(),
             config,
             running: Arc::new(AtomicBool::new(false)),
             local_addr: None,
         }
+    }
+
+    /// Installs an additive memory-residency snapshot provider.
+    #[must_use]
+    pub fn with_memory_residency_snapshot_fn(
+        mut self,
+        snapshot_fn: MemoryResidencySnapshotFn,
+    ) -> Self {
+        self.memory_residency_snapshot_fn = snapshot_fn;
+        self
+    }
+
+    fn default_memory_residency_snapshot_fn() -> MemoryResidencySnapshotFn {
+        Arc::new(|| MemoryResidencyAccountingSnapshot::unavailable(0))
     }
 
     /// Returns the dashboard URL.
@@ -128,6 +150,12 @@ impl DebugServer {
         self.running.load(Ordering::Relaxed)
     }
 
+    /// Returns the bound local address after the server starts.
+    #[must_use]
+    pub const fn local_addr(&self) -> Option<SocketAddr> {
+        self.local_addr
+    }
+
     /// Starts the debug server in a background thread.
     ///
     /// # Errors
@@ -147,6 +175,7 @@ impl DebugServer {
         }
 
         let snapshot_fn = Arc::clone(&self.snapshot_fn);
+        let memory_residency_snapshot_fn = Arc::clone(&self.memory_residency_snapshot_fn);
         let running = Arc::clone(&self.running);
         let active_connections = Arc::new(AtomicUsize::new(0));
         let max_connections = self.config.max_connections;
@@ -157,6 +186,7 @@ impl DebugServer {
                 serve_loop(
                     &listener,
                     &snapshot_fn,
+                    &memory_residency_snapshot_fn,
                     &running,
                     max_connections,
                     &active_connections,
@@ -185,6 +215,7 @@ impl Drop for DebugServer {
 fn serve_loop(
     listener: &TcpListener,
     snapshot_fn: &SnapshotFn,
+    memory_residency_snapshot_fn: &MemoryResidencySnapshotFn,
     running: &AtomicBool,
     max_connections: usize,
     active_connections: &Arc<AtomicUsize>,
@@ -205,6 +236,7 @@ fn serve_loop(
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
                 let snapshot_fn = Arc::clone(snapshot_fn);
+                let memory_residency_snapshot_fn = Arc::clone(memory_residency_snapshot_fn);
                 let active_connections_for_thread = Arc::clone(active_connections);
 
                 if thread::Builder::new()
@@ -213,7 +245,7 @@ fn serve_loop(
                         let _active_connection =
                             ActiveConnectionGuard::new(Arc::clone(&active_connections_for_thread));
                         let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-                            handle_connection(stream, &snapshot_fn);
+                            handle_connection(stream, &snapshot_fn, &memory_residency_snapshot_fn);
                         }));
                     })
                     .is_err()
@@ -252,7 +284,11 @@ impl Drop for ActiveConnectionGuard {
     }
 }
 
-fn handle_connection(mut stream: TcpStream, snapshot_fn: &SnapshotFn) {
+fn handle_connection(
+    mut stream: TcpStream,
+    snapshot_fn: &SnapshotFn,
+    memory_residency_snapshot_fn: &MemoryResidencySnapshotFn,
+) {
     let mut reader = if let Ok(read_half) = stream.try_clone() {
         BufReader::new(read_half)
     } else {
@@ -296,6 +332,18 @@ fn handle_connection(mut stream: TcpStream, snapshot_fn: &SnapshotFn) {
         }
         "/debug/snapshot" => {
             let snapshot = snapshot_fn();
+            match serde_json::to_string_pretty(&snapshot) {
+                Ok(json) => {
+                    let _ = write_response(&mut stream, 200, "application/json", json.as_bytes());
+                }
+                Err(e) => {
+                    let body = format!("{{\"error\":\"{e}\"}}");
+                    let _ = write_response(&mut stream, 500, "application/json", body.as_bytes());
+                }
+            }
+        }
+        "/debug/memory-residency" => {
+            let snapshot = memory_residency_snapshot_fn();
             match serde_json::to_string_pretty(&snapshot) {
                 Ok(json) => {
                     let _ = write_response(&mut stream, 200, "application/json", json.as_bytes());
@@ -705,6 +753,45 @@ mod tests {
 
         assert!(response.contains("200 OK"));
         assert!(response.contains("[]")); // empty events list
+
+        server.stop();
+    }
+
+    #[test]
+    fn server_returns_memory_residency_snapshot_json() {
+        let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);
+        let mut server = DebugServer::with_config(
+            0,
+            snapshot_fn,
+            DebugServerConfig {
+                print_url: false,
+                ..Default::default()
+            },
+        );
+        server.start().unwrap();
+
+        let addr = server.local_addr.unwrap();
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(
+            stream,
+            "GET /debug/memory-residency HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(&stream);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => response.push_str(&line),
+            }
+        }
+
+        assert!(response.contains("200 OK"));
+        assert!(response.contains("asupersync.memory-residency-accounting-snapshot.v1"));
+        assert!(response.contains("\"status\": \"unknown\""));
 
         server.stop();
     }

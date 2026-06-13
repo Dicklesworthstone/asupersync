@@ -1,0 +1,101 @@
+{
+  "schema_version": "memory-residency-policy-contract-v1",
+  "bead_id": "asupersync-memory-residency-control-ho2itz.2",
+  "parent_bead_id": "asupersync-memory-residency-control-ho2itz",
+  "status": "contract_guarded",
+  "generated_on": "2026-06-13",
+  "source_of_truth": {
+    "policy_source": "src/runtime/memory_residency.rs",
+    "runtime_export": "src/runtime/mod.rs",
+    "contract_test": "tests/memory_residency_policy_contract.rs",
+    "docs": "docs/proof/memory_residency_policy.md",
+    "inventory": "artifacts/memory_residency_inventory_v1.json"
+  },
+  "proof_lane": {
+    "lane_id": "memory-residency-policy-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_policy_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_policy_contract -- --nocapture",
+    "covers": "Pure opt-in memory-residency policy decisions, disabled default, deterministic reason ordering, byte-stable serialization, recommendation-only live-task boundary, contract/docs alignment, and no-local-Cargo proof command shape.",
+    "explicit_not_covered": "Does not prove runtime correctness, throughput improvement, p999 improvement, allocator replacement, live RCH fleet availability, production-on-by-default behavior, cache eviction behavior, or release readiness."
+  },
+  "consumers": [
+    "asupersync-memory-residency-control-ho2itz.3 live accounting snapshots",
+    "asupersync-memory-residency-control-ho2itz.4 replay and e2e proof lane",
+    "asupersync-memory-residency-control-ho2itz.5 operator runbook and rollback gates"
+  ],
+  "non_consumers": [
+    "RuntimeBuilder default configuration",
+    "default RuntimeConfig behavior",
+    "scheduler hot-path execution",
+    "artifact cache eviction implementation",
+    "task cancellation or migration paths",
+    "release-readiness signoff"
+  ],
+  "decision_scenarios": [
+    {
+      "scenario_id": "disabled_default_no_effect",
+      "expected_tier": "fallback",
+      "required_reason": "policy_disabled"
+    },
+    {
+      "scenario_id": "fresh_topology_warm_evidence",
+      "expected_tier": "warm",
+      "required_reason": "fresh_topology"
+    },
+    {
+      "scenario_id": "artifact_cache_pressure_spill_available",
+      "expected_tier": "cold",
+      "required_reason": "artifact_cache_pressure"
+    },
+    {
+      "scenario_id": "stale_topology_fallback",
+      "expected_tier": "fallback",
+      "required_reason": "stale_topology"
+    },
+    {
+      "scenario_id": "no_win_locality",
+      "expected_tier": "no_win",
+      "required_reason": "no_win_locality"
+    },
+    {
+      "scenario_id": "cold_evidence_budget_exhausted",
+      "expected_tier": "fallback",
+      "required_reason": "cold_evidence_budget_exhausted"
+    },
+    {
+      "scenario_id": "proof_pack_warmth_mismatch",
+      "expected_tier": "fallback",
+      "required_reason": "proof_pack_warmth_mismatch"
+    },
+    {
+      "scenario_id": "critical_memory_pressure",
+      "expected_tier": "no_win",
+      "required_reason": "critical_memory_pressure"
+    },
+    {
+      "scenario_id": "unsupported_large_pages",
+      "expected_tier": "fallback",
+      "required_reason": "unsupported_large_pages"
+    }
+  ],
+  "fail_closed_checks": [
+    "default_profile_disabled",
+    "no_builder_default_change",
+    "recommendation_only_live_task_action",
+    "stale_topology_fallback",
+    "no_win_locality_refusal",
+    "cold_evidence_budget_exhausted_fallback",
+    "proof_pack_warmth_mismatch_not_correctness_evidence",
+    "critical_memory_pressure_no_win",
+    "unsupported_large_pages_fallback",
+    "byte_stable_serialization",
+    "rch_only_cargo_proof"
+  ],
+  "no_claim_boundaries": [
+    "No default runtime behavior change.",
+    "No task drop, cancellation, migration, or allocator mutation.",
+    "No throughput, p999, memory reduction, NUMA win, cache hit-rate, or release-readiness claim.",
+    "No local Cargo fallback is approved for the focused proof.",
+    "Cache warmth is treated as advisory evidence only, not correctness evidence."
+  ],
+  "next_child_bead": "asupersync-memory-residency-control-ho2itz.3"
+}
