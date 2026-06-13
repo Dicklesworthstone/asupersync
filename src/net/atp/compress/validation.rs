@@ -34,8 +34,17 @@ impl CompressionValidator {
             ));
         }
 
+        if metadata.original_size == 0 || metadata.compressed_size == 0 {
+            return Err(CompressionError::PolicyViolation(
+                "compression metadata sizes must be non-zero".to_string(),
+            ));
+        }
+
         // Validate compression ratio bounds
-        if metadata.compression_ratio <= 0.0 || metadata.compression_ratio > 1.5 {
+        if !metadata.compression_ratio.is_finite()
+            || metadata.compression_ratio <= 0.0
+            || metadata.compression_ratio > 1.5
+        {
             return Err(CompressionError::PolicyViolation(
                 "invalid compression ratio".to_string(),
             ));
@@ -345,6 +354,29 @@ mod tests {
             algorithm: CompressionAlgorithm::Lz4,
             level: 1,
             min_size_threshold: 100,
+            apply_to_kinds: vec![ObjectKind::FileObject],
+        };
+
+        assert!(matches!(
+            CompressionValidator::validate_compression_metadata(&metadata, &policy, None),
+            Err(CompressionError::PolicyViolation(_))
+        ));
+    }
+
+    #[test]
+    fn test_compression_metadata_rejects_zero_size() {
+        let metadata = CompressionMetadata {
+            algorithm: CompressionAlgorithm::Lz4,
+            level: 1,
+            original_size: 0,
+            compressed_size: 0,
+            compression_ratio: f32::NAN,
+        };
+
+        let policy = CompressionPolicy {
+            algorithm: CompressionAlgorithm::Lz4,
+            level: 1,
+            min_size_threshold: 0,
             apply_to_kinds: vec![ObjectKind::FileObject],
         };
 

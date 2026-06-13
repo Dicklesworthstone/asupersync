@@ -3,10 +3,12 @@
 //! This module provides the core compression algorithm implementations
 //! with consistent interfaces and error handling.
 
-use super::CompressionError;
+use super::{
+    CompressionError, checked_expected_size_with_limit, lz4_prepended_size, read_decompressed_exact,
+};
 use crate::atp::manifest::CompressionAlgorithm;
 #[cfg(feature = "compression")]
-use std::io::{Read, Write};
+use std::io::Write;
 
 /// Algorithm-specific compression parameters.
 #[derive(Debug, Clone, PartialEq)]
@@ -182,22 +184,32 @@ impl CompressionAdapter for Lz4Adapter {
     fn compress(
         &self,
         data: &[u8],
-        _params: &CompressionParams,
+        params: &CompressionParams,
     ) -> Result<Vec<u8>, CompressionError> {
-        lz4_flex::compress_prepend_size(data)
-            .map_err(|e| CompressionError::CompressionFailed(e.to_string()))
+        self.validate_params(params)?;
+
+        Ok(lz4_flex::compress_prepend_size(data))
     }
 
     fn decompress(
         &self,
         data: &[u8],
-        _params: &CompressionParams,
+        params: &CompressionParams,
         expected_size: u64,
     ) -> Result<Vec<u8>, CompressionError> {
+        self.validate_params(params)?;
+        let expected_size =
+            checked_expected_size_with_limit(expected_size, params.max_output_size)?;
+        if lz4_prepended_size(data)? != expected_size {
+            return Err(CompressionError::DecompressionFailed(
+                "size mismatch after decompression".to_string(),
+            ));
+        }
+
         let decompressed = lz4_flex::decompress_size_prepended(data)
             .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
 
-        if decompressed.len() != expected_size as usize {
+        if decompressed.len() != expected_size {
             return Err(CompressionError::DecompressionFailed(
                 "size mismatch after decompression".to_string(),
             ));
@@ -225,6 +237,8 @@ impl CompressionAdapter for GzipAdapter {
         data: &[u8],
         params: &CompressionParams,
     ) -> Result<Vec<u8>, CompressionError> {
+        self.validate_params(params)?;
+
         use flate2::{Compression, write::GzEncoder};
         use std::io::Write;
 
@@ -241,26 +255,17 @@ impl CompressionAdapter for GzipAdapter {
     fn decompress(
         &self,
         data: &[u8],
-        _params: &CompressionParams,
+        params: &CompressionParams,
         expected_size: u64,
     ) -> Result<Vec<u8>, CompressionError> {
+        self.validate_params(params)?;
+        let expected_size =
+            checked_expected_size_with_limit(expected_size, params.max_output_size)?;
+
         use flate2::read::GzDecoder;
-        use std::io::Read;
 
         let mut decoder = GzDecoder::new(data);
-        let mut decompressed = Vec::with_capacity(expected_size as usize);
-
-        decoder
-            .read_to_end(&mut decompressed)
-            .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
-
-        if decompressed.len() != expected_size as usize {
-            return Err(CompressionError::DecompressionFailed(
-                "size mismatch after decompression".to_string(),
-            ));
-        }
-
-        Ok(decompressed)
+        read_decompressed_exact(&mut decoder, expected_size)
     }
 
     fn validate_params(&self, params: &CompressionParams) -> Result<(), CompressionError> {
@@ -323,24 +328,10 @@ impl CompressionAdapter for BrotliAdapter {
 
         #[cfg(feature = "compression")]
         {
-            let expected_size = usize::try_from(expected_size).map_err(|_| {
-                CompressionError::DecompressionFailed(
-                    "expected size does not fit usize".to_string(),
-                )
-            })?;
+            let expected_size =
+                checked_expected_size_with_limit(expected_size, params.max_output_size)?;
             let mut decoder = brotli::Decompressor::new(data, 4096);
-            let mut decompressed = Vec::with_capacity(expected_size);
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
-
-            if decompressed.len() != expected_size {
-                return Err(CompressionError::DecompressionFailed(
-                    "size mismatch after decompression".to_string(),
-                ));
-            }
-
-            Ok(decompressed)
+            read_decompressed_exact(&mut decoder, expected_size)
         }
 
         #[cfg(not(feature = "compression"))]
@@ -424,6 +415,19 @@ mod tests {
     }
 
     #[test]
+    fn test_lz4_adapter_honors_max_output_size() {
+        let adapter = Lz4Adapter;
+        let mut params = AlgorithmRegistry::default_params(CompressionAlgorithm::Lz4);
+        let test_data = b"Hello, world! This is a test for capped LZ4 decompression.";
+        let compressed = adapter.compress(test_data, &params).unwrap();
+        params.max_output_size = Some(test_data.len() as u64 - 1);
+
+        let result = adapter.decompress(&compressed, &params, test_data.len() as u64);
+
+        assert!(matches!(result, Err(CompressionError::CompressionBomb)));
+    }
+
+    #[test]
     fn test_gzip_adapter() {
         let adapter = GzipAdapter;
         let params = AlgorithmRegistry::default_params(CompressionAlgorithm::Gzip);
@@ -437,6 +441,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(decompressed, test_data);
+    }
+
+    #[test]
+    fn test_gzip_adapter_honors_max_output_size() {
+        let adapter = GzipAdapter;
+        let mut params = AlgorithmRegistry::default_params(CompressionAlgorithm::Gzip);
+        let test_data = b"Hello, world! This is a test for capped Gzip decompression.";
+        let compressed = adapter.compress(test_data, &params).unwrap();
+        params.max_output_size = Some(test_data.len() as u64 - 1);
+
+        let result = adapter.decompress(&compressed, &params, test_data.len() as u64);
+
+        assert!(matches!(result, Err(CompressionError::CompressionBomb)));
     }
 
     #[test]

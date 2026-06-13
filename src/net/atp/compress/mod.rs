@@ -25,6 +25,78 @@ pub use algorithms::*;
 pub use policy::*;
 pub use validation::*;
 
+const COMPRESSION_RATIO_TOLERANCE: f32 = 0.01;
+const DECOMPRESSION_READ_CHUNK_SIZE: usize = 8192;
+
+pub(crate) fn checked_expected_size(expected_size: u64) -> Result<usize, CompressionError> {
+    usize::try_from(expected_size).map_err(|_| {
+        CompressionError::DecompressionFailed("expected size does not fit usize".to_string())
+    })
+}
+
+pub(crate) fn checked_expected_size_with_limit(
+    expected_size: u64,
+    max_output_size: Option<u64>,
+) -> Result<usize, CompressionError> {
+    if let Some(max_output_size) = max_output_size
+        && expected_size > max_output_size
+    {
+        return Err(CompressionError::CompressionBomb);
+    }
+
+    checked_expected_size(expected_size)
+}
+
+pub(crate) fn lz4_prepended_size(data: &[u8]) -> Result<usize, CompressionError> {
+    let Some(prefix) = data.get(..4) else {
+        return Err(CompressionError::DecompressionFailed(
+            "missing LZ4 size prefix".to_string(),
+        ));
+    };
+
+    let mut size_bytes = [0_u8; 4];
+    size_bytes.copy_from_slice(prefix);
+    usize::try_from(u32::from_le_bytes(size_bytes)).map_err(|_| {
+        CompressionError::DecompressionFailed("LZ4 size prefix does not fit usize".to_string())
+    })
+}
+
+pub(crate) fn read_decompressed_exact<R: Read>(
+    reader: &mut R,
+    expected_size: usize,
+) -> Result<Vec<u8>, CompressionError> {
+    let mut decompressed = Vec::with_capacity(expected_size.min(DECOMPRESSION_READ_CHUNK_SIZE));
+    let mut buffer = [0_u8; DECOMPRESSION_READ_CHUNK_SIZE];
+
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
+        if read == 0 {
+            break;
+        }
+
+        let next_len = decompressed.len().checked_add(read).ok_or_else(|| {
+            CompressionError::DecompressionFailed("decompressed size overflow".to_string())
+        })?;
+        if next_len > expected_size {
+            return Err(CompressionError::DecompressionFailed(
+                "decompressed size mismatch".to_string(),
+            ));
+        }
+
+        decompressed.extend_from_slice(&buffer[..read]);
+    }
+
+    if decompressed.len() != expected_size {
+        return Err(CompressionError::DecompressionFailed(
+            "decompressed size mismatch".to_string(),
+        ));
+    }
+
+    Ok(decompressed)
+}
+
 /// Compression result with metadata for verification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompressionResult {
@@ -86,6 +158,10 @@ impl CompressionEngine {
         policy: &CompressionPolicy,
         transform_order: Option<&TransformOrder>,
     ) -> Result<CompressionResult, CompressionError> {
+        if data.is_empty() {
+            return Err(CompressionError::SizeThresholdViolation);
+        }
+
         // Validate compression is allowed for this object kind
         if !policy.apply_to_kinds.contains(&object_kind) {
             return Err(CompressionError::PolicyViolation(format!(
@@ -100,7 +176,10 @@ impl CompressionEngine {
 
         // Validate transform order if specified
         if let Some(order) = transform_order {
-            Self::validate_transform_position(order)?;
+            Self::validate_transform_position(
+                order,
+                !matches!(policy.algorithm, CompressionAlgorithm::None),
+            )?;
         }
 
         // Compute plaintext hash before compression
@@ -156,23 +235,13 @@ impl CompressionEngine {
         compressed_data: &[u8],
         metadata: &CompressionMetadata,
     ) -> Result<Vec<u8>, CompressionError> {
-        // Check for compression bomb
-        if metadata.compression_ratio < 0.001 {
-            // Ratio too good to be true, likely a bomb
-            return Err(CompressionError::CompressionBomb);
-        }
+        let expected_size = Self::validate_decompression_metadata(compressed_data, metadata)?;
 
         match metadata.algorithm {
             CompressionAlgorithm::None => Ok(compressed_data.to_vec()),
-            CompressionAlgorithm::Lz4 => {
-                Self::decompress_lz4(compressed_data, metadata.original_size)
-            }
-            CompressionAlgorithm::Gzip => {
-                Self::decompress_gzip(compressed_data, metadata.original_size)
-            }
-            CompressionAlgorithm::Brotli => {
-                Self::decompress_brotli(compressed_data, metadata.original_size)
-            }
+            CompressionAlgorithm::Lz4 => Self::decompress_lz4(compressed_data, expected_size),
+            CompressionAlgorithm::Gzip => Self::decompress_gzip(compressed_data, expected_size),
+            CompressionAlgorithm::Brotli => Self::decompress_brotli(compressed_data, expected_size),
         }
     }
 
@@ -185,40 +254,92 @@ impl CompressionEngine {
     /// Validate transform position in the transform order.
     fn validate_transform_position(
         transform_order: &TransformOrder,
+        has_compression: bool,
     ) -> Result<(), CompressionError> {
         let compression_pos = transform_order
             .transforms
             .iter()
             .position(|&t| t == TransformType::Compression);
 
-        if let Some(pos) = compression_pos {
-            // Compression should come after chunking but before encryption
-            if let Some(chunk_pos) = transform_order
-                .transforms
-                .iter()
-                .position(|&t| t == TransformType::Chunking)
-            {
-                if pos <= chunk_pos {
-                    return Err(CompressionError::TransformOrderViolation(
-                        "compression must come after chunking".to_string(),
-                    ));
-                }
-            }
+        if has_compression != compression_pos.is_some() {
+            return Err(CompressionError::TransformOrderViolation(
+                "compression presence doesn't match transform order".to_string(),
+            ));
+        }
 
-            if let Some(enc_pos) = transform_order
-                .transforms
-                .iter()
-                .position(|&t| t == TransformType::Encryption)
-            {
-                if pos >= enc_pos {
-                    return Err(CompressionError::TransformOrderViolation(
-                        "compression must come before encryption".to_string(),
-                    ));
-                }
+        let Some(pos) = compression_pos else {
+            return Ok(());
+        };
+
+        // Compression should come after chunking but before encryption
+        if let Some(chunk_pos) = transform_order
+            .transforms
+            .iter()
+            .position(|&t| t == TransformType::Chunking)
+        {
+            if pos <= chunk_pos {
+                return Err(CompressionError::TransformOrderViolation(
+                    "compression must come after chunking".to_string(),
+                ));
+            }
+        }
+
+        if let Some(enc_pos) = transform_order
+            .transforms
+            .iter()
+            .position(|&t| t == TransformType::Encryption)
+        {
+            if pos >= enc_pos {
+                return Err(CompressionError::TransformOrderViolation(
+                    "compression must come before encryption".to_string(),
+                ));
             }
         }
 
         Ok(())
+    }
+
+    fn validate_decompression_metadata(
+        compressed_data: &[u8],
+        metadata: &CompressionMetadata,
+    ) -> Result<usize, CompressionError> {
+        if metadata.original_size == 0 || metadata.compressed_size == 0 {
+            return Err(CompressionError::PolicyViolation(
+                "compression metadata sizes must be non-zero".to_string(),
+            ));
+        }
+
+        let actual_compressed_size = u64::try_from(compressed_data.len()).map_err(|_| {
+            CompressionError::DecompressionFailed("compressed size does not fit u64".to_string())
+        })?;
+        if metadata.compressed_size != actual_compressed_size {
+            return Err(CompressionError::PolicyViolation(
+                "compressed data length doesn't match metadata".to_string(),
+            ));
+        }
+
+        if !metadata.compression_ratio.is_finite()
+            || metadata.compression_ratio <= 0.0
+            || metadata.compression_ratio > 1.5
+        {
+            return Err(CompressionError::PolicyViolation(
+                "invalid compression ratio".to_string(),
+            ));
+        }
+
+        let computed_ratio = metadata.compressed_size as f32 / metadata.original_size as f32;
+        let ratio_diff = (computed_ratio - metadata.compression_ratio).abs();
+        if ratio_diff > COMPRESSION_RATIO_TOLERANCE {
+            return Err(CompressionError::PolicyViolation(
+                "compression ratio doesn't match computed ratio".to_string(),
+            ));
+        }
+
+        if metadata.compression_ratio < 0.001 {
+            return Err(CompressionError::CompressionBomb);
+        }
+
+        checked_expected_size(metadata.original_size)
     }
 
     /// Compute SHA-256 hash.
@@ -231,16 +352,24 @@ impl CompressionEngine {
 
     /// Compress using LZ4.
     fn compress_lz4(data: &[u8], _level: u8) -> Result<Vec<u8>, CompressionError> {
-        lz4_flex::compress_prepend_size(data)
-            .map_err(|e| CompressionError::CompressionFailed(e.to_string()))
+        Ok(lz4_flex::compress_prepend_size(data))
     }
 
     /// Decompress LZ4.
-    fn decompress_lz4(compressed: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+    fn decompress_lz4(
+        compressed: &[u8],
+        expected_size: usize,
+    ) -> Result<Vec<u8>, CompressionError> {
+        if lz4_prepended_size(compressed)? != expected_size {
+            return Err(CompressionError::DecompressionFailed(
+                "decompressed size mismatch".to_string(),
+            ));
+        }
+
         let decompressed = lz4_flex::decompress_size_prepended(compressed)
             .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
 
-        if decompressed.len() != expected_size as usize {
+        if decompressed.len() != expected_size {
             return Err(CompressionError::DecompressionFailed(
                 "decompressed size mismatch".to_string(),
             ));
@@ -264,23 +393,14 @@ impl CompressionEngine {
     }
 
     /// Decompress Gzip.
-    fn decompress_gzip(compressed: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+    fn decompress_gzip(
+        compressed: &[u8],
+        expected_size: usize,
+    ) -> Result<Vec<u8>, CompressionError> {
         use flate2::read::GzDecoder;
 
         let mut decoder = GzDecoder::new(compressed);
-        let mut decompressed = Vec::with_capacity(expected_size as usize);
-
-        decoder
-            .read_to_end(&mut decompressed)
-            .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
-
-        if decompressed.len() != expected_size as usize {
-            return Err(CompressionError::DecompressionFailed(
-                "decompressed size mismatch".to_string(),
-            ));
-        }
-
-        Ok(decompressed)
+        read_decompressed_exact(&mut decoder, expected_size)
     }
 
     /// Compress using Brotli.
@@ -309,32 +429,17 @@ impl CompressionEngine {
     #[cfg(feature = "compression")]
     fn decompress_brotli(
         compressed: &[u8],
-        expected_size: u64,
+        expected_size: usize,
     ) -> Result<Vec<u8>, CompressionError> {
-        let expected_size = usize::try_from(expected_size).map_err(|_| {
-            CompressionError::DecompressionFailed("expected size does not fit usize".to_string())
-        })?;
         let mut decoder = brotli::Decompressor::new(compressed, 4096);
-        let mut decompressed = Vec::with_capacity(expected_size);
-
-        decoder
-            .read_to_end(&mut decompressed)
-            .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
-
-        if decompressed.len() != expected_size {
-            return Err(CompressionError::DecompressionFailed(
-                "decompressed size mismatch".to_string(),
-            ));
-        }
-
-        Ok(decompressed)
+        read_decompressed_exact(&mut decoder, expected_size)
     }
 
     /// Decompress Brotli.
     #[cfg(not(feature = "compression"))]
     fn decompress_brotli(
         _compressed: &[u8],
-        _expected_size: u64,
+        _expected_size: usize,
     ) -> Result<Vec<u8>, CompressionError> {
         Err(CompressionError::UnsupportedAlgorithm(
             CompressionAlgorithm::Brotli,
@@ -457,6 +562,57 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_payload_rejected_even_with_zero_threshold() {
+        let policy = CompressionPolicy {
+            algorithm: CompressionAlgorithm::Lz4,
+            level: 1,
+            min_size_threshold: 0,
+            apply_to_kinds: vec![ObjectKind::FileObject],
+        };
+
+        let result = CompressionEngine::compress(b"", ObjectKind::FileObject, &policy, None);
+
+        assert!(matches!(
+            result,
+            Err(CompressionError::SizeThresholdViolation)
+        ));
+    }
+
+    #[test]
+    fn test_decompression_rejects_metadata_size_mismatch_before_decode() {
+        let test_data = vec![b'a'; 2048];
+        let compressed_data = lz4_flex::compress_prepend_size(&test_data);
+        let metadata = CompressionMetadata {
+            algorithm: CompressionAlgorithm::Lz4,
+            level: 1,
+            original_size: test_data.len() as u64,
+            compressed_size: compressed_data.len() as u64 + 1,
+            compression_ratio: compressed_data.len() as f32 / test_data.len() as f32,
+        };
+
+        let result = CompressionEngine::decompress(&compressed_data, &metadata);
+
+        assert!(matches!(result, Err(CompressionError::PolicyViolation(_))));
+    }
+
+    #[test]
+    fn test_decompression_rejects_suspicious_metadata_before_decode() {
+        let compressed_data = vec![0_u8; 4];
+        let original_size = 1_000_000_000_u64;
+        let metadata = CompressionMetadata {
+            algorithm: CompressionAlgorithm::Lz4,
+            level: 1,
+            original_size,
+            compressed_size: compressed_data.len() as u64,
+            compression_ratio: compressed_data.len() as f32 / original_size as f32,
+        };
+
+        let result = CompressionEngine::decompress(&compressed_data, &metadata);
+
+        assert!(matches!(result, Err(CompressionError::CompressionBomb)));
+    }
+
+    #[test]
     fn test_transform_order_validation() {
         use crate::atp::manifest::{
             HashPoint, PrivacyLevel, TransformOrder, TransformType, VerificationBoundary,
@@ -517,6 +673,43 @@ mod tests {
             &policy,
             Some(&invalid_order),
         );
+        assert!(matches!(
+            result,
+            Err(CompressionError::TransformOrderViolation(_))
+        ));
+    }
+
+    #[test]
+    fn test_transform_order_must_include_compression_when_applied() {
+        use crate::atp::manifest::{
+            HashPoint, PrivacyLevel, TransformOrder, TransformType, VerificationBoundary,
+            VerificationLevel,
+        };
+
+        let policy = CompressionPolicy {
+            algorithm: CompressionAlgorithm::Lz4,
+            level: 1,
+            min_size_threshold: 10,
+            apply_to_kinds: vec![ObjectKind::FileObject],
+        };
+        let missing_compression = TransformOrder {
+            transforms: vec![TransformType::Chunking, TransformType::Encryption],
+            hash_point: HashPoint::PostCompression,
+            verification_boundary: VerificationBoundary {
+                relay_verifiable: VerificationLevel::TransferIntegrity,
+                mailbox_verifiable: VerificationLevel::ContentHash,
+                e2e_verification_required: true,
+                privacy_level: PrivacyLevel::MetadataVisible,
+            },
+        };
+
+        let result = CompressionEngine::compress(
+            b"Hello, world! This is a test string for compression.",
+            ObjectKind::FileObject,
+            &policy,
+            Some(&missing_compression),
+        );
+
         assert!(matches!(
             result,
             Err(CompressionError::TransformOrderViolation(_))
