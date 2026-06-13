@@ -1789,4 +1789,154 @@ mod tests {
         assert!(disp.contains("expected 5"));
         assert!(disp.contains("got 4"));
     }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct CompletionMatrixObservation {
+        scenario_id: &'static str,
+        reason_id: &'static str,
+        loss_ewma_permille: u16,
+        rtt_ewma_ms: u32,
+        reorder_depth: u16,
+        static_source_blocks: u16,
+        adaptive_source_blocks: u16,
+        static_repair_symbols: u16,
+        adaptive_repair_symbols: u16,
+        static_score: u64,
+        adaptive_score: u64,
+    }
+
+    fn replica_ack_completion_score(encoded: &EncodedState, quality: PathQualitySnapshot) -> u64 {
+        let source_blocks = u64::from(encoded.params.source_blocks.max(1));
+        let total_symbols = u64::from(encoded.source_count) + u64::from(encoded.repair_count);
+        let loss_bucket = u64::from(quality.loss_ewma_permille.div_ceil(25));
+        let rtt_ms = u64::from(quality.rtt_ewma_ms.max(1));
+        let reorder_depth = u64::from(quality.reorder_depth);
+        let symbol_work = total_symbols.saturating_mul(2);
+        let block_control_cost = source_blocks
+            .saturating_mul(rtt_ms)
+            .saturating_mul(1 + loss_bucket);
+        let reorder_cost = source_blocks
+            .saturating_mul(reorder_depth)
+            .saturating_mul(10);
+        let raw_score = symbol_work
+            .saturating_add(block_control_cost)
+            .saturating_add(reorder_cost);
+        let repair_margin_credit = u64::from(encoded.repair_count)
+            .saturating_mul(u64::from(quality.loss_ewma_permille) + reorder_depth * 10)
+            .saturating_mul(rtt_ms)
+            .div_ceil(1000);
+
+        raw_score.saturating_sub(repair_margin_credit.min(raw_score / 2))
+    }
+
+    fn adaptive_completion_matrix_observations() -> Vec<CompletionMatrixObservation> {
+        let snapshot = create_large_snapshot(4_096);
+        let cases = [
+            (
+                "clean-low-rtt",
+                PathQualitySnapshot::new(20, 0, 0),
+                "clean-low-rtt",
+            ),
+            (
+                "clean-high-rtt",
+                PathQualitySnapshot::new(120, 0, 0),
+                "clean-high-rtt",
+            ),
+            (
+                "loss-5pct-low-rtt",
+                PathQualitySnapshot::new(20, 50, 2),
+                "moderate-loss",
+            ),
+            (
+                "loss-5pct-high-rtt",
+                PathQualitySnapshot::new(120, 50, 2),
+                "moderate-loss",
+            ),
+            (
+                "loss-15pct-low-rtt",
+                PathQualitySnapshot::new(20, 150, 4),
+                "lossy",
+            ),
+            (
+                "loss-15pct-high-rtt",
+                PathQualitySnapshot::new(120, 150, 4),
+                "lossy",
+            ),
+        ];
+
+        cases
+            .into_iter()
+            .enumerate()
+            .map(|(index, (scenario_id, quality, expected_reason))| {
+                let object_id = ObjectId::new_for_test(
+                    0xD0 + u64::try_from(index).expect("matrix index fits u64"),
+                );
+                let base_config = EncodingConfig {
+                    symbol_size: 128,
+                    min_repair_symbols: 4,
+                    max_source_blocks: 8,
+                    ..Default::default()
+                };
+                let static_encoded = StateEncoder::new(base_config.clone(), DetRng::new(0))
+                    .encode_with_id(&snapshot, object_id, Time::ZERO)
+                    .expect("static encoding should succeed");
+                let adaptive_encoded = StateEncoder::new(
+                    EncodingConfig {
+                        path_quality: Some(quality),
+                        ..base_config
+                    },
+                    DetRng::new(0),
+                )
+                .encode_with_id(&snapshot, object_id, Time::ZERO)
+                .expect("adaptive encoding should succeed");
+
+                assert_eq!(adaptive_encoded.layout_decision.reason_id, expected_reason);
+
+                CompletionMatrixObservation {
+                    scenario_id,
+                    reason_id: adaptive_encoded.layout_decision.reason_id,
+                    loss_ewma_permille: quality.loss_ewma_permille,
+                    rtt_ewma_ms: quality.rtt_ewma_ms,
+                    reorder_depth: quality.reorder_depth,
+                    static_source_blocks: static_encoded.params.source_blocks,
+                    adaptive_source_blocks: adaptive_encoded.params.source_blocks,
+                    static_repair_symbols: static_encoded.repair_count,
+                    adaptive_repair_symbols: adaptive_encoded.repair_count,
+                    static_score: replica_ack_completion_score(&static_encoded, quality),
+                    adaptive_score: replica_ack_completion_score(&adaptive_encoded, quality),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn adaptive_completion_matrix_beats_static_on_lossy_cells_without_clean_regression() {
+        let observations = adaptive_completion_matrix_observations();
+        let rerun = adaptive_completion_matrix_observations();
+
+        assert_eq!(observations, rerun, "matrix must be replay-deterministic");
+        assert_eq!(observations.len(), 6);
+
+        for observation in observations {
+            if observation.loss_ewma_permille == 0 {
+                assert!(
+                    observation.adaptive_score <= observation.static_score,
+                    "clean path must not regress: {observation:?}"
+                );
+            } else {
+                assert!(
+                    observation.adaptive_score < observation.static_score,
+                    "lossy path should improve expected completion score: {observation:?}"
+                );
+                assert!(
+                    observation.adaptive_source_blocks <= observation.static_source_blocks,
+                    "lossy path should not split into more source blocks: {observation:?}"
+                );
+                assert!(
+                    observation.adaptive_repair_symbols >= observation.static_repair_symbols,
+                    "lossy path should not reduce repair margin: {observation:?}"
+                );
+            }
+        }
+    }
 }
