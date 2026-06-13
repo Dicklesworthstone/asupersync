@@ -859,8 +859,11 @@ where
                     // accept loop (h1 parity).
                     transient_accept_streak = transient_accept_streak.saturating_add(1);
                     let now = (self.config.time_getter)();
-                    crate::time::sleep(now, transient_accept_backoff_delay(transient_accept_streak))
-                        .await;
+                    crate::time::sleep(
+                        now,
+                        transient_accept_backoff_delay(transient_accept_streak),
+                    )
+                    .await;
                     continue;
                 }
                 AcceptOrShutdown::Accept(Err(e)) => return Err(e),

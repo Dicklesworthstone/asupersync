@@ -1584,8 +1584,7 @@ mod tests {
         let config = TimerWheelConfig::new()
             .max_wheel_duration(Duration::from_secs(60 * day))
             .max_timer_duration(Duration::from_secs(90 * day));
-        let mut wheel =
-            TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
+        let mut wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
 
         crate::assert_with_log!(
             wheel.max_range_ns() <= wheel.physical_range_ns(),

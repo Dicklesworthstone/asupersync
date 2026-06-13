@@ -610,10 +610,7 @@ where
         // attributable panic instead — the `Select` family returns a typed
         // `PolledAfterCompletion` error, but `HedgeResult` has no error variant
         // to carry one.
-        assert!(
-            !this.completed,
-            "HedgeFuture polled after completion"
-        );
+        assert!(!this.completed, "HedgeFuture polled after completion");
 
         // Poll primary if present
         if let Some(primary) = &mut this.primary {

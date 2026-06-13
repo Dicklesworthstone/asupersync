@@ -31,11 +31,12 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
         .map_or_else(|| panic!("{key} must be an array"), Vec::as_slice)
 }
 
-fn object<'a>(value: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
+fn object<'a>(value: &'a Value, key: &str) -> &'a Value {
     value
         .get(key)
         .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("{key} must be an object"))
+        .unwrap_or_else(|| panic!("{key} must be an object"));
+    value.get(key).expect("object field checked above")
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
