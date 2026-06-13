@@ -2295,13 +2295,16 @@
       "guarantee_ids": [
         "rust-crate-release-provenance-contract"
       ],
-      "covers": "Rust crates.io release-provenance contract schema, publish-workflow crate surface, fail-closed prepublish provenance gate, fixture dry-run/already-published semantics, companion integrity hashes, manifest/status rows, and no-claim boundaries stay aligned.",
+      "covers": "Rust crates.io release-provenance contract schema, publish-workflow crate surface, fail-closed prepublish provenance gate, fixture dry-run/already-published semantics, companion integrity hashes, R5 deterministic dry-run e2e final signoff packet, manifest/status rows, and no-claim boundaries stay aligned.",
       "explicit_not_covered": "Does not perform cargo publish, does not run cargo publish --dry-run, does not prove release readiness, does not prove runtime correctness, does not prove broad workspace health, does not prove live crates.io publication, and does not prove real package tarball integrity for fixture rows.",
       "expected_signal": "rust_crate_release_provenance_contract tests pass",
       "source_paths": [
         ".github/workflows/publish.yml",
         "artifacts/rust_crate_release_provenance_contract_v1.json",
         "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+        "artifacts/rust_crate_release_provenance_final_signoff_v1.json",
+        "artifacts/rust_crate_release_provenance_dry_run_e2e_v1.log",
+        "docs/rust_crate_release_provenance_final_signoff.md",
         "docs/rust_crate_release_provenance_artifacts.md",
         "docs/rust_crate_release_provenance_policy.md",
         "tests/rust_crate_release_provenance_contract.rs",
@@ -2312,9 +2315,10 @@
         "publish workflow crate list drift",
         "publish workflow provenance gate drift",
         "fixture digest or companion manifest drift",
+        "final signoff e2e/report drift",
         "manifest/status mapping drift"
       ],
-      "escalation_notes": "Use this lane only for Rust crate release-provenance metadata, fixture validation, and publish-workflow provenance gate drift detection. It cannot be cited as release readiness, live publish evidence, broad workspace health, runtime correctness, or real package tarball integrity proof.",
+      "escalation_notes": "Use this lane only for Rust crate release-provenance metadata, fixture validation, publish-workflow provenance gate drift detection, and R5 deterministic final signoff packet drift. It cannot be cited as release readiness, live publish evidence, broad workspace health, runtime correctness, or real package tarball integrity proof.",
       "proof_reuse_policy": {
         "cache_hits_allowed": true,
         "allowed_claim_scopes": [
@@ -2686,7 +2690,7 @@
     },
     {
       "guarantee_id": "rust-crate-release-provenance-contract",
-      "description": "Rust crate release-provenance artifact schema, publish-workflow crate surface, fail-closed prepublish provenance gate, fixture outcomes, integrity hashes, proof manifest/status rows, and overclaim boundaries have a canonical verifier command.",
+      "description": "Rust crate release-provenance artifact schema, publish-workflow crate surface, fail-closed prepublish provenance gate, fixture outcomes, integrity hashes, R5 deterministic final signoff packet, proof manifest/status rows, and overclaim boundaries have a canonical verifier command.",
       "lane_ids": [
         "rust-crate-release-provenance-contract"
       ]

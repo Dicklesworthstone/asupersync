@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 const CONTRACT_PATH: &str = "artifacts/rust_crate_release_provenance_contract_v1.json";
 const INTEGRITY_MANIFEST_PATH: &str =
     "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json";
+const FINAL_SIGNOFF_PATH: &str = "artifacts/rust_crate_release_provenance_final_signoff_v1.json";
+const DRY_RUN_E2E_LOG_PATH: &str = "artifacts/rust_crate_release_provenance_dry_run_e2e_v1.log";
+const FINAL_SIGNOFF_DOC_PATH: &str = "docs/rust_crate_release_provenance_final_signoff.md";
 const OPERATOR_DOC_PATH: &str = "docs/rust_crate_release_provenance_artifacts.md";
 const POLICY_PATH: &str = "docs/rust_crate_release_provenance_policy.md";
 const PROOF_MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
@@ -18,6 +21,7 @@ const TEST_PATH: &str = "tests/rust_crate_release_provenance_contract.rs";
 
 const LANE_ID: &str = "rust-crate-release-provenance-contract";
 const PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract -- --nocapture";
+const CLOSEOUT_PROOF_COMMAND: &str = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture";
 
 const REQUIRED_RECORD_FIELDS: &[&str] = &[
     "schema_version",
@@ -540,6 +544,271 @@ fn validate_contract(contract: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_final_signoff(signoff: &Value, contract: &Value) -> Result<(), String> {
+    if string(signoff, "schema_version")? != "rust-crate-release-provenance-final-signoff-v1" {
+        return Err("final signoff schema_version drifted".to_string());
+    }
+    if string(signoff, "primary_bead")? != "asupersync-release-provenance-core-crates-jpts8n.5"
+        || string(signoff, "parent_bead")? != "asupersync-release-provenance-core-crates-jpts8n"
+    {
+        return Err("final signoff bead mapping drifted".to_string());
+    }
+
+    let source_paths = signoff
+        .get("source_paths")
+        .ok_or_else(|| "source_paths missing".to_string())?;
+    for (field, path) in [
+        ("final_signoff", FINAL_SIGNOFF_PATH),
+        ("dry_run_e2e_log", DRY_RUN_E2E_LOG_PATH),
+        ("operator_report", FINAL_SIGNOFF_DOC_PATH),
+        ("policy", POLICY_PATH),
+        ("artifact_contract", CONTRACT_PATH),
+        ("integrity_manifest", INTEGRITY_MANIFEST_PATH),
+        ("publish_workflow", PUBLISH_WORKFLOW_PATH),
+        ("contract_test", TEST_PATH),
+        ("proof_manifest", PROOF_MANIFEST_PATH),
+        ("proof_status_snapshot", PROOF_STATUS_PATH),
+    ] {
+        if string(source_paths, field)? != path {
+            return Err(format!("source_paths.{field} drifted"));
+        }
+        if !repo_path(path).exists() {
+            return Err(format!("{path} must exist"));
+        }
+    }
+
+    let integrity = array(signoff, "artifact_integrity")?;
+    let integrity_by_path = integrity
+        .iter()
+        .map(|entry| string(entry, "path").map(|path| (path.to_string(), entry)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    for path in [DRY_RUN_E2E_LOG_PATH, FINAL_SIGNOFF_DOC_PATH] {
+        let entry = integrity_by_path
+            .get(path)
+            .ok_or_else(|| format!("missing artifact_integrity row for {path}"))?;
+        let expected = format!("sha256:{}", sha256_hex(path));
+        if string(entry, "sha256")? != expected {
+            return Err(format!("{path}: final signoff digest drifted"));
+        }
+        string(entry, "role")?;
+    }
+
+    let e2e = signoff
+        .get("dry_run_e2e")
+        .ok_or_else(|| "dry_run_e2e missing".to_string())?;
+    if string(e2e, "execution_mode")? != "deterministic_fixture_no_live_publish" {
+        return Err("dry_run_e2e execution mode drifted".to_string());
+    }
+    if bool_field(e2e, "live_publish_performed")?
+        || bool_field(e2e, "cargo_publish_dry_run_performed")?
+    {
+        return Err(
+            "R5 deterministic e2e must not claim live publish or cargo publish --dry-run"
+                .to_string(),
+        );
+    }
+    if string(e2e, "package_byte_source")? != "deterministic_fixture_not_real_crate_tarball" {
+        return Err("R5 package byte source must remain fixture-only".to_string());
+    }
+    for status in ["packaged", "skipped", "already_published", "blocked"] {
+        if !string_set(e2e, "status_vocabulary")?.contains(status) {
+            return Err(format!("dry_run_e2e status vocabulary missing {status}"));
+        }
+    }
+
+    let outputs = e2e
+        .get("artifact_outputs")
+        .ok_or_else(|| "artifact_outputs missing".to_string())?;
+    for (field, path) in [
+        ("json", FINAL_SIGNOFF_PATH),
+        ("markdown", FINAL_SIGNOFF_DOC_PATH),
+        ("log", DRY_RUN_E2E_LOG_PATH),
+    ] {
+        if string(outputs, field)? != path {
+            return Err(format!("artifact_outputs.{field} drifted"));
+        }
+    }
+
+    let surface = array(contract, "published_crate_surface")?;
+    let results = array(e2e, "per_package_results")?;
+    if results.len() != surface.len() {
+        return Err("R5 e2e rows must cover every published crate surface".to_string());
+    }
+    let operator_doc = read_repo_file(FINAL_SIGNOFF_DOC_PATH);
+    let e2e_log = read_repo_file(DRY_RUN_E2E_LOG_PATH);
+    for (index, (surface_row, result)) in surface.iter().zip(results.iter()).enumerate() {
+        let expected_order = index + 1;
+        if result
+            .get("publish_order")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "publish_order must be integer".to_string())?
+            != expected_order as u64
+        {
+            return Err(format!("R5 e2e row {expected_order} publish_order drifted"));
+        }
+        let package = string(result, "package")?;
+        if package != string(surface_row, "package")? {
+            return Err(format!("R5 e2e row {expected_order} package drifted"));
+        }
+        if string(result, "manifest_path")? != string(surface_row, "manifest_path")? {
+            return Err(format!("{package}: manifest path drifted in R5 e2e row"));
+        }
+        if string(result, "status")? != "packaged" {
+            return Err(format!(
+                "{package}: deterministic R5 fixture must stay packaged"
+            ));
+        }
+        let record_id = string(result, "record_id")?;
+        if !(record_id.starts_with("fixture-e2e-") && record_id.ends_with("-0.3.4")) {
+            return Err(format!(
+                "{package}: record_id must be deterministic fixture id"
+            ));
+        }
+        let package_sha = string(result, "package_tarball_sha256")?;
+        assert_prefixed_sha256(package_sha, "package_tarball_sha256")?;
+        if bool_field(result, "live_publish_performed")? {
+            return Err(format!("{package}: R5 e2e row must not claim live publish"));
+        }
+
+        let doc_marker = format!("| {expected_order} | `{package}` | `packaged` | `{record_id}` |");
+        if !operator_doc.contains(&doc_marker) {
+            return Err(format!("operator report missing row marker {doc_marker}"));
+        }
+        let log_marker = format!(
+            "result[{expected_order}]={package} status=packaged record={record_id} package_sha256={package_sha}"
+        );
+        if !e2e_log.lines().any(|line| line == log_marker) {
+            return Err(format!("e2e log missing result line {log_marker}"));
+        }
+    }
+
+    let child_evidence = array(signoff, "child_evidence")?;
+    let child_by_bead = child_evidence
+        .iter()
+        .map(|child| string(child, "bead").map(|bead| (bead.to_string(), child)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    for suffix in ["1", "2", "3", "4"] {
+        let bead = format!("asupersync-release-provenance-core-crates-jpts8n.{suffix}");
+        let child = child_by_bead
+            .get(&bead)
+            .ok_or_else(|| format!("missing child evidence for {bead}"))?;
+        if string(child, "status")? != "closed" {
+            return Err(format!("{bead} must be closed in final signoff"));
+        }
+        if array(child, "evidence_paths")?.is_empty() {
+            return Err(format!("{bead} must carry evidence paths"));
+        }
+    }
+
+    let proof_commands = array(signoff, "proof_commands")?;
+    let commands_by_label = proof_commands
+        .iter()
+        .map(|command| string(command, "label").map(|label| (label.to_string(), command)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    for (label, expected_command) in [
+        ("focused_manifest_lane", PROOF_COMMAND),
+        ("closeout_verifier", CLOSEOUT_PROOF_COMMAND),
+    ] {
+        let command = commands_by_label
+            .get(label)
+            .ok_or_else(|| format!("missing proof command {label}"))?;
+        if string(command, "command")? != expected_command {
+            return Err(format!("{label} command drifted"));
+        }
+        if !bool_field(command, "remote_required")?
+            || bool_field(command, "local_fallback_allowed")?
+        {
+            return Err(format!(
+                "{label} must be remote-required with no local fallback"
+            ));
+        }
+    }
+
+    let closeout = signoff
+        .get("closeout_requirements")
+        .ok_or_else(|| "closeout_requirements missing".to_string())?;
+    for field in [
+        "agent_mail_handoff_required_before_close",
+        "tracker_comment_required_before_close",
+        "focused_rch_verifier_required_before_close",
+        "parent_epic_close_allowed_after_r5_close",
+    ] {
+        if !bool_field(closeout, field)? {
+            return Err(format!("closeout_requirements.{field} must be true"));
+        }
+    }
+    if !string(closeout, "parent_epic_close_claim")?.contains("not release readiness") {
+        return Err("parent epic close claim must preserve release-readiness boundary".to_string());
+    }
+
+    let report = signoff
+        .get("current_operator_report")
+        .ok_or_else(|| "current_operator_report missing".to_string())?;
+    if string(report, "final_verdict")? != "yellow_scoped_signoff_complete" {
+        return Err("R5 final verdict drifted".to_string());
+    }
+    if !report.get("first_failing_row").is_some_and(Value::is_null) {
+        return Err("R5 final signoff should not hide a failing row".to_string());
+    }
+    for (field, expected) in [
+        ("package_surface_rows", 9),
+        ("packaged", 9),
+        ("skipped", 0),
+        ("already_published", 0),
+        ("blocked", 0),
+    ] {
+        if report.get(field).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!("operator report {field} count drifted"));
+        }
+    }
+    if bool_field(report, "live_publish_performed")?
+        || bool_field(report, "cargo_publish_dry_run_performed")?
+    {
+        return Err(
+            "operator report must not claim live publish or cargo publish dry-run".to_string(),
+        );
+    }
+
+    let no_claims = string_set(signoff, "no_claim_boundaries")?;
+    for required in [
+        "does_not_prove_release_readiness",
+        "does_not_prove_runtime_correctness",
+        "does_not_prove_broad_workspace_health",
+        "does_not_prove_security_audit_completion",
+        "does_not_prove_live_crates_io_publication",
+        "does_not_prove_real_package_tarball_integrity",
+        "does_not_authorize_local_cargo_fallback",
+    ] {
+        if !no_claims.contains(required) {
+            return Err(format!(
+                "final signoff missing no-claim boundary {required}"
+            ));
+        }
+    }
+    for marker in [
+        "yellow_scoped_signoff_complete",
+        "does not perform a live crates.io publish",
+        "does not prove release readiness",
+        "Agent Mail handoff",
+    ] {
+        if !operator_doc.contains(marker) {
+            return Err(format!("operator report missing marker {marker}"));
+        }
+    }
+    for marker in [
+        "final_verdict=yellow_scoped_signoff_complete",
+        "live_publish=false",
+        "cargo_publish_dry_run=false",
+        "no_claim=does_not_prove_live_crates_io_publication",
+    ] {
+        if !e2e_log.contains(marker) {
+            return Err(format!("e2e log missing marker {marker}"));
+        }
+    }
+
+    Ok(())
+}
+
 #[test]
 fn contract_schema_fixture_records_and_negative_cases_are_checked() {
     let contract = json(CONTRACT_PATH);
@@ -589,6 +858,35 @@ fn published_crate_surface_tracks_publish_workflow_order() {
 fn companion_integrity_manifest_hashes_live_artifacts() {
     let contract = json(CONTRACT_PATH);
     validate_integrity_manifest(&contract).unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn final_signoff_packet_maps_dry_run_e2e_and_child_evidence() {
+    let contract = json(CONTRACT_PATH);
+    let signoff = json(FINAL_SIGNOFF_PATH);
+    validate_final_signoff(&signoff, &contract).unwrap_or_else(|error| panic!("{error}"));
+
+    let mut overclaiming = signoff.clone();
+    overclaiming["dry_run_e2e"]["live_publish_performed"] = Value::Bool(true);
+    let error = validate_final_signoff(&overclaiming, &contract).unwrap_err();
+    assert!(
+        error.contains("live publish"),
+        "overclaiming final signoff should reject live publish claim: {error}"
+    );
+
+    let mut missing_child = signoff.clone();
+    missing_child["child_evidence"]
+        .as_array_mut()
+        .expect("child evidence array")
+        .retain(|child| {
+            child.get("bead").and_then(Value::as_str)
+                != Some("asupersync-release-provenance-core-crates-jpts8n.3")
+        });
+    let error = validate_final_signoff(&missing_child, &contract).unwrap_err();
+    assert!(
+        error.contains("jpts8n.3"),
+        "final signoff should fail closed when child evidence disappears: {error}"
+    );
 }
 
 #[test]
@@ -681,6 +979,9 @@ fn proof_manifest_and_status_rows_are_scoped_to_provenance_contract() {
         PUBLISH_WORKFLOW_PATH,
         CONTRACT_PATH,
         INTEGRITY_MANIFEST_PATH,
+        FINAL_SIGNOFF_PATH,
+        DRY_RUN_E2E_LOG_PATH,
+        FINAL_SIGNOFF_DOC_PATH,
         OPERATOR_DOC_PATH,
         POLICY_PATH,
         TEST_PATH,
@@ -767,6 +1068,8 @@ fn proof_manifest_and_status_rows_are_scoped_to_provenance_contract() {
     let notes = string(row, "notes").expect("notes").to_ascii_lowercase();
     for boundary in [
         "yellow-scoped",
+        "final signoff",
+        "deterministic dry-run e2e",
         "does not run cargo publish",
         "release readiness",
         "runtime correctness",

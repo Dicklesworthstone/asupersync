@@ -879,7 +879,7 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract -- --nocapture"
       ],
       "blocked_frontier": null,
-      "notes": "Yellow-scoped Rust crate release-provenance contract: cite it only for schema shape, workflow crate surface coverage, fail-closed prepublish provenance gate checks, fixture dry-run/already-published semantics, companion integrity hashes, proof manifest/status rows, and no-claim boundaries. It does not run cargo publish or cargo publish --dry-run, prove release readiness, prove runtime correctness, prove broad workspace health, prove live crates.io publication, or prove real package tarball integrity for fixture rows."
+      "notes": "Yellow-scoped Rust crate release-provenance contract: cite it only for schema shape, workflow crate surface coverage, fail-closed prepublish provenance gate checks, fixture dry-run/already-published semantics, companion integrity hashes, R5 deterministic dry-run e2e final signoff packet, proof manifest/status rows, and no-claim boundaries. It does not run cargo publish or cargo publish --dry-run, prove release readiness, prove runtime correctness, prove broad workspace health, prove live crates.io publication, or prove real package tarball integrity for fixture rows."
     },
     {
       "claim_id": "artifact-governance-final-signoff",
