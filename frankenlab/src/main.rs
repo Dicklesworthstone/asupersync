@@ -11,6 +11,7 @@
 //! frankenlab replay examples/scenarios/01_race_condition.yaml
 //! ```
 
+use asupersync::lab::scenario::Scenario;
 use asupersync::lab::scenario_runner::{
     ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
 };
@@ -179,10 +180,7 @@ fn pretty_json_or<T: serde::Serialize>(value: &T, fallback: &'static str) -> Str
     serde_json::to_string_pretty(value).unwrap_or_else(|_| fallback.to_string())
 }
 
-fn scenario_with_fault_indices(
-    scenario: &asupersync::lab::scenario::Scenario,
-    fault_indices: &[usize],
-) -> asupersync::lab::scenario::Scenario {
+fn scenario_with_fault_indices(scenario: &Scenario, fault_indices: &[usize]) -> Scenario {
     let mut reduced = scenario.clone();
     reduced.faults = fault_indices
         .iter()
@@ -365,6 +363,17 @@ struct FaultMinimizeOutcome {
     verified_still_failing: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct MinimizeScenarioReport {
+    schema_version: u32,
+    input_kind: &'static str,
+    minimized_surface: &'static str,
+    scenario: String,
+    scenario_id: String,
+    outcome: FaultMinimizeOutcome,
+    minimized_scenario: Scenario,
+}
+
 fn fault_elements(fault_count: usize) -> Vec<ScenarioElement> {
     (0..fault_count)
         .map(|index| ScenarioElement::AdvanceTime {
@@ -446,43 +455,64 @@ fn minimize_fault_indices(
     })
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn cmd_minimize(args: MinimizeArgs, json: bool) -> Result<(), String> {
-    let scenario = load_scenario(&args.scenario)?;
-    let outcome = minimize_fault_indices(scenario.faults.len(), args.max_replays, |indices| {
-        let reduced = scenario_with_fault_indices(&scenario, indices);
-        ScenarioRunner::run(&reduced).is_ok_and(|result| !result.passed())
+fn minimize_scenario_report(
+    scenario_path: &Path,
+    scenario: &Scenario,
+    max_replays: usize,
+    mut fails_with_scenario: impl FnMut(&Scenario) -> bool,
+) -> Result<MinimizeScenarioReport, String> {
+    let outcome = minimize_fault_indices(scenario.faults.len(), max_replays, |indices| {
+        let reduced = scenario_with_fault_indices(scenario, indices);
+        fails_with_scenario(&reduced)
     })?;
 
     if !outcome.verified_still_failing {
         return Err("minimized scenario did not reproduce the original failure".into());
     }
 
+    let minimized_scenario =
+        scenario_with_fault_indices(scenario, &outcome.minimized_fault_indices);
+
+    Ok(MinimizeScenarioReport {
+        schema_version: 1,
+        input_kind: "scenario_yaml",
+        minimized_surface: "faults",
+        scenario: scenario_path.display().to_string(),
+        scenario_id: scenario.id.clone(),
+        outcome,
+        minimized_scenario,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn cmd_minimize(args: MinimizeArgs, json: bool) -> Result<(), String> {
+    let scenario = load_scenario(&args.scenario)?;
+    let report =
+        minimize_scenario_report(&args.scenario, &scenario, args.max_replays, |candidate| {
+            ScenarioRunner::run(candidate).is_ok_and(|result| !result.passed())
+        })?;
+
     if json {
-        let minimized = scenario_with_fault_indices(&scenario, &outcome.minimized_fault_indices);
-        let report = serde_json::json!({
-            "schema_version": 1,
-            "input_kind": "scenario_yaml",
-            "minimized_surface": "faults",
-            "scenario": args.scenario.display().to_string(),
-            "scenario_id": scenario.id,
-            "outcome": outcome,
-            "minimized_scenario": minimized,
-        });
         println!("{}", pretty_json_or(&report, "{}"));
     } else {
         println!(
             "Minimized faults: {} -> {} ({:.1}% reduction)",
-            outcome.original_fault_count,
-            outcome.minimized_fault_count,
-            outcome.reduction_ratio * 100.0
+            report.outcome.original_fault_count,
+            report.outcome.minimized_fault_count,
+            report.outcome.reduction_ratio * 100.0
         );
-        println!("Kept fault indices: {:?}", outcome.minimized_fault_indices);
-        println!("Removed fault indices: {:?}", outcome.removed_fault_indices);
+        println!(
+            "Kept fault indices: {:?}",
+            report.outcome.minimized_fault_indices
+        );
+        println!(
+            "Removed fault indices: {:?}",
+            report.outcome.removed_fault_indices
+        );
         println!(
             "Replay attempts: {}{}",
-            outcome.replay_attempts,
-            if outcome.budget_exhausted {
+            report.outcome.replay_attempts,
+            if report.outcome.budget_exhausted {
                 " (budget exhausted)"
             } else {
                 ""
@@ -690,6 +720,19 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::lab::scenario::{FaultAction, FaultEvent};
+    use std::collections::BTreeMap;
+
+    fn disk_pressure_fault(at_ms: u64, path: &str) -> FaultEvent {
+        let mut args = BTreeMap::new();
+        args.insert("path".to_string(), serde_json::json!(path));
+        args.insert("bytes".to_string(), serde_json::json!(1024));
+        FaultEvent {
+            at_ms,
+            action: FaultAction::DiskPressure,
+            args,
+        }
+    }
 
     #[test]
     fn fault_index_elements_round_trip_and_sort() {
@@ -736,6 +779,51 @@ mod tests {
         assert_eq!(first.replay_attempts, second.replay_attempts);
         assert_eq!(first.budget_exhausted, second.budget_exhausted);
         assert_eq!(first.verified_still_failing, second.verified_still_failing);
+    }
+
+    #[test]
+    fn minimize_scenario_report_has_stable_json_shape() {
+        let scenario = Scenario {
+            id: "synthetic-minimize-schema".to_string(),
+            faults: vec![
+                disk_pressure_fault(10, "target/a"),
+                disk_pressure_fault(20, "target/required"),
+                disk_pressure_fault(30, "target/c"),
+            ],
+            ..Scenario::default()
+        };
+
+        let report =
+            minimize_scenario_report(Path::new("synthetic.yaml"), &scenario, 0, |candidate| {
+                candidate.faults.iter().any(|fault| fault.at_ms == 20)
+            })
+            .expect("required synthetic fault should keep scenario failing");
+
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.input_kind, "scenario_yaml");
+        assert_eq!(report.minimized_surface, "faults");
+        assert_eq!(report.scenario, "synthetic.yaml");
+        assert_eq!(report.scenario_id, "synthetic-minimize-schema");
+        assert_eq!(report.outcome.minimized_fault_indices, vec![1]);
+        assert_eq!(report.minimized_scenario.faults.len(), 1);
+        assert_eq!(report.minimized_scenario.faults[0].at_ms, 20);
+
+        let json = serde_json::to_value(&report).expect("report serializes");
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["input_kind"], "scenario_yaml");
+        assert_eq!(json["minimized_surface"], "faults");
+        assert_eq!(json["scenario_id"], "synthetic-minimize-schema");
+        assert_eq!(
+            json["outcome"]["minimized_fault_indices"],
+            serde_json::json!([1])
+        );
+        assert_eq!(
+            json["minimized_scenario"]["faults"]
+                .as_array()
+                .expect("faults is an array")
+                .len(),
+            1
+        );
     }
 
     #[test]
