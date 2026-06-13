@@ -214,7 +214,16 @@ impl<T> TaskHandle<T> {
         _cx: &'a Cx,
         reason: CancelReason,
     ) -> JoinFuture<'a, T> {
-        let cx_inner = self.inner.clone();
+        // Resolve the live linkage at join time, exactly like `join`: mailbox
+        // spawns start with a dangling `self.inner` weak that admission
+        // supersedes via the admitted slot. Cloning `self.inner` directly
+        // would leave the drop-abort path with a permanently-dangling weak, so
+        // dropping the loser in `Scope::race`/`Scope::hedge` would never
+        // request cancellation and the loser would never drain (hang +
+        // quiescence violation).
+        let cx_inner = self
+            .live_inner()
+            .map_or_else(Weak::new, |arc| std::sync::Arc::downgrade(&arc));
         let receiver = &mut self.receiver;
         let terminal_state = &mut self.terminal_consumed;
         JoinFuture {

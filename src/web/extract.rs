@@ -351,24 +351,25 @@ fn deserialize_from_string_map<T>(
 where
     T: DeserializeOwned,
 {
-    let as_strings = serde_json::Value::Object(
-        values
-            .iter()
-            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
-            .collect(),
-    );
-    if let Ok(parsed) = serde_json::from_value::<T>(as_strings) {
-        return Ok(parsed);
-    }
-
-    let as_coerced = serde_json::Value::Object(
-        values
-            .iter()
-            .map(|(key, value)| (key.clone(), coerce_json_scalar(value)))
-            .collect(),
-    );
-    serde_json::from_value::<T>(as_coerced)
-        .map_err(|e| ExtractionError::bad_request(format!("invalid {context}: {e}")))
+    // Use the same type-directed deserializer as `Form`: it coerces each value
+    // based on the *target field's* requested type (string fields stay strings
+    // via `deserialize_str`/`deserialize_any`; numeric/bool fields parse),
+    // rather than the previous per-value guessing. The old two-pass approach
+    // (all-strings, then coerce-every-value-to-its-looks-like type) broke any
+    // struct mixing a `String` field with a numeric field: a string field
+    // holding a numeric-looking value (an all-digit username, a numeric id or
+    // ZIP passed as text, "true"/"false" strings) was coerced to a JSON
+    // number/bool in the fallback pass and then failed to deserialize into
+    // `String`, returning a confusing 400 to legitimate clients.
+    //
+    // Query and Path are always single-valued here (duplicate query keys are
+    // rejected upstream in `parse_urlencoded`, and path params are a
+    // single-value map), so each value becomes a one-element slice.
+    let multi: HashMap<String, Vec<String>> = values
+        .iter()
+        .map(|(key, value)| (key.clone(), vec![value.clone()]))
+        .collect();
+    deserialize_from_multi_value_map(&multi, context)
 }
 
 fn coerce_json_scalar(raw: &str) -> serde_json::Value {
@@ -2039,6 +2040,50 @@ mod tests {
 
         let Path(extracted) = Path::<HashMap<String, String>>::from_request_parts(&req).unwrap();
         assert_eq!(extracted, params);
+    }
+
+    #[test]
+    fn query_string_field_accepts_numeric_looking_value() {
+        // A `String` field holding a numeric/bool-looking value (all-digit
+        // username, numeric id passed as text, "true"/"false" string) must be
+        // kept as a string, not coerced to a JSON number/bool and rejected.
+        #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+        struct Mixed {
+            name: String,
+            flag: String,
+            age: u32,
+        }
+        let req = Request::new("GET", "/u").with_query("name=42&flag=true&age=30");
+        let Query(m) = Query::<Mixed>::from_request_parts(&req).unwrap();
+        assert_eq!(
+            m,
+            Mixed {
+                name: "42".to_string(),
+                flag: "true".to_string(),
+                age: 30,
+            }
+        );
+    }
+
+    #[test]
+    fn path_string_field_accepts_numeric_looking_value() {
+        #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+        struct Params {
+            token: String,
+            id: u64,
+        }
+        let mut params = HashMap::new();
+        params.insert("token".to_string(), "1234".to_string());
+        params.insert("id".to_string(), "9".to_string());
+        let req = Request::new("GET", "/x").with_path_params(params);
+        let Path(p) = Path::<Params>::from_request_parts(&req).unwrap();
+        assert_eq!(
+            p,
+            Params {
+                token: "1234".to_string(),
+                id: 9,
+            }
+        );
     }
 
     #[test]

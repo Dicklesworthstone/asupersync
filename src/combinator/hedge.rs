@@ -564,6 +564,7 @@ pub struct HedgeFuture<Prim, Back, F> {
     backup: Option<Back>,
     timer: Option<Sleep>,
     config: HedgeConfig,
+    completed: bool,
 }
 
 impl<Prim, Back, F> HedgeFuture<Prim, Back, F> {
@@ -584,6 +585,7 @@ impl<Prim, Back, F> HedgeFuture<Prim, Back, F> {
             backup: None,
             timer: Some(timer),
             config,
+            completed: false,
         }
     }
 }
@@ -601,10 +603,23 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
+        // Fail closed on poll-after-completion: this future leaves the winning
+        // inner future in place after returning `Ready`, so re-polling here
+        // would re-poll an already-completed inner future (a `Future` contract
+        // violation that most inner futures panic on). Surface it as a clear,
+        // attributable panic instead — the `Select` family returns a typed
+        // `PolledAfterCompletion` error, but `HedgeResult` has no error variant
+        // to carry one.
+        assert!(
+            !this.completed,
+            "HedgeFuture polled after completion"
+        );
+
         // Poll primary if present
         if let Some(primary) = &mut this.primary {
             if let Poll::Ready(outcome) = Pin::new(primary).poll(cx) {
                 // Primary finished.
+                this.completed = true;
                 return Poll::Ready(if this.backup.is_some() {
                     // Backup was running, so this was a race.
                     // Dropping backup cancels it; loser is represented as race-loser cancellation.
@@ -638,6 +653,7 @@ where
             if let Poll::Ready(outcome) = Pin::new(backup).poll(cx) {
                 // Backup finished first.
                 // Drop primary (cancel).
+                this.completed = true;
                 return Poll::Ready(HedgeResult::backup_won(
                     outcome,
                     Outcome::Cancelled(CancelReason::race_loser()),
