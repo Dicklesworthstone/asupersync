@@ -51,7 +51,7 @@ pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, Siz
 pub use h1::{
     ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, Method,
     MultipartError, MultipartForm, ParsedUrl, RedirectPolicy, Request, RequestBuilder, Response,
-    ResponseBuilder, Scheme, StatusCode, Version,
+    ResponseBuilder, RetryPolicy, Scheme, StatusCode, Version,
 };
 
 /// Ergonomic alias for the high-level pooled HTTP client.

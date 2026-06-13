@@ -516,6 +516,33 @@ impl Default for RedirectPolicy {
     }
 }
 
+/// Retry policy for the HTTP client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPolicy {
+    /// Do not retry failed requests automatically.
+    None,
+    /// Retry safe methods once when a reused pooled connection appears stale.
+    ///
+    /// This covers the common keep-alive race where the peer closed an idle
+    /// connection after it was returned to the pool. Non-safe methods are not
+    /// retried by this policy because the server may have observed the request.
+    SafeMethodsOnStaleReuse,
+}
+
+impl RetryPolicy {
+    fn should_retry_reused_connection_failure(&self, method: &Method, err: &ClientError) -> bool {
+        matches!(self, Self::SafeMethodsOnStaleReuse)
+            && method_is_safe_to_retry_after_stale_reuse(method)
+            && client_error_looks_like_stale_reuse(err)
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self::SafeMethodsOnStaleReuse
+    }
+}
+
 /// Builder for [`HttpClient`].
 ///
 /// This provides a reqwest-style fluent API for configuring the high-level
@@ -597,6 +624,27 @@ impl HttpClientBuilder {
     #[must_use]
     pub fn no_redirects(mut self) -> Self {
         self.config.redirect_policy = RedirectPolicy::None;
+        self
+    }
+
+    /// Sets automatic retry behavior.
+    #[must_use]
+    pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.config.retry_policy = policy;
+        self
+    }
+
+    /// Retries safe methods once when a reused pooled connection is stale.
+    #[must_use]
+    pub fn retry_safe_methods_on_stale_reuse(mut self) -> Self {
+        self.config.retry_policy = RetryPolicy::SafeMethodsOnStaleReuse;
+        self
+    }
+
+    /// Disables all automatic retries.
+    #[must_use]
+    pub fn no_retries(mut self) -> Self {
+        self.config.retry_policy = RetryPolicy::None;
         self
     }
 
@@ -683,6 +731,8 @@ pub struct HttpClientConfig {
     pub pool_config: PoolConfig,
     /// Redirect policy.
     pub redirect_policy: RedirectPolicy,
+    /// Retry policy.
+    pub retry_policy: RetryPolicy,
     /// Default User-Agent header value.
     pub user_agent: Option<String>,
     /// Whether the client should automatically persist and attach cookies.
@@ -711,6 +761,7 @@ impl Default for HttpClientConfig {
         Self {
             pool_config: PoolConfig::default(),
             redirect_policy: RedirectPolicy::default(),
+            retry_policy: RetryPolicy::default(),
             user_agent: Some("asupersync/0.1".into()),
             cookie_store: false,
             proxy_url: None,
@@ -1401,7 +1452,12 @@ impl HttpClient {
             }
             Err(err) => {
                 let err = ClientError::from(err);
-                if reused_connection && should_retry_reused_connection_failure(method, &err) {
+                if reused_connection
+                    && self
+                        .config
+                        .retry_policy
+                        .should_retry_reused_connection_failure(method, &err)
+                {
                     drop(guard);
                     return self
                         .retry_single_request_on_fresh_connection(
@@ -2527,10 +2583,6 @@ fn request_forbids_connection_reuse(headers: &[(String, String)]) -> bool {
             .any(|(name, _)| name.eq_ignore_ascii_case("upgrade"))
 }
 
-fn should_retry_reused_connection_failure(method: &Method, err: &ClientError) -> bool {
-    method_is_safe_to_retry_after_stale_reuse(method) && client_error_looks_like_stale_reuse(err)
-}
-
 fn method_is_safe_to_retry_after_stale_reuse(method: &Method) -> bool {
     matches!(
         method,
@@ -3166,6 +3218,7 @@ mod tests {
             config.redirect_policy,
             RedirectPolicy::Limited(10)
         ));
+        assert_eq!(config.retry_policy, RetryPolicy::SafeMethodsOnStaleReuse);
         assert_eq!(config.user_agent, Some("asupersync/0.1".into()));
         assert!(!config.cookie_store);
         assert!(config.proxy_url.is_none());
@@ -3195,6 +3248,10 @@ mod tests {
             client.config.redirect_policy,
             RedirectPolicy::Limited(10)
         ));
+        assert_eq!(
+            client.config.retry_policy,
+            RetryPolicy::SafeMethodsOnStaleReuse
+        );
         assert_eq!(client.config.user_agent.as_deref(), Some("asupersync/0.1"));
         assert!(!client.config.cookie_store);
         assert!(client.config.proxy_url.is_none());
@@ -3208,6 +3265,7 @@ mod tests {
             .idle_timeout(std::time::Duration::from_secs(15))
             .cleanup_interval(std::time::Duration::from_secs(5))
             .no_redirects()
+            .no_retries()
             .no_user_agent()
             .cookie_store(true)
             .no_cookie_store()
@@ -3229,6 +3287,7 @@ mod tests {
             client.config.redirect_policy,
             RedirectPolicy::None
         ));
+        assert_eq!(client.config.retry_policy, RetryPolicy::None);
         assert!(client.config.user_agent.is_none());
         assert!(!client.config.cookie_store);
         assert!(client.config.proxy_url.is_none());
@@ -3246,6 +3305,7 @@ mod tests {
         let client = HttpClient::builder()
             .pool_config(pool_config)
             .max_redirects(2)
+            .retry_policy(RetryPolicy::SafeMethodsOnStaleReuse)
             .user_agent("asupersync-test/2.0")
             .cookie_store(true)
             .proxy("socks5://proxy.internal:1080")
@@ -3265,6 +3325,10 @@ mod tests {
             client.config.redirect_policy,
             RedirectPolicy::Limited(2)
         ));
+        assert_eq!(
+            client.config.retry_policy,
+            RetryPolicy::SafeMethodsOnStaleReuse
+        );
         assert_eq!(
             client.config.user_agent.as_deref(),
             Some("asupersync-test/2.0")
@@ -4058,6 +4122,32 @@ mod tests {
         assert!(dbg.contains('5'));
         let dbg2 = format!("{b:?}");
         assert_eq!(dbg, dbg2);
+    }
+
+    #[test]
+    fn retry_policy_default_is_safe_stale_reuse() {
+        assert_eq!(RetryPolicy::default(), RetryPolicy::SafeMethodsOnStaleReuse);
+    }
+
+    #[test]
+    fn retry_policy_gates_stale_reuse_by_policy_method_and_error() {
+        let stale_err = || {
+            ClientError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "peer closed idle connection",
+            ))
+        };
+        let other_err = || ClientError::InvalidUrl("not a transport error".into());
+
+        let policy = RetryPolicy::SafeMethodsOnStaleReuse;
+        assert!(policy.should_retry_reused_connection_failure(&Method::Get, &stale_err()));
+        assert!(policy.should_retry_reused_connection_failure(&Method::Head, &stale_err()));
+        assert!(!policy.should_retry_reused_connection_failure(&Method::Post, &stale_err()));
+        assert!(!policy.should_retry_reused_connection_failure(&Method::Get, &other_err()));
+
+        assert!(
+            !RetryPolicy::None.should_retry_reused_connection_failure(&Method::Get, &stale_err())
+        );
     }
 
     #[test]
