@@ -1032,13 +1032,23 @@ impl TimerWheel {
 
     /// Returns the maximum range in nanoseconds for direct wheel storage.
     ///
-    /// Timers with deadlines beyond this range from the current time go to overflow.
+    /// Timers with deadlines beyond this range from the current time go to
+    /// overflow. This is clamped to the physical wheel range: a configured
+    /// `max_wheel_duration` larger than the 4-level wheel can physically
+    /// represent (~49.7 days at 1 ms base resolution) must NOT widen the
+    /// overflow-promotion threshold past what `insert_entry` can place. If it
+    /// did, `refill_overflow` would promote a timer whose delta is in
+    /// `[physical_range, max_wheel_duration)`, `insert_entry` would find no
+    /// level for it and push it straight back to overflow with the same
+    /// deadline, and the next `peek` (with `current` unchanged within the
+    /// call) would re-promote it forever — an infinite loop holding the timer
+    /// driver lock (self-DoS). Clamping keeps such timers parked in overflow
+    /// until time advances enough that they actually fit.
     fn max_range_ns(&self) -> u64 {
-        self.max_wheel_duration_ns
+        self.max_wheel_duration_ns.min(self.physical_range_ns())
     }
 
     /// Returns the physical wheel range based on level structure.
-    #[allow(dead_code)]
     fn physical_range_ns(&self) -> u64 {
         self.levels.last().map_or(0, WheelLevel::range_ns)
     }
@@ -1559,6 +1569,57 @@ mod tests {
         let cancelled = wheel.cancel(&handle);
         crate::assert_with_log!(cancelled, "can cancel overflow timer", true, cancelled);
         crate::test_complete!("timer_24h_overflow_handling");
+    }
+
+    #[test]
+    fn overflow_promotion_terminates_with_oversized_wheel_duration() {
+        init_test("overflow_promotion_terminates_with_oversized_wheel_duration");
+        // A `max_wheel_duration` larger than the ~49.7-day physical wheel span
+        // must be clamped, or a timer whose delta lands in the gap window
+        // `[physical_range, max_wheel_duration)` would be promoted from
+        // overflow, found to fit no level, and pushed straight back to
+        // overflow forever (refill_overflow infinite loop holding the driver
+        // lock).
+        let day = 24 * 3600;
+        let config = TimerWheelConfig::new()
+            .max_wheel_duration(Duration::from_secs(60 * day))
+            .max_timer_duration(Duration::from_secs(90 * day));
+        let mut wheel =
+            TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
+
+        crate::assert_with_log!(
+            wheel.max_range_ns() <= wheel.physical_range_ns(),
+            "wheel max range clamped to physical range",
+            wheel.physical_range_ns(),
+            wheel.max_range_ns()
+        );
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let waker = counter_waker(counter.clone());
+        // Deadline at 55 days: in the gap window (> ~49.7d physical range,
+        // < 60d configured), accepted because max_timer_duration is 90 days.
+        let deadline = Time::from_secs(55 * day);
+        let _handle = wheel.register(deadline, waker);
+        crate::assert_with_log!(
+            wheel.overflow_count() >= 1,
+            "timer parked in overflow",
+            1usize,
+            wheel.overflow_count()
+        );
+
+        // Advancing past the deadline must terminate (no infinite refill loop)
+        // and fire the timer after it is promoted from overflow into a level.
+        // `collect_expired` returns the due wakers for the caller to wake.
+        for waker in wheel.collect_expired(Time::from_secs(55 * day + 1)) {
+            waker.wake();
+        }
+        crate::assert_with_log!(
+            counter.load(Ordering::SeqCst) >= 1,
+            "overflow timer fired after promotion",
+            1u64,
+            counter.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("overflow_promotion_terminates_with_oversized_wheel_duration");
     }
 
     // =========================================================================

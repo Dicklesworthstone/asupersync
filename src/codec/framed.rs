@@ -42,6 +42,18 @@ pub struct Framed<T, U> {
     read_buf: BytesMut,
     write_buf: BytesMut,
     eof: bool,
+    /// Upper bound on the read buffer before a frame completes.
+    ///
+    /// Mirrors [`FramedRead`](crate::codec::FramedRead)'s cap (default
+    /// [`DEFAULT_MAX_BUFFER_LEN`](crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN)
+    /// = 8 MiB); `0` disables enforcement (br-asupersync-bj427s).
+    max_buffer_len: usize,
+    /// Set once the read half surfaces an `Err` (decode, `decode_eof`, or IO).
+    ///
+    /// Subsequent `poll_next` calls return `Ready(None)` instead of re-running
+    /// the decoder over the same bytes, which would re-produce the same error
+    /// forever and hang `collect`/`for_each` consumers (br-asupersync-3asq77).
+    poisoned: bool,
 }
 
 impl<T, U> Framed<T, U> {
@@ -60,7 +72,29 @@ impl<T, U> Framed<T, U> {
             read_buf: BytesMut::with_capacity(capacity),
             write_buf: BytesMut::with_capacity(capacity),
             eof: false,
+            max_buffer_len: crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN,
+            poisoned: false,
         }
+    }
+
+    /// Sets the maximum read-buffer length before a frame completes.
+    ///
+    /// A peer that streams bytes without ever closing a frame would otherwise
+    /// grow this buffer without bound (slowloris-style). A value of `0`
+    /// disables enforcement. Mirrors
+    /// [`FramedRead::with_max_buffer_len`](crate::codec::FramedRead::with_max_buffer_len).
+    #[inline]
+    #[must_use]
+    pub fn with_max_buffer_len(mut self, max: usize) -> Self {
+        self.max_buffer_len = max;
+        self
+    }
+
+    /// Returns the configured maximum read-buffer length.
+    #[inline]
+    #[must_use]
+    pub fn max_buffer_len(&self) -> usize {
+        self.max_buffer_len
     }
 
     /// Returns a reference to the underlying transport.
@@ -141,6 +175,15 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        // br-asupersync-3asq77: once the read half has surfaced an error the
+        // stream is terminally poisoned. Re-polling must NOT re-run the
+        // decoder over the same buffered bytes (which re-produces the same
+        // error in a tight loop, hanging `collect`/`for_each` consumers).
+        if this.poisoned {
+            return Poll::Ready(None);
+        }
+
         let mut read_passes = 0usize;
         let mut should_yield = false;
 
@@ -155,7 +198,10 @@ where
                             return Poll::Pending;
                         }
                     }
-                    Err(e) => return Poll::Ready(Some(Err(e))),
+                    Err(e) => {
+                        this.poisoned = true;
+                        return Poll::Ready(Some(Err(e)));
+                    }
                 }
             }
 
@@ -164,7 +210,10 @@ where
                 return match this.codec.decode_eof(&mut this.read_buf) {
                     Ok(Some(item)) => Poll::Ready(Some(Ok(item))),
                     Ok(None) => Poll::Ready(None),
-                    Err(e) => Poll::Ready(Some(Err(e))),
+                    Err(e) => {
+                        this.poisoned = true;
+                        Poll::Ready(Some(Err(e)))
+                    }
                 };
             }
 
@@ -174,12 +223,39 @@ where
 
             match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e.into()))),
+                Poll::Ready(Err(e)) => {
+                    this.poisoned = true;
+                    return Poll::Ready(Some(Err(e.into())));
+                }
                 Poll::Ready(Ok(())) => {
                     let filled = read_buf.filled();
                     if filled.is_empty() {
                         this.eof = true;
                     } else {
+                        // br-asupersync-bj427s: bound the partial-frame buffer
+                        // BEFORE appending so a peer that never completes a
+                        // frame cannot drive unbounded per-connection memory
+                        // growth. PRE-append so the buffer never crosses the
+                        // cap; `0` disables enforcement.
+                        if this.max_buffer_len > 0 {
+                            let projected = this.read_buf.len().saturating_add(filled.len());
+                            if projected > this.max_buffer_len {
+                                let cap = this.max_buffer_len;
+                                let buffered = this.read_buf.len();
+                                let added = filled.len();
+                                let err = io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "Framed buffer would exceed max_buffer_len: \
+                                         {buffered} + {added} = {projected} > {cap} bytes \
+                                         (slowloris-style partial-frame attack? \
+                                         see br-asupersync-bj427s)"
+                                    ),
+                                );
+                                this.poisoned = true;
+                                return Poll::Ready(Some(Err(err.into())));
+                            }
+                        }
                         this.read_buf.put_slice(filled);
                         read_passes += 1;
                         if read_passes >= MAX_READ_PASSES_PER_POLL {
@@ -539,6 +615,45 @@ mod tests {
 
         let poll = Pin::new(&mut framed).poll_next(&mut cx);
         assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_rejects_buffer_growth_past_max_buffer_len_then_poisons() {
+        // br-asupersync-bj427s + br-asupersync-3asq77: 256 bytes of 'A' with
+        // no newline → LinesCodec never frames, so without the cap the buffer
+        // grows unbounded. Cap at 64 → the first read trips the cap and
+        // surfaces InvalidData; the read half is then poisoned so a re-poll
+        // returns None instead of re-emitting the same error forever.
+        let payload: Vec<u8> = vec![b'A'; 256];
+        let transport = DuplexBuf::new(&payload);
+        let mut framed = Framed::new(transport, LinesCodec::new()).with_max_buffer_len(64);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("max_buffer_len"),
+                    "error must reference max_buffer_len, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidData from max_buffer_len, got {other:?}"),
+        }
+        // Pre-append check: the buffer never crosses the cap.
+        assert!(
+            framed.read_buffer().len() <= 64,
+            "buffer crossed the cap before enforcement (len={})",
+            framed.read_buffer().len()
+        );
+        // Poisoned: subsequent polls return None, not a re-emitted error.
+        let next = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(next, Poll::Ready(None)),
+            "poll after a poisoning error must return None, got {next:?}"
+        );
     }
 
     #[test]
