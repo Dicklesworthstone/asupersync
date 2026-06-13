@@ -1137,7 +1137,11 @@ fn run_real_atp_send(
         .block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("ATP send task context");
             asupersync::net::atp::transport_tcp::send_path(
-                &cx, addr, &source, cfg, "asupersync-cli",
+                &cx,
+                addr,
+                &source,
+                cfg,
+                "asupersync-cli",
             )
             .await
         }))
@@ -2152,6 +2156,7 @@ struct AtpTransferInfo {
     path_info: Option<AtpPathDecisions>,
 }
 
+#[allow(dead_code)]
 impl AtpTransferInfo {
     fn human_summary(&self) -> String {
         let progress_bar = create_progress_bar(self.progress_percent);
@@ -2182,6 +2187,7 @@ fn active_transfers_from_local_state(transfer_id: Option<&str>) -> Vec<AtpTransf
     Vec::new()
 }
 
+#[allow(dead_code)]
 fn create_progress_bar(percent: u8) -> String {
     const BAR_WIDTH: usize = 20;
     let percent = percent.min(100);
@@ -4817,9 +4823,12 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
         })?
         .next()
         .ok_or_else(|| {
-            CliError::new("atp_listen_invalid", "ATP serve listen address resolved to nothing")
-                .detail(args.listen.clone())
-                .exit_code(ExitCode::USER_ERROR)
+            CliError::new(
+                "atp_listen_invalid",
+                "ATP serve listen address resolved to nothing",
+            )
+            .detail(args.listen.clone())
+            .exit_code(ExitCode::USER_ERROR)
         })?;
     let dest_dir = args.data_dir.join("inbox");
 
@@ -4838,7 +4847,9 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
     runtime
         .block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("ATP serve task context");
-            asupersync::fs::create_dir_all(&dest_dir).await.map_err(|e| e.to_string())?;
+            asupersync::fs::create_dir_all(&dest_dir)
+                .await
+                .map_err(|e| e.to_string())?;
             let listener = asupersync::net::TcpListener::bind(listen)
                 .await
                 .map_err(|e| e.to_string())?;
