@@ -631,6 +631,11 @@ struct EntryEncoder {
     index: u32,
     object_id: ObjectId,
     bytes: Vec<u8>,
+    /// Cumulative repair symbols already requested from the encoder (per block).
+    /// Feedback rounds request more and send only the newly-minted ones at their
+    /// TRUE encoder ESIs — a RaptorQ repair symbol's payload is bound to its ESI,
+    /// so it must never be relabeled.
+    repair_cursor: usize,
 }
 
 /// Receiver-side decoder state for one entry.
@@ -754,6 +759,7 @@ pub async fn send_path(
                 index,
                 object_id: entry_object_id(&transfer_id, index),
                 bytes: bytes.clone(),
+                repair_cursor: 0,
             }
         })
         .collect();
@@ -780,7 +786,6 @@ pub async fn send_path(
         &mut encoders,
         &pending,
         config,
-        /* esi_base */ 0,
         /* with_source */ true,
     )
     .await?;
@@ -840,9 +845,8 @@ pub async fn send_path(
                     // loop again to fetch the Proof.
                     continue;
                 }
-                // Fresh repair symbols at a higher ESI base each round.
-                let esi_base = source_ceiling(config.symbol_size)
-                    .saturating_add(feedback_rounds.saturating_mul(repair_batch(config)));
+                // Fresh repair symbols (true encoder ESIs, via the cumulative
+                // cursor in each EntryEncoder) for the still-pending entries.
                 spray_round(
                     cx,
                     &mut sockets,
@@ -853,7 +857,6 @@ pub async fn send_path(
                     &mut encoders,
                     &pending,
                     config,
-                    esi_base,
                     /* with_source */ false,
                 )
                 .await?;
@@ -868,22 +871,24 @@ pub async fn send_path(
     }
 }
 
-/// Per-round repair batch size (extra repair symbols minted per entry per
-/// feedback round).
-fn repair_batch(config: RqConfig) -> u32 {
-    // A generous fixed batch keeps convergence fast under loss.
-    let s = source_ceiling(config.symbol_size);
-    (s / 4).max(16)
-}
-
-/// A conservative upper bound on an entry's source ESI range, used to place
-/// repair ESIs safely above source ESIs across rounds.
-fn source_ceiling(symbol_size: u16) -> u32 {
-    let per_block = (DEFAULT_MAX_BLOCK_SIZE / usize::from(symbol_size.max(1))) as u32;
-    per_block.saturating_add(1)
+/// Per-round repair batch size: how many *additional* repair symbols (per block)
+/// each feedback round mints. A generous batch keeps convergence fast under loss.
+fn repair_batch_per_block(config: RqConfig) -> usize {
+    let block_k = config
+        .max_block_size
+        .div_ceil(usize::from(config.symbol_size.max(1)))
+        .max(1);
+    (block_k / 4).max(16)
 }
 
 /// Spray one round of symbols for the `pending` entries across the UDP sockets.
+///
+/// Round 0 (`with_source`) sends every block's source symbols plus
+/// `repair_overhead` extra repair. Feedback rounds send only *newly minted*
+/// repair symbols, identified per block by the encoder's own (sbn, esi) — the
+/// repair payload is bound to its ESI, so it is emitted verbatim and never
+/// relabeled. The per-entry `repair_cursor` advances so each round's repair is
+/// fresh.
 #[allow(clippy::too_many_arguments)]
 async fn spray_round(
     cx: &Cx,
@@ -895,31 +900,36 @@ async fn spray_round(
     encoders: &mut [EntryEncoder],
     pending: &BTreeSet<u32>,
     config: RqConfig,
-    esi_base: u32,
     with_source: bool,
 ) -> Result<(), RqError> {
     let fanout = sockets.len().max(1);
-    for enc in encoders.iter().filter(|e| pending.contains(&e.index)) {
+    let batch = repair_batch_per_block(config);
+    for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let source_n = source_symbol_count(enc.bytes.len() as u64, config.symbol_size);
-        let repair_extra = if with_source {
+
+        // Cumulative repair count requested from the encoder this round. The
+        // encoder always yields repair symbols at deterministic ESIs starting at
+        // each block's K'; requesting more just extends the tail. We skip the
+        // first `repair_cursor` repair symbols PER BLOCK (already sent in earlier
+        // rounds) and emit the rest at their TRUE ESIs.
+        let already = enc.repair_cursor;
+        let target_repair = if with_source {
             ((source_n as f64) * (config.repair_overhead - 1.0)).ceil() as usize
         } else {
-            repair_batch(config) as usize
-        };
-        let repair_count = repair_extra.max(1);
+            already + batch
+        }
+        .max(already + 1);
 
         // Size the pool by per-BLOCK peak, not whole-object: the encoder streams
-        // block-by-block (releasing symbols between blocks), so a 1 GiB entry
-        // does NOT need a 1 GiB pool. The ceiling is bounded by `max_block_size`
-        // regardless of entry size. `max_size = 0` would exhaust on first
-        // acquire; `allow_growth` keeps actual allocation tracking real usage up
-        // to this ceiling. The 3x covers RFC 6330 intermediate symbols (L > K).
+        // block-by-block (releasing symbols between blocks), so a 1 GiB entry does
+        // NOT need a 1 GiB pool. The 3x covers RFC 6330 intermediate symbols
+        // (L > K); plus the cumulative repair tail.
         let symbol_size_usize = usize::from(config.symbol_size.max(1));
         let block_k = config.max_block_size.div_ceil(symbol_size_usize).max(1);
         let pool_max = block_k
             .saturating_mul(3)
-            .saturating_add(repair_count)
+            .saturating_add(target_repair)
             .saturating_add(256);
         let pool = SymbolPool::new(PoolConfig {
             symbol_size: config.symbol_size,
@@ -939,27 +949,30 @@ async fn spray_round(
             pool,
         );
 
-        for encoded in pipeline.encode_with_repair(enc.object_id, &enc.bytes, repair_count) {
+        // Per-block running index of repair symbols seen this iteration, keyed by
+        // SBN, so we can skip the `already`-sent prefix per block.
+        let mut repair_seen: std::collections::HashMap<u8, usize> =
+            std::collections::HashMap::new();
+
+        for encoded in pipeline.encode_with_repair(enc.object_id, &enc.bytes, target_repair) {
             let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
             let sym = encoded.symbol();
-            // Round 0 sends source + repair; feedback rounds send repair only and
-            // shift repair ESIs above the source range to avoid re-sending the
-            // same symbols.
-            if !with_source && sym.kind().is_source() {
-                continue;
-            }
-            let out_sym = if with_source {
-                sym.clone()
+
+            if sym.kind().is_source() {
+                // Source symbols only on round 0 (systematic; sent verbatim).
+                if !with_source {
+                    continue;
+                }
             } else {
-                // Re-home the repair ESI above source so successive rounds are
-                // fresh; the receiver only cares that (sbn, esi) is novel.
-                let new_esi = esi_base.saturating_add(sym.id().esi());
-                Symbol::new(
-                    SymbolId::new(sym.id().object_id(), sym.id().sbn(), new_esi),
-                    sym.data().to_vec(),
-                    SymbolKind::Repair,
-                )
-            };
+                // Repair symbol: per-block index decides whether it's new.
+                let sbn = sym.id().sbn();
+                let idx = repair_seen.entry(sbn).or_insert(0);
+                let this_idx = *idx;
+                *idx += 1;
+                if this_idx < already {
+                    continue; // already sent in an earlier round
+                }
+            }
 
             // Test-only deterministic loss injection.
             if config.debug_drop_one_in > 0 {
@@ -969,7 +982,8 @@ async fn spray_round(
                 }
             }
 
-            let dgram = encode_symbol_datagram(tag, enc.index, &out_sym);
+            // Emit the symbol VERBATIM (true ESI preserved).
+            let dgram = encode_symbol_datagram(tag, enc.index, sym);
             let sock = &mut sockets[*rr % fanout];
             *rr = rr.wrapping_add(1);
             sock.send(&dgram).await?;
@@ -983,6 +997,7 @@ async fn spray_round(
                 crate::runtime::yield_now().await;
             }
         }
+        enc.repair_cursor = target_repair;
     }
     Ok(())
 }
@@ -1566,8 +1581,100 @@ where
 mod tests {
     use super::*;
 
+    /// In-process encode→feed→decode roundtrip at a chosen `(bytes, max_block)`,
+    /// mirroring exactly how `spray_round` encodes and `feed_symbol` decodes —
+    /// but with NO network — so a coding/params mismatch is isolated from the
+    /// transport. Feeds source + a generous repair tail and asserts the block
+    /// decodes back to the original bytes.
+    fn coding_roundtrip(len: usize, max_block: usize, symbol_size: u16) -> bool {
+        let bytes: Vec<u8> = (0..len)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        let object_id = entry_object_id("test-transfer", 0);
+
+        // Encode: source + repair (generous), like spray_round.
+        let block_k = max_block.div_ceil(usize::from(symbol_size.max(1))).max(1);
+        let repair = block_k; // 100% repair — far more than needed
+        let pool = SymbolPool::new(PoolConfig {
+            symbol_size,
+            initial_size: block_k.min(1024),
+            max_size: block_k * 4 + 256,
+            allow_growth: true,
+            growth_increment: 256,
+        });
+        let mut enc = EncodingPipeline::new(
+            crate::config::EncodingConfig {
+                repair_overhead: 1.5,
+                max_block_size: max_block,
+                symbol_size,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            pool,
+        );
+        let symbols: Vec<Symbol> = enc
+            .encode_with_repair(object_id, &bytes, repair)
+            .map(|e| e.unwrap().into_symbol())
+            .collect();
+
+        // Decode: feed all symbols, like feed_symbol.
+        let dconfig = DecodingConfig {
+            symbol_size,
+            max_block_size: max_block,
+            repair_overhead: 1.5,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: std::time::Duration::from_secs(0),
+            verify_auth: false,
+        };
+        let mut dec = DecodingPipeline::new(dconfig);
+        let params = object_params_for(object_id, len as u64, symbol_size, max_block as u64);
+        dec.set_object_params(params).expect("set_object_params");
+        for s in symbols {
+            let _ = dec.feed(AuthenticatedSymbol::new_unauthenticated(s));
+        }
+        if !dec.is_complete() {
+            return false;
+        }
+        let mut out = dec.into_data().expect("into_data");
+        out.truncate(len);
+        out == bytes
+    }
+
+    #[test]
+    fn coding_roundtrip_small_k_single_block() {
+        // K = 64 (matches the loopback e2e regime).
+        assert!(coding_roundtrip(60_000, 64 * 1024, 1024));
+    }
+
+    #[test]
+    fn coding_roundtrip_k512_single_block() {
+        // K = 512 single 8 MiB block — the default-config regime that the
+        // cross-machine transfer exercised. Regression guard for the
+        // never-converges bug.
+        assert!(coding_roundtrip(512 * 1024, 8 * 1024 * 1024, 1024));
+    }
+
+    #[test]
+    #[ignore = "br-asupersync-mixdaw: multi-block object_params_for/set_object_params \
+                mismatch fails at set_object_params for >1 block; single-block coding is \
+                correct (the two tests above pass). Open multi-block param bug."]
+    fn coding_roundtrip_multi_block_default() {
+        // ~3 MiB across multiple 1 MiB blocks (default-ish). KNOWN-FAILING guard.
+        assert!(coding_roundtrip(3 * 1024 * 1024, 1024 * 1024, 1024));
+    }
+
     #[test]
     fn datagram_roundtrips() {
+        let sym = Symbol::new(
+            SymbolId::new(ObjectId::new(1, 2), 3, 7),
+            vec![9u8; 1024],
+            SymbolKind::Repair,
+        );
+        let dg = encode_symbol_datagram(0xABCD, 42, &sym);
+        let parsed = parse_symbol_header(&dg, 0xABCD).expect("parse");
+        assert_eq!(parsed.entry, 42);
+        assert_eq!(parsed.sbn, 3);
         let sym = Symbol::new(
             SymbolId::new(ObjectId::new(1, 2), 3, 7),
             vec![9u8; 1024],
