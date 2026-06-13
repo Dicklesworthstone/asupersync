@@ -194,14 +194,14 @@ fn run_cookie_replay_scenario(cookie_store_enabled: bool) -> (String, String) {
         let url = format!("http://{addr}/cookie");
 
         let first = client
-            .get(&cx, &url)
+            .send_get(&cx, &url)
             .await
             .expect("first request should succeed");
         assert_eq!(first.status, 200);
         assert_eq!(first.body, b"OK");
 
         let second = client
-            .get(&cx, &url)
+            .send_get(&cx, &url)
             .await
             .expect("second request should succeed");
         assert_eq!(second.status, 200);
@@ -405,7 +405,7 @@ fn http_client_redirect_303_converts_post_to_get() {
         let cx = Cx::for_testing();
         let client = HttpClient::new();
         let response = client
-            .post(
+            .send_post(
                 &cx,
                 &format!("http://{redirect_addr}/submit"),
                 b"payload".to_vec(),

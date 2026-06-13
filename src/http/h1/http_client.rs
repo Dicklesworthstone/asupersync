@@ -9,7 +9,7 @@
 //! ```ignore
 //! let client = HttpClient::new();
 //! let cx = Cx::for_testing();
-//! let resp = client.get(&cx, "http://example.com/api").await?;
+//! let resp = client.get("http://example.com/api").send(&cx).await?;
 //! assert_eq!(resp.status, 200);
 //! ```
 
@@ -1044,58 +1044,63 @@ impl HttpClient {
 
     /// Create a fluent `GET` request builder.
     #[must_use]
-    pub fn get_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+    pub fn get(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Get, url)
     }
 
     /// Create a fluent `POST` request builder.
     #[must_use]
-    pub fn post_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+    pub fn post(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Post, url)
     }
 
     /// Create a fluent `PUT` request builder.
     #[must_use]
-    pub fn put_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+    pub fn put(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Put, url)
     }
 
     /// Create a fluent `PATCH` request builder.
     #[must_use]
-    pub fn patch_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+    pub fn patch(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Patch, url)
     }
 
     /// Create a fluent `DELETE` request builder.
     #[must_use]
-    pub fn delete_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+    pub fn delete(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Delete, url)
     }
 
     /// Create a fluent `HEAD` request builder.
     #[must_use]
-    pub fn head_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+    pub fn head(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Head, url)
     }
 
     /// Create a fluent `OPTIONS` request builder.
     #[must_use]
-    pub fn options_request(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
+    pub fn options(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Options, url)
     }
 
-    /// Send a GET request to the given URL.
+    /// Send a one-shot GET request to the given URL.
     ///
     /// The `cx` parameter participates in structured cancellation: if the
     /// context is cancelled, the in-flight request is abandoned and
     /// `ClientError::Cancelled` is returned.
-    pub async fn get(&self, cx: &Cx, url: &str) -> Result<Response, ClientError> {
+    pub async fn send_get(&self, cx: &Cx, url: &str) -> Result<Response, ClientError> {
         self.request(cx, Method::Get, url, Vec::new(), Vec::new())
             .await
     }
 
-    /// Send a POST request to the given URL with a body.
-    pub async fn post(&self, cx: &Cx, url: &str, body: Vec<u8>) -> Result<Response, ClientError> {
+    /// Send a one-shot POST request to the given URL with a body.
+    pub async fn send_post(
+        &self,
+        cx: &Cx,
+        url: &str,
+        body: Vec<u8>,
+    ) -> Result<Response, ClientError> {
         self.request(cx, Method::Post, url, Vec::new(), body).await
     }
 
@@ -1132,13 +1137,18 @@ impl HttpClient {
             .await
     }
 
-    /// Send a PUT request to the given URL with a body.
-    pub async fn put(&self, cx: &Cx, url: &str, body: Vec<u8>) -> Result<Response, ClientError> {
+    /// Send a one-shot PUT request to the given URL with a body.
+    pub async fn send_put(
+        &self,
+        cx: &Cx,
+        url: &str,
+        body: Vec<u8>,
+    ) -> Result<Response, ClientError> {
         self.request(cx, Method::Put, url, Vec::new(), body).await
     }
 
-    /// Send a DELETE request to the given URL.
-    pub async fn delete(&self, cx: &Cx, url: &str) -> Result<Response, ClientError> {
+    /// Send a one-shot DELETE request to the given URL.
+    pub async fn send_delete(&self, cx: &Cx, url: &str) -> Result<Response, ClientError> {
         self.request(cx, Method::Delete, url, Vec::new(), Vec::new())
             .await
     }
@@ -3396,10 +3406,32 @@ mod tests {
     }
 
     #[test]
+    fn short_client_methods_create_fluent_builders() {
+        let client = HttpClient::new();
+
+        assert_eq!(client.get("http://example.com/get").method, Method::Get);
+        assert_eq!(client.post("http://example.com/post").method, Method::Post);
+        assert_eq!(client.put("http://example.com/put").method, Method::Put);
+        assert_eq!(
+            client.patch("http://example.com/patch").method,
+            Method::Patch
+        );
+        assert_eq!(
+            client.delete("http://example.com/delete").method,
+            Method::Delete
+        );
+        assert_eq!(client.head("http://example.com/head").method, Method::Head);
+        assert_eq!(
+            client.options("http://example.com/options").method,
+            Method::Options
+        );
+    }
+
+    #[test]
     fn client_request_builder_json_and_basic_auth_helpers() {
         let client = HttpClient::new();
         let builder = client
-            .post_request("http://example.com/api")
+            .post("http://example.com/api")
             .json(&serde_json::json!({"ok": true}))
             .expect("json body should serialize")
             .basic_auth("alice", Some("secret"));
@@ -3424,7 +3456,7 @@ mod tests {
     fn client_request_builder_query_extends_existing_url() {
         let client = HttpClient::new();
         let builder = client
-            .get_request("http://example.com/search?existing=true")
+            .get("http://example.com/search?existing=true")
             .query([("q", "rust async"), ("tag", "a+b")]);
 
         assert_eq!(
@@ -3438,7 +3470,7 @@ mod tests {
     fn client_request_builder_form_sets_body_and_content_type() {
         let client = HttpClient::new();
         let builder = client
-            .post_request("http://example.com/form")
+            .post("http://example.com/form")
             .form([("name", "Ada Lovelace"), ("role", "math+runtime")]);
 
         assert_eq!(builder.method, Method::Post);
@@ -3460,7 +3492,7 @@ mod tests {
         let client = HttpClient::new();
         let err = block_on(
             client
-                .get_request("http://127.0.0.1:1/cancelled")
+                .get("http://127.0.0.1:1/cancelled")
                 .header("X-Trace-Id", "trace-1")
                 .send(&cx),
         )
@@ -4299,7 +4331,7 @@ mod tests {
         cx.set_cancel_requested(true);
 
         let client = HttpClient::new();
-        let result = block_on(client.get(&cx, "http://example.com/test"));
+        let result = block_on(client.send_get(&cx, "http://example.com/test"));
         assert!(result.is_err());
         assert!(result.unwrap_err().is_cancelled());
     }
@@ -4310,7 +4342,7 @@ mod tests {
         cx.set_cancel_requested(true);
 
         let client = HttpClient::new();
-        let result = block_on(client.post(&cx, "http://example.com/submit", b"data".to_vec()));
+        let result = block_on(client.send_post(&cx, "http://example.com/submit", b"data".to_vec()));
         assert!(result.unwrap_err().is_cancelled());
     }
 
@@ -4320,7 +4352,7 @@ mod tests {
         cx.set_cancel_requested(true);
 
         let client = HttpClient::new();
-        let result = block_on(client.put(&cx, "http://example.com/item", b"data".to_vec()));
+        let result = block_on(client.send_put(&cx, "http://example.com/item", b"data".to_vec()));
         assert!(result.unwrap_err().is_cancelled());
     }
 
@@ -4330,7 +4362,7 @@ mod tests {
         cx.set_cancel_requested(true);
 
         let client = HttpClient::new();
-        let result = block_on(client.delete(&cx, "http://example.com/item"));
+        let result = block_on(client.send_delete(&cx, "http://example.com/item"));
         assert!(result.unwrap_err().is_cancelled());
     }
 
@@ -4372,7 +4404,7 @@ mod tests {
         // will succeed, but the actual connect will fail since there's no server).
         let cx = Cx::for_testing();
         let client = HttpClient::new();
-        let result = block_on(client.get(&cx, "http://127.0.0.1:1/nonexistent"));
+        let result = block_on(client.send_get(&cx, "http://127.0.0.1:1/nonexistent"));
         // The request should fail with a connect error (not a cancellation error).
         assert!(result.is_err());
         assert!(!result.unwrap_err().is_cancelled());
@@ -4471,8 +4503,9 @@ mod tests {
         let request_client = Arc::clone(&client);
         let url = format!("http://{addr}/late-cancel");
         let request_url = url.clone();
-        let request =
-            std::thread::spawn(move || block_on(request_client.get(&request_cx, &request_url)));
+        let request = std::thread::spawn(move || {
+            block_on(request_client.send_get(&request_cx, &request_url))
+        });
 
         request_seen_rx
             .recv()
@@ -4542,13 +4575,13 @@ mod tests {
         let cx = Cx::for_testing();
         let url = format!("http://{addr}/healthz");
 
-        let first = block_on(client.get(&cx, &url)).expect("initial request should succeed");
+        let first = block_on(client.send_get(&cx, &url)).expect("initial request should succeed");
         assert_eq!(first.status, 200);
         assert_eq!(first.body, b"ok");
 
         std::thread::sleep(Duration::from_millis(100));
 
-        let second = block_on(client.get(&cx, &url)).expect("retry request should succeed");
+        let second = block_on(client.send_get(&cx, &url)).expect("retry request should succeed");
         assert_eq!(second.status, 200);
         assert_eq!(second.body, b"fresh");
 
@@ -4690,7 +4723,7 @@ mod tests {
             .max_body_size(1)
             .build();
         let cx = Cx::for_testing();
-        let err = block_on(client.get(&cx, "http://example.com/oversized"))
+        let err = block_on(client.send_get(&cx, "http://example.com/oversized"))
             .expect_err("response body should exceed configured limit");
 
         match err {
