@@ -25,7 +25,7 @@ use crate::http::h2::settings::Settings;
 use crate::io::AsyncReadExt as _;
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
-use crate::runtime::{JoinHandle, RuntimeHandle};
+use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::ConnectionManager;
 use crate::server::shutdown::{
     DrainStep, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal, ShutdownStats,
@@ -51,6 +51,47 @@ const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
 
 /// Capacity of the per-connection handler-response funnel.
 const RESPONSE_FUNNEL_CAPACITY: usize = 64;
+
+/// Default per-stream request-body buffering cap (mirrors the HTTP/1.1
+/// listener's `max_body_size`). HTTP/2 flow control auto-replenishes stream
+/// and connection windows, so without an explicit cap a single stream could
+/// buffer unbounded bytes and exhaust server memory.
+const DEFAULT_H2_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+
+/// Base delay for the exponential accept-error backoff (h1 parity).
+const TRANSIENT_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
+
+/// Cap for the exponential accept-error backoff (h1 parity).
+const TRANSIENT_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(64);
+
+/// Accept errors that are transient and should be retried (h1 parity).
+fn is_transient_accept_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+    )
+}
+
+/// Exponential backoff delay for a streak of transient accept errors so a
+/// persistent accept failure does not busy-spin the accept loop (h1 parity).
+fn transient_accept_backoff_delay(streak: u32) -> Duration {
+    let exponent = (streak.saturating_sub(1) / 16).min(5);
+    TRANSIENT_ACCEPT_BACKOFF_BASE
+        .saturating_mul(1u32 << exponent)
+        .min(TRANSIENT_ACCEPT_BACKOFF_CAP)
+}
+
+/// A connection-spawn failure that is connection-scoped (the runtime is at
+/// task capacity) should drop that one connection and keep accepting, not
+/// tear down the whole listener (h1 parity).
+fn should_retry_after_spawn_failure(err: &SpawnError) -> bool {
+    matches!(err, SpawnError::RegionAtCapacity { .. })
+}
 
 /// Connection-specific h1 headers that MUST NOT be carried into HTTP/2
 /// messages (RFC 9113 §8.2.2). `te` is handled separately: it is permitted
@@ -243,7 +284,7 @@ async fn next_driver_event(
     task_cx: &Cx,
     signal: &ShutdownSignal,
     watch_drain: bool,
-    finalize_tick_armed: bool,
+    finalize_deadline: Option<Time>,
 ) -> DriverEvent {
     if watch_drain && signal.is_shutting_down() {
         return DriverEvent::DrainRequested;
@@ -251,11 +292,16 @@ async fn next_driver_event(
     let mut recv_fut = std::pin::pin!(resp_rx.recv(task_cx));
     let mut force_fut = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
     let mut drain_fut = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::Draining));
-    let mut tick_fut = std::pin::pin!(async {
-        let now = Cx::current()
-            .and_then(|cx| cx.timer_driver())
-            .map_or_else(crate::time::wall_now, |timer| timer.now());
-        crate::time::sleep(now, DRAIN_SUPERVISION_TICK).await;
+    // Fixed absolute deadline: the stage-1 -> stage-2 GOAWAY window must not
+    // restart on every driver wake-up. Re-creating a relative sleep here let
+    // any active traffic (uploads, PINGs, WINDOW_UPDATEs) postpone finalize
+    // indefinitely, starving graceful drain and keeping the boundary at
+    // 2^31-1 so new streams kept being admitted all through the drain window.
+    let mut tick_fut = std::pin::pin!(async move {
+        match finalize_deadline {
+            Some(deadline) => crate::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
     });
     std::future::poll_fn(move |cx| {
         if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
@@ -266,7 +312,7 @@ async fn next_driver_event(
         if watch_drain && drain_fut.as_mut().poll(cx).is_ready() {
             return Poll::Ready(DriverEvent::DrainRequested);
         }
-        if finalize_tick_armed && tick_fut.as_mut().poll(cx).is_ready() {
+        if finalize_deadline.is_some() && tick_fut.as_mut().poll(cx).is_ready() {
             return Poll::Ready(DriverEvent::FinalizeTick);
         }
         // Cancel-correct channels make dropping a partially-polled recv
@@ -352,6 +398,7 @@ async fn serve_h2_connection<F, Fut>(
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
     runtime: RuntimeHandle,
+    max_body_size: usize,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -374,28 +421,51 @@ where
     // Per-stream request assembly: headers arrive first, DATA accumulates
     // until END_STREAM completes the request.
     let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)> = HashMap::new();
+    // Fixed stage-2 GOAWAY deadline, armed once when stage-1 is outstanding.
+    let mut finalize_at: Option<Time> = None;
 
     loop {
         pump_writes(&mut conn, &mut framed).await?;
 
-        if conn.graceful_shutdown_complete()
-            || (conn.goaway_received()
-                && conn.active_stream_count() == 0
-                && pending_requests.is_empty())
+        // Do not close the transport while frames remain queued. Flow-control
+        // -blocked DATA stays in the connection's pending_ops after
+        // pump_writes (its next_frame re-queues it), and neither
+        // graceful_shutdown_complete() nor goaway_received() consult it.
+        // Closing here would truncate an in-flight response and mis-report
+        // the loss as a clean drain. The connection stays open until a
+        // WINDOW_UPDATE unblocks the data or the drain supervisor escalates
+        // to force-close.
+        if !conn.has_pending_frames()
+            && (conn.graceful_shutdown_complete()
+                || (conn.goaway_received()
+                    && conn.active_stream_count() == 0
+                    && pending_requests.is_empty()))
         {
             std::future::poll_fn(|cx| framed.poll_close(cx)).await?;
             return Ok(());
         }
 
         let watch_drain = !conn.goaway_sent();
-        let finalize_tick_armed = conn.graceful_shutdown_pending();
+        // Arm the stage-2 finalize deadline once, when the stage-1 GOAWAY is
+        // outstanding; keep it fixed across loop iterations so active traffic
+        // cannot reset the window.
+        if conn.graceful_shutdown_pending() {
+            if finalize_at.is_none() {
+                let now = Cx::current()
+                    .and_then(|cx| cx.timer_driver())
+                    .map_or_else(crate::time::wall_now, |timer| timer.now());
+                finalize_at = Some(now + DRAIN_SUPERVISION_TICK);
+            }
+        } else {
+            finalize_at = None;
+        }
         let event = next_driver_event(
             &mut framed,
             &mut resp_rx,
             &task_cx,
             &shutdown_signal,
             watch_drain,
-            finalize_tick_armed,
+            finalize_at,
         )
         .await;
 
@@ -424,17 +494,47 @@ where
             }
             DriverEvent::Frame(Some(Ok(frame))) => match conn.process_frame(frame) {
                 Err(protocol_error) => {
-                    conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
-                    pump_writes(&mut conn, &mut framed).await?;
-                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
-                    return Err(io::Error::other(protocol_error));
+                    // Stream-scoped errors (RFC 9113 §5.4.2) reset only the
+                    // offending stream; tearing down the whole multiplexed
+                    // connection would kill every other in-flight request
+                    // (e.g. a single malformed header block, a stream-level
+                    // flow-control error, or the routine race of client DATA
+                    // arriving after the server reset a stream).
+                    if let Some(stream_id) = protocol_error.stream_id {
+                        conn.reset_stream(stream_id, protocol_error.code);
+                        pending_requests.remove(&stream_id);
+                    } else {
+                        conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
+                        pump_writes(&mut conn, &mut framed).await?;
+                        let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                        return Err(io::Error::other(protocol_error));
+                    }
                 }
                 Ok(Some(ReceivedFrame::Headers {
                     stream_id,
                     headers,
                     end_stream,
                 })) => {
-                    if end_stream {
+                    if let Some((req_headers, req_body)) = pending_requests.remove(&stream_id) {
+                        // A second HEADERS block on a stream already
+                        // assembling a body is request trailers (RFC 9113
+                        // §8.1; the connection enforces trailers carry
+                        // END_STREAM). The buffered request is now complete;
+                        // dispatch it. Trailer fields are not surfaced through
+                        // the h1 Request type.
+                        dispatch_h2_request(
+                            &mut conn,
+                            stream_id,
+                            req_headers,
+                            req_body,
+                            peer_addr,
+                            &handler,
+                            &resp_tx,
+                            &shutdown_signal,
+                            &in_flight_requests,
+                            &runtime,
+                        );
+                    } else if end_stream {
                         dispatch_h2_request(
                             &mut conn,
                             stream_id,
@@ -457,23 +557,33 @@ where
                     end_stream,
                 })) => {
                     if let Some((_, body)) = pending_requests.get_mut(&stream_id) {
-                        body.extend_from_slice(&data);
-                        if end_stream {
-                            let (headers, body) = pending_requests
-                                .remove(&stream_id)
-                                .expect("pending request present");
-                            dispatch_h2_request(
-                                &mut conn,
-                                stream_id,
-                                headers,
-                                body,
-                                peer_addr,
-                                &handler,
-                                &resp_tx,
-                                &shutdown_signal,
-                                &in_flight_requests,
-                                &runtime,
-                            );
+                        if body.len().saturating_add(data.len()) > max_body_size {
+                            // Bound per-stream request buffering: HTTP/2 flow
+                            // control auto-replenishes windows, so without
+                            // this cap one stream could buffer unbounded bytes
+                            // (remote OOM). Refuse the stream and drop its
+                            // partial body.
+                            conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);
+                            pending_requests.remove(&stream_id);
+                        } else {
+                            body.extend_from_slice(&data);
+                            if end_stream {
+                                let (headers, body) = pending_requests
+                                    .remove(&stream_id)
+                                    .expect("pending request present");
+                                dispatch_h2_request(
+                                    &mut conn,
+                                    stream_id,
+                                    headers,
+                                    body,
+                                    peer_addr,
+                                    &handler,
+                                    &resp_tx,
+                                    &shutdown_signal,
+                                    &in_flight_requests,
+                                    &runtime,
+                                );
+                            }
                         }
                     }
                 }
@@ -514,6 +624,10 @@ pub struct Http2ListenerConfig {
     /// Keep the listening socket bound (not accepting) until drain
     /// completes (h1 parity, D2.4 AC5 semantics).
     pub lb_compat_keep_socket: bool,
+    /// Maximum buffered request body per stream before the stream is refused
+    /// (h1 parity with `Http1Config::max_body_size`). Bounds receiver memory
+    /// because HTTP/2 flow control auto-replenishes windows.
+    pub max_body_size: usize,
     /// Time source for shutdown bookkeeping and drain supervision.
     pub time_getter: fn() -> Time,
 }
@@ -532,6 +646,7 @@ impl Default for Http2ListenerConfig {
             drain_timeout: Duration::from_secs(30),
             hard_drain_timeout: Duration::from_secs(60),
             lb_compat_keep_socket: false,
+            max_body_size: DEFAULT_H2_MAX_BODY_SIZE,
             time_getter: default_h2_listener_time_getter,
         }
     }
@@ -571,6 +686,13 @@ impl Http2ListenerConfig {
     #[must_use]
     pub fn lb_compat_keep_socket(mut self, keep: bool) -> Self {
         self.lb_compat_keep_socket = keep;
+        self
+    }
+
+    /// Set the maximum buffered request body per stream.
+    #[must_use]
+    pub fn max_body_size(mut self, size: usize) -> Self {
+        self.max_body_size = size;
         self
     }
 
@@ -687,6 +809,12 @@ where
     #[allow(clippy::too_many_lines)]
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+        // Independent push counter so finished connection tasks are reaped
+        // periodically instead of accumulating for the listener's lifetime
+        // (h1 parity — prevents unbounded memory growth under churn).
+        let mut accept_count: u64 = 0;
+        // Streak of consecutive transient accept errors for backoff.
+        let mut transient_accept_streak: u32 = 0;
         let mut shutdown_rx = self.shutdown_signal.subscribe();
 
         enum AcceptOrShutdown {
@@ -721,16 +849,18 @@ where
 
             let (stream, addr) = match result {
                 AcceptOrShutdown::Shutdown => break,
-                AcceptOrShutdown::Accept(Ok(conn)) => conn,
-                AcceptOrShutdown::Accept(Err(ref e))
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::ConnectionAborted
-                            | io::ErrorKind::ConnectionReset
-                            | io::ErrorKind::Interrupted
-                            | io::ErrorKind::WouldBlock
-                    ) =>
-                {
+                AcceptOrShutdown::Accept(Ok(conn)) => {
+                    transient_accept_streak = 0;
+                    conn
+                }
+                AcceptOrShutdown::Accept(Err(ref e)) if is_transient_accept_error(e) => {
+                    // Back off on a streak of transient errors so a persistent
+                    // accept failure (e.g. EMFILE) does not busy-spin the
+                    // accept loop (h1 parity).
+                    transient_accept_streak = transient_accept_streak.saturating_add(1);
+                    let now = (self.config.time_getter)();
+                    crate::time::sleep(now, transient_accept_backoff_delay(transient_accept_streak))
+                        .await;
                     continue;
                 }
                 AcceptOrShutdown::Accept(Err(e)) => return Err(e),
@@ -746,6 +876,7 @@ where
             let shutdown_signal = self.shutdown_signal.clone();
             let in_flight_requests = Arc::clone(&self.in_flight_requests);
             let runtime_for_conn = runtime.clone();
+            let max_body_size = self.config.max_body_size;
             let spawn_result = runtime.try_spawn(async move {
                 let peer_addr = Some(addr);
                 if let Err(err) = serve_h2_connection(
@@ -756,6 +887,7 @@ where
                     shutdown_signal,
                     in_flight_requests,
                     runtime_for_conn,
+                    max_body_size,
                 )
                 .await
                 {
@@ -767,7 +899,19 @@ where
                 drop(guard);
             });
             match spawn_result {
-                Ok(handle) => tasks.push(handle),
+                Ok(handle) => {
+                    tasks.push(handle);
+                    accept_count = accept_count.wrapping_add(1);
+                    if accept_count.is_multiple_of(64) {
+                        tasks.retain(|h| !h.is_finished());
+                    }
+                }
+                Err(err) if should_retry_after_spawn_failure(&err) => {
+                    // Connection-scoped capacity blip: drop this connection
+                    // (its guard is released when the dropped future is
+                    // collected) and keep accepting (h1 parity). Falling
+                    // through re-enters the accept loop.
+                }
                 Err(err) => {
                     return Err(io::Error::other(format!(
                         "failed to spawn h2 connection task: {err}"

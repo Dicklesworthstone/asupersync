@@ -1146,6 +1146,22 @@ impl SloRuntimePolicyApplication {
                 "compiled policy output is missing or blocked",
             ));
         }
+        // A compiled `no_win` status proves the objective cannot be met, so
+        // the application MUST route to the explicit no-win fallback. Without
+        // this cross-check (the mirror of the `Blocked` one above), a
+        // hand-edited artifact pairing `compiled_status: no_win` with an
+        // admitting `decision` validates as accepted and `evaluate_admission`
+        // then admits work the compiler proved un-meetable — a fail-open hole
+        // on exactly the untrusted-JSON path this validator gates.
+        if self.compiled_status == SloCompiledPolicyStatus::NoWin
+            && self.decision != SloRuntimePolicyDecision::NoWin
+        {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::MissingCompiledOutput,
+                "decision",
+                "compiled no-win status requires a no-win decision",
+            ));
+        }
         self.validate_runtime_provenance(&mut issues);
         self.validate_runtime_optional_work(&mut issues);
         self.validate_runtime_no_win_receipt(&mut issues);
@@ -2240,9 +2256,14 @@ impl SloPolicyBundle {
                     "latency percentiles must be monotonic: p50 <= p95 <= p99 <= p999",
                 ));
             }
-            if matches!(objective.unit, SloLatencyUnit::Milliseconds)
+            // Normalize the p999 objective to milliseconds before comparing
+            // against the cleanup deadline so a microsecond objective cannot
+            // bypass the impossible-deadline check (the compiler normalizes
+            // identically; gating on `Milliseconds` only let µs objectives
+            // validate as accepted while the compiler still blocked them).
+            if !matches!(objective.unit, SloLatencyUnit::Unsupported(_))
                 && self.cleanup_deadline_ms > 0
-                && objective.p999 > self.cleanup_deadline_ms
+                && normalized_p999_ms(objective) > self.cleanup_deadline_ms
             {
                 issues.push(SloPolicyValidationIssue::new(
                     SloPolicyValidationIssueKind::ImpossibleDeadline,

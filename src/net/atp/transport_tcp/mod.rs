@@ -50,6 +50,20 @@ pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 /// memory on the receive side, so this also bounds receiver memory.
 pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Maximum number of files a single transfer manifest may declare. Bounds the
+/// per-entry bookkeeping a remote peer can force the receiver to allocate.
+const MAX_MANIFEST_ENTRIES: usize = 4 * 1024 * 1024;
+
+/// Upper bound on the initial receive-buffer capacity reserved per entry. The
+/// declared entry size is attacker-controlled, so reservation is capped here and
+/// the buffer grows from real bytes (themselves bounded by `max_transfer_bytes`).
+const INITIAL_ENTRY_CAPACITY: u64 = 4 * 1024 * 1024;
+
+/// Consecutive `accept()` failures the serve loop tolerates before giving up,
+/// so a transient error does not kill a long-running listener while a truly
+/// broken listener still terminates instead of hot-looping.
+const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
+
 /// Transport tuning knobs.
 #[derive(Debug, Clone, Copy)]
 pub struct TransferConfig {
@@ -395,6 +409,41 @@ fn collect_dir<'a>(
     })
 }
 
+/// Validate an incoming transfer manifest's bounds before any receive buffer is
+/// allocated. The entry count, the per-entry sizes, and their sum are all
+/// attacker-controlled, so a hostile manifest (one entry declaring `u64::MAX`,
+/// or millions of entries) must be rejected here rather than allowed to exhaust
+/// receiver memory. `total_bytes` is checked too, but it need not match the
+/// per-entry sizes, so the declared sum is the load-bearing bound.
+fn validate_manifest(
+    manifest: &TransferManifest,
+    config: &TransferConfig,
+) -> Result<(), TransportError> {
+    if manifest.total_bytes > config.max_transfer_bytes {
+        return Err(TransportError::TooLarge {
+            size: manifest.total_bytes,
+            max: config.max_transfer_bytes,
+        });
+    }
+    if manifest.entries.len() > MAX_MANIFEST_ENTRIES {
+        return Err(TransportError::Frame(format!(
+            "manifest declares {} entries (max {MAX_MANIFEST_ENTRIES})",
+            manifest.entries.len()
+        )));
+    }
+    let declared_total: u64 = manifest
+        .entries
+        .iter()
+        .fold(0u64, |acc, e| acc.saturating_add(e.size));
+    if declared_total > config.max_transfer_bytes {
+        return Err(TransportError::TooLarge {
+            size: declared_total,
+            max: config.max_transfer_bytes,
+        });
+    }
+    Ok(())
+}
+
 fn data_frame(index: u32, offset: u64, chunk: &[u8]) -> Result<Frame, TransportError> {
     let mut payload = Vec::with_capacity(12 + chunk.len());
     payload.extend_from_slice(&index.to_be_bytes());
@@ -626,18 +675,19 @@ pub async fn receive_connection(
         });
     }
     let manifest: TransferManifest = parse_json(&manifest_frame)?;
-    if manifest.total_bytes > config.max_transfer_bytes {
-        return Err(TransportError::TooLarge {
-            size: manifest.total_bytes,
-            max: config.max_transfer_bytes,
-        });
-    }
+    // The manifest is attacker-controlled — validate its bounds before
+    // allocating any receive buffers.
+    validate_manifest(&manifest, &config)?;
 
-    // Per-entry receive buffers, sized from the manifest.
+    // Per-entry receive buffers. Reservation is capped (the declared size is
+    // untrusted); each buffer grows from real received bytes.
     let mut buffers: Vec<Vec<u8>> = manifest
         .entries
         .iter()
-        .map(|e| Vec::with_capacity(usize::try_from(e.size).unwrap_or(0)))
+        .map(|e| {
+            let reserve = usize::try_from(e.size.min(INITIAL_ENTRY_CAPACITY)).unwrap_or(0);
+            Vec::with_capacity(reserve)
+        })
         .collect();
     let mut received: u64 = 0;
 
@@ -710,8 +760,9 @@ pub async fn receive_connection(
     let mut committed_paths: Vec<PathBuf> = Vec::new();
     let committed = sha_ok && merkle_ok;
     if committed {
-        // Atomic, fully-verified writes into the destination.
-        let base = dest_dir.join(&manifest.root_name);
+        // Atomic, fully-verified writes into the destination. The base path
+        // is sanitized so a hostile `root_name` cannot escape `dest_dir`.
+        let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
         for (entry, buf) in manifest.entries.iter().zip(buffers.iter()) {
             let out_path = if manifest.is_directory {
                 join_relative(&base, &entry.rel_path)?
@@ -771,6 +822,41 @@ pub async fn receive_connection(
 
 /// Join `base` with a forward-slash relative path, rejecting any component that
 /// would escape `base` (`..`, absolute paths, drive prefixes).
+/// Reduce an attacker-controlled `root_name` to a single safe path component
+/// joined under `dest_dir`.
+///
+/// `manifest.root_name` arrives off the wire, and `Path::join` *replaces* the
+/// base when its argument is absolute, so `dest_dir.join(&root_name)` with an
+/// absolute (or separator-bearing) `root_name` would escape the destination
+/// directory entirely — `crate::fs::write_atomic` validates with
+/// `allow_absolute = true`, so it would not catch an absolute target. Senders
+/// already set `root_name` to a bare file name (see `collect_entries`), so
+/// collapsing to the final path component is loss-free for legitimate
+/// transfers while fully containing hostile ones.
+fn safe_base_for_root_name(dest_dir: &Path, root_name: &str) -> Result<PathBuf, TransportError> {
+    if root_name.is_empty() {
+        return Err(TransportError::Source(
+            "manifest root_name is empty".to_string(),
+        ));
+    }
+    let component = Path::new(root_name)
+        .file_name()
+        .ok_or_else(|| TransportError::Source(format!("unsafe manifest root_name: {root_name}")))?;
+    // `file_name()` never yields `.`/`..`/separators, but guard defensively
+    // in case of platform-specific surprises.
+    let component_str = component.to_string_lossy();
+    if component_str == "."
+        || component_str == ".."
+        || component_str.contains('/')
+        || component_str.contains('\\')
+    {
+        return Err(TransportError::Source(format!(
+            "unsafe manifest root_name: {root_name}"
+        )));
+    }
+    Ok(dest_dir.join(component))
+}
+
 fn join_relative(base: &Path, rel: &str) -> Result<PathBuf, TransportError> {
     let mut out = base.to_path_buf();
     for component in rel.split('/') {
@@ -801,13 +887,33 @@ pub async fn serve<F>(
 where
     F: FnMut(Result<ReceiveReport, TransportError>),
 {
+    let mut consecutive_failures: u32 = 0;
     loop {
         if cx.is_cancel_requested() {
             return Ok(());
         }
-        let (stream, peer) = listener.accept().await?;
-        let result = receive_connection(cx, stream, peer, &dest_dir, config, &peer_id).await;
-        on_result(result);
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                consecutive_failures = 0;
+                let result =
+                    receive_connection(cx, stream, peer, &dest_dir, config, &peer_id).await;
+                on_result(result);
+            }
+            Err(err) => {
+                // A transient accept error (e.g. ECONNABORTED, EMFILE) must not
+                // tear down a long-running listener, but a persistently broken
+                // listener must terminate rather than hot-loop.
+                consecutive_failures += 1;
+                let message = err.to_string();
+                on_result(Err(TransportError::Io(err)));
+                if consecutive_failures >= MAX_CONSECUTIVE_ACCEPT_FAILURES {
+                    return Err(TransportError::Frame(format!(
+                        "accept loop aborted after {consecutive_failures} consecutive failures; \
+                         last error: {message}"
+                    )));
+                }
+            }
+        }
     }
 }
 
@@ -894,6 +1000,81 @@ mod tests {
             join_relative(base, "ok/sub/file.txt").unwrap(),
             Path::new("/tmp/inbox/data/ok/sub/file.txt")
         );
+    }
+
+    #[test]
+    fn safe_base_for_root_name_contains_hostile_inputs() {
+        let dest = Path::new("/tmp/inbox");
+        // Legitimate single-component name is preserved.
+        assert_eq!(
+            safe_base_for_root_name(dest, "payload").unwrap(),
+            Path::new("/tmp/inbox/payload")
+        );
+        // Absolute root_name would otherwise replace the base via Path::join;
+        // it must be collapsed to its final component, contained under dest.
+        assert_eq!(
+            safe_base_for_root_name(dest, "/etc/cron.d/evil").unwrap(),
+            Path::new("/tmp/inbox/evil")
+        );
+        // Parent-traversal names collapse to a contained component as well.
+        assert_eq!(
+            safe_base_for_root_name(dest, "../../etc/passwd").unwrap(),
+            Path::new("/tmp/inbox/passwd")
+        );
+        // Names with no usable final component are rejected outright.
+        assert!(safe_base_for_root_name(dest, "").is_err());
+        assert!(safe_base_for_root_name(dest, "/").is_err());
+        assert!(safe_base_for_root_name(dest, "..").is_err());
+    }
+
+    fn manifest_with(entries: Vec<ManifestEntry>, total_bytes: u64) -> TransferManifest {
+        TransferManifest {
+            transfer_id: "t".to_string(),
+            root_name: "r".to_string(),
+            is_directory: true,
+            total_bytes,
+            merkle_root_hex: "0".repeat(64),
+            entries,
+        }
+    }
+
+    fn entry(index: u32, size: u64) -> ManifestEntry {
+        ManifestEntry {
+            index,
+            rel_path: format!("f{index}"),
+            size,
+            sha256_hex: "0".repeat(64),
+        }
+    }
+
+    #[test]
+    fn validate_manifest_accepts_sane_bounds() {
+        let m = manifest_with(vec![entry(0, 100), entry(1, 200)], 300);
+        assert!(validate_manifest(&m, &TransferConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_lying_entry_size() {
+        // total_bytes is small but a single entry declares u64::MAX — the
+        // pre-fix code would `Vec::with_capacity(u64::MAX as usize)` and abort.
+        let m = manifest_with(vec![entry(0, u64::MAX)], 10);
+        assert!(matches!(
+            validate_manifest(&m, &TransferConfig::default()),
+            Err(TransportError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_declared_sum_over_limit() {
+        let cfg = TransferConfig {
+            max_transfer_bytes: 1000,
+            ..TransferConfig::default()
+        };
+        let m = manifest_with(vec![entry(0, 600), entry(1, 600)], 1200);
+        assert!(matches!(
+            validate_manifest(&m, &cfg),
+            Err(TransportError::TooLarge { .. })
+        ));
     }
 
     #[test]
