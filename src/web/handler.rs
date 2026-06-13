@@ -31,6 +31,22 @@ pub trait Handler: Send + Sync + 'static {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>;
 }
 
+// Type-erased handlers remain handlers, so middleware layers can re-wrap the
+// `Box<dyn Handler>` values the router stores (br-asupersync-server-stack-hardening-eeexl1.3).
+impl<H: Handler + ?Sized> Handler for Box<H> {
+    #[inline]
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        (**self).call(cx, req)
+    }
+}
+
+impl<H: Handler + ?Sized> Handler for std::sync::Arc<H> {
+    #[inline]
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        (**self).call(cx, req)
+    }
+}
+
 // ─── Handler Implementations ─────────────────────────────────────────────────
 //
 // We implement Handler for synchronous closures returning IntoResponse.

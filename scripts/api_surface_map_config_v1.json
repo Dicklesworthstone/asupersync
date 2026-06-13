@@ -115,6 +115,36 @@
       "symbol": "observability",
       "summary": "Expose metrics with the Prometheus example surface.",
       "example_path": "examples/prometheus_metrics.rs"
+    },
+    {
+      "use_case": "web_router_middleware",
+      "symbol": "web::Router::layer + web::middleware::Layer",
+      "summary": "Stack middleware onion-style onto a router via the unified Layer trait.",
+      "example_path": "src/web/router.rs"
+    },
+    {
+      "use_case": "web_request_trace",
+      "symbol": "web::middleware::RequestTraceLayer",
+      "summary": "Structured request/response logging with outcome severity, duration, and 499-on-cancel.",
+      "example_path": "tests/web_middleware_golden.rs"
+    },
+    {
+      "use_case": "web_catch_panic",
+      "symbol": "web::middleware::CatchPanicLayer",
+      "summary": "Convert handler panics into [ASUP-E502] 500 responses without killing the worker.",
+      "example_path": "tests/web_middleware_panic_recovery_audit.rs"
+    },
+    {
+      "use_case": "web_timeout_budget",
+      "symbol": "web::middleware::TimeoutLayer",
+      "summary": "Per-route timeouts, optionally tightened by the request budget (min-plus).",
+      "example_path": "src/web/middleware.rs"
+    },
+    {
+      "use_case": "web_compression",
+      "symbol": "web::middleware::CompressionLayer",
+      "summary": "Negotiated response compression as a router layer.",
+      "example_path": "src/web/compress.rs"
     }
   ]
 }

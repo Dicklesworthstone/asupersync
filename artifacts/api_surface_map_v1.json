@@ -1,8 +1,8 @@
 {
   "counts": {
-    "entry_points": 11,
+    "entry_points": 16,
     "modules": 119,
-    "root_exports": 293
+    "root_exports": 294
   },
   "entry_points": [
     {
@@ -103,6 +103,51 @@
       "summary": "Build a minimal supervised application topology.",
       "symbol": "spork",
       "use_case": "supervised_app"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "tests/web_middleware_panic_recovery_audit.rs"
+      },
+      "summary": "Convert handler panics into [ASUP-E502] 500 responses without killing the worker.",
+      "symbol": "web::middleware::CatchPanicLayer",
+      "use_case": "web_catch_panic"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "src/web/compress.rs"
+      },
+      "summary": "Negotiated response compression as a router layer.",
+      "symbol": "web::middleware::CompressionLayer",
+      "use_case": "web_compression"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "tests/web_middleware_golden.rs"
+      },
+      "summary": "Structured request/response logging with outcome severity, duration, and 499-on-cancel.",
+      "symbol": "web::middleware::RequestTraceLayer",
+      "use_case": "web_request_trace"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "src/web/router.rs"
+      },
+      "summary": "Stack middleware onion-style onto a router via the unified Layer trait.",
+      "symbol": "web::Router::layer + web::middleware::Layer",
+      "use_case": "web_router_middleware"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "src/web/middleware.rs"
+      },
+      "summary": "Per-route timeouts, optionally tightened by the request budget (min-plus).",
+      "symbol": "web::middleware::TimeoutLayer",
+      "use_case": "web_timeout_budget"
     }
   ],
   "generated_by": "scripts/generate_api_surface_map.py",
@@ -2777,6 +2822,18 @@
       "line": 446,
       "name": "asupersync_macros::join_all",
       "signature": "pub use asupersync_macros::join_all",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 446,
+      "name": "asupersync_macros::lab_test",
+      "signature": "pub use asupersync_macros::lab_test",
       "stability": "feature-gated"
     },
     {

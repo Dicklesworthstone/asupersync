@@ -31,6 +31,35 @@
 //!     .build();
 //! ```
 //!
+//! # Unified layering (one `Layer` trait)
+//!
+//! Every middleware has a companion `*Layer` adapter implementing
+//! [`crate::service::Layer`] — the SAME trait the `service` stack composes
+//! with. That makes three composition styles interchangeable
+//! (br-asupersync-server-stack-hardening-eeexl1.3):
+//!
+//! ```ignore
+//! // 1. Router-wide, onion-style (last-added layer outermost):
+//! let app = Router::new()
+//!     .route("/", get(handler))
+//!     .layer(AuthLayer::new(policy))
+//!     .layer(CatchPanicLayer::new());
+//!
+//! // 2. Fluent stack around one handler (sugar over the same layers):
+//! let handler = MiddlewareStack::new(handler)
+//!     .layer(AuthLayer::new(policy))
+//!     .build();
+//!
+//! // 3. Raw service::Stack composition:
+//! let handler = Stack::new(AuthLayer::new(policy), CatchPanicLayer::new())
+//!     .layer(handler);
+//! ```
+//!
+//! Stateful layers (`CircuitBreakerLayer`, `RateLimitLayer`, `BulkheadLayer`,
+//! `LoadShedLayer`, `RequestIdLayer`) create their shared state once at layer
+//! construction, so one layer value applied across a router's routes shares a
+//! single breaker / limiter / counter.
+//!
 //! # Execution Order
 //!
 //! When composing middleware via [`MiddlewareStack`], each `with_*` call wraps
@@ -62,7 +91,13 @@ use crate::http::compress::{
     ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
     negotiate_encoding,
 };
-use crate::tracing_compat::{debug, warn};
+/// The unified composition trait shared with the `service` stack.
+///
+/// Web middleware and `crate::service` layers compose through this single
+/// trait; the `*Layer` adapters below implement it over [`Handler`] values
+/// (br-asupersync-server-stack-hardening-eeexl1.3).
+pub use crate::service::Layer;
+use crate::tracing_compat::{debug, error, warn};
 use crate::types::Time;
 use futures_lite::FutureExt;
 
@@ -404,7 +439,7 @@ fn normalize_header_name(name: impl Into<String>) -> String {
     name.into().to_ascii_lowercase()
 }
 
-fn wall_clock_now() -> Time {
+pub(crate) fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
@@ -420,6 +455,7 @@ fn wall_clock_now() -> Time {
 pub struct TimeoutMiddleware<H> {
     inner: H,
     timeout: Duration,
+    budget_aware: bool,
     time_getter: fn() -> Time,
 }
 
@@ -436,7 +472,49 @@ impl<H: Handler> TimeoutMiddleware<H> {
         Self {
             inner,
             timeout,
+            budget_aware: false,
             time_getter,
+        }
+    }
+
+    /// Wrap a handler with a budget-aware timeout (D1 deadline propagation).
+    ///
+    /// The effective timeout is the smaller of `cap` and the remaining
+    /// request budget (`cx.budget().deadline`) observed at request start —
+    /// min-plus composition: the tightest constraint wins. A request that
+    /// arrives with its budget already exhausted times out immediately.
+    #[must_use]
+    pub fn budget_aware(inner: H, cap: Duration) -> Self {
+        Self::budget_aware_with_time_getter(inner, cap, wall_clock_now)
+    }
+
+    /// Budget-aware timeout with a custom time source.
+    #[must_use]
+    pub fn budget_aware_with_time_getter(
+        inner: H,
+        cap: Duration,
+        time_getter: fn() -> Time,
+    ) -> Self {
+        Self {
+            inner,
+            timeout: cap,
+            budget_aware: true,
+            time_getter,
+        }
+    }
+
+    /// Effective timeout for this request: the configured value, optionally
+    /// tightened by the remaining `Cx` budget (min-plus).
+    fn effective_timeout(&self, cx: &crate::Cx, now: Time) -> Duration {
+        if !self.budget_aware {
+            return self.timeout;
+        }
+        match cx.budget().deadline {
+            Some(deadline) => {
+                let remaining = Duration::from_nanos(deadline.duration_since(now));
+                self.timeout.min(remaining)
+            }
+            None => self.timeout,
         }
     }
 }
@@ -450,10 +528,11 @@ impl<H: Handler> Handler for TimeoutMiddleware<H> {
         let cx = cx.clone();
         Box::pin(async move {
             let start = (self.time_getter)();
+            let effective = self.effective_timeout(&cx, start);
             let resp = self.inner.call(&cx, req).await;
             let elapsed = Duration::from_nanos((self.time_getter)().duration_since(start));
 
-            if elapsed > self.timeout {
+            if elapsed > effective {
                 Response::new(
                     StatusCode::GATEWAY_TIMEOUT,
                     format!("Request timed out after {elapsed:?}").into_bytes(),
@@ -1239,11 +1318,156 @@ impl Default for RequestTracePolicy {
     }
 }
 
+/// Structured record of one traced request/response exchange.
+///
+/// This is the canonical schema of the request log line emitted by
+/// [`RequestTraceMiddleware`] and the router's default-on request trace.
+/// Golden tests pin it through a [`RequestLogSink`], so changes here are
+/// log-contract changes (br-asupersync-server-stack-hardening-eeexl1.3).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RequestLogRecord {
+    /// Request method.
+    pub method: String,
+    /// Request path.
+    pub path: String,
+    /// Status as logged. Cancelled requests log `499` (client closed
+    /// request) regardless of what the handler produced.
+    pub status: u16,
+    /// Outcome severity label: `ok`, `client_error`, `server_error`, or
+    /// `cancelled`.
+    pub severity: &'static str,
+    /// Clock duration of the exchange in milliseconds.
+    pub duration_ms: u128,
+    /// Correlation id resolved from extensions / headers, if any.
+    pub request_id: Option<String>,
+    /// Whether cancellation was observed on the request `Cx`.
+    pub cancelled: bool,
+    /// The cancel reason, when cancelled.
+    pub cancel_reason: Option<String>,
+}
+
+/// Observer invoked with the structured record of every traced exchange.
+pub type RequestLogSink = Arc<dyn Fn(&RequestLogRecord) + Send + Sync>;
+
+/// Shared trace instrumentation driving both [`RequestTraceMiddleware`] and
+/// the router's default-on request trace.
+///
+/// Cancellation is an outcome, not an error: a request whose `Cx` observed
+/// cancellation is logged as `499` with its cancel reason, so operators can
+/// tell client-abandoned work from failures.
+pub(crate) async fn trace_request<F, Fut>(
+    policy: &RequestTracePolicy,
+    time_getter: fn() -> Time,
+    sink: Option<&RequestLogSink>,
+    cx: &Cx,
+    req: Request,
+    call: F,
+) -> Response
+where
+    F: FnOnce(Request) -> Fut,
+    Fut: Future<Output = Response>,
+{
+    let method = req.method.clone();
+    let path = req.path.clone();
+    let trace_id = resolve_trace_id(&req);
+    let start = time_getter();
+
+    debug!(
+        method = %method,
+        path = %path,
+        trace_id = ?trace_id,
+        "http request start"
+    );
+
+    let mut resp = call(req).await;
+    let duration_ms = Duration::from_nanos(time_getter().duration_since(start)).as_millis();
+
+    let cancelled = cx.is_cancel_requested();
+    let cancel_reason = if cancelled {
+        Some(
+            cx.cancel_reason()
+                .map_or_else(|| "unknown".to_string(), |reason| reason.to_string()),
+        )
+    } else {
+        None
+    };
+    let status_code = if cancelled { 499 } else { resp.status.as_u16() };
+    let severity = if cancelled {
+        "cancelled"
+    } else if status_code >= 500 {
+        "server_error"
+    } else if status_code >= 400 {
+        "client_error"
+    } else {
+        "ok"
+    };
+
+    if let Some(header_name) = &policy.duration_header {
+        resp.set_header(header_name, duration_ms.to_string());
+    }
+
+    if let (Some(header_name), Some(id)) = (&policy.trace_header, trace_id.as_ref()) {
+        // Trace ID is already sanitized and truncated by resolve_trace_id
+        if !resp.has_header(header_name) {
+            resp.set_header(header_name, id.clone());
+        }
+    }
+
+    if cancelled {
+        warn!(
+            method = %method,
+            path = %path,
+            status = status_code,
+            severity = severity,
+            duration_ms = duration_ms,
+            trace_id = ?trace_id,
+            cancel_reason = ?cancel_reason,
+            "http request cancelled"
+        );
+    } else if status_code >= 500 {
+        warn!(
+            method = %method,
+            path = %path,
+            status = status_code,
+            severity = severity,
+            duration_ms = duration_ms,
+            trace_id = ?trace_id,
+            "http request completed with server error"
+        );
+    } else {
+        debug!(
+            method = %method,
+            path = %path,
+            status = status_code,
+            severity = severity,
+            duration_ms = duration_ms,
+            trace_id = ?trace_id,
+            "http request completed"
+        );
+    }
+
+    if let Some(sink) = sink {
+        sink(&RequestLogRecord {
+            method,
+            path,
+            status: status_code,
+            severity,
+            duration_ms,
+            request_id: trace_id,
+            cancelled,
+            cancel_reason,
+        });
+    }
+
+    resp
+}
+
 /// Middleware that emits request/response tracing events and optional metadata headers.
 pub struct RequestTraceMiddleware<H> {
     inner: H,
     policy: RequestTracePolicy,
     time_getter: fn() -> Time,
+    sink: Option<RequestLogSink>,
 }
 
 impl<H: Handler> RequestTraceMiddleware<H> {
@@ -1268,11 +1492,18 @@ impl<H: Handler> RequestTraceMiddleware<H> {
             inner,
             policy,
             time_getter,
+            sink: None,
         }
     }
 
-    fn resolve_trace_id(req: &Request) -> Option<String> {
-        resolve_trace_id(req)
+    /// Attach a structured record sink observing every traced exchange.
+    ///
+    /// Used by golden tests to pin the log schema; production deployments
+    /// normally rely on the `tracing` events instead.
+    #[must_use]
+    pub fn with_record_sink(mut self, sink: RequestLogSink) -> Self {
+        self.sink = Some(sink);
+        self
     }
 }
 
@@ -1285,7 +1516,7 @@ impl<H: Handler> RequestTraceMiddleware<H> {
 /// truncated to `DEFAULT_TRACE_ID_MAX_LENGTH` to prevent DoS via
 /// giant headers being amplified into logs / response headers,
 /// br-asupersync-gwezkv).
-fn resolve_trace_id(req: &Request) -> Option<String> {
+pub(crate) fn resolve_trace_id(req: &Request) -> Option<String> {
     if let Some(id) = req.extensions.get("trace_id") {
         return Some(id.to_string());
     }
@@ -1304,58 +1535,15 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-            let method = req.method.clone();
-            let path = req.path.clone();
-            let trace_id = Self::resolve_trace_id(&req);
-            let start = (self.time_getter)();
-
-            debug!(
-                method = %method,
-                path = %path,
-                trace_id = ?trace_id,
-                "http request start"
-            );
-
-            let mut resp = self.inner.call(&cx, req).await;
-            let duration_ms =
-                Duration::from_nanos((self.time_getter)().duration_since(start)).as_millis();
-            let status_code = resp.status.as_u16();
-
-            if let Some(header_name) = &self.policy.duration_header {
-                resp.set_header(header_name, duration_ms.to_string());
-            }
-
-            if let (Some(header_name), Some(id)) = (&self.policy.trace_header, trace_id.as_ref()) {
-                // Trace ID is already sanitized and truncated by resolve_trace_id
-                if !resp.has_header(header_name) {
-                    resp.set_header(header_name, id.clone());
-                }
-            }
-
-            if status_code >= 500 {
-                warn!(
-                    method = %method,
-                    path = %path,
-                    status = status_code,
-                    duration_ms = duration_ms,
-                    trace_id = ?trace_id,
-                    "http request completed with server error"
-                );
-            } else {
-                debug!(
-                    method = %method,
-                    path = %path,
-                    status = status_code,
-                    duration_ms = duration_ms,
-                    trace_id = ?trace_id,
-                    "http request completed"
-                );
-            }
-
-            #[cfg(not(feature = "tracing-integration"))]
-            let _ = (&method, &path);
-
-            resp
+            trace_request(
+                &self.policy,
+                self.time_getter,
+                self.sink.as_ref(),
+                &cx,
+                req,
+                |req| self.inner.call(&cx, req),
+            )
+            .await
         })
     }
 }
@@ -1669,24 +1857,35 @@ impl<H: Handler> Handler for CatchPanicMiddleware<H> {
             let path = req.path.clone();
             let trace_id = resolve_trace_id(&req);
 
-            match AssertUnwindSafe(self.inner.call(&cx, req))
-                .catch_unwind()
-                .await
-            {
+            // Two-stage safety net: a handler can panic either synchronously
+            // while CONSTRUCTING its future (inside `call()` itself) or later
+            // while the future is POLLED. Both must convert to a 500 — a
+            // construction panic escaping here would tear down the connection
+            // task this middleware exists to protect
+            // (br-asupersync-server-stack-hardening-eeexl1.3).
+            let outcome =
+                match std::panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(&cx, req))) {
+                    Ok(future) => AssertUnwindSafe(future).catch_unwind().await,
+                    Err(payload) => Err(payload),
+                };
+
+            match outcome {
                 Ok(response) => response,
                 Err(payload) => {
                     let panic_message = panic_payload_message(payload.as_ref());
                     let _panic_log_fields = (&method, &path, &trace_id, &panic_message);
-                    warn!(
+                    error!(
                         method = %method,
                         path = %path,
                         trace_id = trace_id.as_deref().unwrap_or(""),
-                        panic = %panic_message,
-                        "web handler panic recovered"
+                        panic_message = %panic_message,
+                        "[ASUP-E502] web handler panic recovered"
                     );
+                    // The panic message stays server-side; the client gets the
+                    // stable remediation token only (no information leakage).
                     Response::new(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        b"Internal Server Error".to_vec(),
+                        b"[ASUP-E502] Internal Server Error".to_vec(),
                     )
                 }
             }
@@ -1923,17 +2122,13 @@ impl<H: Handler> MiddlewareStack<H> {
     /// Add a timeout middleware layer.
     #[must_use]
     pub fn with_timeout(self, timeout: Duration) -> MiddlewareStack<TimeoutMiddleware<H>> {
-        MiddlewareStack {
-            inner: TimeoutMiddleware::new(self.inner, timeout),
-        }
+        self.layer(TimeoutLayer::new(timeout))
     }
 
     /// Add a CORS middleware layer.
     #[must_use]
     pub fn with_cors(self, policy: CorsPolicy) -> MiddlewareStack<CorsMiddleware<H>> {
-        MiddlewareStack {
-            inner: CorsMiddleware::new(self.inner, policy),
-        }
+        self.layer(CorsLayer::new(policy))
     }
 
     /// Add a circuit breaker middleware layer.
@@ -1942,9 +2137,7 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         policy: CircuitBreakerPolicy,
     ) -> MiddlewareStack<CircuitBreakerMiddleware<H>> {
-        MiddlewareStack {
-            inner: CircuitBreakerMiddleware::new(self.inner, policy),
-        }
+        self.layer(CircuitBreakerLayer::new(policy))
     }
 
     /// Add a circuit breaker middleware layer with a shared breaker.
@@ -1953,9 +2146,7 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         breaker: Arc<CircuitBreaker>,
     ) -> MiddlewareStack<CircuitBreakerMiddleware<H>> {
-        MiddlewareStack {
-            inner: CircuitBreakerMiddleware::shared(self.inner, breaker),
-        }
+        self.layer(CircuitBreakerLayer::shared(breaker))
     }
 
     /// Add a rate limit middleware layer.
@@ -1964,9 +2155,7 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         policy: RateLimitPolicy,
     ) -> MiddlewareStack<RateLimitMiddleware<H>> {
-        MiddlewareStack {
-            inner: RateLimitMiddleware::new(self.inner, policy),
-        }
+        self.layer(RateLimitLayer::new(policy))
     }
 
     /// Add a rate limit middleware layer with a shared limiter.
@@ -1975,17 +2164,13 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         limiter: Arc<RateLimiter>,
     ) -> MiddlewareStack<RateLimitMiddleware<H>> {
-        MiddlewareStack {
-            inner: RateLimitMiddleware::shared(self.inner, limiter),
-        }
+        self.layer(RateLimitLayer::shared(limiter))
     }
 
     /// Add a bulkhead middleware layer.
     #[must_use]
     pub fn with_bulkhead(self, policy: BulkheadPolicy) -> MiddlewareStack<BulkheadMiddleware<H>> {
-        MiddlewareStack {
-            inner: BulkheadMiddleware::new(self.inner, policy),
-        }
+        self.layer(BulkheadLayer::new(policy))
     }
 
     /// Add a bulkhead middleware layer with a shared bulkhead.
@@ -1994,17 +2179,13 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         bulkhead: Arc<Bulkhead>,
     ) -> MiddlewareStack<BulkheadMiddleware<H>> {
-        MiddlewareStack {
-            inner: BulkheadMiddleware::shared(self.inner, bulkhead),
-        }
+        self.layer(BulkheadLayer::shared(bulkhead))
     }
 
     /// Add a retry middleware layer.
     #[must_use]
     pub fn with_retry(self, policy: RetryPolicy) -> MiddlewareStack<RetryMiddleware<H>> {
-        MiddlewareStack {
-            inner: RetryMiddleware::new(self.inner, policy),
-        }
+        self.layer(RetryLayer::new(policy))
     }
 
     /// Add a response compression middleware layer.
@@ -2013,9 +2194,7 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         config: CompressionConfig,
     ) -> MiddlewareStack<CompressionMiddleware<H>> {
-        MiddlewareStack {
-            inner: CompressionMiddleware::new(self.inner, config),
-        }
+        self.layer(CompressionLayer::new(config))
     }
 
     /// Add a request body size limit middleware layer.
@@ -2024,25 +2203,19 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         max_bytes: usize,
     ) -> MiddlewareStack<RequestBodyLimitMiddleware<H>> {
-        MiddlewareStack {
-            inner: RequestBodyLimitMiddleware::new(self.inner, max_bytes),
-        }
+        self.layer(RequestBodyLimitLayer::new(max_bytes))
     }
 
     /// Add a bearer auth middleware layer.
     #[must_use]
     pub fn with_auth(self, policy: AuthPolicy) -> MiddlewareStack<AuthMiddleware<H>> {
-        MiddlewareStack {
-            inner: AuthMiddleware::new(self.inner, policy),
-        }
+        self.layer(AuthLayer::new(policy))
     }
 
     /// Add request-level load shedding middleware.
     #[must_use]
     pub fn with_load_shed(self, policy: LoadShedPolicy) -> MiddlewareStack<LoadShedMiddleware<H>> {
-        MiddlewareStack {
-            inner: LoadShedMiddleware::new(self.inner, policy),
-        }
+        self.layer(LoadShedLayer::new(policy))
     }
 
     /// Add a request ID middleware layer.
@@ -2051,9 +2224,7 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         header_name: impl Into<String>,
     ) -> MiddlewareStack<RequestIdMiddleware<H>> {
-        MiddlewareStack {
-            inner: RequestIdMiddleware::new(self.inner, header_name),
-        }
+        self.layer(RequestIdLayer::new(header_name))
     }
 
     /// Add request/response tracing middleware.
@@ -2062,17 +2233,13 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         policy: RequestTracePolicy,
     ) -> MiddlewareStack<RequestTraceMiddleware<H>> {
-        MiddlewareStack {
-            inner: RequestTraceMiddleware::new(self.inner, policy),
-        }
+        self.layer(RequestTraceLayer::new(policy))
     }
 
     /// Add a panic recovery middleware layer.
     #[must_use]
     pub fn with_catch_panic(self) -> MiddlewareStack<CatchPanicMiddleware<H>> {
-        MiddlewareStack {
-            inner: CatchPanicMiddleware::new(self.inner),
-        }
+        self.layer(CatchPanicLayer::new())
     }
 
     /// Add a path normalization middleware layer.
@@ -2081,9 +2248,7 @@ impl<H: Handler> MiddlewareStack<H> {
         self,
         strategy: TrailingSlash,
     ) -> MiddlewareStack<NormalizePathMiddleware<H>> {
-        MiddlewareStack {
-            inner: NormalizePathMiddleware::new(self.inner, strategy),
-        }
+        self.layer(NormalizePathLayer::new(strategy))
     }
 
     /// Add a response header injection middleware layer.
@@ -2094,8 +2259,22 @@ impl<H: Handler> MiddlewareStack<H> {
         value: impl Into<String>,
         mode: HeaderOverwrite,
     ) -> MiddlewareStack<SetResponseHeaderMiddleware<H>> {
+        self.layer(SetResponseHeaderLayer::new(name, value, mode))
+    }
+
+    /// Apply any [`Layer`] whose output is itself a [`Handler`].
+    ///
+    /// This is the generic escape hatch that proves the stack is sugar over
+    /// the unified [`Layer`] machinery: every `with_*` method is equivalent to
+    /// `self.layer(SomeLayer::new(...))`.
+    #[must_use]
+    pub fn layer<L>(self, layer: L) -> MiddlewareStack<L::Service>
+    where
+        L: Layer<H>,
+        L::Service: Handler,
+    {
         MiddlewareStack {
-            inner: SetResponseHeaderMiddleware::new(self.inner, name, value, mode),
+            inner: layer.layer(self.inner),
         }
     }
 
@@ -2103,6 +2282,624 @@ impl<H: Handler> MiddlewareStack<H> {
     #[must_use]
     pub fn build(self) -> H {
         self.inner
+    }
+}
+
+// ─── Layer adapters (unified service/web layering) ──────────────────────────
+//
+// br-asupersync-server-stack-hardening-eeexl1.3: the web middleware family and
+// the `service` stack share ONE composition trait: [`crate::service::Layer`].
+// Each middleware above has a companion `*Layer` adapter implementing
+// `Layer<H: Handler>`, so handlers can be wrapped via `Router::layer`,
+// [`MiddlewareStack`], or raw `service::Stack` composition interchangeably.
+//
+// Shared-state semantics: stateful layers (`CircuitBreakerLayer`,
+// `RateLimitLayer`, `BulkheadLayer`, `LoadShedLayer`, `RequestIdLayer`) create
+// their shared state ONCE at layer construction. Applying the same layer value
+// to multiple handlers — as `Router::layer` does, one wrap per route — shares
+// the breaker / limiter / bulkhead / in-flight counter / ID counter across all
+// wrapped routes. Construct separate layer values when per-route isolation is
+// wanted.
+
+/// Layer that applies [`CorsMiddleware`] with a fixed policy.
+#[derive(Debug, Clone)]
+pub struct CorsLayer {
+    policy: CorsPolicy,
+}
+
+impl CorsLayer {
+    /// Create a CORS layer from the given policy.
+    #[must_use]
+    pub fn new(policy: CorsPolicy) -> Self {
+        Self { policy }
+    }
+}
+
+impl<H: Handler> Layer<H> for CorsLayer {
+    type Service = CorsMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        CorsMiddleware::new(inner, self.policy.clone())
+    }
+}
+
+/// Layer that applies [`TimeoutMiddleware`] with a fixed timeout.
+///
+/// ```
+/// use asupersync::web::middleware::TimeoutLayer;
+/// use asupersync::web::{FnHandler, Router, get};
+/// use std::time::Duration;
+///
+/// let app = Router::new()
+///     .route("/", get(FnHandler::new(|| "ok")))
+///     // Effective timeout = min(2s, remaining request budget).
+///     .layer(TimeoutLayer::budget_aware(Duration::from_secs(2)));
+/// # let _ = app;
+/// ```
+#[derive(Debug, Clone)]
+pub struct TimeoutLayer {
+    timeout: Duration,
+    budget_aware: bool,
+    time_getter: fn() -> Time,
+}
+
+impl TimeoutLayer {
+    /// Create a timeout layer using the wall clock.
+    #[must_use]
+    pub fn new(timeout: Duration) -> Self {
+        Self::with_time_getter(timeout, wall_clock_now)
+    }
+
+    /// Create a timeout layer with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(timeout: Duration, time_getter: fn() -> Time) -> Self {
+        Self {
+            timeout,
+            budget_aware: false,
+            time_getter,
+        }
+    }
+
+    /// Create a budget-aware timeout layer (D1 deadline propagation): the
+    /// effective timeout per request is `min(cap, remaining Cx budget)`.
+    #[must_use]
+    pub fn budget_aware(cap: Duration) -> Self {
+        Self::budget_aware_with_time_getter(cap, wall_clock_now)
+    }
+
+    /// Budget-aware timeout layer with a custom time source.
+    #[must_use]
+    pub fn budget_aware_with_time_getter(cap: Duration, time_getter: fn() -> Time) -> Self {
+        Self {
+            timeout: cap,
+            budget_aware: true,
+            time_getter,
+        }
+    }
+}
+
+impl<H: Handler> Layer<H> for TimeoutLayer {
+    type Service = TimeoutMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        if self.budget_aware {
+            TimeoutMiddleware::budget_aware_with_time_getter(inner, self.timeout, self.time_getter)
+        } else {
+            TimeoutMiddleware::with_time_getter(inner, self.timeout, self.time_getter)
+        }
+    }
+}
+
+/// Layer that applies [`CircuitBreakerMiddleware`] sharing ONE breaker across
+/// every handler it wraps.
+#[derive(Clone)]
+pub struct CircuitBreakerLayer {
+    breaker: Arc<CircuitBreaker>,
+    time_getter: fn() -> Time,
+}
+
+impl CircuitBreakerLayer {
+    /// Create a layer with a new breaker built from the policy.
+    ///
+    /// The breaker is created once here; all handlers wrapped by this layer
+    /// value share it.
+    #[must_use]
+    pub fn new(policy: CircuitBreakerPolicy) -> Self {
+        Self::with_time_getter(policy, wall_clock_now)
+    }
+
+    /// Create a layer with a new breaker and a custom time source.
+    #[must_use]
+    pub fn with_time_getter(policy: CircuitBreakerPolicy, time_getter: fn() -> Time) -> Self {
+        Self {
+            breaker: Arc::new(CircuitBreaker::new(policy)),
+            time_getter,
+        }
+    }
+
+    /// Create a layer around an existing shared breaker.
+    #[must_use]
+    pub fn shared(breaker: Arc<CircuitBreaker>) -> Self {
+        Self {
+            breaker,
+            time_getter: wall_clock_now,
+        }
+    }
+
+    /// Create a layer around an existing shared breaker with a custom time source.
+    #[must_use]
+    pub fn shared_with_time_getter(
+        breaker: Arc<CircuitBreaker>,
+        time_getter: fn() -> Time,
+    ) -> Self {
+        Self {
+            breaker,
+            time_getter,
+        }
+    }
+
+    /// Returns the shared circuit breaker for metrics inspection.
+    #[must_use]
+    pub fn breaker(&self) -> &Arc<CircuitBreaker> {
+        &self.breaker
+    }
+}
+
+impl<H: Handler> Layer<H> for CircuitBreakerLayer {
+    type Service = CircuitBreakerMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        CircuitBreakerMiddleware::shared_with_time_getter(
+            inner,
+            Arc::clone(&self.breaker),
+            self.time_getter,
+        )
+    }
+}
+
+/// Layer that applies [`RateLimitMiddleware`] sharing ONE limiter across every
+/// handler it wraps.
+#[derive(Clone)]
+pub struct RateLimitLayer {
+    limiter: Arc<RateLimiter>,
+    time_getter: fn() -> Time,
+}
+
+impl RateLimitLayer {
+    /// Create a layer with a new limiter built from the policy.
+    ///
+    /// The limiter is created once here; all handlers wrapped by this layer
+    /// value share it.
+    #[must_use]
+    pub fn new(policy: RateLimitPolicy) -> Self {
+        Self::with_time_getter(policy, wall_clock_now)
+    }
+
+    /// Create a layer with a new limiter and a custom time source.
+    #[must_use]
+    pub fn with_time_getter(policy: RateLimitPolicy, time_getter: fn() -> Time) -> Self {
+        Self {
+            limiter: Arc::new(RateLimiter::new(policy)),
+            time_getter,
+        }
+    }
+
+    /// Create a layer around an existing shared limiter.
+    #[must_use]
+    pub fn shared(limiter: Arc<RateLimiter>) -> Self {
+        Self {
+            limiter,
+            time_getter: wall_clock_now,
+        }
+    }
+
+    /// Create a layer around an existing shared limiter with a custom time source.
+    #[must_use]
+    pub fn shared_with_time_getter(limiter: Arc<RateLimiter>, time_getter: fn() -> Time) -> Self {
+        Self {
+            limiter,
+            time_getter,
+        }
+    }
+
+    /// Returns the shared rate limiter for metrics inspection.
+    #[must_use]
+    pub fn limiter(&self) -> &Arc<RateLimiter> {
+        &self.limiter
+    }
+}
+
+impl<H: Handler> Layer<H> for RateLimitLayer {
+    type Service = RateLimitMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        RateLimitMiddleware::shared_with_time_getter(
+            inner,
+            Arc::clone(&self.limiter),
+            self.time_getter,
+        )
+    }
+}
+
+/// Layer that applies [`BulkheadMiddleware`] sharing ONE bulkhead across every
+/// handler it wraps.
+#[derive(Clone)]
+pub struct BulkheadLayer {
+    bulkhead: Arc<Bulkhead>,
+}
+
+impl BulkheadLayer {
+    /// Create a layer with a new bulkhead built from the policy.
+    ///
+    /// The bulkhead is created once here; all handlers wrapped by this layer
+    /// value share its concurrency limit.
+    #[must_use]
+    pub fn new(policy: BulkheadPolicy) -> Self {
+        Self {
+            bulkhead: Arc::new(Bulkhead::new(policy)),
+        }
+    }
+
+    /// Create a layer around an existing shared bulkhead.
+    #[must_use]
+    pub fn shared(bulkhead: Arc<Bulkhead>) -> Self {
+        Self { bulkhead }
+    }
+
+    /// Returns the shared bulkhead for metrics inspection.
+    #[must_use]
+    pub fn bulkhead(&self) -> &Arc<Bulkhead> {
+        &self.bulkhead
+    }
+}
+
+impl<H: Handler> Layer<H> for BulkheadLayer {
+    type Service = BulkheadMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        BulkheadMiddleware::shared(inner, Arc::clone(&self.bulkhead))
+    }
+}
+
+/// Layer that applies [`RetryMiddleware`] with a fixed policy.
+#[derive(Debug, Clone)]
+pub struct RetryLayer {
+    policy: RetryPolicy,
+}
+
+impl RetryLayer {
+    /// Create a retry layer from the given policy.
+    #[must_use]
+    pub fn new(policy: RetryPolicy) -> Self {
+        Self { policy }
+    }
+}
+
+impl<H: Handler> Layer<H> for RetryLayer {
+    type Service = RetryMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        RetryMiddleware::new(inner, self.policy.clone())
+    }
+}
+
+/// Layer that applies [`CompressionMiddleware`] with a fixed config.
+///
+/// ```
+/// use asupersync::web::middleware::{CompressionConfig, CompressionLayer};
+/// use asupersync::web::{FnHandler, Router, get};
+///
+/// let app = Router::new()
+///     .route("/big", get(FnHandler::new(|| "payload".repeat(100))))
+///     .layer(CompressionLayer::new(CompressionConfig::default()));
+/// # let _ = app;
+/// ```
+#[derive(Debug, Clone)]
+pub struct CompressionLayer {
+    config: CompressionConfig,
+}
+
+impl CompressionLayer {
+    /// Create a compression layer from the given config.
+    #[must_use]
+    pub fn new(config: CompressionConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Default for CompressionLayer {
+    fn default() -> Self {
+        Self::new(CompressionConfig::default())
+    }
+}
+
+impl<H: Handler> Layer<H> for CompressionLayer {
+    type Service = CompressionMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        CompressionMiddleware::new(inner, self.config.clone())
+    }
+}
+
+/// Layer that applies [`RequestBodyLimitMiddleware`] with a fixed byte cap.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestBodyLimitLayer {
+    max_bytes: usize,
+}
+
+impl RequestBodyLimitLayer {
+    /// Create a body-limit layer with the given maximum body size in bytes.
+    #[must_use]
+    pub fn new(max_bytes: usize) -> Self {
+        Self { max_bytes }
+    }
+}
+
+impl<H: Handler> Layer<H> for RequestBodyLimitLayer {
+    type Service = RequestBodyLimitMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        RequestBodyLimitMiddleware::new(inner, self.max_bytes)
+    }
+}
+
+/// Layer that applies [`RequestIdMiddleware`] sharing ONE counter across every
+/// handler it wraps, so generated IDs stay unique router-wide.
+#[derive(Debug, Clone)]
+pub struct RequestIdLayer {
+    header_name: String,
+    counter: Arc<AtomicU64>,
+    max_id_length: usize,
+}
+
+impl RequestIdLayer {
+    /// Create a request-ID layer for the given header name.
+    ///
+    /// The ID counter is created once here; all handlers wrapped by this layer
+    /// value share it.
+    #[must_use]
+    pub fn new(header_name: impl Into<String>) -> Self {
+        Self::shared(header_name, Arc::new(AtomicU64::new(1)))
+    }
+
+    /// Create a request-ID layer around an existing shared counter.
+    #[must_use]
+    pub fn shared(header_name: impl Into<String>, counter: Arc<AtomicU64>) -> Self {
+        Self {
+            header_name: header_name.into(),
+            counter,
+            max_id_length: DEFAULT_REQUEST_ID_MAX_LENGTH,
+        }
+    }
+
+    /// Set the maximum accepted client-supplied request-ID length.
+    ///
+    /// Zero is coerced to the default, matching
+    /// [`RequestIdMiddleware::with_max_length`].
+    #[must_use]
+    pub fn with_max_length(mut self, max: usize) -> Self {
+        self.max_id_length = max;
+        self
+    }
+}
+
+impl<H: Handler> Layer<H> for RequestIdLayer {
+    type Service = RequestIdMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        RequestIdMiddleware::shared(inner, self.header_name.clone(), Arc::clone(&self.counter))
+            .with_max_length(self.max_id_length)
+    }
+}
+
+/// Layer that applies [`RequestTraceMiddleware`] with a fixed policy.
+///
+/// The router already traces dispatches by default (log-only); an explicit
+/// layer is how you add duration / trace-id header stamping or scope tracing
+/// to a subset of routes.
+///
+/// ```
+/// use asupersync::web::middleware::{RequestTraceLayer, RequestTracePolicy};
+/// use asupersync::web::{FnHandler, Router, get};
+///
+/// let app = Router::new()
+///     .route("/", get(FnHandler::new(|| "ok")))
+///     .layer(RequestTraceLayer::new(RequestTracePolicy::default()));
+/// # let _ = app;
+/// ```
+#[derive(Clone)]
+pub struct RequestTraceLayer {
+    policy: RequestTracePolicy,
+    time_getter: fn() -> Time,
+    sink: Option<RequestLogSink>,
+}
+
+impl RequestTraceLayer {
+    /// Create a request-trace layer using the wall clock.
+    #[must_use]
+    pub fn new(policy: RequestTracePolicy) -> Self {
+        Self::with_time_getter(policy, wall_clock_now)
+    }
+
+    /// Create a request-trace layer with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(policy: RequestTracePolicy, time_getter: fn() -> Time) -> Self {
+        Self {
+            policy,
+            time_getter,
+            sink: None,
+        }
+    }
+
+    /// Attach a structured record sink observing every traced exchange.
+    #[must_use]
+    pub fn with_record_sink(mut self, sink: RequestLogSink) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+}
+
+impl<H: Handler> Layer<H> for RequestTraceLayer {
+    type Service = RequestTraceMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        let middleware =
+            RequestTraceMiddleware::with_time_getter(inner, self.policy.clone(), self.time_getter);
+        match &self.sink {
+            Some(sink) => middleware.with_record_sink(Arc::clone(sink)),
+            None => middleware,
+        }
+    }
+}
+
+/// Layer that applies [`AuthMiddleware`] with a fixed policy.
+#[derive(Debug, Clone)]
+pub struct AuthLayer {
+    policy: AuthPolicy,
+    time_getter: fn() -> Time,
+}
+
+impl AuthLayer {
+    /// Create an auth layer using the wall clock.
+    #[must_use]
+    pub fn new(policy: AuthPolicy) -> Self {
+        Self::with_time_getter(policy, wall_clock_now)
+    }
+
+    /// Create an auth layer with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(policy: AuthPolicy, time_getter: fn() -> Time) -> Self {
+        Self {
+            policy,
+            time_getter,
+        }
+    }
+}
+
+impl<H: Handler> Layer<H> for AuthLayer {
+    type Service = AuthMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        AuthMiddleware::with_time_getter(inner, self.policy.clone(), self.time_getter)
+    }
+}
+
+/// Layer that applies [`LoadShedMiddleware`] sharing ONE in-flight counter
+/// across every handler it wraps, so shedding is router-wide rather than
+/// per-route.
+#[derive(Debug, Clone)]
+pub struct LoadShedLayer {
+    policy: LoadShedPolicy,
+    in_flight: Arc<AtomicUsize>,
+}
+
+impl LoadShedLayer {
+    /// Create a load-shed layer from the given policy.
+    ///
+    /// The in-flight counter is created once here; all handlers wrapped by
+    /// this layer value share it.
+    #[must_use]
+    pub fn new(policy: LoadShedPolicy) -> Self {
+        Self {
+            policy,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl<H: Handler> Layer<H> for LoadShedLayer {
+    type Service = LoadShedMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        LoadShedMiddleware {
+            inner,
+            policy: self.policy,
+            in_flight: Arc::clone(&self.in_flight),
+        }
+    }
+}
+
+/// Layer that applies [`CatchPanicMiddleware`].
+///
+/// A panicking handler yields `500` with the stable `[ASUP-E502]` token in
+/// the body (panic details stay server-side). Keep this layer outermost so
+/// panics in other middleware are contained too.
+///
+/// ```
+/// use asupersync::web::middleware::CatchPanicLayer;
+/// use asupersync::web::{FnHandler, Router, get};
+///
+/// let app = Router::new()
+///     .route("/", get(FnHandler::new(|| "ok")))
+///     .layer(CatchPanicLayer::new());
+/// # let _ = app;
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CatchPanicLayer;
+
+impl CatchPanicLayer {
+    /// Create a panic-recovery layer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl<H: Handler> Layer<H> for CatchPanicLayer {
+    type Service = CatchPanicMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        CatchPanicMiddleware::new(inner)
+    }
+}
+
+/// Layer that applies [`NormalizePathMiddleware`] with a fixed strategy.
+#[derive(Debug, Clone, Copy)]
+pub struct NormalizePathLayer {
+    strategy: TrailingSlash,
+}
+
+impl NormalizePathLayer {
+    /// Create a path-normalization layer with the given strategy.
+    #[must_use]
+    pub fn new(strategy: TrailingSlash) -> Self {
+        Self { strategy }
+    }
+}
+
+impl<H: Handler> Layer<H> for NormalizePathLayer {
+    type Service = NormalizePathMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        NormalizePathMiddleware::new(inner, self.strategy)
+    }
+}
+
+/// Layer that applies [`SetResponseHeaderMiddleware`] with a fixed header.
+#[derive(Debug, Clone)]
+pub struct SetResponseHeaderLayer {
+    name: String,
+    value: String,
+    mode: HeaderOverwrite,
+}
+
+impl SetResponseHeaderLayer {
+    /// Create a response-header layer.
+    #[must_use]
+    pub fn new(name: impl Into<String>, value: impl Into<String>, mode: HeaderOverwrite) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+            mode,
+        }
+    }
+}
+
+impl<H: Handler> Layer<H> for SetResponseHeaderLayer {
+    type Service = SetResponseHeaderMiddleware<H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        SetResponseHeaderMiddleware::new(inner, self.name.clone(), self.value.clone(), self.mode)
     }
 }
 
@@ -4402,7 +5199,7 @@ mod tests {
         let resp = mw.call(make_request());
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
         let body = String::from_utf8_lossy(&resp.body);
-        assert_eq!(body, "Internal Server Error");
+        assert_eq!(body, "[ASUP-E502] Internal Server Error");
     }
 
     #[test]
@@ -5035,6 +5832,195 @@ mod tests {
             // AUDIT VERIFICATION: Edge case robustness
             // - Handles zero burst configuration correctly
             // - Still returns proper 429 + Retry-After headers
+        }
+    }
+
+    // ─── Layer adapter tests (br-asupersync-server-stack-hardening-eeexl1.3) ─
+
+    mod layer_adapters {
+        use super::*;
+        use crate::service::{Identity, Stack};
+
+        #[test]
+        fn timeout_layer_matches_direct_construction() {
+            set_timeout_test_time(0);
+            let via_layer =
+                TimeoutLayer::with_time_getter(Duration::from_secs(5), timeout_test_time)
+                    .layer(FnHandler::new(ok_handler));
+            let direct = TimeoutMiddleware::with_time_getter(
+                FnHandler::new(ok_handler),
+                Duration::from_secs(5),
+                timeout_test_time,
+            );
+            let layer_resp = call_sync(&via_layer, make_request());
+            let direct_resp = call_sync(&direct, make_request());
+            assert_eq!(layer_resp.status, direct_resp.status);
+            assert_eq!(layer_resp.status, StatusCode::OK);
+        }
+
+        #[test]
+        fn budget_aware_timeout_tightens_to_remaining_budget() {
+            set_timeout_test_time(0);
+            // Handler "takes" 100ms on the injected clock.
+            let slow = FnHandler::new(|| {
+                set_timeout_test_time(100);
+                "done"
+            });
+            // Cap is generous (5s) but the request budget expires at 50ms →
+            // min-plus: effective timeout is 50ms → 504.
+            let mw = TimeoutMiddleware::budget_aware_with_time_getter(
+                slow,
+                Duration::from_secs(5),
+                timeout_test_time,
+            );
+            let budget = crate::types::Budget::INFINITE.with_deadline(Time::from_millis(50));
+            let cx = crate::Cx::for_testing_with_budget(budget);
+            let resp = futures_lite::future::block_on(Handler::call(&mw, &cx, make_request()));
+            assert_eq!(
+                resp.status,
+                StatusCode::GATEWAY_TIMEOUT,
+                "budget tighter than cap must win (min-plus)"
+            );
+
+            // Without a budget deadline the cap alone applies → OK.
+            set_timeout_test_time(0);
+            let fast = FnHandler::new(|| {
+                set_timeout_test_time(100);
+                "done"
+            });
+            let mw = TimeoutMiddleware::budget_aware_with_time_getter(
+                fast,
+                Duration::from_secs(5),
+                timeout_test_time,
+            );
+            let resp = call_sync(&mw, make_request());
+            assert_eq!(resp.status, StatusCode::OK);
+        }
+
+        #[test]
+        fn auth_layer_short_circuits_unauthorized() {
+            let mw = AuthLayer::new(AuthPolicy::exact_bearer("token-123"))
+                .layer(FnHandler::new(ok_handler));
+            let resp = call_sync(&mw, make_request());
+            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+        }
+
+        #[test]
+        fn rate_limit_layer_shares_limiter_across_wrapped_handlers() {
+            set_rate_limit_test_time(0);
+            let policy = RateLimitPolicy {
+                rate: 1,
+                burst: 1,
+                period: Duration::from_secs(60),
+                ..Default::default()
+            };
+            let layer = RateLimitLayer::with_time_getter(policy, rate_limit_test_time);
+            let a = layer.layer(FnHandler::new(ok_handler));
+            let b = layer.layer(FnHandler::new(ok_handler));
+
+            assert_eq!(call_sync(&a, make_request()).status, StatusCode::OK);
+            // The second handler shares the limiter, so the single token is gone.
+            assert_eq!(
+                call_sync(&b, make_request()).status,
+                StatusCode::TOO_MANY_REQUESTS,
+                "layer-shared limiter must apply across all wrapped handlers"
+            );
+        }
+
+        #[test]
+        fn circuit_breaker_layer_shares_breaker() {
+            let layer = CircuitBreakerLayer::new(CircuitBreakerPolicy::default());
+            let a = layer.layer(FnHandler::new(ok_handler));
+            let b = layer.layer(FnHandler::new(ok_handler));
+            assert!(
+                Arc::ptr_eq(&a.breaker, &b.breaker),
+                "one layer value must share one breaker"
+            );
+        }
+
+        #[test]
+        fn bulkhead_layer_shares_bulkhead() {
+            let layer = BulkheadLayer::new(BulkheadPolicy::default());
+            let a = layer.layer(FnHandler::new(ok_handler));
+            let b = layer.layer(FnHandler::new(ok_handler));
+            assert!(
+                Arc::ptr_eq(&a.bulkhead, &b.bulkhead),
+                "one layer value must share one bulkhead"
+            );
+        }
+
+        #[test]
+        fn load_shed_layer_shares_in_flight_counter() {
+            let layer = LoadShedLayer::new(LoadShedPolicy { max_in_flight: 7 });
+            let a = layer.layer(FnHandler::new(ok_handler));
+            let b = layer.layer(FnHandler::new(ok_handler));
+            assert!(
+                Arc::ptr_eq(&a.in_flight, &b.in_flight),
+                "one layer value must share one in-flight counter"
+            );
+        }
+
+        #[test]
+        fn request_id_layer_keeps_ids_unique_across_wrapped_handlers() {
+            let layer = RequestIdLayer::new("x-request-id");
+            let a = layer.layer(FnHandler::new(ok_handler));
+            let b = layer.layer(FnHandler::new(ok_handler));
+            assert!(Arc::ptr_eq(&a.counter, &b.counter));
+
+            let ra = call_sync(&a, make_request());
+            let rb = call_sync(&b, make_request());
+            let ida = ra.headers.get("x-request-id").cloned();
+            let idb = rb.headers.get("x-request-id").cloned();
+            assert!(ida.is_some() && idb.is_some());
+            assert_ne!(ida, idb, "shared counter must keep generated IDs unique");
+        }
+
+        #[test]
+        fn service_stack_composes_web_layers() {
+            // The service stack's Stack/Identity machinery composes web layers
+            // directly: ONE Layer trait serves both families.
+            let stack = Stack::new(
+                AuthLayer::new(AuthPolicy::exact_bearer("tok")),
+                SetResponseHeaderLayer::new("x-sec", "1", HeaderOverwrite::Always),
+            );
+            let handler = stack.layer(FnHandler::new(ok_handler));
+
+            // Unauthorized request: inner auth layer rejects, outer header
+            // layer still stamps the synthetic response.
+            let resp = call_sync(&handler, make_request());
+            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+            assert_eq!(resp.headers.get("x-sec").map(String::as_str), Some("1"));
+        }
+
+        #[test]
+        fn identity_layer_is_transparent_for_handlers() {
+            let handler = Identity.layer(FnHandler::new(ok_handler));
+            assert_eq!(call_sync(&handler, make_request()).status, StatusCode::OK);
+        }
+
+        #[test]
+        fn middleware_stack_layer_method_composes() {
+            let handler = MiddlewareStack::new(FnHandler::new(ok_handler))
+                .layer(CatchPanicLayer::new())
+                .layer(SetResponseHeaderLayer::new(
+                    "x-layered",
+                    "yes",
+                    HeaderOverwrite::Always,
+                ))
+                .build();
+            let resp = call_sync(&handler, make_request());
+            assert_eq!(resp.status, StatusCode::OK);
+            assert_eq!(
+                resp.headers.get("x-layered").map(String::as_str),
+                Some("yes")
+            );
+        }
+
+        #[test]
+        fn boxed_dyn_handler_can_be_layered() {
+            let boxed: Box<dyn Handler> = Box::new(FnHandler::new(ok_handler));
+            let wrapped = CatchPanicLayer::new().layer(boxed);
+            assert_eq!(call_sync(&wrapped, make_request()).status, StatusCode::OK);
         }
     }
 }

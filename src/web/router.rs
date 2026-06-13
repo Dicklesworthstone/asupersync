@@ -16,12 +16,19 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::extract::{Extensions, Request};
 use super::handler::Handler;
+use super::middleware::{
+    RequestLogSink, RequestTracePolicy, resolve_trace_id, trace_request, wall_clock_now,
+};
 use super::response::{IntoResponse, Response, StatusCode};
 use crate::Cx;
+use crate::service::Layer;
 use crate::types::{
-    Budget,
+    Budget, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
 
@@ -97,6 +104,18 @@ impl MethodRouter {
     #[must_use]
     pub fn options(self, handler: impl Handler) -> Self {
         self.on(METHOD_OPTIONS, handler)
+    }
+
+    /// Re-wrap every registered method handler through `wrap`.
+    ///
+    /// Used by [`Router::layer`] to apply middleware onion-style
+    /// (br-asupersync-server-stack-hardening-eeexl1.3).
+    fn map_handlers(&mut self, wrap: &dyn Fn(Box<dyn Handler>) -> Box<dyn Handler>) {
+        let handlers = std::mem::take(&mut self.handlers);
+        self.handlers = handlers
+            .into_iter()
+            .map(|(method, handler)| (method, wrap(handler)))
+            .collect();
     }
 
     /// Dispatch a request to the appropriate method handler.
@@ -322,12 +341,50 @@ impl RoutePattern {
 /// let app = Router::new()
 ///     .nest("/api/v1", api);
 /// ```
-#[derive(Default)]
 pub struct Router {
     routes: Vec<(RoutePattern, MethodRouter)>,
     nested: Vec<(String, Self)>,
     fallback: Option<Box<dyn Handler>>,
     extensions: Extensions,
+    default_trace: Option<DefaultTrace>,
+}
+
+/// Default-on request trace configuration for [`Router`]
+/// (br-asupersync-server-stack-hardening-eeexl1.3 AC3).
+struct DefaultTrace {
+    policy: RequestTracePolicy,
+    time_getter: fn() -> Time,
+    counter: Arc<AtomicU64>,
+    sink: Option<RequestLogSink>,
+}
+
+impl Default for DefaultTrace {
+    fn default() -> Self {
+        Self {
+            // Log-only default: structured request log lines without
+            // response-header mutation. Opt into duration/trace headers via
+            // `Router::with_default_trace_policy`.
+            policy: RequestTracePolicy {
+                duration_header: None,
+                trace_header: None,
+            },
+            time_getter: wall_clock_now,
+            counter: Arc::new(AtomicU64::new(1)),
+            sink: None,
+        }
+    }
+}
+
+impl Default for Router {
+    fn default() -> Self {
+        Self {
+            routes: Vec::new(),
+            nested: Vec::new(),
+            fallback: None,
+            extensions: Extensions::new(),
+            default_trace: Some(DefaultTrace::default()),
+        }
+    }
 }
 
 impl Router {
@@ -359,6 +416,73 @@ impl Router {
         self
     }
 
+    /// Wrap every route registered **so far** — including nested routers and
+    /// the fallback — with the given middleware layer.
+    ///
+    /// Any [`Layer`] from `asupersync::web::middleware` (or any custom
+    /// `Layer<Box<dyn Handler>>` whose output is a [`Handler`]) can be used;
+    /// web and service middleware share that one composition trait
+    /// (br-asupersync-server-stack-hardening-eeexl1.3).
+    ///
+    /// # Onion ordering
+    ///
+    /// Each `.layer(...)` call wraps everything registered so far, so the
+    /// **last-added layer is the outermost**: it sees the request first and
+    /// the response last. This matches [`MiddlewareStack`] and
+    /// `ServiceBuilder` composition in this crate:
+    ///
+    /// ```text
+    /// Router::new()
+    ///     .route("/a", get(handler))
+    ///     .layer(auth)        // added first  → inner
+    ///     .layer(request_id)  // added last   → outer
+    ///
+    ///            ┌──────────── request_id ────────────┐
+    ///            │        ┌─────── auth ───────┐      │
+    /// Request ──▶│ before │ before ┌─────────┐ │      │
+    ///            │        │        │ handler │ │      │
+    /// Response ◀─│ after  │ after  └─────────┘ │      │
+    ///            │        └────────────────────┘      │
+    ///            └─────────────────────────────────────┘
+    /// ```
+    ///
+    /// # Scope
+    ///
+    /// Routes registered **after** a `.layer(...)` call are *not* wrapped by
+    /// it. Register routes first, then layers, or interleave deliberately when
+    /// some routes should bypass a middleware.
+    ///
+    /// Stateful layers (rate limit, circuit breaker, bulkhead, load shed,
+    /// request-ID) hold their shared state in the layer value itself, so one
+    /// `.layer(...)` call shares a single limiter/breaker/counter across all
+    /// wrapped routes.
+    ///
+    /// [`MiddlewareStack`]: super::middleware::MiddlewareStack
+    #[must_use]
+    pub fn layer<L>(mut self, layer: L) -> Self
+    where
+        L: Layer<Box<dyn Handler>>,
+        L::Service: Handler,
+    {
+        let wrap =
+            move |handler: Box<dyn Handler>| -> Box<dyn Handler> { Box::new(layer.layer(handler)) };
+        self.apply_wrap(&wrap);
+        self
+    }
+
+    /// Apply a handler wrapper to all routes, the fallback, and nested routers.
+    fn apply_wrap(&mut self, wrap: &dyn Fn(Box<dyn Handler>) -> Box<dyn Handler>) {
+        for (_, method_router) in &mut self.routes {
+            method_router.map_handlers(wrap);
+        }
+        if let Some(fallback) = self.fallback.take() {
+            self.fallback = Some(wrap(fallback));
+        }
+        for (_, nested) in &mut self.nested {
+            nested.apply_wrap(wrap);
+        }
+    }
+
     /// Attach clonable shared typed state for request extraction.
     ///
     /// Handlers can retrieve this state with [`super::extract::State<T>`].
@@ -368,6 +492,51 @@ impl Router {
         T: Clone + Send + Sync + 'static,
     {
         self.extensions.insert_typed(state);
+        self
+    }
+
+    /// Disable the default request trace.
+    ///
+    /// By default, every dispatched request emits structured start/completion
+    /// log events carrying outcome severity, duration, and the request id
+    /// (generated when the request carries none). Cancelled requests log as
+    /// `499` with their cancel reason. This opt-out silences that
+    /// instrumentation entirely.
+    #[must_use]
+    pub fn without_default_trace(mut self) -> Self {
+        self.default_trace = None;
+        self
+    }
+
+    /// Customize the default request-trace policy, e.g. to stamp
+    /// `x-response-time-ms` / `x-trace-id` response headers (off by default).
+    #[must_use]
+    pub fn with_default_trace_policy(mut self, policy: RequestTracePolicy) -> Self {
+        self.default_trace
+            .get_or_insert_with(DefaultTrace::default)
+            .policy = policy;
+        self
+    }
+
+    /// Use a custom time source for the default request trace
+    /// (deterministic tests).
+    #[must_use]
+    pub fn with_default_trace_time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.default_trace
+            .get_or_insert_with(DefaultTrace::default)
+            .time_getter = time_getter;
+        self
+    }
+
+    /// Attach a structured record sink observing every traced exchange.
+    ///
+    /// Golden tests use this to pin the request log schema; production
+    /// deployments normally rely on the `tracing` events instead.
+    #[must_use]
+    pub fn with_default_trace_record_sink(mut self, sink: RequestLogSink) -> Self {
+        self.default_trace
+            .get_or_insert_with(DefaultTrace::default)
+            .sink = Some(sink);
         self
     }
 
@@ -389,8 +558,44 @@ impl Router {
     ///
     /// This is the async path used by runtime-integrated handlers and lab
     /// harnesses that already own a [`Cx`].
+    ///
+    /// Unless [`Router::without_default_trace`] was called, dispatch runs
+    /// inside the default request trace: structured start/completion log
+    /// events with outcome severity and duration, a generated request id when
+    /// the request carries none, and `499` logging for cancelled requests.
+    /// Nested routers do not re-trace — only the outermost router (the one
+    /// whose `handle_with_cx` is invoked) instruments the exchange.
     #[must_use]
     pub async fn handle_with_cx(&self, cx: &Cx, mut req: Request) -> Response {
+        if let Some(trace) = &self.default_trace {
+            Self::ensure_request_id(&mut req, &trace.counter);
+            return trace_request(
+                &trace.policy,
+                trace.time_getter,
+                trace.sink.as_ref(),
+                cx,
+                req,
+                |req| self.handle_inner(cx, req),
+            )
+            .await;
+        }
+        self.handle_inner(cx, req).await
+    }
+
+    /// Generate a request id when the request carries none, mirroring it
+    /// into the `x-request-id` header so a downstream
+    /// [`super::middleware::RequestIdMiddleware`] reuses the same id instead
+    /// of minting a divergent one.
+    fn ensure_request_id(req: &mut Request, counter: &AtomicU64) {
+        if resolve_trace_id(req).is_none() {
+            let id = format!("req-{}", counter.fetch_add(1, Ordering::Relaxed));
+            req.extensions.insert("request_id", id.clone());
+            req.headers.insert("x-request-id".to_string(), id);
+        }
+    }
+
+    /// Route-match and dispatch without trace instrumentation.
+    async fn handle_inner(&self, cx: &Cx, mut req: Request) -> Response {
         req.extensions.extend_from(&self.extensions);
 
         // Pick the most specific top-level route. First-registered only wins
@@ -428,7 +633,9 @@ impl Router {
         }
         if let Some((_, router, sub_path)) = best_nested_match {
             req.path = sub_path;
-            return Box::pin(router.handle_with_cx(cx, req)).await;
+            // Nested routers dispatch without re-tracing: the outermost
+            // router already instruments the exchange.
+            return Box::pin(router.handle_inner(cx, req)).await;
         }
 
         // Fallback.
@@ -1400,6 +1607,559 @@ mod tests {
             assert_eq!(
                 String::from_utf8(resp_admin.body.to_vec()).unwrap(),
                 "captured:admin"
+            );
+        }
+    }
+
+    // ─── Router::layer (br-asupersync-server-stack-hardening-eeexl1.3) ──────
+
+    mod layering {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+
+        /// Test layer that records enter/exit events around the inner handler.
+        #[derive(Clone)]
+        struct RecordingLayer {
+            name: &'static str,
+            log: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl RecordingLayer {
+            fn new(name: &'static str, log: Arc<Mutex<Vec<String>>>) -> Self {
+                Self { name, log }
+            }
+        }
+
+        struct RecordingMiddleware<H> {
+            inner: H,
+            name: &'static str,
+            log: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl<H: Handler> Layer<H> for RecordingLayer {
+            type Service = RecordingMiddleware<H>;
+
+            fn layer(&self, inner: H) -> Self::Service {
+                RecordingMiddleware {
+                    inner,
+                    name: self.name,
+                    log: Arc::clone(&self.log),
+                }
+            }
+        }
+
+        impl<H: Handler> Handler for RecordingMiddleware<H> {
+            fn call(
+                &self,
+                cx: &Cx,
+                req: Request,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+            {
+                let cx = cx.clone();
+                Box::pin(async move {
+                    self.log
+                        .lock()
+                        .expect("log lock")
+                        .push(format!("enter:{}", self.name));
+                    let resp = self.inner.call(&cx, req).await;
+                    self.log
+                        .lock()
+                        .expect("log lock")
+                        .push(format!("exit:{}", self.name));
+                    resp
+                })
+            }
+        }
+
+        fn recording_handler(log: Arc<Mutex<Vec<String>>>) -> impl Handler {
+            struct H(Arc<Mutex<Vec<String>>>);
+            impl Handler for H {
+                fn call(
+                    &self,
+                    _cx: &Cx,
+                    _req: Request,
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+                {
+                    Box::pin(async move {
+                        self.0.lock().expect("log lock").push("handler".to_string());
+                        StatusCode::OK.into_response()
+                    })
+                }
+            }
+            H(log)
+        }
+
+        /// Golden execution-order trace for three stacked layers.
+        ///
+        /// Documented contract: the LAST-added layer is the OUTERMOST — it
+        /// sees the request first and the response last.
+        #[test]
+        fn layer_execution_order_golden() {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let router = Router::new()
+                .route("/traced", get(recording_handler(Arc::clone(&log))))
+                .layer(RecordingLayer::new("auth", Arc::clone(&log)))
+                .layer(RecordingLayer::new("trace", Arc::clone(&log)))
+                .layer(RecordingLayer::new("request_id", Arc::clone(&log)));
+
+            let resp = router.handle(Request::new("GET", "/traced"));
+            assert_eq!(resp.status, StatusCode::OK);
+
+            let golden = vec![
+                "enter:request_id".to_string(),
+                "enter:trace".to_string(),
+                "enter:auth".to_string(),
+                "handler".to_string(),
+                "exit:auth".to_string(),
+                "exit:trace".to_string(),
+                "exit:request_id".to_string(),
+            ];
+            assert_eq!(
+                *log.lock().expect("log lock"),
+                golden,
+                "onion ordering: last-added layer must be outermost"
+            );
+        }
+
+        #[test]
+        fn routes_added_after_layer_are_not_wrapped() {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let router = Router::new()
+                .route("/wrapped", get(FnHandler::new(ok_handler)))
+                .layer(RecordingLayer::new("mw", Arc::clone(&log)))
+                .route("/bare", get(FnHandler::new(ok_handler)));
+
+            let _ = router.handle(Request::new("GET", "/bare"));
+            assert!(
+                log.lock().expect("log lock").is_empty(),
+                "route added after .layer() must not be wrapped"
+            );
+
+            let _ = router.handle(Request::new("GET", "/wrapped"));
+            assert_eq!(
+                *log.lock().expect("log lock"),
+                vec!["enter:mw".to_string(), "exit:mw".to_string()],
+                "route added before .layer() must be wrapped"
+            );
+        }
+
+        #[test]
+        fn layer_wraps_fallback() {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let router = Router::new()
+                .fallback(FnHandler::new(not_found_handler))
+                .layer(RecordingLayer::new("mw", Arc::clone(&log)));
+
+            let resp = router.handle(Request::new("GET", "/nope"));
+            assert_eq!(resp.status, StatusCode::NOT_FOUND);
+            assert_eq!(
+                *log.lock().expect("log lock"),
+                vec!["enter:mw".to_string(), "exit:mw".to_string()],
+                "fallback handler must be wrapped by .layer()"
+            );
+        }
+
+        #[test]
+        fn layer_wraps_nested_routers() {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let api = Router::new().route("/users", get(FnHandler::new(ok_handler)));
+            let router = Router::new()
+                .nest("/api", api)
+                .layer(RecordingLayer::new("mw", Arc::clone(&log)));
+
+            let resp = router.handle(Request::new("GET", "/api/users"));
+            assert_eq!(resp.status, StatusCode::OK);
+            assert_eq!(
+                *log.lock().expect("log lock"),
+                vec!["enter:mw".to_string(), "exit:mw".to_string()],
+                "nested router handlers must be wrapped by .layer()"
+            );
+        }
+
+        #[test]
+        fn builtin_middleware_layers_compose_on_router() {
+            use crate::web::middleware::{
+                AuthLayer, AuthPolicy, HeaderOverwrite, SetResponseHeaderLayer,
+            };
+
+            let router = Router::new()
+                .route("/secure", get(FnHandler::new(ok_handler)))
+                .layer(AuthLayer::new(AuthPolicy::exact_bearer("tok")))
+                .layer(SetResponseHeaderLayer::new(
+                    "x-frame-options",
+                    "DENY",
+                    HeaderOverwrite::Always,
+                ));
+
+            // Unauthorized: auth (inner) rejects; header layer (outer) still stamps.
+            let resp = router.handle(Request::new("GET", "/secure"));
+            assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                resp.headers.get("x-frame-options").map(String::as_str),
+                Some("DENY")
+            );
+
+            // Authorized request flows through to the handler.
+            let resp = router
+                .handle(Request::new("GET", "/secure").with_header("authorization", "Bearer tok"));
+            assert_eq!(resp.status, StatusCode::OK);
+            assert_eq!(
+                resp.headers.get("x-frame-options").map(String::as_str),
+                Some("DENY")
+            );
+        }
+
+        // ─── Extension<T> lifecycle ──────────────────────────────────────────
+
+        mod extension_lifecycle {
+            use super::*;
+            use crate::web::extract::Extension;
+            use crate::web::handler::FnHandler1;
+            use std::sync::atomic::{AtomicU64, Ordering};
+            use std::sync::{Arc, Mutex, Weak};
+
+            #[derive(Clone)]
+            struct RequestStamp {
+                serial: u64,
+            }
+
+            /// Middleware that stamps each request with a unique serial.
+            #[derive(Clone)]
+            struct StampLayer {
+                counter: Arc<AtomicU64>,
+            }
+
+            struct StampMiddleware<H> {
+                inner: H,
+                counter: Arc<AtomicU64>,
+            }
+
+            impl<H: Handler> Layer<H> for StampLayer {
+                type Service = StampMiddleware<H>;
+
+                fn layer(&self, inner: H) -> Self::Service {
+                    StampMiddleware {
+                        inner,
+                        counter: Arc::clone(&self.counter),
+                    }
+                }
+            }
+
+            impl<H: Handler> Handler for StampMiddleware<H> {
+                fn call(
+                    &self,
+                    cx: &Cx,
+                    mut req: Request,
+                ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+                {
+                    let serial = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    req.extensions.insert_typed(RequestStamp { serial });
+                    self.inner.call(cx, req)
+                }
+            }
+
+            fn stamp_echo_handler() -> impl Handler {
+                FnHandler1::<_, Extension<RequestStamp>>::new(
+                    |Extension(stamp): Extension<RequestStamp>| format!("serial:{}", stamp.serial),
+                )
+            }
+
+            /// Insert-in-middleware → extract-in-handler, and cross-request
+            /// isolation: every request sees only its own stamp.
+            #[test]
+            fn middleware_insert_handler_extract_no_cross_request_bleed() {
+                let router = Router::new()
+                    .route("/stamped", get(stamp_echo_handler()))
+                    .layer(StampLayer {
+                        counter: Arc::new(AtomicU64::new(0)),
+                    });
+
+                let r1 = router.handle(Request::new("GET", "/stamped"));
+                let r2 = router.handle(Request::new("GET", "/stamped"));
+                let r3 = router.handle(Request::new("GET", "/stamped"));
+                assert_eq!(String::from_utf8(r1.body.to_vec()).unwrap(), "serial:1");
+                assert_eq!(String::from_utf8(r2.body.to_vec()).unwrap(), "serial:2");
+                assert_eq!(String::from_utf8(r3.body.to_vec()).unwrap(), "serial:3");
+            }
+
+            /// A handler that asks for a missing extension gets a 500: wiring
+            /// bugs must be loud, not silently defaulted.
+            #[test]
+            fn missing_extension_is_internal_server_error() {
+                let router = Router::new().route("/stamped", get(stamp_echo_handler()));
+                let resp = router.handle(Request::new("GET", "/stamped"));
+                assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+            }
+
+            #[derive(Clone)]
+            struct ProbeExt(#[allow(dead_code)] Arc<()>);
+
+            /// Extensions drop with the request: once the request region's
+            /// handler run completes, no copy of the extension value survives.
+            #[test]
+            fn extension_dropped_when_request_region_completes() {
+                use crate::web::request_region::{RegionOutcome, RequestRegion};
+
+                let probe = Arc::new(());
+                let weak: Weak<()> = Arc::downgrade(&probe);
+
+                let mut req = Request::new("GET", "/probe");
+                req.extensions.insert_typed(ProbeExt(probe));
+
+                let handler = FnHandler1::<_, Extension<ProbeExt>>::new(
+                    |Extension(_probe): Extension<ProbeExt>| "ok",
+                );
+
+                let cx = Cx::for_testing();
+                let region = RequestRegion::new(&cx, req);
+                let outcome = futures_lite::future::block_on(region.run_handler(&handler));
+                assert!(matches!(outcome, RegionOutcome::Ok(_)));
+
+                assert!(
+                    weak.upgrade().is_none(),
+                    "extension value must drop with the request when the region run completes"
+                );
+            }
+
+            /// Routed dispatch drops middleware-inserted extensions request by
+            /// request: nothing accumulates across calls.
+            #[test]
+            fn per_request_extensions_do_not_accumulate() {
+                let weaks: Arc<Mutex<Vec<Weak<()>>>> = Arc::new(Mutex::new(Vec::new()));
+
+                #[derive(Clone)]
+                struct ProbeLayer {
+                    weaks: Arc<Mutex<Vec<Weak<()>>>>,
+                }
+
+                struct ProbeMiddleware<H> {
+                    inner: H,
+                    weaks: Arc<Mutex<Vec<Weak<()>>>>,
+                }
+
+                impl<H: Handler> Layer<H> for ProbeLayer {
+                    type Service = ProbeMiddleware<H>;
+
+                    fn layer(&self, inner: H) -> Self::Service {
+                        ProbeMiddleware {
+                            inner,
+                            weaks: Arc::clone(&self.weaks),
+                        }
+                    }
+                }
+
+                impl<H: Handler> Handler for ProbeMiddleware<H> {
+                    fn call(
+                        &self,
+                        cx: &Cx,
+                        mut req: Request,
+                    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+                    {
+                        let probe = Arc::new(());
+                        self.weaks
+                            .lock()
+                            .expect("weaks lock")
+                            .push(Arc::downgrade(&probe));
+                        req.extensions.insert_typed(ProbeExt(probe));
+                        self.inner.call(cx, req)
+                    }
+                }
+
+                let router = Router::new()
+                    .route(
+                        "/probe",
+                        get(FnHandler1::<_, Extension<ProbeExt>>::new(
+                            |Extension(_p): Extension<ProbeExt>| "ok",
+                        )),
+                    )
+                    .layer(ProbeLayer {
+                        weaks: Arc::clone(&weaks),
+                    });
+
+                for _ in 0..3 {
+                    let resp = router.handle(Request::new("GET", "/probe"));
+                    assert_eq!(resp.status, StatusCode::OK);
+                }
+
+                let weaks = weaks.lock().expect("weaks lock");
+                assert_eq!(weaks.len(), 3);
+                assert!(
+                    weaks.iter().all(|w| w.upgrade().is_none()),
+                    "every request's extension must be dropped once its dispatch completes"
+                );
+            }
+        }
+    }
+
+    // ─── Default request trace (br-asupersync-server-stack-hardening-eeexl1.3 AC3) ──
+
+    mod default_trace {
+        use super::*;
+        use crate::CancelReason;
+        use crate::web::middleware::{RequestLogRecord, RequestLogSink};
+        use std::sync::{Arc, Mutex};
+
+        fn fixed_time() -> Time {
+            Time::from_millis(7_000)
+        }
+
+        fn collecting_sink() -> (RequestLogSink, Arc<Mutex<Vec<RequestLogRecord>>>) {
+            let records = Arc::new(Mutex::new(Vec::new()));
+            let sink_records = Arc::clone(&records);
+            let sink: RequestLogSink = Arc::new(move |record: &RequestLogRecord| {
+                sink_records
+                    .lock()
+                    .expect("records lock")
+                    .push(record.clone());
+            });
+            (sink, records)
+        }
+
+        fn boom_handler() -> Response {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+
+        /// Golden of the structured request log emitted by the default-on
+        /// trace, scrubbed for determinism: a fixed time getter zeroes
+        /// durations, and generated request ids are sequential.
+        #[test]
+        fn default_trace_golden_scrubbed() {
+            let (sink, records) = collecting_sink();
+            let router = Router::new()
+                .route("/ok", get(FnHandler::new(ok_handler)))
+                .route("/boom", get(FnHandler::new(boom_handler)))
+                .with_default_trace_time_getter(fixed_time)
+                .with_default_trace_record_sink(sink);
+
+            let _ = router.handle(Request::new("GET", "/ok"));
+            let _ = router.handle(Request::new("GET", "/boom"));
+            let _ = router.handle(Request::new("GET", "/missing"));
+
+            let got =
+                serde_json::to_value(&*records.lock().expect("records lock")).expect("serialize");
+            let want = serde_json::json!([
+                {
+                    "method": "GET",
+                    "path": "/ok",
+                    "status": 200,
+                    "severity": "ok",
+                    "duration_ms": 0,
+                    "request_id": "req-1",
+                    "cancelled": false,
+                    "cancel_reason": null
+                },
+                {
+                    "method": "GET",
+                    "path": "/boom",
+                    "status": 500,
+                    "severity": "server_error",
+                    "duration_ms": 0,
+                    "request_id": "req-2",
+                    "cancelled": false,
+                    "cancel_reason": null
+                },
+                {
+                    "method": "GET",
+                    "path": "/missing",
+                    "status": 404,
+                    "severity": "client_error",
+                    "duration_ms": 0,
+                    "request_id": "req-3",
+                    "cancelled": false,
+                    "cancel_reason": null
+                }
+            ]);
+            assert_eq!(got, want, "request log schema golden drifted");
+        }
+
+        /// Cancelled requests log as 499 with the cancel reason — the
+        /// outcome-severity contract for client-abandoned work.
+        #[test]
+        fn cancelled_request_logs_499_with_reason() {
+            let (sink, records) = collecting_sink();
+            let router = Router::new()
+                .route("/slow", get(FnHandler::new(ok_handler)))
+                .with_default_trace_time_getter(fixed_time)
+                .with_default_trace_record_sink(sink);
+
+            let cx = Cx::for_testing();
+            cx.set_cancel_requested(true);
+            cx.set_cancel_reason(CancelReason::user("client disconnected"));
+            let _resp = futures_lite::future::block_on(
+                router.handle_with_cx(&cx, Request::new("GET", "/slow")),
+            );
+
+            let records = records.lock().expect("records lock");
+            assert_eq!(records.len(), 1);
+            let record = &records[0];
+            assert_eq!(record.status, 499, "cancelled requests must log as 499");
+            assert_eq!(record.severity, "cancelled");
+            assert!(record.cancelled);
+            let reason = record.cancel_reason.as_deref().expect("cancel reason");
+            assert!(
+                reason.contains("client disconnected"),
+                "cancel reason must carry the message, got: {reason}"
+            );
+        }
+
+        /// Opt-out: `without_default_trace` silences the instrumentation.
+        #[test]
+        fn without_default_trace_emits_nothing() {
+            let (sink, records) = collecting_sink();
+            let router = Router::new()
+                .with_default_trace_record_sink(sink)
+                .without_default_trace()
+                .route("/ok", get(FnHandler::new(ok_handler)));
+
+            let resp = router.handle(Request::new("GET", "/ok"));
+            assert_eq!(resp.status, StatusCode::OK);
+            assert!(
+                records.lock().expect("records lock").is_empty(),
+                "opted-out router must not emit trace records"
+            );
+        }
+
+        /// A client-supplied request id is propagated, never replaced.
+        #[test]
+        fn client_request_id_is_propagated() {
+            let (sink, records) = collecting_sink();
+            let router = Router::new()
+                .route("/ok", get(FnHandler::new(ok_handler)))
+                .with_default_trace_time_getter(fixed_time)
+                .with_default_trace_record_sink(sink);
+
+            let _ = router
+                .handle(Request::new("GET", "/ok").with_header("x-request-id", "client-abc-123"));
+
+            let records = records.lock().expect("records lock");
+            assert_eq!(records[0].request_id.as_deref(), Some("client-abc-123"));
+        }
+
+        /// Response headers stay untouched under the log-only default policy.
+        #[test]
+        fn default_policy_does_not_mutate_response_headers() {
+            let router = Router::new().route("/ok", get(FnHandler::new(ok_handler)));
+            let resp = router.handle(Request::new("GET", "/ok"));
+            assert!(!resp.headers.contains_key("x-response-time-ms"));
+            assert!(!resp.headers.contains_key("x-trace-id"));
+        }
+
+        /// Opting into headers via the policy stamps duration + trace id.
+        #[test]
+        fn opt_in_policy_stamps_headers() {
+            let router = Router::new()
+                .route("/ok", get(FnHandler::new(ok_handler)))
+                .with_default_trace_policy(RequestTracePolicy::default())
+                .with_default_trace_time_getter(fixed_time);
+
+            let resp = router.handle(Request::new("GET", "/ok"));
+            assert_eq!(
+                resp.headers.get("x-response-time-ms").map(String::as_str),
+                Some("0")
+            );
+            assert_eq!(
+                resp.headers.get("x-trace-id").map(String::as_str),
+                Some("req-1")
             );
         }
     }

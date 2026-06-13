@@ -29,11 +29,11 @@
 //!        anything else surfaces as `<non-string panic payload>`.
 //!     3. `tracing::error!` is emitted with structured fields:
 //!        `method`, `path`, `trace_id`, `panic_message`, plus the
-//!        message "http handler panicked; returning 500 Internal
-//!        Server Error".
-//!     4. The 500 response body remains `b"Internal Server Error"`
-//!        — panic message is NOT exposed to the client (no
-//!        information leakage).
+//!        message "[ASUP-E502] web handler panic recovered".
+//!     4. The 500 response body remains the fixed string
+//!        `b"[ASUP-E502] Internal Server Error"` — panic message is
+//!        NOT exposed to the client (no information leakage); the
+//!        stable `[ASUP-E502]` token links to the remediation page.
 //!     5. The recovery path is itself infallible — the
 //!        `panic_payload_message` helper cannot panic on the
 //!        panic (would lead to a double-panic abort).
@@ -52,8 +52,8 @@
 //!       middlewares (consistent correlation across the stack).
 //!   (4) `panic_payload_message` downcasts both `&'static str`
 //!       and `String`.
-//!   (5) The 500 body string `"Internal Server Error"` is fixed
-//!       — panic details NOT exposed to the client.
+//!   (5) The 500 body string `"[ASUP-E502] Internal Server Error"`
+//!       is fixed — panic details NOT exposed to the client.
 //!   (6) Behavioral end-to-end test (gated on default features):
 //!       wrap a panicking handler, send a request, observe the
 //!       500 response. (Log capture requires
@@ -176,20 +176,22 @@ fn resolve_trace_id_is_a_shared_free_function() {
     // source of truth.
     let source = read_middleware_source();
 
-    // Look for the free fn signature at module scope (no
-    // leading whitespace before `fn`).
+    // Look for the free fn signature at module scope (no leading
+    // whitespace before the visibility modifier). It is pub(crate) so the
+    // router's default request trace shares the SAME resolver
+    // (br-asupersync-server-stack-hardening-eeexl1.3).
     assert!(
-        source.contains("\nfn resolve_trace_id(req: &Request) -> Option<String> {"),
-        "REGRESSION: free function `fn resolve_trace_id(req: \
-         &Request) -> Option<String>` is gone. Both \
-         CatchPanicMiddleware and RequestTraceMiddleware MUST \
+        source.contains("\npub(crate) fn resolve_trace_id(req: &Request) -> Option<String> {"),
+        "REGRESSION: shared free function `pub(crate) fn resolve_trace_id(req: \
+         &Request) -> Option<String>` is gone. CatchPanicMiddleware, \
+         RequestTraceMiddleware, and the router default trace MUST \
          resolve trace IDs through the same helper to guarantee \
          consistent correlation across the middleware stack.",
     );
 
     // The free fn must include the sanitize+truncate path for
     // the x-request-id header (DoS guard, br-gwezkv).
-    let fn_marker = "\nfn resolve_trace_id(req: &Request) -> Option<String> {";
+    let fn_marker = "\npub(crate) fn resolve_trace_id(req: &Request) -> Option<String> {";
     let start = source.find(fn_marker).expect("free fn");
     let body_end = source[start..].find("\n}\n").expect("free fn close");
     let fn_body = &source[start..start + body_end];
@@ -261,9 +263,9 @@ fn catch_panic_response_does_not_leak_panic_message_to_client() {
     let body = catch_panic_call_body(&source);
 
     assert!(
-        body.contains("b\"Internal Server Error\".to_vec()"),
+        body.contains("b\"[ASUP-E502] Internal Server Error\".to_vec()"),
         "REGRESSION: response body is no longer the fixed string \
-         'Internal Server Error'. Verify the new body does NOT \
+         '[ASUP-E502] Internal Server Error'. Verify the new body does NOT \
          include the panic message — exposing it to the client \
          would be an information-leakage vulnerability.\n\n\
          impl body:\n{body}",
@@ -404,7 +406,7 @@ mod behavioral {
             "panic must produce 500 status",
         );
         assert_eq!(
-            &*resp.body, b"Internal Server Error",
+            &*resp.body, b"[ASUP-E502] Internal Server Error",
             "body must be the fixed canned string — the panic \
              message MUST NOT appear here (information leakage)",
         );
@@ -447,7 +449,7 @@ mod behavioral {
              response body. Body MUST be the fixed canned string. \
              body: {body_str}",
         );
-        assert_eq!(body_str, "Internal Server Error");
+        assert_eq!(body_str, "[ASUP-E502] Internal Server Error");
     }
 
     #[test]

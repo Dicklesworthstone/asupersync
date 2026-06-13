@@ -352,7 +352,7 @@ fn web_proof_middleware_panic_recovery(bead_id: &str, artifact_path: &str) -> Va
         None,
         None,
         StatusCode::INTERNAL_SERVER_ERROR,
-        b"Internal Server Error",
+        b"[ASUP-E502] Internal Server Error",
         &resp,
         extra_failure,
         &[],

@@ -69,7 +69,8 @@ pub mod static_files_path_traversal_audit;
 pub mod websocket;
 
 pub use extract::{
-    Cookie, CookieJar, Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, State,
+    Cookie, CookieJar, Extension, Form, FromRequest, FromRequestParts, Json as JsonExtract, Path,
+    Query, State,
 };
 pub use handler::{
     AsyncCxFnHandler, AsyncCxFnHandler1, AsyncCxFnHandler2, AsyncCxFnHandler3, AsyncCxFnHandler4,

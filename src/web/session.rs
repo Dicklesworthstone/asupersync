@@ -646,6 +646,28 @@ impl<S: SessionStore> SessionLayer<S> {
     }
 }
 
+// Unified layering (br-asupersync-server-stack-hardening-eeexl1.3): the
+// session layer composes through the same `service::Layer` trait as the rest
+// of the web middleware, so it works with `Router::layer` and
+// `MiddlewareStack::layer`. The store is `Arc`-shared, so one layer value
+// applied across a router's routes shares ONE session store — exactly the
+// semantics sessions need.
+impl<S: SessionStore, H: Handler> crate::service::Layer<H> for SessionLayer<S> {
+    type Service = SessionMiddleware<S, H>;
+
+    fn layer(&self, inner: H) -> Self::Service {
+        // Same validation gate as `wrap`.
+        self.config
+            .validate()
+            .expect("SessionConfig validation failed before wrap");
+        SessionMiddleware {
+            inner,
+            store: Arc::clone(&self.store),
+            config: self.config.clone(),
+        }
+    }
+}
+
 impl<S: SessionStore> fmt::Debug for SessionLayer<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionLayer")

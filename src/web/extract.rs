@@ -1215,6 +1215,62 @@ where
     }
 }
 
+// ─── Extension<T> ────────────────────────────────────────────────────────────
+
+/// Extract a typed value injected by middleware.
+///
+/// Middleware inserts values into the request's [`Extensions`] store with
+/// [`Extensions::insert_typed`]; handlers extract them with `Extension<T>`.
+/// The value lives on the [`Request`] itself, so it is request-scoped: each
+/// request carries its own extensions map, with no bleed between requests,
+/// and the map is dropped with the request when handling completes (inside
+/// the request region when the server dispatches through one).
+///
+/// Difference from [`State<T>`]: `State` carries application-lifetime shared
+/// state injected once via `Router::with_state`; `Extension` carries
+/// per-request values injected by middleware (auth principals, request
+/// metadata, trace context, ...). Both read the same typed store.
+///
+/// Missing extensions are a server-side wiring bug, so extraction failure
+/// maps to `500 Internal Server Error` (matching [`State<T>`]).
+///
+/// ```
+/// use asupersync::web::extract::{Extension, FromRequestParts, Request};
+///
+/// #[derive(Clone, Debug, PartialEq)]
+/// struct CurrentUser {
+///     id: u64,
+/// }
+///
+/// // Middleware inserts:
+/// let mut req = Request::new("GET", "/me");
+/// req.extensions.insert_typed(CurrentUser { id: 42 });
+///
+/// // Handler extracts:
+/// let Extension(user) =
+///     Extension::<CurrentUser>::from_request_parts(&req).expect("extension present");
+/// assert_eq!(user, CurrentUser { id: 42 });
+/// ```
+#[derive(Debug, Clone)]
+pub struct Extension<T>(pub T);
+
+impl<T> FromRequestParts for Extension<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        req.extensions
+            .get_typed_cloned::<T>()
+            .map(Self)
+            .ok_or_else(|| {
+                ExtractionError::new(
+                    super::response::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("missing request extension {}", std::any::type_name::<T>()),
+                )
+            })
+    }
+}
+
 // ─── RawBody ─────────────────────────────────────────────────────────────────
 
 /// Extract the raw request body as bytes.
