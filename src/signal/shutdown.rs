@@ -4,11 +4,14 @@
 //! signals throughout an application. Uses our sync primitives (Notify) to
 //! coordinate without external dependencies.
 
+use std::future::Future;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{SignalKind, signal};
 use crate::sync::Notify;
+use crate::tracing_compat::{info, warn};
 
 /// Internal state shared between controller and receivers.
 #[derive(Debug)]
@@ -49,6 +52,268 @@ struct ShutdownState {
 pub struct ShutdownController {
     /// Shared state between controller and receivers.
     state: Arc<ShutdownState>,
+}
+
+/// Internal state shared between reload controller and receivers.
+#[derive(Debug)]
+struct ReloadState {
+    /// Monotone reload request sequence.
+    requests: std::sync::atomic::AtomicU64,
+    /// Ensures the SIGHUP listener is installed at most once per controller.
+    signal_listener_started: AtomicBool,
+    /// Notifier for reload request broadcasts.
+    notify: Notify,
+}
+
+/// Controller for SIGHUP-style configuration reload notifications.
+///
+/// Reloads are independent from shutdown. Calling [`request_reload`](Self::request_reload)
+/// or receiving SIGHUP through [`listen_for_sighup`](Self::listen_for_sighup)
+/// increments a monotone reload sequence and wakes subscribed receivers, but it
+/// never marks a [`ShutdownController`] as shutting down.
+#[derive(Debug)]
+pub struct ReloadController {
+    /// Shared state between controller and receivers.
+    state: Arc<ReloadState>,
+}
+
+impl ReloadController {
+    /// Creates a new reload controller.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(ReloadState {
+                requests: std::sync::atomic::AtomicU64::new(0),
+                signal_listener_started: AtomicBool::new(false),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    /// Gets a receiver for future reload notifications.
+    ///
+    /// The receiver starts after the current reload sequence, so it observes
+    /// reloads requested after subscription rather than replaying historical
+    /// requests.
+    #[must_use]
+    pub fn subscribe(&self) -> ReloadReceiver {
+        ReloadReceiver {
+            state: Arc::clone(&self.state),
+            seen_requests: self.reload_count(),
+        }
+    }
+
+    /// Requests a reload and returns the new reload sequence number.
+    ///
+    /// This wakes all receivers waiting for a reload notification. The request
+    /// is event-like, not sticky: receivers created after this call start after
+    /// the returned sequence.
+    pub fn request_reload(&self) -> u64 {
+        Self::trigger_reload_state(&self.state)
+    }
+
+    /// Returns the number of reload requests recorded by this controller.
+    #[must_use]
+    pub fn reload_count(&self) -> u64 {
+        self.state.requests.load(Ordering::Acquire)
+    }
+
+    /// Installs an opt-in SIGHUP listener for this reload controller.
+    ///
+    /// The listener is Unix-only because SIGHUP has no portable Windows
+    /// equivalent. Unsupported platforms return a deterministic
+    /// [`io::ErrorKind::Unsupported`] error.
+    ///
+    /// Calling this method more than once is idempotent.
+    pub fn listen_for_sighup(self: &Arc<Self>) -> io::Result<()> {
+        if self
+            .state
+            .signal_listener_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return Ok(());
+        }
+
+        match Self::spawn_sighup_listener(Arc::downgrade(&self.state)) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.state
+                    .signal_listener_started
+                    .store(false, Ordering::Release);
+                Err(err)
+            }
+        }
+    }
+
+    fn trigger_reload_state(state: &ReloadState) -> u64 {
+        let sequence = state.requests.fetch_add(1, Ordering::AcqRel) + 1;
+        info!(reload_sequence = sequence, "reload requested");
+        state.notify.notify_waiters();
+        sequence
+    }
+
+    #[cfg(unix)]
+    fn spawn_sighup_listener(state: std::sync::Weak<ReloadState>) -> io::Result<()> {
+        let mut stream = signal(SignalKind::hangup())?;
+        std::thread::Builder::new()
+            .name("asupersync-reload-sighup".to_string())
+            .spawn(move || {
+                while futures_lite::future::block_on(stream.recv()).is_some() {
+                    let Some(state) = state.upgrade() else {
+                        break;
+                    };
+                    Self::trigger_reload_state(&state);
+                }
+            })
+            .map(|_| ())
+    }
+
+    #[cfg(not(unix))]
+    fn spawn_sighup_listener(_state: std::sync::Weak<ReloadState>) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SIGHUP reload listener is only supported on Unix",
+        ))
+    }
+}
+
+impl Default for ReloadController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for ReloadController {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+/// Outcome of handling one reload request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReloadOutcome<E> {
+    /// The reload handler completed successfully.
+    Completed {
+        /// Reload sequence handled by the caller.
+        sequence: u64,
+    },
+    /// The reload handler returned an error.
+    Failed {
+        /// Reload sequence handled by the caller.
+        sequence: u64,
+        /// Error returned by the handler.
+        error: E,
+    },
+}
+
+/// Receiver for reload notifications.
+///
+/// A receiver observes a monotone sequence of reload requests. If several
+/// reloads arrive before the receiver is polled again, repeated calls to
+/// [`wait`](Self::wait) drain the pending sequence numbers without losing
+/// notifications.
+#[derive(Debug)]
+pub struct ReloadReceiver {
+    /// Shared state with the controller.
+    state: Arc<ReloadState>,
+    /// Last reload sequence observed by this receiver.
+    seen_requests: u64,
+}
+
+impl ReloadReceiver {
+    /// Waits for the next reload request and returns its sequence number.
+    pub async fn wait(&mut self) -> u64 {
+        let state = Arc::clone(&self.state);
+        loop {
+            let current = state.requests.load(Ordering::Acquire);
+            if current > self.seen_requests {
+                self.seen_requests = self.seen_requests.saturating_add(1);
+                return self.seen_requests;
+            }
+
+            let mut notified = std::pin::pin!(state.notify.notified());
+            std::future::poll_fn(|cx| {
+                let current = state.requests.load(Ordering::Acquire);
+                if current > self.seen_requests
+                    || std::future::Future::poll(notified.as_mut(), cx).is_ready()
+                {
+                    return std::task::Poll::Ready(());
+                }
+                std::task::Poll::Pending
+            })
+            .await;
+        }
+    }
+
+    /// Returns the last reload sequence this receiver has observed.
+    #[must_use]
+    pub fn seen_reload_count(&self) -> u64 {
+        self.seen_requests
+    }
+
+    /// Waits for one reload request and runs the supplied async handler.
+    ///
+    /// Structured tracing records the requested sequence, successful
+    /// completion, handler failure, and cancellation if the returned future is
+    /// dropped while the handler is still running.
+    pub async fn handle_next_reload<F, Fut, E>(&mut self, handler: F) -> ReloadOutcome<E>
+    where
+        F: FnOnce(u64) -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+    {
+        let sequence = self.wait().await;
+        let mut guard = ReloadAttemptGuard::new(sequence);
+        match handler(sequence).await {
+            Ok(()) => {
+                guard.finish();
+                info!(reload_sequence = sequence, "reload completed");
+                ReloadOutcome::Completed { sequence }
+            }
+            Err(error) => {
+                guard.finish();
+                warn!(reload_sequence = sequence, "reload failed");
+                ReloadOutcome::Failed { sequence, error }
+            }
+        }
+    }
+}
+
+impl Clone for ReloadReceiver {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            seen_requests: self.seen_requests,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ReloadAttemptGuard {
+    sequence: u64,
+    finished: bool,
+}
+
+impl ReloadAttemptGuard {
+    fn new(sequence: u64) -> Self {
+        Self {
+            sequence,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for ReloadAttemptGuard {
+    fn drop(&mut self) {
+        if !self.finished && self.sequence > 0 {
+            warn!(reload_sequence = self.sequence, "reload cancelled");
+        }
+    }
 }
 
 impl ShutdownController {
@@ -517,6 +782,184 @@ mod tests {
             shutting_down
         );
         crate::test_complete!("listen_for_signals_is_idempotent");
+    }
+
+    #[test]
+    fn reload_controller_request_wakes_receiver_without_shutdown() {
+        init_test("reload_controller_request_wakes_receiver_without_shutdown");
+        let reload = ReloadController::new();
+        let shutdown = ShutdownController::new();
+        let mut reload_rx = reload.subscribe();
+        let shutdown_rx = shutdown.subscribe();
+
+        let sequence = reload.request_reload();
+        crate::assert_with_log!(sequence == 1, "reload sequence", 1, sequence);
+
+        let mut fut = Box::pin(reload_rx.wait());
+        let observed = futures_lite::future::block_on(fut.as_mut());
+        crate::assert_with_log!(observed == 1, "receiver observed sequence", 1, observed);
+        crate::assert_with_log!(
+            !shutdown.is_shutting_down(),
+            "reload does not trigger shutdown controller",
+            false,
+            shutdown.is_shutting_down()
+        );
+        crate::assert_with_log!(
+            !shutdown_rx.is_shutting_down(),
+            "reload does not trigger shutdown receiver",
+            false,
+            shutdown_rx.is_shutting_down()
+        );
+        crate::test_complete!("reload_controller_request_wakes_receiver_without_shutdown");
+    }
+
+    #[test]
+    fn reload_receiver_drains_queued_sequences() {
+        init_test("reload_receiver_drains_queued_sequences");
+        let reload = ReloadController::new();
+        let mut receiver = reload.subscribe();
+
+        reload.request_reload();
+        reload.request_reload();
+
+        let first = futures_lite::future::block_on(receiver.wait());
+        let second = futures_lite::future::block_on(receiver.wait());
+        crate::assert_with_log!(first == 1, "first reload sequence", 1, first);
+        crate::assert_with_log!(second == 2, "second reload sequence", 2, second);
+        crate::assert_with_log!(
+            receiver.seen_reload_count() == 2,
+            "receiver seen sequence",
+            2,
+            receiver.seen_reload_count()
+        );
+        crate::test_complete!("reload_receiver_drains_queued_sequences");
+    }
+
+    #[test]
+    fn reload_receiver_invokes_handler_and_reports_outcome() {
+        init_test("reload_receiver_invokes_handler_and_reports_outcome");
+        let reload = ReloadController::new();
+        let mut receiver = reload.subscribe();
+
+        reload.request_reload();
+        let completed =
+            futures_lite::future::block_on(receiver.handle_next_reload(|sequence| async move {
+                crate::assert_with_log!(sequence == 1, "handler sequence", 1, sequence);
+                Ok::<(), &'static str>(())
+            }));
+        crate::assert_with_log!(
+            completed == ReloadOutcome::Completed { sequence: 1 },
+            "handler completed",
+            ReloadOutcome::<&'static str>::Completed { sequence: 1 },
+            completed
+        );
+
+        reload.request_reload();
+        let failed =
+            futures_lite::future::block_on(receiver.handle_next_reload(|_sequence| async {
+                Err::<(), &'static str>("reload failed")
+            }));
+        crate::assert_with_log!(
+            failed
+                == ReloadOutcome::Failed {
+                    sequence: 2,
+                    error: "reload failed"
+                },
+            "handler failed",
+            ReloadOutcome::Failed {
+                sequence: 2,
+                error: "reload failed"
+            },
+            failed
+        );
+        crate::test_complete!("reload_receiver_invokes_handler_and_reports_outcome");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sighup_triggers_reload_only_and_sigterm_triggers_shutdown() {
+        init_test("sighup_triggers_reload_only_and_sigterm_triggers_shutdown");
+        let reload = Arc::new(ReloadController::new());
+        let shutdown = Arc::new(ShutdownController::new());
+        let mut reload_rx = reload.subscribe();
+        let mut shutdown_rx = shutdown.subscribe();
+
+        let listener_installed = reload.listen_for_sighup().is_ok();
+        crate::assert_with_log!(
+            listener_installed,
+            "install SIGHUP listener",
+            true,
+            listener_installed
+        );
+        if !listener_installed {
+            return;
+        }
+        shutdown.listen_for_signals();
+
+        let sighup_injected = inject_test_signal(SignalKind::hangup()).is_ok();
+        crate::assert_with_log!(sighup_injected, "inject SIGHUP", true, sighup_injected);
+        if !sighup_injected {
+            return;
+        }
+        for _ in 0..50 {
+            if reload.reload_count() > 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut reload_fut = Box::pin(reload_rx.wait());
+        let reload_sequence = match poll_once(&mut reload_fut) {
+            Poll::Ready(sequence) => sequence,
+            Poll::Pending => {
+                crate::assert_with_log!(
+                    false,
+                    "SIGHUP triggered reload before timeout",
+                    true,
+                    false
+                );
+                return;
+            }
+        };
+        crate::assert_with_log!(
+            reload_sequence == 1,
+            "SIGHUP triggers reload sequence",
+            1,
+            reload_sequence
+        );
+        crate::assert_with_log!(
+            !shutdown.is_shutting_down(),
+            "SIGHUP does not trigger shutdown",
+            false,
+            shutdown.is_shutting_down()
+        );
+
+        let sigterm_injected = inject_test_signal(SignalKind::terminate()).is_ok();
+        crate::assert_with_log!(sigterm_injected, "inject SIGTERM", true, sigterm_injected);
+        if !sigterm_injected {
+            return;
+        }
+        let mut fut = Box::pin(shutdown_rx.wait());
+        for _ in 0..50 {
+            if poll_once(&mut fut).is_ready() {
+                crate::assert_with_log!(
+                    shutdown.is_shutting_down(),
+                    "SIGTERM triggers shutdown",
+                    true,
+                    shutdown.is_shutting_down()
+                );
+                crate::test_complete!("sighup_triggers_reload_only_and_sigterm_triggers_shutdown");
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        crate::assert_with_log!(
+            false,
+            "SIGTERM triggered shutdown before timeout",
+            true,
+            false
+        );
     }
 
     #[test]

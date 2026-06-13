@@ -10,6 +10,8 @@
 //! - [`ctrl_c`]: Cross-platform Ctrl+C handling
 //! - [`ShutdownController`]: Coordinated graceful shutdown
 //! - [`ShutdownReceiver`]: Handle for receiving shutdown notifications
+//! - [`ReloadController`]: Opt-in SIGHUP reload notifications that do not
+//!   trigger shutdown
 //! - [`with_graceful_shutdown`]: Run tasks with shutdown support
 //!
 //! # Platform Behavior
@@ -66,7 +68,9 @@ pub use graceful::{
     GracePeriodGuard, GracefulBuilder, GracefulConfig, GracefulOutcome, with_graceful_shutdown,
 };
 pub use kind::SignalKind;
-pub use shutdown::{ShutdownController, ShutdownReceiver};
+pub use shutdown::{
+    ReloadController, ReloadOutcome, ReloadReceiver, ShutdownController, ShutdownReceiver,
+};
 pub use signal::{Signal, SignalError, signal};
 
 // Cross-platform helpers for the signal subset supported on Unix and Windows.
