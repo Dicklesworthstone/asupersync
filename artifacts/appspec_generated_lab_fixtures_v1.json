@@ -1,0 +1,213 @@
+{
+  "schema_version": "appspec-generated-lab-fixtures-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2.3",
+  "parent_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
+  "artifact_path": "artifacts/appspec_generated_lab_fixtures_v1.json",
+  "docs_path": "docs/appspec_generated_lab_fixtures.md",
+  "contract_test": "tests/appspec_generated_lab_fixtures_contract.rs",
+  "docs_markers": [
+    "APPSPEC-GENERATED-LAB-FIXTURES:SOURCE",
+    "APPSPEC-GENERATED-LAB-FIXTURES:FIXTURES",
+    "APPSPEC-GENERATED-LAB-FIXTURES:NEGATIVE",
+    "APPSPEC-GENERATED-LAB-FIXTURES:MANIFEST",
+    "APPSPEC-GENERATED-LAB-FIXTURES:VALIDATION",
+    "APPSPEC-GENERATED-LAB-FIXTURES:NO-CLAIMS"
+  ],
+  "source_of_truth": {
+    "appspec_schema": "artifacts/appspec_v1_schema.json",
+    "appspec_docs": "docs/appspec_v1.md",
+    "appspec_source": "src/app.rs",
+    "artifact": "artifacts/appspec_generated_lab_fixtures_v1.json",
+    "runbook": "docs/appspec_generated_lab_fixtures.md",
+    "contract_test": "tests/appspec_generated_lab_fixtures_contract.rs"
+  },
+  "blocked_by": [
+    {
+      "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2.2",
+      "status": "in_progress",
+      "reason": "A2 source landed, but its exact focused RCH unit proof was canceled or stale-progress, so A3 remains a contract packet until the A2 proof is fresh."
+    }
+  ],
+  "generation_policy": {
+    "manual_fixture_tables_accepted": false,
+    "generator_contract": "accepted AppSpec manifests must project into deterministic lab fixtures, expected topology snapshots, proof-lane manifest projections, and negative validation fixtures before they can be cited as executable AppSpec evidence",
+    "fail_closed_rules": [
+      "missing source_of_truth path blocks fixture citation",
+      "missing accepted fixture blocks proof-manifest projection",
+      "missing negative fixture for a required validation class blocks proof-manifest projection",
+      "missing RCH remote-required command blocks fixture citation",
+      "fresh-rch-pass status is forbidden until the focused contract test completes remotely"
+    ]
+  },
+  "accepted_fixtures": [
+    {
+      "fixture_id": "minimal-http-worker-topology",
+      "fixture_status": "contracted-not-executed",
+      "manifest_summary": {
+        "app_id": "minimal-http-worker",
+        "services": [
+          "api"
+        ],
+        "background_jobs": [
+          "worker"
+        ],
+        "routes": [
+          "/health"
+        ],
+        "budgets": [
+          "api.request.cpu_ms",
+          "worker.batch.cpu_ms"
+        ],
+        "capabilities": [
+          "net.listen",
+          "http.server",
+          "trace.emit"
+        ],
+        "supervision_groups": [
+          "root",
+          "root/api",
+          "root/worker"
+        ],
+        "observability_sinks": [
+          "trace-ledger"
+        ]
+      },
+      "expected_topology_snapshot": {
+        "region_tree": [
+          "root",
+          "root/api",
+          "root/worker"
+        ],
+        "children": [
+          "service:api",
+          "background:worker"
+        ],
+        "route_bindings": [
+          "/health -> service:api"
+        ],
+        "budget_bindings": [
+          "service:api -> api.request.cpu_ms",
+          "background:worker -> worker.batch.cpu_ms"
+        ],
+        "capability_declarations": [
+          "service:api requires net.listen",
+          "service:api requires http.server",
+          "background:worker requires trace.emit"
+        ],
+        "observability_bindings": [
+          "root -> trace-ledger"
+        ]
+      },
+      "lab_replay": {
+        "scenario_id": "appspec/minimal-http-worker-topology",
+        "execution_status": "blocked-by-a2-proof",
+        "deterministic_seeds": [
+          1,
+          2,
+          3
+        ],
+        "oracles": [
+          "no-task-leaks",
+          "region-close-quiescence",
+          "no-obligation-leaks",
+          "race-losers-drained"
+        ],
+        "expected_outcome": "not-executed-until-a2-proof-is-fresh"
+      }
+    }
+  ],
+  "negative_fixtures": [
+    {
+      "fixture_id": "missing-capability",
+      "category": "missing-capability",
+      "expected_validation_phase": "capability-resolution",
+      "expected_error_kind": "missing declared capability",
+      "no_claims": [
+        "does not prove capability enforcement in runtime source",
+        "does not prove broad AppSpec validation completeness"
+      ]
+    },
+    {
+      "fixture_id": "invalid-budget-composition",
+      "category": "invalid-budget-composition",
+      "expected_validation_phase": "budget-composition",
+      "expected_error_kind": "invalid budget composition",
+      "no_claims": [
+        "does not prove scheduler budget enforcement",
+        "does not prove performance isolation"
+      ]
+    },
+    {
+      "fixture_id": "unsupported-db-protocol-feature",
+      "category": "unsupported-db-protocol-feature",
+      "expected_validation_phase": "protocol-feature-gate",
+      "expected_error_kind": "unsupported database or protocol feature",
+      "no_claims": [
+        "does not prove database adapter correctness",
+        "does not prove transport protocol support"
+      ]
+    },
+    {
+      "fixture_id": "supervision-cycle",
+      "category": "supervision-cycle",
+      "expected_validation_phase": "supervision-graph",
+      "expected_error_kind": "cycle in supervision graph",
+      "no_claims": [
+        "does not prove runtime region quiescence",
+        "does not prove live supervision restart behavior"
+      ]
+    }
+  ],
+  "proof_manifest_projection": {
+    "lane_id": "appspec-generated-lab-fixtures-contract",
+    "kind": "artifact_contract",
+    "resource_envelope_class": "focused-artifact-contract",
+    "package": "asupersync",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_appspec_generated_lab_fixtures_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test appspec_generated_lab_fixtures_contract --no-default-features -- --nocapture",
+    "guarantee_ids": [
+      "appspec-generated-lab-fixtures-contract"
+    ],
+    "source_paths": [
+      "artifacts/appspec_generated_lab_fixtures_v1.json",
+      "docs/appspec_generated_lab_fixtures.md",
+      "tests/appspec_generated_lab_fixtures_contract.rs",
+      "artifacts/appspec_v1_schema.json",
+      "docs/appspec_v1.md",
+      "src/app.rs"
+    ],
+    "expected_signal": "focused integration contract passes remotely and keeps the A3 fixture packet fail-closed while A2 is proof-blocked",
+    "no_claims": [
+      "broad workspace health",
+      "release readiness",
+      "AppSpec production readiness",
+      "runtime correctness",
+      "local Cargo fallback"
+    ]
+  },
+  "proof_status_projection": {
+    "claim_id": "appspec-generated-lab-fixtures",
+    "status": "blocked-by-a2-proof",
+    "fresh_rch_pass": false,
+    "first_blocker": "asupersync-idea-wizard-fifth-wave-3gaiun.2.2",
+    "operator_action": "rerun A2 focused proof, then run appspec-generated-lab-fixtures-contract remotely"
+  },
+  "validation": {
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_appspec_generated_lab_fixtures_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test appspec_generated_lab_fixtures_contract --no-default-features -- --nocapture",
+    "no_local_cargo_fallback": true,
+    "local_non_cargo_checks": [
+      "jq empty artifacts/appspec_generated_lab_fixtures_v1.json",
+      "rustfmt --edition 2024 --check tests/appspec_generated_lab_fixtures_contract.rs",
+      "git diff --check -- artifacts/appspec_generated_lab_fixtures_v1.json docs/appspec_generated_lab_fixtures.md tests/appspec_generated_lab_fixtures_contract.rs"
+    ]
+  },
+  "no_claims": [
+    "broad workspace health",
+    "release readiness",
+    "AppSpec production readiness",
+    "runtime correctness",
+    "local Cargo fallback",
+    "closure of asupersync-idea-wizard-fifth-wave-3gaiun.2",
+    "closure of asupersync-idea-wizard-fifth-wave-3gaiun.2.3",
+    "closure of asupersync-idea-wizard-fifth-wave-3gaiun.16"
+  ]
+}
