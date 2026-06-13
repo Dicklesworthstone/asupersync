@@ -39,7 +39,9 @@ pub use circuit_breaker::{
 };
 pub use concurrency_limit::{ConcurrencyLimit, ConcurrencyLimitError, ConcurrencyLimitLayer};
 pub use discover::{
-    Change, Discover, DnsDiscoveryConfig, DnsDiscoveryError, DnsServiceDiscovery, StaticList,
+    ActiveHealthConfig, ActiveHealthDiscovery, ActiveHealthDiscoveryError, Change, Discover,
+    DnsDiscoveryConfig, DnsDiscoveryError, DnsServiceDiscovery, EndpointHealth,
+    EndpointHealthStatus, HealthProbeKind, ProbeBackoff, ProbeOutcome, StaticList,
 };
 pub use filter::{Filter, FilterError, FilterFuture, FilterLayer};
 pub use hedge::{Hedge, HedgeConfig, HedgeError, HedgeFuture, HedgeLayer};

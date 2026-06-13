@@ -8,6 +8,8 @@
 //!
 //! - [`StaticList`]: Fixed set of endpoints (no changes).
 //! - [`DnsServiceDiscovery`]: Resolves a hostname via DNS, polling periodically.
+//! - [`ActiveHealthDiscovery`]: Wraps another discovery source with deterministic
+//!   endpoint probes and backoff.
 //!
 //! # Example
 //!
@@ -24,7 +26,7 @@
 
 use crate::types::Time;
 use parking_lot::{Condvar, Mutex};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -157,6 +159,435 @@ impl<K: fmt::Debug> fmt::Debug for StaticList<K> {
         f.debug_struct("StaticList")
             .field("endpoints", &self.endpoints)
             .field("delivered", &*self.delivered.lock())
+            .finish()
+    }
+}
+
+// ─── Active health discovery ───────────────────────────────────────────────
+
+/// Health probe transport shape.
+///
+/// The probe kind is metadata for callers that want one reusable probe closure
+/// across HTTP, gRPC, and TCP checks. The discovery wrapper itself stays
+/// runtime-agnostic and deterministic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthProbeKind {
+    /// HTTP health check, conventionally a GET against `path`.
+    Http {
+        /// Request path used by the probe.
+        path: String,
+    },
+    /// gRPC health-check protocol.
+    Grpc,
+    /// TCP connect-style liveness check.
+    Tcp,
+}
+
+impl HealthProbeKind {
+    /// Build an HTTP probe kind.
+    #[must_use]
+    pub fn http(path: impl Into<String>) -> Self {
+        Self::Http { path: path.into() }
+    }
+}
+
+/// Result of probing one endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// Endpoint is available for load-balanced traffic.
+    Healthy,
+    /// Endpoint should be withheld from load-balanced traffic.
+    Unhealthy,
+}
+
+/// Published endpoint health state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointHealthStatus {
+    /// Endpoint is known in topology but has not produced a probe result yet.
+    Unknown,
+    /// Endpoint is currently available.
+    Healthy,
+    /// Endpoint is currently unavailable.
+    Unhealthy,
+}
+
+impl EndpointHealthStatus {
+    /// Returns whether this status should be exposed through [`Discover::endpoints`].
+    #[must_use]
+    pub const fn is_healthy(self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+}
+
+/// Exponential backoff settings for failed active probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeBackoff {
+    base: Duration,
+    max: Duration,
+}
+
+impl ProbeBackoff {
+    /// Create a probe backoff schedule.
+    #[must_use]
+    pub const fn new(base: Duration, max: Duration) -> Self {
+        Self { base, max }
+    }
+
+    /// Base delay applied after the first failed probe.
+    #[must_use]
+    pub const fn base(self) -> Duration {
+        self.base
+    }
+
+    /// Maximum delay applied after repeated failed probes.
+    #[must_use]
+    pub const fn max(self) -> Duration {
+        self.max
+    }
+
+    #[must_use]
+    fn delay_for(self, consecutive_failures: u32) -> Duration {
+        let mut nanos = duration_to_nanos(self.base);
+        let shifts = consecutive_failures.saturating_sub(1).min(31);
+        for _ in 0..shifts {
+            nanos = nanos.saturating_mul(2);
+        }
+        Duration::from_nanos(nanos.min(duration_to_nanos(self.max)))
+    }
+}
+
+impl Default for ProbeBackoff {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(1), Duration::from_secs(30))
+    }
+}
+
+/// Configuration for active health discovery.
+#[derive(Clone)]
+pub struct ActiveHealthConfig {
+    probe_kind: HealthProbeKind,
+    probe_interval: Duration,
+    failure_backoff: ProbeBackoff,
+    time_getter: fn() -> Time,
+}
+
+impl ActiveHealthConfig {
+    /// Create active health configuration for a probe kind.
+    #[must_use]
+    pub fn new(probe_kind: HealthProbeKind) -> Self {
+        Self {
+            probe_kind,
+            probe_interval: Duration::from_secs(30),
+            failure_backoff: ProbeBackoff::default(),
+            time_getter: wall_clock_now,
+        }
+    }
+
+    /// Set the interval between successful probes.
+    #[must_use]
+    pub fn probe_interval(mut self, interval: Duration) -> Self {
+        self.probe_interval = interval;
+        self
+    }
+
+    /// Set the failed-probe backoff schedule.
+    #[must_use]
+    pub fn failure_backoff(mut self, backoff: ProbeBackoff) -> Self {
+        self.failure_backoff = backoff;
+        self
+    }
+
+    /// Set a deterministic time source.
+    #[must_use]
+    pub fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.time_getter = time_getter;
+        self
+    }
+
+    /// Returns the configured probe kind.
+    #[must_use]
+    pub const fn probe_kind(&self) -> &HealthProbeKind {
+        &self.probe_kind
+    }
+}
+
+impl fmt::Debug for ActiveHealthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActiveHealthConfig")
+            .field("probe_kind", &self.probe_kind)
+            .field("probe_interval", &self.probe_interval)
+            .field("failure_backoff", &self.failure_backoff)
+            .field("time_getter", &"<fn>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProbeEntry {
+    status: EndpointHealthStatus,
+    consecutive_failures: u32,
+    probe_count: u64,
+    transition_count: u64,
+    next_probe_at: Option<Time>,
+}
+
+impl Default for ProbeEntry {
+    fn default() -> Self {
+        Self {
+            status: EndpointHealthStatus::Unknown,
+            consecutive_failures: 0,
+            probe_count: 0,
+            transition_count: 0,
+            next_probe_at: None,
+        }
+    }
+}
+
+impl ProbeEntry {
+    fn should_probe(&self, now: Time) -> bool {
+        self.next_probe_at.is_none_or(|deadline| now >= deadline)
+    }
+
+    fn record_probe(&mut self, outcome: ProbeOutcome, now: Time, config: &ActiveHealthConfig) {
+        self.probe_count = self.probe_count.saturating_add(1);
+        let next_status = match outcome {
+            ProbeOutcome::Healthy => EndpointHealthStatus::Healthy,
+            ProbeOutcome::Unhealthy => EndpointHealthStatus::Unhealthy,
+        };
+        if self.status != next_status {
+            self.transition_count = self.transition_count.saturating_add(1);
+        }
+        self.status = next_status;
+
+        match outcome {
+            ProbeOutcome::Healthy => {
+                self.consecutive_failures = 0;
+                self.next_probe_at = Some(now + config.probe_interval);
+            }
+            ProbeOutcome::Unhealthy => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                self.next_probe_at =
+                    Some(now + config.failure_backoff.delay_for(self.consecutive_failures));
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ActiveHealthState<K> {
+    entries: HashMap<K, ProbeEntry>,
+    published: Vec<K>,
+}
+
+impl<K> Default for ActiveHealthState<K> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            published: Vec::new(),
+        }
+    }
+}
+
+/// Health snapshot for one endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointHealth<K> {
+    /// Endpoint key.
+    pub endpoint: K,
+    /// Current health status.
+    pub status: EndpointHealthStatus,
+    /// Consecutive failed probes.
+    pub consecutive_failures: u32,
+    /// Total probes run for this endpoint.
+    pub probe_count: u64,
+    /// Number of status transitions observed.
+    pub transition_count: u64,
+    /// Next scheduled probe time.
+    pub next_probe_at: Option<Time>,
+}
+
+/// Discovery error from active health wrapping.
+#[derive(Debug)]
+pub enum ActiveHealthDiscoveryError<E> {
+    /// The wrapped discovery source failed.
+    Discover(E),
+}
+
+impl<E: fmt::Display> fmt::Display for ActiveHealthDiscoveryError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Discover(e) => write!(f, "active health discovery source error: {e}"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for ActiveHealthDiscoveryError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Discover(e) => Some(e),
+        }
+    }
+}
+
+/// Discovery wrapper that withholds endpoints failing active health probes.
+///
+/// The wrapped discovery source remains the topology authority. Active health
+/// only decides which known endpoints are published to load balancers through
+/// the normal [`Discover`] contract.
+pub struct ActiveHealthDiscovery<D: Discover, P> {
+    inner: D,
+    config: ActiveHealthConfig,
+    probe: P,
+    state: Mutex<ActiveHealthState<D::Key>>,
+}
+
+impl<D: Discover, P> ActiveHealthDiscovery<D, P> {
+    /// Create an active-health wrapper around a discovery source.
+    #[must_use]
+    pub fn new(inner: D, config: ActiveHealthConfig, probe: P) -> Self {
+        Self {
+            inner,
+            config,
+            probe,
+            state: Mutex::new(ActiveHealthState::default()),
+        }
+    }
+
+    /// Returns the wrapped discovery source.
+    #[must_use]
+    pub const fn inner(&self) -> &D {
+        &self.inner
+    }
+
+    /// Returns the active-health configuration.
+    #[must_use]
+    pub const fn config(&self) -> &ActiveHealthConfig {
+        &self.config
+    }
+
+    /// Returns the latest health snapshot for an endpoint.
+    #[must_use]
+    pub fn endpoint_health(&self, endpoint: &D::Key) -> Option<EndpointHealth<D::Key>>
+    where
+        D::Key: Clone,
+    {
+        self.state
+            .lock()
+            .entries
+            .get(endpoint)
+            .map(|entry| EndpointHealth {
+                endpoint: endpoint.clone(),
+                status: entry.status,
+                consecutive_failures: entry.consecutive_failures,
+                probe_count: entry.probe_count,
+                transition_count: entry.transition_count,
+                next_probe_at: entry.next_probe_at,
+            })
+    }
+}
+
+impl<D, P> Discover for ActiveHealthDiscovery<D, P>
+where
+    D: Discover,
+    D::Key: Clone + Eq + std::hash::Hash + fmt::Debug + Send + Sync + 'static,
+    P: Fn(&D::Key, &HealthProbeKind) -> ProbeOutcome + Send + Sync,
+{
+    type Key = D::Key;
+    type Error = ActiveHealthDiscoveryError<D::Error>;
+
+    fn poll_discover(&self) -> Result<Vec<Change<Self::Key>>, Self::Error> {
+        self.inner
+            .poll_discover()
+            .map_err(ActiveHealthDiscoveryError::Discover)?;
+
+        let raw_endpoints = self.inner.endpoints();
+        let raw_set: HashSet<_> = raw_endpoints.iter().cloned().collect();
+        let now = (self.config.time_getter)();
+        let due = {
+            let mut state = self.state.lock();
+            state
+                .entries
+                .retain(|endpoint, _| raw_set.contains(endpoint));
+            raw_endpoints
+                .iter()
+                .filter_map(|endpoint| {
+                    let entry = state.entries.entry(endpoint.clone()).or_default();
+                    entry.should_probe(now).then(|| endpoint.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let probe_results = due
+            .into_iter()
+            .map(|endpoint| {
+                let outcome = (self.probe)(&endpoint, &self.config.probe_kind);
+                (endpoint, outcome)
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = self.state.lock();
+        state
+            .entries
+            .retain(|endpoint, _| raw_set.contains(endpoint));
+        for endpoint in &raw_endpoints {
+            state.entries.entry(endpoint.clone()).or_default();
+        }
+        for (endpoint, outcome) in probe_results {
+            if raw_set.contains(&endpoint) {
+                state
+                    .entries
+                    .entry(endpoint)
+                    .or_default()
+                    .record_probe(outcome, now, &self.config);
+            }
+        }
+
+        let new_published = raw_endpoints
+            .into_iter()
+            .filter(|endpoint| {
+                state
+                    .entries
+                    .get(endpoint)
+                    .is_some_and(|entry| entry.status.is_healthy())
+            })
+            .collect::<Vec<_>>();
+        let old_published = state.published.clone();
+        let old_set: HashSet<_> = old_published.iter().cloned().collect();
+        let new_set: HashSet<_> = new_published.iter().cloned().collect();
+        let mut changes = Vec::new();
+
+        changes.extend(
+            new_published
+                .iter()
+                .filter(|endpoint| !old_set.contains(*endpoint))
+                .cloned()
+                .map(Change::Insert),
+        );
+        changes.extend(
+            old_published
+                .into_iter()
+                .filter(|endpoint| !new_set.contains(endpoint))
+                .map(Change::Remove),
+        );
+        state.published = new_published;
+
+        Ok(changes)
+    }
+
+    fn endpoints(&self) -> Vec<Self::Key> {
+        self.state.lock().published.clone()
+    }
+}
+
+impl<D, P> fmt::Debug for ActiveHealthDiscovery<D, P>
+where
+    D: Discover + fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.lock();
+        f.debug_struct("ActiveHealthDiscovery")
+            .field("inner", &self.inner)
+            .field("config", &self.config)
+            .field("endpoints", &state.published.len())
             .finish()
     }
 }
@@ -534,7 +965,7 @@ mod tests {
     )]
     use super::*;
     use std::cell::Cell;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex as StdMutex};
@@ -675,6 +1106,111 @@ mod tests {
         let list = StaticList::new(vec![1, 2]);
         let dbg = format!("{list:?}");
         assert!(dbg.contains("StaticList"));
+    }
+
+    // ================================================================
+    // ActiveHealthDiscovery
+    // ================================================================
+
+    #[test]
+    fn active_health_discovery_filters_retries_and_readds_endpoints_with_backoff() {
+        init_test("active_health_discovery_filters_retries_and_readds_endpoints_with_backoff");
+        set_test_time(0);
+        let outcomes = Arc::new(StdMutex::new(HashMap::from([
+            (
+                "http".to_string(),
+                VecDeque::from([ProbeOutcome::Healthy, ProbeOutcome::Healthy]),
+            ),
+            (
+                "grpc".to_string(),
+                VecDeque::from([ProbeOutcome::Unhealthy, ProbeOutcome::Healthy]),
+            ),
+            (
+                "tcp".to_string(),
+                VecDeque::from([ProbeOutcome::Healthy, ProbeOutcome::Healthy]),
+            ),
+        ])));
+        let outcomes_for_probe = Arc::clone(&outcomes);
+        let discovery = ActiveHealthDiscovery::new(
+            StaticList::new(vec![
+                "http".to_string(),
+                "grpc".to_string(),
+                "tcp".to_string(),
+            ]),
+            ActiveHealthConfig::new(HealthProbeKind::http("/health"))
+                .probe_interval(Duration::from_secs(10))
+                .failure_backoff(ProbeBackoff::new(
+                    Duration::from_secs(5),
+                    Duration::from_secs(20),
+                ))
+                .with_time_getter(test_time),
+            move |endpoint: &String, kind: &HealthProbeKind| {
+                assert_eq!(kind, &HealthProbeKind::http("/health"));
+                outcomes_for_probe
+                    .lock()
+                    .expect("probe outcome script lock poisoned")
+                    .get_mut(endpoint)
+                    .expect("endpoint should have a probe script")
+                    .pop_front()
+                    .expect("endpoint probe script exhausted")
+            },
+        );
+
+        let first = discovery.poll_discover().unwrap();
+        assert_eq!(
+            first,
+            vec![
+                Change::Insert("http".to_string()),
+                Change::Insert("tcp".to_string())
+            ]
+        );
+        assert_eq!(
+            discovery.endpoints(),
+            vec!["http".to_string(), "tcp".to_string()]
+        );
+
+        let grpc_health = discovery
+            .endpoint_health(&"grpc".to_string())
+            .expect("grpc endpoint should have health state");
+        assert_eq!(grpc_health.status, EndpointHealthStatus::Unhealthy);
+        assert_eq!(grpc_health.consecutive_failures, 1);
+        assert_eq!(grpc_health.probe_count, 1);
+        assert_eq!(grpc_health.transition_count, 1);
+        assert_eq!(grpc_health.next_probe_at, Some(Time::from_secs(5)));
+
+        set_test_time(Time::from_secs(4).as_nanos());
+        assert_eq!(
+            discovery.poll_discover().unwrap(),
+            Vec::<Change<String>>::new()
+        );
+        assert_eq!(
+            discovery
+                .endpoint_health(&"grpc".to_string())
+                .expect("grpc health state should remain present")
+                .probe_count,
+            1,
+            "failed endpoint must respect active-probe backoff"
+        );
+
+        set_test_time(Time::from_secs(5).as_nanos());
+        let recovered = discovery.poll_discover().unwrap();
+        assert_eq!(recovered, vec![Change::Insert("grpc".to_string())]);
+        assert_eq!(
+            discovery.endpoints(),
+            vec!["http".to_string(), "grpc".to_string(), "tcp".to_string()]
+        );
+
+        let grpc_health = discovery
+            .endpoint_health(&"grpc".to_string())
+            .expect("grpc endpoint should still have health state");
+        assert_eq!(grpc_health.status, EndpointHealthStatus::Healthy);
+        assert_eq!(grpc_health.consecutive_failures, 0);
+        assert_eq!(grpc_health.probe_count, 2);
+        assert_eq!(grpc_health.transition_count, 2);
+        assert_eq!(grpc_health.next_probe_at, Some(Time::from_secs(15)));
+        crate::test_complete!(
+            "active_health_discovery_filters_retries_and_readds_endpoints_with_backoff"
+        );
     }
 
     // ================================================================

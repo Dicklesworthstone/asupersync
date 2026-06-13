@@ -1064,9 +1064,10 @@ mod tests {
     )]
     use super::*;
     use parking_lot::Mutex;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -2675,6 +2676,80 @@ mod tests {
             .expect("subsequent static discovery polls should be no-ops");
         assert_eq!(lb.len(), 2);
         crate::test_complete!("lb_update_from_static_discovery_is_idempotent");
+    }
+
+    #[test]
+    fn lb_update_from_active_health_discovery_skips_unhealthy_and_readds_recovered() {
+        init_test("lb_update_from_active_health_discovery_skips_unhealthy_and_readds_recovered");
+        let outcomes = Arc::new(Mutex::new(HashMap::from([
+            (
+                "backend-a".to_string(),
+                VecDeque::from([
+                    super::super::discover::ProbeOutcome::Healthy,
+                    super::super::discover::ProbeOutcome::Healthy,
+                ]),
+            ),
+            (
+                "backend-b".to_string(),
+                VecDeque::from([
+                    super::super::discover::ProbeOutcome::Unhealthy,
+                    super::super::discover::ProbeOutcome::Healthy,
+                ]),
+            ),
+        ])));
+        let outcomes_for_probe = Arc::clone(&outcomes);
+        let discover = super::super::discover::ActiveHealthDiscovery::new(
+            super::super::discover::StaticList::new(backend_names(["backend-a", "backend-b"])),
+            super::super::discover::ActiveHealthConfig::new(
+                super::super::discover::HealthProbeKind::Tcp,
+            )
+            .probe_interval(Duration::ZERO)
+            .failure_backoff(super::super::discover::ProbeBackoff::new(
+                Duration::ZERO,
+                Duration::ZERO,
+            )),
+            move |endpoint: &String, kind: &super::super::discover::HealthProbeKind| {
+                assert_eq!(kind, &super::super::discover::HealthProbeKind::Tcp);
+                outcomes_for_probe
+                    .lock()
+                    .get_mut(endpoint)
+                    .expect("endpoint should have a probe script")
+                    .pop_front()
+                    .expect("endpoint probe script exhausted")
+            },
+        );
+        let lb = LoadBalancer::empty(RoundRobin::new());
+
+        lb.update_from_discover(&discover)
+            .expect("first active-health update should apply");
+        assert_eq!(discover.endpoints(), backend_names(["backend-a"]));
+        assert_eq!(
+            lb.len(),
+            1,
+            "unhealthy backend should be withheld from load balancing"
+        );
+
+        lb.update_from_discover(&discover)
+            .expect("recovered active-health update should apply");
+        assert_eq!(
+            discover.endpoints(),
+            backend_names(["backend-a", "backend-b"])
+        );
+        assert_eq!(
+            lb.len(),
+            2,
+            "recovered backend should be reinserted into the balancer"
+        );
+
+        let mut remaining = vec![
+            lb.remove(0).expect("backend-a should remain"),
+            lb.remove(0).expect("backend-b should be re-added"),
+        ];
+        remaining.sort();
+        assert_eq!(remaining, backend_names(["backend-a", "backend-b"]));
+        crate::test_complete!(
+            "lb_update_from_active_health_discovery_skips_unhealthy_and_readds_recovered"
+        );
     }
 
     #[test]
