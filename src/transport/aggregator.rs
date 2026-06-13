@@ -7,6 +7,7 @@
 //! - `SymbolReorderer`: Buffers and reorders symbols
 //! - `MultipathAggregator`: Main aggregation orchestrator
 
+use crate::distributed::encoding::PathQualitySnapshot;
 use crate::error::{Error, ErrorKind};
 use crate::types::Time;
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
@@ -146,6 +147,20 @@ impl PathCharacteristics {
         }
     }
 
+    /// Exports these configured path characteristics for adaptive RaptorQ block layout.
+    ///
+    /// The current transport model tracks latency, loss, and jitter rather than
+    /// a direct reorder-depth EWMA, so jitter is converted into a conservative
+    /// replay-stable reorder proxy.
+    #[must_use]
+    pub fn encoding_path_quality(&self) -> PathQualitySnapshot {
+        PathQualitySnapshot::from_loss_rate(
+            self.latency_ms,
+            self.loss_rate,
+            reorder_depth_from_jitter_ms(self.jitter_ms),
+        )
+    }
+
     /// Calculates an overall quality score (higher = better).
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
@@ -164,6 +179,19 @@ impl PathCharacteristics {
         // Weighted combination
         latency_score * 0.3 + bandwidth_score * 0.3 + loss_score * 0.3 + jitter_score * 0.1
     }
+}
+
+fn reorder_depth_from_jitter_ms(jitter_ms: u32) -> u16 {
+    u16::try_from(jitter_ms / 10).unwrap_or(u16::MAX)
+}
+
+fn reorder_depth_from_duplicate_pressure(duplicates: u64, received: u64) -> u16 {
+    if duplicates == 0 || received == 0 {
+        return 0;
+    }
+
+    let depth = duplicates.saturating_mul(8).div_ceil(received);
+    u16::try_from(depth).unwrap_or(u16::MAX)
 }
 
 /// A transport path for symbol transmission.
@@ -250,6 +278,33 @@ impl TransportPath {
     /// Records a loss.
     pub fn record_loss(&self) {
         self.symbols_lost.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Exports live path counters for adaptive RaptorQ block layout.
+    ///
+    /// Observed loss takes precedence once the path has traffic; otherwise the
+    /// configured path loss estimate is used. Reorder depth combines the
+    /// configured jitter proxy with duplicate-pressure observed on this path.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn encoding_path_quality(&self) -> PathQualitySnapshot {
+        let received = self.symbols_received.load(Ordering::Relaxed);
+        let lost = self.symbols_lost.load(Ordering::Relaxed);
+        let total = received.saturating_add(lost);
+        let loss_rate = if total == 0 {
+            self.characteristics.loss_rate
+        } else {
+            lost as f64 / total as f64
+        };
+        let duplicates = self.duplicates_received.load(Ordering::Relaxed);
+        let reorder_depth = reorder_depth_from_jitter_ms(self.characteristics.jitter_ms)
+            .max(reorder_depth_from_duplicate_pressure(duplicates, received));
+
+        PathQualitySnapshot::from_loss_rate(
+            self.characteristics.latency_ms,
+            loss_rate,
+            reorder_depth,
+        )
     }
 
     /// Returns the effective loss rate.
@@ -2060,6 +2115,24 @@ mod tests {
         crate::test_complete!("test_quality_score");
     }
 
+    #[test]
+    fn path_characteristics_exports_path_quality_snapshot() {
+        init_test("path_characteristics_exports_path_quality_snapshot");
+        let chars = PathCharacteristics {
+            latency_ms: 75,
+            loss_rate: 0.125,
+            jitter_ms: 39,
+            ..PathCharacteristics::default()
+        };
+
+        let quality = chars.encoding_path_quality();
+
+        assert_eq!(quality.rtt_ewma_ms, 75);
+        assert_eq!(quality.loss_ewma_permille, 125);
+        assert_eq!(quality.reorder_depth, 3);
+        crate::test_complete!("path_characteristics_exports_path_quality_snapshot");
+    }
+
     // Test 3: Path statistics
     #[test]
     fn test_path_statistics() {
@@ -2090,6 +2163,29 @@ mod tests {
             loss_rate > 0.0
         );
         crate::test_complete!("test_path_statistics");
+    }
+
+    #[test]
+    fn transport_path_exports_observed_path_quality_snapshot() {
+        init_test("transport_path_exports_observed_path_quality_snapshot");
+        let path = test_path(1).with_characteristics(PathCharacteristics {
+            latency_ms: 90,
+            loss_rate: 0.01,
+            jitter_ms: 10,
+            ..PathCharacteristics::default()
+        });
+
+        path.record_receipt(Time::from_secs(1));
+        path.record_receipt(Time::from_secs(2));
+        path.record_duplicate();
+        path.record_loss();
+
+        let quality = path.encoding_path_quality();
+
+        assert_eq!(quality.rtt_ewma_ms, 90);
+        assert_eq!(quality.loss_ewma_permille, 333);
+        assert_eq!(quality.reorder_depth, 4);
+        crate::test_complete!("transport_path_exports_observed_path_quality_snapshot");
     }
 
     // Test 4: PathSet selection - UseAll

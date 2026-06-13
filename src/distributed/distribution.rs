@@ -15,7 +15,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use super::assignment::{AssignmentStrategy, SymbolAssigner};
-use super::encoding::EncodedState;
+use super::encoding::{EncodedState, EncodingConfig, PathQualitySnapshot};
 
 // ---------------------------------------------------------------------------
 // DistributorTransport
@@ -48,6 +48,8 @@ pub struct DistributionConfig {
     pub hedge_enabled: bool,
     /// Hedge delay (send to backup after this delay).
     pub hedge_delay: Duration,
+    /// Optional path-quality snapshot to apply when creating an encoder config.
+    pub encoding_path_quality: Option<PathQualitySnapshot>,
 }
 
 impl Default for DistributionConfig {
@@ -58,7 +60,24 @@ impl Default for DistributionConfig {
             max_concurrent: 10,
             hedge_enabled: false,
             hedge_delay: Duration::from_millis(50),
+            encoding_path_quality: None,
         }
+    }
+}
+
+impl DistributionConfig {
+    /// Returns a copy with path-quality input for adaptive RaptorQ block layout.
+    #[must_use]
+    pub const fn with_encoding_path_quality(mut self, quality: PathQualitySnapshot) -> Self {
+        self.encoding_path_quality = Some(quality);
+        self
+    }
+
+    /// Applies this distribution config's path-quality input to an encoding config.
+    #[must_use]
+    pub const fn apply_to_encoding_config(&self, mut config: EncodingConfig) -> EncodingConfig {
+        config.path_quality = self.encoding_path_quality;
+        config
     }
 }
 
@@ -1092,6 +1111,7 @@ mod tests {
             max_concurrent: 5,
             hedge_enabled: true,
             hedge_delay: Duration::from_millis(100),
+            encoding_path_quality: None,
         };
         let distributor = SymbolDistributor::new(config);
 
@@ -1099,6 +1119,15 @@ mod tests {
         assert_eq!(distributor.config().ack_timeout, Duration::from_secs(10));
         assert_eq!(distributor.config().max_concurrent, 5);
         assert!(distributor.config().hedge_enabled);
+    }
+
+    #[test]
+    fn distribution_config_applies_path_quality_to_encoding_config() {
+        let quality = PathQualitySnapshot::new(120, 150, 4);
+        let distribution = DistributionConfig::default().with_encoding_path_quality(quality);
+        let encoding = distribution.apply_to_encoding_config(EncodingConfig::default());
+
+        assert_eq!(encoding.path_quality, Some(quality));
     }
 
     #[test]

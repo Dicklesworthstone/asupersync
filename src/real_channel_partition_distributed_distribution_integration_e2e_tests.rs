@@ -29,8 +29,7 @@ mod tests {
             assignment::{AssignmentStrategy, ReplicaAssignment, SymbolAssigner},
             consistent_hash::{ConsistentHashError, HashRing},
             distribution::{
-                ConsistencyLevel, DistributionConfig, ReplicaAck, ReplicaFailure,
-                SymbolDistributor,
+                ConsistencyLevel, DistributionConfig, ReplicaAck, ReplicaFailure, SymbolDistributor,
             },
         },
         error::RuntimeError,
@@ -362,6 +361,7 @@ mod tests {
                 max_concurrent: 10,
                 hedge_enabled: true,
                 hedge_delay: Duration::from_millis(100),
+                encoding_path_quality: None,
             };
 
             // Create symbol distributor

@@ -7,6 +7,7 @@
 //! - Load balancing strategies: round-robin, weighted, least-connections
 
 use crate::cx::Cx;
+use crate::distributed::encoding::PathQualitySnapshot;
 use crate::error::{Error, ErrorKind};
 #[cfg(feature = "messaging-fabric")]
 use crate::messaging::capability::FabricCapability;
@@ -275,6 +276,20 @@ impl Endpoint {
         } else {
             failures as f64 / total as f64
         }
+    }
+
+    /// Exports endpoint failure telemetry for adaptive RaptorQ block layout.
+    ///
+    /// Routers do not own RTT or reorder estimators, so callers pass the
+    /// replayable RTT/reorder observations from their probe or transport layer;
+    /// this method contributes the endpoint failure-rate EWMA as the loss input.
+    #[must_use]
+    pub fn encoding_path_quality(
+        &self,
+        rtt_ewma_ms: u32,
+        reorder_depth: u16,
+    ) -> PathQualitySnapshot {
+        PathQualitySnapshot::from_loss_rate(rtt_ewma_ms, self.failure_rate(), reorder_depth)
     }
 
     /// Acquires a connection slot and returns a RAII guard.
@@ -3180,6 +3195,20 @@ mod tests {
         // Failure rate: 1 / (2 + 1) = 0.333...
         let rate = endpoint.failure_rate();
         assert!(rate > 0.3 && rate < 0.34);
+    }
+
+    #[test]
+    fn endpoint_exports_path_quality_snapshot() {
+        let endpoint = test_endpoint(1);
+        endpoint.record_success(Time::from_secs(1));
+        endpoint.record_success(Time::from_secs(2));
+        endpoint.record_failure(Time::from_secs(3));
+
+        let quality = endpoint.encoding_path_quality(44, 3);
+
+        assert_eq!(quality.rtt_ewma_ms, 44);
+        assert_eq!(quality.loss_ewma_permille, 333);
+        assert_eq!(quality.reorder_depth, 3);
     }
 
     // Test 3: Load balancer round robin
