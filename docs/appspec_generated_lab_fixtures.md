@@ -48,9 +48,12 @@ The contract requires one negative fixture for each validation class below:
 - `invalid-budget-composition`
 - `unsupported-db-protocol-feature`
 - `supervision-cycle`
+- `supervision-assignment`
 
 Each negative row owns its validation phase, expected error kind, and local
 no-claim boundary. Missing any required row blocks proof-manifest projection.
+The `supervision-assignment` row is tied to the A2 validation surface that rejects
+missing, duplicate, or mismatched service-to-supervision-group assignment.
 
 <!-- APPSPEC-GENERATED-LAB-FIXTURES:MANIFEST -->
 
@@ -66,6 +69,11 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target
 
 The projection is not a canonical manifest row until the focused contract test
 passes remotely and the A2 proof blocker is cleared.
+
+The current A2 source evidence is commits `739780907` and `5707618c1`. Those
+commits added the compiler bridge and supervision-assignment validation, but the
+focused test-profile proof still needs a fresh remote pass before this packet can
+be cited as executable generated-fixture evidence.
 
 <!-- APPSPEC-GENERATED-LAB-FIXTURES:VALIDATION -->
 

@@ -248,7 +248,7 @@ fn accepted_fixture_declares_deterministic_topology_and_lab_replay() {
 fn negative_fixture_catalog_covers_required_validation_classes() {
     let artifact = artifact();
     let negative = array(&artifact, "negative_fixtures");
-    assert_eq!(negative.len(), 4, "A3 requires four negative fixtures");
+    assert_eq!(negative.len(), 5, "A3 requires five negative fixtures");
 
     let categories = negative
         .iter()
@@ -259,6 +259,7 @@ fn negative_fixture_catalog_covers_required_validation_classes() {
         "invalid-budget-composition",
         "unsupported-db-protocol-feature",
         "supervision-cycle",
+        "supervision-assignment",
     ] {
         assert!(categories.contains(required), "missing category {required}");
     }
@@ -272,11 +273,47 @@ fn negative_fixture_catalog_covers_required_validation_classes() {
             "negative fixture must carry local no-claim boundaries"
         );
     }
+
+    let supervision = negative
+        .iter()
+        .find(|row| string(row, "category") == "supervision-assignment")
+        .unwrap_or_else(|| panic!("missing supervision-assignment fixture"));
+    let source_evidence = string_set(supervision, "source_evidence");
+    for required in [
+        "src/app.rs::validate_supervision_assignments",
+        "docs/appspec_v1.md validation contract",
+    ] {
+        assert!(
+            source_evidence.contains(required),
+            "missing supervision source evidence {required}"
+        );
+    }
 }
 
 #[test]
 fn proof_projection_and_status_remain_fail_closed() {
     let artifact = artifact();
+
+    let a2_evidence = object(&artifact, "a2_source_evidence");
+    let commits = string_set(a2_evidence, "commits");
+    for required in ["739780907", "5707618c1"] {
+        assert!(commits.contains(required), "missing A2 commit {required}");
+    }
+    let validation_surfaces = string_set(a2_evidence, "validation_surfaces");
+    for required in [
+        "AppSpecV1::compiler_plan",
+        "AppSpecV1::compile_with_child_specs",
+        "validate_supervision_assignments",
+    ] {
+        assert!(
+            validation_surfaces.contains(required),
+            "missing A2 validation surface {required}"
+        );
+    }
+    assert_eq!(
+        string(a2_evidence, "proof_status"),
+        "source-check-passed-focused-tests-blocked-by-rch"
+    );
 
     let blockers = array(&artifact, "blocked_by");
     assert!(

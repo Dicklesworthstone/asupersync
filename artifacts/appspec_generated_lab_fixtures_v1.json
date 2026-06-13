@@ -25,9 +25,30 @@
     {
       "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2.2",
       "status": "in_progress",
-      "reason": "A2 source landed, but its exact focused RCH unit proof was canceled or stale-progress, so A3 remains a contract packet until the A2 proof is fresh."
+      "reason": "A2 source landed in 739780907 and 5707618c1, but its exact focused RCH unit proof was canceled, stale-progress, or refused before worker assignment, so A3 remains a contract packet until the A2 proof is fresh."
     }
   ],
+  "a2_source_evidence": {
+    "commits": [
+      "739780907",
+      "5707618c1"
+    ],
+    "source_paths": [
+      "src/app.rs",
+      "docs/appspec_v1.md"
+    ],
+    "validation_surfaces": [
+      "AppSpecV1::compiler_plan",
+      "AppSpecV1::compile_with_child_specs",
+      "validate_supervision_assignments"
+    ],
+    "focused_test_filters": [
+      "appspec_v1_roundtrip_preserves_capability_contract",
+      "appspec_v1_compile_lowers_to_existing_builder",
+      "appspec_v1_validate_rejects_"
+    ],
+    "proof_status": "source-check-passed-focused-tests-blocked-by-rch"
+  },
   "generation_policy": {
     "manual_fixture_tables_accepted": false,
     "generator_contract": "accepted AppSpec manifests must project into deterministic lab fixtures, expected topology snapshots, proof-lane manifest projections, and negative validation fixtures before they can be cited as executable AppSpec evidence",
@@ -35,6 +56,7 @@
       "missing source_of_truth path blocks fixture citation",
       "missing accepted fixture blocks proof-manifest projection",
       "missing negative fixture for a required validation class blocks proof-manifest projection",
+      "missing supervision-assignment fixture blocks proof-manifest projection",
       "missing RCH remote-required command blocks fixture citation",
       "fresh-rch-pass status is forbidden until the focused contract test completes remotely"
     ]
@@ -156,6 +178,20 @@
         "does not prove runtime region quiescence",
         "does not prove live supervision restart behavior"
       ]
+    },
+    {
+      "fixture_id": "missing-or-conflicting-supervision-assignment",
+      "category": "supervision-assignment",
+      "expected_validation_phase": "supervision-assignment",
+      "expected_error_kind": "missing, duplicate, or mismatched service supervision assignment",
+      "source_evidence": [
+        "src/app.rs::validate_supervision_assignments",
+        "docs/appspec_v1.md validation contract"
+      ],
+      "no_claims": [
+        "does not prove supervision-cycle detection",
+        "does not prove runtime restart behavior"
+      ]
     }
   ],
   "proof_manifest_projection": {
@@ -189,6 +225,7 @@
     "status": "blocked-by-a2-proof",
     "fresh_rch_pass": false,
     "first_blocker": "asupersync-idea-wizard-fifth-wave-3gaiun.2.2",
+    "latest_remote_required_refusal": "2026-06-13 A2 focused proof refused before worker assignment with critical_pressure=1, health_below_fallback=1, hard_preflight=3, active_project_exclusion=1",
     "operator_action": "rerun A2 focused proof, then run appspec-generated-lab-fixtures-contract remotely"
   },
   "validation": {
