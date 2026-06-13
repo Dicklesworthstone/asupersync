@@ -2,7 +2,8 @@
   "schema_version": "security-release-policy-v1",
   "source_documents": [
     "docs/security_threat_model.md",
-    "WASM_SIZE_PERF_BUDGETS.md"
+    "WASM_SIZE_PERF_BUDGETS.md",
+    "docs/rust_crate_release_provenance_policy.md"
   ],
   "release_blocking_criteria": [
     {
@@ -79,7 +80,7 @@
       "category": "supply_chain_artifact_integrity",
       "title": "SBOM and provenance artifact bundle integrity",
       "severity": "critical",
-      "description": "Rust/npm release surfaces must publish deterministic SBOM + provenance artifacts, and a SHA-256 integrity manifest must match the committed artifact bytes.",
+      "description": "Browser/WASM and npm release surfaces must publish deterministic SBOM + provenance artifacts, and a SHA-256 integrity manifest must match the committed artifact bytes. Core Rust crate provenance is inventoried separately in docs/rust_crate_release_provenance_policy.md until the Rust crate package provenance gate lands.",
       "required_artifacts": [
         "docs/wasm_browser_sbom_v1.json",
         "docs/wasm_browser_provenance_attestation_v1.json",
