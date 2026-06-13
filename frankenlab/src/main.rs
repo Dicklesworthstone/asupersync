@@ -897,7 +897,8 @@ mod tests {
     use asupersync::trace::replay::TraceMetadata;
     use asupersync::trace::{
         IncidentCommand, IncidentDeterminism, IncidentProvenance, IncidentReplayCanonicalization,
-        IncidentReplaySource, IncidentSourceKind,
+        IncidentReplayMinimizationIssueKind, IncidentReplayShrinkStepKind, IncidentReplaySource,
+        IncidentSourceKind,
     };
     use std::collections::BTreeMap;
 
@@ -1104,6 +1105,72 @@ mod tests {
         assert_eq!(repro.removed_source_ids, ["trace-log-main"]);
         assert_eq!(repro.removed_feature_flags, ["extra-diagnostics"]);
         assert!(!repro.summary.budget_exhausted);
+    }
+
+    #[test]
+    fn minimize_incident_replay_package_has_stable_json_projection() {
+        let package = synthetic_incident_replay_package();
+        let first = minimize_incident_replay_package_report(
+            Path::new("synthetic-incident-package.json"),
+            &package,
+            8,
+        );
+        let second = minimize_incident_replay_package_report(
+            Path::new("synthetic-incident-package.json"),
+            &package,
+            8,
+        );
+
+        let first_json = serde_json::to_string_pretty(&first).expect("report serializes");
+        let second_json = serde_json::to_string_pretty(&second).expect("report serializes");
+        assert_eq!(first_json, second_json);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&first_json).expect("report JSON parses");
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["input_kind"], "incident_replay_package_json");
+        assert_eq!(value["minimized_surface"], "replay_package_sources");
+        assert_eq!(value["package"], "synthetic-incident-package.json");
+        assert_eq!(value["package_id"], "incident-replay-v1:synthetic");
+        assert_eq!(value["oracle"]["kind"], "panic");
+        assert_eq!(
+            value["oracle"]["expected_signal"],
+            "crashpack_replay_source_preserved"
+        );
+        assert_eq!(value["config"]["step_budget"], 8);
+        assert_eq!(value["outcome"]["verdict"], "minimized");
+        assert_eq!(
+            value["outcome"]["repro"]["retained_sources"][0]["source_id"],
+            "crashpack-main"
+        );
+    }
+
+    #[test]
+    fn minimize_incident_replay_package_budget_exhaustion_keeps_best_repro() {
+        let package = synthetic_incident_replay_package();
+        let report = minimize_incident_replay_package_report(
+            Path::new("synthetic-incident-package.json"),
+            &package,
+            1,
+        );
+        let repro = report.outcome.repro.expect("budgeted repro emitted");
+
+        assert_eq!(
+            report.outcome.verdict,
+            IncidentReplayMinimizationVerdict::BudgetExhausted
+        );
+        assert!(report.outcome.issues.iter().any(|issue| {
+            issue.kind == IncidentReplayMinimizationIssueKind::BudgetExhausted
+                && issue.field == "config.step_budget"
+        }));
+        assert!(report.outcome.steps.iter().any(|step| {
+            step.kind == IncidentReplayShrinkStepKind::BudgetExhausted && !step.accepted
+        }));
+        assert!(repro.summary.budget_exhausted);
+        assert_eq!(repro.retained_sources.len(), 1);
+        assert_eq!(repro.retained_sources[0].source_id, "crashpack-main");
+        assert_eq!(repro.removed_source_ids, ["trace-log-main"]);
+        assert_eq!(repro.retained_feature_flags, ["extra-diagnostics"]);
     }
 
     #[test]

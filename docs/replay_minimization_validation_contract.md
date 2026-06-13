@@ -80,6 +80,17 @@ sets. A package that cannot satisfy the crashpack-preservation oracle emits a
 typed blocked/inconclusive outcome and exits non-zero rather than pretending it
 found a repro.
 
+Package minimization uses a stable JSON report projection:
+`schema_version`, `input_kind=incident_replay_package_json`,
+`minimized_surface=replay_package_sources`, the package identifier, the
+deterministic oracle, the effective shrink config, and the full
+`IncidentReplayMinimizationReport`. Budget exhaustion is still a repro-bearing
+best-so-far result when the crashpack-preservation oracle remains true: the
+report verdict is `budget_exhausted`, the issue list names
+`config.step_budget`, the shrink log includes a non-accepted budget step, and
+the emitted repro summary marks `budget_exhausted=true`. This satisfies the
+CLI's no-hang contract without claiming fixed-point minimality.
+
 ### Dimension 3: Geodesic Normalization Correctness
 
 Normalized traces must be valid linear extensions with reduced switch cost:
