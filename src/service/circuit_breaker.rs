@@ -192,6 +192,33 @@ pub enum CircuitBreakerError<E> {
     Inner(E),
 }
 
+impl<E> CircuitBreakerError<E> {
+    /// Returns true when the breaker rejected a call before it reached the
+    /// inner service.
+    #[must_use]
+    pub const fn is_rejected(&self) -> bool {
+        matches!(self, Self::Open { .. } | Self::HalfOpenFull)
+    }
+
+    /// Returns true when the circuit is open.
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+
+    /// Returns true when the circuit is half-open and has no probe slots left.
+    #[must_use]
+    pub const fn is_half_open_full(&self) -> bool {
+        matches!(self, Self::HalfOpenFull)
+    }
+
+    /// Returns true when the inner service returned the error.
+    #[must_use]
+    pub const fn is_inner(&self) -> bool {
+        matches!(self, Self::Inner(_))
+    }
+}
+
 impl<E: fmt::Display> fmt::Display for CircuitBreakerError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -419,8 +446,13 @@ mod tests {
     )]
 
     use super::*;
+    use crate::combinator::circuit_breaker::FailurePredicate;
+    use crate::service::retry::{Policy, Retry, RetryError};
     use std::cell::Cell;
     use std::collections::VecDeque;
+    use std::future::{Future, Ready, ready};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
     use std::time::Duration;
 
@@ -508,6 +540,50 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct SharedScriptedService {
+        steps: std::sync::Arc<Mutex<VecDeque<Step>>>,
+        calls: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl SharedScriptedService {
+        fn new(steps: impl IntoIterator<Item = Step>) -> Self {
+            Self {
+                steps: std::sync::Arc::new(Mutex::new(steps.into_iter().collect())),
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Service<()> for SharedScriptedService {
+        type Response = &'static str;
+        type Error = &'static str;
+        type Future = ScriptedFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let step = self
+                .steps
+                .lock()
+                .expect("scripted service mutex poisoned")
+                .pop_front()
+                .expect("scripted service exhausted");
+            match step {
+                Step::Ok(value) => ScriptedFuture::ready(Ok(value)),
+                Step::Err(error) => ScriptedFuture::ready(Err(error)),
+                Step::Pending => ScriptedFuture::pending(),
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct ScriptedFuture {
         result: Option<Result<&'static str, &'static str>>,
@@ -539,6 +615,33 @@ mod tests {
             } else {
                 Poll::Ready(self.result.take().expect("future polled after completion"))
             }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct RetryInnerOnly {
+        remaining: usize,
+    }
+
+    impl Policy<(), &'static str, CircuitBreakerError<&'static str>> for RetryInnerOnly {
+        type Future = Ready<Self>;
+
+        fn retry(
+            &self,
+            _req: &(),
+            result: Result<&&'static str, &CircuitBreakerError<&'static str>>,
+        ) -> Option<Self::Future> {
+            match result {
+                Err(error) if error.is_inner() && self.remaining > 0 => Some(ready(Self {
+                    remaining: self.remaining - 1,
+                })),
+                Err(error) if error.is_rejected() => None,
+                Err(_) | Ok(_) => None,
+            }
+        }
+
+        fn clone_request(&self, _req: &()) -> Option<()> {
+            Some(())
         }
     }
 
@@ -651,6 +754,114 @@ mod tests {
             service.inner().calls()
         );
         crate::test_complete!("call_without_poll_ready_fails_closed");
+    }
+
+    #[test]
+    fn failure_predicate_ignores_non_counting_errors() {
+        fn is_fatal(error: &str) -> bool {
+            error == "fatal"
+        }
+
+        init_test("failure_predicate_ignores_non_counting_errors");
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1,
+            failure_predicate: FailurePredicate::ByType(is_fatal),
+            ..test_policy()
+        };
+        let mut service = CircuitBreaker::with_time_getter(
+            ScriptedService::new([Step::Err("soft"), Step::Err("soft"), Step::Err("fatal")]),
+            policy,
+            test_time,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for attempt in 1..=2 {
+            let ready = service.poll_ready(&mut cx);
+            let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+            crate::assert_with_log!(ready_ok, "soft error ready", true, ready_ok);
+            let mut future = service.call(());
+            let result = poll_once(&mut future);
+            let soft_error = matches!(result, Poll::Ready(Err(CircuitBreakerError::Inner("soft"))));
+            crate::assert_with_log!(soft_error, "soft error returned", true, soft_error);
+            crate::assert_with_log!(
+                service.state() == (State::Closed { failures: 0 }),
+                "ignored errors keep closed streak clear",
+                State::Closed { failures: 0 },
+                service.state()
+            );
+            crate::assert_with_log!(
+                service.metrics().total_ignored_errors == attempt,
+                "ignored error counted",
+                attempt,
+                service.metrics().total_ignored_errors
+            );
+        }
+
+        let fatal_ready = service.poll_ready(&mut cx);
+        let fatal_ready_ok = matches!(fatal_ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(fatal_ready_ok, "fatal ready", true, fatal_ready_ok);
+        let mut fatal = service.call(());
+        let fatal_result = poll_once(&mut fatal);
+        let fatal_error = matches!(
+            fatal_result,
+            Poll::Ready(Err(CircuitBreakerError::Inner("fatal")))
+        );
+        crate::assert_with_log!(fatal_error, "fatal error returned", true, fatal_error);
+        let opened = matches!(service.state(), State::Open { .. });
+        crate::assert_with_log!(opened, "fatal error opens", true, opened);
+        let metrics = service.metrics();
+        crate::assert_with_log!(
+            metrics.total_ignored_errors == 2,
+            "two ignored errors",
+            2,
+            metrics.total_ignored_errors
+        );
+        crate::assert_with_log!(
+            metrics.total_failure == 1,
+            "one counted failure",
+            1,
+            metrics.total_failure
+        );
+        crate::assert_with_log!(
+            service.inner().calls() == 3,
+            "all scripted attempts reached inner",
+            3,
+            service.inner().calls()
+        );
+        crate::test_complete!("failure_predicate_ignores_non_counting_errors");
+    }
+
+    #[test]
+    fn retry_policy_can_stop_on_open_breaker_rejection() {
+        init_test("retry_policy_can_stop_on_open_breaker_rejection");
+        let shared = SharedScriptedService::new([Step::Err("fatal"), Step::Ok("unexpected")]);
+        let policy = CircuitBreakerPolicy {
+            failure_threshold: 1,
+            ..test_policy()
+        };
+        let breaker = CircuitBreaker::with_time_getter(shared.clone(), policy, test_time);
+        let mut service = Retry::new(breaker, RetryInnerOnly { remaining: 3 });
+
+        let mut future = service.call(());
+        let result = poll_once(&mut future);
+        let stopped_on_open = matches!(
+            result,
+            Poll::Ready(Err(RetryError::Inner(ref error))) if error.is_open()
+        );
+        crate::assert_with_log!(
+            stopped_on_open,
+            "retry stops on open breaker",
+            true,
+            stopped_on_open
+        );
+        crate::assert_with_log!(
+            shared.calls() == 1,
+            "retry did not storm inner through open breaker",
+            1,
+            shared.calls()
+        );
+        crate::test_complete!("retry_policy_can_stop_on_open_breaker_rejection");
     }
 
     #[test]
