@@ -386,7 +386,7 @@ impl AtpSession {
         let signature_valid = self
             .verify_detached_object_signature(object_path, &computed_hash, size_bytes)
             .await;
-        let verified = integrity_check_passed && signature_valid.unwrap_or(true);
+        let verified = integrity_check_passed && signature_valid == Some(true);
 
         AtpOutcome::Ok(ObjectVerification {
             path: object_path.to_path_buf(),
@@ -850,7 +850,10 @@ pub struct ObjectVerification {
     pub verified: bool,
     /// Whether integrity check passed.
     pub integrity_check_passed: bool,
-    /// Whether signature verification passed (if applicable).
+    /// Whether detached signature verification passed.
+    ///
+    /// `None` means the detached signature was absent. Missing signatures still
+    /// allow integrity-only hash checks, but they never make `verified` true.
     pub signature_valid: Option<bool>,
 }
 
@@ -1260,6 +1263,50 @@ mod tests {
                 &hash,
                 object.len() as u64
             ));
+        });
+    }
+
+    #[test]
+    fn verify_object_missing_detached_signature_is_integrity_only() {
+        futures_lite::future::block_on(async {
+            use sha2::{Digest, Sha256};
+
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::for_testing();
+            let peer = PeerId::from_label("unsigned_object_peer");
+            let session = sdk
+                .open_session(
+                    &cx,
+                    granted_direct_options(&config, peer, "unsigned-object-verification"),
+                )
+                .await
+                .unwrap();
+
+            let object_path = Path::new("src/net/atp/sdk/transfer.rs");
+            assert!(
+                !detached_object_signature_path(object_path).exists(),
+                "fixture must not carry a detached signature"
+            );
+            let object = std::fs::read(object_path).unwrap();
+            let mut hasher = Sha256::new();
+            hasher.update(&object);
+            let expected_hash: [u8; 32] = hasher.finalize().into();
+
+            let result = session
+                .verify_object(&cx, object_path, Some(&expected_hash[..]))
+                .await;
+            let verification = match result {
+                AtpOutcome::Ok(verification) => verification,
+                other => panic!("verify_object should return verification data: {other:?}"),
+            };
+
+            assert!(verification.integrity_check_passed);
+            assert_eq!(verification.signature_valid, None);
+            assert!(
+                !verification.verified,
+                "missing detached signatures must not be treated as authenticated"
+            );
         });
     }
 
