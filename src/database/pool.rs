@@ -37,7 +37,7 @@ use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::types::Time;
@@ -370,6 +370,13 @@ pub struct DbPool<M: ConnectionManager> {
     config: DbPoolConfig,
     inner: Mutex<PoolInner<M::Connection>>,
     stats: PoolStatCounters,
+    /// Live maximum pool size enforced by capacity checks (yj2nxx.7).
+    ///
+    /// Starts at `config.max_size`; managed pool sizing may lower it toward
+    /// `config.min_idle` and raise it back, but never above `config.max_size`
+    /// (the configured hard ceiling). A shrink never force-closes live
+    /// connections — it only blocks new creates until the pool drains.
+    live_max_size: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -592,6 +599,7 @@ impl<M: ConnectionManager> Drop for CreationGuard<'_, M> {
 impl<M: ConnectionManager> DbPool<M> {
     /// Create a new connection pool with the given manager and configuration.
     pub fn new(manager: M, config: DbPoolConfig) -> Self {
+        let live_max_size = AtomicUsize::new(config.max_size);
         Self {
             manager: Arc::new(manager),
             config,
@@ -604,12 +612,54 @@ impl<M: ConnectionManager> DbPool<M> {
                 client_retry_state: HashMap::new(), // br-asupersync-mlojr9
             }),
             stats: PoolStatCounters::default(),
+            live_max_size,
         }
     }
 
     /// Create a pool with default configuration.
     pub fn with_manager(manager: M) -> Self {
         Self::new(manager, DbPoolConfig::default())
+    }
+
+    /// The live maximum pool size currently enforced by capacity checks.
+    ///
+    /// This is the managed-mode operational cap (yj2nxx.7). It starts at
+    /// `config.max_size` and is adjusted by [`set_max_size`](Self::set_max_size)
+    /// within `[config.min_idle, config.max_size]`. `DbPoolStats::max_size`
+    /// continues to report the configured ceiling.
+    #[must_use]
+    pub fn current_max_size(&self) -> usize {
+        self.effective_max_size()
+    }
+
+    fn effective_max_size(&self) -> usize {
+        self.live_max_size.load(Ordering::Relaxed)
+    }
+
+    /// Set the live maximum pool size, clamped into `[min_idle, config.max_size]`.
+    ///
+    /// The configured `max_size` is the hard ceiling: managed sizing may shrink
+    /// the pool below it and grow it back, but never beyond it. A shrink only
+    /// prevents new creates; live connections drain naturally. Returns the
+    /// clamped value actually applied.
+    pub fn set_max_size(&self, requested: usize) -> usize {
+        let applied = requested
+            .max(self.config.min_idle)
+            .min(self.config.max_size);
+        self.live_max_size.store(applied, Ordering::Relaxed);
+        applied
+    }
+
+    /// Apply a managed pool-sizing decision to the live maximum size.
+    ///
+    /// Only [`PoolSizingAction::Resize`] mutates the cap (clamped into the
+    /// configured bounds); advisory mode and hysteresis/cadence holds are
+    /// no-ops. Returns the applied size when a resize was taken.
+    pub fn apply_pool_sizing_decision(&self, decision: &PoolSizingDecision) -> Option<usize> {
+        match decision.action {
+            PoolSizingAction::Resize { to_size, .. } => Some(self.set_max_size(to_size)),
+            _ => None,
+        }
     }
 
     /// Get the pool configuration.
@@ -726,7 +776,7 @@ impl<M: ConnectionManager> DbPool<M> {
 
                 if popped.is_none() {
                     // No valid idle connection; create new if under capacity.
-                    if inner.total < self.config.max_size {
+                    if inner.total < self.effective_max_size() {
                         inner.total += 1;
                         // Release lock during creation.
                     } else {
@@ -902,7 +952,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 }
 
                 if popped.is_none() {
-                    if inner.total < self.config.max_size {
+                    if inner.total < self.effective_max_size() {
                         inner.total += 1;
                     } else {
                         return Err(DbPoolError::Full);
@@ -1581,7 +1631,7 @@ impl<M: ConnectionManager> DbPool<M> {
         let mut created = 0;
         for _ in 0..self.config.min_idle {
             let mut inner = self.inner.lock();
-            if inner.total >= self.config.max_size || inner.closed {
+            if inner.total >= self.effective_max_size() || inner.closed {
                 break;
             }
             inner.total += 1;
