@@ -144,13 +144,13 @@ The right semantic object is a **trace equivalence class**:
 
 Why this matters inside Asupersync:
 
-* **DPOR becomes semantics-preserving**, not a heuristic: the lab runtime explores **one representative per trace class** (see §18).
+* **DPOR becomes semantics-preserving as a target**, not just a heuristic: the lab runtime should avoid redundant schedules by reasoning over trace classes (see §18). Current code is DPOR-style/guided coverage, not a certified optimal-DPOR engine that proves exactly one representative per trace class.
 * **Trace replay becomes canonicalizable**: you can normalize executions (Foata normal form / “parallel layers”) and compare runs robustly.
 * **Observational equivalence** (`≃`) becomes a real thing: many semiring laws are “true up to commuting independent work,” which is exactly what we want for lawful rewrites and plan optimization.
 
 There is an even deeper view (useful later, not required day‑1): the space of executions forms a **directed topological space**; commutations become 2‑cells (squares), higher commutations become higher cubes, and schedule equivalence is **directed homotopy** (dihomotopy). This is the geometric backbone behind "don't explore the same concurrency twice."
 
-*Practical note:* For finite discrete systems, Mazurkiewicz trace equivalence *is* the discrete version of dihomotopy equivalence—optimal DPOR already achieves the topological reduction. The d‑space perspective is a cleaner mathematical lens, not a more powerful algorithm.
+*Practical note:* For finite discrete systems, Mazurkiewicz trace equivalence *is* the discrete version of dihomotopy equivalence; a complete optimal-DPOR implementation would achieve that topological reduction. The d‑space perspective is a cleaner mathematical lens, not a more powerful algorithm.
 
 #### Geodesic schedule normalization — IMPLEMENTED (originally a Phase 5+ experiment)
 
@@ -182,7 +182,7 @@ specification; the "Experiment" framing is historical.
 
 **Comparison metrics:** switch count, swap distance to normal form, and trace length (should be identical). Normalized traces should be shorter in "visual entropy" and more stable for diff/replay.
 
-**Tie-in to DPOR/Mazurkiewicz:** adjacent swaps of independent actions are 2-cells; the space of schedules is a cubical complex. Geodesic normalization picks a shortest path in that complex. DPOR already picks one representative per trace class; this normalization makes that representative deterministic and human-readable for replay and debugging.
+**Tie-in to DPOR/Mazurkiewicz:** adjacent swaps of independent actions are 2-cells; the space of schedules is a cubical complex. Geodesic normalization picks a shortest path in that complex. The current DPOR-style machinery tracks equivalence-class fingerprints, races, backtrack points, and sleep-set deduplication; it does not prove complete optimal-DPOR one-representative coverage. This normalization makes discovered representatives deterministic and human-readable for replay and debugging.
 
 #### Experiment: persistent directed homology for schedule prioritization (Phase 5+)
 
@@ -1022,13 +1022,14 @@ Schedule exploration hooks (DPOR-class foundation).
 Property assertions: no task leaks, quiescence, finalizers exactly once, no unresolved obligations, losers drained, deadlines respected.
 Operational semantics is TLA+-friendly.
 
-For schedule exploration, “DPOR-class” should mean **optimal DPOR**:
+For schedule exploration, “DPOR-class” is the design target of **optimal DPOR**, but the current implementation is a DPOR-style/guided explorer rather than a certified optimal-DPOR engine:
 
 * define independence `I` on labels (from §3.2),
-* explore exactly **one execution per Mazurkiewicz trace** (equivalence class),
-* use wakeup trees / source sets / sleep sets to avoid redundancy.
+* track Mazurkiewicz/Foata-style equivalence-class fingerprints for discovered traces,
+* detect races and derive backtrack points,
+* use sleep-set deduplication to reduce redundant backtrack exploration.
 
-Longer-term, directed topological methods (dihomotopy classes of execution paths) can subsume some POR cases, but optimal DPOR is the practical, proven sweet spot.
+No current proof says every reachable trace class is explored exactly once. Longer-term, directed topological methods (dihomotopy classes of execution paths) can subsume some POR cases, but optimal DPOR remains the practical, proven target for the complete version.
 
 ---
 

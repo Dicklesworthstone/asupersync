@@ -679,12 +679,14 @@ impl ScheduleExplorer {
 /// 5. If new, explore further; if known, prune
 /// 6. Repeat until work queue is empty or budget is exhausted
 ///
-/// # Coverage Guarantees
+/// # Coverage Boundary
 ///
-/// DPOR explores at least one representative schedule per Mazurkiewicz
-/// equivalence class reachable from the initial schedule through single-race
-/// reversals. This is sound (no false negatives) but not complete for deeply
-/// nested race chains without iterative deepening.
+/// This explorer tracks Mazurkiewicz/Foata-style equivalence-class fingerprints,
+/// derives targeted seeds from race backtrack points, and prunes already-seen
+/// classes through a sleep set. It is DPOR-style guided coverage, not a
+/// certified optimal-DPOR engine: it does not prove that every reachable class
+/// is explored, nor does it claim no false negatives for deeply nested race
+/// chains without additional iterative-deepening proof machinery.
 pub struct DporExplorer {
     config: ExplorerConfig,
     /// Seeds pending exploration (derived from backtrack points).
