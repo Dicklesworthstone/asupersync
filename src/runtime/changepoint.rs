@@ -18,6 +18,15 @@
 //! conservative response is to *forget* stale learning (reset a controller to
 //! its priors), never to take aggressive scheduling action directly.
 //!
+//! # Configuration profile
+//!
+//! [`ChangePointMonitorConfig`] is intentionally a pure profile object: it
+//! describes which detectors would be installed, whether the monitor is enabled,
+//! and how to build a [`ChangePointMonitor`]. The conservative scheduler profile
+//! registers the expected runtime series but still starts disabled. That keeps
+//! "off by default" verifiable at construction time, not just as an operator
+//! convention.
+//!
 //! # Determinism
 //!
 //! Every accumulator is an `i64` in micro-units ([`MetricSample::SCALE`]).
@@ -468,6 +477,182 @@ impl From<PageHinkleyDetector> for SeriesDetector {
 impl From<CusumDetector> for SeriesDetector {
     fn from(detector: CusumDetector) -> Self {
         Self::Cusum(detector)
+    }
+}
+
+/// Declarative detector entry for a [`ChangePointMonitorConfig`].
+///
+/// This is a copyable profile row, not live detector state. Calling
+/// [`Self::build_detector`] creates a fresh detector with zero samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangePointSeriesConfig {
+    /// Page-Hinkley detector for one runtime series.
+    PageHinkley {
+        /// Series sampled by the detector.
+        series: RuntimeMetricSeries,
+        /// Detector parameters.
+        config: PageHinkleyConfig,
+    },
+    /// One-sided CUSUM detector for one runtime series.
+    Cusum {
+        /// Series sampled by the detector.
+        series: RuntimeMetricSeries,
+        /// Detector parameters.
+        config: CusumConfig,
+    },
+}
+
+impl ChangePointSeriesConfig {
+    /// Build a Page-Hinkley profile row.
+    #[must_use]
+    pub const fn page_hinkley(series: RuntimeMetricSeries, config: PageHinkleyConfig) -> Self {
+        Self::PageHinkley { series, config }
+    }
+
+    /// Build a CUSUM profile row.
+    #[must_use]
+    pub const fn cusum(series: RuntimeMetricSeries, config: CusumConfig) -> Self {
+        Self::Cusum { series, config }
+    }
+
+    /// Runtime series this profile row monitors.
+    #[must_use]
+    pub const fn series(self) -> RuntimeMetricSeries {
+        match self {
+            Self::PageHinkley { series, .. } | Self::Cusum { series, .. } => series,
+        }
+    }
+
+    /// Detector kind represented by this profile row.
+    #[must_use]
+    pub const fn kind(self) -> ChangePointDetectorKind {
+        match self {
+            Self::PageHinkley { .. } => ChangePointDetectorKind::PageHinkley,
+            Self::Cusum { .. } => ChangePointDetectorKind::Cusum,
+        }
+    }
+
+    /// Build a fresh live detector from this profile row.
+    #[must_use]
+    pub const fn build_detector(self) -> SeriesDetector {
+        match self {
+            Self::PageHinkley { series, config } => {
+                SeriesDetector::PageHinkley(PageHinkleyDetector::new(series, config))
+            }
+            Self::Cusum { series, config } => {
+                SeriesDetector::Cusum(CusumDetector::new(series, config))
+            }
+        }
+    }
+}
+
+impl From<ChangePointSeriesConfig> for SeriesDetector {
+    fn from(config: ChangePointSeriesConfig) -> Self {
+        config.build_detector()
+    }
+}
+
+/// Pure, off-by-default configuration for a [`ChangePointMonitor`].
+///
+/// The profile is detached from runtime sampling. Building it never starts a
+/// background task or mutates scheduler state; callers must explicitly feed
+/// samples to the returned monitor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangePointMonitorConfig {
+    /// Whether the built monitor should emit detections.
+    pub enabled: bool,
+    /// Detector profile rows installed in deterministic registration order.
+    pub series: Vec<ChangePointSeriesConfig>,
+}
+
+impl ChangePointMonitorConfig {
+    /// Empty disabled profile.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            series: Vec::new(),
+        }
+    }
+
+    /// Conservative scheduler-facing detector profile.
+    ///
+    /// The profile includes the runtime series named in the adaptive-control
+    /// design notes, but remains disabled. Operators or future runtime-builder
+    /// wiring must opt in by calling [`Self::enable`].
+    #[must_use]
+    pub fn conservative_scheduler_defaults() -> Self {
+        Self {
+            enabled: false,
+            series: vec![
+                ChangePointSeriesConfig::page_hinkley(
+                    RuntimeMetricSeries::ReadyQueueDepth,
+                    PageHinkleyConfig::conservative(),
+                ),
+                ChangePointSeriesConfig::page_hinkley(
+                    RuntimeMetricSeries::WakeToRunLatencyMicros,
+                    PageHinkleyConfig::conservative(),
+                ),
+                ChangePointSeriesConfig::page_hinkley(
+                    RuntimeMetricSeries::CancelStreakReward,
+                    PageHinkleyConfig::conservative(),
+                ),
+                ChangePointSeriesConfig::page_hinkley(
+                    RuntimeMetricSeries::DrainRate,
+                    PageHinkleyConfig::conservative(),
+                ),
+            ],
+        }
+    }
+
+    /// Append one detector profile row.
+    #[must_use]
+    pub fn with_series(mut self, series: ChangePointSeriesConfig) -> Self {
+        self.series.push(series);
+        self
+    }
+
+    /// Enable the built monitor.
+    #[must_use]
+    pub fn enable(mut self) -> Self {
+        self.enabled = true;
+        self
+    }
+
+    /// Disable the built monitor.
+    #[must_use]
+    pub fn disable(mut self) -> Self {
+        self.enabled = false;
+        self
+    }
+
+    /// Number of configured detector rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.series.len()
+    }
+
+    /// Whether no detector rows are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.series.is_empty()
+    }
+
+    /// Build a fresh monitor from this profile.
+    #[must_use]
+    pub fn build_monitor(&self) -> ChangePointMonitor {
+        let mut monitor = ChangePointMonitor::new();
+        for series in &self.series {
+            monitor.register(series.build_detector());
+        }
+        monitor.set_enabled(self.enabled);
+        monitor
+    }
+}
+
+impl Default for ChangePointMonitorConfig {
+    fn default() -> Self {
+        Self::disabled()
     }
 }
 
@@ -929,5 +1114,121 @@ mod tests {
                 other => panic!("unexpected routed series {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn monitor_config_default_is_disabled_and_empty() {
+        let config = ChangePointMonitorConfig::default();
+        assert!(!config.enabled);
+        assert!(config.is_empty());
+
+        let mut monitor = config.build_monitor();
+        assert!(!monitor.is_enabled());
+        assert!(monitor.is_empty());
+        assert!(
+            monitor
+                .observe(
+                    RuntimeMetricSeries::ReadyQueueDepth,
+                    MetricSample::from_units(100)
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn conservative_scheduler_profile_is_installed_but_off() {
+        let config = ChangePointMonitorConfig::conservative_scheduler_defaults();
+        assert!(!config.enabled);
+        assert_eq!(config.len(), 4);
+        assert_eq!(
+            config
+                .series
+                .iter()
+                .map(|series| (series.series(), series.kind()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    RuntimeMetricSeries::ReadyQueueDepth,
+                    ChangePointDetectorKind::PageHinkley
+                ),
+                (
+                    RuntimeMetricSeries::WakeToRunLatencyMicros,
+                    ChangePointDetectorKind::PageHinkley
+                ),
+                (
+                    RuntimeMetricSeries::CancelStreakReward,
+                    ChangePointDetectorKind::PageHinkley
+                ),
+                (
+                    RuntimeMetricSeries::DrainRate,
+                    ChangePointDetectorKind::PageHinkley
+                ),
+            ]
+        );
+
+        let mut monitor = config.build_monitor();
+        let before = monitor.snapshots();
+        for value in [10, 10, 10, 10, 10, 30, 30, 30, 30, 30] {
+            assert!(
+                monitor
+                    .observe(
+                        RuntimeMetricSeries::ReadyQueueDepth,
+                        MetricSample::from_units(value)
+                    )
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            monitor.snapshots(),
+            before,
+            "disabled config must not advance detector state"
+        );
+    }
+
+    #[test]
+    fn enabled_scheduler_profile_detects_without_custom_wiring() {
+        let mut monitor = ChangePointMonitorConfig::conservative_scheduler_defaults()
+            .enable()
+            .build_monitor();
+        assert!(monitor.is_enabled());
+        assert_eq!(monitor.len(), 4);
+
+        let detection = [10, 10, 10, 10, 10, 30, 30, 30, 30, 30]
+            .into_iter()
+            .find_map(|value| {
+                monitor.observe(
+                    RuntimeMetricSeries::ReadyQueueDepth,
+                    MetricSample::from_units(value),
+                )
+            })
+            .expect("enabled conservative profile should detect a large step");
+
+        assert_eq!(detection.series, RuntimeMetricSeries::ReadyQueueDepth);
+        assert_eq!(detection.detector, ChangePointDetectorKind::PageHinkley);
+        assert_eq!(detection.direction, ChangeDirection::Increase);
+    }
+
+    #[test]
+    fn custom_config_can_install_cusum_profile() {
+        let config = ChangePointMonitorConfig::disabled()
+            .with_series(ChangePointSeriesConfig::cusum(
+                RuntimeMetricSeries::DrainRate,
+                CusumConfig::downward(MetricSample::from_units(20), 8 * MetricSample::SCALE),
+            ))
+            .enable();
+        let mut monitor = config.build_monitor();
+
+        let detection = [20, 19, 18, 15, 15, 15]
+            .into_iter()
+            .find_map(|value| {
+                monitor.observe(
+                    RuntimeMetricSeries::DrainRate,
+                    MetricSample::from_units(value),
+                )
+            })
+            .expect("custom CUSUM profile should detect a falling drain rate");
+
+        assert_eq!(detection.detector, ChangePointDetectorKind::Cusum);
+        assert_eq!(detection.direction, ChangeDirection::Decrease);
     }
 }

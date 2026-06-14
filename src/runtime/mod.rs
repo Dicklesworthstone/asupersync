@@ -199,8 +199,9 @@ pub use cache::{
 };
 pub use changepoint::{
     ChangeDirection, ChangePointDetection, ChangePointDetectorKind, ChangePointMonitor,
-    ChangePointSnapshot, CusumConfig, CusumDetector, MetricSample, PageHinkleyConfig,
-    PageHinkleyDetector, RuntimeMetricSeries, SeriesDetector,
+    ChangePointMonitorConfig, ChangePointSeriesConfig, ChangePointSnapshot, CusumConfig,
+    CusumDetector, MetricSample, PageHinkleyConfig, PageHinkleyDetector, RuntimeMetricSeries,
+    SeriesDetector,
 };
 pub use config::{BlockingPoolConfig, RuntimeConfig, TraceStorageBudget, TraceStorageProfile};
 pub use deadline_monitor::{
