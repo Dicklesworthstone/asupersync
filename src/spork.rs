@@ -9,7 +9,7 @@
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
-//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupEventSubscriber`, `GroupEventBatch`, `GroupMonitorDelivery`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
+//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupMembership`, `GroupSnapshot`, `GroupEventSubscriber`, `GroupEventBatch`, `GroupMonitorDelivery`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -297,6 +297,13 @@ pub mod process_group {
         BroadcastRecipientUnknown(GroupMemberId),
         /// A broadcast report accounted for the same recipient more than once.
         BroadcastRecipientDuplicate(GroupMemberId),
+        /// A membership handle was used with a different process group.
+        GroupMismatch {
+            /// The group recorded in the membership handle.
+            handle: GroupName,
+            /// The group owned by the target state.
+            state: GroupName,
+        },
     }
 
     impl fmt::Display for ProcessGroupError {
@@ -322,6 +329,12 @@ pub mod process_group {
                 }
                 Self::BroadcastRecipientDuplicate(member) => {
                     write!(f, "process group broadcast recipient duplicated: {member}")
+                }
+                Self::GroupMismatch { handle, state } => {
+                    write!(
+                        f,
+                        "process group membership for {handle} used with state for {state}"
+                    )
                 }
             }
         }
@@ -367,6 +380,114 @@ pub mod process_group {
         #[must_use]
         pub fn join_sequence(&self) -> u64 {
             self.join_sequence
+        }
+    }
+
+    /// One active local process-group membership.
+    ///
+    /// This is the value-layer shape that the async `join` surface can wrap
+    /// around a registry lease. It is intentionally not `Clone`: a membership
+    /// handle represents one owner, and leave/down transitions are one-shot.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct GroupMembership {
+        group: GroupName,
+        member: GroupMemberId,
+        joined_event: GroupEvent,
+        active: bool,
+    }
+
+    impl GroupMembership {
+        #[must_use]
+        fn new(group: GroupName, member: GroupMemberId, joined_event: GroupEvent) -> Self {
+            Self {
+                group,
+                member,
+                joined_event,
+                active: true,
+            }
+        }
+
+        /// Returns the process group that owns this membership.
+        #[must_use]
+        pub fn group(&self) -> &GroupName {
+            &self.group
+        }
+
+        /// Returns this membership's member identity.
+        #[must_use]
+        pub fn member(&self) -> &GroupMemberId {
+            &self.member
+        }
+
+        /// Returns the join event that minted this membership.
+        #[must_use]
+        pub fn joined_event(&self) -> &GroupEvent {
+            &self.joined_event
+        }
+
+        /// Returns whether the membership has not yet left or gone down.
+        #[must_use]
+        pub fn is_active(&self) -> bool {
+            self.active
+        }
+
+        /// Leaves the group once through the explicit release path.
+        ///
+        /// Returns `Ok(None)` when the handle has already resolved, making
+        /// cleanup idempotent after retry or drop-supervision paths.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ProcessGroupError::GroupMismatch`] if this handle is used
+        /// with a different group state, or forwards the state transition
+        /// failure from [`ProcessGroupState::leave`].
+        pub fn leave(
+            &mut self,
+            state: &mut ProcessGroupState,
+            at: Time,
+        ) -> Result<Option<GroupEvent>, ProcessGroupError> {
+            if !self.active {
+                return Ok(None);
+            }
+            self.ensure_group(state)?;
+            let event = state.leave(&self.member, at)?;
+            self.active = false;
+            Ok(Some(event))
+        }
+
+        /// Marks the member down once through monitor/region cleanup.
+        ///
+        /// Returns `Ok(None)` when the handle has already resolved.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ProcessGroupError::GroupMismatch`] if this handle is used
+        /// with a different group state, or forwards the state transition
+        /// failure from [`ProcessGroupState::mark_down`].
+        pub fn mark_down(
+            &mut self,
+            state: &mut ProcessGroupState,
+            reason: DownReason,
+            at: Time,
+        ) -> Result<Option<GroupEvent>, ProcessGroupError> {
+            if !self.active {
+                return Ok(None);
+            }
+            self.ensure_group(state)?;
+            let event = state.mark_down(&self.member, reason, at)?;
+            self.active = false;
+            Ok(Some(event))
+        }
+
+        fn ensure_group(&self, state: &ProcessGroupState) -> Result<(), ProcessGroupError> {
+            if &self.group == state.group() {
+                Ok(())
+            } else {
+                Err(ProcessGroupError::GroupMismatch {
+                    handle: self.group.clone(),
+                    state: state.group().clone(),
+                })
+            }
         }
     }
 
@@ -570,6 +691,27 @@ pub mod process_group {
             );
             self.events.push(event.clone());
             Ok(event)
+        }
+
+        /// Adds a member and returns its one-shot membership handle.
+        ///
+        /// The returned handle is the synchronous value-layer stand-in for the
+        /// future runtime join handle that will also own the registry lease.
+        ///
+        /// # Errors
+        ///
+        /// Forwards the state transition failure from [`Self::join`].
+        pub fn join_membership(
+            &mut self,
+            member: GroupMemberId,
+            at: Time,
+        ) -> Result<GroupMembership, ProcessGroupError> {
+            let joined_event = self.join(member.clone(), at)?;
+            Ok(GroupMembership::new(
+                self.group.clone(),
+                member,
+                joined_event,
+            ))
         }
 
         /// Removes a member through the explicit leave path.
@@ -1399,9 +1541,10 @@ pub mod crash {
 /// - **GenServer**: `GenServer`, `GenServerHandle`, `Reply`,
 ///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
-/// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`,
-///   `GroupEventSubscriber`, `GroupEventBatch`, `GroupMonitorDelivery`,
-///   `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary`
+/// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupMembership`,
+///   `GroupSnapshot`, `GroupEventSubscriber`, `GroupEventBatch`,
+///   `GroupMonitorDelivery`, `GroupBroadcastPlan`, `GroupBroadcastReport`,
+///   `GroupBroadcastSummary`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -1429,8 +1572,8 @@ pub mod prelude {
         BroadcastBackpressurePolicy, GroupBroadcastPlan, GroupBroadcastRecipientReport,
         GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupBroadcastSummary, GroupEvent,
         GroupEventBatch, GroupEventCursor, GroupEventKind, GroupEventSubscriber, GroupMember,
-        GroupMemberId, GroupMonitorDelivery, GroupMonitorDeliveryError, GroupName, GroupNameError,
-        GroupSnapshot, ProcessGroupError, ProcessGroupState,
+        GroupMemberId, GroupMembership, GroupMonitorDelivery, GroupMonitorDeliveryError, GroupName,
+        GroupNameError, GroupSnapshot, ProcessGroupError, ProcessGroupState,
     };
 
     // -- Monitor --
@@ -1738,6 +1881,7 @@ mod tests {
         let _ = std::any::type_name::<prelude::NameLease>();
         let _ = std::any::type_name::<prelude::GroupName>();
         let _ = std::any::type_name::<prelude::GroupMemberId>();
+        let _ = std::any::type_name::<prelude::GroupMembership>();
         let _ = std::any::type_name::<prelude::GroupSnapshot>();
         let _ = std::any::type_name::<prelude::GroupEvent>();
         let _ = std::any::type_name::<prelude::GroupEventBatch>();
@@ -1804,6 +1948,7 @@ mod tests {
         // Process group sub-module
         let _ = std::any::type_name::<process_group::GroupName>();
         let _ = std::any::type_name::<process_group::GroupMemberId>();
+        let _ = std::any::type_name::<process_group::GroupMembership>();
         let _ = std::any::type_name::<process_group::GroupMember>();
         let _ = std::any::type_name::<process_group::GroupSnapshot>();
         let _ = std::any::type_name::<process_group::GroupEvent>();
@@ -2349,6 +2494,141 @@ mod tests {
         );
 
         crate::test_complete!("process_group_broadcast_report_rejects_silent_accounting_gaps");
+    }
+
+    #[test]
+    fn process_group_membership_handle_leaves_once() {
+        init_test("process_group_membership_handle_leaves_once");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let member = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+
+        let mut membership = state
+            .join_membership(member.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        assert!(membership.is_active());
+        assert_eq!(membership.group(), state.group());
+        assert_eq!(membership.member(), &member);
+        assert!(matches!(
+            membership.joined_event().kind(),
+            process_group::GroupEventKind::Joined
+        ));
+        assert!(state.contains_member(&member));
+
+        let left = membership
+            .leave(&mut state, crate::types::Time::from_nanos(20))
+            .unwrap()
+            .expect("first leave should emit an event");
+        assert!(matches!(left.kind(), process_group::GroupEventKind::Left));
+        assert_eq!(left.member(), &member);
+        assert_eq!(left.sequence(), 1);
+        assert!(!membership.is_active());
+        assert!(!state.contains_member(&member));
+        assert_eq!(state.event_log().len(), 2);
+
+        assert_eq!(
+            membership
+                .leave(&mut state, crate::types::Time::from_nanos(30))
+                .unwrap(),
+            None
+        );
+        assert_eq!(state.event_log().len(), 2);
+
+        crate::test_complete!("process_group_membership_handle_leaves_once");
+    }
+
+    #[test]
+    fn process_group_membership_handle_marks_down_once() {
+        init_test("process_group_membership_handle_marks_down_once");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let member = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let mut membership = state
+            .join_membership(member.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+
+        let down = membership
+            .mark_down(
+                &mut state,
+                monitor::DownReason::Error("crashed".into()),
+                crate::types::Time::from_nanos(20),
+            )
+            .unwrap()
+            .expect("first down transition should emit an event");
+        assert!(matches!(
+            down.kind(),
+            process_group::GroupEventKind::Down(monitor::DownReason::Error(message))
+                if message == "crashed"
+        ));
+        assert_eq!(down.member(), &member);
+        assert!(!membership.is_active());
+        assert!(!state.contains_member(&member));
+
+        assert_eq!(
+            membership
+                .mark_down(
+                    &mut state,
+                    monitor::DownReason::Normal,
+                    crate::types::Time::from_nanos(30),
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(state.event_log().len(), 2);
+
+        crate::test_complete!("process_group_membership_handle_marks_down_once");
+    }
+
+    #[test]
+    fn process_group_membership_handle_rejects_wrong_group_state() {
+        init_test("process_group_membership_handle_rejects_wrong_group_state");
+
+        let mut workers = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let mut auditors = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("auditors").unwrap(),
+        );
+        let member = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let mut membership = workers
+            .join_membership(member.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+
+        assert_eq!(
+            membership
+                .leave(&mut auditors, crate::types::Time::from_nanos(20))
+                .unwrap_err(),
+            process_group::ProcessGroupError::GroupMismatch {
+                handle: process_group::GroupName::new("workers").unwrap(),
+                state: process_group::GroupName::new("auditors").unwrap(),
+            }
+        );
+        assert!(membership.is_active());
+        assert!(workers.contains_member(&member));
+        assert!(!auditors.contains_member(&member));
+
+        let left = membership
+            .leave(&mut workers, crate::types::Time::from_nanos(30))
+            .unwrap()
+            .expect("membership should still be releasable from its owner group");
+        assert!(matches!(left.kind(), process_group::GroupEventKind::Left));
+        assert!(!membership.is_active());
+        assert!(!workers.contains_member(&member));
+
+        crate::test_complete!("process_group_membership_handle_rejects_wrong_group_state");
     }
 
     #[test]
