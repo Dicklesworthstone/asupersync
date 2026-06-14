@@ -45,7 +45,9 @@ fn combine(left: u64, right: u64) -> u64 {
 /// How a key differs between two replicas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffKind {
-    /// Present (or with a different content hash on) the local replica only.
+    /// Present on the local replica only (absent on the remote). A key present
+    /// on both with a differing content hash is [`DiffKind::HashDiffers`], not
+    /// this variant.
     OnlyHere,
     /// Present on the remote replica only.
     OnlyThere,
