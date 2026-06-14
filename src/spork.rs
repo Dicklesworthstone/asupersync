@@ -9,7 +9,7 @@
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
-//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupBroadcastPlan` |
+//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupBroadcastPlan`, `GroupBroadcastReport` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -291,6 +291,12 @@ pub mod process_group {
         JoinSequenceExhausted,
         /// The deterministic event sequence counter has no remaining values.
         EventSequenceExhausted,
+        /// A broadcast report did not account for a planned recipient.
+        BroadcastRecipientMissing(GroupMemberId),
+        /// A broadcast report mentioned a recipient outside the broadcast plan.
+        BroadcastRecipientUnknown(GroupMemberId),
+        /// A broadcast report accounted for the same recipient more than once.
+        BroadcastRecipientDuplicate(GroupMemberId),
     }
 
     impl fmt::Display for ProcessGroupError {
@@ -307,6 +313,15 @@ pub mod process_group {
                 }
                 Self::EventSequenceExhausted => {
                     write!(f, "process group event sequence exhausted")
+                }
+                Self::BroadcastRecipientMissing(member) => {
+                    write!(f, "process group broadcast recipient missing: {member}")
+                }
+                Self::BroadcastRecipientUnknown(member) => {
+                    write!(f, "process group broadcast recipient unknown: {member}")
+                }
+                Self::BroadcastRecipientDuplicate(member) => {
+                    write!(f, "process group broadcast recipient duplicated: {member}")
                 }
             }
         }
@@ -807,6 +822,163 @@ pub mod process_group {
             self.recipients.is_empty()
         }
     }
+
+    /// Per-recipient outcome recorded by a broadcast executor.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum GroupBroadcastRecipientStatus {
+        /// The recipient accepted the message.
+        Delivered,
+        /// The recipient was skipped according to
+        /// [`BroadcastBackpressurePolicy::Skip`].
+        Skipped,
+        /// The recipient could not accept the message before the caller's
+        /// budget or policy boundary.
+        Backpressured,
+    }
+
+    /// Accounting row for one broadcast recipient.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GroupBroadcastRecipientReport {
+        member: GroupMemberId,
+        status: GroupBroadcastRecipientStatus,
+    }
+
+    impl GroupBroadcastRecipientReport {
+        /// Creates a per-recipient broadcast accounting row.
+        #[must_use]
+        pub fn new(member: GroupMemberId, status: GroupBroadcastRecipientStatus) -> Self {
+            Self { member, status }
+        }
+
+        /// Returns the accounted recipient.
+        #[must_use]
+        pub fn member(&self) -> &GroupMemberId {
+            &self.member
+        }
+
+        /// Returns the recorded delivery status.
+        #[must_use]
+        pub fn status(&self) -> GroupBroadcastRecipientStatus {
+            self.status
+        }
+    }
+
+    /// Complete accounting report for one process-group broadcast.
+    ///
+    /// Construction validates that every planned recipient appears exactly
+    /// once. The async delivery surface will use this as its no-silent-drop
+    /// boundary: a broadcast may deliver, skip, or backpressure a recipient,
+    /// but it must account for each planned recipient deterministically.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GroupBroadcastReport {
+        group: GroupName,
+        policy: BroadcastBackpressurePolicy,
+        recipients: Vec<GroupBroadcastRecipientReport>,
+    }
+
+    impl GroupBroadcastReport {
+        /// Builds a report from an immutable recipient plan and outcome rows.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ProcessGroupError::BroadcastRecipientUnknown`] for
+        /// recipients outside `plan`,
+        /// [`ProcessGroupError::BroadcastRecipientDuplicate`] for duplicate
+        /// rows, and [`ProcessGroupError::BroadcastRecipientMissing`] if a
+        /// planned recipient has no outcome.
+        pub fn from_plan<I>(
+            plan: &GroupBroadcastPlan,
+            outcomes: I,
+        ) -> Result<Self, ProcessGroupError>
+        where
+            I: IntoIterator<Item = (GroupMemberId, GroupBroadcastRecipientStatus)>,
+        {
+            let mut statuses = BTreeMap::new();
+            for (member, status) in outcomes {
+                if !plan.recipients().contains(&member) {
+                    return Err(ProcessGroupError::BroadcastRecipientUnknown(member));
+                }
+                if statuses.insert(member.clone(), status).is_some() {
+                    return Err(ProcessGroupError::BroadcastRecipientDuplicate(member));
+                }
+            }
+
+            let mut recipients = Vec::with_capacity(plan.len());
+            for member in plan.recipients() {
+                let status = statuses
+                    .remove(member)
+                    .ok_or_else(|| ProcessGroupError::BroadcastRecipientMissing(member.clone()))?;
+                recipients.push(GroupBroadcastRecipientReport::new(member.clone(), status));
+            }
+
+            Ok(Self {
+                group: plan.group().clone(),
+                policy: plan.policy(),
+                recipients,
+            })
+        }
+
+        /// Builds an all-delivered report for the common successful path.
+        #[must_use]
+        pub fn all_delivered(plan: &GroupBroadcastPlan) -> Self {
+            let recipients = plan
+                .recipients()
+                .iter()
+                .cloned()
+                .map(|member| {
+                    GroupBroadcastRecipientReport::new(
+                        member,
+                        GroupBroadcastRecipientStatus::Delivered,
+                    )
+                })
+                .collect();
+
+            Self {
+                group: plan.group().clone(),
+                policy: plan.policy(),
+                recipients,
+            }
+        }
+
+        /// Returns the target group.
+        #[must_use]
+        pub fn group(&self) -> &GroupName {
+            &self.group
+        }
+
+        /// Returns the broadcast backpressure policy.
+        #[must_use]
+        pub fn policy(&self) -> BroadcastBackpressurePolicy {
+            self.policy
+        }
+
+        /// Returns per-recipient accounting rows in the plan's recipient order.
+        #[must_use]
+        pub fn recipients(&self) -> &[GroupBroadcastRecipientReport] {
+            &self.recipients
+        }
+
+        /// Returns the number of accounted recipients.
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.recipients.len()
+        }
+
+        /// Returns whether this report contains no recipients.
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.recipients.is_empty()
+        }
+
+        /// Counts recipients with a particular delivery status.
+        #[must_use]
+        pub fn count_status(&self, status: GroupBroadcastRecipientStatus) -> usize {
+            self.recipients
+                .iter()
+                .filter(|recipient| recipient.status() == status)
+                .count()
+        }
+    }
 }
 
 /// Unidirectional down notifications.
@@ -858,7 +1030,7 @@ pub mod crash {
 ///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
 /// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`,
-///   `GroupBroadcastPlan`
+///   `GroupBroadcastPlan`, `GroupBroadcastReport`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -883,7 +1055,8 @@ pub mod prelude {
 
     // -- Process groups --
     pub use super::process_group::{
-        BroadcastBackpressurePolicy, GroupBroadcastPlan, GroupEvent, GroupEventCursor,
+        BroadcastBackpressurePolicy, GroupBroadcastPlan, GroupBroadcastRecipientReport,
+        GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupEvent, GroupEventCursor,
         GroupEventKind, GroupMember, GroupMemberId, GroupName, GroupNameError, GroupSnapshot,
         ProcessGroupError, ProcessGroupState,
     };
@@ -1199,6 +1372,9 @@ mod tests {
         let _ = std::any::type_name::<prelude::ProcessGroupError>();
         let _ = std::any::type_name::<prelude::GroupEventCursor>();
         let _ = std::any::type_name::<prelude::GroupBroadcastPlan>();
+        let _ = std::any::type_name::<prelude::GroupBroadcastReport>();
+        let _ = std::any::type_name::<prelude::GroupBroadcastRecipientReport>();
+        let _ = std::any::type_name::<prelude::GroupBroadcastRecipientStatus>();
         let _ = std::any::type_name::<prelude::BroadcastBackpressurePolicy>();
         let _ = std::any::type_name::<prelude::MonitorRef>();
         let _ = std::any::type_name::<prelude::DownReason>();
@@ -1256,6 +1432,9 @@ mod tests {
         let _ = std::any::type_name::<process_group::GroupEvent>();
         let _ = std::any::type_name::<process_group::GroupEventCursor>();
         let _ = std::any::type_name::<process_group::GroupBroadcastPlan>();
+        let _ = std::any::type_name::<process_group::GroupBroadcastReport>();
+        let _ = std::any::type_name::<process_group::GroupBroadcastRecipientReport>();
+        let _ = std::any::type_name::<process_group::GroupBroadcastRecipientStatus>();
         let _ = std::any::type_name::<process_group::GroupEventKind>();
         let _ = std::any::type_name::<process_group::ProcessGroupState>();
         let _ = std::any::type_name::<process_group::ProcessGroupError>();
@@ -1474,6 +1653,179 @@ mod tests {
         );
 
         crate::test_complete!("process_group_broadcast_plan_allows_empty_groups");
+    }
+
+    #[test]
+    fn process_group_broadcast_report_preserves_plan_order_and_counts() {
+        init_test("process_group_broadcast_report_preserves_plan_order_and_counts");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let third = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-c"),
+            test_task_id(3),
+        );
+        state
+            .join(first.clone(), crate::types::Time::from_nanos(20))
+            .unwrap();
+        state
+            .join(second.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(third.clone(), crate::types::Time::from_nanos(30))
+            .unwrap();
+
+        let plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Skip);
+        let report = process_group::GroupBroadcastReport::from_plan(
+            &plan,
+            vec![
+                (
+                    third,
+                    process_group::GroupBroadcastRecipientStatus::Backpressured,
+                ),
+                (
+                    first,
+                    process_group::GroupBroadcastRecipientStatus::Delivered,
+                ),
+                (
+                    second,
+                    process_group::GroupBroadcastRecipientStatus::Skipped,
+                ),
+            ],
+        )
+        .unwrap();
+        let recipients: Vec<(String, process_group::GroupBroadcastRecipientStatus)> = report
+            .recipients()
+            .iter()
+            .map(|recipient| (recipient.member().to_string(), recipient.status()))
+            .collect();
+
+        assert_eq!(report.group().as_str(), "workers");
+        assert_eq!(
+            report.policy(),
+            process_group::BroadcastBackpressurePolicy::Skip
+        );
+        assert_eq!(report.len(), 3);
+        assert_eq!(
+            recipients,
+            vec![
+                (
+                    "Node(node-b):T2".to_string(),
+                    process_group::GroupBroadcastRecipientStatus::Delivered,
+                ),
+                (
+                    "Node(node-a):T1".to_string(),
+                    process_group::GroupBroadcastRecipientStatus::Skipped,
+                ),
+                (
+                    "Node(node-c):T3".to_string(),
+                    process_group::GroupBroadcastRecipientStatus::Backpressured,
+                ),
+            ]
+        );
+        assert_eq!(
+            report.count_status(process_group::GroupBroadcastRecipientStatus::Delivered),
+            1
+        );
+        assert_eq!(
+            report.count_status(process_group::GroupBroadcastRecipientStatus::Skipped),
+            1
+        );
+        assert_eq!(
+            report.count_status(process_group::GroupBroadcastRecipientStatus::Backpressured),
+            1
+        );
+
+        crate::test_complete!("process_group_broadcast_report_preserves_plan_order_and_counts");
+    }
+
+    #[test]
+    fn process_group_broadcast_report_rejects_silent_accounting_gaps() {
+        init_test("process_group_broadcast_report_rejects_silent_accounting_gaps");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let unknown = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-c"),
+            test_task_id(3),
+        );
+        state
+            .join(first.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(second.clone(), crate::types::Time::from_nanos(20))
+            .unwrap();
+        let plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Error);
+
+        assert_eq!(
+            process_group::GroupBroadcastReport::from_plan(
+                &plan,
+                vec![(
+                    first.clone(),
+                    process_group::GroupBroadcastRecipientStatus::Delivered,
+                )],
+            )
+            .unwrap_err(),
+            process_group::ProcessGroupError::BroadcastRecipientMissing(second.clone())
+        );
+        assert_eq!(
+            process_group::GroupBroadcastReport::from_plan(
+                &plan,
+                vec![
+                    (
+                        first.clone(),
+                        process_group::GroupBroadcastRecipientStatus::Delivered,
+                    ),
+                    (
+                        unknown.clone(),
+                        process_group::GroupBroadcastRecipientStatus::Skipped,
+                    ),
+                ],
+            )
+            .unwrap_err(),
+            process_group::ProcessGroupError::BroadcastRecipientUnknown(unknown)
+        );
+        assert_eq!(
+            process_group::GroupBroadcastReport::from_plan(
+                &plan,
+                vec![
+                    (
+                        first.clone(),
+                        process_group::GroupBroadcastRecipientStatus::Delivered,
+                    ),
+                    (
+                        first.clone(),
+                        process_group::GroupBroadcastRecipientStatus::Skipped,
+                    ),
+                    (
+                        second,
+                        process_group::GroupBroadcastRecipientStatus::Delivered,
+                    ),
+                ],
+            )
+            .unwrap_err(),
+            process_group::ProcessGroupError::BroadcastRecipientDuplicate(first)
+        );
+
+        crate::test_complete!("process_group_broadcast_report_rejects_silent_accounting_gaps");
     }
 
     #[test]
