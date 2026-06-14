@@ -156,7 +156,7 @@ impl AtpSession {
             PlatformError::OperatingSystemError
         ));
         let _ = config;
-        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     /// Create an ATP reader for receiving streamed data from the remote peer.
@@ -165,7 +165,7 @@ impl AtpSession {
             PlatformError::OperatingSystemError
         ));
         let _ = config;
-        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 }
 
@@ -530,7 +530,7 @@ mod tests {
 
     fn assert_missing_stream_transport<T: std::fmt::Debug>(outcome: AtpOutcome<T>) {
         match outcome {
-            AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
+            AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented)) => {}
             other => panic!("stream setup must fail closed without transport: {other:?}"), // ubs:ignore
         }
     }

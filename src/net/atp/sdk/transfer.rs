@@ -287,7 +287,7 @@ impl AtpSession {
             AtpOutcome::Panicked(p) => return AtpOutcome::Panicked(p),
         }
 
-        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     async fn receive_object_in_process(
@@ -323,7 +323,7 @@ impl AtpSession {
         }
 
         let _ = (transfer_id, options);
-        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     async fn verify_object_in_process(
@@ -444,7 +444,7 @@ impl AtpSession {
         }
 
         let _ = (transfer_id, resume_phase);
-        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     async fn cancel_transfer_in_process(
@@ -456,7 +456,7 @@ impl AtpSession {
         if cx.checkpoint().is_err() {
             return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
         }
-        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     async fn send_object_daemon_delegated(
@@ -927,7 +927,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
                 ),
                 "in-process SDK send must not fabricate an active transfer: {result:?}"
             );
@@ -959,7 +959,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
                 ),
                 "valid file send must fail closed without a worker: {result:?}"
             );
@@ -1005,7 +1005,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
                 ),
                 "sync_tree must not fabricate transfer success: {result:?}"
             );
@@ -1023,7 +1023,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
                 ),
                 "stream_large_buffer must not fabricate transfer success: {result:?}"
             );
@@ -1070,7 +1070,7 @@ mod tests {
                 .receive_object(&cx, TransferDestination::Stream, TransferOptions::default())
                 .await;
             match result {
-                AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented)) => {}
                 other => panic!("receive must fail closed without a real transport: {other:?}"), // ubs:ignore
             }
         });
@@ -1096,7 +1096,7 @@ mod tests {
                 .resume_transfer(&cx, &transfer_id, "1:2:data_transfer")
                 .await;
             match result {
-                AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented)) => {}
                 other => panic!("resume must fail closed without active transfer state: {other:?}"), // ubs:ignore
             }
         });
@@ -1122,7 +1122,7 @@ mod tests {
                 .cancel_transfer(&cx, &transfer_id, Some("user requested".to_string()))
                 .await;
             match result {
-                AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented)) => {}
                 other => panic!("session cancel must not fabricate success: {other:?}"), // ubs:ignore
             }
         });

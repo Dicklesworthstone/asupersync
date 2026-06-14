@@ -213,6 +213,8 @@ pub enum ProtocolError {
     UnexpectedFrame,
     FrameTooLarge,
     SessionStateMismatch,
+    /// Real protocol wiring is not implemented for this ATP operation yet.
+    NotImplemented,
 }
 
 impl ProtocolError {
@@ -225,6 +227,7 @@ impl ProtocolError {
             Self::UnexpectedFrame => "protocol_unexpected_frame",
             Self::FrameTooLarge => "protocol_frame_too_large",
             Self::SessionStateMismatch => "protocol_session_state_mismatch",
+            Self::NotImplemented => "ASUP-E701",
         }
     }
 
@@ -235,6 +238,7 @@ impl ProtocolError {
             Self::UnexpectedFrame => true, // May be transient race
             Self::FrameTooLarge => false,
             Self::SessionStateMismatch => true, // May recover with state sync
+            Self::NotImplemented => false,
         }
     }
 }
@@ -249,6 +253,10 @@ impl fmt::Display for ProtocolError {
             Self::UnexpectedFrame => write!(f, "unexpected frame in current state"),
             Self::FrameTooLarge => write!(f, "frame exceeds size limit"),
             Self::SessionStateMismatch => write!(f, "session state mismatch"),
+            Self::NotImplemented => write!(
+                f,
+                "[ASUP-E701] ATP command is not yet implemented; see docs/error_codes/ASUP-E701.md"
+            ),
         }
     }
 }
@@ -1393,6 +1401,7 @@ mod tests {
             TransportError::ConnectionTimeout.code(),
             "transport_connection_timeout"
         );
+        assert_eq!(ProtocolError::NotImplemented.code(), "ASUP-E701");
         assert_eq!(AuthError::GrantExpired.code(), "auth_grant_expired");
         assert_eq!(
             RepairError::InsufficientSymbols.code(),
@@ -1403,9 +1412,17 @@ mod tests {
     #[test]
     fn retryable_classification() {
         assert!(TransportError::ConnectionTimeout.is_retryable());
+        assert!(!ProtocolError::NotImplemented.is_retryable());
         assert!(!AuthError::InvalidSignature.is_retryable());
         assert!(RepairError::MissingRepairSymbol.is_retryable());
         assert!(!ManifestError::InvalidFormat.is_retryable());
+    }
+
+    #[test]
+    fn not_implemented_display_carries_operator_code() {
+        let message = ProtocolError::NotImplemented.to_string();
+        assert!(message.starts_with("[ASUP-E701]"));
+        assert!(message.contains("docs/error_codes/ASUP-E701.md"));
     }
 
     #[test]
