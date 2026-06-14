@@ -143,7 +143,9 @@ cli = [
     "tracing-integration",
 ]
 # Enable the small standalone `atp` file-transfer binary. Minimal footprint:
-# only adds clap on top of the always-compiled ATP-over-TCP transport.
+# only adds clap on top of the always-compiled ATP transports. The binary
+# supports direct host:port sends plus rsync-like SSH bootstrap targets
+# (`user@host:/path`) while keeping ATP RQ/TCP as the bulk data plane.
 atp-cli = ["dep:clap"]
 # Enable SQLite async wrapper with blocking pool integration.
 sqlite = ["dep:rusqlite", "dep:sqlparser"]

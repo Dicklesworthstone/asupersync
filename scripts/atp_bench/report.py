@@ -37,8 +37,15 @@ def main():
         print(f"- **RTT**: {conditions.get('rtt')}")
         print(f"- **Cores**: sender {conditions.get('sender_cores')}, receiver {conditions.get('receiver_cores')}")
         print(f"- **Runs per cell**: {conditions.get('runs')} measured + 1 warmup (warmup excluded from aggregates)\n")
-    print("Note: the current `atp` TCP transport is plaintext, so `rsyncd` (plaintext)\n"
-          "is the apples-to-apples row; `rsync-ssh` is the realistic-usage row.\n")
+        if "atp_rq_streams" in conditions:
+            print(
+                f"- **ATP RQ settings**: streams {conditions.get('atp_rq_streams')}, "
+                f"symbol size {conditions.get('atp_rq_symbol_size')} bytes, "
+                f"repair overhead {conditions.get('atp_rq_repair_overhead')}\n"
+            )
+    print("Note: `atp-rq` is the RaptorQ/UDP ATP candidate; `atp-tcp` is the\n"
+          "legacy ATP control row. `rsyncd` is the plaintext rsync ceiling, and\n"
+          "`rsync-ssh` is the realistic-usage rsync row.\n")
 
     # Group measured runs.
     groups = defaultdict(list)

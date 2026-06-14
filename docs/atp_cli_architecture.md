@@ -134,6 +134,14 @@ All ATP commands support JSON output for machine parsing. Output format is autom
 # Send a directory with automatic profile selection
 asupersync atp send /home/user/documents/ peer123
 
+# Send with rsync-like SSH bootstrap syntax. SSH authenticates and starts the
+# remote receiver; ATP still moves bulk bytes over the selected ATP transport.
+atp send /home/user/documents/ user@host:/srv/inbox --transport rq
+
+# Prefer a Tailscale data endpoint when the remote host reports one, while
+# falling back to the SSH host/public address if Tailscale is unavailable.
+atp send /home/user/documents/ user@host:/srv/inbox --transport rq --prefer tailscale
+
 # Send with specific profile and progress
 asupersync atp send /project/ peer456 --profile=sync-tree --progress
 
@@ -200,6 +208,27 @@ maps to the disabled policy and ignores provider output while leaving direct
 UDP, public IPv6, NAT traversal, relay, and mailbox candidates in the normal
 path race. Provider failures are non-fatal path caveats and must not block other
 candidate sources.
+
+### SSH Bootstrap Policy
+
+SSH is a bootstrap and identity channel, not the normal ATP bulk-data plane.
+The rsync-like target syntax `user@host:/path` means:
+
+1. open an SSH control connection to `user@host`;
+2. start the remote `atp recv /path --once` command with the selected ATP
+   transport;
+3. discover the best reachable ATP data endpoint, preferring an explicit
+   `--data-host` first, then a Tailscale address when `--prefer tailscale` is
+   set, then the SSH host address;
+4. move bytes over the selected ATP transport, with SHA-256 and Merkle receipt
+   verification exactly as direct `host:port` transfers do.
+
+This keeps rsync ergonomics without forcing ATP into a single SSH stream. A
+future `--data-plane ssh` fallback may be useful for hostile networks, but it is
+a fallback mode and must be reported separately in benchmark results. Today
+`--transport rq` means RaptorQ over UDP with a TCP control plane; the native
+QUIC lane should replace the data/control split without changing the SSH
+bootstrap contract.
 
 ### Configuration Examples
 

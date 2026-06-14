@@ -9,12 +9,16 @@ set -euo pipefail
 SENDER="" SENDER_KEY="" RECEIVER="" RECEIVER_KEY=""
 ATP_BINARY="target/release/atp"
 PAYLOADS="512k,1m,10m,100m,1g,tree"
-TOOLS="atp-tcp,rsync-ssh,rsyncd"
+TOOLS="atp-rq,atp-tcp,rsync-ssh,rsyncd"
 RUNS=3
 OUT="artifacts/atp_bench/$(date +%Y-%m-%d)"
 ATP_PORT=8472
 RSYNCD_PORT=8730
 BASE=/root/atp-bench
+ATP_RQ_STREAMS=8
+ATP_RQ_SYMBOL_SIZE=1024
+ATP_RQ_REPAIR_OVERHEAD=1.15
+ATP_RQ_TAIL_DRAIN_MS=2
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -27,6 +31,10 @@ while [[ $# -gt 0 ]]; do
         --tools) TOOLS="$2"; shift 2;;
         --runs) RUNS="$2"; shift 2;;
         --out) OUT="$2"; shift 2;;
+        --atp-rq-streams) ATP_RQ_STREAMS="$2"; shift 2;;
+        --atp-rq-symbol-size) ATP_RQ_SYMBOL_SIZE="$2"; shift 2;;
+        --atp-rq-repair-overhead) ATP_RQ_REPAIR_OVERHEAD="$2"; shift 2;;
+        --atp-rq-tail-drain-ms) ATP_RQ_TAIL_DRAIN_MS="$2"; shift 2;;
         *) echo "unknown arg: $1" >&2; exit 2;;
     esac
 done
@@ -72,7 +80,7 @@ RTT=$("${SSH_S[@]}" "ping -c 10 -q $RECEIVER_IP 2>/dev/null | tail -1" || echo "
 SENDER_CORES=$("${SSH_S[@]}" nproc)
 RECEIVER_CORES=$("${SSH_R[@]}" nproc)
 cat > "$OUT/conditions.json" <<EOF
-{"date":"$(date -u +%FT%TZ)","sender":"$SENDER","receiver":"$RECEIVER","rtt":"$RTT","sender_cores":$SENDER_CORES,"receiver_cores":$RECEIVER_CORES,"tools":"$TOOLS","payloads":"$PAYLOADS","runs":$RUNS}
+{"date":"$(date -u +%FT%TZ)","sender":"$SENDER","receiver":"$RECEIVER","rtt":"$RTT","sender_cores":$SENDER_CORES,"receiver_cores":$RECEIVER_CORES,"tools":"$TOOLS","payloads":"$PAYLOADS","runs":$RUNS,"atp_rq_streams":$ATP_RQ_STREAMS,"atp_rq_symbol_size":$ATP_RQ_SYMBOL_SIZE,"atp_rq_repair_overhead":$ATP_RQ_REPAIR_OVERHEAD,"atp_rq_tail_drain_ms":$ATP_RQ_TAIL_DRAIN_MS}
 EOF
 note "RTT: $RTT"
 
@@ -121,30 +129,40 @@ run_transfer() { # tool payload run_idx -> appends one JSON line to RESULTS
     # Receiver-side sampler + (for atp) the one-shot receiver under time -v.
     local recv_pid_file="$BASE/recv_run.pid"
     case "$tool" in
+        atp-rq)
+            "${SSH_R[@]}" "rm -f $BASE/recv_time.txt; nohup $BASE/collect_metrics.sh '$BASE/atp recv' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid
+nohup /usr/bin/time -v -o $BASE/recv_time.txt $BASE/atp recv $BASE/recv --listen 0.0.0.0:$ATP_PORT --once --transport rq --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS > $BASE/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
+            sleep 1 ;;
         atp-tcp)
             "${SSH_R[@]}" "rm -f $BASE/recv_time.txt; nohup $BASE/collect_metrics.sh '$BASE/atp recv' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid
-nohup /usr/bin/time -v -o $BASE/recv_time.txt $BASE/atp recv $BASE/recv --listen 0.0.0.0:$ATP_PORT --once > $BASE/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
+nohup /usr/bin/time -v -o $BASE/recv_time.txt $BASE/atp recv $BASE/recv --listen 0.0.0.0:$ATP_PORT --once --transport tcp > $BASE/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
             sleep 1 ;;
         rsync-ssh)
             "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh 'rsync' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid" ;;
         rsyncd)
             "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh 'rsync' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid" ;;
+        *)
+            echo "unknown tool: $tool" >&2; exit 2 ;;
     esac
 
     # Sender command.
     local label="${tool}_${payload}_r${run_idx}"
     local sender_json
     case "$tool" in
+        atp-rq)
+            sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport rq --streams $ATP_RQ_STREAMS --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS") ;;
         atp-tcp)
-            sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT") ;;
+            sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport tcp") ;;
         rsync-ssh)
             sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- rsync -aW --inplace -e 'ssh -T -x -o Compression=no -o StrictHostKeyChecking=accept-new -c aes128-gcm@openssh.com' $BASE/payloads/$ppath root@$RECEIVER_IP:$BASE/recv/") ;;
         rsyncd)
             sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- rsync -aW --inplace --port $RSYNCD_PORT $BASE/payloads/$ppath rsync://$RECEIVER_IP/bench/") ;;
+        *)
+            echo "unknown tool: $tool" >&2; exit 2 ;;
     esac
 
     # Wait for the atp receiver to finish committing (it exits on --once).
-    if [[ "$tool" == atp-tcp ]]; then
+    if [[ "$tool" == atp-* ]]; then
         "${SSH_R[@]}" "for i in \$(seq 1 120); do kill -0 \$(cat $recv_pid_file) 2>/dev/null || exit 0; sleep 0.5; done; exit 1" \
             || note "WARN: atp receiver still alive after 60s"
     fi
@@ -165,7 +183,7 @@ except FileNotFoundError: pass
 if n: avg_rss/=n; avg_cpu/=n
 print(json.dumps({'samples':n,'peak_rss_kb':peak_rss,'avg_rss_kb':round(avg_rss,1),'peak_cpu_pct':peak_cpu,'avg_cpu_pct':round(avg_cpu,1),'peak_load1':peak_load}))
 PY")
-    if [[ "$tool" == atp-tcp ]]; then
+    if [[ "$tool" == atp-* ]]; then
         recv_time_json=$("${SSH_R[@]}" "python3 - <<'PY'
 import json,re
 d={}

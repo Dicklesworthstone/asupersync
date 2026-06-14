@@ -18,9 +18,10 @@ bit-for-bit SHA-256 verification of every single transfer.
   - ssh transport tuned: `-T -x -o Compression=no -c aes128-gcm@openssh.com`
     (fastest AEAD cipher commonly available; no TTY, no X11).
   - **`rsyncd` daemon mode** is also measured: plaintext TCP, no ssh crypto at
-    all. The current `atp` TCP transport is also plaintext, so `rsyncd` is the
-    apples-to-apples row; rsync-over-ssh is the realistic-usage row. This is
-    stated in the report rather than hidden.
+    all. `atp-rq` is the RaptorQ/UDP ATP candidate, `atp-tcp` is the legacy
+    ATP control row, `rsyncd` is the plaintext rsync ceiling, and
+    rsync-over-ssh is the realistic-usage row. This is stated in the report
+    rather than hidden.
 - **3 measured runs + 1 warmup** per (tool × payload), receiver destination
   wiped between runs.
 - **Verification**: a SHA-256 manifest is generated at payload creation; after
@@ -52,6 +53,26 @@ bit-for-bit SHA-256 verification of every single transfer.
   verifies hashes, writes `results.jsonl`.
 - `report.py` — aggregates `results.jsonl` → markdown comparison report.
 
+## ATP RQ knobs
+
+`atp-rq` is included by default and should be treated as the primary ATP row.
+The TCP row remains useful as a regression/control comparison while RQ/QUIC
+work continues.
+
+```bash
+--atp-rq-streams 8
+--atp-rq-symbol-size 1024
+--atp-rq-repair-overhead 1.15
+--atp-rq-tail-drain-ms 2
+```
+
+Those values are recorded in `conditions.json` for every run. Sweep them when
+working on throughput: larger symbols reduce coding overhead, more streams can
+help fill the path, and repair overhead trades network bytes for fewer decode
+round trips. Tail drain is the receiver-side quiet window after each fountain
+round marker; increasing it can prevent false `NeedMore` rounds on high-RTT
+paths where TCP control beats queued UDP symbols to user space.
+
 ## Usage
 
 ```bash
@@ -61,7 +82,11 @@ scripts/atp_bench/run_bench.sh \
   --receiver root@178.18.254.243 --receiver-key ~/.ssh/contabo_vps_ed25519 \
   --atp-binary target/release/atp \
   --payloads 512k,1m,10m,100m,1g,tree \
-  --tools atp-tcp,rsync-ssh,rsyncd \
+  --tools atp-rq,atp-tcp,rsync-ssh,rsyncd \
+  --atp-rq-streams 8 \
+  --atp-rq-symbol-size 1024 \
+  --atp-rq-repair-overhead 1.15 \
+  --atp-rq-tail-drain-ms 2 \
   --runs 3 \
   --out artifacts/atp_bench/$(date +%Y-%m-%d)
 
