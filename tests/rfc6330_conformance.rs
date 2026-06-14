@@ -9,7 +9,7 @@
 //! | RFC Section | Function | Test Count | Status |
 //! |-------------|----------|------------|--------|
 //! | 5.3.5.1 | rand(y,i,m) | Representative golden vectors | ✓ |
-//! | 5.3.5.2 | deg(v) | Boundary golden vectors | ✓ |
+//! | 5.3.5.2 | deg(v) | Exhaustive boundary matrix (both edges, f[1..=30]) | ✓ |
 //! | 5.3.5.3 | tuple(J,W,P,X) | Representative golden vectors | ✓ |
 //! | 5.4.2.1 | Intermediate symbols | Determinism + shape | ✓ |
 //! | 5.4.2.2 | Repair symbols | Bounds + determinism | ✓ |
@@ -277,6 +277,9 @@ pub fn run_rfc6330_conformance() -> Vec<ConformanceResult> {
         results.push(result);
     }
 
+    // Exhaustive deg() boundary matrix over every cumulative threshold.
+    results.extend(test_deg_full_boundary_matrix());
+
     // Test fallible tuple vectors
     for vector in TUPLE_VECTORS {
         let result = test_tuple_function(vector);
@@ -337,6 +340,69 @@ fn test_deg_function(vector: &GoldenVector<u32, usize>) -> ConformanceResult {
         ),
         error_details: if verdict == TestVerdict::Fail {
             Some(format!("Expected {}, got {}", vector.expected, actual))
+        } else {
+            None
+        },
+    }
+}
+
+/// Exhaustive RFC 6330 Section 5.3.5.2 degree-distribution boundary matrix.
+///
+/// The hand-written `DEG_VECTORS` only pin degrees 1-4 and 30. A single-value
+/// transcription error in any *intermediate* cumulative threshold f[d]
+/// (degrees 5-29) silently shifts LT degree selection for an entire band of
+/// random inputs and corrupts every encode/decode that draws a degree from
+/// that band -- exactly the "silent decode corruption" AC #3 forbids, and
+/// undetectable by the V0-V3 table hash (which does not cover the private
+/// degree table inside `deg`). This matrix probes BOTH sides of every
+/// threshold f[1..=30], so any single-value drift flips at least one verdict.
+///
+/// `F` is the canonical cumulative distribution from RFC 6330 Section 5.3.5.2,
+/// transcribed here as an independent golden reference -- the RFC is the
+/// source of truth, not the implementation's private table.
+fn test_deg_full_boundary_matrix() -> Vec<ConformanceResult> {
+    // f[0..=30]; deg(v) = smallest d such that v < f[d]. f[0] = 0 is implicit.
+    #[allow(clippy::unreadable_literal)]
+    const F: [u32; 31] = [
+        0, 5_243, 529_531, 704_294, 791_675, 844_104, 879_057, 904_023, 922_747, 937_311, 948_962,
+        958_494, 966_438, 973_160, 978_921, 983_914, 988_283, 992_138, 995_565, 998_631, 1_001_391,
+        1_003_887, 1_006_157, 1_008_229, 1_010_129, 1_011_876, 1_013_490, 1_014_983, 1_016_370,
+        1_017_662, 1_048_576,
+    ];
+
+    let mut results = Vec::with_capacity(60);
+    for d in 1usize..=30 {
+        // Lower boundary of degree d: v = f[d-1] must yield exactly d.
+        let lo = F[d - 1];
+        results.push(deg_boundary_result(d, "lower", lo, d, deg(lo)));
+
+        // Upper boundary of degree d: v = f[d] - 1 must yield exactly d.
+        let hi = F[d] - 1;
+        results.push(deg_boundary_result(d, "upper", hi, d, deg(hi)));
+    }
+    results
+}
+
+fn deg_boundary_result(
+    degree: usize,
+    edge: &str,
+    input: u32,
+    expected: usize,
+    actual: usize,
+) -> ConformanceResult {
+    let verdict = if actual == expected {
+        TestVerdict::Pass
+    } else {
+        TestVerdict::Fail
+    };
+    ConformanceResult {
+        test_id: format!("RFC6330-5.3.5.2-matrix-d{degree:02}-{edge}"),
+        rfc_section: "5.3.5.2".to_string(),
+        requirement_level: RequirementLevel::Must,
+        verdict: verdict.clone(),
+        description: format!("degree-{degree} {edge} boundary: deg({input}) -> {expected}"),
+        error_details: if verdict == TestVerdict::Fail {
+            Some(format!("Expected {expected}, got {actual}"))
         } else {
             None
         },
