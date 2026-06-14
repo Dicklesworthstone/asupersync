@@ -5,6 +5,64 @@
 //! ambient state: callers feed fixed-point samples and receive optional
 //! detection receipts. Runtime integration can then decide whether a detection
 //! should emit trace evidence, reset a controller, or remain observe-only.
+//!
+//! # Why change-point detection
+//!
+//! The EXP3 cancel-preemption controller and the Lyapunov governor adapt
+//! *within* a regime. Neither notices that the regime itself shifted (a
+//! workload phase change, a deploy, a traffic-pattern flip) — the classic
+//! failure mode of adaptive control is confidently optimizing for yesterday.
+//! CUSUM and Page-Hinkley are the buried-standard online detectors: `O(1)`
+//! per-sample updates with provable average-run-length (ARL) trade-offs. They
+//! are the missing complement, not a competitor: on detection the bounded,
+//! conservative response is to *forget* stale learning (reset a controller to
+//! its priors), never to take aggressive scheduling action directly.
+//!
+//! # Determinism
+//!
+//! Every accumulator is an `i64` in micro-units ([`MetricSample::SCALE`]).
+//! Running means use an `i128` intermediate and clamp back to `i64`; no step
+//! touches floating point. Two detectors fed the same sample sequence from a
+//! fresh state therefore produce byte-identical receipts and snapshots, so
+//! replay and lab runs reproduce exactly.
+//!
+//! # Galaxy-brain card — Page-Hinkley ([`PageHinkleyDetector`])
+//!
+//! Tracks cumulative deviation of each sample from the running mean, minus a
+//! tolerated drift `δ`, and alarms when the run-up above the running minimum of
+//! that cumulative sum exceeds a threshold `λ`:
+//!
+//! ```text
+//! x̄_T  = running mean of x_1..x_T
+//! m_T  = Σ_{t≤T} (x_t − x̄_t − δ)          (cumulative above-tolerance evidence)
+//! M_T  = min_{t≤T} m_t                      (running floor)
+//! PH_T = m_T − M_T                          (run-up since the floor)
+//! alarm ⇔ PH_T ≥ λ
+//! ```
+//!
+//! Substituted defaults ([`PageHinkleyConfig::conservative`]): `δ = 0.05` units
+//! (`50_000` micro-units), `λ = 3.0` units. ARL intuition: the false-alarm ARL
+//! grows roughly exponentially in `λ` relative to the noise scale, so a larger
+//! `λ` buys a longer quiet run at the cost of slower detection; `δ` is the
+//! magnitude of drift deemed acceptable and trades detection delay against
+//! sensitivity. With unit-scale scheduler noise, `λ = 3` means ~3 units of
+//! accumulated above-tolerance evidence must pile up before an alarm fires.
+//!
+//! # Galaxy-brain card — CUSUM ([`CusumDetector`])
+//!
+//! One-sided cumulative sum of residuals against a fixed baseline `μ₀`, with a
+//! slack `k` (half the shift magnitude you want to catch) and threshold `h`:
+//!
+//! ```text
+//! upward:   S_0 = 0,  S_t = max(0, S_{t−1} + (x_t − μ₀ − k)),   alarm ⇔ S_t ≥ h
+//! downward: S_0 = 0,  S_t = max(0, S_{t−1} + (μ₀ − x_t − k)),   alarm ⇔ S_t ≥ h
+//! ```
+//!
+//! Substituted defaults ([`CusumConfig::upward`]/[`CusumConfig::downward`]):
+//! `k = 0.05` units (`50_000` micro-units), `h` caller-supplied. ARL intuition:
+//! picking `k = (μ₁ − μ₀) / 2` is SPRT-optimal for detecting a shift to `μ₁`;
+//! the false-alarm ARL increases with `h`, while the detection delay is roughly
+//! `h / (shift − k)` once the true mean exceeds the baseline by more than `k`.
 
 /// Fixed-point runtime metric sample.
 ///
@@ -179,6 +237,12 @@ impl PageHinkleyDetector {
         }
     }
 
+    /// Runtime series this detector monitors.
+    #[must_use]
+    pub const fn series(&self) -> RuntimeMetricSeries {
+        self.series
+    }
+
     /// Consume one sample and return a detection receipt if the threshold crosses.
     pub fn update(&mut self, sample: MetricSample) -> Option<ChangePointDetection> {
         self.sample_count = self.sample_count.saturating_add(1);
@@ -293,6 +357,12 @@ impl CusumDetector {
         }
     }
 
+    /// Runtime series this detector monitors.
+    #[must_use]
+    pub const fn series(&self) -> RuntimeMetricSeries {
+        self.series
+    }
+
     /// Consume one sample and return a detection receipt if the threshold crosses.
     pub fn update(&mut self, sample: MetricSample) -> Option<ChangePointDetection> {
         self.sample_count = self.sample_count.saturating_add(1);
@@ -340,6 +410,198 @@ impl CusumDetector {
             statistic: self.statistic,
             threshold: self.config.threshold,
         }
+    }
+}
+
+/// Pluggable detector backing one monitored series inside a [`ChangePointMonitor`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeriesDetector {
+    /// Page-Hinkley cumulative mean-shift detector.
+    PageHinkley(PageHinkleyDetector),
+    /// One-sided cumulative-sum detector.
+    Cusum(CusumDetector),
+}
+
+impl SeriesDetector {
+    /// Runtime series this detector monitors.
+    #[must_use]
+    pub const fn series(&self) -> RuntimeMetricSeries {
+        match self {
+            Self::PageHinkley(detector) => detector.series(),
+            Self::Cusum(detector) => detector.series(),
+        }
+    }
+
+    /// Detector algorithm represented by this slot.
+    #[must_use]
+    pub const fn kind(&self) -> ChangePointDetectorKind {
+        match self {
+            Self::PageHinkley(_) => ChangePointDetectorKind::PageHinkley,
+            Self::Cusum(_) => ChangePointDetectorKind::Cusum,
+        }
+    }
+
+    /// Consume one sample and return a detection receipt if the threshold crosses.
+    pub fn update(&mut self, sample: MetricSample) -> Option<ChangePointDetection> {
+        match self {
+            Self::PageHinkley(detector) => detector.update(sample),
+            Self::Cusum(detector) => detector.update(sample),
+        }
+    }
+
+    /// Deterministic state snapshot for this detector.
+    #[must_use]
+    pub const fn snapshot(&self) -> ChangePointSnapshot {
+        match self {
+            Self::PageHinkley(detector) => detector.snapshot(),
+            Self::Cusum(detector) => detector.snapshot(),
+        }
+    }
+}
+
+impl From<PageHinkleyDetector> for SeriesDetector {
+    fn from(detector: PageHinkleyDetector) -> Self {
+        Self::PageHinkley(detector)
+    }
+}
+
+impl From<CusumDetector> for SeriesDetector {
+    fn from(detector: CusumDetector) -> Self {
+        Self::Cusum(detector)
+    }
+}
+
+/// Deterministic, off-by-default monitor over a fixed set of runtime series.
+///
+/// The monitor owns one or more [`SeriesDetector`]s and routes each observed
+/// sample to every detector registered for that series, in registration order.
+/// It performs no sampling, locking, or background work of its own — the
+/// scheduler snapshot path feeds it and decides what to do with a receipt.
+///
+/// Detection is gated on [`Self::is_enabled`]: a freshly built monitor is
+/// **disabled**, so [`Self::observe`] returns `None` until a caller opts in.
+/// This makes "off by default" a structural property rather than a convention.
+///
+/// # Examples
+///
+/// ```
+/// use asupersync::runtime::changepoint::{
+///     ChangePointMonitor, MetricSample, PageHinkleyConfig, PageHinkleyDetector,
+///     RuntimeMetricSeries,
+/// };
+///
+/// let detector = PageHinkleyDetector::new(
+///     RuntimeMetricSeries::ReadyQueueDepth,
+///     PageHinkleyConfig {
+///         tolerance: MetricSample::from_micro_units(0),
+///         threshold: 10 * MetricSample::SCALE,
+///         reset_after_detection: false,
+///     },
+/// );
+/// let mut monitor = ChangePointMonitor::new().with_detector(detector).enable();
+///
+/// let mut fired = None;
+/// for value in [10, 10, 10, 10, 10, 18, 18, 18, 18, 18] {
+///     if let Some(detection) =
+///         monitor.observe(RuntimeMetricSeries::ReadyQueueDepth, MetricSample::from_units(value))
+///     {
+///         fired = Some(detection);
+///         break;
+///     }
+/// }
+/// assert!(fired.is_some());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChangePointMonitor {
+    enabled: bool,
+    detectors: Vec<SeriesDetector>,
+}
+
+impl ChangePointMonitor {
+    /// Build an empty, disabled monitor.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            enabled: false,
+            detectors: Vec::new(),
+        }
+    }
+
+    /// Register a detector, returning the monitor for chaining.
+    #[must_use]
+    pub fn with_detector(mut self, detector: impl Into<SeriesDetector>) -> Self {
+        self.detectors.push(detector.into());
+        self
+    }
+
+    /// Mark the monitor enabled, returning it for chaining.
+    #[must_use]
+    pub fn enable(mut self) -> Self {
+        self.enabled = true;
+        self
+    }
+
+    /// Register an additional detector in place.
+    pub fn register(&mut self, detector: impl Into<SeriesDetector>) {
+        self.detectors.push(detector.into());
+    }
+
+    /// Enable or disable detection.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Whether detection is currently enabled.
+    #[must_use]
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Number of registered detectors.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.detectors.len()
+    }
+
+    /// Whether no detectors are registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.detectors.is_empty()
+    }
+
+    /// Feed `sample` to every detector registered for `series`.
+    ///
+    /// Returns the first detection in registration order, or `None` when the
+    /// monitor is disabled, no detector is registered for `series`, or no
+    /// threshold crossed. All matching detectors advance their state regardless
+    /// of which one produced the returned receipt, so later observations
+    /// reflect every sample seen.
+    pub fn observe(
+        &mut self,
+        series: RuntimeMetricSeries,
+        sample: MetricSample,
+    ) -> Option<ChangePointDetection> {
+        if !self.enabled {
+            return None;
+        }
+        let mut first: Option<ChangePointDetection> = None;
+        for detector in &mut self.detectors {
+            if detector.series() != series {
+                continue;
+            }
+            // Advance every matching detector; keep the earliest receipt.
+            first = first.or(detector.update(sample));
+        }
+        first
+    }
+
+    /// Deterministic snapshots of every registered detector, in registration order.
+    #[must_use]
+    pub fn snapshots(&self) -> Vec<ChangePointSnapshot> {
+        self.detectors
+            .iter()
+            .map(SeriesDetector::snapshot)
+            .collect()
     }
 }
 
@@ -461,6 +723,211 @@ mod tests {
             let right_detection = right.update(MetricSample::from_units(sample));
             assert_eq!(left_detection, right_detection);
             assert_eq!(left.snapshot(), right.snapshot());
+        }
+    }
+
+    #[test]
+    fn page_hinkley_detection_delay_within_documented_window() {
+        // (prefix_value, prefix_len, post_value, threshold_units, max_delay)
+        let cases = [
+            (10_i64, 5_usize, 18_i64, 10_i64, 4_u64),
+            (5, 6, 25, 8, 3),
+            (100, 8, 130, 20, 4),
+        ];
+        for (prefix, prefix_len, post, threshold_units, max_delay) in cases {
+            let mut detector = PageHinkleyDetector::new(
+                RuntimeMetricSeries::ReadyQueueDepth,
+                PageHinkleyConfig {
+                    tolerance: MetricSample::from_micro_units(0),
+                    threshold: threshold_units * MetricSample::SCALE,
+                    reset_after_detection: false,
+                },
+            );
+            // A stable prefix must never trigger.
+            for _ in 0..prefix_len {
+                assert!(detector.update(MetricSample::from_units(prefix)).is_none());
+            }
+            // The shift must be detected, strictly after the prefix and within the window.
+            let prefix_count = u64::try_from(prefix_len).expect("prefix length fits in u64");
+            let mut detected_at = None;
+            for step in 1..=(max_delay + 2) {
+                if let Some(detection) = detector.update(MetricSample::from_units(post)) {
+                    assert_eq!(detection.direction, ChangeDirection::Increase);
+                    assert_eq!(detection.sample_index, prefix_count + step);
+                    detected_at = Some(step);
+                    break;
+                }
+            }
+            let delay = detected_at.expect("post-shift samples should cross threshold");
+            assert!(
+                delay <= max_delay,
+                "delay {delay} exceeded documented window {max_delay}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_hinkley_detects_gradual_drift() {
+        let mut detector = PageHinkleyDetector::new(
+            RuntimeMetricSeries::WakeToRunLatencyMicros,
+            PageHinkleyConfig {
+                tolerance: MetricSample::from_micro_units(0),
+                threshold: 5 * MetricSample::SCALE,
+                reset_after_detection: false,
+            },
+        );
+        // Ramp upward by 0.5 units per sample: the lagging running mean opens a
+        // growing positive gap that Page-Hinkley accumulates.
+        let mut detection = None;
+        for step in 0..40_i64 {
+            let value = MetricSample::from_micro_units(40 * MetricSample::SCALE + step * 500_000);
+            if let Some(found) = detector.update(value) {
+                detection = Some(found);
+                break;
+            }
+        }
+        let detection = detection.expect("a sustained upward drift must eventually be detected");
+        assert_eq!(detection.direction, ChangeDirection::Increase);
+    }
+
+    #[test]
+    fn steady_corpus_yields_no_false_positives() {
+        // Bounded jitter in micro-units: spikes exceed the conservative tolerance
+        // (50_000) yet the per-cycle drift is strongly negative, so the run-up
+        // above the cumulative floor never approaches the 3.0-unit threshold.
+        const JITTER: [i64; 8] = [
+            40_000, -90_000, 10_000, -50_000, 80_000, -20_000, -100_000, 30_000,
+        ];
+        let series = [
+            RuntimeMetricSeries::ReadyQueueDepth,
+            RuntimeMetricSeries::WakeToRunLatencyMicros,
+            RuntimeMetricSeries::DrainRate,
+        ];
+        // Each (series, phase) pair is a deterministic steady-workload seed.
+        for (seed, metric) in series.into_iter().enumerate() {
+            let base = 50_i64 * MetricSample::SCALE;
+            let mut detector = PageHinkleyDetector::new(metric, PageHinkleyConfig::conservative());
+            for index in 0..256_usize {
+                let jitter = JITTER[(index + seed) % JITTER.len()];
+                let value = MetricSample::from_micro_units(base + jitter);
+                assert!(
+                    detector.update(value).is_none(),
+                    "steady seed {seed} produced a false positive at index {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn monitor_disabled_by_default_suppresses_detection() {
+        let detector = PageHinkleyDetector::new(
+            RuntimeMetricSeries::ReadyQueueDepth,
+            PageHinkleyConfig {
+                tolerance: MetricSample::from_micro_units(0),
+                threshold: 10 * MetricSample::SCALE,
+                reset_after_detection: false,
+            },
+        );
+        let mut monitor = ChangePointMonitor::new().with_detector(detector);
+        assert!(!monitor.is_enabled());
+        assert_eq!(monitor.len(), 1);
+        assert!(!monitor.is_empty());
+
+        // While disabled, even an obvious step yields nothing and advances no state.
+        for value in [10, 10, 10, 10, 10, 30, 30, 30, 30, 30] {
+            assert!(
+                monitor
+                    .observe(
+                        RuntimeMetricSeries::ReadyQueueDepth,
+                        MetricSample::from_units(value)
+                    )
+                    .is_none()
+            );
+        }
+
+        // Enabling resumes detection on the freshly observed step.
+        monitor.set_enabled(true);
+        let mut fired = false;
+        for value in [10, 10, 10, 10, 10, 30, 30, 30, 30, 30] {
+            if monitor
+                .observe(
+                    RuntimeMetricSeries::ReadyQueueDepth,
+                    MetricSample::from_units(value),
+                )
+                .is_some()
+            {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired, "enabled monitor must detect the step");
+    }
+
+    #[test]
+    fn monitor_routes_per_series_and_replays_identically() {
+        fn build() -> ChangePointMonitor {
+            ChangePointMonitor::new()
+                .with_detector(PageHinkleyDetector::new(
+                    RuntimeMetricSeries::ReadyQueueDepth,
+                    PageHinkleyConfig {
+                        tolerance: MetricSample::from_micro_units(0),
+                        threshold: 10 * MetricSample::SCALE,
+                        reset_after_detection: true,
+                    },
+                ))
+                .with_detector(CusumDetector::new(
+                    RuntimeMetricSeries::DrainRate,
+                    CusumConfig::downward(MetricSample::from_units(20), 8 * MetricSample::SCALE),
+                ))
+                .enable()
+        }
+
+        // Interleaved (series, value) stream: a rising ready-queue and a falling
+        // drain-rate, routed to their respective detectors.
+        let stream = [
+            (RuntimeMetricSeries::ReadyQueueDepth, 10),
+            (RuntimeMetricSeries::DrainRate, 20),
+            (RuntimeMetricSeries::ReadyQueueDepth, 10),
+            (RuntimeMetricSeries::DrainRate, 19),
+            (RuntimeMetricSeries::ReadyQueueDepth, 18),
+            (RuntimeMetricSeries::DrainRate, 15),
+            (RuntimeMetricSeries::ReadyQueueDepth, 18),
+            (RuntimeMetricSeries::DrainRate, 15),
+            (RuntimeMetricSeries::ReadyQueueDepth, 18),
+            (RuntimeMetricSeries::DrainRate, 15),
+        ];
+
+        let run = |mut monitor: ChangePointMonitor| {
+            stream
+                .iter()
+                .filter_map(|&(series, value)| {
+                    monitor.observe(series, MetricSample::from_units(value))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let first = run(build());
+        let second = run(build());
+        assert_eq!(
+            first, second,
+            "replay from a fresh monitor must be byte-identical"
+        );
+        assert!(
+            !first.is_empty(),
+            "the interleaved stream should trigger at least one detector"
+        );
+        for detection in &first {
+            match detection.series {
+                RuntimeMetricSeries::ReadyQueueDepth => {
+                    assert_eq!(detection.detector, ChangePointDetectorKind::PageHinkley);
+                    assert_eq!(detection.direction, ChangeDirection::Increase);
+                }
+                RuntimeMetricSeries::DrainRate => {
+                    assert_eq!(detection.detector, ChangePointDetectorKind::Cusum);
+                    assert_eq!(detection.direction, ChangeDirection::Decrease);
+                }
+                other => panic!("unexpected routed series {other:?}"),
+            }
         }
     }
 }
