@@ -1,0 +1,86 @@
+//! br-asupersync-b1fojq: regression proof that the default RaptorQ decode
+//! configuration is **fail-closed** (per-symbol authentication required) and
+//! that the insecure no-auth path is an explicit, deliberate opt-out.
+//!
+//! This is a public-API integration test, so it compiles the library with
+//! `cfg(test)` OFF — it is immune to unrelated in-crate `#[cfg(test)]` churn —
+//! and verifies the security posture through the same surface real callers use.
+//!
+//! Pre-fix `DecodingConfig::default()` set `verify_auth: false`, so a
+//! default-config `DecodingPipeline` authenticated NOTHING and silently
+//! accepted forged / unauthenticated symbols (decode-matrix poisoning).
+
+use asupersync::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
+use asupersync::security::AuthenticatedSymbol;
+use asupersync::security::tag::AuthenticationTag;
+use asupersync::types::symbol::{ObjectId, Symbol, SymbolId, SymbolKind};
+
+fn unauthenticated_symbol(object_value: u64, symbol_size: u16) -> AuthenticatedSymbol {
+    let symbol = Symbol::new(
+        SymbolId::new(ObjectId::new_for_test(object_value), 0, 0),
+        vec![0u8; usize::from(symbol_size)],
+        SymbolKind::Source,
+    );
+    // `from_parts` produces an UNVERIFIED authenticated-symbol wrapper carrying
+    // the all-zero sentinel tag — exactly what a forging peer can synthesize.
+    AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero())
+}
+
+#[test]
+fn default_decoding_config_is_fail_closed() {
+    let secure = DecodingConfig::default();
+    assert!(
+        secure.verify_auth,
+        "DecodingConfig::default() must be fail-closed (verify_auth=true)"
+    );
+
+    let insecure = DecodingConfig::without_auth();
+    assert!(
+        !insecure.verify_auth,
+        "DecodingConfig::without_auth() is the explicit insecure opt-out (verify_auth=false)"
+    );
+}
+
+#[test]
+fn default_pipeline_rejects_unauthenticated_symbol() {
+    // A pipeline built from the default config carries no SecurityContext, so
+    // the fail-closed default must REJECT an unauthenticated symbol rather than
+    // silently accept it.
+    let mut decoder = DecodingPipeline::new(DecodingConfig::default());
+    let auth = unauthenticated_symbol(7, DecodingConfig::default().symbol_size);
+
+    let result = decoder.feed(auth).expect("feed should not error");
+    assert_eq!(
+        result,
+        SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed),
+        "default-config pipeline must reject an unauthenticated symbol"
+    );
+    assert_eq!(
+        decoder.skipped_verifications(),
+        0,
+        "a rejected symbol is never counted as an auth-skipped acceptance"
+    );
+}
+
+#[test]
+fn without_auth_pipeline_accepts_symbol_as_explicit_opt_out() {
+    // The explicit opt-out preserves the legacy erasure-only behaviour: a
+    // no-auth pipeline accepts the symbol (authentication deliberately skipped)
+    // and the acceptance is surfaced via `skipped_verifications()`.
+    let mut decoder = DecodingPipeline::new(DecodingConfig::without_auth());
+    let auth = unauthenticated_symbol(8, DecodingConfig::without_auth().symbol_size);
+
+    let result = decoder.feed(auth).expect("feed should not error");
+    assert!(
+        !matches!(
+            result,
+            SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed)
+        ),
+        "without_auth() pipeline must not reject on authentication, got {result:?}"
+    );
+    assert_eq!(
+        decoder.skipped_verifications(),
+        1,
+        "the accepted-without-auth symbol must be counted for operator audit"
+    );
+}

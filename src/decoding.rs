@@ -149,6 +149,19 @@ pub struct DecodingConfig {
 }
 
 impl Default for DecodingConfig {
+    /// br-asupersync-b1fojq: the default is **fail-closed** —
+    /// `verify_auth: true`. A `DecodingPipeline` built from
+    /// `DecodingConfig::default()` rejects every symbol unless an
+    /// [`SecurityContext`] is installed (see [`DecodingPipeline::with_auth`])
+    /// and the symbol authenticates. Previously the default was
+    /// `verify_auth: false`, so a default-config pipeline authenticated
+    /// NOTHING and silently accepted forged/unauthenticated symbols
+    /// (decode-matrix poisoning). Callers that legitimately decode without
+    /// per-symbol authentication (erasure-only / integrity-vs-manifest
+    /// transports, or paths that authenticate each symbol upstream) must opt
+    /// out **explicitly** via [`DecodingConfig::without_auth`] or by setting
+    /// `verify_auth: false` in a literal — the insecure choice is no longer
+    /// the default.
     fn default() -> Self {
         Self {
             symbol_size: 256,
@@ -157,7 +170,29 @@ impl Default for DecodingConfig {
             min_overhead: 0,
             max_buffered_symbols: 8192,
             block_timeout: Duration::from_secs(30),
+            verify_auth: true,
+        }
+    }
+}
+
+impl DecodingConfig {
+    /// Explicit, **insecure** opt-out from per-symbol authentication.
+    ///
+    /// br-asupersync-b1fojq: returns the same configuration as
+    /// [`DecodingConfig::default`] except `verify_auth` is `false`, so the
+    /// resulting [`DecodingPipeline`] accepts symbols WITHOUT verifying an
+    /// authentication tag. This is the correct configuration only when the
+    /// caller does not need anti-forgery at the symbol layer — e.g.
+    /// erasure-only recovery, integrity-vs-manifest transports, or pipelines
+    /// that authenticate every symbol upstream before feeding it. Acceptance
+    /// is still surfaced via [`DecodingPipeline::skipped_verifications`] and a
+    /// one-time WARN. Prefer [`DecodingConfig::default`] (fail-closed) for any
+    /// path that ingests symbols from an untrusted peer.
+    #[must_use]
+    pub fn without_auth() -> Self {
+        Self {
             verify_auth: false,
+            ..Self::default()
         }
     }
 }
@@ -1578,7 +1613,7 @@ mod tests {
     fn pipeline_set_object_params_rejects_mismatched_symbol_size() {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: 256,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         let params = ObjectParams::new(ObjectId::new_for_test(1), 1024, 128, 1, 8);
         let err = pipeline.set_object_params(params).unwrap_err();
@@ -1593,7 +1628,7 @@ mod tests {
 
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         pipeline
             .set_object_params(ObjectParams::new(oid1, 512, config.symbol_size, 1, 2))
@@ -1611,7 +1646,7 @@ mod tests {
 
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         pipeline
             .set_object_params(ObjectParams::new(oid, 512, config.symbol_size, 1, 2))
@@ -1635,7 +1670,7 @@ mod tests {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: 1,
             max_block_size: 1024 * 1024,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         // 65_000 bytes / 1-byte-symbols = 65_000 symbols/block — exceeds
         // the RFC max of 56,403.
@@ -1660,7 +1695,7 @@ mod tests {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         let err = pipeline
             .set_object_params(ObjectParams::new(object_id, 1536, config.symbol_size, 1, 4))
@@ -1680,7 +1715,7 @@ mod tests {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         let err = pipeline
             .set_object_params(ObjectParams::new(object_id, 2048, config.symbol_size, 2, 8))
@@ -1701,7 +1736,7 @@ mod tests {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         let err = pipeline
             .set_object_params(ObjectParams::new(
@@ -1733,7 +1768,7 @@ mod tests {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         pipeline
             .set_object_params(ObjectParams::new(
@@ -1769,7 +1804,7 @@ mod tests {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         pipeline
             .set_object_params(ObjectParams::new(
@@ -1827,7 +1862,7 @@ mod tests {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
             verify_auth: false,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         decoder
             .set_object_params(ObjectParams::new(object_id, 512, config.symbol_size, 1, 2))
@@ -1921,7 +1956,7 @@ mod tests {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
             max_block_size: 1024,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         // data_len=512 < max_block_size=1024 => 1 block
         let k = (512usize).div_ceil(usize::from(config.symbol_size)) as u16;
@@ -2020,7 +2055,7 @@ mod tests {
         let mut pipeline = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
         let k = (512usize).div_ceil(usize::from(config.symbol_size)) as u16;
         pipeline
@@ -2171,7 +2206,7 @@ mod tests {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
             verify_auth: true,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
 
         let symbol = Symbol::new(
@@ -2213,7 +2248,7 @@ mod tests {
             symbol_size: config.symbol_size,
             max_block_size: config.max_block_size,
             verify_auth: true,
-            ..DecodingConfig::default()
+            ..DecodingConfig::without_auth()
         });
 
         let symbol = Symbol::new(
@@ -2246,7 +2281,7 @@ mod tests {
                 symbol_size: config.symbol_size,
                 max_block_size: config.max_block_size,
                 verify_auth: true,
-                ..DecodingConfig::default()
+                ..DecodingConfig::without_auth()
             },
             crate::security::SecurityContext::for_testing(42),
         );
@@ -2267,6 +2302,76 @@ mod tests {
         let ok = result == expected;
         crate::assert_with_log!(ok, "bad tag rejected", expected, result);
         crate::test_complete!("with_auth_rejects_bad_tag");
+    }
+
+    /// br-asupersync-b1fojq: the default decode configuration MUST be
+    /// fail-closed (`verify_auth = true`). This test locks the secure default
+    /// in place so a future change cannot silently reintroduce the fail-open
+    /// posture, and verifies the explicit opt-out
+    /// [`DecodingConfig::without_auth`] differs from the default ONLY in
+    /// `verify_auth`.
+    #[test]
+    fn default_config_is_fail_closed() {
+        init_test("default_config_is_fail_closed");
+        let secure = DecodingConfig::default();
+        crate::assert_with_log!(
+            secure.verify_auth,
+            "DecodingConfig::default() is fail-closed (verify_auth=true)",
+            true,
+            secure.verify_auth
+        );
+
+        let insecure = DecodingConfig::without_auth();
+        crate::assert_with_log!(
+            !insecure.verify_auth,
+            "DecodingConfig::without_auth() opts out (verify_auth=false)",
+            false,
+            insecure.verify_auth
+        );
+
+        let fields_match = insecure.symbol_size == secure.symbol_size
+            && insecure.max_block_size == secure.max_block_size
+            && insecure.repair_overhead.to_bits() == secure.repair_overhead.to_bits()
+            && insecure.min_overhead == secure.min_overhead
+            && insecure.max_buffered_symbols == secure.max_buffered_symbols
+            && insecure.block_timeout == secure.block_timeout;
+        crate::assert_with_log!(
+            fields_match,
+            "without_auth differs from default only in verify_auth",
+            true,
+            fields_match
+        );
+        crate::test_complete!("default_config_is_fail_closed");
+    }
+
+    /// br-asupersync-b1fojq: end-to-end proof that a pipeline built from the
+    /// default config (no [`SecurityContext`] installed) REJECTS an
+    /// unauthenticated symbol instead of silently accepting it. Pre-fix the
+    /// default was `verify_auth = false`, so this exact symbol would have been
+    /// accepted (decode-matrix poisoning).
+    #[test]
+    fn default_config_pipeline_rejects_unauthenticated_symbol() {
+        init_test("default_config_pipeline_rejects_unauthenticated_symbol");
+        let mut decoder = DecodingPipeline::new(DecodingConfig::default());
+        let symbol = Symbol::new(
+            SymbolId::new(ObjectId::new_for_test(201), 0, 0),
+            vec![0u8; usize::from(DecodingConfig::default().symbol_size)],
+            SymbolKind::Source,
+        );
+        let auth = AuthenticatedSymbol::from_parts(
+            symbol,
+            crate::security::tag::AuthenticationTag::zero(),
+        );
+        let result = decoder.feed(auth).expect("feed should not return Err");
+        let expected = SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed);
+        let ok = result == expected;
+        crate::assert_with_log!(
+            ok,
+            "default-config pipeline rejects unauthenticated symbol",
+            expected,
+            result
+        );
+        crate::test_complete!("default_config_pipeline_rejects_unauthenticated_symbol");
     }
 
     #[test]

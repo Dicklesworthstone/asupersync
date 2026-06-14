@@ -400,9 +400,12 @@ fn test_typed_symbol_operations(data: &[u8]) {
         }
     }
 
-    // Test TypedDecoder with constructed symbols
+    // Test TypedDecoder with constructed symbols. Typed decode is erasure-only
+    // and carries no SecurityContext, so it uses the explicit no-auth opt-out
+    // (br-asupersync-b1fojq); the fail-closed DecodingConfig::default() would
+    // otherwise reject every symbol before the decode path is exercised.
     let mut decoder = TypedDecoder::<TestPayload>::with_config(
-        DecodingConfig::default(),
+        DecodingConfig::without_auth(),
         SerializationFormat::MessagePack,
     );
 

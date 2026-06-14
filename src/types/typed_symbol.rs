@@ -670,10 +670,19 @@ impl<T> std::fmt::Debug for TypedDecoder<T> {
 }
 
 impl<T: DeserializeOwned> TypedDecoder<T> {
-    /// Create a new typed decoder with default config.
+    /// Create a new typed decoder.
+    ///
+    /// br-asupersync-b1fojq: typed decode is an **erasure-only** convenience —
+    /// it reconstructs a serialized value from RaptorQ symbols and carries no
+    /// [`SecurityContext`](crate::security::SecurityContext), so it explicitly opts out of per-symbol
+    /// authentication via [`DecodingConfig::without_auth`]. (Were it to use the
+    /// now-fail-closed [`DecodingConfig::default`], every symbol would be
+    /// rejected for lack of an auth context.) Callers that need anti-forgery at
+    /// the symbol layer must authenticate symbols upstream before decoding, or
+    /// use [`Self::with_config`] with an auth-enabled pipeline.
     #[must_use]
     pub fn new(format: SerializationFormat) -> Self {
-        Self::with_config(DecodingConfig::default(), format)
+        Self::with_config(DecodingConfig::without_auth(), format)
     }
 
     /// Create a decoder with custom config.
