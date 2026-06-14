@@ -1,7 +1,7 @@
 //! TCP socket configuration.
 
 use crate::net::tcp::listener::TcpListener;
-use crate::net::tcp::stream::{KeepaliveConfig, TcpStream};
+use crate::net::tcp::stream::{KeepaliveConfig, TcpKeepaliveConfig, TcpStream};
 use parking_lot::Mutex;
 use std::io;
 use std::net::SocketAddr;
@@ -80,6 +80,16 @@ impl TcpSocket {
     /// Pass `Some(duration)` to enable keepalive with the requested idle time,
     /// or `None` to explicitly disable keepalive.
     pub fn set_keepalive(&self, keepalive: Option<Duration>) -> io::Result<()> {
+        self.set_keepalive_config(keepalive.map(TcpKeepaliveConfig::new))
+    }
+
+    /// Configures TCP keepalive with explicit idle, interval, and retry parameters.
+    ///
+    /// Defaults are explicit: `None` disables keepalive, while leaving this
+    /// unset defers to the operating system. Unsupported interval or retry
+    /// parameters return `io::ErrorKind::Unsupported` when the socket is
+    /// connected or listened.
+    pub fn set_keepalive_config(&self, keepalive: Option<TcpKeepaliveConfig>) -> io::Result<()> {
         self.state.lock().keepalive =
             keepalive.map_or(KeepaliveConfig::Disabled, KeepaliveConfig::Enabled);
         Ok(())
@@ -208,8 +218,8 @@ fn apply_socket_options(socket: &socket2::Socket, state: &TcpSocketState) -> io:
     }
 
     match state.keepalive {
-        KeepaliveConfig::Enabled(duration) => {
-            let params = socket2::TcpKeepalive::new().with_time(duration);
+        KeepaliveConfig::Enabled(config) => {
+            let params = config.to_socket2()?;
             socket.set_tcp_keepalive(&params)?;
         }
         KeepaliveConfig::Disabled => socket.set_keepalive(false)?,
@@ -243,6 +253,32 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_linux_keepalive_options(
+        stream: &net::TcpStream,
+        expected_idle: Duration,
+        expected_interval: Duration,
+        expected_retries: u32,
+    ) {
+        let socket = socket2::SockRef::from(stream);
+        assert!(socket.keepalive().expect("read SO_KEEPALIVE"));
+        assert_eq!(
+            socket.tcp_keepalive_time().expect("read TCP_KEEPIDLE"),
+            expected_idle,
+            "TCP_KEEPIDLE value"
+        );
+        assert_eq!(
+            socket.tcp_keepalive_interval().expect("read TCP_KEEPINTVL"),
+            expected_interval,
+            "TCP_KEEPINTVL value"
+        );
+        assert_eq!(
+            socket.tcp_keepalive_retries().expect("read TCP_KEEPCNT"),
+            expected_retries,
+            "TCP_KEEPCNT value"
+        );
     }
 
     #[test]
@@ -337,11 +373,14 @@ mod tests {
     fn test_socket_records_tcp_convenience_options() {
         init_test("test_socket_records_tcp_convenience_options");
         let socket = TcpSocket::new_v4().expect("new_v4");
+        let keepalive = TcpKeepaliveConfig::new(Duration::from_secs(42))
+            .with_interval(Duration::from_secs(8))
+            .with_retries(5);
 
         socket.set_nodelay(true).expect("set nodelay");
         socket
-            .set_keepalive(Some(Duration::from_secs(42)))
-            .expect("set keepalive");
+            .set_keepalive_config(Some(keepalive))
+            .expect("set keepalive config");
 
         let state = socket.state.lock();
         crate::assert_with_log!(
@@ -351,9 +390,9 @@ mod tests {
             state.nodelay
         );
         crate::assert_with_log!(
-            state.keepalive == KeepaliveConfig::Enabled(Duration::from_secs(42)),
+            state.keepalive == KeepaliveConfig::Enabled(keepalive),
             "keepalive state",
-            KeepaliveConfig::Enabled(Duration::from_secs(42)),
+            KeepaliveConfig::Enabled(keepalive),
             state.keepalive
         );
         crate::test_complete!("test_socket_records_tcp_convenience_options");
@@ -400,6 +439,83 @@ mod tests {
         crate::assert_with_log!(accepted, "accepted connection", true, accepted);
         handle.join().expect("join accept thread");
         crate::test_complete!("test_connect_applies_nodelay_and_keepalive_options");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "linux"))]
+    #[test]
+    fn test_connect_applies_keepalive_config_knobs() {
+        init_test("test_connect_applies_keepalive_config_knobs");
+        let listener = net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept().expect("accept");
+        });
+
+        futures_lite::future::block_on(async {
+            let socket = TcpSocket::new_v4().expect("new_v4");
+            socket
+                .set_keepalive_config(Some(
+                    TcpKeepaliveConfig::new(Duration::from_secs(33))
+                        .with_interval(Duration::from_secs(6))
+                        .with_retries(4),
+                ))
+                .expect("set keepalive config");
+
+            let stream = socket.connect(addr).await.expect("connect");
+            let std_stream = stream.try_as_std().expect("std tcp stream");
+            assert_linux_keepalive_options(
+                std_stream,
+                Duration::from_secs(33),
+                Duration::from_secs(6),
+                4,
+            );
+        });
+
+        handle.join().expect("join accept thread");
+        crate::test_complete!("test_connect_applies_keepalive_config_knobs");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "linux"))]
+    #[test]
+    fn test_listen_propagates_tcp_keepalive_options_to_accepted_stream() {
+        init_test("test_listen_propagates_tcp_keepalive_options_to_accepted_stream");
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind");
+        socket.set_nodelay(true).expect("set nodelay");
+        socket
+            .set_keepalive_config(Some(
+                TcpKeepaliveConfig::new(Duration::from_secs(44))
+                    .with_interval(Duration::from_secs(9))
+                    .with_retries(3),
+            ))
+            .expect("set keepalive config");
+
+        let listener = socket.listen(128).expect("listen");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            net::TcpStream::connect(addr).expect("client connect");
+        });
+
+        let (accepted, _) = futures_lite::future::block_on(listener.accept()).expect("accept");
+        handle.join().expect("join client thread");
+
+        let std_stream = accepted.try_as_std().expect("std tcp stream");
+        crate::assert_with_log!(
+            std_stream.nodelay().expect("read nodelay"),
+            "accepted stream nodelay",
+            true,
+            std_stream.nodelay().expect("read nodelay")
+        );
+        assert_linux_keepalive_options(
+            std_stream,
+            Duration::from_secs(44),
+            Duration::from_secs(9),
+            3,
+        );
+        crate::test_complete!("test_listen_propagates_tcp_keepalive_options_to_accepted_stream");
     }
 
     #[cfg(unix)]

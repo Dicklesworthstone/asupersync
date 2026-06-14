@@ -63,8 +63,94 @@ pub enum KeepaliveConfig {
     Default,
     /// Explicitly disable TCP keepalive.
     Disabled,
-    /// Explicitly enable TCP keepalive with the given duration.
-    Enabled(Duration),
+    /// Explicitly enable TCP keepalive with the given parameters.
+    Enabled(TcpKeepaliveConfig),
+}
+
+/// Explicit TCP keepalive parameters.
+///
+/// `idle` is the duration before the first keepalive probe on an idle
+/// connection. `interval` and `retries` are optional because operating-system
+/// support differs; when requested on an unsupported target, applying the
+/// config returns `io::ErrorKind::Unsupported`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TcpKeepaliveConfig {
+    idle: Duration,
+    interval: Option<Duration>,
+    retries: Option<u32>,
+}
+
+impl TcpKeepaliveConfig {
+    /// Create keepalive parameters with an explicit idle duration.
+    #[inline]
+    #[must_use]
+    pub const fn new(idle: Duration) -> Self {
+        Self {
+            idle,
+            interval: None,
+            retries: None,
+        }
+    }
+
+    /// Set the interval between keepalive probes.
+    #[inline]
+    #[must_use]
+    pub const fn with_interval(mut self, interval: Duration) -> Self {
+        self.interval = Some(interval);
+        self
+    }
+
+    /// Set the maximum number of keepalive probes before dropping the connection.
+    #[inline]
+    #[must_use]
+    pub const fn with_retries(mut self, retries: u32) -> Self {
+        self.retries = Some(retries);
+        self
+    }
+
+    /// Duration before the first keepalive probe on an idle connection.
+    #[inline]
+    #[must_use]
+    pub const fn idle(&self) -> Duration {
+        self.idle
+    }
+
+    /// Optional interval between keepalive probes.
+    #[inline]
+    #[must_use]
+    pub const fn interval(&self) -> Option<Duration> {
+        self.interval
+    }
+
+    /// Optional keepalive probe count before dropping the connection.
+    #[inline]
+    #[must_use]
+    pub const fn retries(&self) -> Option<u32> {
+        self.retries
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn to_socket2(self) -> io::Result<socket2::TcpKeepalive> {
+        let mut params = socket2::TcpKeepalive::new().with_time(self.idle);
+
+        if let Some(interval) = self.interval {
+            params = tcp_keepalive_with_interval(params, interval)?;
+        }
+
+        if let Some(retries) = self.retries {
+            params = tcp_keepalive_with_retries(params, retries)?;
+        }
+
+        Ok(params)
+    }
+}
+
+impl KeepaliveConfig {
+    #[inline]
+    #[must_use]
+    pub(crate) const fn enabled(idle: Duration) -> Self {
+        Self::Enabled(TcpKeepaliveConfig::new(idle))
+    }
 }
 
 /// Builder for configuring TCP stream options before connecting.
@@ -118,6 +204,14 @@ where
     #[inline]
     #[must_use]
     pub fn keepalive(mut self, keepalive: Option<Duration>) -> Self {
+        self.keepalive = keepalive.map_or(KeepaliveConfig::Disabled, KeepaliveConfig::enabled);
+        self
+    }
+
+    /// Configure TCP keepalive with explicit idle, interval, and retry parameters.
+    #[inline]
+    #[must_use]
+    pub fn keepalive_config(mut self, keepalive: Option<TcpKeepaliveConfig>) -> Self {
         self.keepalive = keepalive.map_or(KeepaliveConfig::Disabled, KeepaliveConfig::Enabled);
         self
     }
@@ -142,7 +236,7 @@ where
         }
 
         match keepalive {
-            KeepaliveConfig::Enabled(duration) => stream.set_keepalive(Some(duration))?,
+            KeepaliveConfig::Enabled(config) => stream.set_keepalive_config(Some(config))?,
             KeepaliveConfig::Disabled => stream.set_keepalive(None)?,
             KeepaliveConfig::Default => {} // Do nothing, let OS decide
         }
@@ -406,18 +500,29 @@ impl TcpStream {
     /// Uses `socket2` to configure `SO_KEEPALIVE` and platform-specific
     /// keepalive idle time. Pass `None` to disable keepalive.
     pub fn set_keepalive(&self, keepalive: Option<Duration>) -> io::Result<()> {
+        self.set_keepalive_config(keepalive.map(TcpKeepaliveConfig::new))
+    }
+
+    /// Set keepalive with explicit idle, interval, and retry parameters.
+    ///
+    /// Pass `None` to disable keepalive. Unsupported interval or retry-count
+    /// parameters return `io::ErrorKind::Unsupported` instead of becoming
+    /// ambient no-ops.
+    pub fn set_keepalive_config(&self, keepalive: Option<TcpKeepaliveConfig>) -> io::Result<()> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = keepalive;
-            Err(super::browser_tcp_unsupported("TcpStream::set_keepalive"))
+            Err(super::browser_tcp_unsupported(
+                "TcpStream::set_keepalive_config",
+            ))
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             let socket = socket2::SockRef::from(&*self.inner);
             match keepalive {
-                Some(interval) => {
-                    let params = socket2::TcpKeepalive::new().with_time(interval);
+                Some(config) => {
+                    let params = config.to_socket2()?;
                     socket.set_tcp_keepalive(&params)?;
                 }
                 None => {
@@ -526,6 +631,116 @@ impl TcpStream {
             Err(err) => Err(err),
         }
     }
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "illumos",
+    target_os = "ios",
+    target_os = "visionos",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "windows",
+    target_os = "cygwin",
+    all(target_os = "wasi", not(target_env = "p1")),
+))]
+#[cfg(not(target_arch = "wasm32"))]
+fn tcp_keepalive_with_interval(
+    params: socket2::TcpKeepalive,
+    interval: Duration,
+) -> io::Result<socket2::TcpKeepalive> {
+    Ok(params.with_interval(interval))
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "illumos",
+    target_os = "ios",
+    target_os = "visionos",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "windows",
+    target_os = "cygwin",
+    all(target_os = "wasi", not(target_env = "p1")),
+)))]
+#[cfg(not(target_arch = "wasm32"))]
+fn tcp_keepalive_with_interval(
+    params: socket2::TcpKeepalive,
+    interval: Duration,
+) -> io::Result<socket2::TcpKeepalive> {
+    let _ = params;
+    let _ = interval;
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP keepalive interval is unsupported on this platform",
+    ))
+}
+
+#[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "illumos",
+    target_os = "ios",
+    target_os = "visionos",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "windows",
+    target_os = "cygwin",
+    all(target_os = "wasi", not(target_env = "p1")),
+))]
+#[cfg(not(target_arch = "wasm32"))]
+fn tcp_keepalive_with_retries(
+    params: socket2::TcpKeepalive,
+    retries: u32,
+) -> io::Result<socket2::TcpKeepalive> {
+    Ok(params.with_retries(retries))
+}
+
+#[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "fuchsia",
+    target_os = "illumos",
+    target_os = "ios",
+    target_os = "visionos",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "netbsd",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "windows",
+    target_os = "cygwin",
+    all(target_os = "wasi", not(target_env = "p1")),
+)))]
+#[cfg(not(target_arch = "wasm32"))]
+fn tcp_keepalive_with_retries(
+    params: socket2::TcpKeepalive,
+    retries: u32,
+) -> io::Result<socket2::TcpKeepalive> {
+    let _ = params;
+    let _ = retries;
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP keepalive retry count is unsupported on this platform",
+    ))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1239,8 +1454,28 @@ mod tests {
         assert_eq!(builder.nodelay, Some(true));
         assert_eq!(
             builder.keepalive,
-            KeepaliveConfig::Enabled(Duration::from_secs(30))
+            KeepaliveConfig::enabled(Duration::from_secs(30))
         );
+    }
+
+    #[test]
+    fn tcp_stream_builder_keepalive_config_chain() {
+        let keepalive = TcpKeepaliveConfig::new(Duration::from_secs(30))
+            .with_interval(Duration::from_secs(10))
+            .with_retries(4);
+        let builder = TcpStreamBuilder::new("127.0.0.1:0").keepalive_config(Some(keepalive));
+
+        assert_eq!(
+            builder.keepalive,
+            KeepaliveConfig::Enabled(
+                TcpKeepaliveConfig::new(Duration::from_secs(30))
+                    .with_interval(Duration::from_secs(10))
+                    .with_retries(4)
+            )
+        );
+        assert_eq!(keepalive.idle(), Duration::from_secs(30));
+        assert_eq!(keepalive.interval(), Some(Duration::from_secs(10)));
+        assert_eq!(keepalive.retries(), Some(4));
     }
 
     #[test]
@@ -2193,11 +2428,12 @@ mod tests {
 
         let socket_fd = stream.inner.as_raw_fd();
 
-        // Test setting specific keepalive interval (Linux-specific)
-        let keepalive_interval = Duration::from_secs(60);
+        let keepalive = TcpKeepaliveConfig::new(Duration::from_secs(60))
+            .with_interval(Duration::from_secs(7))
+            .with_retries(4);
         stream
-            .set_keepalive(Some(keepalive_interval))
-            .expect("set keepalive with interval");
+            .set_keepalive_config(Some(keepalive))
+            .expect("set keepalive config");
 
         // Verify TCP_KEEPIDLE parameter on Linux
         let mut keepidle_val: libc::c_int = 0;
@@ -2213,6 +2449,34 @@ mod tests {
         };
         assert_eq!(result, 0, "getsockopt TCP_KEEPIDLE should succeed");
         assert_eq!(keepidle_val, 60, "TCP_KEEPIDLE should be set to 60 seconds");
+
+        let mut keepintvl_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPINTVL,
+                std::ptr::from_mut(&mut keepintvl_val).cast::<libc::c_void>(),
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt TCP_KEEPINTVL should succeed");
+        assert_eq!(keepintvl_val, 7, "TCP_KEEPINTVL should be set to 7 seconds");
+
+        let mut keepcnt_val: libc::c_int = 0;
+        let mut opt_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket_fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_KEEPCNT,
+                std::ptr::from_mut(&mut keepcnt_val).cast::<libc::c_void>(),
+                &mut opt_len,
+            )
+        };
+        assert_eq!(result, 0, "getsockopt TCP_KEEPCNT should succeed");
+        assert_eq!(keepcnt_val, 4, "TCP_KEEPCNT should be set to 4 probes");
     }
 
     #[cfg(all(not(target_arch = "wasm32"), unix))]
