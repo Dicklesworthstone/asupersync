@@ -11,4 +11,5 @@
 //! authority outside the Cx capability system.
 
 pub mod ambient;
+pub mod clean_overlay_planner;
 pub mod meta_audit;
