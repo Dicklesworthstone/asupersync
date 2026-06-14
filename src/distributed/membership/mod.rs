@@ -45,10 +45,12 @@
 //! (no obligation leaks) continue to hold. The `MembershipEvent` stream is the
 //! seam: bead `.4.3` subscribes the lease manager to it.
 
+pub mod cluster;
 pub mod gossip;
 pub mod lifeguard;
 pub mod swim;
 
+pub use cluster::{ClusterConfig, VirtualCluster};
 pub use gossip::GossipBuffer;
 pub use lifeguard::{
     Awareness, Millis, max_suspicion_ms, min_suspicion_ms, node_scale, suspicion_timeout_ms,
