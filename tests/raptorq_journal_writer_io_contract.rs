@@ -9,7 +9,8 @@ use asupersync::config::EncodingConfig;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::trace::raptorq_journal::{latest_complete_epoch, scan_frames};
 use asupersync::trace::raptorq_journal_writer::{
-    encode_and_serialize_epoch, read_epoch_manifest, read_epoch_stripes, write_epoch_manifest,
+    DurableTraceJournal, DurableTraceJournalConfig, encode_and_serialize_epoch,
+    read_epoch_manifest, read_epoch_stripes, stripe_file_name, write_epoch_manifest,
     write_epoch_stripes,
 };
 use tempfile::tempdir;
@@ -103,4 +104,42 @@ fn manifest_persists_and_drives_recovery_purely_from_disk() {
     }));
 
     assert!(ok, "epoch must recover using the disk-persisted manifest");
+}
+
+#[test]
+fn durable_trace_journal_handle_records_and_recovers() {
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let ok = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 4,
+            stripe_count: 3,
+        });
+
+        let data = vec![0x11u8; 600];
+        journal.record_epoch(55, &data).await.expect("record epoch");
+
+        let recoverable_full = journal.epoch_recoverable(55).await.expect("recoverable");
+
+        // Lose one stripe file (a failure domain) — still recoverable.
+        std::fs::remove_file(dir_path.join(stripe_file_name(55, 0))).expect("remove stripe 0");
+        let recoverable_after_loss = journal
+            .epoch_recoverable(55)
+            .await
+            .expect("recoverable after loss");
+
+        // An epoch never recorded (no manifest) is reported not-recoverable.
+        let unknown = journal.epoch_recoverable(999).await.expect("unknown epoch");
+
+        recoverable_full && recoverable_after_loss && !unknown
+    }));
+
+    assert!(
+        ok,
+        "DurableTraceJournal must record an epoch and report it recoverable through one stripe loss"
+    );
 }

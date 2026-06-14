@@ -10,7 +10,10 @@
 
 use crate::config::EncodingConfig;
 use crate::encoding::{EncodingError, EncodingPipeline};
-use crate::trace::raptorq_journal::{BlockSymbols, EpochManifest, serialize_epoch};
+use crate::trace::raptorq_journal::{
+    BlockSymbols, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, latest_complete_epoch,
+    scan_frames, serialize_epoch,
+};
 use crate::types::ObjectId;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use std::collections::BTreeMap;
@@ -190,5 +193,126 @@ pub async fn read_epoch_manifest(
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+/// Error from a [`DurableTraceJournal`] operation.
+#[derive(Debug)]
+pub enum DurableJournalError {
+    /// RaptorQ encoding failed.
+    Encoding(EncodingError),
+    /// A filesystem operation failed.
+    Io(std::io::Error),
+    /// The journal was configured with zero stripes.
+    NoStripes,
+}
+
+impl core::fmt::Display for DurableJournalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Encoding(error) => write!(f, "durable journal encode error: {error}"),
+            Self::Io(error) => write!(f, "durable journal I/O error: {error}"),
+            Self::NoStripes => f.write_str("durable journal configured with zero stripes"),
+        }
+    }
+}
+
+impl std::error::Error for DurableJournalError {}
+
+impl From<EncodingError> for DurableJournalError {
+    fn from(error: EncodingError) -> Self {
+        Self::Encoding(error)
+    }
+}
+
+impl From<std::io::Error> for DurableJournalError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// Configuration for a [`DurableTraceJournal`].
+#[derive(Debug, Clone)]
+pub struct DurableTraceJournalConfig {
+    /// Directory the stripe and manifest files live in.
+    pub directory: std::path::PathBuf,
+    /// RaptorQ encoding configuration.
+    pub encoding: EncodingConfig,
+    /// Repair symbols per source block (redundancy for stripe loss).
+    pub repair_count: usize,
+    /// Number of stripe files (failure domains) to spread each epoch across.
+    pub stripe_count: usize,
+}
+
+/// Cohesive handle over the crash-durable RaptorQ trace journal: encode + stripe
+/// + durably persist a checkpoint epoch, and ask whether a persisted epoch still
+/// recovers from the surviving stripes.
+///
+/// This is the API a trace recorder holds — it bundles the configuration so the
+/// recorder's checkpoint hook is a single [`DurableTraceJournal::record_epoch`]
+/// call, while staying decoupled from the recorder (callers pass the checkpoint
+/// bytes directly, keeping the journal independently testable).
+#[derive(Debug, Clone)]
+pub struct DurableTraceJournal {
+    config: DurableTraceJournalConfig,
+}
+
+impl DurableTraceJournal {
+    /// Build a journal handle from its configuration.
+    #[must_use]
+    pub fn new(config: DurableTraceJournalConfig) -> Self {
+        Self { config }
+    }
+
+    /// The journal's configuration.
+    #[must_use]
+    pub fn config(&self) -> &DurableTraceJournalConfig {
+        &self.config
+    }
+
+    /// Encode, stripe, and durably persist a checkpoint `epoch`'s bytes (stripe
+    /// files + manifest), returning the persisted [`EpochManifest`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableJournalError`] if encoding fails, the configuration has
+    /// zero stripes, or a filesystem write fails.
+    pub async fn record_epoch(
+        &self,
+        epoch: u64,
+        data: &[u8],
+    ) -> Result<EpochManifest, DurableJournalError> {
+        let (stripes, manifest) = encode_and_serialize_epoch(
+            epoch,
+            data,
+            self.config.encoding.clone(),
+            self.config.repair_count,
+            self.config.stripe_count,
+            JOURNAL_FLAG_CHECKPOINT_BOUNDARY,
+        )?
+        .ok_or(DurableJournalError::NoStripes)?;
+        write_epoch_stripes(&self.config.directory, epoch, &stripes).await?;
+        write_epoch_manifest(&self.config.directory, manifest).await?;
+        Ok(manifest)
+    }
+
+    /// Whether `epoch` still fully recovers from the surviving stripe files,
+    /// judged against its persisted manifest.
+    ///
+    /// Returns `false` if the epoch's manifest file is absent (recovery cannot be
+    /// confirmed without the declared block count).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`std::io::Error`] for a read failure other than a
+    /// missing file.
+    pub async fn epoch_recoverable(&self, epoch: u64) -> std::io::Result<bool> {
+        let Some(manifest) = read_epoch_manifest(&self.config.directory, epoch).await? else {
+            return Ok(false);
+        };
+        let survivors =
+            read_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
+        let (frames, _) = scan_frames(&survivors);
+        Ok(latest_complete_epoch(&frames, &[manifest]) == Some(epoch))
     }
 }
