@@ -4734,11 +4734,13 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
             .exit_code(ExitCode::USER_ERROR)
         })?;
     let dest_dir = args.data_dir.join("inbox");
+    let listen_label = listen.to_string();
 
-    let payload = AtpServeOutput::new("listening", &listen.to_string());
-    output
-        .write(&payload)
-        .map_err(output_write_error("ATP serve status"))?;
+    std::fs::create_dir_all(&dest_dir).map_err(|err| {
+        CliError::new("io_error", "Failed to create ATP serve inbox directory")
+            .detail(format!("Path: {}, Error: {}", dest_dir.display(), err))
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
 
     let runtime = asupersync::runtime::RuntimeBuilder::multi_thread()
         .build()
@@ -4747,15 +4749,29 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
                 .detail(err.to_string())
         })?;
     let cfg = asupersync::net::atp::transport_tcp::TransferConfig::default();
+    let listener = runtime
+        .block_on(runtime.handle().spawn(async move {
+            asupersync::net::TcpListener::bind(listen)
+                .await
+                .map_err(|e| e.to_string())
+        }))
+        .map_err(|err: String| {
+            CliError::new(
+                "atp_serve_bind_failed",
+                "[ASUP-E702] ATP serve failed to bind listener",
+            )
+            .detail(format!("{listen_label}: {err}"))
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+
+    let payload = AtpServeOutput::new("listening", &listen_label);
+    output
+        .write(&payload)
+        .map_err(output_write_error("ATP serve status"))?;
+
     runtime
         .block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("ATP serve task context");
-            asupersync::fs::create_dir_all(&dest_dir)
-                .await
-                .map_err(|e| e.to_string())?;
-            let listener = asupersync::net::TcpListener::bind(listen)
-                .await
-                .map_err(|e| e.to_string())?;
             asupersync::net::atp::transport_tcp::serve(
                 &cx,
                 listener,
@@ -16246,6 +16262,29 @@ lab:
         // before any resolution/connection attempt (this target is bogus).
         let err = atp_send(&args, &mut output).expect_err("send --explain must fail closed");
         assert_eq!(err.error_type, "atp_not_implemented");
+    }
+
+    #[test]
+    fn atp_serve_does_not_report_listening_when_bind_fails() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve test port");
+        let listen = occupied.local_addr().expect("read local addr").to_string();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        let args = AtpServeArgs {
+            profile: "full".to_string(),
+            listen,
+            data_dir: temp.path().join("atp"),
+            daemon: false,
+        };
+
+        let err = atp_serve(&args, &mut output).expect_err("occupied port must fail");
+
+        assert_eq!(err.error_type, "atp_serve_bind_failed");
+        assert!(
+            capture.contents().is_empty(),
+            "serve must not report listening before bind succeeds"
+        );
     }
 
     #[test]
