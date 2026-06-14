@@ -6,6 +6,17 @@
     "opt_in_posture": "Dynamic QPACK field-section references, encoder/decoder instruction streams, and bounded blocked-stream scheduling are supported through H3QpackMode::DynamicTableAllowed plus QpackInstructionStreamState.",
     "parity_boundary": "The native HTTP/3 state machine supports opt-in QPACK instruction-stream processing and blocked-stream wake scheduling, but this is not a claim of h3/quinn drop-in parity, full QUIC deployment parity, or default dynamic QPACK enablement."
   },
+  "security_disclosures": [
+    {
+      "id": "quic-native-server-cert-unverified",
+      "bead": "asupersync-7pwwwe",
+      "severity": "high",
+      "surface": "src/net/quic_native/",
+      "claim": "quic_native is exposed via the quic/http3 features as an Active QUIC + HTTP/3 surface.",
+      "disclosure": "The native quic_native TLS 1.3 layer does NOT verify server certificates: it implements no Certificate/CertificateVerify/cert-chain/hostname/trust-anchor handling (verified: zero such references under src/net/quic_native/). It therefore provides no MITM protection and must not be used against untrusted peers.",
+      "remediation": "Implement X.509 chain + hostname + CertificateVerify-signature validation in the quic_native handshake (or delegate the handshake to rustls/webpki and keep only QUIC packet protection native); until then use quic_native only over already-trusted transports."
+    }
+  ],
   "source_files": [
     "src/http/h3_native.rs",
     "tests/quic_h3_e2e_h3.rs",
