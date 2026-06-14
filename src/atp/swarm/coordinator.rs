@@ -628,6 +628,42 @@ impl SwarmCoordinator {
         Ok(())
     }
 
+    async fn fail_transfer(
+        &mut self,
+        cx: &Cx,
+        transfer_id: MailboxTransferId,
+        reason: String,
+    ) -> SwarmResult<()> {
+        let Some(transfer) = self.active_transfers.remove(&transfer_id) else {
+            return Ok(());
+        };
+
+        for (piece_id, request) in &transfer.active_requests {
+            if let Some(peer) = self.peers.get_mut(&request.peer_id) {
+                peer.pending_requests.remove(piece_id);
+            }
+        }
+
+        let completed_pieces = transfer.status.completed_pieces;
+        let total_pieces = transfer.status.total_pieces;
+        self.piece_tracker.cleanup_transfer(&transfer_id);
+        self.quality_metrics
+            .complete_transfer_tracking(&transfer_id);
+
+        self.emit_event(
+            cx,
+            SwarmEvent::TransferFailed {
+                transfer_id,
+                reason,
+                completed_pieces,
+                total_pieces,
+            },
+        )
+        .await;
+
+        Ok(())
+    }
+
     /// Get current status of a transfer.
     pub fn get_transfer_status(
         &self,
@@ -639,6 +675,28 @@ impl SwarmCoordinator {
     /// Check for timeouts and handle cleanup.
     pub async fn process_timeouts(&mut self, cx: &Cx) -> SwarmResult<()> {
         let now = Instant::now();
+        let max_transfer_duration = self.config.max_transfer_duration;
+        let mut timed_out_transfers = Vec::new();
+
+        for (transfer_id, transfer) in &self.active_transfers {
+            let elapsed = now.duration_since(transfer.started_at);
+            if transfer.status.remaining_pieces > 0 && elapsed >= max_transfer_duration {
+                timed_out_transfers.push((*transfer_id, elapsed));
+            }
+        }
+
+        for (transfer_id, elapsed) in timed_out_transfers {
+            self.fail_transfer(
+                cx,
+                transfer_id,
+                format!(
+                    "transfer exceeded max duration {:?} after {:?}",
+                    max_transfer_duration, elapsed
+                ),
+            )
+            .await?;
+        }
+
         let mut timed_out_requests = Vec::new();
 
         for (transfer_id, transfer) in &mut self.active_transfers {
@@ -1007,6 +1065,7 @@ impl PiecePicker for EndgameStrategy {
 mod tests {
     use super::*;
     use crate::atp::swarm::{PeerCapabilities, PeerReputation};
+    use crate::channel::mpsc;
     use crate::cx::Cx;
     use futures_lite::future::block_on;
     use std::collections::BTreeSet;
@@ -1181,6 +1240,87 @@ mod tests {
                     .unwrap(),
                 PieceStatus::Requested { peer_id, .. } if peer_id == peer_b.peer_id
             ));
+        });
+    }
+
+    #[test]
+    fn max_transfer_duration_emits_transfer_failed_and_cleans_state() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let mut coordinator = SwarmCoordinator::new(SwarmConfig {
+                peer_quality_threshold: 0.0,
+                max_pieces_per_peer: 1,
+                max_transfer_duration: Duration::ZERO,
+                ..SwarmConfig::default()
+            });
+            let (event_tx, mut event_rx) = mpsc::channel(8);
+            coordinator.set_event_sink(event_tx);
+
+            let piece_id = PieceId::new(0);
+            let peer = test_peer("peer-a", [piece_id]);
+            let mut piece_map = PieceMap::new(1, 1024, "test-hash".to_string());
+            piece_map.add_peer_pieces(peer.peer_id.clone(), [piece_id].into_iter().collect());
+
+            let transfer_id = coordinator
+                .start_swarm_transfer(
+                    &cx,
+                    "object".to_string(),
+                    1024,
+                    1,
+                    vec![peer.clone()],
+                    piece_map,
+                )
+                .await
+                .unwrap();
+            let assignments = coordinator.assign_pieces(&cx, &transfer_id).await.unwrap();
+            assert_eq!(assignments.len(), 1);
+            assert!(
+                coordinator
+                    .peers
+                    .get(&peer.peer_id)
+                    .unwrap()
+                    .pending_requests
+                    .contains(&piece_id)
+            );
+
+            coordinator.process_timeouts(&cx).await.unwrap();
+
+            assert!(coordinator.get_transfer_status(&transfer_id).is_none());
+            assert!(
+                !coordinator
+                    .peers
+                    .get(&peer.peer_id)
+                    .unwrap()
+                    .pending_requests
+                    .contains(&piece_id)
+            );
+            assert!(matches!(
+                coordinator
+                    .piece_tracker
+                    .get_transfer_progress(&transfer_id),
+                Err(SwarmError::TransferNotFound { transfer_id: missing }) if missing == transfer_id
+            ));
+
+            let mut failed_event = None;
+            while let Ok(event) = event_rx.try_recv() {
+                if let SwarmEvent::TransferFailed {
+                    transfer_id: failed_transfer_id,
+                    reason,
+                    completed_pieces,
+                    total_pieces,
+                } = event
+                {
+                    failed_event =
+                        Some((failed_transfer_id, reason, completed_pieces, total_pieces));
+                }
+            }
+
+            let (failed_transfer_id, reason, completed_pieces, total_pieces) =
+                failed_event.expect("transfer failure event must be emitted");
+            assert_eq!(failed_transfer_id, transfer_id);
+            assert!(reason.contains("max duration"));
+            assert_eq!(completed_pieces, 0);
+            assert_eq!(total_pieces, 1);
         });
     }
 
