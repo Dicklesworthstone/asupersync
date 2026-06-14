@@ -283,6 +283,7 @@ const BITMAP_WORDS: usize = SLOTS_PER_LEVEL / 64;
 struct WheelLevel {
     slots: Vec<Vec<TimerEntry>>,
     resolution_ns: u64,
+    range_ns: u64,
     cursor: usize,
     /// Bitmap tracking which slots contain at least one entry.
     /// Bit `i` of `occupied[i / 64]` corresponds to slot `i`.
@@ -295,13 +296,14 @@ impl WheelLevel {
         Self {
             slots: vec![Vec::new(); SLOTS_PER_LEVEL],
             resolution_ns,
+            range_ns: resolution_ns.saturating_mul(SLOTS_PER_LEVEL as u64),
             cursor,
             occupied: [0u64; BITMAP_WORDS],
         }
     }
 
     fn range_ns(&self) -> u64 {
-        self.resolution_ns.saturating_mul(SLOTS_PER_LEVEL as u64)
+        self.range_ns
     }
 
     /// Checks if a slot is occupied in the bitmap.
@@ -521,7 +523,7 @@ impl TimerWheel {
 
     /// Inserts a timer whose deadline has already been validated/clamped by
     /// the caller. Avoids a redundant `current_time()` read on the hot path.
-    fn insert_validated(&mut self, deadline: Time, waker: Waker, _current: Time) -> TimerHandle {
+    fn insert_validated(&mut self, deadline: Time, waker: Waker, current: Time) -> TimerHandle {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
 
@@ -534,7 +536,7 @@ impl TimerWheel {
             generation,
         };
 
-        self.insert_entry(entry);
+        self.insert_entry_at(entry, current);
 
         TimerHandle { id, generation }
     }
@@ -637,6 +639,10 @@ impl TimerWheel {
 
     fn insert_entry(&mut self, entry: TimerEntry) {
         let current = self.current_time();
+        self.insert_entry_at(entry, current);
+    }
+
+    fn insert_entry_at(&mut self, entry: TimerEntry, current: Time) {
         if entry.deadline <= current {
             self.ready.push(entry);
             return;
