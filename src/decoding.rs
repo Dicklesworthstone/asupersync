@@ -10,7 +10,6 @@ use crate::error::{Error, ErrorKind};
 use crate::raptorq::decoder::{
     DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol,
 };
-use crate::raptorq::gf256::Gf256;
 use crate::raptorq::systematic::{SystematicError, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
@@ -810,14 +809,7 @@ fn decode_block(
                         details: format!("source esi {esi} >= k {k}"),
                     });
                 }
-                // Systematic: source symbol i maps to intermediate symbol i (identity).
-                received.push(ReceivedSymbol {
-                    esi: symbol.esi(),
-                    is_source: true,
-                    columns: vec![esi],
-                    coefficients: vec![Gf256::ONE],
-                    data: symbol.data().to_vec(),
-                });
+                received.push(ReceivedSymbol::source(symbol.esi(), symbol.data().to_vec()));
             }
             SymbolKind::Repair => {
                 let (columns, coefficients) = match decoder.repair_equation(symbol.esi()) {

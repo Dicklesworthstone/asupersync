@@ -935,23 +935,12 @@ async fn spray_round(
         }
         .max(already + 1);
 
-        // Size the pool by per-BLOCK peak, not whole-object: the encoder streams
-        // block-by-block (releasing symbols between blocks), so a 1 GiB entry does
-        // NOT need a 1 GiB pool. The 3x covers RFC 6330 intermediate symbols
-        // (L > K); plus the cumulative repair tail.
-        let symbol_size_usize = usize::from(config.symbol_size.max(1));
-        let block_k = config.max_block_size.div_ceil(symbol_size_usize).max(1);
-        let pool_max = block_k
-            .saturating_mul(3)
-            .saturating_add(target_repair)
-            .saturating_add(256);
-        let pool = SymbolPool::new(PoolConfig {
-            symbol_size: config.symbol_size,
-            initial_size: source_n.min(block_k).min(1024),
-            max_size: pool_max,
-            allow_growth: true,
-            growth_increment: 256,
-        });
+        // The encoder's `Symbol` output owns its payload buffer, so buffers
+        // allocated from `SymbolPool` are consumed rather than returned to the
+        // pool. A bounded pool therefore becomes an artificial cap on the number
+        // of symbols emitted in a round. Use the encoder's unpooled path here;
+        // round sizing, UDP pacing, and receiver-side limits own memory pressure.
+        let pool = SymbolPool::new(PoolConfig::default());
         let mut pipeline = EncodingPipeline::new(
             crate::config::EncodingConfig {
                 repair_overhead: config.repair_overhead,
@@ -1347,12 +1336,73 @@ fn feed_symbol(
         parsed.kind,
     );
     let auth = AuthenticatedSymbol::new_unauthenticated(sym);
-    matches!(
-        pipeline.feed(auth),
-        Ok(SymbolAcceptResult::BlockComplete { .. }
-            | SymbolAcceptResult::Accepted { .. }
-            | SymbolAcceptResult::DecodingStarted { .. })
-    )
+    match pipeline.feed(auth) {
+        Ok(SymbolAcceptResult::Accepted { received, needed }) => {
+            if received >= needed || received % 64 == 0 {
+                rqtrace!(
+                    "receiver: entry {} accepted sbn={} esi={} kind={:?} received={} needed={}",
+                    dec.index,
+                    parsed.sbn,
+                    parsed.esi,
+                    parsed.kind,
+                    received,
+                    needed
+                );
+            }
+            true
+        }
+        Ok(SymbolAcceptResult::DecodingStarted { block_sbn }) => {
+            rqtrace!(
+                "receiver: entry {} started decode block {} via esi={} kind={:?}",
+                dec.index,
+                block_sbn,
+                parsed.esi,
+                parsed.kind
+            );
+            true
+        }
+        Ok(SymbolAcceptResult::BlockComplete { block_sbn, .. }) => {
+            rqtrace!(
+                "receiver: entry {} completed block {} via esi={} kind={:?}",
+                dec.index,
+                block_sbn,
+                parsed.esi,
+                parsed.kind
+            );
+            true
+        }
+        Ok(SymbolAcceptResult::Duplicate) => {
+            rqtrace!(
+                "receiver: entry {} duplicate sbn={} esi={} kind={:?}",
+                dec.index,
+                parsed.sbn,
+                parsed.esi,
+                parsed.kind
+            );
+            false
+        }
+        Ok(SymbolAcceptResult::Rejected(reason)) => {
+            rqtrace!(
+                "receiver: entry {} rejected sbn={} esi={} kind={:?} reason={:?}",
+                dec.index,
+                parsed.sbn,
+                parsed.esi,
+                parsed.kind,
+                reason
+            );
+            false
+        }
+        Err(err) => {
+            rqtrace!(
+                "receiver: entry {} feed error sbn={} esi={} kind={:?}: {err}",
+                dec.index,
+                parsed.sbn,
+                parsed.esi,
+                parsed.kind
+            );
+            false
+        }
+    }
 }
 
 /// Assemble a decoded entry's bytes by consuming the completed pipeline.
@@ -1707,13 +1757,7 @@ mod tests {
         // Encode: source + repair (generous), like spray_round.
         let block_k = max_block.div_ceil(usize::from(symbol_size.max(1))).max(1);
         let repair = block_k; // 100% repair — far more than needed
-        let pool = SymbolPool::new(PoolConfig {
-            symbol_size,
-            initial_size: block_k.min(1024),
-            max_size: block_k * 4 + 256,
-            allow_growth: true,
-            growth_increment: 256,
-        });
+        let pool = SymbolPool::new(PoolConfig::default());
         let mut enc = EncodingPipeline::new(
             crate::config::EncodingConfig {
                 repair_overhead: 1.5,

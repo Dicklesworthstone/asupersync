@@ -1,5 +1,5 @@
-use asupersync::{Cx, main};
+use asupersync::main;
 #[main]
-async fn main(cx: &Cx) {
+async fn main(cx: &asupersync::Cx) {
     cx.checkpoint().expect("checkpoint");
 }
