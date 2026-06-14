@@ -952,6 +952,9 @@ pub enum PathMigrationError {
     /// Continuity invariants were not preserved.
     #[error("path migration continuity invariant failed")]
     ContinuityFailed,
+    /// Rejection attempted to archive a non-terminal-success status.
+    #[error("path migration rejection status is invalid")]
+    InvalidRejectionStatus,
 }
 
 /// ATP path manager for request/observe/race/reject migration hooks.
@@ -1074,6 +1077,13 @@ impl AtpPathManager {
         status: PathMigrationStatus,
         now_micros: u64,
     ) -> Result<PathMigrationRecord, PathMigrationError> {
+        if !matches!(
+            status,
+            PathMigrationStatus::Rejected | PathMigrationStatus::TimedOut
+        ) {
+            return Err(PathMigrationError::InvalidRejectionStatus);
+        }
+
         let Some(record) = self.pending.remove(&path_id) else {
             return Err(PathMigrationError::NotPending);
         };
@@ -1491,6 +1501,56 @@ mod tests {
             observed_at_micros: nonce,
         })
         .expect("observation")
+    }
+
+    fn path_candidate(id: u64, preference_rank: u8, observed_at_micros: u64) -> AtpPathCandidate {
+        let remote_port = 41_641u16
+            .checked_add(u16::try_from(id).expect("small test path id"))
+            .expect("test path port in range");
+        AtpPathCandidate::new(
+            AtpPathId::new(id),
+            AtpPathEndpoints::new(
+                endpoint("10.0.0.2", 41_641),
+                endpoint("198.51.100.7", remote_port),
+            ),
+            preference_rank,
+            observed_at_micros,
+            format!("candidate-{id}"),
+            format!("verifier-{id}"),
+        )
+        .expect("path candidate")
+    }
+
+    #[test]
+    fn path_rejection_rejects_success_status_without_archiving() {
+        let active = path_candidate(0, 10, 1);
+        let candidate = path_candidate(1, 5, 2);
+        let mut manager = AtpPathManager::new(active);
+
+        manager
+            .request_migration(candidate, PathMigrationReason::ActiveMigration, 10)
+            .expect("migration requested");
+
+        let err = manager
+            .reject_migration(AtpPathId::new(1), PathMigrationStatus::Committed, 11)
+            .expect_err("committed is not a rejection status");
+        assert_eq!(err, PathMigrationError::InvalidRejectionStatus);
+        assert!(manager.pending().contains_key(&AtpPathId::new(1)));
+        assert!(manager.history().is_empty());
+
+        let err = manager
+            .reject_migration(AtpPathId::new(1), PathMigrationStatus::Validated, 12)
+            .expect_err("validated is not a rejection status");
+        assert_eq!(err, PathMigrationError::InvalidRejectionStatus);
+        assert!(manager.pending().contains_key(&AtpPathId::new(1)));
+        assert!(manager.history().is_empty());
+
+        let rejected = manager
+            .reject_migration(AtpPathId::new(1), PathMigrationStatus::Rejected, 13)
+            .expect("explicit rejection");
+        assert_eq!(rejected.status(), PathMigrationStatus::Rejected);
+        assert!(manager.pending().is_empty());
+        assert_eq!(manager.history().len(), 1);
     }
 
     #[test]
