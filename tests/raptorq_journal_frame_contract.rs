@@ -8,10 +8,11 @@
 #![allow(missing_docs)]
 
 use asupersync::trace::raptorq_journal::{
-    BlockKey, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, JOURNAL_FRAME_HEADER_LEN,
-    JOURNAL_FRAME_MAGIC, JOURNAL_FRAME_VERSION, JournalFrame, JournalFrameError, StripePlan, crc32,
-    decodable_blocks, epoch_is_complete, latest_complete_epoch, latest_recoverable_epoch,
-    scan_frames, serialize_striped, summarize_blocks,
+    BlockKey, BlockSymbols, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY,
+    JOURNAL_FRAME_HEADER_LEN, JOURNAL_FRAME_MAGIC, JOURNAL_FRAME_VERSION, JournalFrame,
+    JournalFrameError, StripePlan, crc32, decodable_blocks, epoch_is_complete,
+    latest_complete_epoch, latest_recoverable_epoch, scan_frames, serialize_epoch,
+    serialize_striped, summarize_blocks,
 };
 
 fn sample_frame() -> JournalFrame {
@@ -338,6 +339,71 @@ fn latest_complete_epoch_uses_manifests() {
     // 9 is higher but incomplete (missing block 1); 7 is the latest complete.
     assert_eq!(latest_complete_epoch(&frames, &manifests), Some(7));
     assert_eq!(latest_complete_epoch(&frames, &[]), None);
+}
+
+fn block_symbols(sbn: u32, k: u32, count: u32) -> BlockSymbols {
+    BlockSymbols {
+        source_block_number: sbn,
+        source_symbol_count: k,
+        symbol_size: 8,
+        symbols: (0..count).map(|esi| (esi, vec![esi as u8; 8])).collect(),
+    }
+}
+
+#[test]
+fn serialize_epoch_round_trips_multi_block_with_manifest() {
+    // Two source blocks: block 0 (K'=2, 3 symbols), block 1 (K'=2, 2 symbols).
+    let blocks = [block_symbols(0, 2, 3), block_symbols(1, 2, 2)];
+    let (stripes, manifest) =
+        serialize_epoch(20, 3, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, &blocks).expect("nonzero stripes");
+    assert_eq!(stripes.len(), 3);
+    assert_eq!(
+        manifest,
+        EpochManifest {
+            epoch: 20,
+            source_block_count: 2,
+        }
+    );
+
+    // Full recovery: concatenate every stripe, scan, and confirm both declared
+    // blocks are complete per the manifest.
+    let mut all = Vec::new();
+    for stripe in &stripes {
+        all.extend_from_slice(stripe);
+    }
+    let (frames, consumed) = scan_frames(&all);
+    assert_eq!(consumed, all.len());
+    assert_eq!(frames.len(), 5);
+    assert!(epoch_is_complete(&frames, manifest));
+    assert_eq!(latest_complete_epoch(&frames, &[manifest]), Some(20));
+    assert_eq!(decodable_blocks(&frames).len(), 2);
+
+    assert_eq!(serialize_epoch(20, 0, 0, &blocks), None);
+}
+
+#[test]
+fn serialize_epoch_incomplete_after_losing_too_many_stripes() {
+    // Block 0 has K'=3 with exactly 3 symbols across 3 stripes (one symbol each):
+    // losing any stripe drops it below K', so the epoch is no longer complete.
+    let blocks = [block_symbols(0, 3, 3)];
+    let (stripes, manifest) = serialize_epoch(21, 3, 0, &blocks).expect("nonzero stripes");
+
+    // All stripes -> complete.
+    let mut all = Vec::new();
+    for stripe in &stripes {
+        all.extend_from_slice(stripe);
+    }
+    let (frames, _) = scan_frames(&all);
+    assert!(epoch_is_complete(&frames, manifest));
+
+    // Drop one stripe -> only 2 symbols survive (< K'=3) -> incomplete.
+    let mut survivors = Vec::new();
+    for stripe in &stripes[1..] {
+        survivors.extend_from_slice(stripe);
+    }
+    let (survivor_frames, _) = scan_frames(&survivors);
+    assert!(!epoch_is_complete(&survivor_frames, manifest));
+    assert_eq!(latest_complete_epoch(&survivor_frames, &[manifest]), None);
 }
 
 #[test]

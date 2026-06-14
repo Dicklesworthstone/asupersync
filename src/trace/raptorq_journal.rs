@@ -525,6 +525,68 @@ pub fn serialize_striped(
     stripes
 }
 
+/// One source block's encoding symbols for an epoch write.
+///
+/// `source_block_number` must be the block's index `0..N` within the epoch so
+/// the emitted [`EpochManifest`] (which declares `source_block_count = N`) lines
+/// up with [`epoch_is_complete`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockSymbols {
+    /// Block index within the epoch (`0..source_block_count`).
+    pub source_block_number: u32,
+    /// Source-symbol count K' needed to decode this block.
+    pub source_symbol_count: u32,
+    /// Symbol size T in bytes.
+    pub symbol_size: u32,
+    /// `(encoding_symbol_id, payload)` for every symbol generated for the block.
+    pub symbols: Vec<(u32, Vec<u8>)>,
+}
+
+/// Serialize a whole checkpoint epoch — all of its source blocks — into
+/// `stripe_count` per-stripe byte streams plus the matching [`EpochManifest`].
+///
+/// Each block's symbols are round-robined across the stripes (via
+/// [`serialize_striped`]) and the per-stripe bytes are concatenated, so every
+/// stripe file ends up with an even share of every block. The writer flushes
+/// stripe `i` to file `i` (ideally a distinct failure domain) and persists the
+/// returned manifest. Recovery is: concatenate the surviving stripe files →
+/// [`scan_frames`] → [`latest_complete_epoch`] with the manifest.
+///
+/// Returns `None` if `stripe_count` is zero. `blocks` should carry
+/// `source_block_number` values `0..blocks.len()`.
+#[must_use]
+pub fn serialize_epoch(
+    epoch: u64,
+    stripe_count: usize,
+    flags: u16,
+    blocks: &[BlockSymbols],
+) -> Option<(Vec<Vec<u8>>, EpochManifest)> {
+    if stripe_count == 0 {
+        return None;
+    }
+    let mut stripes = vec![Vec::new(); stripe_count];
+    for block in blocks {
+        let plan = StripePlan::new(block.symbols.len(), stripe_count)?;
+        let per_block = serialize_striped(
+            epoch,
+            block.source_block_number,
+            block.source_symbol_count,
+            block.symbol_size,
+            flags,
+            &block.symbols,
+            &plan,
+        );
+        for (stripe, bytes) in per_block.into_iter().enumerate() {
+            stripes[stripe].extend_from_slice(&bytes);
+        }
+    }
+    let manifest = EpochManifest {
+        epoch,
+        source_block_count: u32::try_from(blocks.len()).unwrap_or(u32::MAX),
+    };
+    Some((stripes, manifest))
+}
+
 #[inline]
 fn read4(bytes: &[u8], at: usize) -> [u8; 4] {
     [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
