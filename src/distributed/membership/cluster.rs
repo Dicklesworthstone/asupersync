@@ -20,6 +20,7 @@
 use super::lifeguard::Millis;
 use super::swim::{MemberState, MembershipEvent, Outgoing, Packet, Swim, SwimConfig};
 use crate::remote::NodeId;
+use crate::util::det_rng::DetRng;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Virtual-transport timing for a [`VirtualCluster`].
@@ -30,6 +31,10 @@ pub struct ClusterConfig {
     /// One-way message delivery latency, in virtual milliseconds. Keep it below
     /// the SWIM probe timeout so probe/ack round-trips can complete.
     pub latency_ms: Millis,
+    /// Per-message drop probability, in per-mille (0 = lossless). Applied at
+    /// delivery via the cluster's seeded PRNG, modelling a best-effort transport
+    /// for false-positive-rate measurement.
+    pub loss_permille: u16,
 }
 
 impl Default for ClusterConfig {
@@ -37,6 +42,7 @@ impl Default for ClusterConfig {
         Self {
             tick_ms: 100,
             latency_ms: 20,
+            loss_permille: 0,
         }
     }
 }
@@ -59,6 +65,7 @@ pub struct VirtualCluster {
     dead: BTreeSet<NodeId>,
     partition: BTreeMap<NodeId, u8>,
     events: BTreeMap<NodeId, Vec<MembershipEvent>>,
+    rng: DetRng,
 }
 
 impl VirtualCluster {
@@ -96,6 +103,8 @@ impl VirtualCluster {
             dead: BTreeSet::new(),
             partition,
             events,
+            // Decorrelate the loss PRNG from the per-node Swim seeds.
+            rng: DetRng::new(seed ^ 0xA7C3_5E91_D24B_8F60),
         }
     }
 
@@ -216,6 +225,12 @@ impl VirtualCluster {
 
         for message in due {
             if !self.reachable(&message.from, &message.to) {
+                continue;
+            }
+            // Seeded packet loss (best-effort transport model).
+            if self.config.loss_permille > 0
+                && (self.rng.next_usize(1000) as u16) < self.config.loss_permille
+            {
                 continue;
             }
             let outcome = if let Some(node) = self.nodes.get_mut(&message.to) {
