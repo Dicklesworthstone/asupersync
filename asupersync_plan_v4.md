@@ -33,7 +33,7 @@ If you use Asupersync primitives, you get **cancel correctness**, **no orphan ta
 
 1. **No orphaned work**: all spawned work is owned by a region; region close guarantees quiescence.
 2. **Cancellation you can reason about**: explicit request with downward propagation, upward outcome reporting, and bounded cleanup.
-3. **No silent data loss** under cancellation for library primitives (channels, streams, queues, RPC handles).
+3. **No silent data loss** under cancellation for covered two-phase library primitives (channels and selected queues/RPC handles); inherently partial I/O and adapter surfaces must state narrower cancel-safety boundaries instead of inheriting this blanket claim.
 4. **Local reasoning**: inside a region, “when I leave this block, nothing from it is still running, and its resources are closed.”
 5. **Composable concurrency**: join/race/timeout/hedge/quorum/pipeline/retry are safe and interoperable.
 6. **Performance + scalability**: zero-cost where possible; predictable overhead where not.

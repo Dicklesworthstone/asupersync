@@ -40,7 +40,7 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 | **No orphan tasks** | Every spawned task is owned by a region; region close waits for all children |
 | **Cancel-correctness** | Cancellation is request → drain → finalize, never silent data loss |
 | **Bounded cleanup** | Cleanup budgets are *sufficient conditions*, not hopes |
-| **No silent drops** | Two-phase effects (reserve/commit) make data loss impossible for primitives |
+| **No silent drops** | Covered two-phase primitives use reserve/commit so uncommitted work aborts cleanly and committed sends are never half-sent |
 | **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
 | **Adaptive preemption fairness** | Deterministic EXP3/Hedge policy tunes cancel streak limits with regret-bounded updates |
 | **Drain progress certificates** | Variance-adaptive Azuma/Freedman bounds classify drain phase and confidence to quiescence |
@@ -269,7 +269,7 @@ Cancellation progress is continuously certifiable. `ProgressCertificate` tracks 
 
 ### 3. Two-Phase Effects Prevent Data Loss
 
-Anywhere cancellation could lose data, Asupersync uses reserve/commit:
+For covered two-phase communication surfaces where cancellation could otherwise lose a message, Asupersync uses reserve/commit:
 
 ```rust
 let permit = tx.reserve(cx).await?;  // ← cancel-safe: nothing committed yet
@@ -277,6 +277,8 @@ permit.send(message);                 // ← linear: must happen or abort
 ```
 
 Dropping a permit aborts cleanly. Message never partially sent.
+
+This is not a blanket claim for every effect. Inherently partial I/O and adapter surfaces publish their own cancel-safety boundaries, including operations such as `read_exact` and `write_all` that are explicitly not cancel-safe.
 
 ### 4. Capability Security (No Ambient Authority)
 
