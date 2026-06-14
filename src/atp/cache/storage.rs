@@ -231,7 +231,7 @@ impl FileStorage {
             }
 
             let digest = Sha256::digest(&decompressed);
-            if &digest[..] != &content[digest_offset..payload_offset] {
+            if digest[..] != content[digest_offset..payload_offset] {
                 return Err(CacheError::Storage(
                     "Compressed cache plaintext digest mismatch".to_string(),
                 ));

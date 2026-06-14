@@ -244,9 +244,9 @@ pub struct DurableTraceJournalConfig {
     pub stripe_count: usize,
 }
 
-/// Cohesive handle over the crash-durable RaptorQ trace journal: encode + stripe
-/// + durably persist a checkpoint epoch, and ask whether a persisted epoch still
-/// recovers from the surviving stripes.
+/// Cohesive handle over the crash-durable RaptorQ trace journal: encode, stripe,
+/// and durably persist a checkpoint epoch, and ask whether a persisted epoch
+/// still recovers from the surviving stripes.
 ///
 /// This is the API a trace recorder holds — it bundles the configuration so the
 /// recorder's checkpoint hook is a single [`DurableTraceJournal::record_epoch`]
