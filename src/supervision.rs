@@ -1733,6 +1733,305 @@ pub struct StartedChild {
     pub task_id: TaskId,
 }
 
+/// Stable identifier for a dynamically supervised child.
+///
+/// The slot keeps lookup compact, while generation prevents stale handles from
+/// naming a different child after a slot is reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChildId {
+    slot: u32,
+    generation: u32,
+}
+
+impl ChildId {
+    /// Create a child id from a slot and generation.
+    #[must_use]
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
+
+    /// Slot index in the dynamic-child table.
+    #[must_use]
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+
+    /// Generation for stale-handle detection.
+    #[must_use]
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
+}
+
+/// Handle returned for a dynamically started child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildHandle {
+    id: ChildId,
+    name: ChildName,
+    task_id: TaskId,
+}
+
+impl ChildHandle {
+    /// Create a child handle from its stable id, name, and root task.
+    #[must_use]
+    pub fn new(id: ChildId, name: ChildName, task_id: TaskId) -> Self {
+        Self { id, name, task_id }
+    }
+
+    /// Stable dynamic child id.
+    #[must_use]
+    pub const fn id(&self) -> ChildId {
+        self.id
+    }
+
+    /// Child name.
+    #[must_use]
+    pub fn name(&self) -> &ChildName {
+        &self.name
+    }
+
+    /// Root task id for the child.
+    #[must_use]
+    pub const fn task_id(&self) -> TaskId {
+        self.task_id
+    }
+}
+
+/// Pure bookkeeping record for a live dynamic child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicChildRecord {
+    handle: ChildHandle,
+    restart: SupervisionStrategy,
+    shutdown_budget: Budget,
+    start_sequence: u64,
+}
+
+impl DynamicChildRecord {
+    /// Create a dynamic-child record.
+    #[must_use]
+    pub fn new(
+        handle: ChildHandle,
+        restart: SupervisionStrategy,
+        shutdown_budget: Budget,
+        start_sequence: u64,
+    ) -> Self {
+        Self {
+            handle,
+            restart,
+            shutdown_budget,
+            start_sequence,
+        }
+    }
+
+    /// Child handle.
+    #[must_use]
+    pub const fn handle(&self) -> &ChildHandle {
+        &self.handle
+    }
+
+    /// Stable dynamic child id.
+    #[must_use]
+    pub const fn id(&self) -> ChildId {
+        self.handle.id()
+    }
+
+    /// Child name.
+    #[must_use]
+    pub fn name(&self) -> &ChildName {
+        self.handle.name()
+    }
+
+    /// Root task id for the child.
+    #[must_use]
+    pub const fn task_id(&self) -> TaskId {
+        self.handle.task_id()
+    }
+
+    /// Restart strategy inherited by this dynamic child.
+    #[must_use]
+    pub const fn restart(&self) -> &SupervisionStrategy {
+        &self.restart
+    }
+
+    /// Shutdown budget used by terminate/restart protocols.
+    #[must_use]
+    pub const fn shutdown_budget(&self) -> Budget {
+        self.shutdown_budget
+    }
+
+    /// Monotone sequence assigned when the child was started.
+    #[must_use]
+    pub const fn start_sequence(&self) -> u64 {
+        self.start_sequence
+    }
+}
+
+/// Errors from pure dynamic-child bookkeeping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DynamicChildError {
+    /// A live child already owns this name.
+    DuplicateChildName(ChildName),
+    /// The table cannot allocate another slot or generation.
+    ChildIdExhausted,
+    /// The deterministic start-sequence counter overflowed.
+    StartSequenceExhausted,
+}
+
+impl std::fmt::Display for DynamicChildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateChildName(name) => {
+                write!(f, "duplicate dynamic child name: {name}")
+            }
+            Self::ChildIdExhausted => write!(f, "dynamic child id space exhausted"),
+            Self::StartSequenceExhausted => {
+                write!(f, "dynamic child start sequence exhausted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DynamicChildError {}
+
+/// Deterministic table for children started after supervisor boot.
+///
+/// This is a pure model for the `start_child`/`terminate_child` management
+/// surface. Runtime wiring still has to perform the actual spawn, cancellation,
+/// drain, and restart protocol.
+#[derive(Debug, Default)]
+pub struct DynamicChildTable {
+    entries: Vec<Option<DynamicChildRecord>>,
+    generations: Vec<u32>,
+    free_slots: Vec<usize>,
+    by_name: BTreeMap<ChildName, ChildId>,
+    next_start_sequence: u64,
+}
+
+impl DynamicChildTable {
+    /// Create an empty table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of live dynamic children.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    /// Whether the table has no live dynamic children.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+
+    /// Insert a child that was already started by runtime wiring.
+    ///
+    /// The returned handle is stable until the child is removed. If the same
+    /// slot is later reused, its generation changes so the old handle no longer
+    /// resolves.
+    pub fn insert_started(
+        &mut self,
+        name: impl Into<ChildName>,
+        task_id: TaskId,
+        restart: SupervisionStrategy,
+        shutdown_budget: Budget,
+    ) -> Result<ChildHandle, DynamicChildError> {
+        let name = name.into();
+        if self.by_name.contains_key(name.as_str()) {
+            return Err(DynamicChildError::DuplicateChildName(name));
+        }
+
+        let start_sequence = self.next_start_sequence;
+        let next_start_sequence = self
+            .next_start_sequence
+            .checked_add(1)
+            .ok_or(DynamicChildError::StartSequenceExhausted)?;
+
+        let (slot, generation) = self.allocate_id_parts()?;
+        let id = ChildId::new(slot, generation);
+        let handle = ChildHandle::new(id, name.clone(), task_id);
+        let record =
+            DynamicChildRecord::new(handle.clone(), restart, shutdown_budget, start_sequence);
+
+        let slot_index = usize::try_from(slot).map_err(|_| DynamicChildError::ChildIdExhausted)?;
+        self.entries[slot_index] = Some(record);
+        self.by_name.insert(name, id);
+        self.next_start_sequence = next_start_sequence;
+
+        Ok(handle)
+    }
+
+    /// Remove a live child by handle id.
+    ///
+    /// Returns `None` for stale handles or unknown children.
+    pub fn remove(&mut self, id: ChildId) -> Option<DynamicChildRecord> {
+        let slot = usize::try_from(id.slot()).ok()?;
+        if self.generations.get(slot).copied()? != id.generation() {
+            return None;
+        }
+
+        let record = self.entries.get_mut(slot)?.take()?;
+        self.by_name.remove(record.name().as_str());
+        self.free_slots.push(slot);
+        Some(record)
+    }
+
+    /// Look up a child by handle id.
+    #[must_use]
+    pub fn get(&self, id: ChildId) -> Option<&DynamicChildRecord> {
+        let slot = usize::try_from(id.slot()).ok()?;
+        if self.generations.get(slot).copied()? != id.generation() {
+            return None;
+        }
+        self.entries.get(slot)?.as_ref()
+    }
+
+    /// Look up a child by name.
+    #[must_use]
+    pub fn get_by_name(&self, name: &str) -> Option<&DynamicChildRecord> {
+        let id = *self.by_name.get(name)?;
+        self.get(id)
+    }
+
+    /// Whether a live child currently owns `name`.
+    #[must_use]
+    pub fn contains_name(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
+    /// Return live children in deterministic start order.
+    #[must_use]
+    pub fn which_children(&self) -> Vec<&DynamicChildRecord> {
+        let mut children = self
+            .entries
+            .iter()
+            .filter_map(std::option::Option::as_ref)
+            .collect::<Vec<_>>();
+        children.sort_by_key(|child| child.start_sequence());
+        children
+    }
+
+    fn allocate_id_parts(&mut self) -> Result<(u32, u32), DynamicChildError> {
+        if let Some(&slot) = self.free_slots.last() {
+            let next_generation = self.generations[slot]
+                .checked_add(1)
+                .ok_or(DynamicChildError::ChildIdExhausted)?;
+            self.free_slots.pop();
+            self.generations[slot] = next_generation;
+            let slot = u32::try_from(slot).map_err(|_| DynamicChildError::ChildIdExhausted)?;
+            return Ok((slot, next_generation));
+        }
+
+        let slot_index = self.entries.len();
+        let slot = u32::try_from(slot_index).map_err(|_| DynamicChildError::ChildIdExhausted)?;
+        self.entries.push(None);
+        self.generations.push(0);
+        Ok((slot, 0))
+    }
+}
+
 impl BackoffStrategy {
     /// Calculate the delay for a given restart attempt (0-indexed).
     ///
@@ -4424,6 +4723,121 @@ mod tests {
         assert!(spec.required);
 
         crate::test_complete!("child_spec_defaults");
+    }
+
+    #[test]
+    fn dynamic_child_table_assigns_generation_safe_ids() {
+        init_test("dynamic_child_table_assigns_generation_safe_ids");
+
+        let mut table = DynamicChildTable::new();
+        assert!(table.is_empty());
+
+        let first = table
+            .insert_started(
+                "alpha",
+                test_task_id(),
+                SupervisionStrategy::Restart(RestartConfig::new(3, Duration::from_secs(1))),
+                Budget::with_deadline_at_secs(5),
+            )
+            .expect("first child should insert");
+        let second = table
+            .insert_started(
+                "bravo",
+                test_task_id(),
+                SupervisionStrategy::Stop,
+                Budget::INFINITE,
+            )
+            .expect("second child should insert");
+
+        assert_eq!(first.id().slot(), 0);
+        assert_eq!(first.id().generation(), 0);
+        assert_eq!(second.id().slot(), 1);
+        assert_eq!(table.len(), 2);
+
+        let names = table
+            .which_children()
+            .into_iter()
+            .map(|record| record.name().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["alpha", "bravo"]);
+
+        let removed = table.remove(first.id()).expect("first child should remove");
+        assert_eq!(removed.name().as_str(), "alpha");
+        assert!(table.get(first.id()).is_none());
+        assert!(!table.contains_name("alpha"));
+
+        let third = table
+            .insert_started(
+                "charlie",
+                test_task_id(),
+                SupervisionStrategy::Stop,
+                Budget::INFINITE,
+            )
+            .expect("slot should be reusable");
+
+        assert_eq!(third.id().slot(), first.id().slot());
+        assert_ne!(third.id().generation(), first.id().generation());
+        assert!(table.get(first.id()).is_none());
+
+        let names = table
+            .which_children()
+            .into_iter()
+            .map(|record| record.name().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["bravo", "charlie"]);
+
+        crate::test_complete!("dynamic_child_table_assigns_generation_safe_ids");
+    }
+
+    #[test]
+    fn dynamic_child_table_rejects_duplicate_names_and_keeps_lookup_stable() {
+        init_test("dynamic_child_table_rejects_duplicate_names_and_keeps_lookup_stable");
+
+        let mut table = DynamicChildTable::new();
+        let handle = table
+            .insert_started(
+                "worker",
+                test_task_id(),
+                SupervisionStrategy::Stop,
+                Budget::with_deadline_at_secs(2),
+            )
+            .expect("child should insert");
+
+        let duplicate = table
+            .insert_started(
+                "worker",
+                test_task_id(),
+                SupervisionStrategy::Stop,
+                Budget::INFINITE,
+            )
+            .expect_err("duplicate name should fail");
+        assert!(matches!(
+            duplicate,
+            DynamicChildError::DuplicateChildName(ref name) if name == "worker"
+        ));
+
+        let record = table
+            .get_by_name("worker")
+            .expect("name lookup should resolve inserted child");
+        assert_eq!(record.id(), handle.id());
+        assert_eq!(record.task_id(), handle.task_id());
+        assert_eq!(record.restart(), &SupervisionStrategy::Stop);
+        assert_eq!(record.shutdown_budget(), Budget::with_deadline_at_secs(2));
+        assert!(table.get_by_name("missing").is_none());
+
+        let stale_generation = ChildId::new(handle.id().slot(), handle.id().generation() + 1);
+        assert!(table.remove(stale_generation).is_none());
+        assert_eq!(table.len(), 1);
+
+        let removed = table
+            .remove(handle.id())
+            .expect("live handle should remove");
+        assert_eq!(removed.name().as_str(), "worker");
+        assert!(table.is_empty());
+
+        crate::test_complete!(
+            "dynamic_child_table_rejects_duplicate_names_and_keeps_lookup_stable"
+        );
     }
 
     #[test]
