@@ -49,6 +49,7 @@ pub mod cluster;
 pub mod gossip;
 pub mod lifeguard;
 pub mod swim;
+pub mod wire;
 
 pub use cluster::{ClusterConfig, VirtualCluster};
 pub use gossip::GossipBuffer;
@@ -59,3 +60,4 @@ pub use swim::{
     MemberState, MembershipEvent, MembershipKind, Outgoing, Packet, Payload, Rumor, Swim,
     SwimConfig, SwimConfigError,
 };
+pub use wire::{DEFAULT_MTU, EncodedDatagram, WIRE_VERSION, WireError, decode_packet, encode_packet};
