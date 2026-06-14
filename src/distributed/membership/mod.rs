@@ -50,11 +50,13 @@ pub mod gossip;
 pub mod lifeguard;
 pub mod swim;
 pub mod udp;
+pub mod view;
 pub mod wire;
 
 pub use cluster::{ClusterConfig, VirtualCluster};
 pub use gossip::GossipBuffer;
 pub use udp::{UdpMembershipError, UdpMembershipTransport};
+pub use view::MembershipView;
 pub use lifeguard::{
     Awareness, Millis, max_suspicion_ms, min_suspicion_ms, node_scale, suspicion_timeout_ms,
 };
