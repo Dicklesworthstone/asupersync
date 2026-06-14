@@ -227,9 +227,7 @@ impl AtpSdk {
         }
 
         let _ = options;
-        AtpOutcome::Err(AtpError::Daemon(
-            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
-        ))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     fn get_supported_features(&self) -> Vec<AtpFeature> {
@@ -317,9 +315,14 @@ impl AtpSession {
             SdkMode::InProcess => AtpOutcome::Err(AtpError::Protocol(
                 crate::net::atp::protocol::ProtocolError::SessionStateMismatch,
             )),
-            SdkMode::DaemonDelegated { .. } => AtpOutcome::Err(AtpError::Daemon(
-                crate::net::atp::protocol::DaemonError::ServiceUnavailable,
-            )),
+            SdkMode::DaemonDelegated { .. } => {
+                if daemon_endpoint_is_reachable(&self.mode).is_err() {
+                    return AtpOutcome::Err(AtpError::Daemon(
+                        crate::net::atp::protocol::DaemonError::DaemonOffline,
+                    ));
+                }
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
+            }
         }
     }
 }
@@ -419,6 +422,26 @@ mod tests {
             local_peer,
             label,
         )])
+    }
+
+    fn reachable_daemon_endpoint() -> (std::net::TcpListener, String) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback daemon placeholder");
+        let endpoint = listener
+            .local_addr()
+            .expect("read loopback daemon placeholder address")
+            .to_string();
+        (listener, endpoint)
+    }
+
+    async fn in_process_session(cx: &Cx, label: &str) -> AtpSession {
+        let config = SessionConfig::default();
+        let local_peer = config.local_peer;
+        let sdk = AtpSdk::new_in_process(config);
+        let peer = PeerId::from_label(label);
+        sdk.open_session(cx, granted_direct_options(local_peer, peer, label))
+            .await
+            .unwrap()
     }
 
     #[test]
@@ -540,6 +563,60 @@ mod tests {
 
             let session = sdk.open_session(&cx, options).await;
             assert!(session.is_err()); // No daemon service is listening for this test endpoint.
+        });
+    }
+
+    #[test]
+    fn daemon_session_creation_reachable_stub_uses_asup_e701() {
+        block_on(async {
+            let (_listener, endpoint) = reachable_daemon_endpoint();
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_daemon_delegated(config, endpoint, Some("token".to_string()));
+
+            let cx = Cx::for_testing();
+            let peer = PeerId::from_label("remote_peer");
+            let options = SessionOptions::direct(peer);
+
+            let session = sdk.open_session(&cx, options).await;
+            match session {
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented)) => {}
+                other => panic!(
+                    "reachable daemon-delegated session stub must fail closed with ASUP-E701: {other:?}"
+                ),
+            }
+        });
+    }
+
+    #[test]
+    fn daemon_session_close_distinguishes_offline_from_unwired_stub() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let (offline_listener, offline_endpoint) = reachable_daemon_endpoint();
+            drop(offline_listener);
+            let mut offline_session = in_process_session(&cx, "daemon-close-offline").await;
+            offline_session.mode = SdkMode::DaemonDelegated {
+                daemon_endpoint: offline_endpoint,
+                auth_token: Some("token".to_string()),
+            };
+            match offline_session.close(&cx).await {
+                AtpOutcome::Err(AtpError::Daemon(
+                    crate::net::atp::protocol::DaemonError::DaemonOffline,
+                )) => {}
+                other => panic!("offline daemon close must report DaemonOffline: {other:?}"),
+            }
+
+            let (_listener, endpoint) = reachable_daemon_endpoint();
+            let mut reachable_session = in_process_session(&cx, "daemon-close-reachable").await;
+            reachable_session.mode = SdkMode::DaemonDelegated {
+                daemon_endpoint: endpoint,
+                auth_token: Some("token".to_string()),
+            };
+            match reachable_session.close(&cx).await {
+                AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented)) => {}
+                other => panic!(
+                    "reachable daemon-delegated close stub must fail closed with ASUP-E701: {other:?}"
+                ),
+            }
         });
     }
 }

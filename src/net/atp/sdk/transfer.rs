@@ -491,9 +491,7 @@ impl AtpSession {
                 crate::net::atp::protocol::DaemonError::DaemonOffline,
             ));
         }
-        AtpOutcome::Err(AtpError::Daemon(
-            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
-        ))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     async fn resume_transfer_daemon_delegated(
@@ -519,9 +517,7 @@ impl AtpSession {
                 crate::net::atp::protocol::DaemonError::DaemonOffline,
             ));
         }
-        AtpOutcome::Err(AtpError::Daemon(
-            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
-        ))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     async fn daemon_delegation_unavailable(
@@ -539,9 +535,7 @@ impl AtpSession {
         }
 
         let _ = options;
-        AtpOutcome::Err(AtpError::Daemon(
-            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
-        ))
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
 
     // Helper methods
@@ -868,7 +862,7 @@ mod tests {
         CapabilityAction, CapabilityGrant, CapabilityGrantId, CapabilityScope, PeerId,
         ProtocolError, SessionContextKind,
     };
-    use crate::net::atp::sdk::{AtpSdk, SessionConfig, SessionOptions};
+    use crate::net::atp::sdk::{AtpSdk, SdkMode, SessionConfig, SessionOptions};
 
     fn granted_direct_options(config: &SessionConfig, peer: PeerId, label: &str) -> SessionOptions {
         SessionOptions::direct(peer).with_grants(vec![CapabilityGrant::new(
@@ -878,6 +872,30 @@ mod tests {
             [CapabilityAction::Read, CapabilityAction::Write],
             CapabilityScope::for_context(SessionContextKind::Direct),
         )])
+    }
+
+    fn reachable_daemon_endpoint() -> (std::net::TcpListener, String) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback daemon placeholder");
+        let endpoint = listener
+            .local_addr()
+            .expect("read loopback daemon placeholder address")
+            .to_string();
+        (listener, endpoint)
+    }
+
+    async fn daemon_delegated_session(cx: &Cx, label: &str) -> (std::net::TcpListener, AtpSession) {
+        let (listener, endpoint) = reachable_daemon_endpoint();
+        let config = SessionConfig::default();
+        let peer = PeerId::from_label(label);
+        let session_options = granted_direct_options(&config, peer, label);
+        let sdk = AtpSdk::new_in_process(config);
+        let mut session = sdk.open_session(cx, session_options).await.unwrap();
+        session.mode = SdkMode::DaemonDelegated {
+            daemon_endpoint: endpoint,
+            auth_token: Some("token".to_string()),
+        };
+        (listener, session)
     }
 
     #[test]
@@ -1073,6 +1091,75 @@ mod tests {
                 AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented)) => {}
                 other => panic!("receive must fail closed without a real transport: {other:?}"), // ubs:ignore
             }
+        });
+    }
+
+    #[test]
+    fn daemon_delegated_transfer_stubs_use_asup_e701_when_endpoint_is_reachable() {
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            let (_listener, session) = daemon_delegated_session(&cx, "daemon-transfer-stubs").await;
+
+            let request = TransferRequest {
+                source: TransferSource::Object {
+                    data: vec![1, 2, 3, 4],
+                    content_type: Some("application/octet-stream".to_string()),
+                },
+                destination: TransferDestination::Object {
+                    object_id: "daemon-object".to_string(),
+                },
+                options: TransferOptions::default(),
+            };
+            assert!(
+                matches!(
+                    session.send_object(&cx, request).await,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
+                ),
+                "reachable daemon-delegated send stub must report ASUP-E701"
+            );
+
+            assert!(
+                matches!(
+                    session
+                        .receive_object(
+                            &cx,
+                            TransferDestination::Stream,
+                            TransferOptions::default(),
+                        )
+                        .await,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
+                ),
+                "reachable daemon-delegated receive stub must report ASUP-E701"
+            );
+
+            let transfer_id = TransferId::new("daemon-transfer");
+            assert!(
+                matches!(
+                    session
+                        .resume_transfer(&cx, &transfer_id, "1:2:data_transfer")
+                        .await,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
+                ),
+                "reachable daemon-delegated resume stub must report ASUP-E701"
+            );
+            assert!(
+                matches!(
+                    session
+                        .cancel_transfer(&cx, &transfer_id, Some("user requested".to_string()))
+                        .await,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
+                ),
+                "reachable daemon-delegated cancel stub must report ASUP-E701"
+            );
+            assert!(
+                matches!(
+                    session
+                        .verify_object(&cx, Path::new("src/net/atp/sdk/transfer.rs"), None)
+                        .await,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
+                ),
+                "reachable daemon-delegated verify stub must report ASUP-E701"
+            );
         });
     }
 

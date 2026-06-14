@@ -477,16 +477,38 @@ impl TimingSideChannelDetector {
         let stats_a = TimingStatistics::from_samples(&samples_a);
         let stats_b = TimingStatistics::from_samples(&samples_b);
 
-        let p_value = stats_a.welch_t_test(&stats_b);
+        let (p_value, detected, description) =
+            self.classify_constant_time_stats(&stats_a, &stats_b);
+
+        SideChannelDetectionResult {
+            detected,
+            p_value,
+            baseline_stats: stats_a,
+            test_stats: stats_b,
+            description,
+        }
+    }
+
+    fn classify_constant_time_stats(
+        &self,
+        stats_a: &TimingStatistics,
+        stats_b: &TimingStatistics,
+    ) -> (f64, bool, String) {
+        let p_value = stats_a.welch_t_test(stats_b);
         let mean_diff = (stats_a.mean - stats_b.mean).abs();
 
         let statistically_significant = p_value < self.config.significance_threshold;
         let practically_significant = mean_diff >= self.config.min_suspicious_delta_ns as f64;
-        let detected = statistically_significant && practically_significant;
+        let detected = statistically_significant;
 
-        let description = if detected {
+        let description = if statistically_significant && practically_significant {
             format!(
                 "Timing side-channel in constant-time operation: {:.1}ns difference, p={:.6}",
+                mean_diff, p_value
+            )
+        } else if statistically_significant {
+            format!(
+                "Statistically significant sub-threshold timing difference in constant-time operation requires review: {:.1}ns difference, p={:.6}",
                 mean_diff, p_value
             )
         } else {
@@ -496,13 +518,7 @@ impl TimingSideChannelDetector {
             )
         };
 
-        SideChannelDetectionResult {
-            detected,
-            p_value,
-            baseline_stats: stats_a,
-            test_stats: stats_b,
-            description,
-        }
+        (p_value, detected, description)
     }
 }
 
@@ -542,6 +558,53 @@ mod tests {
         assert_eq!(stats.min, 90);
         assert_eq!(stats.max, 120);
         assert!((stats.mean - 105.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn significant_sub_threshold_constant_time_difference_requires_review() {
+        let detector = TimingSideChannelDetector::new(TimingDetectorConfig {
+            significance_threshold: 0.01,
+            min_suspicious_delta_ns: 100,
+            ..TimingDetectorConfig::default()
+        });
+        let stats_a = TimingStatistics {
+            mean: 1_000.0,
+            std_dev: 1.0,
+            variance: 1.0,
+            coefficient_of_variation: 0.001,
+            min: 998,
+            max: 1_002,
+            sample_count: 1_000,
+        };
+        let stats_b = TimingStatistics {
+            mean: 1_050.0,
+            std_dev: 1.0,
+            variance: 1.0,
+            coefficient_of_variation: 0.001,
+            min: 1_048,
+            max: 1_052,
+            sample_count: 1_000,
+        };
+
+        let (p_value, detected, description) =
+            detector.classify_constant_time_stats(&stats_a, &stats_b);
+
+        assert!(
+            p_value < 0.01,
+            "synthetic timing delta should be significant"
+        );
+        assert!(
+            detected,
+            "sub-threshold statistically significant deltas must not be certified"
+        );
+        assert!(
+            description.contains("requires review"),
+            "unexpected description: {description}"
+        );
+        assert!(
+            !description.contains("verified"),
+            "sub-threshold significant delta was certified: {description}"
+        );
     }
 
     #[test]
