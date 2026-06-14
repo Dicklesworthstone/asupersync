@@ -20,6 +20,7 @@
 //! - [`recovery`]: Region recovery protocol
 //! - [`bridge`]: Local-to-distributed region bridge
 //! - [`consensus`]: Byzantine fault tolerant consensus algorithms
+//! - [`membership`]: SWIM-style cluster membership and failure detection
 
 pub mod assignment;
 pub mod bridge;
@@ -27,6 +28,7 @@ pub mod consensus;
 pub mod consistent_hash;
 pub mod distribution;
 pub mod encoding;
+pub mod membership;
 pub mod recovery;
 pub mod snapshot;
 
@@ -43,6 +45,9 @@ pub use consistent_hash::{BoundedLoadConfig, BoundedLoadDecision, BoundedLoadFal
 pub use distribution::{
     DistributionConfig, DistributionMetrics, DistributionResult, ReplicaAck, ReplicaFailure,
     SymbolDistributor,
+};
+pub use membership::{
+    MemberState, MembershipEvent, MembershipKind, Swim, SwimConfig, SwimConfigError,
 };
 pub use encoding::{
     ADAPTIVE_BLOCK_LAYOUT_POLICY_ID, EncodedState, EncodingConfig, EncodingError,
