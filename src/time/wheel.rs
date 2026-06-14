@@ -878,6 +878,10 @@ impl TimerWheel {
     }
 
     fn drain_ready(&mut self, now: Time) -> WakerBatch {
+        if self.ready.is_empty() && !self.coalescing.enabled {
+            return WakerBatch::new();
+        }
+
         let mut wakers = WakerBatch::new();
 
         // Take the ready vec out so we can mutate it in-place while also
@@ -1194,6 +1198,45 @@ mod tests {
         crate::assert_with_log!(count == 1, "counter", 1, count);
         crate::assert_with_log!(wheel.is_empty(), "wheel empty", true, wheel.is_empty());
         crate::test_complete!("wheel_register_and_fire");
+    }
+
+    #[test]
+    fn collect_expired_no_ready_preserves_future_timer() {
+        init_test("collect_expired_no_ready_preserves_future_timer");
+        let mut wheel = TimerWheel::new();
+        let counter = Arc::new(AtomicU64::new(0));
+
+        wheel.register(Time::from_secs(1), counter_waker(counter.clone()));
+
+        let early = wheel.collect_expired(Time::from_millis(1));
+        crate::assert_with_log!(
+            early.is_empty(),
+            "no-ready tick does not fire future timer",
+            true,
+            early.len()
+        );
+        crate::assert_with_log!(
+            wheel.len() == 1,
+            "future timer remains live",
+            1,
+            wheel.len()
+        );
+
+        let due = wheel.collect_expired(Time::from_secs(1));
+        crate::assert_with_log!(
+            due.len() == 1,
+            "future timer fires at deadline",
+            1,
+            due.len()
+        );
+
+        for waker in due {
+            waker.wake();
+        }
+
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "counter", 1, count);
+        crate::test_complete!("collect_expired_no_ready_preserves_future_timer");
     }
 
     #[test]
