@@ -563,9 +563,26 @@ fn hrw_score<K: Hash, N: Hash + ?Sized>(
 
     let unit = (hash as f64 + 1.0) / (u64::MAX as f64 + 1.0);
     Some(HrwScore {
-        score: f64::from(weight) / -unit.ln(),
+        score: hrw_score_from_unit(weight, unit),
         tie_break,
     })
+}
+
+/// Map a uniform `unit` in `(0, 1]` and a weight to a weighted-rendezvous score.
+///
+/// br-asupersync-xw4sbk: at `unit == 1.0` — reachable because the top ~2048
+/// `u64` hash values round up to `2^64` in `f64`, making `unit = 2^64/2^64 =
+/// 1.0` — `unit.ln()` is `+0.0`, so `weight / -(+0.0)` is `-inf`. That would
+/// invert the score and make the maximal-hash node (the strongest rendezvous
+/// candidate) the weakest, so it would never be selected. The score is
+/// monotonically increasing as `unit -> 1`, so the boundary is the `+inf`
+/// limit; clamp to it instead of flipping the sign.
+fn hrw_score_from_unit(weight: u32, unit: f64) -> f64 {
+    if unit < 1.0 {
+        f64::from(weight) / -unit.ln()
+    } else {
+        f64::INFINITY
+    }
 }
 
 #[cfg(test)]
@@ -581,6 +598,37 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn hrw_score_from_unit_boundary_is_positive_infinity() {
+        // br-asupersync-xw4sbk: unit == 1.0 must be the +inf limit, not -inf
+        // (weight / -0.0). Before the fix this returned -inf, demoting the
+        // maximal-hash node to the weakest rendezvous candidate.
+        let at_one = hrw_score_from_unit(3, 1.0);
+        assert!(
+            at_one.is_infinite() && at_one.is_sign_positive(),
+            "unit==1.0 must be +inf, got {at_one}"
+        );
+
+        // Interior units give finite, strictly positive scores that increase
+        // monotonically toward the boundary.
+        let mid = hrw_score_from_unit(3, 0.5);
+        let high = hrw_score_from_unit(3, 0.99);
+        assert!(
+            mid.is_finite() && mid > 0.0,
+            "interior score must be > 0, got {mid}"
+        );
+        assert!(
+            high > mid,
+            "score must increase toward unit=1, got {high} <= {mid}"
+        );
+
+        // Heavier weight scores higher at the same unit.
+        assert!(
+            hrw_score_from_unit(6, 0.5) > hrw_score_from_unit(3, 0.5),
+            "score must scale with weight"
+        );
+    }
 
     fn build_ring(node_count: usize, vnodes_per_node: usize) -> HashRing {
         // br-asupersync-rnybb1: tests use a fixed seed (0) for
