@@ -851,6 +851,17 @@ fn recv_with_ancillary_impl(
             }
         }
 
+        // The kernel reports control-message truncation via MSG_CTRUNC. When
+        // more SCM_RIGHTS fds are sent than fit in the control buffer, the fds
+        // that fit are still parsed by cmsgs() (the Ok branch above) while the
+        // kernel drops/closes the rest and sets MSG_CTRUNC — so the ENOBUFS
+        // branch only catches the buffer-too-small-for-any-cmsg case, not
+        // partial truncation. Without this check a caller would see
+        // is_truncated() == false and silently assume it received every fd.
+        if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
+            truncated = true;
+        }
+
         Ok::<_, io::Error>((msg.bytes, received_fds, truncated))
     }?;
 
@@ -1231,6 +1242,55 @@ mod tests {
             nix::unistd::close(fd).expect("close received fd");
         });
         crate::test_complete!("test_send_recv_with_ancillary");
+    }
+
+    #[test]
+    fn recv_with_ancillary_reports_truncation_via_msg_ctrunc() {
+        use crate::net::unix::{AncillaryMessage, SocketAncillary};
+        use std::os::unix::io::AsRawFd;
+        init_test("recv_with_ancillary_reports_truncation_via_msg_ctrunc");
+
+        // Connected Unix stream pair for a synchronous sendmsg/recvmsg exchange.
+        let (sender, receiver) = UnixStream::pair().expect("UnixStream::pair");
+
+        // An fd worth passing (the read end of a pipe).
+        let (pipe_read, pipe_write) = nix::unistd::pipe().expect("pipe");
+
+        let mut send_ancillary = SocketAncillary::new(0);
+        send_ancillary.add_fds(&[pipe_read.as_raw_fd()]);
+        let sent = send_with_ancillary_impl(sender.as_raw_fd(), b"x", &mut send_ancillary)
+            .expect("send_with_ancillary_impl");
+        crate::assert_with_log!(sent == 1, "sent one byte", 1, sent);
+
+        // Receive with a control buffer too small to hold even one SCM_RIGHTS
+        // header: the kernel sets MSG_CTRUNC and delivers no fds while cmsgs()
+        // still returns Ok (not ENOBUFS). Before the MSG_CTRUNC check this left
+        // is_truncated() == false, so the caller silently believed it received
+        // every fd.
+        let mut recv_buf = [0u8; 8];
+        let mut recv_ancillary = SocketAncillary::new(1);
+        let received =
+            recv_with_ancillary_impl(receiver.as_raw_fd(), &mut recv_buf, &mut recv_ancillary)
+                .expect("recv_with_ancillary_impl");
+        crate::assert_with_log!(received == 1, "received one byte", 1, received);
+        crate::assert_with_log!(
+            recv_ancillary.is_truncated(),
+            "MSG_CTRUNC must surface as is_truncated()",
+            true,
+            recv_ancillary.is_truncated()
+        );
+
+        // Close any fds that were delivered so the test leaks nothing.
+        for msg in recv_ancillary.messages() {
+            let AncillaryMessage::ScmRights(fds) = msg;
+            for fd in fds {
+                let _ = nix::unistd::close(fd);
+            }
+        }
+        drop(pipe_read);
+        drop(pipe_write);
+
+        crate::test_complete!("recv_with_ancillary_reports_truncation_via_msg_ctrunc");
     }
 
     #[test]
