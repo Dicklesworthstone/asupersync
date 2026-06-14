@@ -983,7 +983,14 @@ The two-phase pattern (reserve a permit, then commit the send) is central to can
 | **ContendedMutex** | `src/sync/contended_mutex.rs` | Mutex with contention metrics |
 | **Pool** | `src/sync/pool.rs` | Object pool with per-thread caches |
 
-All primitives are deterministic under the lab runtime and participate in futurelock detection.
+The synchronization primitives are deterministic under the lab runtime and
+their wait queues/guards have focused cancellation and cleanup coverage.
+Futurelock detection is narrower: it fires for tasks that stop being polled
+while holding runtime-recorded obligations, such as channel permits, leases,
+`IoOp` records, and semaphore permit tokens. Mutex and RwLock guards release
+on drop and are covered by guard/queue cleanup tests, but they are not
+themselves futurelock-tracked obligations unless the surrounding task also
+holds a runtime obligation.
 
 ---
 

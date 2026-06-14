@@ -1,13 +1,14 @@
-//! Two-phase async mutex with guard obligations.
+//! Two-phase async mutex with cancel-aware guard cleanup.
 //!
 //! An async mutex that allows holding the lock across await points.
-//! Each acquired guard is tracked as an obligation that must be released.
+//! Each acquired guard releases the mutex on drop; waiter cleanup is
+//! cancel-safe while the lock future is still pending.
 //!
 //! # Cancel Safety
 //!
 //! The lock operation is split into two phases:
 //! - **Phase 1**: Wait for lock availability (cancel-safe)
-//! - **Phase 2**: Acquire lock and create obligation (cannot fail)
+//! - **Phase 2**: Acquire lock and return a guard (cannot fail)
 //!
 //! # Example
 //!
@@ -3705,7 +3706,7 @@ mod tests {
         println!("  - Asupersync semantics: COMPLIANT ✅");
         println!("    • Mutex provides exclusive access only");
         println!("    • No RwLock-style shared read capabilities");
-        println!("    • Proper two-phase locking with obligations");
+        println!("    • Proper two-phase locking with cancel-safe guard cleanup");
         println!("    • Cancel-safe lock acquisition");
 
         crate::test_complete!("audit_mutex_exclusive_only_no_rwlock_apis");

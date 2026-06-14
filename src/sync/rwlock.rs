@@ -1,4 +1,4 @@
-//! Cancel-aware read-write lock with guard obligations.
+//! Cancel-aware read-write lock with guard cleanup.
 //!
 //! This RwLock allows multiple readers or a single writer with write-preferring
 //! fairness. Acquisition is cancel-safe:
