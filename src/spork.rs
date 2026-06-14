@@ -9,7 +9,7 @@
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
-//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
+//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupEventBatch`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -518,6 +518,18 @@ pub mod process_group {
             &self.events[start..]
         }
 
+        /// Returns an owned event batch without mutating the caller's cursor.
+        ///
+        /// This is the handoff shape for future monitor streams: event
+        /// delivery can reserve queue capacity first, then commit an owned
+        /// batch and advance the subscriber cursor only after the commit.
+        #[must_use]
+        pub fn event_batch(&self, cursor: GroupEventCursor) -> GroupEventBatch {
+            let mut next_cursor = cursor;
+            let events = self.events_since(&mut next_cursor).to_vec();
+            GroupEventBatch::new(events, next_cursor)
+        }
+
         /// Adds a member and returns the corresponding joined event.
         ///
         /// # Errors
@@ -672,6 +684,59 @@ pub mod process_group {
     impl Default for GroupEventCursor {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    /// Owned membership-event batch for monitor-style consumers.
+    ///
+    /// A batch carries both the events to deliver and the cursor that should be
+    /// committed after delivery succeeds. Keeping these together avoids the
+    /// classic monitor-stream bug where a subscriber cursor advances before the
+    /// event payload is actually enqueued.
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    pub struct GroupEventBatch {
+        events: Vec<GroupEvent>,
+        next_cursor: GroupEventCursor,
+    }
+
+    impl GroupEventBatch {
+        /// Creates an owned event batch.
+        #[must_use]
+        pub fn new(events: Vec<GroupEvent>, next_cursor: GroupEventCursor) -> Self {
+            Self {
+                events,
+                next_cursor,
+            }
+        }
+
+        /// Returns the events in deterministic emission order.
+        #[must_use]
+        pub fn events(&self) -> &[GroupEvent] {
+            &self.events
+        }
+
+        /// Returns the cursor to commit after delivery succeeds.
+        #[must_use]
+        pub fn next_cursor(&self) -> GroupEventCursor {
+            self.next_cursor
+        }
+
+        /// Returns the number of events in this batch.
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.events.len()
+        }
+
+        /// Returns whether this batch contains no events.
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.events.is_empty()
+        }
+
+        /// Consumes the batch and returns its owned event payload.
+        #[must_use]
+        pub fn into_events(self) -> Vec<GroupEvent> {
+            self.events
         }
     }
 
@@ -1130,7 +1195,8 @@ pub mod crash {
 ///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
 /// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`,
-///   `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary`
+///   `GroupEventBatch`, `GroupBroadcastPlan`, `GroupBroadcastReport`,
+///   `GroupBroadcastSummary`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -1157,8 +1223,8 @@ pub mod prelude {
     pub use super::process_group::{
         BroadcastBackpressurePolicy, GroupBroadcastPlan, GroupBroadcastRecipientReport,
         GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupBroadcastSummary, GroupEvent,
-        GroupEventCursor, GroupEventKind, GroupMember, GroupMemberId, GroupName, GroupNameError,
-        GroupSnapshot, ProcessGroupError, ProcessGroupState,
+        GroupEventBatch, GroupEventCursor, GroupEventKind, GroupMember, GroupMemberId, GroupName,
+        GroupNameError, GroupSnapshot, ProcessGroupError, ProcessGroupState,
     };
 
     // -- Monitor --
@@ -1468,6 +1534,7 @@ mod tests {
         let _ = std::any::type_name::<prelude::GroupMemberId>();
         let _ = std::any::type_name::<prelude::GroupSnapshot>();
         let _ = std::any::type_name::<prelude::GroupEvent>();
+        let _ = std::any::type_name::<prelude::GroupEventBatch>();
         let _ = std::any::type_name::<prelude::ProcessGroupState>();
         let _ = std::any::type_name::<prelude::ProcessGroupError>();
         let _ = std::any::type_name::<prelude::GroupEventCursor>();
@@ -1531,6 +1598,7 @@ mod tests {
         let _ = std::any::type_name::<process_group::GroupMember>();
         let _ = std::any::type_name::<process_group::GroupSnapshot>();
         let _ = std::any::type_name::<process_group::GroupEvent>();
+        let _ = std::any::type_name::<process_group::GroupEventBatch>();
         let _ = std::any::type_name::<process_group::GroupEventCursor>();
         let _ = std::any::type_name::<process_group::GroupBroadcastPlan>();
         let _ = std::any::type_name::<process_group::GroupBroadcastReport>();
@@ -2141,6 +2209,65 @@ mod tests {
         assert_eq!(late_cursor.next_sequence(), 4);
 
         crate::test_complete!("process_group_event_cursor_replays_each_transition_once");
+    }
+
+    #[test]
+    fn process_group_event_batch_is_owned_and_cursor_safe() {
+        init_test("process_group_event_batch_is_owned_and_cursor_safe");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let cursor = process_group::GroupEventCursor::new();
+
+        let empty = state.event_batch(cursor);
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert_eq!(empty.next_cursor().next_sequence(), 0);
+        assert_eq!(cursor.next_sequence(), 0);
+
+        state
+            .join(first.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(second.clone(), crate::types::Time::from_nanos(20))
+            .unwrap();
+
+        let batch = state.event_batch(cursor);
+        assert_eq!(cursor.next_sequence(), 0);
+        assert_eq!(batch.next_cursor().next_sequence(), 2);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(
+            batch
+                .events()
+                .iter()
+                .map(process_group::GroupEvent::sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        let next_cursor = batch.next_cursor();
+        let owned_events = batch.into_events();
+        drop(state);
+
+        assert_eq!(
+            owned_events
+                .iter()
+                .map(|event| event.member().to_string())
+                .collect::<Vec<_>>(),
+            vec!["Node(node-a):T1".to_string(), "Node(node-b):T2".to_string()]
+        );
+        assert_eq!(next_cursor.next_sequence(), 2);
+
+        crate::test_complete!("process_group_event_batch_is_owned_and_cursor_safe");
     }
 
     #[test]
