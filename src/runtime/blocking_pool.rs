@@ -43,8 +43,8 @@
 
 use crate::runtime::config::BlockingPoolAffinityProfile;
 use crate::runtime::pool_sizing::{
-    PoolSizingBounds, PoolSizingControllerState, PoolSizingDecision, PoolSizingPolicy,
-    PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing,
+    PoolSizingAction, PoolSizingBounds, PoolSizingControllerState, PoolSizingDecision,
+    PoolSizingPolicy, PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing,
 };
 use crossbeam_queue::SegQueue;
 use parking_lot::{Condvar, Mutex};
@@ -253,8 +253,15 @@ impl BlockingPoolAffinityState {
 struct BlockingPoolInner {
     /// Minimum number of threads to keep alive.
     min_threads: usize,
-    /// Maximum number of threads allowed.
+    /// Maximum number of threads allowed (the hard ceiling).
     max_threads: usize,
+    /// Live operational cap on spawns (yj2nxx.7), within `[min_threads, max_threads]`.
+    ///
+    /// Starts at `max_threads`; managed pool sizing may lower it to throttle
+    /// spawning and raise it back, but never above `max_threads`. A shrink only
+    /// blocks new spawns — threads above the cap retire naturally via idle
+    /// timeout, so the atomic claim/retire invariants are preserved.
+    live_max_threads: AtomicUsize,
     /// Current number of active threads.
     active_threads: AtomicUsize,
     /// Number of threads currently executing work.
@@ -487,6 +494,7 @@ impl BlockingPool {
         let inner = Arc::new(BlockingPoolInner {
             min_threads,
             max_threads,
+            live_max_threads: AtomicUsize::new(max_threads),
             active_threads: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
@@ -648,6 +656,36 @@ impl BlockingPool {
         target: PoolSizingTarget,
     ) -> PoolSizingDecision {
         blocking_pool_advisory_pool_sizing_decision(&self.inner, estimate, target)
+    }
+
+    /// The live operational cap on worker spawns (yj2nxx.7).
+    ///
+    /// Starts at the configured `max_threads` and is adjusted by
+    /// [`set_max_threads`](Self::set_max_threads) within
+    /// `[min_threads, max_threads]`. `pool_sizing_bounds()` keeps reporting the
+    /// configured floor/ceiling.
+    #[must_use]
+    pub fn current_max_threads(&self) -> usize {
+        blocking_pool_current_max_threads(&self.inner)
+    }
+
+    /// Set the live spawn cap, clamped into `[min_threads, max_threads]`.
+    ///
+    /// The configured `max_threads` is the hard ceiling. A shrink only blocks
+    /// new spawns; threads above the cap retire naturally via idle timeout, so
+    /// the pool's atomic claim/retire invariants are preserved. Returns the
+    /// clamped value actually applied.
+    pub fn set_max_threads(&self, requested: usize) -> usize {
+        blocking_pool_set_max_threads(&self.inner, requested)
+    }
+
+    /// Apply a managed pool-sizing decision to the live spawn cap.
+    ///
+    /// Only [`PoolSizingAction::Resize`] mutates the cap (clamped into the
+    /// configured bounds); advisory mode and hysteresis/cadence holds are
+    /// no-ops. Returns the applied size when a resize was taken.
+    pub fn apply_pool_sizing_decision(&self, decision: &PoolSizingDecision) -> Option<usize> {
+        blocking_pool_apply_pool_sizing_decision(&self.inner, decision)
     }
 
     /// Returns `true` if the pool is shut down.
@@ -847,6 +885,29 @@ impl BlockingPoolHandle {
         blocking_pool_advisory_pool_sizing_decision(&self.inner, estimate, target)
     }
 
+    /// The live operational cap on worker spawns (yj2nxx.7).
+    #[must_use]
+    pub fn current_max_threads(&self) -> usize {
+        blocking_pool_current_max_threads(&self.inner)
+    }
+
+    /// Set the live spawn cap, clamped into `[min_threads, max_threads]`.
+    ///
+    /// See [`BlockingPool::set_max_threads`]; the configured `max_threads` stays
+    /// the hard ceiling and a shrink only blocks new spawns.
+    pub fn set_max_threads(&self, requested: usize) -> usize {
+        blocking_pool_set_max_threads(&self.inner, requested)
+    }
+
+    /// Apply a managed pool-sizing decision to the live spawn cap.
+    ///
+    /// Only [`PoolSizingAction::Resize`] mutates the cap; advisory and
+    /// hysteresis/cadence holds are no-ops. Returns the applied size when a
+    /// resize was taken.
+    pub fn apply_pool_sizing_decision(&self, decision: &PoolSizingDecision) -> Option<usize> {
+        blocking_pool_apply_pool_sizing_decision(&self.inner, decision)
+    }
+
     /// Returns a snapshot of locality-routing activity for this handle's pool.
     #[must_use]
     pub fn affinity_metrics(&self) -> BlockingPoolAffinityMetricsSnapshot {
@@ -915,6 +976,28 @@ fn blocking_pool_affinity_metrics(
 
 fn blocking_pool_sizing_bounds(inner: &BlockingPoolInner) -> PoolSizingBounds {
     PoolSizingBounds::new(inner.min_threads, inner.max_threads)
+}
+
+fn blocking_pool_current_max_threads(inner: &BlockingPoolInner) -> usize {
+    inner.live_max_threads.load(Ordering::Relaxed)
+}
+
+fn blocking_pool_set_max_threads(inner: &BlockingPoolInner, requested: usize) -> usize {
+    let applied = requested.max(inner.min_threads).min(inner.max_threads);
+    inner.live_max_threads.store(applied, Ordering::Relaxed);
+    applied
+}
+
+fn blocking_pool_apply_pool_sizing_decision(
+    inner: &BlockingPoolInner,
+    decision: &PoolSizingDecision,
+) -> Option<usize> {
+    match decision.action {
+        PoolSizingAction::Resize { to_size, .. } => {
+            Some(blocking_pool_set_max_threads(inner, to_size))
+        }
+        _ => None,
+    }
 }
 
 fn blocking_pool_sizing_controller_state(inner: &BlockingPoolInner) -> PoolSizingControllerState {
@@ -1054,12 +1137,12 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     // from seeing stale counts and bypassing the limit simultaneously
     loop {
         let current = inner.active_threads.load(Ordering::Acquire);
-        if current >= inner.max_threads {
+        if current >= inner.live_max_threads.load(Ordering::Relaxed) {
             return;
         }
 
         // Double-check limit before increment to prevent TOCTOU bypass
-        if current + 1 > inner.max_threads {
+        if current + 1 > inner.live_max_threads.load(Ordering::Relaxed) {
             return;
         }
 
@@ -1147,7 +1230,7 @@ fn maybe_spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     //    (idle = active - busy). This handles bursts of tasks correctly
     //    even before threads have woken up to increment `busy_threads`.
     let idle = active.saturating_sub(busy);
-    if active < inner.max_threads && pending > idle {
+    if active < inner.live_max_threads.load(Ordering::Relaxed) && pending > idle {
         spawn_thread_on_inner(inner);
     }
 }
@@ -1250,7 +1333,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
                         let mut current = inner.active_threads.load(Ordering::Relaxed);
                         let mut unretired = false;
                         loop {
-                            if current >= inner.max_threads {
+                            if current >= inner.live_max_threads.load(Ordering::Relaxed) {
                                 break;
                             }
                             match inner.active_threads.compare_exchange_weak(
@@ -1396,6 +1479,7 @@ mod tests {
         Arc::new(BlockingPoolInner {
             min_threads: 0,
             max_threads: 4,
+            live_max_threads: AtomicUsize::new(4),
             active_threads: AtomicUsize::new(0),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
@@ -2056,6 +2140,7 @@ mod tests {
         let inner = Arc::new(BlockingPoolInner {
             min_threads: 1,
             max_threads: 2,
+            live_max_threads: AtomicUsize::new(2),
             active_threads: AtomicUsize::new(2),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
@@ -2160,6 +2245,7 @@ mod tests {
         let inner = Arc::new(BlockingPoolInner {
             min_threads: 0,
             max_threads: 2,
+            live_max_threads: AtomicUsize::new(2),
             active_threads: AtomicUsize::new(2),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
@@ -2198,6 +2284,7 @@ mod tests {
         let inner = Arc::new(BlockingPoolInner {
             min_threads: 0,
             max_threads: 1,
+            live_max_threads: AtomicUsize::new(1),
             active_threads: AtomicUsize::new(1),
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
