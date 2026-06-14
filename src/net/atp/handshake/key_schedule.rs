@@ -144,14 +144,14 @@ impl KeySchedule {
         local_keys: KeyMaterial,
         remote_keys: KeyMaterial,
     ) -> Outcome<(), HandshakeError> {
-        // Verify keys are not zero
-        match KeyDerivation::verify_non_zero_keys(&local_keys) {
+        // Verify initial keys match RFC 9001 Initial packet protection.
+        match KeyDerivation::verify_key_material(&local_keys, INITIAL_KEY_MATERIAL) {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
-        match KeyDerivation::verify_non_zero_keys(&remote_keys) {
+        match KeyDerivation::verify_key_material(&remote_keys, INITIAL_KEY_MATERIAL) {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -170,14 +170,14 @@ impl KeySchedule {
         local_keys: KeyMaterial,
         remote_keys: KeyMaterial,
     ) -> Outcome<(), HandshakeError> {
-        // Verify keys are not zero
-        match KeyDerivation::verify_non_zero_keys(&local_keys) {
+        // Verify keys match this module's traffic-key profile.
+        match KeyDerivation::verify_key_material(&local_keys, DEFAULT_TRAFFIC_KEY_MATERIAL) {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
-        match KeyDerivation::verify_non_zero_keys(&remote_keys) {
+        match KeyDerivation::verify_key_material(&remote_keys, DEFAULT_TRAFFIC_KEY_MATERIAL) {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -196,14 +196,14 @@ impl KeySchedule {
         local_keys: KeyMaterial,
         remote_keys: KeyMaterial,
     ) -> Outcome<(), HandshakeError> {
-        // Verify keys are not zero
-        match KeyDerivation::verify_non_zero_keys(&local_keys) {
+        // Verify keys match this module's traffic-key profile.
+        match KeyDerivation::verify_key_material(&local_keys, DEFAULT_TRAFFIC_KEY_MATERIAL) {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
-        match KeyDerivation::verify_non_zero_keys(&remote_keys) {
+        match KeyDerivation::verify_key_material(&remote_keys, DEFAULT_TRAFFIC_KEY_MATERIAL) {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -277,14 +277,14 @@ impl KeySchedule {
     /// Commit to next key phase (after receiving key update from peer)
     pub fn commit_key_update(&mut self) -> Outcome<(), HandshakeError> {
         if let Some((local_keys, remote_keys)) = self.next_phase_keys.take() {
-            // Verify updated keys are not zero
-            match KeyDerivation::verify_non_zero_keys(&local_keys) {
+            // Verify updated keys match this module's traffic-key profile.
+            match KeyDerivation::verify_key_material(&local_keys, DEFAULT_TRAFFIC_KEY_MATERIAL) {
                 Outcome::Ok(()) => {}
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(r) => return Outcome::Cancelled(r),
                 Outcome::Panicked(p) => return Outcome::Panicked(p),
             }
-            match KeyDerivation::verify_non_zero_keys(&remote_keys) {
+            match KeyDerivation::verify_key_material(&remote_keys, DEFAULT_TRAFFIC_KEY_MATERIAL) {
                 Outcome::Ok(()) => {}
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -352,6 +352,35 @@ const INITIAL_SALT: &[u8] = &[
     0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
     0xcc, 0xbb, 0x7f, 0x0a,
 ];
+const TRAFFIC_SECRET_LEN: usize = 32;
+const INITIAL_KEY_LEN: usize = 16;
+const INITIAL_IV_LEN: usize = 12;
+const INITIAL_HP_KEY_LEN: usize = 16;
+const DEFAULT_TRAFFIC_KEY_LEN: usize = 32;
+const DEFAULT_TRAFFIC_IV_LEN: usize = 12;
+const DEFAULT_TRAFFIC_HP_KEY_LEN: usize = 32;
+
+#[derive(Debug, Clone, Copy)]
+struct KeyMaterialShape {
+    name: &'static str,
+    key_len: usize,
+    iv_len: usize,
+    hp_key_len: usize,
+}
+
+const INITIAL_KEY_MATERIAL: KeyMaterialShape = KeyMaterialShape {
+    name: "initial",
+    key_len: INITIAL_KEY_LEN,
+    iv_len: INITIAL_IV_LEN,
+    hp_key_len: INITIAL_HP_KEY_LEN,
+};
+
+const DEFAULT_TRAFFIC_KEY_MATERIAL: KeyMaterialShape = KeyMaterialShape {
+    name: "traffic",
+    key_len: DEFAULT_TRAFFIC_KEY_LEN,
+    iv_len: DEFAULT_TRAFFIC_IV_LEN,
+    hp_key_len: DEFAULT_TRAFFIC_HP_KEY_LEN,
+};
 
 /// Key derivation utilities implementing RFC 9001 QUIC-TLS
 pub struct KeyDerivation;
@@ -361,39 +390,35 @@ impl KeyDerivation {
     pub fn derive_initial_keys(
         connection_id: &[u8],
     ) -> Outcome<(KeyMaterial, KeyMaterial), HandshakeError> {
-        if connection_id.is_empty() {
-            return Outcome::Err(HandshakeError::ProtectionError {
-                reason: "connection ID cannot be empty for initial key derivation".to_string(),
-            });
-        }
-
         // HKDF-Extract with Initial salt
         let hkdf = HkdfSha256::new(Some(INITIAL_SALT), connection_id);
 
         // Derive client initial secret
-        let client_secret = match Self::hkdf_expand_label(&hkdf, 32, b"client in", &[]) {
-            Outcome::Ok(secret) => secret,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
-        };
+        let client_secret =
+            match Self::hkdf_expand_label(&hkdf, TRAFFIC_SECRET_LEN, b"client in", &[]) {
+                Outcome::Ok(secret) => secret,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
 
         // Derive server initial secret
-        let server_secret = match Self::hkdf_expand_label(&hkdf, 32, b"server in", &[]) {
-            Outcome::Ok(secret) => secret,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
-        };
+        let server_secret =
+            match Self::hkdf_expand_label(&hkdf, TRAFFIC_SECRET_LEN, b"server in", &[]) {
+                Outcome::Ok(secret) => secret,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
 
         // Derive key material from secrets
-        let client_keys = match Self::derive_keys_from_secret(&client_secret) {
+        let client_keys = match Self::derive_initial_keys_from_secret(&client_secret) {
             Outcome::Ok(keys) => keys,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
             Outcome::Panicked(p) => return Outcome::Panicked(p),
         };
-        let server_keys = match Self::derive_keys_from_secret(&server_secret) {
+        let server_keys = match Self::derive_initial_keys_from_secret(&server_secret) {
             Outcome::Ok(keys) => keys,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -457,18 +482,31 @@ impl KeyDerivation {
             }
         };
 
-        let updated_secret = match Self::hkdf_expand_label(&hkdf, 32, b"traffic upd", &[]) {
-            Outcome::Ok(secret) => secret,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
-        };
+        let updated_secret =
+            match Self::hkdf_expand_label(&hkdf, TRAFFIC_SECRET_LEN, b"quic ku", &[]) {
+                Outcome::Ok(secret) => secret,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
 
         Self::derive_keys_from_secret(&updated_secret)
     }
 
     /// Derive key material (key, IV, header protection key) from a traffic secret
     fn derive_keys_from_secret(secret: &[u8]) -> Outcome<KeyMaterial, HandshakeError> {
+        Self::derive_key_material_from_secret(secret, DEFAULT_TRAFFIC_KEY_MATERIAL)
+    }
+
+    /// Derive Initial packet key material from an Initial traffic secret.
+    fn derive_initial_keys_from_secret(secret: &[u8]) -> Outcome<KeyMaterial, HandshakeError> {
+        Self::derive_key_material_from_secret(secret, INITIAL_KEY_MATERIAL)
+    }
+
+    fn derive_key_material_from_secret(
+        secret: &[u8],
+        shape: KeyMaterialShape,
+    ) -> Outcome<KeyMaterial, HandshakeError> {
         let hkdf = match HkdfSha256::from_prk(secret) {
             Ok(hkdf) => hkdf,
             Err(_) => {
@@ -478,24 +516,21 @@ impl KeyDerivation {
             }
         };
 
-        // Derive packet protection key (32 bytes for AES-256-GCM)
-        let key = match Self::hkdf_expand_label(&hkdf, 32, b"quic key", &[]) {
+        let key = match Self::hkdf_expand_label(&hkdf, shape.key_len, b"quic key", &[]) {
             Outcome::Ok(k) => k,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
             Outcome::Panicked(p) => return Outcome::Panicked(p),
         };
 
-        // Derive IV (12 bytes for AES-GCM)
-        let iv = match Self::hkdf_expand_label(&hkdf, 12, b"quic iv", &[]) {
+        let iv = match Self::hkdf_expand_label(&hkdf, shape.iv_len, b"quic iv", &[]) {
             Outcome::Ok(i) => i,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
             Outcome::Panicked(p) => return Outcome::Panicked(p),
         };
 
-        // Derive header protection key (32 bytes for AES-256)
-        let hp_key = match Self::hkdf_expand_label(&hkdf, 32, b"quic hp", &[]) {
+        let hp_key = match Self::hkdf_expand_label(&hkdf, shape.hp_key_len, b"quic hp", &[]) {
             Outcome::Ok(h) => h,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -503,6 +538,46 @@ impl KeyDerivation {
         };
 
         Outcome::ok(KeyMaterial::new(key, iv, hp_key))
+    }
+
+    fn verify_key_material(
+        keys: &KeyMaterial,
+        shape: KeyMaterialShape,
+    ) -> Outcome<(), HandshakeError> {
+        if keys.key.len() != shape.key_len {
+            return Outcome::Err(HandshakeError::ProtectionError {
+                reason: format!(
+                    "{} packet protection key must be {} bytes, got {}",
+                    shape.name,
+                    shape.key_len,
+                    keys.key.len()
+                ),
+            });
+        }
+
+        if keys.iv.len() != shape.iv_len {
+            return Outcome::Err(HandshakeError::ProtectionError {
+                reason: format!(
+                    "{} IV must be {} bytes, got {}",
+                    shape.name,
+                    shape.iv_len,
+                    keys.iv.len()
+                ),
+            });
+        }
+
+        if keys.hp_key.len() != shape.hp_key_len {
+            return Outcome::Err(HandshakeError::ProtectionError {
+                reason: format!(
+                    "{} header protection key must be {} bytes, got {}",
+                    shape.name,
+                    shape.hp_key_len,
+                    keys.hp_key.len()
+                ),
+            });
+        }
+
+        Self::verify_non_zero_keys(keys)
     }
 
     /// HKDF-Expand-Label implementation for QUIC (RFC 9001, Section 5.1)
@@ -585,6 +660,30 @@ impl KeyDerivation {
 mod tests {
     use super::*;
 
+    fn initial_test_keys(base: u8) -> KeyMaterial {
+        KeyMaterial::new(
+            vec![base; INITIAL_KEY_LEN],
+            vec![base.wrapping_add(1); INITIAL_IV_LEN],
+            vec![base.wrapping_add(2); INITIAL_HP_KEY_LEN],
+        )
+    }
+
+    fn traffic_test_keys(base: u8) -> KeyMaterial {
+        KeyMaterial::new(
+            vec![base; DEFAULT_TRAFFIC_KEY_LEN],
+            vec![base.wrapping_add(1); DEFAULT_TRAFFIC_IV_LEN],
+            vec![base.wrapping_add(2); DEFAULT_TRAFFIC_HP_KEY_LEN],
+        )
+    }
+
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
     #[test]
     fn test_key_schedule_creation() {
         let schedule = KeySchedule::new();
@@ -600,8 +699,8 @@ mod tests {
         let mut schedule = KeySchedule::new();
 
         // Create non-zero test keys
-        let local_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
-        let remote_keys = KeyMaterial::new(vec![4u8; 32], vec![5u8; 12], vec![6u8; 32]);
+        let local_keys = initial_test_keys(1);
+        let remote_keys = initial_test_keys(4);
 
         assert!(
             schedule
@@ -618,12 +717,40 @@ mod tests {
         let mut schedule = KeySchedule::new();
 
         // Zero keys should be rejected
-        let zero_keys = KeyMaterial::zero(32, 12);
-        let non_zero_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
+        let zero_keys = KeyMaterial::zero(INITIAL_KEY_LEN, INITIAL_IV_LEN);
+        let non_zero_keys = initial_test_keys(1);
 
         assert!(
             schedule
                 .install_initial_keys(zero_keys, non_zero_keys)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_initial_install_rejects_wrong_key_lengths() {
+        let mut schedule = KeySchedule::new();
+
+        let traffic_sized_keys = traffic_test_keys(1);
+        let initial_keys = initial_test_keys(4);
+
+        assert!(
+            schedule
+                .install_initial_keys(traffic_sized_keys, initial_keys)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_application_install_rejects_wrong_key_lengths() {
+        let mut schedule = KeySchedule::new();
+
+        let initial_sized_keys = initial_test_keys(1);
+        let traffic_keys = traffic_test_keys(4);
+
+        assert!(
+            schedule
+                .install_application_keys(initial_sized_keys, traffic_keys)
                 .is_err()
         );
     }
@@ -663,12 +790,14 @@ mod tests {
     fn test_key_discard_rules() {
         let mut schedule = KeySchedule::new();
 
-        let local_keys = KeyMaterial::new(vec![1u8; 32], vec![2u8; 12], vec![3u8; 32]);
-        let remote_keys = KeyMaterial::new(vec![4u8; 32], vec![5u8; 12], vec![6u8; 32]);
+        let initial_local_keys = initial_test_keys(1);
+        let initial_remote_keys = initial_test_keys(4);
+        let local_keys = traffic_test_keys(7);
+        let remote_keys = traffic_test_keys(10);
 
         // Install all keys
         schedule
-            .install_initial_keys(local_keys.clone(), remote_keys.clone())
+            .install_initial_keys(initial_local_keys, initial_remote_keys)
             .unwrap();
         schedule
             .install_handshake_keys(local_keys.clone(), remote_keys.clone())
@@ -703,12 +832,12 @@ mod tests {
         let (client_keys, server_keys) = result.unwrap();
 
         // Verify key lengths
-        assert_eq!(client_keys.key.len(), 32);
-        assert_eq!(client_keys.iv.len(), 12);
-        assert_eq!(client_keys.hp_key.len(), 32);
-        assert_eq!(server_keys.key.len(), 32);
-        assert_eq!(server_keys.iv.len(), 12);
-        assert_eq!(server_keys.hp_key.len(), 32);
+        assert_eq!(client_keys.key.len(), INITIAL_KEY_LEN);
+        assert_eq!(client_keys.iv.len(), INITIAL_IV_LEN);
+        assert_eq!(client_keys.hp_key.len(), INITIAL_HP_KEY_LEN);
+        assert_eq!(server_keys.key.len(), INITIAL_KEY_LEN);
+        assert_eq!(server_keys.iv.len(), INITIAL_IV_LEN);
+        assert_eq!(server_keys.hp_key.len(), INITIAL_HP_KEY_LEN);
 
         // Keys should be different
         assert_ne!(client_keys.key, server_keys.key);
@@ -721,9 +850,9 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_connection_id_rejection() {
+    fn test_empty_connection_id_derivation_allowed() {
         let result = KeyDerivation::derive_initial_keys(&[]);
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -765,6 +894,29 @@ mod tests {
     }
 
     #[test]
+    fn test_key_update_uses_quic_update_label() {
+        let current_secret = vec![0xAAu8; TRAFFIC_SECRET_LEN];
+        let actual = KeyDerivation::derive_updated_keys(&current_secret).unwrap();
+        let hkdf = HkdfSha256::from_prk(&current_secret).unwrap();
+
+        let quic_update_secret =
+            KeyDerivation::hkdf_expand_label(&hkdf, TRAFFIC_SECRET_LEN, b"quic ku", &[]).unwrap();
+        let quic_expected = KeyDerivation::derive_keys_from_secret(&quic_update_secret).unwrap();
+
+        let tls_update_secret =
+            KeyDerivation::hkdf_expand_label(&hkdf, TRAFFIC_SECRET_LEN, b"traffic upd", &[])
+                .unwrap();
+        let tls_expected = KeyDerivation::derive_keys_from_secret(&tls_update_secret).unwrap();
+
+        assert_eq!(actual.key, quic_expected.key);
+        assert_eq!(actual.iv, quic_expected.iv);
+        assert_eq!(actual.hp_key, quic_expected.hp_key);
+        assert_ne!(actual.key, tls_expected.key);
+        assert_ne!(actual.iv, tls_expected.iv);
+        assert_ne!(actual.hp_key, tls_expected.hp_key);
+    }
+
+    #[test]
     fn test_empty_secret_rejection() {
         assert!(KeyDerivation::derive_handshake_keys(&[]).is_err());
         assert!(KeyDerivation::derive_application_keys(&[]).is_err());
@@ -772,25 +924,29 @@ mod tests {
     }
 
     #[test]
-    fn test_rfc9001_initial_keys_deterministic() {
-        // Test with a known connection ID to ensure deterministic derivation
+    fn test_rfc9001_initial_keys_match_appendix_a_vector() {
         let connection_id = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
-        let result1 = KeyDerivation::derive_initial_keys(&connection_id);
-        let result2 = KeyDerivation::derive_initial_keys(&connection_id);
+        let (client_keys, server_keys) =
+            KeyDerivation::derive_initial_keys(&connection_id).unwrap();
 
-        assert!(result1.is_ok());
-        assert!(result2.is_ok());
-
-        let (client_keys1, server_keys1) = result1.unwrap();
-        let (client_keys2, server_keys2) = result2.unwrap();
-
-        // Derivation should be deterministic
-        assert_eq!(client_keys1.key, client_keys2.key);
-        assert_eq!(client_keys1.iv, client_keys2.iv);
-        assert_eq!(client_keys1.hp_key, client_keys2.hp_key);
-        assert_eq!(server_keys1.key, server_keys2.key);
-        assert_eq!(server_keys1.iv, server_keys2.iv);
-        assert_eq!(server_keys1.hp_key, server_keys2.hp_key);
+        assert_eq!(
+            client_keys.key,
+            decode_hex("1f369613dd76d5467730efcbe3b1a22d")
+        );
+        assert_eq!(client_keys.iv, decode_hex("fa044b2f42a3fd3b46fb255c"));
+        assert_eq!(
+            client_keys.hp_key,
+            decode_hex("9f50449e04a0e810283a1e9933adedd2")
+        );
+        assert_eq!(
+            server_keys.key,
+            decode_hex("cf3a5331653c364c88f0f379b6067e37")
+        );
+        assert_eq!(server_keys.iv, decode_hex("0ac1493ca1905853b0bba03e"));
+        assert_eq!(
+            server_keys.hp_key,
+            decode_hex("c206b8d9b9f0f37644430b490eeaa314")
+        );
     }
 
     #[test]
