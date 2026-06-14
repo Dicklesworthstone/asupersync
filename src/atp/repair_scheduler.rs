@@ -7,7 +7,7 @@ use crate::atp::object::ObjectId;
 use crate::error::Result;
 use crate::error::{Error, ErrorKind};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
 #[cfg(feature = "tracing-integration")]
@@ -259,6 +259,13 @@ impl std::fmt::Display for RejectionReason {
     }
 }
 
+/// Upper bound on how many recent rejected requests are retained for
+/// diagnostics. A long-lived, churny transfer can reject an unbounded number of
+/// symbols (timeouts, hijacks, low-trust peers); retaining every one of them
+/// would leak memory for the lifetime of the scheduler. Older rejections are
+/// dropped past this cap while `rejected_total` keeps the lifetime count.
+const MAX_RETAINED_REJECTIONS: usize = 256;
+
 /// Multi-source repair scheduler for RaptorQ symbols
 #[derive(Debug)]
 pub struct MultiSourceRepairScheduler {
@@ -271,7 +278,9 @@ pub struct MultiSourceRepairScheduler {
     peers: HashMap<PeerId, PeerInfo>,
     received_symbols: HashSet<u32>,
     pending_requests: HashMap<u32, RepairSymbolRequest>,
-    rejected_requests: Vec<(RepairSymbolRequest, RejectionReason)>,
+    rejected_requests: VecDeque<(RepairSymbolRequest, RejectionReason)>,
+    /// Lifetime count of rejected symbol requests (not bounded by retention).
+    rejected_total: u64,
     decode_matrix: DecodeMatrix,
     symbol_rarity_map: HashMap<u32, f64>,
 }
@@ -292,7 +301,8 @@ impl MultiSourceRepairScheduler {
             peers: HashMap::new(),
             received_symbols: HashSet::new(),
             pending_requests: HashMap::new(),
-            rejected_requests: Vec::new(),
+            rejected_requests: VecDeque::new(),
+            rejected_total: 0,
             decode_matrix: DecodeMatrix::new(k_prime),
             symbol_rarity_map: HashMap::new(),
         }
@@ -402,7 +412,7 @@ impl MultiSourceRepairScheduler {
             if matches!(reason, RejectionReason::MaliciousPeer { .. }) {
                 self.update_peer_trust(from_peer, false);
             } else if let Some(request) = self.pending_requests.remove(&symbol_index) {
-                self.rejected_requests.push((request, reason.clone()));
+                self.record_rejection(request, reason.clone());
             }
 
             return Ok(SymbolProcessResult::Rejected { reason });
@@ -444,7 +454,7 @@ impl MultiSourceRepairScheduler {
             decode_progress_ratio: self.decode_matrix.decode_progress(),
             pending_requests: self.pending_requests.len(),
             active_peers: self.peers.len(),
-            rejected_symbols: self.rejected_requests.len(),
+            rejected_symbols: self.rejected_total as usize,
         }
     }
 
@@ -648,14 +658,32 @@ impl MultiSourceRepairScheduler {
                     request.peer_id.as_string()
                 );
 
+                // A peer that let its assigned symbol time out is an unreliable
+                // source; decay its trust so the scheduler stops re-selecting a
+                // dead/slow peer for the re-request and gives healthier peers a
+                // turn. Without this, a departed peer keeps full trust and is
+                // chosen again, stalling the symbol indefinitely.
+                self.update_peer_trust(&request.peer_id, false);
+
                 let reason = RejectionReason::StaleSymbol {
                     age_ms: now
                         .duration_since(request.requested_at)
                         .unwrap_or_default()
                         .as_millis() as u64,
                 };
-                self.rejected_requests.push((request, reason));
+                self.record_rejection(request, reason);
             }
+        }
+    }
+
+    /// Record a rejected symbol request for diagnostics while bounding the
+    /// retained history. The lifetime count is tracked separately so progress
+    /// statistics stay accurate even after older rejections are evicted.
+    fn record_rejection(&mut self, request: RepairSymbolRequest, reason: RejectionReason) {
+        self.rejected_total = self.rejected_total.saturating_add(1);
+        self.rejected_requests.push_back((request, reason));
+        while self.rejected_requests.len() > MAX_RETAINED_REJECTIONS {
+            self.rejected_requests.pop_front();
         }
     }
 
@@ -1294,6 +1322,79 @@ mod tests {
         assert!(
             matches!(honest, SymbolProcessResult::Accepted { .. }),
             "the requested peer's delivery must still be accepted"
+        );
+    }
+
+    #[test]
+    fn timed_out_request_decays_the_assigned_peer_trust() {
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            3,
+        );
+
+        let peer_id = create_test_peer_id(8001);
+        let peer_info = create_test_peer_info(&scheduler, peer_id.clone(), vec![1, 2, 3]);
+        scheduler.register_peer(peer_info).unwrap();
+
+        let requests = scheduler.schedule_next_batch().unwrap();
+        assert!(!requests.is_empty(), "expected scheduled requests");
+
+        let trust_before = scheduler.peers.get(&peer_id).unwrap().trust_score;
+
+        // Advance past the request timeout and run the cleanup sweep.
+        let later =
+            SystemTime::now() + scheduler.config.symbol_timeout_duration + Duration::from_secs(1);
+        scheduler.cleanup_timed_out_requests(later);
+
+        let trust_after = scheduler.peers.get(&peer_id).unwrap().trust_score;
+        assert!(
+            trust_after < trust_before,
+            "a timed-out peer's trust must decay: {trust_before} -> {trust_after}"
+        );
+        assert!(
+            scheduler.pending_requests.is_empty(),
+            "timed-out requests must be cleared"
+        );
+        assert_eq!(
+            scheduler.get_decode_progress().rejected_symbols,
+            requests.len(),
+            "every timed-out request is counted as rejected"
+        );
+    }
+
+    #[test]
+    fn rejected_request_history_is_bounded_but_total_count_is_exact() {
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            3,
+        );
+
+        let peer_id = create_test_peer_id(8001);
+        let total = MAX_RETAINED_REJECTIONS + 50;
+        for index in 0..total {
+            let request = RepairSymbolRequest {
+                symbol_index: index as u32,
+                peer_id: peer_id.clone(),
+                requested_at: SystemTime::now(),
+                decode_usefulness: 0.0,
+                retry_count: 0,
+                timeout_at: SystemTime::now(),
+            };
+            scheduler.record_rejection(request, RejectionReason::DuplicateSymbol);
+        }
+
+        assert!(
+            scheduler.rejected_requests.len() <= MAX_RETAINED_REJECTIONS,
+            "retained rejection history must stay bounded"
+        );
+        assert_eq!(
+            scheduler.get_decode_progress().rejected_symbols,
+            total,
+            "lifetime rejected count must remain exact despite bounded retention"
         );
     }
 
