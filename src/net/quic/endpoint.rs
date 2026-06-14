@@ -1,6 +1,11 @@
 //! QUIC endpoint type.
 //!
 //! Provides cancel-correct endpoint management for QUIC connections.
+//!
+//! ORPHANED LEGACY WRAPPER: the live `net::quic` API is the inline module in
+//! `src/net/mod.rs`, which aliases to `src/net/quic_native`. This directory is
+//! intentionally not wired into the crate root. If it is ever reintroduced, it
+//! must stay fail-closed for certificate verification.
 
 use super::config::{ClientAuth, QuicConfig};
 use super::connection::QuicConnection;
@@ -45,10 +50,11 @@ impl QuicEndpoint {
         };
 
         let mut crypto = if config.insecure_skip_verify {
-            rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-                .with_no_client_auth()
+            return Err(QuicError::Config(
+                "insecure_skip_verify is disabled in the orphaned legacy QUIC wrapper; \
+                 use the live quic_native stack or provide trusted roots"
+                    .into(),
+            ));
         } else {
             if root_certs.is_empty() {
                 return Err(QuicError::Config(
@@ -266,58 +272,6 @@ where
     .await
 }
 
-/// Skip server certificate verification (for testing).
-///
-/// WARNING: This is insecure and should only be used in controlled environments.
-#[derive(Debug)]
-struct SkipServerVerification;
-
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -334,6 +288,19 @@ mod tests {
 
     fn noop_waker() -> std::task::Waker {
         std::task::Waker::noop().clone()
+    }
+
+    #[test]
+    fn client_rejects_insecure_skip_verify() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig::new().insecure_skip_verify(true);
+        let err = QuicEndpoint::client(&cx, &config).expect_err("skip verify must fail closed");
+        match err {
+            QuicError::Config(message) => {
+                assert!(message.contains("insecure_skip_verify"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     struct PendingOnce {
