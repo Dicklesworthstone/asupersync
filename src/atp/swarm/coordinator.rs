@@ -98,7 +98,16 @@ struct PieceRequest {
     /// Retry count
     retry_count: u32,
 
-    /// Priority level
+    /// Priority level.
+    ///
+    /// br-asupersync-yms9p9: reserved for priority-ordered reassignment — set
+    /// from the assignment at construction but not yet read by the scheduler.
+    /// Without this allow the write-only field trips `deny(dead_code)`
+    /// (`lib.rs` crate attr) on every non-test lib build — integration tests,
+    /// release, and downstream consumers — even though `cargo test --lib`
+    /// happens to pass. Wire the read or drop the field when the reassignment
+    /// policy consumes it.
+    #[allow(dead_code)]
     priority: u32,
 }
 
