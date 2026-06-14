@@ -2359,6 +2359,30 @@ impl<Caps> Cx<Caps> {
         self.inner.read().materialised_checkpoint_state()
     }
 
+    /// Returns the oldest-to-newest history of message checkpoints.
+    ///
+    /// Messageless [`checkpoint`](Self::checkpoint) calls update checkpoint
+    /// count and time only; they do not allocate or append history entries.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// cx.checkpoint_with("connected")?;
+    /// cx.checkpoint_with("querying")?;
+    /// let trail = cx.checkpoint_history();
+    /// assert_eq!(trail.last().map(|(_, msg)| msg.as_str()), Some("querying"));
+    /// ```
+    #[must_use]
+    pub fn checkpoint_history(&self) -> Vec<(Time, String)> {
+        self.inner
+            .read()
+            .materialised_checkpoint_state()
+            .history()
+            .into_iter()
+            .map(|entry| (entry.at, entry.message))
+            .collect()
+    }
+
     /// Returns the current physical time according to the configured timer driver,
     /// or the wall clock if no timer driver is available.
     #[must_use]
@@ -5458,6 +5482,24 @@ mod tests {
         let state = cx.checkpoint_state();
         assert_eq!(state.last_message.as_deref(), Some("processing step 2"));
         assert_eq!(state.checkpoint_count, 2);
+    }
+
+    #[test]
+    fn checkpoint_history_returns_message_trail() {
+        let cx = test_cx();
+
+        cx.checkpoint_with("connect")
+            .expect("first checkpoint_with should succeed");
+        cx.checkpoint()
+            .expect("messageless checkpoint should succeed");
+        cx.checkpoint_with("query")
+            .expect("second checkpoint_with should succeed");
+
+        let history = cx.checkpoint_history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].1.as_str(), "connect");
+        assert_eq!(history[1].1.as_str(), "query");
+        assert!(history[0].0 <= history[1].0);
     }
 
     #[test]

@@ -19,6 +19,7 @@
 //! - **Resource accounting**: Budgets are tracked and enforced at the task level
 
 use crate::types::{Budget, CancelReason, CapabilityBudget, RegionId, TaskId, Time};
+use std::collections::VecDeque;
 use std::task::Waker;
 
 /// Maximum nesting depth for `Cx::masked()` sections.
@@ -42,6 +43,24 @@ pub const MAX_MASK_DEPTH: u32 = 64;
 /// reasonable nesting scenarios.
 pub const MAX_CONTEXT_STACK_DEPTH: usize = 32;
 
+/// Default number of message checkpoints retained per task.
+pub const DEFAULT_CHECKPOINT_HISTORY_CAPACITY: usize = 8;
+
+/// Hard cap on retained message checkpoints per task.
+pub const MAX_CHECKPOINT_HISTORY_CAPACITY: usize = 64;
+
+/// Maximum bytes retained for one checkpoint history message.
+pub const MAX_CHECKPOINT_HISTORY_MESSAGE_BYTES: usize = 64;
+
+/// One retained checkpoint message entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointHistoryEntry {
+    /// Runtime time when the checkpoint was recorded.
+    pub at: Time,
+    /// Bounded checkpoint message.
+    pub message: String,
+}
+
 /// State for tracking checkpoint progress.
 ///
 /// This struct tracks progress reporting checkpoints, which are distinct from
@@ -50,7 +69,7 @@ pub const MAX_CONTEXT_STACK_DEPTH: usize = 32;
 /// - Detecting stuck/stalled tasks
 /// - Work-stealing scheduler decisions
 /// - Observability and debugging
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CheckpointState {
     /// The runtime time of the last checkpoint.
     pub last_checkpoint: Option<Time>,
@@ -58,6 +77,10 @@ pub struct CheckpointState {
     pub last_message: Option<String>,
     /// The total number of checkpoints recorded.
     pub checkpoint_count: u64,
+    /// Bounded oldest-to-newest history of message checkpoints.
+    history: VecDeque<CheckpointHistoryEntry>,
+    /// Maximum number of message checkpoints to retain.
+    history_capacity: usize,
 }
 
 impl CheckpointState {
@@ -66,6 +89,38 @@ impl CheckpointState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a checkpoint state with a specific message-history capacity.
+    #[must_use]
+    pub fn with_history_capacity(capacity: usize) -> Self {
+        let mut state = Self::default();
+        state.set_history_capacity(capacity);
+        state
+    }
+
+    /// Returns the configured message-history capacity.
+    #[inline]
+    #[must_use]
+    pub const fn history_capacity(&self) -> usize {
+        self.history_capacity
+    }
+
+    /// Configures the message-history capacity.
+    pub fn set_history_capacity(&mut self, capacity: usize) {
+        self.history_capacity = capacity.min(MAX_CHECKPOINT_HISTORY_CAPACITY);
+        while self.history.len() > self.history_capacity {
+            self.history.pop_front();
+        }
+        if self.history_capacity == 0 {
+            self.history.clear();
+        }
+    }
+
+    /// Returns the oldest-to-newest message checkpoint history.
+    #[must_use]
+    pub fn history(&self) -> Vec<CheckpointHistoryEntry> {
+        self.history.iter().cloned().collect()
     }
 
     /// Records a checkpoint without a message.
@@ -106,10 +161,44 @@ impl CheckpointState {
     /// Records a checkpoint with a message at an explicit runtime time.
     #[inline]
     pub fn record_with_message_at(&mut self, message: String, at: Time) {
+        let bounded = truncate_checkpoint_history_message(&message);
         self.last_checkpoint = Some(at);
         self.last_message = Some(message);
         self.checkpoint_count += 1;
+        if self.history_capacity > 0 {
+            if self.history.len() == self.history_capacity {
+                self.history.pop_front();
+            }
+            self.history.push_back(CheckpointHistoryEntry {
+                at,
+                message: bounded,
+            });
+        }
     }
+}
+
+impl Default for CheckpointState {
+    fn default() -> Self {
+        Self {
+            last_checkpoint: None,
+            last_message: None,
+            checkpoint_count: 0,
+            history: VecDeque::with_capacity(DEFAULT_CHECKPOINT_HISTORY_CAPACITY),
+            history_capacity: DEFAULT_CHECKPOINT_HISTORY_CAPACITY,
+        }
+    }
+}
+
+fn truncate_checkpoint_history_message(message: &str) -> String {
+    if message.len() <= MAX_CHECKPOINT_HISTORY_MESSAGE_BYTES {
+        return message.to_owned();
+    }
+
+    let mut end = MAX_CHECKPOINT_HISTORY_MESSAGE_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message[..end].to_owned()
 }
 
 /// Internal state for a capability context.
@@ -269,6 +358,18 @@ mod tests {
             0,
             state.checkpoint_count
         );
+        crate::assert_with_log!(
+            state.history_capacity() == DEFAULT_CHECKPOINT_HISTORY_CAPACITY,
+            "checkpoint history capacity",
+            DEFAULT_CHECKPOINT_HISTORY_CAPACITY,
+            state.history_capacity()
+        );
+        crate::assert_with_log!(
+            state.history().is_empty(),
+            "checkpoint history empty",
+            true,
+            state.history().is_empty()
+        );
         crate::test_complete!("test_checkpoint_state_default");
     }
 
@@ -393,7 +494,81 @@ mod tests {
             1,
             state.checkpoint_count
         );
+        assert_eq!(
+            state.history(),
+            vec![CheckpointHistoryEntry {
+                at,
+                message: "hello".to_string()
+            }]
+        );
         crate::test_complete!("test_checkpoint_state_record_with_message_at");
+    }
+
+    #[test]
+    fn checkpoint_history_preserves_oldest_to_newest_with_capacity() {
+        init_test("checkpoint_history_preserves_oldest_to_newest_with_capacity");
+        let mut state = CheckpointState::with_history_capacity(2);
+
+        state.record_with_message_at("one".to_string(), Time::from_nanos(1));
+        state.record_with_message_at("two".to_string(), Time::from_nanos(2));
+        state.record_with_message_at("three".to_string(), Time::from_nanos(3));
+
+        assert_eq!(
+            state.history(),
+            vec![
+                CheckpointHistoryEntry {
+                    at: Time::from_nanos(2),
+                    message: "two".to_string(),
+                },
+                CheckpointHistoryEntry {
+                    at: Time::from_nanos(3),
+                    message: "three".to_string(),
+                },
+            ]
+        );
+        crate::test_complete!("checkpoint_history_preserves_oldest_to_newest_with_capacity");
+    }
+
+    #[test]
+    fn checkpoint_history_can_be_disabled() {
+        init_test("checkpoint_history_can_be_disabled");
+        let mut state = CheckpointState::with_history_capacity(0);
+
+        state.record_with_message_at("hidden".to_string(), Time::from_nanos(9));
+
+        assert_eq!(state.last_message.as_deref(), Some("hidden"));
+        assert!(state.history().is_empty());
+        crate::test_complete!("checkpoint_history_can_be_disabled");
+    }
+
+    #[test]
+    fn checkpoint_history_truncates_long_messages_on_char_boundary() {
+        init_test("checkpoint_history_truncates_long_messages_on_char_boundary");
+        let mut state = CheckpointState::new();
+        let message = format!(
+            "{}{}",
+            "a".repeat(MAX_CHECKPOINT_HISTORY_MESSAGE_BYTES - 1),
+            "é"
+        );
+
+        state.record_with_message_at(message, Time::from_nanos(1));
+
+        let history = state.history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            state
+                .last_message
+                .as_ref()
+                .expect("last message should remain present")
+                .len(),
+            MAX_CHECKPOINT_HISTORY_MESSAGE_BYTES + 1
+        );
+        assert_eq!(
+            history[0].message.len(),
+            MAX_CHECKPOINT_HISTORY_MESSAGE_BYTES - 1
+        );
+        assert!(history[0].message.ends_with('a'));
+        crate::test_complete!("checkpoint_history_truncates_long_messages_on_char_boundary");
     }
 
     #[test]
