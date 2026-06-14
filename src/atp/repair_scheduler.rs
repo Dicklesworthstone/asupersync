@@ -6,10 +6,11 @@
 use crate::atp::object::ObjectId;
 use crate::error::Result;
 use crate::error::{Error, ErrorKind};
+use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 #[cfg(feature = "tracing-integration")]
 use tracing::{debug, info, warn};
 
@@ -135,7 +136,7 @@ pub struct PeerInfo {
     /// Churn probability (0.0 to 1.0)
     pub churn_probability: f64,
     /// Last seen timestamp
-    pub last_seen: SystemTime,
+    pub last_seen: Time,
     /// Authentication domain
     pub auth_domain: String,
 }
@@ -173,13 +174,13 @@ pub struct RepairSymbolRequest {
     /// Peer to request from
     pub peer_id: PeerId,
     /// Request timestamp
-    pub requested_at: SystemTime,
+    pub requested_at: Time,
     /// Expected usefulness for decode progress
     pub decode_usefulness: f64,
     /// Number of retries so far
     pub retry_count: u32,
     /// Timeout timestamp
-    pub timeout_at: SystemTime,
+    pub timeout_at: Time,
 }
 
 /// Reason why a symbol or peer was rejected
@@ -340,10 +341,13 @@ impl MultiSourceRepairScheduler {
         }
     }
 
-    /// Schedule next batch of symbol requests based on current decode state
-    pub fn schedule_next_batch(&mut self) -> Result<Vec<RepairSymbolRequest>> {
+    /// Schedule next batch of symbol requests based on current decode state.
+    ///
+    /// `now` is the caller-provided runtime time. Production callers can pass
+    /// runtime time, and lab callers can pass virtual time; the scheduler does
+    /// not consult host wall-clock state.
+    pub fn schedule_next_batch_at(&mut self, now: Time) -> Result<Vec<RepairSymbolRequest>> {
         let mut requests = Vec::new();
-        let now = SystemTime::now();
 
         // Remove timed-out requests
         self.cleanup_timed_out_requests(now);
@@ -669,7 +673,7 @@ impl MultiSourceRepairScheduler {
         self.decode_matrix.symbol_usefulness(symbol_index)
     }
 
-    fn cleanup_timed_out_requests(&mut self, now: SystemTime) {
+    fn cleanup_timed_out_requests(&mut self, now: Time) {
         let timed_out: Vec<u32> = self
             .pending_requests
             .iter()
@@ -693,10 +697,7 @@ impl MultiSourceRepairScheduler {
                 self.update_peer_trust(&request.peer_id, false);
 
                 let reason = RejectionReason::StaleSymbol {
-                    age_ms: now
-                        .duration_since(request.requested_at)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
+                    age_ms: now.duration_since(request.requested_at) / 1_000_000,
                 };
                 self.record_rejection(request, reason);
             }
@@ -981,7 +982,7 @@ mod tests {
             trust_score: 0.8,
             relay_cost_per_byte: 0.001,
             churn_probability: 0.1,
-            last_seen: SystemTime::now(),
+            last_seen: Time::from_secs(100),
             auth_domain: scheduler.expected_auth_domain(),
         }
     }
@@ -1242,7 +1243,9 @@ mod tests {
             create_test_peer_info(&scheduler, create_test_peer_id(8001), vec![1, 2, 3, 4, 5]);
         scheduler.register_peer(peer_info).unwrap();
 
-        let requests = scheduler.schedule_next_batch().unwrap();
+        let requests = scheduler
+            .schedule_next_batch_at(Time::from_secs(10))
+            .unwrap();
 
         assert!(!requests.is_empty(), "Should schedule some requests");
         assert!(requests.len() <= 5, "Should not request more than needed");
@@ -1262,7 +1265,9 @@ mod tests {
         scheduler.register_peer(peer_info).unwrap();
 
         // Schedule a request
-        let requests = scheduler.schedule_next_batch().unwrap();
+        let requests = scheduler
+            .schedule_next_batch_at(Time::from_secs(10))
+            .unwrap();
         assert!(!requests.is_empty());
 
         // Process received symbol
@@ -1301,7 +1306,9 @@ mod tests {
             create_test_peer_info(&scheduler, requested_peer.clone(), vec![1, 2, 3]);
         scheduler.register_peer(requested_info).unwrap();
 
-        let requests = scheduler.schedule_next_batch().unwrap();
+        let requests = scheduler
+            .schedule_next_batch_at(Time::from_secs(10))
+            .unwrap();
         assert!(!requests.is_empty(), "expected scheduled requests");
         let hijacked_index = requests[0].symbol_index;
         assert!(
@@ -1365,14 +1372,25 @@ mod tests {
         let peer_info = create_test_peer_info(&scheduler, peer_id.clone(), vec![1, 2, 3]);
         scheduler.register_peer(peer_info).unwrap();
 
-        let requests = scheduler.schedule_next_batch().unwrap();
+        let start = Time::from_secs(10);
+        let requests = scheduler.schedule_next_batch_at(start).unwrap();
         assert!(!requests.is_empty(), "expected scheduled requests");
+        assert!(
+            requests.iter().all(|request| request.requested_at == start),
+            "requests must inherit the explicit logical scheduling time"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.timeout_at
+                    == start + scheduler.config.symbol_timeout_duration),
+            "request deadlines must derive from the explicit logical scheduling time"
+        );
 
         let trust_before = scheduler.peers.get(&peer_id).unwrap().trust_score;
 
         // Advance past the request timeout and run the cleanup sweep.
-        let later =
-            SystemTime::now() + scheduler.config.symbol_timeout_duration + Duration::from_secs(1);
+        let later = start + scheduler.config.symbol_timeout_duration + Duration::from_secs(1);
         scheduler.cleanup_timed_out_requests(later);
 
         let trust_after = scheduler.peers.get(&peer_id).unwrap().trust_score;
@@ -1406,10 +1424,10 @@ mod tests {
             let request = RepairSymbolRequest {
                 symbol_index: index as u32,
                 peer_id: peer_id.clone(),
-                requested_at: SystemTime::now(),
+                requested_at: Time::from_secs(10),
                 decode_usefulness: 0.0,
                 retry_count: 0,
-                timeout_at: SystemTime::now(),
+                timeout_at: Time::from_secs(10),
             };
             scheduler.record_rejection(request, RejectionReason::DuplicateSymbol);
         }
@@ -1448,7 +1466,9 @@ mod tests {
             scheduler.register_peer(info).unwrap();
         }
 
-        let requests = scheduler.schedule_next_batch().unwrap();
+        let requests = scheduler
+            .schedule_next_batch_at(Time::from_secs(10))
+            .unwrap();
         assert!(!requests.is_empty(), "expected scheduled requests");
 
         let mut per_peer: HashMap<PeerId, usize> = HashMap::new();
