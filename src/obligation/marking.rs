@@ -493,8 +493,22 @@ pub struct LeakViolation {
     pub close_time: Time,
 }
 
+impl LeakViolation {
+    /// Stable ASUP error code for the specific leak class, if one exists.
+    #[must_use]
+    pub const fn asup_code(&self) -> Option<&'static str> {
+        match self.kind {
+            ObligationKind::SendPermit => Some("ASUP-E202"),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for LeakViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(code) = self.asup_code() {
+            write!(f, "[{code}] ")?;
+        }
         write!(
             f,
             "leak: {} {} obligation(s) in {:?} at {}",
@@ -1285,6 +1299,23 @@ mod tests {
         let count = leak.count;
         crate::assert_with_log!(count == 1, "count", 1, count);
         crate::test_complete!("leak_detected_on_region_close");
+    }
+
+    #[test]
+    fn send_permit_leak_display_has_asup_e202() {
+        init_test("send_permit_leak_display_has_asup_e202");
+        let events = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            close(10, r(0)),
+        ];
+
+        let mut analyzer = MarkingAnalyzer::new();
+        let result = analyzer.analyze(&events);
+        let rendered = result.leaks[0].to_string();
+
+        assert!(rendered.starts_with("[ASUP-E202]"));
+        assert!(rendered.contains("send_permit obligation(s)"));
+        crate::test_complete!("send_permit_leak_display_has_asup_e202");
     }
 
     #[test]

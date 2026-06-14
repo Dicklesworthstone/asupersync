@@ -34,7 +34,7 @@ lands.
 | ASUP-E104 | live | obligations | [Obligation abort missing](./ASUP-E104.md) |
 | ASUP-E105 | reserved | obligations | [Obligation drain timeout](./ASUP-E105.md) |
 | ASUP-E201 | live | channels-sync | [Channel closed](./ASUP-E201.md) |
-| ASUP-E202 | reserved | channels-sync | [Send permit leaked](./ASUP-E202.md) |
+| ASUP-E202 | live | channels-sync | [Send permit leaked](./ASUP-E202.md) |
 | ASUP-E203 | live | channels-sync | [Receive cancelled](./ASUP-E203.md) |
 | ASUP-E204 | live | channels-sync | [Semaphore permit exhausted](./ASUP-E204.md) |
 | ASUP-E205 | live | channels-sync | [Lock-order violation](./ASUP-E205.md) |

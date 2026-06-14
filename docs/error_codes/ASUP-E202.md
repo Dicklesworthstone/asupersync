@@ -20,6 +20,10 @@ aborted.
 If `reserve()` succeeds and the task is cancelled before `send()`, abort the
 reservation before returning.
 
+The obligation-marking analyzer reports leaked send permits with:
+
+`[ASUP-E202] leak: 1 send_permit obligation(s) in ...`
+
 ## Related
 
 - `ASUP-E101`

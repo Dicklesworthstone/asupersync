@@ -322,7 +322,7 @@
       "code": "ASUP-E202",
       "name": "send-permit-leaked",
       "area": "channels-sync",
-      "status": "reserved",
+      "status": "live",
       "summary": "A two-phase send permit was reserved but never committed or aborted.",
       "probable_causes": [
         "Cancellation happened between reserve and send.",
@@ -333,8 +333,10 @@
         "Add a test that cancels immediately after reserve."
       ],
       "doc_path": "docs/error_codes/ASUP-E202.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/obligation/marking.rs"
+      ]
     },
     {
       "code": "ASUP-E203",
