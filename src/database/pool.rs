@@ -28,6 +28,10 @@
 //! ```
 
 use crate::combinator::{RetryPolicy, calculate_delay};
+use crate::runtime::pool_sizing::{
+    PoolSizingAction, PoolSizingBounds, PoolSizingControllerState, PoolSizingDecision,
+    PoolSizingPolicy, PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing,
+};
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -277,6 +281,13 @@ impl DbPoolConfig {
         self.min_retry_delay_per_client_ms = delay_ms;
         self
     }
+
+    /// Returns the hard floor and ceiling used by advisory pool-sizing.
+    #[inline]
+    #[must_use]
+    pub const fn pool_sizing_bounds(&self) -> PoolSizingBounds {
+        PoolSizingBounds::new(self.min_idle, self.max_size)
+    }
 }
 
 // ─── Pool internals ─────────────────────────────────────────────────────────
@@ -432,6 +443,30 @@ pub struct DbPoolStats {
     /// Total disconnect failures.
     /// br-asupersync-sxhome: Tracks connection disconnect failure events.
     pub total_disconnect_failures: u64,
+}
+
+impl DbPoolStats {
+    /// Returns the live controller state used by advisory pool-sizing.
+    #[must_use]
+    pub const fn pool_sizing_controller_state(&self) -> PoolSizingControllerState {
+        PoolSizingControllerState {
+            current_size: self.total,
+            last_resize_epoch: 0,
+        }
+    }
+}
+
+fn db_pool_advisory_pool_sizing_decision(
+    bounds: PoolSizingBounds,
+    state: PoolSizingControllerState,
+    estimate: PoolWorkloadEstimate,
+    target: PoolSizingTarget,
+) -> PoolSizingDecision {
+    let mut policy = PoolSizingPolicy::advisory(bounds);
+    policy.target = target;
+    let decision = decide_pool_sizing(policy, state, estimate, 0);
+    debug_assert_eq!(decision.action, PoolSizingAction::ObserveOnly);
+    decision
 }
 
 /// Error returned by pool operations.
@@ -603,6 +638,33 @@ impl<M: ConnectionManager> DbPool<M> {
                 .load(Ordering::Relaxed),
             total_disconnect_failures: self.stats.total_disconnect_failures.load(Ordering::Relaxed),
         }
+    }
+
+    /// Returns the hard floor and ceiling used by advisory pool-sizing.
+    #[must_use]
+    pub fn pool_sizing_bounds(&self) -> PoolSizingBounds {
+        self.config.pool_sizing_bounds()
+    }
+
+    /// Returns the live controller state used by advisory pool-sizing.
+    #[must_use]
+    pub fn pool_sizing_controller_state(&self) -> PoolSizingControllerState {
+        self.stats().pool_sizing_controller_state()
+    }
+
+    /// Computes an advisory pool-sizing decision without opening or closing connections.
+    #[must_use]
+    pub fn advisory_pool_sizing_decision(
+        &self,
+        estimate: PoolWorkloadEstimate,
+        target: PoolSizingTarget,
+    ) -> PoolSizingDecision {
+        db_pool_advisory_pool_sizing_decision(
+            self.pool_sizing_bounds(),
+            self.pool_sizing_controller_state(),
+            estimate,
+            target,
+        )
     }
 
     fn sleep_retry_backoff(&self, mut duration: Duration) -> bool {
@@ -1873,6 +1935,33 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 .load(Ordering::Relaxed),
             total_disconnect_failures: self.stats.total_disconnect_failures.load(Ordering::Relaxed),
         }
+    }
+
+    /// Returns the hard floor and ceiling used by advisory pool-sizing.
+    #[must_use]
+    pub fn pool_sizing_bounds(&self) -> PoolSizingBounds {
+        self.config.pool_sizing_bounds()
+    }
+
+    /// Returns the live controller state used by advisory pool-sizing.
+    #[must_use]
+    pub fn pool_sizing_controller_state(&self) -> PoolSizingControllerState {
+        self.stats().pool_sizing_controller_state()
+    }
+
+    /// Computes an advisory pool-sizing decision without opening or closing connections.
+    #[must_use]
+    pub fn advisory_pool_sizing_decision(
+        &self,
+        estimate: PoolWorkloadEstimate,
+        target: PoolSizingTarget,
+    ) -> PoolSizingDecision {
+        db_pool_advisory_pool_sizing_decision(
+            self.pool_sizing_bounds(),
+            self.pool_sizing_controller_state(),
+            estimate,
+            target,
+        )
     }
 
     fn async_pool_capacity_available_locked(&self, inner: &PoolInner<M::Connection>) -> bool {
@@ -3274,6 +3363,31 @@ mod tests {
     }
 
     #[test]
+    fn async_pool_advisory_sizing_stays_observe_only() {
+        init_test("async_pool_advisory_sizing_stays_observe_only");
+        let pool = AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(6).min_idle(2),
+        );
+        let estimate = PoolWorkloadEstimate::new(6_000_000, 1_000_000, 0);
+        let target = PoolSizingTarget::MaxWaitProbabilityPpm(50_000);
+
+        let decision = pool.advisory_pool_sizing_decision(estimate, target);
+        assert_eq!(decision.action, PoolSizingAction::ObserveOnly);
+        assert_eq!(decision.recommendation.bounds, PoolSizingBounds::new(2, 6));
+        assert_eq!(decision.recommendation.target, target);
+        assert_eq!(
+            pool.pool_sizing_controller_state(),
+            PoolSizingControllerState {
+                current_size: 0,
+                last_resize_epoch: 0,
+            }
+        );
+        assert_eq!(pool.manager.creates.load(Ordering::SeqCst), 0);
+        crate::test_complete!("async_pool_advisory_sizing_stays_observe_only");
+    }
+
+    #[test]
     fn async_get_records_structured_pool_lifecycle_traces() {
         init_test("async_get_records_structured_pool_lifecycle_traces");
         let cx = Cx::for_testing();
@@ -3394,6 +3508,15 @@ mod tests {
     }
 
     #[test]
+    fn config_pool_sizing_bounds_follow_min_idle_and_max_size() {
+        init_test("config_pool_sizing_bounds_follow_min_idle_and_max_size");
+        let config = DbPoolConfig::with_max_size(8).min_idle(3);
+
+        assert_eq!(config.pool_sizing_bounds(), PoolSizingBounds::new(3, 8));
+        crate::test_complete!("config_pool_sizing_bounds_follow_min_idle_and_max_size");
+    }
+
+    #[test]
     fn config_debug_clone() {
         let config = DbPoolConfig::default();
         let dbg = format!("{config:?}");
@@ -3417,6 +3540,39 @@ mod tests {
         assert_eq!(stats.max_size, 10);
         assert!(!pool.is_closed());
         crate::test_complete!("pool_new");
+    }
+
+    #[test]
+    fn pool_advisory_sizing_uses_live_total_without_mutating_capacity() {
+        init_test("pool_advisory_sizing_uses_live_total_without_mutating_capacity");
+        let manager = TestManager::new();
+        let pool = DbPool::new(
+            manager.clone(),
+            DbPoolConfig::with_max_size(4)
+                .min_idle(1)
+                .validate_on_checkout(false),
+        );
+        let _first = pool.get().expect("first checkout creates a connection");
+        let _second = pool.get().expect("second checkout creates a connection");
+        let estimate = PoolWorkloadEstimate::new(5_000_000, 1_000_000, 0);
+        let target = PoolSizingTarget::MaxWaitProbabilityPpm(100_000);
+
+        assert_eq!(pool.pool_sizing_bounds(), PoolSizingBounds::new(1, 4));
+        assert_eq!(
+            pool.pool_sizing_controller_state(),
+            PoolSizingControllerState {
+                current_size: 2,
+                last_resize_epoch: 0,
+            }
+        );
+
+        let decision = pool.advisory_pool_sizing_decision(estimate, target);
+        assert_eq!(decision.action, PoolSizingAction::ObserveOnly);
+        assert_eq!(decision.recommendation.bounds, PoolSizingBounds::new(1, 4));
+        assert_eq!(decision.recommendation.target, target);
+        assert_eq!(manager.creates.load(Ordering::SeqCst), 2);
+        assert_eq!(pool.stats().total, 2);
+        crate::test_complete!("pool_advisory_sizing_uses_live_total_without_mutating_capacity");
     }
 
     #[test]

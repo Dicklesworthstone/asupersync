@@ -42,6 +42,10 @@
 //! ```
 
 use crate::runtime::config::BlockingPoolAffinityProfile;
+use crate::runtime::pool_sizing::{
+    PoolSizingBounds, PoolSizingControllerState, PoolSizingDecision, PoolSizingPolicy,
+    PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing,
+};
 use crossbeam_queue::SegQueue;
 use parking_lot::{Condvar, Mutex};
 use std::fmt;
@@ -624,6 +628,28 @@ impl BlockingPool {
         self.inner.busy_threads.load(Ordering::Relaxed)
     }
 
+    /// Returns the hard floor and ceiling used by advisory pool-sizing.
+    #[must_use]
+    pub fn pool_sizing_bounds(&self) -> PoolSizingBounds {
+        blocking_pool_sizing_bounds(&self.inner)
+    }
+
+    /// Returns the live controller state used by advisory pool-sizing.
+    #[must_use]
+    pub fn pool_sizing_controller_state(&self) -> PoolSizingControllerState {
+        blocking_pool_sizing_controller_state(&self.inner)
+    }
+
+    /// Computes an advisory pool-sizing decision without resizing the pool.
+    #[must_use]
+    pub fn advisory_pool_sizing_decision(
+        &self,
+        estimate: PoolWorkloadEstimate,
+        target: PoolSizingTarget,
+    ) -> PoolSizingDecision {
+        blocking_pool_advisory_pool_sizing_decision(&self.inner, estimate, target)
+    }
+
     /// Returns `true` if the pool is shut down.
     #[must_use]
     pub fn is_shutdown(&self) -> bool {
@@ -799,6 +825,28 @@ impl BlockingPoolHandle {
         self.inner.busy_threads.load(Ordering::Relaxed)
     }
 
+    /// Returns the hard floor and ceiling used by advisory pool-sizing.
+    #[must_use]
+    pub fn pool_sizing_bounds(&self) -> PoolSizingBounds {
+        blocking_pool_sizing_bounds(&self.inner)
+    }
+
+    /// Returns the live controller state used by advisory pool-sizing.
+    #[must_use]
+    pub fn pool_sizing_controller_state(&self) -> PoolSizingControllerState {
+        blocking_pool_sizing_controller_state(&self.inner)
+    }
+
+    /// Computes an advisory pool-sizing decision without resizing the pool.
+    #[must_use]
+    pub fn advisory_pool_sizing_decision(
+        &self,
+        estimate: PoolWorkloadEstimate,
+        target: PoolSizingTarget,
+    ) -> PoolSizingDecision {
+        blocking_pool_advisory_pool_sizing_decision(&self.inner, estimate, target)
+    }
+
     /// Returns a snapshot of locality-routing activity for this handle's pool.
     #[must_use]
     pub fn affinity_metrics(&self) -> BlockingPoolAffinityMetricsSnapshot {
@@ -863,6 +911,32 @@ fn blocking_pool_affinity_metrics(
             global_pending_count,
         },
     }
+}
+
+fn blocking_pool_sizing_bounds(inner: &BlockingPoolInner) -> PoolSizingBounds {
+    PoolSizingBounds::new(inner.min_threads, inner.max_threads)
+}
+
+fn blocking_pool_sizing_controller_state(inner: &BlockingPoolInner) -> PoolSizingControllerState {
+    PoolSizingControllerState {
+        current_size: inner.active_threads.load(Ordering::Relaxed),
+        last_resize_epoch: 0,
+    }
+}
+
+fn blocking_pool_advisory_pool_sizing_decision(
+    inner: &BlockingPoolInner,
+    estimate: PoolWorkloadEstimate,
+    target: PoolSizingTarget,
+) -> PoolSizingDecision {
+    let mut policy = PoolSizingPolicy::advisory(blocking_pool_sizing_bounds(inner));
+    policy.target = target;
+    decide_pool_sizing(
+        policy,
+        blocking_pool_sizing_controller_state(inner),
+        estimate,
+        0,
+    )
 }
 
 fn pop_next_blocking_task(
@@ -1252,6 +1326,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
 #[allow(dead_code)]
 mod tests {
     use super::*;
+    use crate::runtime::pool_sizing::PoolSizingAction;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize};
     use std::sync::{Condvar as StdCondvar, Mutex as StdMutex, OnceLock};
@@ -1455,6 +1530,33 @@ mod tests {
 
         task.wait();
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn advisory_pool_sizing_reports_bounds_without_resizing() {
+        let pool = BlockingPool::new(0, 4);
+        let handle = pool.handle();
+        let estimate = PoolWorkloadEstimate::new(5_000_000, 1_000_000, 0);
+        let target = PoolSizingTarget::MaxWaitProbabilityPpm(100_000);
+
+        assert_eq!(pool.pool_sizing_bounds(), PoolSizingBounds::new(0, 4));
+        assert_eq!(handle.pool_sizing_bounds(), PoolSizingBounds::new(0, 4));
+        assert_eq!(
+            pool.pool_sizing_controller_state(),
+            PoolSizingControllerState {
+                current_size: 0,
+                last_resize_epoch: 0,
+            }
+        );
+
+        let decision = pool.advisory_pool_sizing_decision(estimate, target);
+        assert_eq!(decision.action, PoolSizingAction::ObserveOnly);
+        assert_eq!(decision.recommendation.bounds, PoolSizingBounds::new(0, 4));
+        assert_eq!(decision.recommendation.target, target);
+        assert_eq!(pool.active_threads(), 0);
+
+        let handle_decision = handle.advisory_pool_sizing_decision(estimate, target);
+        assert_eq!(handle_decision, decision);
     }
 
     #[test]
