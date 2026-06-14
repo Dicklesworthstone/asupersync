@@ -9,7 +9,7 @@
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
-//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupEventBatch`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
+//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupEventSubscriber`, `GroupEventBatch`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -687,6 +687,55 @@ pub mod process_group {
         }
     }
 
+    /// Subscriber-side cursor for monitor-style process-group event streams.
+    ///
+    /// The subscriber observes owned [`GroupEventBatch`] values and commits
+    /// their cursor only after delivery succeeds. Committing a stale batch is a
+    /// no-op so out-of-order retry cleanup cannot move the stream backwards.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct GroupEventSubscriber {
+        cursor: GroupEventCursor,
+    }
+
+    impl GroupEventSubscriber {
+        /// Creates a subscriber positioned before the first event.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Creates a subscriber from a previously committed cursor.
+        #[must_use]
+        pub fn from_cursor(cursor: GroupEventCursor) -> Self {
+            Self { cursor }
+        }
+
+        /// Returns the currently committed cursor.
+        #[must_use]
+        pub fn cursor(&self) -> GroupEventCursor {
+            self.cursor
+        }
+
+        /// Returns the next batch without advancing this subscriber.
+        #[must_use]
+        pub fn pending_batch(&self, state: &ProcessGroupState) -> GroupEventBatch {
+            state.event_batch(self.cursor)
+        }
+
+        /// Commits a delivered batch cursor.
+        ///
+        /// Returns `true` if the subscriber advanced. Stale batches are ignored
+        /// to preserve exactly-once cursor monotonicity across retry cleanup.
+        pub fn commit(&mut self, batch: &GroupEventBatch) -> bool {
+            let next_cursor = batch.next_cursor();
+            if next_cursor <= self.cursor {
+                return false;
+            }
+            self.cursor = next_cursor;
+            true
+        }
+    }
+
     /// Owned membership-event batch for monitor-style consumers.
     ///
     /// A batch carries both the events to deliver and the cursor that should be
@@ -1206,8 +1255,8 @@ pub mod crash {
 ///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
 /// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`,
-///   `GroupEventBatch`, `GroupBroadcastPlan`, `GroupBroadcastReport`,
-///   `GroupBroadcastSummary`
+///   `GroupEventSubscriber`, `GroupEventBatch`, `GroupBroadcastPlan`,
+///   `GroupBroadcastReport`, `GroupBroadcastSummary`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -1234,8 +1283,9 @@ pub mod prelude {
     pub use super::process_group::{
         BroadcastBackpressurePolicy, GroupBroadcastPlan, GroupBroadcastRecipientReport,
         GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupBroadcastSummary, GroupEvent,
-        GroupEventBatch, GroupEventCursor, GroupEventKind, GroupMember, GroupMemberId, GroupName,
-        GroupNameError, GroupSnapshot, ProcessGroupError, ProcessGroupState,
+        GroupEventBatch, GroupEventCursor, GroupEventKind, GroupEventSubscriber, GroupMember,
+        GroupMemberId, GroupName, GroupNameError, GroupSnapshot, ProcessGroupError,
+        ProcessGroupState,
     };
 
     // -- Monitor --
@@ -1546,6 +1596,7 @@ mod tests {
         let _ = std::any::type_name::<prelude::GroupSnapshot>();
         let _ = std::any::type_name::<prelude::GroupEvent>();
         let _ = std::any::type_name::<prelude::GroupEventBatch>();
+        let _ = std::any::type_name::<prelude::GroupEventSubscriber>();
         let _ = std::any::type_name::<prelude::ProcessGroupState>();
         let _ = std::any::type_name::<prelude::ProcessGroupError>();
         let _ = std::any::type_name::<prelude::GroupEventCursor>();
@@ -1610,6 +1661,7 @@ mod tests {
         let _ = std::any::type_name::<process_group::GroupSnapshot>();
         let _ = std::any::type_name::<process_group::GroupEvent>();
         let _ = std::any::type_name::<process_group::GroupEventBatch>();
+        let _ = std::any::type_name::<process_group::GroupEventSubscriber>();
         let _ = std::any::type_name::<process_group::GroupEventCursor>();
         let _ = std::any::type_name::<process_group::GroupBroadcastPlan>();
         let _ = std::any::type_name::<process_group::GroupBroadcastReport>();
@@ -2347,6 +2399,56 @@ mod tests {
         assert_eq!(next_cursor.next_sequence(), 2);
 
         crate::test_complete!("process_group_event_batch_is_owned_and_cursor_safe");
+    }
+
+    #[test]
+    fn process_group_event_subscriber_commits_batches_monotonically() {
+        init_test("process_group_event_subscriber_commits_batches_monotonically");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let mut subscriber = process_group::GroupEventSubscriber::new();
+
+        state
+            .join(first, crate::types::Time::from_nanos(10))
+            .unwrap();
+        let first_batch = subscriber.pending_batch(&state);
+        assert_eq!(subscriber.cursor().next_sequence(), 0);
+        assert_eq!(first_batch.len(), 1);
+        assert_eq!(first_batch.next_cursor().next_sequence(), 1);
+
+        assert!(subscriber.commit(&first_batch));
+        assert_eq!(subscriber.cursor().next_sequence(), 1);
+        assert!(!subscriber.commit(&first_batch));
+        assert_eq!(subscriber.cursor().next_sequence(), 1);
+
+        state
+            .join(second.clone(), crate::types::Time::from_nanos(20))
+            .unwrap();
+        let second_batch = subscriber.pending_batch(&state);
+        assert_eq!(second_batch.len(), 1);
+        assert_eq!(second_batch.events()[0].member(), &second);
+        assert_eq!(second_batch.next_cursor().next_sequence(), 2);
+        assert!(subscriber.commit(&second_batch));
+        assert_eq!(subscriber.cursor().next_sequence(), 2);
+
+        let restored = process_group::GroupEventSubscriber::from_cursor(
+            process_group::GroupEventCursor::new(),
+        );
+        let replay = restored.pending_batch(&state);
+        assert_eq!(replay.len(), 2);
+        assert_eq!(restored.cursor().next_sequence(), 0);
+
+        crate::test_complete!("process_group_event_subscriber_commits_batches_monotonically");
     }
 
     #[test]
