@@ -9,7 +9,7 @@
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
-//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupBroadcastPlan`, `GroupBroadcastReport` |
+//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -863,6 +863,72 @@ pub mod process_group {
         }
     }
 
+    /// Aggregate broadcast accounting for one process group.
+    ///
+    /// The summary keeps skip and backpressure counts distinct so the async
+    /// delivery surface can report policy effects without collapsing them into
+    /// a generic partial-failure bucket.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct GroupBroadcastSummary {
+        delivered: usize,
+        skipped: usize,
+        backpressured: usize,
+    }
+
+    impl GroupBroadcastSummary {
+        /// Creates a summary from explicit status counts.
+        #[must_use]
+        pub fn new(delivered: usize, skipped: usize, backpressured: usize) -> Self {
+            Self {
+                delivered,
+                skipped,
+                backpressured,
+            }
+        }
+
+        /// Returns the number of delivered recipients.
+        #[must_use]
+        pub fn delivered(&self) -> usize {
+            self.delivered
+        }
+
+        /// Returns the number of skipped recipients.
+        #[must_use]
+        pub fn skipped(&self) -> usize {
+            self.skipped
+        }
+
+        /// Returns the number of backpressured recipients.
+        #[must_use]
+        pub fn backpressured(&self) -> usize {
+            self.backpressured
+        }
+
+        /// Returns the total number of accounted recipients.
+        #[must_use]
+        pub fn total(&self) -> usize {
+            self.delivered + self.skipped + self.backpressured
+        }
+
+        /// Returns true when every accounted recipient accepted the message.
+        #[must_use]
+        pub fn is_all_delivered(&self) -> bool {
+            self.skipped == 0 && self.backpressured == 0
+        }
+
+        /// Returns true when at least one recipient was skipped by policy.
+        #[must_use]
+        pub fn has_skipped_recipients(&self) -> bool {
+            self.skipped > 0
+        }
+
+        /// Returns true when at least one recipient hit backpressure.
+        #[must_use]
+        pub fn has_backpressured_recipients(&self) -> bool {
+            self.backpressured > 0
+        }
+    }
+
     /// Complete accounting report for one process-group broadcast.
     ///
     /// Construction validates that every planned recipient appears exactly
@@ -978,6 +1044,40 @@ pub mod process_group {
                 .filter(|recipient| recipient.status() == status)
                 .count()
         }
+
+        /// Returns aggregate delivery accounting for this report.
+        #[must_use]
+        pub fn summary(&self) -> GroupBroadcastSummary {
+            GroupBroadcastSummary::new(
+                self.delivered_count(),
+                self.skipped_count(),
+                self.backpressured_count(),
+            )
+        }
+
+        /// Returns the number of delivered recipients.
+        #[must_use]
+        pub fn delivered_count(&self) -> usize {
+            self.count_status(GroupBroadcastRecipientStatus::Delivered)
+        }
+
+        /// Returns the number of skipped recipients.
+        #[must_use]
+        pub fn skipped_count(&self) -> usize {
+            self.count_status(GroupBroadcastRecipientStatus::Skipped)
+        }
+
+        /// Returns the number of backpressured recipients.
+        #[must_use]
+        pub fn backpressured_count(&self) -> usize {
+            self.count_status(GroupBroadcastRecipientStatus::Backpressured)
+        }
+
+        /// Returns true when every planned recipient accepted the message.
+        #[must_use]
+        pub fn is_all_delivered(&self) -> bool {
+            self.summary().is_all_delivered()
+        }
     }
 }
 
@@ -1030,7 +1130,7 @@ pub mod crash {
 ///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
 /// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`,
-///   `GroupBroadcastPlan`, `GroupBroadcastReport`
+///   `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -1056,9 +1156,9 @@ pub mod prelude {
     // -- Process groups --
     pub use super::process_group::{
         BroadcastBackpressurePolicy, GroupBroadcastPlan, GroupBroadcastRecipientReport,
-        GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupEvent, GroupEventCursor,
-        GroupEventKind, GroupMember, GroupMemberId, GroupName, GroupNameError, GroupSnapshot,
-        ProcessGroupError, ProcessGroupState,
+        GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupBroadcastSummary, GroupEvent,
+        GroupEventCursor, GroupEventKind, GroupMember, GroupMemberId, GroupName, GroupNameError,
+        GroupSnapshot, ProcessGroupError, ProcessGroupState,
     };
 
     // -- Monitor --
@@ -1373,6 +1473,7 @@ mod tests {
         let _ = std::any::type_name::<prelude::GroupEventCursor>();
         let _ = std::any::type_name::<prelude::GroupBroadcastPlan>();
         let _ = std::any::type_name::<prelude::GroupBroadcastReport>();
+        let _ = std::any::type_name::<prelude::GroupBroadcastSummary>();
         let _ = std::any::type_name::<prelude::GroupBroadcastRecipientReport>();
         let _ = std::any::type_name::<prelude::GroupBroadcastRecipientStatus>();
         let _ = std::any::type_name::<prelude::BroadcastBackpressurePolicy>();
@@ -1433,6 +1534,7 @@ mod tests {
         let _ = std::any::type_name::<process_group::GroupEventCursor>();
         let _ = std::any::type_name::<process_group::GroupBroadcastPlan>();
         let _ = std::any::type_name::<process_group::GroupBroadcastReport>();
+        let _ = std::any::type_name::<process_group::GroupBroadcastSummary>();
         let _ = std::any::type_name::<process_group::GroupBroadcastRecipientReport>();
         let _ = std::any::type_name::<process_group::GroupBroadcastRecipientStatus>();
         let _ = std::any::type_name::<process_group::GroupEventKind>();
@@ -1746,6 +1848,79 @@ mod tests {
         );
 
         crate::test_complete!("process_group_broadcast_report_preserves_plan_order_and_counts");
+    }
+
+    #[test]
+    fn process_group_broadcast_summary_separates_policy_outcomes() {
+        init_test("process_group_broadcast_summary_separates_policy_outcomes");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let third = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-c"),
+            test_task_id(3),
+        );
+        state
+            .join(first.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(second.clone(), crate::types::Time::from_nanos(20))
+            .unwrap();
+        state
+            .join(third.clone(), crate::types::Time::from_nanos(30))
+            .unwrap();
+
+        let plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Skip);
+        let report = process_group::GroupBroadcastReport::from_plan(
+            &plan,
+            vec![
+                (
+                    first.clone(),
+                    process_group::GroupBroadcastRecipientStatus::Delivered,
+                ),
+                (
+                    second,
+                    process_group::GroupBroadcastRecipientStatus::Skipped,
+                ),
+                (
+                    third,
+                    process_group::GroupBroadcastRecipientStatus::Backpressured,
+                ),
+            ],
+        )
+        .unwrap();
+        let summary = report.summary();
+
+        assert_eq!(summary, process_group::GroupBroadcastSummary::new(1, 1, 1));
+        assert_eq!(summary.delivered(), 1);
+        assert_eq!(summary.skipped(), 1);
+        assert_eq!(summary.backpressured(), 1);
+        assert_eq!(summary.total(), 3);
+        assert_eq!(report.delivered_count(), 1);
+        assert_eq!(report.skipped_count(), 1);
+        assert_eq!(report.backpressured_count(), 1);
+        assert!(!report.is_all_delivered());
+        assert!(!summary.is_all_delivered());
+        assert!(summary.has_skipped_recipients());
+        assert!(summary.has_backpressured_recipients());
+
+        let all_delivered = process_group::GroupBroadcastReport::all_delivered(&plan);
+        assert_eq!(
+            all_delivered.summary(),
+            process_group::GroupBroadcastSummary::new(3, 0, 0)
+        );
+        assert!(all_delivered.is_all_delivered());
+
+        crate::test_complete!("process_group_broadcast_summary_separates_policy_outcomes");
     }
 
     #[test]
