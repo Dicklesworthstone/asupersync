@@ -13,12 +13,33 @@ use crate::types::{
 };
 use core::fmt;
 
-/// Stable ticket identifier derived from explicit owner IDs and child lineage.
+/// Stable ticket identifier derived from explicit owner IDs, child lineage,
+/// and a per-mint sibling nonce.
+///
+/// br-asupersync-audit-followups-2026-06-12-7tcipb (item 1): the prior id was
+/// `(owner_region, owner_task, lineage)` only, which is **not** unique across
+/// siblings — two `split()`/`lend_*` of the same parent share owner + lineage
+/// depth, so they minted byte-identical ids. A receipt consumer matching
+/// releases by `ticket_id` would then mis-close one sibling and stamp the leak
+/// as closed, silently masking the other ticket's unreleased-obligation leak.
+/// `nonce` is a deterministic path-fold ([`fold_child_nonce`]) of the parent
+/// nonce and a per-parent monotonic child sequence, so every descendant in a
+/// ticket tree (direct siblings *and* cousins at the same depth) gets a
+/// distinct id, while two identical split sequences still reproduce the same
+/// ids — the "deterministic value object" contract is preserved (no ambient
+/// clock / RNG / global counter).
+///
+/// NOTE — still open on 7tcipb item 1 (deferred, see bead): two independent
+/// ROOT tickets minted by the same `(region, task)` still collide (there is no
+/// shared parent counter to draw from — needs a caller/`Cx`-supplied admission
+/// sequence), and the `Clone` + by-value `release`/`revoke` double-receipt and
+/// missing-`Drop` leak-detection gaps are not addressed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityTicketId {
     owner_region: RegionId,
     owner_task: TaskId,
     lineage: u64,
+    nonce: u64,
 }
 
 impl CapacityTicketId {
@@ -28,15 +49,17 @@ impl CapacityTicketId {
             owner_region,
             owner_task,
             lineage: 0,
+            nonce: 0,
         }
     }
 
     #[inline]
-    const fn child(self, owner_region: RegionId, owner_task: TaskId) -> Self {
+    const fn child(self, owner_region: RegionId, owner_task: TaskId, child_seq: u64) -> Self {
         Self {
             owner_region,
             owner_task,
             lineage: self.lineage.saturating_add(1),
+            nonce: fold_child_nonce(self.nonce, child_seq),
         }
     }
 
@@ -57,6 +80,34 @@ impl CapacityTicketId {
     pub const fn lineage(self) -> u64 {
         self.lineage
     }
+
+    /// Per-mint sibling nonce that disambiguates tickets sharing the same owner
+    /// and lineage depth (see the type docs). Always `0` for root tickets.
+    #[inline]
+    pub const fn nonce(self) -> u64 {
+        self.nonce
+    }
+}
+
+/// Deterministic SplitMix64 fold of a parent nonce and a per-parent child
+/// sequence into a child nonce (br-asupersync-audit-followups-2026-06-12-7tcipb
+/// item 1). Pure function of its inputs: the same `(parent_nonce, child_seq)`
+/// always yields the same value, so the capacity-ticket "deterministic value
+/// object" contract is preserved (no clock / RNG / global counter). Because
+/// distinct parents already carry distinct nonces, folding the parent nonce in
+/// keeps cousins distinct — not just direct siblings — even when the per-parent
+/// child sequence repeats across different parents.
+#[inline]
+const fn fold_child_nonce(parent_nonce: u64, child_seq: u64) -> u64 {
+    // Combine the inputs, then run the SplitMix64 finalizer so structurally
+    // close inputs (child_seq 1 vs 2) map to far-apart, well-mixed ids.
+    let mut z = parent_nonce
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(child_seq)
+        .wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// Admission surface the ticket is being requested for.
@@ -278,6 +329,12 @@ pub struct CapacityTicket {
     requirements: CapabilityBudgetRequirements,
     work_kind: CapacityTicketWorkKind,
     reason: String,
+    /// Per-parent monotonic child sequence (br-asupersync-audit-followups-
+    /// 2026-06-12-7tcipb item 1). Advanced once per successful `split`/`lend_*`
+    /// so each derived child folds a distinct nonce into its [`CapacityTicketId`],
+    /// keeping sibling tickets unique. Not part of ticket identity — it is mint
+    /// bookkeeping carried by the live ticket value.
+    next_child_seq: u64,
 }
 
 impl CapacityTicket {
@@ -298,6 +355,7 @@ impl CapacityTicket {
             requirements: request.requirements,
             work_kind: request.work_kind,
             reason: request.reason,
+            next_child_seq: 0,
         }
     }
 
@@ -350,27 +408,34 @@ impl CapacityTicket {
     }
 
     /// Splits this ticket for the same owner and work kind.
+    ///
+    /// Takes `&mut self` (br-asupersync-audit-followups-2026-06-12-7tcipb item 1)
+    /// so the parent can advance its per-parent child sequence and mint a child
+    /// with a distinct [`CapacityTicketId`] on every call.
     #[inline]
     pub fn split(
-        &self,
+        &mut self,
         requested: CapabilityBudget,
         requirements: CapabilityBudgetRequirements,
         reason: impl Into<String>,
     ) -> Result<Self, CapacityTicketRefusal> {
-        self.split_for(self.work_kind, requested, requirements, reason)
+        let work_kind = self.work_kind;
+        self.split_for(work_kind, requested, requirements, reason)
     }
 
     /// Splits this ticket for the same owner and an explicit child work kind.
     pub fn split_for(
-        &self,
+        &mut self,
         work_kind: CapacityTicketWorkKind,
         requested: CapabilityBudget,
         requirements: CapabilityBudgetRequirements,
         reason: impl Into<String>,
     ) -> Result<Self, CapacityTicketRefusal> {
+        let owner_region = self.owner_region;
+        let owner_task = self.owner_task;
         self.derive_child(
-            self.owner_region,
-            self.owner_task,
+            owner_region,
+            owner_task,
             CapacityTicketRequest::new(requested, requirements, reason).with_work_kind(work_kind),
         )
     }
@@ -378,17 +443,18 @@ impl CapacityTicket {
     /// Lends a child ticket to another explicit owner with the same work kind.
     #[inline]
     pub fn lend_to(
-        &self,
+        &mut self,
         owner_region: RegionId,
         owner_task: TaskId,
         requested: CapabilityBudget,
         requirements: CapabilityBudgetRequirements,
         reason: impl Into<String>,
     ) -> Result<Self, CapacityTicketRefusal> {
+        let work_kind = self.work_kind;
         self.lend_to_for(
             owner_region,
             owner_task,
-            self.work_kind,
+            work_kind,
             requested,
             requirements,
             reason,
@@ -397,7 +463,7 @@ impl CapacityTicket {
 
     /// Lends a child ticket to another explicit owner and work kind.
     pub fn lend_to_for(
-        &self,
+        &mut self,
         owner_region: RegionId,
         owner_task: TaskId,
         work_kind: CapacityTicketWorkKind,
@@ -413,7 +479,7 @@ impl CapacityTicket {
     }
 
     fn derive_child(
-        &self,
+        &mut self,
         owner_region: RegionId,
         owner_task: TaskId,
         request: CapacityTicketRequest,
@@ -431,10 +497,16 @@ impl CapacityTicket {
                 )
             })?;
 
+        // Advance the per-parent child sequence only after admission succeeds,
+        // so a refused split does not perturb the sequence and the next
+        // successful split still mints a fresh, distinct nonce.
+        self.next_child_seq = self.next_child_seq.saturating_add(1);
+        let child_seq = self.next_child_seq;
+
         Ok(Self::admitted(
             owner_region,
             owner_task,
-            self.ticket_id.child(owner_region, owner_task),
+            self.ticket_id.child(owner_region, owner_task, child_seq),
             Some(self.ticket_id),
             granted,
             request,
@@ -642,7 +714,7 @@ mod tests {
     fn split_and_lend_inherit_parent_budget_and_keep_explicit_owner() {
         let owner_region = RegionId::new_for_test(7, 1);
         let owner_task = TaskId::new_for_test(7, 0);
-        let parent = request_capacity_ticket_from_budget(
+        let mut parent = request_capacity_ticket_from_budget(
             owner_region,
             owner_task,
             CapabilityBudget::UNSPECIFIED,
@@ -734,5 +806,101 @@ mod tests {
             revoked.cancel_reason.as_ref().map(|reason| reason.kind),
             Some(CancelKind::User)
         );
+    }
+
+    #[test]
+    fn sibling_and_cousin_children_get_distinct_ticket_ids() {
+        // br-asupersync-audit-followups-2026-06-12-7tcipb item 1: two split()s
+        // of the same parent previously minted identical CapacityTicketIds
+        // (same owner + lineage depth). A receipt consumer matching releases by
+        // ticket_id would then mis-close one sibling and silently mask the
+        // other's unreleased-ticket obligation leak. Every derived ticket must
+        // now carry a distinct id — for direct siblings AND for cousins at the
+        // same depth (which share owner and lineage but descend from distinct
+        // parents).
+        let owner_region = RegionId::new_for_test(13, 1);
+        let owner_task = TaskId::new_for_test(13, 0);
+        let mut parent = request_capacity_ticket_from_budget(
+            owner_region,
+            owner_task,
+            CapabilityBudget::UNSPECIFIED,
+            CapacityTicketRequest::agent_swarm_admission(
+                CapabilityBudget::new()
+                    .with_memory_bytes(8192)
+                    .with_cpu_units(8)
+                    .with_artifact_bytes(1024),
+                "parent",
+            ),
+        )
+        .expect("parent admits");
+
+        let budget = CapabilityBudget::new()
+            .with_memory_bytes(1024)
+            .with_cpu_units(1)
+            .with_artifact_bytes(64);
+        let reqs = CapabilityBudgetRequirements::new()
+            .require_memory_bytes()
+            .require_cpu_units()
+            .require_artifact_bytes();
+
+        let mut first = parent
+            .split(budget, reqs, "first child")
+            .expect("first split admits");
+        let mut second = parent
+            .split(budget, reqs, "second child")
+            .expect("second split admits");
+
+        // Same owner, same lineage depth, same request shape...
+        assert_eq!(first.owner_region(), second.owner_region());
+        assert_eq!(first.owner_task(), second.owner_task());
+        assert_eq!(first.id().lineage(), 1);
+        assert_eq!(second.id().lineage(), 1);
+        // ...but the ids (and their sibling nonces) MUST differ.
+        assert_ne!(
+            first.id(),
+            second.id(),
+            "sibling splits must mint distinct capacity-ticket ids"
+        );
+        assert_ne!(first.id().nonce(), second.id().nonce());
+        // Both still link back to the same parent.
+        assert_eq!(first.parent_id(), Some(parent.id()));
+        assert_eq!(second.parent_id(), Some(parent.id()));
+
+        // Cousins: the first grandchild of each distinct parent shares owner and
+        // lineage depth (2) but must still mint distinct ids, because the parent
+        // nonce is folded into every child nonce.
+        let g1 = first
+            .split(budget, reqs, "grandchild of first")
+            .expect("admits");
+        let g2 = second
+            .split(budget, reqs, "grandchild of second")
+            .expect("admits");
+        assert_eq!(g1.id().lineage(), 2);
+        assert_eq!(g2.id().lineage(), 2);
+        assert_ne!(
+            g1.id(),
+            g2.id(),
+            "cousins at the same depth must mint distinct capacity-ticket ids"
+        );
+
+        // Determinism: re-running the identical split sequence reproduces the
+        // same ids (the fix introduces no ambient clock / RNG / global counter).
+        let mut parent_replay = request_capacity_ticket_from_budget(
+            owner_region,
+            owner_task,
+            CapabilityBudget::UNSPECIFIED,
+            CapacityTicketRequest::agent_swarm_admission(
+                CapabilityBudget::new()
+                    .with_memory_bytes(8192)
+                    .with_cpu_units(8)
+                    .with_artifact_bytes(1024),
+                "parent",
+            ),
+        )
+        .expect("parent admits");
+        let first_replay = parent_replay
+            .split(budget, reqs, "first child")
+            .expect("first split admits");
+        assert_eq!(first.id(), first_replay.id());
     }
 }

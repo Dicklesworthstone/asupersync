@@ -217,7 +217,7 @@ fn capacity_ticket_budget_semantics_fail_closed_and_preserve_owner() {
 #[test]
 fn split_lend_and_receipts_are_meet_based_and_leak_visible() {
     let (region, task) = owner();
-    let parent = request_capacity_ticket_from_budget(
+    let mut parent = request_capacity_ticket_from_budget(
         region,
         task,
         CapabilityBudget::UNSPECIFIED,
@@ -286,6 +286,94 @@ fn split_lend_and_receipts_are_meet_based_and_leak_visible() {
         revoked.cancel_reason.as_ref().map(|reason| reason.kind),
         Some(CancelKind::User)
     );
+}
+
+#[test]
+fn sibling_and_cousin_splits_mint_distinct_ticket_ids() {
+    // br-asupersync-audit-followups-2026-06-12-7tcipb item 1 (enforcement):
+    // CapacityTicketId was (owner_region, owner_task, lineage) only, so two
+    // split()/lend_*() of the same parent minted byte-identical ids. A receipt
+    // consumer that closes leaks by ticket_id would mis-close one sibling and
+    // silently stamp the other's unreleased-ticket obligation leak as resolved.
+    // Every derived ticket must now carry a distinct id — direct siblings AND
+    // cousins at the same lineage depth — and identical split sequences must
+    // still reproduce the same ids (deterministic, no ambient state).
+    let (region, task) = owner();
+    let mut parent = request_capacity_ticket_from_budget(
+        region,
+        task,
+        CapabilityBudget::UNSPECIFIED,
+        agent_request("parent"),
+    )
+    .expect("parent admits");
+
+    let budget = CapabilityBudget::new()
+        .with_memory_bytes(1024)
+        .with_cpu_units(1)
+        .with_artifact_bytes(64);
+    let reqs = CapabilityBudgetRequirements::new()
+        .require_memory_bytes()
+        .require_cpu_units()
+        .require_artifact_bytes();
+
+    let mut first = parent
+        .split(budget, reqs, "first child")
+        .expect("first split admits");
+    let mut second = parent
+        .split(budget, reqs, "second child")
+        .expect("second split admits");
+
+    // Direct siblings: same owner + lineage depth, distinct ids/nonces.
+    assert_eq!(first.id().lineage(), 1);
+    assert_eq!(second.id().lineage(), 1);
+    assert_eq!(first.owner_region(), second.owner_region());
+    assert_eq!(first.owner_task(), second.owner_task());
+    assert_ne!(
+        first.id(),
+        second.id(),
+        "sibling splits must mint distinct capacity-ticket ids"
+    );
+    assert_ne!(first.id().nonce(), second.id().nonce());
+    assert_eq!(first.parent_id(), Some(parent.id()));
+    assert_eq!(second.parent_id(), Some(parent.id()));
+
+    // Cousins: first grandchild of each distinct parent shares owner + lineage
+    // depth (2) but must still be distinct (parent nonce is folded in).
+    let grandchild_one = first
+        .split(budget, reqs, "grandchild of first")
+        .expect("admits");
+    let grandchild_two = second
+        .split(budget, reqs, "grandchild of second")
+        .expect("admits");
+    assert_eq!(grandchild_one.id().lineage(), 2);
+    assert_eq!(grandchild_two.id().lineage(), 2);
+    assert_ne!(
+        grandchild_one.id(),
+        grandchild_two.id(),
+        "cousins at the same depth must mint distinct capacity-ticket ids"
+    );
+
+    // Determinism: an identical split sequence reproduces identical ids.
+    let mut parent_replay = request_capacity_ticket_from_budget(
+        region,
+        task,
+        CapabilityBudget::UNSPECIFIED,
+        agent_request("parent"),
+    )
+    .expect("parent admits");
+    let first_replay = parent_replay
+        .split(budget, reqs, "first child")
+        .expect("first split admits");
+    assert_eq!(first.id(), first_replay.id());
+
+    // Distinct ids carry distinct receipts: matching a release by ticket_id can
+    // no longer mis-close a sibling. (release() consumes the ticket, so do this
+    // last.)
+    let first_receipt = first.release();
+    let second_unreleased = second.unreleased_receipt();
+    assert_ne!(first_receipt.ticket_id, second_unreleased.ticket_id);
+    assert!(first_receipt.obligation_leak_free);
+    assert!(!second_unreleased.obligation_leak_free);
 }
 
 #[test]
