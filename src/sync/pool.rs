@@ -1002,10 +1002,22 @@ where
             }
             drop(state);
 
-            // Remove from return_wakers list
+            // Remove from return_wakers list. If we were the dispatcher (the
+            // first entry, which `notify_return_wakers` wakes to drain the
+            // return channel via `process_returns`), hand the dispatcher role
+            // to the next waiter. Otherwise a resource returned just before
+            // this cancellation — which already woke us — would sit undrained
+            // in the channel and the remaining waiters would never wake
+            // (lost wakeup). (br-asupersync-dq5g7a)
             let mut wakers = self.pool.return_wakers.lock();
             if let Some(idx) = wakers.iter().position(|(wid, _)| *wid == id) {
+                let was_dispatcher = idx == 0;
                 wakers.remove(idx);
+                if was_dispatcher && let Some((_, next)) = wakers.first() {
+                    let next = next.clone();
+                    drop(wakers);
+                    next.wake();
+                }
             }
         }
     }
@@ -5907,5 +5919,91 @@ mod tests {
             stats.idle, 1,
             "resource should be reusable after cancellation"
         );
+    }
+
+    /// Regression for br-asupersync-dq5g7a: when the dispatcher waiter (the
+    /// first `return_wakers` entry, woken by `notify_return_wakers` to drain
+    /// the return channel) is cancelled after a resource return woke it but
+    /// before it polls `process_returns`, its `Drop` must hand the dispatcher
+    /// role to the next waiter. Otherwise the returned resource stays stranded
+    /// in the channel and the remaining waiters are never woken (lost wakeup).
+    ///
+    /// The existing cancellation tests manually re-poll the survivors, which
+    /// hides the missing wake; this test uses recording wakers to observe it.
+    #[test]
+    fn cancelling_dispatcher_after_return_redispatches_to_next_waiter() {
+        init_test("cancelling_dispatcher_after_return_redispatches_to_next_waiter");
+
+        struct FlagWake(Arc<std::sync::atomic::AtomicBool>);
+        impl Wake for FlagWake {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+        let cx = Cx::for_testing();
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
+
+        let dispatcher_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dispatcher_waker = Waker::from(Arc::new(FlagWake(Arc::clone(&dispatcher_flag))));
+        let mut dispatcher_cx = Context::from_waker(&dispatcher_waker);
+
+        let survivor_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let survivor_waker = Waker::from(Arc::new(FlagWake(Arc::clone(&survivor_flag))));
+        let mut survivor_cx = Context::from_waker(&survivor_waker);
+
+        let mut dispatcher = pool.acquire(&cx);
+        let mut survivor = pool.acquire(&cx);
+
+        // The dispatcher registers first, so a return wakes it.
+        assert!(dispatcher.as_mut().poll(&mut dispatcher_cx).is_pending());
+        assert!(survivor.as_mut().poll(&mut survivor_cx).is_pending());
+        crate::assert_with_log!(
+            pool.stats().waiters == 2,
+            "two waiters queued",
+            2,
+            pool.stats().waiters
+        );
+
+        // Clear wakes recorded during the registration polls.
+        dispatcher_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        survivor_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Returning the only resource wakes the dispatcher to drain the channel.
+        held.return_to_pool();
+        crate::assert_with_log!(
+            dispatcher_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "return wakes the dispatcher (first) waiter",
+            true,
+            dispatcher_flag.load(std::sync::atomic::Ordering::SeqCst)
+        );
+
+        // Cancel the dispatcher before it polls process_returns. The Drop must
+        // re-dispatch to the survivor, else the resource is stranded.
+        drop(dispatcher);
+        crate::assert_with_log!(
+            survivor_flag.load(std::sync::atomic::Ordering::SeqCst),
+            "cancelling the dispatcher re-dispatches to the next waiter",
+            true,
+            survivor_flag.load(std::sync::atomic::Ordering::SeqCst)
+        );
+
+        // The survivor can now actually acquire the returned resource.
+        let resource = match survivor.as_mut().poll(&mut survivor_cx) {
+            Poll::Ready(Ok(resource)) => resource,
+            Poll::Ready(Err(error)) => {
+                panic!("survivor should acquire the returned resource, got error: {error}")
+            }
+            Poll::Pending => {
+                panic!("survivor should acquire the returned resource after re-dispatch")
+            }
+        };
+        resource.return_to_pool();
+
+        crate::test_complete!("cancelling_dispatcher_after_return_redispatches_to_next_waiter");
     }
 }
