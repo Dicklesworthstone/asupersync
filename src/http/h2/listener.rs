@@ -1633,6 +1633,13 @@ mod tests {
         encoded.freeze()
     }
 
+    fn expect_settings_ack(conn: &mut Connection) {
+        match conn.next_frame().expect("SETTINGS ACK should be queued") {
+            Frame::Settings(settings) => assert!(settings.ack, "expected SETTINGS ACK"),
+            other => panic!("expected SETTINGS ACK, got {other:?}"),
+        }
+    }
+
     async fn panicking_h2_handler(_request: Request) -> Response {
         panic!("handler exploded")
     }
@@ -2053,6 +2060,7 @@ mod tests {
             .expect("initial settings accepted")
             .is_none()
         );
+        expect_settings_ack(&mut conn);
 
         let request_headers = encode_hpack_test_headers(&[
             (":method", "GET"),
@@ -2148,6 +2156,7 @@ mod tests {
             .expect("initial settings accepted")
             .is_none()
         );
+        expect_settings_ack(&mut conn);
 
         let request_headers = encode_hpack_test_headers(&[
             (":method", "GET"),
@@ -2213,6 +2222,7 @@ mod tests {
             .expect("initial settings accepted")
             .is_none()
         );
+        expect_settings_ack(&mut conn);
 
         let request_headers = encode_hpack_test_headers(&[
             (":method", "GET"),
@@ -2282,6 +2292,7 @@ mod tests {
             .expect("max concurrent settings accepted")
             .is_none()
         );
+        expect_settings_ack(&mut conn);
 
         let request_headers = encode_hpack_test_headers(&[
             (":method", "GET"),
