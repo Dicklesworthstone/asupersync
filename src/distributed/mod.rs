@@ -35,10 +35,17 @@ pub mod membership;
 pub mod recovery;
 pub mod snapshot;
 
+pub use adaptive_layout::{AdaptiveLayoutConfig, BlockLayoutChoice, PathQuality};
+pub use anti_entropy::{DiffKind, DiffReport, KeyDiff, MerkleRangeTree};
 pub use assignment::{AssignmentStrategy, ReplicaAssignment, SymbolAssigner};
 pub use bridge::{
     BridgeConfig, CloseResult, ConflictResolution, DistributedToLocal, EffectiveState,
     LocalToDistributed, RegionBridge, RegionMode, SyncMode, SyncResult, SyncState, UpgradeResult,
+};
+pub use computation_schema::{
+    ComputationSchemaRegistry, ComputationSchemaRegistryError, HasSchema,
+    RegisteredComputationSchema, SchemaDescriptor, SchemaFingerprint, SchemaMismatch,
+    SchemaMismatchKind,
 };
 pub use consensus::{
     ConsensusBatch, ConsensusError, ConsensusRequest, ConsensusResponse, MessageDigest, PbftConfig,
@@ -49,17 +56,12 @@ pub use distribution::{
     DistributionConfig, DistributionMetrics, DistributionResult, ReplicaAck, ReplicaFailure,
     SymbolDistributor,
 };
-pub use adaptive_layout::{AdaptiveLayoutConfig, BlockLayoutChoice, PathQuality};
-pub use anti_entropy::{DiffKind, DiffReport, KeyDiff, MerkleRangeTree};
-pub use computation_schema::{
-    HasSchema, SchemaDescriptor, SchemaFingerprint, SchemaMismatch, SchemaMismatchKind,
-};
-pub use membership::{
-    MemberState, MembershipEvent, MembershipKind, Swim, SwimConfig, SwimConfigError,
-};
 pub use encoding::{
     ADAPTIVE_BLOCK_LAYOUT_POLICY_ID, EncodedState, EncodingConfig, EncodingError,
     EncodingLayoutDecision, PathQualitySnapshot, STATIC_BLOCK_LAYOUT_POLICY_ID, StateEncoder,
+};
+pub use membership::{
+    MemberState, MembershipEvent, MembershipKind, Swim, SwimConfig, SwimConfigError,
 };
 pub use recovery::{
     CollectedSymbol, CollectionConsistency, CollectionMetrics, RecoveryCollector, RecoveryConfig,

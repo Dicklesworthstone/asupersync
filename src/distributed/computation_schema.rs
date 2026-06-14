@@ -26,7 +26,7 @@
 //! the `#[remote_computation]` derive (which will auto-generate
 //! [`HasSchema`] impls) build on top of it in sibling slices of the bead.
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 /// Canonical, declaration-order structural description of a value's wire schema.
 ///
@@ -466,7 +466,10 @@ impl fmt::Display for SchemaMismatchKind {
             Self::FieldMissing { field } => write!(f, "missing field `{field}`"),
             Self::FieldExtra { field } => write!(f, "unexpected extra field `{field}`"),
             Self::ArityChanged { expected, actual } => {
-                write!(f, "tuple arity changed: expected {expected}, found {actual}")
+                write!(
+                    f,
+                    "tuple arity changed: expected {expected}, found {actual}"
+                )
             }
         }
     }
@@ -551,6 +554,176 @@ impl<A: HasSchema, B: HasSchema, C: HasSchema> HasSchema for (A, B, C) {
         SchemaDescriptor::tuple(vec![A::schema(), B::schema(), C::schema()])
     }
 }
+
+/// Registered schema metadata for one named remote computation.
+///
+/// This is the runtime-introspection shape that a node can advertise to peers:
+/// computation name plus the structural input/output schema fingerprints that
+/// must match the spawn envelope before dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredComputationSchema {
+    name: String,
+    input_schema: SchemaDescriptor,
+    output_schema: SchemaDescriptor,
+    input_fingerprint: SchemaFingerprint,
+    output_fingerprint: SchemaFingerprint,
+}
+
+impl RegisteredComputationSchema {
+    /// Creates a named computation schema entry from explicit descriptors.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        input_schema: SchemaDescriptor,
+        output_schema: SchemaDescriptor,
+    ) -> Self {
+        let input_fingerprint = input_schema.fingerprint();
+        let output_fingerprint = output_schema.fingerprint();
+        Self {
+            name: name.into(),
+            input_schema,
+            output_schema,
+            input_fingerprint,
+            output_fingerprint,
+        }
+    }
+
+    /// Creates a named computation schema entry from typed input/output values.
+    #[must_use]
+    pub fn typed<I, O>(name: impl Into<String>) -> Self
+    where
+        I: HasSchema,
+        O: HasSchema,
+    {
+        Self::new(name, I::schema(), O::schema())
+    }
+
+    /// Stable computation name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Expected input schema.
+    #[must_use]
+    pub const fn input_schema(&self) -> &SchemaDescriptor {
+        &self.input_schema
+    }
+
+    /// Expected output schema.
+    #[must_use]
+    pub const fn output_schema(&self) -> &SchemaDescriptor {
+        &self.output_schema
+    }
+
+    /// Expected input schema fingerprint.
+    #[must_use]
+    pub const fn input_fingerprint(&self) -> SchemaFingerprint {
+        self.input_fingerprint
+    }
+
+    /// Expected output schema fingerprint.
+    #[must_use]
+    pub const fn output_fingerprint(&self) -> SchemaFingerprint {
+        self.output_fingerprint
+    }
+}
+
+/// Deterministic registry of named remote-computation schemas.
+///
+/// Entries are keyed and iterated in sorted name order so metadata emission is
+/// byte-stable across independently-built nodes and deterministic lab replays.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComputationSchemaRegistry {
+    entries: BTreeMap<String, RegisteredComputationSchema>,
+}
+
+impl ComputationSchemaRegistry {
+    /// Creates an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a computation entry.
+    ///
+    /// Duplicate names are rejected instead of replacing an existing schema;
+    /// schema evolution must be explicit at the caller layer.
+    pub fn register(
+        &mut self,
+        entry: RegisteredComputationSchema,
+    ) -> Result<(), ComputationSchemaRegistryError> {
+        let name = entry.name.clone();
+        if self.entries.contains_key(&name) {
+            return Err(ComputationSchemaRegistryError::DuplicateName { name });
+        }
+        self.entries.insert(name, entry);
+        Ok(())
+    }
+
+    /// Registers a typed input/output pair under `name`.
+    pub fn register_typed<I, O>(
+        &mut self,
+        name: impl Into<String>,
+    ) -> Result<(), ComputationSchemaRegistryError>
+    where
+        I: HasSchema,
+        O: HasSchema,
+    {
+        self.register(RegisteredComputationSchema::typed::<I, O>(name))
+    }
+
+    /// Returns the schema entry for `name`, if registered.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&RegisteredComputationSchema> {
+        self.entries.get(name)
+    }
+
+    /// Returns true when a computation name is registered.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.entries.contains_key(name)
+    }
+
+    /// Iterates registered computations in deterministic name order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &RegisteredComputationSchema> + '_ {
+        self.entries.values()
+    }
+
+    /// Number of registered computations.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true when the registry is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Errors raised while building a computation schema registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputationSchemaRegistryError {
+    /// A computation name was registered more than once.
+    DuplicateName {
+        /// Duplicate computation name.
+        name: String,
+    },
+}
+
+impl fmt::Display for ComputationSchemaRegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateName { name } => {
+                write!(f, "duplicate remote computation schema `{name}`")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ComputationSchemaRegistryError {}
 
 #[cfg(test)]
 mod tests {
@@ -672,5 +845,50 @@ mod tests {
         assert!(rendered.contains("$.id"), "rendered: {rendered}");
         assert!(rendered.contains("u64"), "rendered: {rendered}");
         assert!(rendered.contains("u32"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn computation_registry_enumerates_entries_in_name_order() {
+        let mut registry = ComputationSchemaRegistry::new();
+        registry
+            .register_typed::<u64, String>("zeta.encode")
+            .unwrap();
+        registry
+            .register_typed::<(u64, String), Vec<u8>>("alpha.decode")
+            .unwrap();
+
+        assert_eq!(registry.len(), 2);
+        assert!(registry.contains("alpha.decode"));
+
+        let names: Vec<&str> = registry
+            .iter()
+            .map(RegisteredComputationSchema::name)
+            .collect();
+        assert_eq!(names, vec!["alpha.decode", "zeta.encode"]);
+
+        let alpha = registry.get("alpha.decode").unwrap();
+        assert_eq!(
+            alpha.input_fingerprint(),
+            <(u64, String)>::schema_fingerprint()
+        );
+        assert_eq!(alpha.output_fingerprint(), <Vec<u8>>::schema_fingerprint());
+    }
+
+    #[test]
+    fn computation_registry_rejects_duplicate_names() {
+        let mut registry = ComputationSchemaRegistry::new();
+        registry.register_typed::<u64, u64>("work").unwrap();
+        let err = registry
+            .register_typed::<String, String>("work")
+            .expect_err("duplicate computation names must fail closed");
+
+        assert!(matches!(
+            err,
+            ComputationSchemaRegistryError::DuplicateName { ref name } if name == "work"
+        ));
+        assert_eq!(registry.len(), 1);
+        let work = registry.get("work").unwrap();
+        assert_eq!(work.input_fingerprint(), u64::schema_fingerprint());
+        assert_eq!(work.output_fingerprint(), u64::schema_fingerprint());
     }
 }
