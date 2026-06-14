@@ -37,6 +37,7 @@ use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::cx::scope::CatchUnwind;
@@ -713,6 +714,9 @@ pub struct ServerRequestRegion {
     cx: Cx,
     started_at: Time,
     protocol: &'static str,
+    /// Set once `server.budget_consumed` has been emitted, so the event fires
+    /// exactly once across the normal finish paths and the [`Drop`] backstop.
+    consumed: AtomicBool,
 }
 
 impl ServerRequestRegion {
@@ -732,6 +736,7 @@ impl ServerRequestRegion {
             cx,
             started_at: now,
             protocol,
+            consumed: AtomicBool::new(false),
         })
     }
 
@@ -840,6 +845,13 @@ impl ServerRequestRegion {
     }
 
     fn emit_consumed(&self, outcome: &'static str) {
+        // Emit exactly once: the explicit finish paths and the Drop backstop
+        // (force-close) both route through here, so the first caller wins and
+        // later calls are no-ops. This keeps the "server.budget_consumed on
+        // every path" contract without double-emitting on the normal paths.
+        if self.consumed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let now = region_now(&self.cx);
         let elapsed_ns = now.duration_since(self.started_at);
         let remaining = self
@@ -991,6 +1003,18 @@ impl ServerRequestRegion {
                 }
             }
         }
+    }
+}
+
+impl Drop for ServerRequestRegion {
+    /// Backstop for the budget-trace contract: if the region is dropped without
+    /// an explicit `finish` — e.g. the HTTP/1.1 force-close path drops the
+    /// `run_with_protocol_drain` future while it is still pending — emit
+    /// `server.budget_consumed outcome=force_closed` so the event is never
+    /// silently lost. `emit_consumed` is idempotent, so normal paths that
+    /// already called `finish` make this a no-op.
+    fn drop(&mut self) {
+        self.emit_consumed("force_closed");
     }
 }
 
@@ -2155,6 +2179,60 @@ mod tests {
                 assert!(messages[0].contains("source=inherited"));
                 assert!(messages[1].starts_with("server.budget_consumed proto=test "));
                 assert!(messages[1].contains("outcome=ok"));
+            });
+        }
+
+        #[test]
+        fn hop_force_closed_future_drop_emits_consumed_event() {
+            // The HTTP/1.1 force-close path drops the run_with_protocol_drain
+            // future while the handler is still pending, so no explicit finish
+            // runs. The Drop backstop must still emit server.budget_consumed
+            // (outcome=force_closed) exactly once so the budget-trace contract
+            // holds on every path. Regression guard for br-asupersync-tkmiv8.
+            block_on(async {
+                let region = ServerRequestRegion::mint("test", Budget::INFINITE, NOW)
+                    .expect("runtime installed");
+                let trace = region.cx().trace_buffer().expect("runtime trace buffer");
+
+                let fut = region.run_with_protocol_drain::<u32, _>(
+                    RequestBudgetSource::Inherited,
+                    None,
+                    Duration::from_millis(10),
+                    std::future::pending::<u32>(),
+                );
+                // Box::pin so `drop` actually drops the future (and the region
+                // it owns); `pin!` would only drop a borrow, leaving the region
+                // alive until end of scope and the Drop backstop unobserved.
+                let mut fut = Box::pin(fut);
+                let waker = std::task::Waker::noop();
+                let mut task_cx = std::task::Context::from_waker(waker);
+                assert!(
+                    fut.as_mut().poll(&mut task_cx).is_pending(),
+                    "pending handler keeps the hop future pending"
+                );
+                // Force-close: drop the in-flight future before it resolves.
+                drop(fut);
+
+                let messages = budget_trace_messages(&trace.snapshot());
+                assert!(
+                    messages
+                        .iter()
+                        .any(|m| m.starts_with("server.budget_installed proto=test ")),
+                    "installed event present: {messages:?}"
+                );
+                let consumed: Vec<&String> = messages
+                    .iter()
+                    .filter(|m| m.starts_with("server.budget_consumed"))
+                    .collect();
+                assert_eq!(
+                    consumed.len(),
+                    1,
+                    "exactly one consumed event: {messages:?}"
+                );
+                assert!(
+                    consumed[0].contains("outcome=force_closed"),
+                    "force-closed outcome: {consumed:?}"
+                );
             });
         }
 
