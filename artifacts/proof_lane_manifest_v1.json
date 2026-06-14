@@ -471,6 +471,7 @@
     "channel-mpsc-select-e2e-public-run",
     "all-target-compile-frontier",
     "clippy-frontier",
+    "cli-feature-clippy-frontier",
     "rustfmt-frontier",
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
@@ -976,6 +977,49 @@
           "fresh-rch-pass",
           "release-readiness",
           "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "cli-feature-clippy",
+      "kind": "lint_frontier",
+      "resource_envelope_class": "lint-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cli_feature_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features cli -- -D warnings",
+      "package": "asupersync",
+      "feature_flags": [
+        "cli"
+      ],
+      "guarantee_ids": [
+        "cli-feature-clippy-frontier"
+      ],
+      "covers": "Clippy warning-deny frontier for the runtime crate's non-default cli feature surface, which default all-target clippy does not enable.",
+      "explicit_not_covered": "Does not prove behavior, every optional feature combination, workspace satellite crates, dependency graph policy, fuzz campaigns, release-readiness, or broad workspace health.",
+      "expected_signal": "clippy exits 0 under --features cli or records the first cli-feature lint frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/bin",
+        "src/lib.rs",
+        "src/tracing_compat.rs"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty CLI module mid-edit",
+        "feature-gated dependency lint drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only for cli-feature lint coverage. It intentionally complements, rather than replaces, clippy-all-targets and native-feature-smoke.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "cli-feature-clippy-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "clippy-frontier",
+          "feature-gated-native-surfaces"
         ]
       }
     },
@@ -2580,6 +2624,13 @@
       "description": "Runtime crate all-target clippy warning-deny frontier has a canonical rch command.",
       "lane_ids": [
         "clippy-all-targets"
+      ]
+    },
+    {
+      "guarantee_id": "cli-feature-clippy-frontier",
+      "description": "Runtime crate non-default cli feature clippy warning-deny frontier has a canonical rch command.",
+      "lane_ids": [
+        "cli-feature-clippy"
       ]
     },
     {

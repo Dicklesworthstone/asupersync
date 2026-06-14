@@ -401,6 +401,7 @@
     "channel-mpsc-select-e2e-public-run",
     "all-target-compile-frontier",
     "clippy-frontier",
+    "cli-feature-clippy-frontier",
     "rustfmt-frontier",
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
@@ -665,6 +666,26 @@
         "Cargo.toml",
         "src",
         "tests"
+      ]
+    },
+    {
+      "lane_id": "cli-feature-clippy",
+      "kind": "lint_frontier",
+      "resource_envelope_class": "lint-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cli_feature_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features cli -- -D warnings",
+      "guarantee_ids": [
+        "cli-feature-clippy-frontier"
+      ],
+      "feature_flags": [
+        "cli"
+      ],
+      "expected_signal": "clippy exits 0 under --features cli or records the first cli-feature lint frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/bin",
+        "src/lib.rs",
+        "src/tracing_compat.rs"
       ]
     },
     {
@@ -1488,6 +1509,12 @@
       "guarantee_id": "clippy-frontier",
       "lane_ids": [
         "clippy-all-targets"
+      ]
+    },
+    {
+      "guarantee_id": "cli-feature-clippy-frontier",
+      "lane_ids": [
+        "cli-feature-clippy"
       ]
     },
     {
