@@ -633,9 +633,30 @@ fn dispatch_h2_request<F, Fut>(
             drop(guard);
             return;
         };
-        let Some(response) = race_force_close(&signal, handler(request)).await else {
+        let Some(handler_result) = race_force_close(
+            &signal,
+            CatchUnwind {
+                inner: handler(request),
+            },
+        )
+        .await
+        else {
             drop(guard);
             return;
+        };
+        let response = match handler_result {
+            Ok(response) => response,
+            Err(payload) => {
+                // Match h1's panic isolation contract: the connection driver
+                // survives the handler panic and completes the stream with a
+                // deterministic 500 instead of leaving it active forever.
+                let _ = &payload;
+                error!(
+                    message = %crate::cx::scope::payload_to_string(&payload),
+                    "h2 handler task panicked"
+                );
+                Response::new(500, "Internal Server Error", Vec::new())
+            }
         };
         if let Ok(permit) = resp_tx.reserve(&cx).await {
             permit.send((stream_id, response, guard, suppress_response_body));
@@ -1382,6 +1403,10 @@ mod tests {
         encoded.freeze()
     }
 
+    async fn panicking_h2_handler(_request: Request) -> Response {
+        panic!("handler exploded")
+    }
+
     #[test]
     fn stats_snapshot_records_accept_spawn_and_drain_counters() {
         let stats = Http2ListenerStats::new(h2_listener_test_time);
@@ -1585,6 +1610,109 @@ mod tests {
             0,
             "guard releases only after the stream has no queued frames"
         );
+    }
+
+    #[test]
+    fn handler_panic_maps_to_500_and_releases_guard_after_flush() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime installs Cx for block_on");
+            let mut conn = Connection::server(Settings::default());
+            assert!(
+                conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                    Vec::new()
+                )))
+                .expect("initial settings accepted")
+                .is_none()
+            );
+
+            let request_headers = encode_hpack_test_headers(&[
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":path", "/panic"),
+                (":authority", "panic.example"),
+            ]);
+            let received = conn
+                .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                    1,
+                    request_headers,
+                    true,
+                    true,
+                )))
+                .expect("request headers accepted")
+                .expect("request headers decoded");
+            let ReceivedFrame::Headers {
+                stream_id,
+                headers,
+                end_stream,
+            } = received
+            else {
+                panic!("expected decoded request headers");
+            };
+            assert_eq!(stream_id, 1);
+            assert!(end_stream);
+
+            let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
+            let shutdown_signal = ShutdownSignal::new();
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let handler = Arc::new(panicking_h2_handler);
+
+            dispatch_h2_request(
+                &mut conn,
+                stream_id,
+                headers,
+                Vec::new(),
+                None,
+                &handler,
+                &resp_tx,
+                &shutdown_signal,
+                &in_flight,
+                &handle,
+            );
+
+            let (response_stream, response, guard, suppress_response_body) = resp_rx
+                .recv(&cx)
+                .await
+                .expect("panic response must be sent through funnel");
+            assert_eq!(response_stream, 1);
+            assert_eq!(response.status, 500);
+            assert_eq!(response.reason, "Internal Server Error");
+            assert!(response.body.is_empty());
+            assert!(!suppress_response_body);
+            assert_eq!(
+                in_flight.load(Ordering::Acquire),
+                1,
+                "guard remains active until the 500 response is queued and flushed"
+            );
+
+            let mut response_guards = HashMap::new();
+            queue_h2_response(
+                &mut conn,
+                response_stream,
+                response,
+                guard,
+                suppress_response_body,
+                &mut response_guards,
+            );
+            while conn.has_pending_frames_for_stream(response_stream) {
+                assert!(
+                    conn.next_frame().is_some(),
+                    "500 response frames must be flushable"
+                );
+            }
+            release_flushed_response_guards(&conn, &mut response_guards);
+
+            assert!(response_guards.is_empty());
+            assert_eq!(
+                in_flight.load(Ordering::Acquire),
+                0,
+                "handler-panic guard releases after the synthesized response flushes"
+            );
+        });
     }
 
     #[test]
