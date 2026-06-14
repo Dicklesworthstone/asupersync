@@ -134,7 +134,7 @@ impl Drop for IoOp {
             }
             // ubs:ignore - safety guard against resource leaks
             panic!(
-                "I/O obligation {:?} was dropped without completion, cancellation, abort, or explicit into_raw() handoff",
+                "[ASUP-E104] I/O obligation {:?} was dropped without completion, cancellation, abort, or explicit into_raw() handoff; see docs/error_codes/ASUP-E104.md",
                 self.obligation
             );
         }
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "I/O obligation")]
+    #[should_panic(expected = "[ASUP-E104] I/O obligation")]
     fn dropping_unresolved_io_op_panics() {
         init_test("dropping_unresolved_io_op_panics");
         let mut state = RuntimeState::new();

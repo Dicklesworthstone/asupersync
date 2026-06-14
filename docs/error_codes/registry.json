@@ -262,19 +262,23 @@
       "code": "ASUP-E104",
       "name": "obligation-abort-missing",
       "area": "obligations",
-      "status": "reserved",
-      "summary": "A cancellation path dropped work without aborting its obligation.",
+      "status": "live",
+      "summary": "An obligation was dropped without being completed, cancelled, or aborted (e.g. an in-flight I/O obligation dropped without complete/cancel/abort/into_raw handoff).",
       "probable_causes": [
         "A two-phase reserve/send path lost the reserved permit.",
-        "A cancellation branch returned before abort cleanup."
+        "A cancellation branch returned before abort cleanup.",
+        "An IoOp was dropped while still pending without complete(), cancel(), abort(), or into_raw()."
       ],
       "remediation": [
         "Add abort cleanup to every early return after reservation.",
-        "Test cancellation between reserve and commit."
+        "Test cancellation between reserve and commit.",
+        "Resolve every IoOp via complete/cancel/abort, or hand the obligation off with into_raw() before dropping it."
       ],
       "doc_path": "docs/error_codes/ASUP-E104.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/runtime/io_op.rs"
+      ]
     },
     {
       "code": "ASUP-E105",
