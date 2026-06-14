@@ -83,6 +83,7 @@
     "formal Lean posture",
     "rustdoc/API examples",
     "downstream consumer proof",
+    "memory residency replay e2e contract",
     "lab-live support-claim report",
     "browser GA final signoff",
     "validation frontier final signoff",
@@ -743,6 +744,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow frontier for the external downstream fixture: run the listed profile lanes for fresh proof. No-claim boundaries: broad-workspace-health, conformance-crate, performance, release-readiness, test-internals-public-api."
+    },
+    {
+      "claim_id": "memory-residency-replay-e2e-contract",
+      "category": "memory residency replay e2e contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "memory-residency replay e2e contract",
+          "memory-residency-replay-e2e-contract"
+        ],
+        "AGENTS.md": [
+          "memory-residency replay e2e contract",
+          "memory-residency-replay-e2e-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "memory-residency-replay-e2e-contract"
+      ],
+      "manifest_lane_ids": [
+        "memory-residency-replay-e2e-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_replay_e2e_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_replay_e2e_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped replay/e2e contract evidence only; does not prove broad workspace health, release readiness, runtime correctness outside the memory-residency policy/accounting surfaces, performance improvement, live RCH fleet availability, or local Cargo fallback approval."
     },
     {
       "claim_id": "lab-live-support-claim-report",

@@ -405,6 +405,7 @@
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
+    "memory-residency-replay-e2e-contract",
     "fourth-wave-governor-schema-contract",
     "fourth-wave-governor-policy-engine",
     "fourth-wave-swarm-replay-corpus",
@@ -1333,6 +1334,31 @@
       ]
     },
     {
+      "lane_id": "memory-residency-replay-e2e-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_replay_e2e_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_replay_e2e_contract -- --nocapture",
+      "guarantee_ids": [
+        "memory-residency-replay-e2e-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "memory_residency_replay_e2e_contract tests pass",
+      "source_paths": [
+        "artifacts/memory_residency_replay_e2e_contract_v1.json",
+        "scripts/memory_residency_replay_e2e.py",
+        "scripts/run_memory_residency_replay_e2e.sh",
+        "scripts/run_all_e2e.sh",
+        "tests/memory_residency_replay_e2e_contract.rs",
+        "docs/proof/memory_residency_replay_e2e.md",
+        "artifacts/memory_residency_policy_contract_v1.json",
+        "artifacts/memory_residency_accounting_snapshot_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ]
+    },
+    {
       "lane_id": "artifact-governance-final-signoff",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1603,6 +1629,12 @@
       "guarantee_id": "validation-frontier-final-signoff",
       "lane_ids": [
         "validation-frontier-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "memory-residency-replay-e2e-contract",
+      "lane_ids": [
+        "memory-residency-replay-e2e-contract"
       ]
     },
     {

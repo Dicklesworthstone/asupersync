@@ -981,6 +981,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "proof-lane-manifest-contract",
         "rch-topology-preflight-canary",
         "rust-crate-release-provenance-contract",
+        "memory-residency-replay-e2e-contract",
     ] {
         assert!(lane_ids.contains(required), "missing lane {required}");
     }
@@ -1258,6 +1259,10 @@ fn every_lane_declares_fail_closed_resource_envelope() {
         ),
         (
             "rust-crate-release-provenance-contract",
+            "artifact-contract-medium",
+        ),
+        (
+            "memory-residency-replay-e2e-contract",
             "artifact-contract-medium",
         ),
         ("rustdoc-api", "documentation-frontier-medium"),

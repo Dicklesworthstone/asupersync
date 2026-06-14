@@ -475,6 +475,7 @@
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
+    "memory-residency-replay-e2e-contract",
     "fourth-wave-governor-schema-contract",
     "fourth-wave-governor-policy-engine",
     "fourth-wave-swarm-replay-corpus",
@@ -2337,6 +2338,56 @@
       }
     },
     {
+      "lane_id": "memory-residency-replay-e2e-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_replay_e2e_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_replay_e2e_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "memory-residency-replay-e2e-contract"
+      ],
+      "covers": "Deterministic 64C/256G memory-residency replay fixture, E2E runner artifact contract, orchestrator registration, M2/M3 source linkage, stale/missing input failure output, proof manifest/status mapping, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not run live host probes, prove p50/p95/p999 improvement, prove memory reduction, prove cache hit-rate improvement, prove scheduler performance, prove production-on-by-default behavior, prove broad workspace health, prove release readiness, prove live RCH fleet availability, or prove source correctness outside this replay/e2e contract.",
+      "expected_signal": "memory_residency_replay_e2e_contract tests pass",
+      "source_paths": [
+        "artifacts/memory_residency_replay_e2e_contract_v1.json",
+        "scripts/memory_residency_replay_e2e.py",
+        "scripts/run_memory_residency_replay_e2e.sh",
+        "scripts/run_all_e2e.sh",
+        "tests/memory_residency_replay_e2e_contract.rs",
+        "docs/proof/memory_residency_replay_e2e.md",
+        "artifacts/memory_residency_policy_contract_v1.json",
+        "artifacts/memory_residency_accounting_snapshot_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "memory-residency replay scenario drift",
+        "E2E orchestrator registration drift",
+        "manifest projection golden drift",
+        "proof-status row drift"
+      ],
+      "escalation_notes": "Use this lane only for the M4 deterministic replay/e2e contract. It cannot be cited as live benchmark evidence, production scheduler improvement, broad workspace health, release readiness, live RCH fleet availability, or permission to use local Cargo fallback.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "memory-residency-replay-e2e-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
       "lane_id": "artifact-governance-final-signoff",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -2672,6 +2723,13 @@
       "description": "Validation-frontier final signoff artifact, operator runbook, child deliverable mapping, channel fixture split, e2e runner commands, manifest/status rows, deterministic Markdown summary, and scoped no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "validation-frontier-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "memory-residency-replay-e2e-contract",
+      "description": "Memory-residency M4 deterministic replay/e2e artifact, runner, orchestrator registration, manifest/status mapping, stale/missing input failures, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "memory-residency-replay-e2e-contract"
       ]
     },
     {
