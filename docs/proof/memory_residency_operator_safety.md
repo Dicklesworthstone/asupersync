@@ -58,8 +58,8 @@ Rollback is non-destructive:
 3. Treat stale topology, unknown accounting, and missing proof-pack warmth as
    fallback evidence.
 4. Keep runtime records and trace artifacts intact. This runbook grants no
-   permission to delete files, clean worktrees, create branches, or create
-   worktrees.
+   destructive authority: no permission to delete files, clean worktrees, create
+   branches, or create worktrees.
 5. Rerun the focused M5 proof lane through RCH before re-enabling.
 
 ## Incident Checklist

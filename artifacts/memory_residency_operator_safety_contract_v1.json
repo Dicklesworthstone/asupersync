@@ -113,7 +113,7 @@
         "local fallback marker appears"
       ],
       "operator_message": "Local Cargo output is not acceptable evidence for the memory-residency safety packet.",
-      "rollback_action": "Refuse the evidence and rerun the exact manifest lane remotely.",
+      "rollback_action": "Refuse the evidence and rerun the exact manifest lane through RCH.",
       "fail_closed": true
     }
   ],
