@@ -438,6 +438,7 @@ fn validate_sqlite_open_path_lexical(path: &Path) -> Result<(), SqliteError> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn validate_sqlite_open_path(path: &Path) -> Result<(), SqliteError> {
     validate_sqlite_open_path_lexical(path)?;
     let resolved = resolve_sqlite_open_path(path)?;
