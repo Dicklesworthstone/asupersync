@@ -164,6 +164,7 @@ impl SwarmCoordinator {
                 details: "swarm transfer requires at least one piece".to_string(),
             });
         }
+        Self::validate_piece_count_matches_map(piece_count, &piece_map)?;
 
         if available_peers.len() > self.config.max_peers {
             cx.trace("Too many peers provided, selecting subset");
@@ -262,6 +263,19 @@ impl SwarmCoordinator {
         ));
 
         Ok(transfer_id)
+    }
+
+    fn validate_piece_count_matches_map(piece_count: u64, piece_map: &PieceMap) -> SwarmResult<()> {
+        if piece_count != piece_map.total_pieces {
+            return Err(SwarmError::ConfigurationError {
+                details: format!(
+                    "swarm transfer piece_count {piece_count} does not match piece_map.total_pieces {}",
+                    piece_map.total_pieces
+                ),
+            });
+        }
+
+        Ok(())
     }
 
     /// Add a peer to the swarm.
@@ -1064,6 +1078,27 @@ mod tests {
 
         let priority = coordinator.calculate_piece_priority(&PieceId::new(1), &transfer);
         assert!(priority >= 100);
+    }
+
+    #[test]
+    fn validate_piece_count_rejects_piece_map_mismatch() {
+        let piece_map = PieceMap::new(2, 1024, "test-hash".to_string());
+
+        let err = SwarmCoordinator::validate_piece_count_matches_map(3, &piece_map)
+            .expect_err("mismatched piece metadata must fail before transfer creation");
+
+        assert!(
+            matches!(&err, SwarmError::ConfigurationError { details } if details.contains("piece_count 3") && details.contains("piece_map.total_pieces 2")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_piece_count_accepts_piece_map_match() {
+        let piece_map = PieceMap::new(3, 1024, "test-hash".to_string());
+
+        SwarmCoordinator::validate_piece_count_matches_map(3, &piece_map)
+            .expect("matching transfer and piece-map metadata must be accepted");
     }
 
     #[test]
