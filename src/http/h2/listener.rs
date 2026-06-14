@@ -376,7 +376,7 @@ pub(crate) fn h2_headers_from_response(response: &Response) -> Vec<Header> {
 
 /// RAII in-flight request counter guard (mirrors the HTTP/1.1 server's
 /// guard): acquired when a complete request is dispatched to its handler,
-/// released after the response frames are queued on the connection.
+/// released after the stream's response frames have left the connection queue.
 struct InFlightRequestGuard {
     counter: Option<Arc<AtomicUsize>>,
 }
@@ -423,6 +423,48 @@ async fn race_force_close<F: Future>(signal: &ShutdownSignal, fut: F) -> Option<
 /// frames are queued. The trailing flag records whether the originating
 /// request was HEAD and therefore must not receive DATA frames.
 type FunnelItem = (u32, Response, InFlightRequestGuard, bool);
+
+fn release_flushed_response_guards(
+    conn: &Connection,
+    response_guards: &mut HashMap<u32, InFlightRequestGuard>,
+) {
+    response_guards.retain(|stream_id, _| conn.has_pending_frames_for_stream(*stream_id));
+}
+
+fn queue_h2_response(
+    conn: &mut Connection,
+    stream_id: u32,
+    mut response: Response,
+    guard: InFlightRequestGuard,
+    suppress_response_body: bool,
+    response_guards: &mut HashMap<u32, InFlightRequestGuard>,
+) {
+    if suppress_response_body {
+        suppress_response_body_for_head(&mut response);
+    }
+    let header_block = h2_headers_from_response(&response);
+    let end_stream = response.body.is_empty();
+    let mut queued_response = false;
+    if conn
+        .send_headers(stream_id, header_block, end_stream)
+        .is_ok()
+    {
+        queued_response = true;
+        if !end_stream {
+            let _ = conn.send_data(stream_id, crate::bytes::Bytes::from(response.body), true);
+        }
+    }
+
+    if queued_response && conn.has_pending_frames_for_stream(stream_id) {
+        let previous = response_guards.insert(stream_id, guard);
+        debug_assert!(
+            previous.is_none(),
+            "one response guard should be active per h2 stream"
+        );
+    } else {
+        drop(guard);
+    }
+}
 
 fn replace_or_insert_header(resp: &mut Response, header_name: &str, header_value: String) {
     let mut replaced = false;
@@ -648,9 +690,11 @@ where
     let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)> = HashMap::new();
     // Fixed stage-2 GOAWAY deadline, armed once when stage-1 is outstanding.
     let mut finalize_at: Option<Time> = None;
+    let mut response_guards: HashMap<u32, InFlightRequestGuard> = HashMap::new();
 
     loop {
         pump_writes(&mut conn, &mut framed).await?;
+        release_flushed_response_guards(&conn, &mut response_guards);
 
         // Do not close the transport while frames remain queued. Flow-control
         // -blocked DATA stays in the connection's pending_ops after
@@ -817,21 +861,15 @@ where
                 }
                 Ok(_) => {}
             },
-            DriverEvent::Response((stream_id, mut response, guard, suppress_response_body)) => {
-                if suppress_response_body {
-                    suppress_response_body_for_head(&mut response);
-                }
-                let header_block = h2_headers_from_response(&response);
-                let end_stream = response.body.is_empty();
-                if conn
-                    .send_headers(stream_id, header_block, end_stream)
-                    .is_ok()
-                    && !end_stream
-                {
-                    let _ =
-                        conn.send_data(stream_id, crate::bytes::Bytes::from(response.body), true);
-                }
-                drop(guard);
+            DriverEvent::Response((stream_id, response, guard, suppress_response_body)) => {
+                queue_h2_response(
+                    &mut conn,
+                    stream_id,
+                    response,
+                    guard,
+                    suppress_response_body,
+                    &mut response_guards,
+                );
             }
         }
     }
@@ -1333,6 +1371,17 @@ mod tests {
         headers
     }
 
+    fn encode_hpack_test_headers(headers: &[(&str, &str)]) -> crate::bytes::Bytes {
+        let mut encoder = crate::http::h2::hpack::Encoder::new();
+        let mut encoded = crate::bytes::BytesMut::new();
+        let headers = headers
+            .iter()
+            .map(|(name, value)| Header::new(*name, *value))
+            .collect::<Vec<_>>();
+        encoder.encode(&headers, &mut encoded);
+        encoded.freeze()
+    }
+
     #[test]
     fn stats_snapshot_records_accept_spawn_and_drain_counters() {
         let stats = Http2ListenerStats::new(h2_listener_test_time);
@@ -1389,6 +1438,81 @@ mod tests {
 
             assert_eq!(listener.stats_handle().snapshot().last_accept_at_ms, 456);
         });
+    }
+
+    #[test]
+    fn response_guard_lives_until_queued_stream_frames_flush() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new()
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/guard"),
+            (":authority", "guard.example"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(
+            matches!(received, Some(ReceivedFrame::Headers { stream_id: 1, .. })),
+            "request stream must be established before queuing a response"
+        );
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let guard = InFlightRequestGuard::acquire(Some(&in_flight));
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+        let mut response_guards = HashMap::new();
+        queue_h2_response(
+            &mut conn,
+            1,
+            Response::new(200, "OK", b"hello".to_vec()),
+            guard,
+            false,
+            &mut response_guards,
+        );
+
+        assert_eq!(
+            in_flight.load(Ordering::Acquire),
+            1,
+            "guard remains active while response frames are queued"
+        );
+        assert!(response_guards.contains_key(&1));
+        assert!(conn.has_pending_frames_for_stream(1));
+
+        release_flushed_response_guards(&conn, &mut response_guards);
+        assert_eq!(
+            in_flight.load(Ordering::Acquire),
+            1,
+            "pending stream frames keep the guard alive"
+        );
+
+        while conn.has_pending_frames_for_stream(1) {
+            assert!(
+                conn.next_frame().is_some(),
+                "pending stream frames must eventually flush"
+            );
+        }
+        release_flushed_response_guards(&conn, &mut response_guards);
+
+        assert!(response_guards.is_empty());
+        assert_eq!(
+            in_flight.load(Ordering::Acquire),
+            0,
+            "guard releases only after the stream has no queued frames"
+        );
     }
 
     #[test]

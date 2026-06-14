@@ -230,6 +230,39 @@ pub enum PendingOp {
     },
 }
 
+impl PendingOp {
+    fn references_stream(&self, stream_id: u32) -> bool {
+        match self {
+            Self::Settings(_) | Self::SettingsAck | Self::PingAck(_) | Self::GoAway { .. } => false,
+            Self::WindowUpdate {
+                stream_id: op_stream,
+                ..
+            }
+            | Self::Headers {
+                stream_id: op_stream,
+                ..
+            }
+            | Self::Continuation {
+                stream_id: op_stream,
+                ..
+            }
+            | Self::Data {
+                stream_id: op_stream,
+                ..
+            }
+            | Self::RstStream {
+                stream_id: op_stream,
+                ..
+            } => *op_stream == stream_id,
+            Self::PushPromise {
+                stream_id: associated_stream,
+                promised_stream_id,
+                ..
+            } => *associated_stream == stream_id || *promised_stream_id == stream_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PushPromiseAccumulator {
     associated_stream_id: u32,
@@ -1841,6 +1874,20 @@ impl Connection {
     #[must_use]
     pub fn has_pending_frames(&self) -> bool {
         !self.pending_ops.is_empty()
+    }
+
+    /// Check whether any queued outbound frame still belongs to `stream_id`.
+    ///
+    /// This lets the HTTP/2 listener keep request in-flight accounting alive
+    /// until response frames have actually left the connection queue rather
+    /// than only until the handler has produced a response. That distinction
+    /// matters when DATA is flow-control-blocked and remains in `pending_ops`
+    /// across drain-supervisor observations.
+    #[must_use]
+    pub fn has_pending_frames_for_stream(&self, stream_id: u32) -> bool {
+        self.pending_ops
+            .iter()
+            .any(|op| op.references_stream(stream_id))
     }
 
     /// Send a WINDOW_UPDATE for connection-level flow control.
