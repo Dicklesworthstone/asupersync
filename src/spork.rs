@@ -289,6 +289,8 @@ pub mod process_group {
         MemberNotFound(GroupMemberId),
         /// The deterministic join sequence counter has no remaining values.
         JoinSequenceExhausted,
+        /// The deterministic event sequence counter has no remaining values.
+        EventSequenceExhausted,
     }
 
     impl fmt::Display for ProcessGroupError {
@@ -302,6 +304,9 @@ pub mod process_group {
                 }
                 Self::JoinSequenceExhausted => {
                     write!(f, "process group join sequence exhausted")
+                }
+                Self::EventSequenceExhausted => {
+                    write!(f, "process group event sequence exhausted")
                 }
             }
         }
@@ -413,7 +418,9 @@ pub mod process_group {
     pub struct ProcessGroupState {
         group: GroupName,
         members: BTreeMap<GroupMemberId, GroupMember>,
+        events: Vec<GroupEvent>,
         next_join_sequence: u64,
+        next_event_sequence: u64,
     }
 
     impl ProcessGroupState {
@@ -423,7 +430,9 @@ pub mod process_group {
             Self {
                 group,
                 members: BTreeMap::new(),
+                events: Vec::new(),
                 next_join_sequence: 0,
+                next_event_sequence: 0,
             }
         }
 
@@ -457,10 +466,41 @@ pub mod process_group {
             self.next_join_sequence
         }
 
+        /// Returns the deterministic event sequence that will be assigned next.
+        #[must_use]
+        pub fn next_event_sequence(&self) -> u64 {
+            self.next_event_sequence
+        }
+
         /// Returns an active member record.
         #[must_use]
         pub fn member(&self, member: &GroupMemberId) -> Option<&GroupMember> {
             self.members.get(member)
+        }
+
+        /// Returns all recorded membership events in emission order.
+        #[must_use]
+        pub fn event_log(&self) -> &[GroupEvent] {
+            &self.events
+        }
+
+        /// Replays events at or after `cursor` and advances it past the replay.
+        ///
+        /// This is the deterministic core for monitor-style streams: callers
+        /// keep a cursor per subscriber, and each call returns only events not
+        /// previously observed by that cursor.
+        pub fn events_since(&self, cursor: &mut GroupEventCursor) -> &[GroupEvent] {
+            let start = self
+                .events
+                .partition_point(|event| event.sequence() < cursor.next_sequence());
+            let next_sequence = self.events.last().map_or(cursor.next_sequence(), |event| {
+                event
+                    .sequence()
+                    .saturating_add(1)
+                    .max(cursor.next_sequence())
+            });
+            cursor.set_next_sequence(next_sequence);
+            &self.events[start..]
         }
 
         /// Adds a member and returns the corresponding joined event.
@@ -480,19 +520,29 @@ pub mod process_group {
             }
 
             let join_sequence = self.next_join_sequence;
-            self.next_join_sequence = self
+            let next_join_sequence = self
                 .next_join_sequence
                 .checked_add(1)
                 .ok_or(ProcessGroupError::JoinSequenceExhausted)?;
+            let event_sequence = self.next_event_sequence;
+            let next_event_sequence = self
+                .next_event_sequence
+                .checked_add(1)
+                .ok_or(ProcessGroupError::EventSequenceExhausted)?;
 
             let record = GroupMember::new(member.clone(), at, join_sequence);
             self.members.insert(member.clone(), record);
-            Ok(GroupEvent::new(
+            self.next_join_sequence = next_join_sequence;
+            self.next_event_sequence = next_event_sequence;
+            let event = GroupEvent::with_sequence(
                 self.group.clone(),
                 member,
                 GroupEventKind::Joined,
                 at,
-            ))
+                event_sequence,
+            );
+            self.events.push(event.clone());
+            Ok(event)
         }
 
         /// Removes a member through the explicit leave path.
@@ -506,15 +556,24 @@ pub mod process_group {
             member: &GroupMemberId,
             at: Time,
         ) -> Result<GroupEvent, ProcessGroupError> {
-            self.members
-                .remove(member)
-                .ok_or_else(|| ProcessGroupError::MemberNotFound(member.clone()))?;
-            Ok(GroupEvent::new(
+            if !self.members.contains_key(member) {
+                return Err(ProcessGroupError::MemberNotFound(member.clone()));
+            }
+            let event_sequence = self.next_event_sequence;
+            self.next_event_sequence = self
+                .next_event_sequence
+                .checked_add(1)
+                .ok_or(ProcessGroupError::EventSequenceExhausted)?;
+            let _ = self.members.remove(member);
+            let event = GroupEvent::with_sequence(
                 self.group.clone(),
                 member.clone(),
                 GroupEventKind::Left,
                 at,
-            ))
+                event_sequence,
+            );
+            self.events.push(event.clone());
+            Ok(event)
         }
 
         /// Removes a member through monitor/region cleanup.
@@ -529,21 +588,66 @@ pub mod process_group {
             reason: DownReason,
             at: Time,
         ) -> Result<GroupEvent, ProcessGroupError> {
-            self.members
-                .remove(member)
-                .ok_or_else(|| ProcessGroupError::MemberNotFound(member.clone()))?;
-            Ok(GroupEvent::new(
+            if !self.members.contains_key(member) {
+                return Err(ProcessGroupError::MemberNotFound(member.clone()));
+            }
+            let event_sequence = self.next_event_sequence;
+            self.next_event_sequence = self
+                .next_event_sequence
+                .checked_add(1)
+                .ok_or(ProcessGroupError::EventSequenceExhausted)?;
+            let _ = self.members.remove(member);
+            let event = GroupEvent::with_sequence(
                 self.group.clone(),
                 member.clone(),
                 GroupEventKind::Down(reason),
                 at,
-            ))
+                event_sequence,
+            );
+            self.events.push(event.clone());
+            Ok(event)
         }
 
         /// Returns a deterministic snapshot of active members.
         #[must_use]
         pub fn snapshot(&self) -> GroupSnapshot {
             GroupSnapshot::new(self.group.clone(), self.members.values().cloned().collect())
+        }
+    }
+
+    /// Cursor into a process-group membership event log.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct GroupEventCursor {
+        next_sequence: u64,
+    }
+
+    impl GroupEventCursor {
+        /// Creates a cursor positioned before the first event.
+        #[must_use]
+        pub fn new() -> Self {
+            Self { next_sequence: 0 }
+        }
+
+        /// Creates a cursor positioned at an explicit next event sequence.
+        #[must_use]
+        pub fn from_next_sequence(next_sequence: u64) -> Self {
+            Self { next_sequence }
+        }
+
+        /// Returns the next event sequence this cursor will observe.
+        #[must_use]
+        pub fn next_sequence(&self) -> u64 {
+            self.next_sequence
+        }
+
+        fn set_next_sequence(&mut self, next_sequence: u64) {
+            self.next_sequence = next_sequence;
+        }
+    }
+
+    impl Default for GroupEventCursor {
+        fn default() -> Self {
+            Self::new()
         }
     }
 
@@ -565,10 +669,11 @@ pub mod process_group {
         member: GroupMemberId,
         kind: GroupEventKind,
         at: Time,
+        sequence: u64,
     }
 
     impl GroupEvent {
-        /// Creates a membership-change event.
+        /// Creates a standalone membership-change event.
         #[must_use]
         pub fn new(
             group: GroupName,
@@ -576,11 +681,24 @@ pub mod process_group {
             kind: GroupEventKind,
             at: Time,
         ) -> Self {
+            Self::with_sequence(group, member, kind, at, 0)
+        }
+
+        /// Creates a membership-change event with a deterministic sequence.
+        #[must_use]
+        pub fn with_sequence(
+            group: GroupName,
+            member: GroupMemberId,
+            kind: GroupEventKind,
+            at: Time,
+            sequence: u64,
+        ) -> Self {
             Self {
                 group,
                 member,
                 kind,
                 at,
+                sequence,
             }
         }
 
@@ -606,6 +724,12 @@ pub mod process_group {
         #[must_use]
         pub fn at(&self) -> Time {
             self.at
+        }
+
+        /// Returns the deterministic event sequence.
+        #[must_use]
+        pub fn sequence(&self) -> u64 {
+            self.sequence
         }
     }
 
@@ -700,8 +824,9 @@ pub mod prelude {
 
     // -- Process groups --
     pub use super::process_group::{
-        BroadcastBackpressurePolicy, GroupEvent, GroupEventKind, GroupMember, GroupMemberId,
-        GroupName, GroupNameError, GroupSnapshot, ProcessGroupError, ProcessGroupState,
+        BroadcastBackpressurePolicy, GroupEvent, GroupEventCursor, GroupEventKind, GroupMember,
+        GroupMemberId, GroupName, GroupNameError, GroupSnapshot, ProcessGroupError,
+        ProcessGroupState,
     };
 
     // -- Monitor --
@@ -1013,6 +1138,7 @@ mod tests {
         let _ = std::any::type_name::<prelude::GroupEvent>();
         let _ = std::any::type_name::<prelude::ProcessGroupState>();
         let _ = std::any::type_name::<prelude::ProcessGroupError>();
+        let _ = std::any::type_name::<prelude::GroupEventCursor>();
         let _ = std::any::type_name::<prelude::BroadcastBackpressurePolicy>();
         let _ = std::any::type_name::<prelude::MonitorRef>();
         let _ = std::any::type_name::<prelude::DownReason>();
@@ -1068,6 +1194,7 @@ mod tests {
         let _ = std::any::type_name::<process_group::GroupMember>();
         let _ = std::any::type_name::<process_group::GroupSnapshot>();
         let _ = std::any::type_name::<process_group::GroupEvent>();
+        let _ = std::any::type_name::<process_group::GroupEventCursor>();
         let _ = std::any::type_name::<process_group::GroupEventKind>();
         let _ = std::any::type_name::<process_group::ProcessGroupState>();
         let _ = std::any::type_name::<process_group::ProcessGroupError>();
@@ -1207,6 +1334,7 @@ mod tests {
 
         assert_eq!(event.group().as_str(), "workers");
         assert_eq!(event.at(), crate::types::Time::from_millis(5));
+        assert_eq!(event.sequence(), 0);
         assert!(matches!(
             event.kind(),
             process_group::GroupEventKind::Down(monitor::DownReason::Error(message))
@@ -1259,6 +1387,9 @@ mod tests {
             process_group::GroupEventKind::Joined
         ));
         assert_eq!(state.next_join_sequence(), 2);
+        assert_eq!(state.next_event_sequence(), 2);
+        assert_eq!(joined_first.sequence(), 0);
+        assert_eq!(joined_second.sequence(), 1);
 
         let ordered: Vec<String> = state
             .snapshot()
@@ -1271,6 +1402,7 @@ mod tests {
             .leave(&first, crate::types::Time::from_nanos(30))
             .unwrap();
         assert!(matches!(left.kind(), process_group::GroupEventKind::Left));
+        assert_eq!(left.sequence(), 2);
         assert!(!state.contains_member(&first));
 
         let down = state
@@ -1285,9 +1417,83 @@ mod tests {
             process_group::GroupEventKind::Down(monitor::DownReason::Error(message))
                 if message == "crashed"
         ));
+        assert_eq!(down.sequence(), 3);
         assert!(state.is_empty());
+        assert_eq!(state.event_log().len(), 4);
 
         crate::test_complete!("process_group_state_join_leave_and_down_events_are_exact");
+    }
+
+    #[test]
+    fn process_group_event_cursor_replays_each_transition_once() {
+        init_test("process_group_event_cursor_replays_each_transition_once");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let mut cursor = process_group::GroupEventCursor::new();
+
+        assert!(state.events_since(&mut cursor).is_empty());
+        assert_eq!(cursor.next_sequence(), 0);
+
+        state
+            .join(first.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(second.clone(), crate::types::Time::from_nanos(20))
+            .unwrap();
+        let initial_replay: Vec<(u64, String)> = state
+            .events_since(&mut cursor)
+            .iter()
+            .map(|event| (event.sequence(), event.member().to_string()))
+            .collect();
+        assert_eq!(
+            initial_replay,
+            vec![
+                (0, "Node(node-a):T1".to_string()),
+                (1, "Node(node-b):T2".to_string()),
+            ]
+        );
+        assert_eq!(cursor.next_sequence(), 2);
+        assert!(state.events_since(&mut cursor).is_empty());
+        assert_eq!(cursor.next_sequence(), 2);
+
+        state
+            .leave(&first, crate::types::Time::from_nanos(30))
+            .unwrap();
+        state
+            .mark_down(
+                &second,
+                monitor::DownReason::Error("crashed".into()),
+                crate::types::Time::from_nanos(40),
+            )
+            .unwrap();
+        let second_replay: Vec<u64> = state
+            .events_since(&mut cursor)
+            .iter()
+            .map(process_group::GroupEvent::sequence)
+            .collect();
+        assert_eq!(second_replay, vec![2, 3]);
+        assert_eq!(cursor.next_sequence(), 4);
+
+        let mut late_cursor = process_group::GroupEventCursor::from_next_sequence(3);
+        let late_replay: Vec<u64> = state
+            .events_since(&mut late_cursor)
+            .iter()
+            .map(process_group::GroupEvent::sequence)
+            .collect();
+        assert_eq!(late_replay, vec![3]);
+        assert_eq!(late_cursor.next_sequence(), 4);
+
+        crate::test_complete!("process_group_event_cursor_replays_each_transition_once");
     }
 
     #[test]
