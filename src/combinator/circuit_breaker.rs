@@ -753,6 +753,55 @@ impl CircuitBreaker {
         }
     }
 
+    /// Release a permit without counting the call as a success or a failure.
+    ///
+    /// Used when a higher layer's failure classifier decides a completed call
+    /// is neither (for example an HTTP 4xx, or a cancelled call, that should not
+    /// trip the breaker). The call is tallied in
+    /// [`CircuitBreakerMetrics::total_ignored_errors`], and a half-open probe
+    /// permit is released so the trial slot is freed — without recording a
+    /// success toward closing the circuit. This is the neutral counterpart to
+    /// [`Self::record_success`] / [`Self::record_failure`] and mirrors the
+    /// behaviour `record_failure` already applies to predicate-ignored errors.
+    pub fn record_ignored(&self, permit: Permit) {
+        self.total_ignored_errors.fetch_add(1, Ordering::Relaxed);
+
+        // Free the half-open probe slot if this was a probe call, leaving the
+        // success count (which drives closing) untouched.
+        if let Permit::Probe {
+            epoch: permit_epoch,
+        } = permit
+        {
+            let mut current_bits = self.state_bits.load(Ordering::Acquire);
+            loop {
+                let state = State::from_bits(current_bits);
+                match state {
+                    State::HalfOpen {
+                        epoch,
+                        probes_active,
+                        successes,
+                    } if epoch == permit_epoch => {
+                        let new_state = State::HalfOpen {
+                            epoch,
+                            probes_active: probes_active.saturating_sub(1),
+                            successes,
+                        };
+                        match self.state_bits.compare_exchange_weak(
+                            current_bits,
+                            new_state.to_bits(),
+                            Ordering::Release,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => break,
+                            Err(actual) => current_bits = actual,
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
     /// Record a failed call.
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn record_failure(&self, permit: Permit, error: &str, now: Time) {

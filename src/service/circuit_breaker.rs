@@ -20,32 +20,136 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
+/// How a completed inner call should be recorded against the breaker.
+///
+/// Returned by a [`ResultClassifier`]. Configurable failure classification
+/// (bead eeexl1.7 AC4) hinges on this: a transport-successful response can still
+/// be a breaker *failure* (e.g. an HTTP 5xx returned as `Ok(Response)`), and
+/// some completed calls should be *ignored* entirely (e.g. a caller-driven
+/// `Cancelled`, or an HTTP 4xx client error that does not mean the upstream is
+/// unhealthy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// Count as a success (advances a half-open circuit toward closing).
+    Success,
+    /// Count as a failure (advances the circuit toward opening).
+    Failure,
+    /// Neither — release the permit without affecting open/close transitions.
+    Ignore,
+}
+
+/// Classifies a completed inner-service result into a breaker [`Disposition`].
+///
+/// The default ([`DefaultClassifier`]) preserves the simplest behaviour: `Ok`
+/// is a success and `Err` is a failure (errors are then further filtered by the
+/// breaker policy's `FailurePredicate`). Supply a custom classifier — e.g. via
+/// [`FnClassifier`] — to count successful-looking responses as failures or to
+/// ignore specific outcomes.
+pub trait ResultClassifier<Res, Err> {
+    /// Classify a completed inner result.
+    fn classify(&self, result: &Result<Res, Err>) -> Disposition;
+}
+
+/// The default classifier: `Ok` => [`Disposition::Success`], `Err` =>
+/// [`Disposition::Failure`]. Reproduces the breaker's original behaviour, where
+/// error filtering is delegated to the policy's `FailurePredicate`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultClassifier;
+
+impl<Res, Err> ResultClassifier<Res, Err> for DefaultClassifier {
+    fn classify(&self, result: &Result<Res, Err>) -> Disposition {
+        match result {
+            Ok(_) => Disposition::Success,
+            Err(_) => Disposition::Failure,
+        }
+    }
+}
+
+/// A [`ResultClassifier`] backed by a function or closure.
+///
+/// The function is the determinism-friendly extension point (mirroring the
+/// breaker policy's function-pointer `FailurePredicate`): pass a plain `fn`
+/// pointer for fully deterministic, replayable classification — for example,
+/// the canonical HTTP policy "5xx counts, 4xx does not, cancellation ignored":
+///
+/// ```ignore
+/// FnClassifier(|r: &Result<Resp, Err>| match r {
+///     Ok(resp) if resp.status() >= 500 => Disposition::Failure, // 5xx counts
+///     Ok(resp) if resp.status() >= 400 => Disposition::Ignore,  // 4xx neither
+///     Ok(_) => Disposition::Success,                            // 2xx success
+///     Err(e) if e.is_cancelled() => Disposition::Ignore,        // cancel ignored
+///     Err(_) => Disposition::Failure,
+/// })
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct FnClassifier<F>(pub F);
+
+impl<Res, Err, F> ResultClassifier<Res, Err> for FnClassifier<F>
+where
+    F: Fn(&Result<Res, Err>) -> Disposition,
+{
+    fn classify(&self, result: &Result<Res, Err>) -> Disposition {
+        (self.0)(result)
+    }
+}
+
 /// A layer that applies circuit-breaker protection to requests.
 ///
 /// Cloned services share one breaker instance so endpoint health is tracked
 /// across all handles produced from this layer.
 #[derive(Debug, Clone)]
-pub struct CircuitBreakerLayer {
+pub struct CircuitBreakerLayer<C = DefaultClassifier> {
     policy: CircuitBreakerPolicy,
     time_getter: fn() -> Time,
+    classifier: C,
 }
 
 impl CircuitBreakerLayer {
-    /// Creates a new circuit-breaker layer with the given policy.
+    /// Creates a new circuit-breaker layer with the given policy and the
+    /// [`DefaultClassifier`] (`Ok` => success, `Err` => failure).
     #[must_use]
     pub fn new(policy: CircuitBreakerPolicy) -> Self {
         Self {
             policy,
             time_getter: wall_clock_now,
+            classifier: DefaultClassifier,
         }
     }
 
-    /// Creates a new circuit-breaker layer with a custom time source.
+    /// Creates a new circuit-breaker layer with a custom time source and the
+    /// [`DefaultClassifier`].
     #[must_use]
     pub fn with_time_getter(policy: CircuitBreakerPolicy, time_getter: fn() -> Time) -> Self {
         Self {
             policy,
             time_getter,
+            classifier: DefaultClassifier,
+        }
+    }
+}
+
+impl<C> CircuitBreakerLayer<C> {
+    /// Creates a layer with a custom failure classifier (bead eeexl1.7 AC4).
+    #[must_use]
+    pub fn with_classifier(policy: CircuitBreakerPolicy, classifier: C) -> Self {
+        Self {
+            policy,
+            time_getter: wall_clock_now,
+            classifier,
+        }
+    }
+
+    /// Creates a layer with a custom failure classifier and time source.
+    #[must_use]
+    pub fn with_classifier_and_time(
+        policy: CircuitBreakerPolicy,
+        classifier: C,
+        time_getter: fn() -> Time,
+    ) -> Self {
+        Self {
+            policy,
+            time_getter,
+            classifier,
         }
     }
 
@@ -62,42 +166,50 @@ impl CircuitBreakerLayer {
     }
 }
 
-impl<S> Layer<S> for CircuitBreakerLayer {
-    type Service = CircuitBreaker<S>;
+impl<S, C: Clone> Layer<S> for CircuitBreakerLayer<C> {
+    type Service = CircuitBreaker<S, C>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        CircuitBreaker::with_time_getter(inner, self.policy.clone(), self.time_getter)
+        CircuitBreaker::from_parts(
+            inner,
+            self.policy.clone(),
+            self.time_getter,
+            self.classifier.clone(),
+        )
     }
 }
 
 /// Service wrapper that rejects calls while its circuit is open.
 #[derive(Debug)]
-pub struct CircuitBreaker<S> {
+pub struct CircuitBreaker<S, C = DefaultClassifier> {
     inner: S,
     breaker: Arc<InnerCircuitBreaker>,
     time_getter: fn() -> Time,
     ready_observed: bool,
+    classifier: C,
 }
 
-impl<S: Clone> Clone for CircuitBreaker<S> {
+impl<S: Clone, C: Clone> Clone for CircuitBreaker<S, C> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             breaker: self.breaker.clone(),
             time_getter: self.time_getter,
             ready_observed: false,
+            classifier: self.classifier.clone(),
         }
     }
 }
 
 impl<S> CircuitBreaker<S> {
-    /// Creates a new circuit-breaker service.
+    /// Creates a new circuit-breaker service with the [`DefaultClassifier`].
     #[must_use]
     pub fn new(inner: S, policy: CircuitBreakerPolicy) -> Self {
         Self::with_time_getter(inner, policy, wall_clock_now)
     }
 
-    /// Creates a new circuit-breaker service with a custom time source.
+    /// Creates a new circuit-breaker service with a custom time source and the
+    /// [`DefaultClassifier`].
     #[must_use]
     pub fn with_time_getter(
         inner: S,
@@ -111,18 +223,68 @@ impl<S> CircuitBreaker<S> {
         )
     }
 
-    /// Creates a new service wrapper sharing an existing breaker.
+    /// Creates a new service wrapper sharing an existing breaker, with the
+    /// [`DefaultClassifier`].
     #[must_use]
     pub fn from_shared(
         inner: S,
         breaker: Arc<InnerCircuitBreaker>,
         time_getter: fn() -> Time,
     ) -> Self {
+        Self::from_shared_with_classifier(inner, breaker, time_getter, DefaultClassifier)
+    }
+}
+
+impl<S, C> CircuitBreaker<S, C> {
+    /// Creates a circuit-breaker service with a custom failure classifier
+    /// (bead eeexl1.7 AC4).
+    #[must_use]
+    pub fn with_classifier(inner: S, policy: CircuitBreakerPolicy, classifier: C) -> Self {
+        Self::from_parts(inner, policy, wall_clock_now, classifier)
+    }
+
+    /// Creates a circuit-breaker service with a custom classifier and time
+    /// source.
+    #[must_use]
+    pub fn with_classifier_and_time(
+        inner: S,
+        policy: CircuitBreakerPolicy,
+        time_getter: fn() -> Time,
+        classifier: C,
+    ) -> Self {
+        Self::from_parts(inner, policy, time_getter, classifier)
+    }
+
+    /// Builds a service from a policy, time source, and classifier.
+    #[must_use]
+    pub fn from_parts(
+        inner: S,
+        policy: CircuitBreakerPolicy,
+        time_getter: fn() -> Time,
+        classifier: C,
+    ) -> Self {
+        Self::from_shared_with_classifier(
+            inner,
+            Arc::new(InnerCircuitBreaker::new(policy)),
+            time_getter,
+            classifier,
+        )
+    }
+
+    /// Builds a service sharing an existing breaker, with a custom classifier.
+    #[must_use]
+    pub fn from_shared_with_classifier(
+        inner: S,
+        breaker: Arc<InnerCircuitBreaker>,
+        time_getter: fn() -> Time,
+        classifier: C,
+    ) -> Self {
         Self {
             inner,
             breaker,
             time_getter,
             ready_observed: false,
+            classifier,
         }
     }
 
@@ -245,15 +407,16 @@ impl<E: std::error::Error + 'static> std::error::Error for CircuitBreakerError<E
     }
 }
 
-impl<S, Request> Service<Request> for CircuitBreaker<S>
+impl<S, C, Request> Service<Request> for CircuitBreaker<S, C>
 where
     S: Service<Request>,
     S::Error: fmt::Display,
     S::Future: Unpin,
+    C: ResultClassifier<S::Response, S::Error> + Clone + Unpin,
 {
     type Response = S::Response;
     type Error = CircuitBreakerError<S::Error>;
-    type Future = CircuitBreakerFuture<S::Future>;
+    type Future = CircuitBreakerFuture<S::Future, C>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.inner.poll_ready(cx) {
@@ -295,26 +458,26 @@ where
             "service future dropped before completion",
         );
         let future = self.inner.call(req);
-        CircuitBreakerFuture::running(future, guard)
+        CircuitBreakerFuture::running(future, guard, self.classifier.clone())
     }
 }
 
 /// Future returned by [`CircuitBreaker`] service.
 #[derive(Debug)]
-pub struct CircuitBreakerFuture<F> {
-    state: CircuitBreakerFutureState<F>,
+pub struct CircuitBreakerFuture<F, C = DefaultClassifier> {
+    state: CircuitBreakerFutureState<F, C>,
 }
 
 #[derive(Debug)]
-enum CircuitBreakerFutureState<F> {
+enum CircuitBreakerFutureState<F, C> {
     NotReady,
     Open { remaining: std::time::Duration },
     HalfOpenFull,
-    Running { inner: F, guard: PermitGuard },
+    Running { inner: F, guard: PermitGuard, classifier: C },
     Done,
 }
 
-impl<F> CircuitBreakerFuture<F> {
+impl<F, C> CircuitBreakerFuture<F, C> {
     /// Creates a future that immediately returns a readiness misuse error.
     #[must_use]
     pub const fn not_ready() -> Self {
@@ -339,17 +502,22 @@ impl<F> CircuitBreakerFuture<F> {
         }
     }
 
-    fn running(inner: F, guard: PermitGuard) -> Self {
+    fn running(inner: F, guard: PermitGuard, classifier: C) -> Self {
         Self {
-            state: CircuitBreakerFutureState::Running { inner, guard },
+            state: CircuitBreakerFutureState::Running {
+                inner,
+                guard,
+                classifier,
+            },
         }
     }
 }
 
-impl<F, Response, Error> Future for CircuitBreakerFuture<F>
+impl<F, C, Response, Error> Future for CircuitBreakerFuture<F, C>
 where
     F: Future<Output = Result<Response, Error>> + Unpin,
     Error: fmt::Display,
+    C: ResultClassifier<Response, Error> + Unpin,
 {
     type Output = Result<Response, CircuitBreakerError<Error>>;
 
@@ -365,22 +533,42 @@ where
             CircuitBreakerFutureState::HalfOpenFull => {
                 Poll::Ready(Err(CircuitBreakerError::HalfOpenFull))
             }
-            CircuitBreakerFutureState::Running { mut inner, guard } => {
-                match Pin::new(&mut inner).poll(cx) {
-                    Poll::Pending => {
-                        this.state = CircuitBreakerFutureState::Running { inner, guard };
-                        Poll::Pending
+            CircuitBreakerFutureState::Running {
+                mut inner,
+                guard,
+                classifier,
+            } => match Pin::new(&mut inner).poll(cx) {
+                Poll::Pending => {
+                    this.state = CircuitBreakerFutureState::Running {
+                        inner,
+                        guard,
+                        classifier,
+                    };
+                    Poll::Pending
+                }
+                Poll::Ready(output) => {
+                    // The classifier — not just Ok/Err — decides how a completed
+                    // call is recorded (bead eeexl1.7 AC4): a successful-looking
+                    // response can be a failure (5xx), and some outcomes are
+                    // neither (4xx, cancellation).
+                    match classifier.classify(&output) {
+                        Disposition::Success => guard.record_success(),
+                        Disposition::Ignore => guard.record_ignored(),
+                        Disposition::Failure => match &output {
+                            Ok(_) => {
+                                guard.record_failure_with(
+                                    "circuit breaker classified response as failure",
+                                );
+                            }
+                            Err(error) => guard.record_failure_with(&error.to_string()),
+                        },
                     }
-                    Poll::Ready(Ok(response)) => {
-                        guard.record_success();
-                        Poll::Ready(Ok(response))
-                    }
-                    Poll::Ready(Err(error)) => {
-                        guard.record_failure(&error);
-                        Poll::Ready(Err(CircuitBreakerError::Inner(error)))
+                    match output {
+                        Ok(response) => Poll::Ready(Ok(response)),
+                        Err(error) => Poll::Ready(Err(CircuitBreakerError::Inner(error))),
                     }
                 }
-            }
+            },
             CircuitBreakerFutureState::Done => {
                 Poll::Ready(Err(CircuitBreakerError::PolledAfterCompletion))
             }
@@ -417,10 +605,16 @@ impl PermitGuard {
         }
     }
 
-    fn record_failure<E: fmt::Display>(mut self, error: &E) {
+    fn record_failure_with(mut self, error: &str) {
         if let Some(permit) = self.permit.take() {
             self.breaker
-                .record_failure(permit, &error.to_string(), (self.time_getter)());
+                .record_failure(permit, error, (self.time_getter)());
+        }
+    }
+
+    fn record_ignored(mut self) {
+        if let Some(permit) = self.permit.take() {
+            self.breaker.record_ignored(permit);
         }
     }
 }
@@ -643,6 +837,153 @@ mod tests {
         fn clone_request(&self, _req: &()) -> Option<()> {
             Some(())
         }
+    }
+
+    // ---- AC4: configurable failure classification --------------------------
+
+    /// Canonical HTTP-style classifier: 5xx counts as failure, 4xx is ignored
+    /// (the upstream answered, just not what the caller wanted), `"cancelled"`
+    /// errors are ignored, all other errors count as failures.
+    fn http_like_classifier(result: &Result<&'static str, &'static str>) -> Disposition {
+        match result {
+            Ok(status) if status.starts_with('5') => Disposition::Failure,
+            Ok(status) if status.starts_with('4') => Disposition::Ignore,
+            Ok(_) => Disposition::Success,
+            Err(error) if *error == "cancelled" => Disposition::Ignore,
+            Err(_) => Disposition::Failure,
+        }
+    }
+
+    fn classifier_policy() -> CircuitBreakerPolicy {
+        // The classifier is the sole decider, so the inner predicate counts
+        // everything handed to `record_failure`.
+        CircuitBreakerPolicy {
+            failure_predicate: FailurePredicate::AllErrors,
+            ..test_policy()
+        }
+    }
+
+    #[test]
+    fn classifier_counts_5xx_response_as_failure() {
+        init_test("classifier_counts_5xx_response_as_failure");
+        let mut service = CircuitBreaker::with_classifier_and_time(
+            ScriptedService::new([Step::Ok("500"), Step::Ok("503")]),
+            classifier_policy(),
+            test_time,
+            FnClassifier(http_like_classifier),
+        );
+
+        // Two 5xx responses — each still delivered to the caller as `Ok(..)` —
+        // are recorded as failures and trip the breaker (threshold 2).
+        for _ in 0..2 {
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(matches!(service.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            let mut fut = service.call(());
+            assert!(matches!(poll_once(&mut fut), Poll::Ready(Ok(_))));
+        }
+        assert!(matches!(service.state(), State::Open { .. }));
+
+        // The breaker is now open: the next call is rejected before reaching
+        // the (exhausted) inner service.
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let _ = service.poll_ready(&mut cx);
+        let mut fut = service.call(());
+        assert!(matches!(
+            poll_once(&mut fut),
+            Poll::Ready(Err(CircuitBreakerError::Open { .. }))
+        ));
+    }
+
+    #[test]
+    fn classifier_ignores_4xx_response() {
+        init_test("classifier_ignores_4xx_response");
+        let mut service = CircuitBreaker::with_classifier_and_time(
+            ScriptedService::new([Step::Ok("404"), Step::Ok("400"), Step::Ok("403")]),
+            classifier_policy(),
+            test_time,
+            FnClassifier(http_like_classifier),
+        );
+
+        for _ in 0..3 {
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(matches!(service.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            let mut fut = service.call(());
+            assert!(matches!(poll_once(&mut fut), Poll::Ready(Ok(_))));
+        }
+
+        // 4xx never counts toward opening; the breaker stays closed with no
+        // failures, and each is tallied as an ignored call.
+        assert_eq!(service.state(), State::Closed { failures: 0 });
+        assert_eq!(service.metrics().total_ignored_errors, 3);
+    }
+
+    #[test]
+    fn classifier_ignores_cancelled_but_counts_other_errors() {
+        init_test("classifier_ignores_cancelled_but_counts_other_errors");
+        let mut service = CircuitBreaker::with_classifier_and_time(
+            ScriptedService::new([
+                Step::Err("cancelled"),
+                Step::Err("cancelled"),
+                Step::Err("boom"),
+                Step::Err("boom"),
+            ]),
+            classifier_policy(),
+            test_time,
+            FnClassifier(http_like_classifier),
+        );
+
+        // Cancellations are ignored — the breaker stays closed.
+        for _ in 0..2 {
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(matches!(service.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+            let mut fut = service.call(());
+            assert!(matches!(
+                poll_once(&mut fut),
+                Poll::Ready(Err(CircuitBreakerError::Inner("cancelled")))
+            ));
+        }
+        assert_eq!(service.state(), State::Closed { failures: 0 });
+        assert_eq!(service.metrics().total_ignored_errors, 2);
+
+        // Real errors do count and open the breaker.
+        for _ in 0..2 {
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let _ = service.poll_ready(&mut cx);
+            let mut fut = service.call(());
+            let _ = poll_once(&mut fut);
+        }
+        assert!(matches!(service.state(), State::Open { .. }));
+    }
+
+    #[test]
+    fn default_classifier_preserves_ok_success_err_failure() {
+        init_test("default_classifier_preserves_ok_success_err_failure");
+        // Without a custom classifier, behaviour is unchanged: Ok => success,
+        // Err => failure (subject to the policy predicate).
+        let mut service = CircuitBreaker::with_time_getter(
+            ScriptedService::new([Step::Ok("ok"), Step::Err("e1"), Step::Err("e2")]),
+            classifier_policy(),
+            test_time,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = service.poll_ready(&mut cx);
+        let mut ok = service.call(());
+        assert!(matches!(poll_once(&mut ok), Poll::Ready(Ok("ok"))));
+        assert_eq!(service.state(), State::Closed { failures: 0 });
+
+        for _ in 0..2 {
+            let _ = service.poll_ready(&mut cx);
+            let mut fut = service.call(());
+            let _ = poll_once(&mut fut);
+        }
+        assert!(matches!(service.state(), State::Open { .. }));
     }
 
     #[test]
