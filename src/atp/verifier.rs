@@ -12,6 +12,10 @@ use crate::atp::object::{ContentId, Object, ObjectGraph, ObjectGraphError, Objec
 use std::collections::BTreeSet;
 use std::fmt;
 
+const CHUNK_VERIFICATION_DIGEST_DOMAIN: &[u8] = b"asupersync.atp.verifier.chunk.v1";
+const REPAIR_SYMBOL_DIGEST_DOMAIN: &[u8] = b"asupersync.atp.verifier.repair_symbol.v1";
+const PROOF_BUNDLE_DIGEST_DOMAIN: &[u8] = b"asupersync.atp.verifier.proof_bundle.v1";
+
 /// Stable verifier stage names used in logs and error taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VerificationStage {
@@ -662,7 +666,7 @@ impl AtpVerifier {
             });
         }
 
-        let computed = ContentId::from_bytes(chunk.bytes);
+        let computed = chunk_verification_digest(chunk.chunk_index, chunk.offset, chunk.bytes);
         if computed != chunk.expected_digest {
             return Err(VerificationError::ChunkDigestMismatch {
                 chunk_index: chunk.chunk_index,
@@ -1061,24 +1065,65 @@ impl AtpVerifier {
 /// Computes the deterministic repair-symbol digest used by verifier tests and callers.
 #[must_use]
 pub fn repair_symbol_digest(source_block: u32, repair_index: u32, bytes: &[u8]) -> ContentId {
-    let mut payload =
-        Vec::with_capacity(std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + bytes.len());
-    payload.extend_from_slice(&source_block.to_be_bytes());
-    payload.extend_from_slice(&repair_index.to_be_bytes());
-    payload.extend_from_slice(bytes);
-    ContentId::from_bytes(&payload)
+    let source_block = source_block.to_be_bytes();
+    let repair_index = repair_index.to_be_bytes();
+    verifier_domain_digest(
+        REPAIR_SYMBOL_DIGEST_DOMAIN,
+        &[&source_block, &repair_index, bytes],
+    )
+}
+
+/// Computes the deterministic chunk-verification digest used by verifier
+/// tests and callers.
+#[must_use]
+pub fn chunk_verification_digest(chunk_index: u64, offset: u64, bytes: &[u8]) -> ContentId {
+    let chunk_index = chunk_index.to_be_bytes();
+    let offset = offset.to_be_bytes();
+    verifier_domain_digest(
+        CHUNK_VERIFICATION_DIGEST_DOMAIN,
+        &[&chunk_index, &offset, bytes],
+    )
 }
 
 /// Computes the deterministic digest for a proof bundle.
 #[must_use]
 pub fn proof_bundle_digest(bundle: &ProofBundleVerification) -> ContentId {
-    let mut payload = Vec::with_capacity(32 + bundle.entries.len() * 33);
-    payload.extend_from_slice(bundle.merkle_root.hash());
+    let mut payload = Vec::with_capacity(
+        digest_part_len(PROOF_BUNDLE_DIGEST_DOMAIN)
+            + digest_part_len(bundle.merkle_root.hash())
+            + bundle.entries.len() * (digest_part_len(&[0]) + digest_part_len(&[0; 32])),
+    );
+    push_digest_part(&mut payload, PROOF_BUNDLE_DIGEST_DOMAIN);
+    push_digest_part(&mut payload, bundle.merkle_root.hash());
     for entry in &bundle.entries {
-        payload.push(entry.stage.code());
-        payload.extend_from_slice(entry.digest.hash());
+        push_digest_part(&mut payload, &[entry.stage.code()]);
+        push_digest_part(&mut payload, entry.digest.hash());
     }
     ContentId::from_bytes(&payload)
+}
+
+fn verifier_domain_digest(domain: &[u8], parts: &[&[u8]]) -> ContentId {
+    let payload_len = digest_part_len(domain)
+        + parts
+            .iter()
+            .map(|part| digest_part_len(part))
+            .sum::<usize>();
+    let mut payload = Vec::with_capacity(payload_len);
+    push_digest_part(&mut payload, domain);
+    for part in parts {
+        push_digest_part(&mut payload, part);
+    }
+    ContentId::from_bytes(&payload)
+}
+
+const fn digest_part_len(part: &[u8]) -> usize {
+    std::mem::size_of::<u64>() + part.len()
+}
+
+fn push_digest_part(payload: &mut Vec<u8>, part: &[u8]) {
+    let len = u64::try_from(part.len()).expect("digest part length fits in u64");
+    payload.extend_from_slice(&len.to_be_bytes());
+    payload.extend_from_slice(part);
 }
 
 fn map_graph_error(err: ObjectGraphError) -> VerificationError {
@@ -1109,7 +1154,7 @@ mod tests {
     fn chunk_verifier_accepts_matching_digest() {
         let verifier = AtpVerifier::default();
         let bytes = b"verified chunk";
-        let digest = ContentId::from_bytes(bytes);
+        let digest = chunk_verification_digest(7, 4096, bytes);
 
         let evidence = verifier
             .verify_chunk(ChunkVerification {
@@ -1133,7 +1178,7 @@ mod tests {
                 chunk_index: 2,
                 offset: 0,
                 bytes: b"actual bytes",
-                expected_digest: ContentId::from_bytes(b"expected bytes"),
+                expected_digest: chunk_verification_digest(2, 0, b"expected bytes"),
             })
             .expect_err("mismatched digest must fail closed");
 
@@ -1284,6 +1329,26 @@ mod tests {
 
         assert_eq!(err.stage(), VerificationStage::RepairSymbol);
         assert_eq!(err.redacted_reason(), "repair symbol 4:99 digest mismatch");
+    }
+
+    #[test]
+    fn verifier_evidence_digests_are_domain_separated() {
+        let bytes = b"shared verifier evidence";
+        let chunk_digest = chunk_verification_digest(1, 0, bytes);
+        let repair_digest = repair_symbol_digest(1, 0, bytes);
+        let proof_seed = ProofBundleVerification {
+            merkle_root: MerkleRoot::new([9; 32]),
+            entries: vec![ProofBundleEntry {
+                stage: VerificationStage::ChunkHash,
+                digest: ContentId::from_bytes(bytes),
+            }],
+            expected_digest: ContentId::from_bytes(b"proof-bundle-seed"),
+        };
+        let proof_digest = proof_bundle_digest(&proof_seed);
+
+        assert_ne!(chunk_digest, repair_digest);
+        assert_ne!(chunk_digest, proof_digest);
+        assert_ne!(repair_digest, proof_digest);
     }
 
     #[test]
