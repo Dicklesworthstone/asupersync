@@ -1869,13 +1869,30 @@ impl SloProofReport {
             &self.provenance.profile_hash,
             issues,
         );
-        if let Some(observed) = &self.provenance.observed_profile_hash {
-            validate_proof_content_hash("provenance.observed_profile_hash", observed, issues);
-            if observed != &self.provenance.profile_hash {
+        match &self.provenance.observed_profile_hash {
+            Some(observed) => {
+                validate_proof_content_hash("provenance.observed_profile_hash", observed, issues);
+                if observed != &self.provenance.profile_hash {
+                    issues.push(SloProofReportIssue::new(
+                        SloProofReportIssueKind::StaleProfileHash,
+                        "provenance.observed_profile_hash",
+                        "observed profile hash does not match declared profile hash",
+                    ));
+                }
+            }
+            None => {
+                // br-asupersync-7tcipb item 6: fail closed. Previously a missing
+                // `observed_profile_hash` SKIPPED the staleness/match check, so a
+                // report could pass the fail-closed opt-in gate without ever
+                // proving the observed evidence matched the declared profile hash
+                // — omitting the field silently evaded staleness detection. The
+                // runtime-application validator (`validate_runtime_provenance`)
+                // already requires this freshness evidence; the proof-report gate
+                // must too, or the two validators disagree on the same field.
                 issues.push(SloProofReportIssue::new(
                     SloProofReportIssueKind::StaleProfileHash,
                     "provenance.observed_profile_hash",
-                    "observed profile hash does not match declared profile hash",
+                    "proof report requires observed profile hash freshness evidence",
                 ));
             }
         }

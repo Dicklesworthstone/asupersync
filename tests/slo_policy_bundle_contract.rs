@@ -853,6 +853,39 @@ fn proof_report_issue_set(report: &SloProofReport) -> BTreeSet<String> {
         .collect()
 }
 
+/// br-asupersync-7tcipb item 6: a proof report MUST carry observed profile hash
+/// freshness evidence. Before the fix, omitting `observed_profile_hash` skipped
+/// the staleness/match check entirely, so a report passed the fail-closed
+/// opt-in gate without proving the observed evidence matched the declared
+/// profile hash. This locks the fail-closed behavior and keeps the proof-report
+/// validator consistent with the runtime-application validator (which already
+/// requires the field).
+#[test]
+fn proof_report_missing_observed_profile_hash_fails_closed() {
+    // Baseline: the canonical fixture carries the hash and is accepted.
+    let mut report = valid_proof_report(SloProofReportStatus::Pass);
+    assert!(
+        report.validate().accepted,
+        "valid proof report with observed profile hash must be accepted"
+    );
+
+    // Omitting the freshness evidence must NOT pass the gate.
+    report.provenance.observed_profile_hash = None;
+    let validation = report.validate();
+    assert!(
+        !validation.accepted,
+        "proof report omitting observed_profile_hash must be rejected (fail closed)"
+    );
+    assert!(
+        validation.issues.iter().any(|issue| {
+            issue.kind == SloProofReportIssueKind::StaleProfileHash
+                && issue.field == "provenance.observed_profile_hash"
+        }),
+        "missing observed_profile_hash must raise a StaleProfileHash issue; got {:?}",
+        validation.issues
+    );
+}
+
 fn valid_runtime_application() -> SloRuntimePolicyApplication {
     let compiled = valid_bundle().compile_for_budget_admission(Some(&valid_capacity_evidence()));
     SloRuntimePolicyApplication::from_compiled_policy(
