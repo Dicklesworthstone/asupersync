@@ -319,6 +319,18 @@ impl SwarmCoordinator {
         if let Some(peer) = self.peers.remove(peer_id) {
             let contributed_pieces = peer.available_pieces.len() as u64;
             self.quality_metrics.remove_peer_tracking(peer_id);
+            self.piece_tracker.remove_peer(peer_id);
+
+            for transfer in self.active_transfers.values_mut() {
+                let request_count_before = transfer.active_requests.len();
+                transfer
+                    .active_requests
+                    .retain(|_, request| &request.peer_id != peer_id);
+                if transfer.active_requests.len() != request_count_before {
+                    transfer.status.pending_pieces = transfer.active_requests.len() as u64;
+                    transfer.last_activity = Instant::now();
+                }
+            }
 
             // Emit leave event
             self.emit_event(

@@ -609,6 +609,61 @@ impl PieceTracker {
         }
     }
 
+    /// Remove a peer from every tracked transfer.
+    pub fn remove_peer(&mut self, peer_id: &PeerId) {
+        let failed_at = swarm_time_now();
+
+        for (transfer_id, transfer_map) in &mut self.transfer_maps {
+            if let Some(removed_pieces) = transfer_map.peer_pieces.remove(peer_id) {
+                for piece_id in removed_pieces {
+                    let availability_key = AvailabilityKey {
+                        transfer_id: *transfer_id,
+                        piece_id,
+                    };
+                    let entry_is_empty = if let Some(peer_set) =
+                        self.global_availability.get_mut(&availability_key)
+                    {
+                        peer_set.remove(peer_id);
+                        peer_set.is_empty()
+                    } else {
+                        false
+                    };
+
+                    if entry_is_empty {
+                        self.global_availability.remove(&availability_key);
+                    }
+
+                    let remaining_redundancy = transfer_map
+                        .peer_pieces
+                        .values()
+                        .filter(|pieces| pieces.contains(&piece_id))
+                        .count() as u32;
+                    transfer_map
+                        .redundancy
+                        .insert(piece_id, remaining_redundancy);
+                }
+            }
+
+            for status in transfer_map.piece_status.values_mut() {
+                let was_assigned_to_removed_peer = matches!(
+                    status,
+                    PieceStatus::Requested { peer_id: assigned_peer, .. }
+                        | PieceStatus::Downloading { peer_id: assigned_peer, .. }
+                        | PieceStatus::Verifying { peer_id: assigned_peer, .. }
+                        if assigned_peer == peer_id
+                );
+
+                if was_assigned_to_removed_peer {
+                    *status = PieceStatus::Failed {
+                        failed_at,
+                        peer_id: peer_id.clone(),
+                        reason: "peer removed".to_string(),
+                    };
+                }
+            }
+        }
+    }
+
     /// Return the tracked redundancy for a piece in a transfer.
     pub fn get_piece_redundancy(
         &self,
@@ -933,6 +988,85 @@ mod tests {
         assert_eq!(remaining_peers.len(), 1);
         assert!(remaining_peers.contains(&peer_b));
         assert!(!remaining_peers.contains(&peer_a));
+    }
+
+    #[test]
+    fn remove_peer_drops_availability_and_retries_inflight_pieces() {
+        let mut tracker = PieceTracker::new();
+        let transfer_id = MailboxTransferId::new();
+        let peer_a = PeerId::new("peer-a");
+        let peer_b = PeerId::new("peer-b");
+        let piece_a = PieceId::new(0);
+        let shared_piece = PieceId::new(1);
+        let mut piece_map = PieceMap::new(2, 1024, "test-hash".to_string());
+        piece_map.add_peer_pieces(
+            peer_a.clone(),
+            [piece_a, shared_piece].into_iter().collect(),
+        );
+        piece_map.add_peer_pieces(peer_b.clone(), [shared_piece].into_iter().collect());
+
+        tracker
+            .initialize_transfer(&transfer_id, &piece_map)
+            .unwrap();
+        tracker
+            .mark_piece_requested(&transfer_id, piece_a, peer_a.clone())
+            .unwrap();
+        tracker
+            .mark_piece_downloading(&transfer_id, shared_piece, peer_b.clone())
+            .unwrap();
+
+        tracker.remove_peer(&peer_a);
+
+        assert!(
+            tracker
+                .get_peer_pieces(&transfer_id, &peer_a)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.get_peer_pieces(&transfer_id, &peer_b).unwrap(),
+            [shared_piece].into_iter().collect()
+        );
+        assert_eq!(
+            tracker
+                .get_piece_redundancy(&transfer_id, &piece_a)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            tracker
+                .get_piece_redundancy(&transfer_id, &shared_piece)
+                .unwrap(),
+            1
+        );
+
+        let failed_status = tracker.get_piece_status(&transfer_id, &piece_a).unwrap();
+        assert!(
+            matches!(failed_status, PieceStatus::Failed { peer_id, reason, .. } if peer_id == peer_a && reason == "peer removed")
+        );
+        let shared_status = tracker
+            .get_piece_status(&transfer_id, &shared_piece)
+            .unwrap();
+        assert!(
+            matches!(shared_status, PieceStatus::Downloading { peer_id, .. } if peer_id == peer_b)
+        );
+
+        let needed = tracker.get_needed_pieces(&transfer_id).unwrap();
+        assert!(needed.contains(&piece_a));
+        assert!(!needed.contains(&shared_piece));
+        assert!(!tracker.global_availability.contains_key(&AvailabilityKey {
+            transfer_id,
+            piece_id: piece_a,
+        }));
+        let remaining_peers = tracker
+            .global_availability
+            .get(&AvailabilityKey {
+                transfer_id,
+                piece_id: shared_piece,
+            })
+            .expect("shared piece availability must remain");
+        assert_eq!(remaining_peers.len(), 1);
+        assert!(remaining_peers.contains(&peer_b));
     }
 
     #[test]
