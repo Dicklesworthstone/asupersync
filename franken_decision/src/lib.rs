@@ -348,7 +348,22 @@ impl LossMatrix {
     /// Compute expected loss for a specific action given a posterior.
     ///
     /// `E[loss|a] = sum_s posterior(s) * loss(s, a)`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `posterior` does not have exactly [`Self::n_states`] entries.
+    /// A longer posterior would index past the loss values (OOB in [`Self::get`]),
+    /// and a shorter one would silently sum only the leading states and return a
+    /// plausible-but-wrong expected loss; both are caught here as a fail-loud
+    /// dimension violation, matching the crate's existing fail-loud style.
     pub fn expected_loss(&self, posterior: &Posterior, action: usize) -> f64 {
+        assert_eq!(
+            posterior.probs().len(),
+            self.n_states(),
+            "posterior dimension ({}) must match loss-matrix state count ({})",
+            posterior.probs().len(),
+            self.n_states()
+        );
         posterior
             .probs()
             .iter()
@@ -1050,6 +1065,31 @@ mod tests {
         // E[loss|stop] = 0.8*0.3 + 0.2*0.1 = 0.26
         let el_stop = m.expected_loss(&posterior, 1);
         assert!((el_stop - 0.26).abs() < 1e-10);
+    }
+
+    #[test]
+    #[should_panic(expected = "posterior dimension")]
+    fn expected_loss_panics_on_short_posterior() {
+        // A 3-state matrix with a 2-entry posterior previously summed only the
+        // leading states and returned a plausible-but-wrong value with no error.
+        let m = LossMatrix::new(
+            vec!["s0".into(), "s1".into(), "s2".into()],
+            vec!["a0".into()],
+            vec![1.0, 2.0, 3.0],
+        )
+        .unwrap();
+        let short = Posterior::new(vec![0.5, 0.5]).unwrap();
+        let _ = m.expected_loss(&short, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "posterior dimension")]
+    fn expected_loss_panics_on_long_posterior() {
+        // A 2-state matrix with a 3-entry posterior previously panicked OOB in
+        // get(); now it fails with a clear dimension message instead.
+        let m = two_state_matrix();
+        let long = Posterior::new(vec![0.3, 0.3, 0.4]).unwrap();
+        let _ = m.expected_loss(&long, 0);
     }
 
     #[test]
