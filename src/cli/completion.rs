@@ -1293,7 +1293,7 @@ mod tests {
                 }
             }
 
-            comprehensive_report.push_str("\n");
+            comprehensive_report.push('\n');
         }
 
         // Create golden snapshot for completion format validation

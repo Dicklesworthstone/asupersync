@@ -50,9 +50,11 @@ pub trait ResultClassifier<Res, Err> {
     fn classify(&self, result: &Result<Res, Err>) -> Disposition;
 }
 
-/// The default classifier: `Ok` => [`Disposition::Success`], `Err` =>
-/// [`Disposition::Failure`]. Reproduces the breaker's original behaviour, where
-/// error filtering is delegated to the policy's `FailurePredicate`.
+/// The default classifier.
+///
+/// `Ok` => [`Disposition::Success`], `Err` => [`Disposition::Failure`].
+/// Reproduces the breaker's original behaviour, where error filtering is
+/// delegated to the policy's `FailurePredicate`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultClassifier;
 

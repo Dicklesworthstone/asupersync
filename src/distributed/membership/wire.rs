@@ -21,9 +21,11 @@ use crate::remote::NodeId;
 /// Wire format version. Bump on any incompatible framing change.
 pub const WIRE_VERSION: u8 = 1;
 
-/// A conservative default UDP payload budget: below the common 1500-byte
-/// Ethernet MTU minus IPv4/IPv6 + UDP headers, leaving margin to avoid IP
-/// fragmentation on typical LAN paths. Not a path-MTU-discovery result.
+/// A conservative default UDP payload budget.
+///
+/// Below the common 1500-byte Ethernet MTU minus IPv4/IPv6 + UDP headers,
+/// leaving margin to avoid IP fragmentation on typical LAN paths. Not a
+/// path-MTU-discovery result.
 pub const DEFAULT_MTU: usize = 1400;
 
 /// Errors produced while decoding (or over-budget encoding) a datagram.
