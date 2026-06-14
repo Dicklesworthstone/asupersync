@@ -15,7 +15,7 @@ use crate::http::h1::server::Http1Config;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::pool::PoolConfig;
 use crate::observability::{LogLevel, ObservabilityConfig};
-use crate::security::AuthMode;
+use crate::security::{AuthKey, AuthMode, SecurityContext};
 use crate::transport::{
     AggregatorConfig, ExperimentalTransportGate, PathSelectionPolicy, TransportCodingPolicy,
 };
@@ -87,6 +87,11 @@ impl RaptorQConfig {
         {
             return Err(ConfigError::InvalidBackoffRange);
         }
+
+        // br-asupersync-x7ad3b: reject internally-inconsistent security knobs
+        // (fail closed) so the parsed SecurityConfig is actually honored on the
+        // live load() / builder paths instead of being a phantom control.
+        self.security.validate()?;
 
         Ok(())
     }
@@ -473,6 +478,56 @@ impl Default for SecurityConfig {
     }
 }
 
+impl SecurityConfig {
+    /// br-asupersync-x7ad3b: validates that the configured security knobs are
+    /// internally consistent and HONORABLE by the runtime.
+    ///
+    /// Previously this whole struct was parsed, syntax-checked and serialized
+    /// but never read by any production path, so an impossible combination was
+    /// silently accepted and gave operators a false sense of enforcement. The
+    /// one combination the runtime physically cannot honor is
+    /// `reject_unauthenticated = true` together with `auth_mode = Disabled`:
+    /// `Disabled` skips tag verification entirely, so there is no way to reject
+    /// a symbol for *being* unauthenticated. Rather than silently pick one side,
+    /// we fail CLOSED at load time so the misconfiguration surfaces loudly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InconsistentSecurity`] when
+    /// `reject_unauthenticated` is set while `auth_mode` is [`AuthMode::Disabled`].
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.reject_unauthenticated && self.auth_mode == AuthMode::Disabled {
+            return Err(ConfigError::InconsistentSecurity(
+                "reject_unauthenticated=true is incompatible with auth_mode=disabled: \
+                 disabled mode skips authentication entirely, so unauthenticated \
+                 symbols cannot be rejected. Set auth_mode to strict/permissive or \
+                 reject_unauthenticated=false."
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// br-asupersync-x7ad3b: materializes the [`SecurityContext`] this config
+    /// describes, if a deterministic key seed is configured.
+    ///
+    /// When `auth_key_seed` is `Some`, the runtime derives an authentication key
+    /// from it and builds a context at the configured [`AuthMode`] (via
+    /// [`SecurityContext::from_config`], a construction-time mode selection — an
+    /// explicit deployment decision, not a runtime downgrade). The RaptorQ
+    /// receive path consumes this so that setting `RAPTORQ_SECURITY_AUTH_KEY_SEED`
+    /// / `auth_mode` actually authenticates symbols instead of being inert.
+    ///
+    /// Returns `None` when no seed is configured; in that case symbol
+    /// authentication depends on a [`SecurityContext`] supplied at receiver
+    /// construction time (or is absent entirely).
+    #[must_use]
+    pub fn build_context(&self) -> Option<SecurityContext> {
+        self.auth_key_seed
+            .map(|seed| SecurityContext::from_config(AuthKey::from_seed(seed), self.auth_mode))
+    }
+}
+
 /// Pre-defined configuration profiles.
 #[derive(Debug, Clone)]
 pub enum RuntimeProfile {
@@ -642,6 +697,10 @@ pub enum ConfigError {
     InvalidBackoffMultiplier,
     /// Initial backoff delay exceeds max delay.
     InvalidBackoffRange,
+    /// br-asupersync-x7ad3b: security knobs are internally inconsistent and
+    /// cannot be honored by the runtime (e.g. `reject_unauthenticated=true`
+    /// with `auth_mode=disabled`).
+    InconsistentSecurity(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -664,6 +723,9 @@ impl std::fmt::Display for ConfigError {
             }
             Self::InvalidBackoffRange => {
                 write!(f, "backoff initial_delay must not exceed max_delay")
+            }
+            Self::InconsistentSecurity(msg) => {
+                write!(f, "inconsistent security config: {msg}")
             }
         }
     }

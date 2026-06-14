@@ -255,8 +255,26 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 
         decoder.set_object_params(*params).map_err(Error::from)?;
 
+        // br-asupersync-x7ad3b: honor the parsed SecurityConfig on the live
+        // receive path. Resolve the effective authentication context: an
+        // explicit builder-supplied context wins; otherwise derive one from the
+        // configured `auth_key_seed` + `auth_mode` so those knobs actually
+        // authenticate symbols instead of being phantom controls. When
+        // `reject_unauthenticated` is set and a context IS active, every
+        // consumed symbol must verify or we fail CLOSED before it can poison the
+        // decode matrix. (When no auth material is available anywhere the
+        // erasure-only / integrity-vs-manifest behavior is preserved unchanged —
+        // hardening this no-key default is the larger e880xo transport change.)
+        // br-asupersync-x7ad3b: a config-derived context is owned for the whole
+        // call; the per-symbol verify below borrows `self.security` OR this
+        // local only within each iteration (never across the `&mut self.source`
+        // read) to keep the disjoint field borrows clean.
+        let config_security = self.config.security.build_context();
+        let has_auth_material = self.security.is_some() || config_security.is_some();
+        let reject_unauthenticated = self.config.security.reject_unauthenticated;
+
         let mut symbols_received = 0usize;
-        let mut authenticated = self.security.is_some();
+        let mut authenticated = has_auth_material;
 
         // Read symbols until decoding completes.
         while !decoder.is_complete() {
@@ -269,15 +287,32 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                     continue;
                 }
 
-                let symbol_verified = if let Some(ctx) = &self.security {
-                    ctx.verify_authenticated_symbol(&mut auth_symbol)
-                        .map_err(|err| {
-                            Error::new(ErrorKind::CorruptedSymbol).with_message(err.to_string())
-                        })?;
-                    auth_symbol.is_verified()
-                } else {
-                    false
-                };
+                // Explicit builder-supplied context wins; otherwise fall back to
+                // the context derived from the configured `auth_key_seed` +
+                // `auth_mode` so those knobs actually authenticate symbols
+                // instead of being phantom controls.
+                let symbol_verified =
+                    if let Some(ctx) = self.security.as_ref().or(config_security.as_ref()) {
+                        ctx.verify_authenticated_symbol(&mut auth_symbol)
+                            .map_err(|err| {
+                                Error::new(ErrorKind::CorruptedSymbol).with_message(err.to_string())
+                            })?;
+                        auth_symbol.is_verified()
+                    } else {
+                        false
+                    };
+
+                // br-asupersync-x7ad3b: reject_unauthenticated enforcement. With
+                // auth material available (explicit or config-derived) the
+                // operator has the means to authenticate, so an unverified
+                // symbol is a hard failure rather than a silently-accepted one.
+                // We fail CLOSED before feeding it into the decode matrix.
+                if reject_unauthenticated && has_auth_material && !symbol_verified {
+                    return Err(Error::new(ErrorKind::CorruptedSymbol).with_message(
+                        "symbol rejected: reject_unauthenticated=true and symbol \
+                         did not authenticate",
+                    ));
+                }
 
                 match decoder.feed(auth_symbol).map_err(Error::from)? {
                     SymbolAcceptResult::Accepted { .. }
@@ -1354,6 +1389,110 @@ mod tests {
 
         let recv = receiver.receive_object(&cx, &params).unwrap();
         assert!(recv.authenticated);
+    }
+
+    #[test]
+    fn receive_object_config_auth_key_seed_authenticates_without_explicit_context() {
+        // br-asupersync-x7ad3b: a receiver given ONLY a config `auth_key_seed`
+        // (no explicit SecurityContext) must authenticate symbols using the
+        // configured key. This proves the config knob is wired into the live
+        // decode path rather than parsed-and-ignored.
+        let cx: Cx = Cx::for_testing();
+        let security = SecurityContext::for_testing(7);
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, Some(security), None);
+
+        let data = vec![0x22u8; 1024];
+        let object_id = ObjectId::new_for_test(70);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let symbols: Vec<AuthenticatedSymbol> = sender.transport_mut().symbols.drain(..).collect();
+        let stream = VecStream::new(symbols);
+
+        let mut config = RaptorQConfig::default();
+        config.security.auth_key_seed = Some(7);
+        // No explicit SecurityContext: authentication must come from config alone.
+        let mut receiver = RaptorQReceiver::new(config, stream, None, None);
+
+        let recv = receiver.receive_object(&cx, &params).unwrap();
+        assert!(
+            recv.authenticated,
+            "config auth_key_seed must drive symbol verification"
+        );
+    }
+
+    #[test]
+    fn receive_object_reject_unauthenticated_fails_closed_against_unsigned_symbols() {
+        // br-asupersync-x7ad3b: with a configured key + reject_unauthenticated
+        // (the fail-closed default), UNSIGNED symbols must be rejected rather
+        // than silently accepted. Pre-fix config.security was never read, so an
+        // operator hardening a deployment via RAPTORQ_SECURITY_* gained nothing.
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        // Sender has NO security -> emits unsigned symbols (erasure-only style).
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let data = vec![0x33u8; 1024];
+        let object_id = ObjectId::new_for_test(71);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let symbols: Vec<AuthenticatedSymbol> = sender.transport_mut().symbols.drain(..).collect();
+        let stream = VecStream::new(symbols);
+
+        let mut config = RaptorQConfig::default();
+        config.security.auth_key_seed = Some(7); // operator demands authentication
+        assert!(config.security.reject_unauthenticated);
+        let mut receiver = RaptorQReceiver::new(config, stream, None, None);
+
+        let result = receiver.receive_object(&cx, &params);
+        assert!(
+            result.is_err(),
+            "unsigned symbols must fail closed when a key is configured"
+        );
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::CorruptedSymbol);
+    }
+
+    #[test]
+    fn receive_object_no_auth_material_preserves_erasure_only_accept() {
+        // br-asupersync-x7ad3b regression guard: the default no-key path (no
+        // explicit context AND no configured seed) is UNCHANGED — it still
+        // accepts unauthenticated symbols and reports authenticated=false.
+        // Hardening this default is the larger e880xo transport change,
+        // intentionally out of scope here.
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let data = vec![0x44u8; 512];
+        let object_id = ObjectId::new_for_test(72);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let symbols: Vec<AuthenticatedSymbol> = sender.transport_mut().symbols.drain(..).collect();
+        let stream = VecStream::new(symbols);
+        // Default config: reject_unauthenticated=true but auth_key_seed=None.
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let recv = receiver.receive_object(&cx, &params).unwrap();
+        assert_eq!(&recv.data[..data.len()], &data);
+        assert!(!recv.authenticated);
     }
 
     #[test]

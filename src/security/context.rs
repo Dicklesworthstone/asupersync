@@ -124,6 +124,29 @@ impl SecurityContext {
         Self::new(AuthKey::from_seed(seed))
     }
 
+    /// br-asupersync-x7ad3b: constructs a context at a deployment-configured
+    /// [`AuthMode`], selected at CONSTRUCTION time.
+    ///
+    /// This is the sanctioned production path for building a non-`Strict`
+    /// context: [`Self::with_mode`] deliberately panics on downgrades because a
+    /// *runtime transition* to a looser mode is almost always a bug, but a
+    /// deployment that declares `auth_mode` in its [`crate::config::SecurityConfig`]
+    /// is making an explicit, audited mode choice up front (see the module doc
+    /// on `with_mode`). [`crate::config::SecurityConfig::build_context`] is the
+    /// only intended caller; it threads the operator's configured mode and key
+    /// seed into the live decode path so the `RAPTORQ_SECURITY_AUTH_MODE` /
+    /// `RAPTORQ_SECURITY_AUTH_KEY_SEED` knobs actually take effect instead of
+    /// being parsed-and-ignored phantom controls.
+    #[must_use]
+    pub fn from_config(key: AuthKey, mode: AuthMode) -> Self {
+        Self {
+            key,
+            mode,
+            stats: Arc::new(AuthStats::default()),
+            replica_authorizations: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
+
     /// br-asupersync-jgpcvp: test-only constructor that sets the
     /// initial mode at construction time, bypassing the no-downgrade
     /// rule on [`Self::with_mode`]. Tests that need to verify
