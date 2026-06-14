@@ -84,3 +84,67 @@ pub fn encode_and_serialize_epoch(
     let blocks = encode_checkpoint_blocks(epoch, data, config, repair_count)?;
     Ok(serialize_epoch(epoch, stripe_count, flags, &blocks))
 }
+
+/// File name for stripe `index` of `epoch` within a journal directory.
+#[must_use]
+pub fn stripe_file_name(epoch: u64, index: usize) -> String {
+    format!("epoch-{epoch}-stripe-{index}.rqj")
+}
+
+/// Durably write each stripe of an epoch to its own file in `dir`, one file per
+/// failure domain, returning the written paths in stripe order.
+///
+/// Each stripe is written with [`crate::fs::write_atomic`] (temp file →
+/// `sync_all` → rename → parent-dir `sync_all`), so a crash mid-write never
+/// leaves a torn stripe file in place — the previous stripe content (if any)
+/// survives and the new content lands atomically. For maximum failure-domain
+/// isolation a caller can point `dir` at a per-stripe mount; the file-per-stripe
+/// layout keeps that a pure deployment choice.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if the directory or any stripe file
+/// cannot be created or synced.
+pub async fn write_epoch_stripes(
+    dir: &std::path::Path,
+    epoch: u64,
+    stripes: &[Vec<u8>],
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    crate::fs::create_dir_all(dir).await?;
+    let mut paths = Vec::with_capacity(stripes.len());
+    for (index, bytes) in stripes.iter().enumerate() {
+        let path = dir.join(stripe_file_name(epoch, index));
+        crate::fs::write_atomic(&path, bytes).await?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// Read and concatenate the surviving stripe files for `epoch` from `dir`,
+/// skipping any stripe whose file is missing (a lost failure domain).
+///
+/// The concatenated bytes feed [`super::raptorq_journal::scan_frames`]; recovery
+/// then succeeds as long as enough symbols survived (see
+/// [`super::raptorq_journal::latest_complete_epoch`]). A missing stripe is the
+/// expected crash case and is silently skipped; any other I/O error propagates.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] for any read failure other than a
+/// missing stripe file.
+pub async fn read_epoch_stripes(
+    dir: &std::path::Path,
+    epoch: u64,
+    stripe_count: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    for index in 0..stripe_count {
+        let path = dir.join(stripe_file_name(epoch, index));
+        match crate::fs::read(&path).await {
+            Ok(bytes) => out.extend_from_slice(&bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(out)
+}
