@@ -24,6 +24,7 @@
 
 pub mod assignment;
 pub mod bridge;
+pub mod computation_schema;
 pub mod consensus;
 pub mod consistent_hash;
 pub mod distribution;
@@ -45,6 +46,9 @@ pub use consistent_hash::{BoundedLoadConfig, BoundedLoadDecision, BoundedLoadFal
 pub use distribution::{
     DistributionConfig, DistributionMetrics, DistributionResult, ReplicaAck, ReplicaFailure,
     SymbolDistributor,
+};
+pub use computation_schema::{
+    HasSchema, SchemaDescriptor, SchemaFingerprint, SchemaMismatch, SchemaMismatchKind,
 };
 pub use membership::{
     MemberState, MembershipEvent, MembershipKind, Swim, SwimConfig, SwimConfigError,
