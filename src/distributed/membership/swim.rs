@@ -910,8 +910,11 @@ impl Swim {
         let mut delta = 1;
         if probe.indirect_helpers > 0 && probe.nacks < probe.indirect_helpers {
             // Our own indirect probers did not all respond -> we may be the
-            // degraded one; raise local health awareness accordingly.
-            delta += (probe.indirect_helpers - probe.nacks) as i32;
+            // degraded one; raise local health awareness accordingly. The
+            // unanswered-helper count is bounded by the probe fan-out, so the
+            // conversion never realistically saturates; saturate rather than
+            // wrap on the impossible overflow.
+            delta += i32::try_from(probe.indirect_helpers - probe.nacks).unwrap_or(i32::MAX);
         }
         self.awareness.apply_delta(delta);
 

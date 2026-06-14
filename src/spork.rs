@@ -743,20 +743,15 @@ pub mod process_group {
     }
 
     /// Broadcast behavior when one member cannot accept a message immediately.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
     pub enum BroadcastBackpressurePolicy {
         /// Wait for the slow member within the caller's budget.
+        #[default]
         Wait,
         /// Skip the slow member and report the skip count.
         Skip,
         /// Fail the broadcast immediately.
         Error,
-    }
-
-    impl Default for BroadcastBackpressurePolicy {
-        fn default() -> Self {
-            Self::Wait
-        }
     }
 
     /// Deterministic broadcast recipient plan for one process group.
