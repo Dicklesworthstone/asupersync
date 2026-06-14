@@ -8,7 +8,7 @@
 #![allow(missing_docs)]
 
 use asupersync::trace::raptorq_journal::{
-    BlockKey, BlockSymbols, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY,
+    BlockKey, BlockSymbols, EPOCH_MANIFEST_LEN, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY,
     JOURNAL_FRAME_HEADER_LEN, JOURNAL_FRAME_MAGIC, JOURNAL_FRAME_VERSION, JournalFrame,
     JournalFrameError, StripePlan, crc32, decodable_blocks, epoch_is_complete,
     latest_complete_epoch, latest_recoverable_epoch, scan_frames, serialize_epoch,
@@ -315,6 +315,37 @@ fn epoch_manifest_detects_missing_and_undersymboled_blocks() {
             source_block_count: 2,
         }
     ));
+}
+
+#[test]
+fn epoch_manifest_record_roundtrips_and_detects_corruption() {
+    let manifest = EpochManifest {
+        epoch: 123,
+        source_block_count: 7,
+    };
+    let encoded = manifest.encode();
+    assert_eq!(encoded.len(), EPOCH_MANIFEST_LEN);
+    assert_eq!(EpochManifest::decode(&encoded), Ok(manifest));
+
+    // Truncated record.
+    assert_eq!(
+        EpochManifest::decode(&encoded[..encoded.len() - 1]),
+        Err(JournalFrameError::Truncated)
+    );
+    // Bad magic.
+    let mut bad_magic = encoded;
+    bad_magic[0] ^= 0xFF;
+    assert_eq!(
+        EpochManifest::decode(&bad_magic),
+        Err(JournalFrameError::BadMagic)
+    );
+    // Corrupt payload (a byte inside the epoch field) -> CRC mismatch.
+    let mut corrupt = encoded;
+    corrupt[10] ^= 0xFF;
+    assert_eq!(
+        EpochManifest::decode(&corrupt),
+        Err(JournalFrameError::HeaderChecksumMismatch)
+    );
 }
 
 #[test]

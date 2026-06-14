@@ -9,7 +9,8 @@ use asupersync::config::EncodingConfig;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::trace::raptorq_journal::{latest_complete_epoch, scan_frames};
 use asupersync::trace::raptorq_journal_writer::{
-    encode_and_serialize_epoch, read_epoch_stripes, write_epoch_stripes,
+    encode_and_serialize_epoch, read_epoch_manifest, read_epoch_stripes, write_epoch_manifest,
+    write_epoch_stripes,
 };
 use tempfile::tempdir;
 
@@ -58,4 +59,48 @@ fn striped_files_persist_and_recover_after_losing_a_stripe() {
         recovered,
         "epoch must still recover after losing one of three stripe files"
     );
+}
+
+#[test]
+fn manifest_persists_and_drives_recovery_purely_from_disk() {
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let ok = runtime.block_on(runtime.handle().spawn(async move {
+        let data = vec![0x5Au8; 600];
+        let (stripes, manifest) =
+            encode_and_serialize_epoch(88, &data, EncodingConfig::default(), 4, 3, 0)
+                .expect("encode ok")
+                .expect("nonzero stripes");
+        write_epoch_stripes(&dir_path, 88, &stripes)
+            .await
+            .expect("write stripes");
+        write_epoch_manifest(&dir_path, manifest)
+            .await
+            .expect("write manifest");
+
+        // Recover with nothing but what is on disk: the manifest record + stripes.
+        let loaded = read_epoch_manifest(&dir_path, 88)
+            .await
+            .expect("read manifest")
+            .expect("manifest present");
+        assert_eq!(loaded, manifest);
+
+        // A missing epoch's manifest is reported as absent, not an error.
+        assert!(
+            read_epoch_manifest(&dir_path, 999)
+                .await
+                .expect("read missing manifest")
+                .is_none()
+        );
+
+        let survivors = read_epoch_stripes(&dir_path, 88, 3)
+            .await
+            .expect("read stripes");
+        let (frames, _) = scan_frames(&survivors);
+        latest_complete_epoch(&frames, &[loaded]) == Some(88)
+    }));
+
+    assert!(ok, "epoch must recover using the disk-persisted manifest");
 }

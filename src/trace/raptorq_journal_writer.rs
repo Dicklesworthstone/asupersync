@@ -148,3 +148,47 @@ pub async fn read_epoch_stripes(
     }
     Ok(out)
 }
+
+/// File name for an epoch's persisted manifest record within a journal directory.
+#[must_use]
+pub fn manifest_file_name(epoch: u64) -> String {
+    format!("epoch-{epoch}-manifest.rqm")
+}
+
+/// Durably persist an epoch's [`EpochManifest`] record (CRC-protected, atomic +
+/// fsync) so recovery can detect a wholly-missing source block from disk alone.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if the directory or manifest file
+/// cannot be created or synced.
+pub async fn write_epoch_manifest(
+    dir: &std::path::Path,
+    manifest: EpochManifest,
+) -> std::io::Result<std::path::PathBuf> {
+    crate::fs::create_dir_all(dir).await?;
+    let path = dir.join(manifest_file_name(manifest.epoch));
+    crate::fs::write_atomic(&path, &manifest.encode()).await?;
+    Ok(path)
+}
+
+/// Read an epoch's persisted [`EpochManifest`], returning `None` if its file is
+/// absent (so recovery can fall back to symbol-only judgement).
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] for a read failure other than a missing file, or
+/// `InvalidData` if the record is corrupt / mis-versioned.
+pub async fn read_epoch_manifest(
+    dir: &std::path::Path,
+    epoch: u64,
+) -> std::io::Result<Option<EpochManifest>> {
+    let path = dir.join(manifest_file_name(epoch));
+    match crate::fs::read(&path).await {
+        Ok(bytes) => EpochManifest::decode(&bytes)
+            .map(Some)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}

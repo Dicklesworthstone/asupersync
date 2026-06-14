@@ -377,6 +377,57 @@ pub struct EpochManifest {
     pub source_block_count: u32,
 }
 
+/// Magic identifying a persisted epoch-manifest record.
+pub const EPOCH_MANIFEST_MAGIC: [u8; 4] = *b"ASRM";
+
+/// Length of a persisted epoch-manifest record (magic + version + epoch +
+/// block-count + CRC-32).
+pub const EPOCH_MANIFEST_LEN: usize = 4 + 2 + 8 + 4 + 4;
+
+impl EpochManifest {
+    /// Serialize the manifest to its CRC-protected on-disk record so a writer
+    /// can persist it alongside the stripe files. Big-endian, shares the journal
+    /// version and CRC-32 with the frame format.
+    #[must_use]
+    pub fn encode(&self) -> [u8; EPOCH_MANIFEST_LEN] {
+        let mut out = [0u8; EPOCH_MANIFEST_LEN];
+        out[0..4].copy_from_slice(&EPOCH_MANIFEST_MAGIC);
+        out[4..6].copy_from_slice(&JOURNAL_FRAME_VERSION.to_be_bytes());
+        out[6..14].copy_from_slice(&self.epoch.to_be_bytes());
+        out[14..18].copy_from_slice(&self.source_block_count.to_be_bytes());
+        let crc = crc32(&out[0..18]);
+        out[18..22].copy_from_slice(&crc.to_be_bytes());
+        out
+    }
+
+    /// Parse a manifest record, validating magic, version, and CRC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalFrameError`] for a short, mis-magicked, future-versioned,
+    /// or corrupt record.
+    pub fn decode(bytes: &[u8]) -> Result<Self, JournalFrameError> {
+        if bytes.len() < EPOCH_MANIFEST_LEN {
+            return Err(JournalFrameError::Truncated);
+        }
+        if bytes[0..4] != EPOCH_MANIFEST_MAGIC {
+            return Err(JournalFrameError::BadMagic);
+        }
+        let version = u16::from_be_bytes([bytes[4], bytes[5]]);
+        if version > JOURNAL_FRAME_VERSION {
+            return Err(JournalFrameError::UnsupportedVersion(version));
+        }
+        let stored_crc = u32::from_be_bytes(read4(bytes, 18));
+        if stored_crc != crc32(&bytes[0..18]) {
+            return Err(JournalFrameError::HeaderChecksumMismatch);
+        }
+        Ok(Self {
+            epoch: u64::from_be_bytes(read8(bytes, 6)),
+            source_block_count: u32::from_be_bytes(read4(bytes, 14)),
+        })
+    }
+}
+
 /// Whether every source block `0..manifest.source_block_count` in the epoch is
 /// present *and* decodable among `frames`.
 ///
