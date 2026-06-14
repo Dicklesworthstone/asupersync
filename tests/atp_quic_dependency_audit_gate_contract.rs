@@ -18,6 +18,33 @@ fn audit_target_dir(profile_name: &str) -> String {
 }
 
 #[test]
+fn orphaned_quic_wrapper_has_no_accept_all_cert_verifier() {
+    let endpoint = std::fs::read_to_string("src/net/quic/endpoint.rs")
+        .expect("legacy quic endpoint source must be readable");
+
+    assert!(
+        endpoint.contains("ORPHANED LEGACY WRAPPER"),
+        "legacy QUIC wrapper must carry an orphaned-source banner"
+    );
+    assert!(
+        endpoint.contains("insecure_skip_verify is disabled"),
+        "legacy QUIC wrapper must fail closed for insecure_skip_verify"
+    );
+
+    for forbidden in [
+        "with_custom_certificate_verifier",
+        "ServerCertVerified::assertion()",
+        "HandshakeSignatureValid::assertion()",
+        "SkipServerVerification",
+    ] {
+        assert!(
+            !endpoint.contains(forbidden),
+            "legacy QUIC wrapper must not contain accept-all verifier token {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn atp_dependency_audit_gate_passes() {
     // Run the ATP dependency audit script
     let output = Command::new("scripts/detect_forbidden_quic_deps.sh")

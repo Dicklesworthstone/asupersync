@@ -186,12 +186,22 @@ fn test_certificate_verification_requirement() -> ConformanceResult {
         }
     }
 
-    // Test 2: When insecure_skip_verify is enabled, verification should be skipped
+    // Test 2: insecure_skip_verify must fail closed in the orphaned wrapper.
     config.insecure_skip_verify = true;
     match QuicEndpoint::client(&cx, &config) {
-        Ok(_) => ConformanceResult::Pass,
+        Err(crate::net::quic::QuicError::Config(message))
+            if message.contains("insecure_skip_verify") =>
+        {
+            ConformanceResult::Pass
+        }
+        Ok(_) => ConformanceResult::Fail {
+            reason: "Client with skip verify unexpectedly succeeded".to_string(),
+        },
         Err(e) => ConformanceResult::Fail {
-            reason: format!("Client with skip verify failed: {}", e),
+            reason: format!(
+                "Client with skip verify failed with unexpected error: {}",
+                e
+            ),
         },
     }
 }
