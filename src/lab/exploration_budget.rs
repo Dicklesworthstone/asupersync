@@ -1,10 +1,10 @@
 //! Conformal exploration-budget estimates for schedule search.
 //!
 //! This module converts DPOR or seed-sweep novelty observations into a
-//! deterministic stopping signal. The conformal bound is intentionally scoped:
-//! it is a finite-sample upper prediction threshold for the next binary
-//! novelty observation under exchangeability, not a proof that every reachable
-//! schedule class has been enumerated.
+//! deterministic stopping signal. The bound is intentionally scoped: it is a
+//! finite-sample upper confidence bound on the binary novelty proportion under
+//! exchangeability, not a proof that every reachable schedule class has been
+//! enumerated.
 
 use crate::lab::explorer::RunResult;
 use serde::Serialize;
@@ -93,7 +93,7 @@ pub struct ExplorationBudgetEstimate {
     /// Empirical residual discovery rate, `discoveries / total_runs`, or `1.0`
     /// before the first calibration sample.
     pub residual_discovery_rate: f64,
-    /// Finite-sample conformal upper threshold for the next novelty score.
+    /// Finite-sample upper confidence bound for the residual discovery rate.
     pub conformal_upper_bound: f64,
     /// Target residual discovery rate, `1 - target_coverage`.
     pub target_residual_rate: f64,
@@ -143,7 +143,7 @@ impl ExplorationBudget {
     /// Estimate residual novelty from aggregate counts.
     ///
     /// This is useful for serialized coverage reports that preserve discovery
-    /// counts but not individual run order. The conformal binary quantile is
+    /// counts but not individual run order. The binary proportion bound is
     /// order-insensitive, so the aggregate path produces the same bound as a
     /// per-run series with the same counts.
     #[must_use]
@@ -174,7 +174,7 @@ impl ExplorationBudget {
         let residual_discovery_rate = ratio(discoveries, total_runs);
         let target_residual_rate = 1.0 - config.target_coverage;
         let conformal_upper_bound =
-            conformal_binary_upper_bound(&novelty, config.alpha, config.min_samples);
+            binary_novelty_upper_bound(&novelty, config.alpha, config.min_samples);
         let target_met = conformal_upper_bound <= target_residual_rate;
         let recommended_additional_runs = if target_met {
             0
@@ -224,37 +224,15 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
     numerator as f64 / denominator as f64
 }
 
-fn conformal_binary_upper_bound(novelty: &[bool], alpha: f64, min_samples: usize) -> f64 {
+fn binary_novelty_upper_bound(novelty: &[bool], alpha: f64, min_samples: usize) -> f64 {
     if novelty.len() < min_samples {
         return 1.0;
     }
-    let scores: Vec<f64> = novelty
-        .iter()
-        .map(|&is_new| if is_new { 1.0 } else { 0.0 })
-        .collect();
-    let threshold = conformal_quantile(&scores, alpha);
-    if threshold.is_infinite() {
-        1.0
-    } else {
-        threshold
-    }
-}
-
-fn conformal_quantile(scores: &[f64], alpha: f64) -> f64 {
-    if scores.is_empty() {
-        return f64::INFINITY;
-    }
-
-    let mut sorted = scores.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let level = (1.0 - alpha) * (scores.len() as f64 + 1.0);
-    let rank = level.ceil() as usize;
-    if rank > scores.len() {
-        return f64::INFINITY;
-    }
-
-    sorted[rank.saturating_sub(1)]
+    let discoveries = novelty.iter().filter(|&&is_new| is_new).count();
+    let empirical_rate = ratio(discoveries, novelty.len());
+    let sample_count = novelty.len() as f64;
+    let radius = ((1.0 / alpha).ln() / (2.0 * sample_count)).sqrt();
+    (empirical_rate + radius).min(1.0)
 }
 
 fn recommended_existing_class_runs(novelty: &[bool], config: ExplorationBudgetConfig) -> usize {
@@ -274,7 +252,7 @@ fn target_reached_after_existing_hits(
     let mut projected = Vec::with_capacity(novelty.len() + additional);
     projected.extend_from_slice(novelty);
     projected.extend(std::iter::repeat_n(false, additional));
-    conformal_binary_upper_bound(&projected, config.alpha, config.min_samples)
+    binary_novelty_upper_bound(&projected, config.alpha, config.min_samples)
         <= 1.0 - config.target_coverage
 }
 
@@ -306,54 +284,64 @@ mod tests {
     #[test]
     fn existing_class_hits_can_satisfy_target_after_min_samples() {
         let estimate = ExplorationBudget::estimate_from_novelty(
-            [false, false, false, false, false],
+            [false; 25],
             ExplorationBudgetConfig::new(0.20, 0.80).min_samples(5),
         );
 
-        assert_eq!(estimate.total_runs, 5);
-        assert_eq!(estimate.conformal_upper_bound, 0.0);
+        assert_eq!(estimate.total_runs, 25);
+        assert!(estimate.conformal_upper_bound <= estimate.target_residual_rate);
         assert_eq!(estimate.recommended_additional_runs, 0);
         assert!(estimate.target_met);
         assert!(!estimate.exhausted_recommendation);
     }
 
     #[test]
-    fn conformal_quantile_is_infinite_when_rank_exceeds_samples() {
-        let scores: Vec<f64> = (1..=18).map(f64::from).collect();
-
-        assert!(
-            conformal_quantile(&scores, 0.05).is_infinite(),
-            "n=18, alpha=0.05 gives rank ceil(0.95*19)=19 > n"
-        );
-
-        let scores: Vec<f64> = (1..=19).map(f64::from).collect();
-        assert_eq!(conformal_quantile(&scores, 0.05), 19.0);
-    }
-
-    #[test]
-    fn binary_bound_fails_closed_when_rank_exceeds_samples() {
+    fn binary_bound_fails_closed_before_min_samples() {
         let estimate = ExplorationBudget::estimate_from_novelty(
             [false; 18],
             ExplorationBudgetConfig::new(0.05, 0.95)
-                .min_samples(5)
+                .min_samples(20)
                 .max_additional_runs(3),
         );
 
         assert_eq!(estimate.conformal_upper_bound, 1.0);
         assert!(!estimate.target_met);
-        assert_eq!(estimate.recommended_additional_runs, 1);
+        assert_eq!(estimate.recommended_additional_runs, 3);
+    }
+
+    #[test]
+    fn target_coverage_changes_decision_for_same_observations() {
+        let relaxed = ExplorationBudget::estimate_from_novelty(
+            [false; 25],
+            ExplorationBudgetConfig::new(0.20, 0.80)
+                .min_samples(5)
+                .max_additional_runs(400),
+        );
+        let strict = ExplorationBudget::estimate_from_novelty(
+            [false; 25],
+            ExplorationBudgetConfig::new(0.20, 0.95)
+                .min_samples(5)
+                .max_additional_runs(400),
+        );
+
+        assert_eq!(relaxed.conformal_upper_bound, strict.conformal_upper_bound);
+        assert!(relaxed.target_met);
+        assert!(!strict.target_met);
+        assert_eq!(relaxed.recommended_additional_runs, 0);
+        assert!(strict.recommended_additional_runs > 0);
     }
 
     #[test]
     fn discoveries_keep_conformal_bound_conservative() {
         let no_discoveries = ExplorationBudget::estimate_from_novelty(
-            [false; 20],
+            [false; 25],
             ExplorationBudgetConfig::new(0.20, 0.80).min_samples(5),
         );
         let with_discoveries = ExplorationBudget::estimate_from_novelty(
             [
                 true, true, true, true, true, false, false, false, false, false, false, false,
-                false, false, false, false, false, false, false, false,
+                false, false, false, false, false, false, false, false, false, false, false, false,
+                false,
             ],
             ExplorationBudgetConfig::new(0.20, 0.80).min_samples(5),
         );
