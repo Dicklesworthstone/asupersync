@@ -468,9 +468,9 @@ pub struct RecoveryDecodingConfig {
 impl Default for RecoveryDecodingConfig {
     fn default() -> Self {
         Self {
-            // Default off until recovery is plumbed with a `SecurityContext`.
-            // (DecodingPipeline requires an auth context to verify tags.)
-            verify_integrity: false,
+            // Fail closed by default: without a SecurityContext, the decoding
+            // pipeline rejects every symbol instead of trusting carried bits.
+            verify_integrity: true,
             auth_context: None,
             max_decode_attempts: 3,
             allow_partial_decode: false,
@@ -1220,7 +1220,7 @@ mod tests {
         let snapshot = create_test_snapshot();
         let encoded = encode_test_snapshot(&snapshot);
 
-        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        let mut decoder = StateDecoder::new(unauthenticated_fixture_decoding_config());
         for sym in &encoded.symbols {
             let sym = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
             decoder.add_symbol(&sym).unwrap();
@@ -1272,6 +1272,22 @@ mod tests {
             let unverified =
                 AuthenticatedSymbol::from_parts(sym.clone(), AuthenticationTag::zero());
             decoder.add_symbol(&unverified).unwrap();
+        }
+
+        let err = decoder.decode_snapshot(&encoded.params).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InsufficientSymbols);
+    }
+
+    #[test]
+    fn decoder_default_rejects_unauthenticated_fixture_symbols() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        for sym in &encoded.symbols {
+            let claimed_verified =
+                AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+            decoder.add_symbol(&claimed_verified).unwrap();
         }
 
         let err = decoder.decode_snapshot(&encoded.params).unwrap_err();
@@ -1713,6 +1729,13 @@ mod tests {
         encoded
     }
 
+    fn unauthenticated_fixture_decoding_config() -> RecoveryDecodingConfig {
+        RecoveryDecodingConfig {
+            verify_integrity: false,
+            ..RecoveryDecodingConfig::default()
+        }
+    }
+
     fn make_collected_symbol(esi: u32) -> CollectedSymbol {
         CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, esi, &[0u8; 128]),
@@ -2000,7 +2023,7 @@ mod tests {
         );
 
         // Take exactly K symbols
-        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        let mut decoder = StateDecoder::new(unauthenticated_fixture_decoding_config());
         for sym in encoded.symbols.iter().take(k) {
             let sym = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
             decoder.add_symbol(&sym).unwrap();
@@ -2231,7 +2254,7 @@ mod tests {
     #[test]
     fn decoding_config_default_values() {
         let config = RecoveryDecodingConfig::default();
-        assert!(!config.verify_integrity);
+        assert!(config.verify_integrity);
         assert!(config.auth_context.is_none());
         assert_eq!(config.max_decode_attempts, 3);
         assert!(!config.allow_partial_decode);
@@ -2430,8 +2453,10 @@ mod tests {
             initiator: "test".to_string(),
             reason: None,
         };
-        let mut orchestrator =
-            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            unauthenticated_fixture_decoding_config(),
+        );
 
         let result = orchestrator.recover_from_symbols(
             &trigger,
@@ -2508,7 +2533,7 @@ mod tests {
         };
         let encoded2 = encode_test_snapshot(&snapshot2);
 
-        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        let mut decoder = StateDecoder::new(unauthenticated_fixture_decoding_config());
 
         // Decode first object
         for sym in &encoded1.symbols {
