@@ -93,6 +93,12 @@
       "example_path": "src/real_http_h1_client_pool_integration_e2e_tests.rs"
     },
     {
+      "use_case": "http_client_fluent_request",
+      "symbol": "http::Client",
+      "summary": "Build an explicit-Cx pooled HTTP request with fluent headers, query, JSON body, timeout, and response helpers.",
+      "example_path": "src/http/h1/http_client.rs"
+    },
+    {
       "use_case": "supervised_app",
       "symbol": "spork",
       "summary": "Build a minimal supervised application topology.",
