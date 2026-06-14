@@ -77,11 +77,11 @@ fn test_version_negotiation() {
     assert_eq!(decoded.supported_versions, supported_versions);
 
     // Test version selection
+    assert_eq!(packet.select_version(QuicVersion::V1 as u32), None);
     assert_eq!(
-        packet.select_version(QuicVersion::V1 as u32),
+        packet.select_version(0xabcdef00),
         Some(QuicVersion::V1 as u32)
     );
-    assert_eq!(packet.select_version(0xabcdef00), Some(0x12345678)); // Should select highest
 
     // Test negotiation utilities
     assert!(!VersionNegotiation::is_negotiation_needed(

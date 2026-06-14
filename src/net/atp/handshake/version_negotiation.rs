@@ -6,6 +6,8 @@ use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::net::atp::handshake::state_machine::{HandshakeError, QuicVersion};
 use crate::types::outcome::Outcome;
 
+const VERSION_NEGOTIATION_MARKER: u32 = QuicVersion::Negotiation as u32;
+
 /// Version negotiation packet
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionNegotiationPacket {
@@ -29,12 +31,16 @@ impl VersionNegotiationPacket {
 
     /// Encode packet to wire format
     pub fn encode(&self) -> Outcome<Bytes, HandshakeError> {
+        if let Outcome::Err(error) = validate_supported_versions(&self.supported_versions) {
+            return Outcome::err(error);
+        }
+
         let mut buf = BytesMut::new();
 
         // Long header form with version = 0 for version negotiation
         let first_byte = 0x80; // Long header
         buf.put_u8(first_byte);
-        buf.put_u32(0); // Version = 0 for version negotiation
+        buf.put_u32(VERSION_NEGOTIATION_MARKER);
 
         // Destination Connection ID
         if self.dest_cid.len() > 255 {
@@ -82,7 +88,7 @@ impl VersionNegotiationPacket {
 
         // Check version is 0
         let version = buf.get_u32();
-        if version != 0 {
+        if version != VERSION_NEGOTIATION_MARKER {
             return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "version negotiation must have version 0".to_string(),
             });
@@ -125,10 +131,8 @@ impl VersionNegotiationPacket {
             supported_versions.push(buf.get_u32());
         }
 
-        if supported_versions.is_empty() {
-            return Outcome::err(HandshakeError::InvalidPacket {
-                reason: "no supported versions".to_string(),
-            });
+        if let Outcome::Err(error) = validate_supported_versions(&supported_versions) {
+            return Outcome::err(error);
         }
 
         Outcome::ok(Self {
@@ -145,13 +149,17 @@ impl VersionNegotiationPacket {
 
     /// Select the best supported version from client's attempted version
     pub fn select_version(&self, attempted_version: u32) -> Option<u32> {
-        // If the attempted version is supported, use it
+        // A Version Negotiation packet listing the attempted version is invalid
+        // for the active connection attempt and must be discarded.
         if self.supports_version(attempted_version) {
-            return Some(attempted_version);
+            return None;
         }
 
-        // Otherwise, select the highest supported version
-        self.supported_versions.iter().max().copied()
+        self.supported_versions
+            .iter()
+            .copied()
+            .filter(|&version| QuicVersion::is_supported(version))
+            .max()
     }
 }
 
@@ -181,6 +189,7 @@ impl VersionNegotiation {
         packet: &VersionNegotiationPacket,
         original_dest_cid: &[u8],
         original_source_cid: &[u8],
+        attempted_version: u32,
     ) -> Outcome<(), HandshakeError> {
         // Destination CID must match original source CID
         if packet.dest_cid.as_ref() != original_source_cid {
@@ -196,20 +205,40 @@ impl VersionNegotiation {
             });
         }
 
-        // Must contain at least one supported version
-        let has_supported = packet
-            .supported_versions
-            .iter()
-            .any(|&v| QuicVersion::is_supported(v));
+        if let Outcome::Err(error) = validate_supported_versions(&packet.supported_versions) {
+            return Outcome::err(error);
+        }
 
-        if !has_supported {
+        if packet.supports_version(attempted_version) {
+            return Outcome::err(HandshakeError::InvalidPacket {
+                reason: "version negotiation lists attempted version".to_string(),
+            });
+        }
+
+        if packet.select_version(attempted_version).is_none() {
             return Outcome::err(HandshakeError::UnsupportedVersion {
-                version: 0, // No compatible version
+                version: attempted_version,
             });
         }
 
         Outcome::ok(())
     }
+}
+
+fn validate_supported_versions(versions: &[u32]) -> Outcome<(), HandshakeError> {
+    if versions.is_empty() {
+        return Outcome::err(HandshakeError::InvalidPacket {
+            reason: "no supported versions".to_string(),
+        });
+    }
+
+    if versions.contains(&VERSION_NEGOTIATION_MARKER) {
+        return Outcome::err(HandshakeError::InvalidPacket {
+            reason: "supported versions include version negotiation marker".to_string(),
+        });
+    }
+
+    Outcome::ok(())
 }
 
 #[cfg(test)]
@@ -257,11 +286,18 @@ mod tests {
             vec![0x00000001, 0x12345678],
         );
 
-        // Supported version should be selected
-        assert_eq!(packet.select_version(0x00000001), Some(0x00000001));
+        // A server that lists the attempted version did not need negotiation.
+        assert_eq!(packet.select_version(0x00000001), None);
 
-        // Unsupported version should select highest supported
-        assert_eq!(packet.select_version(0xabcdef00), Some(0x12345678));
+        // Unsupported attempted versions select the best version supported locally.
+        assert_eq!(packet.select_version(0xabcdef00), Some(0x00000001));
+
+        let unsupported_only = VersionNegotiationPacket::new(
+            Bytes::from_static(b"src"),
+            Bytes::from_static(b"dst"),
+            vec![0x12345678],
+        );
+        assert_eq!(unsupported_only.select_version(0xabcdef00), None);
     }
 
     #[test]
@@ -291,5 +327,59 @@ mod tests {
         // Non-zero version
         let result = VersionNegotiationPacket::decode(&[0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_version_zero_rejected_in_supported_versions() {
+        let packet = VersionNegotiationPacket::new(
+            Bytes::from_static(b"src"),
+            Bytes::from_static(b"dst"),
+            vec![VERSION_NEGOTIATION_MARKER],
+        );
+        assert!(packet.encode().is_err());
+
+        let encoded_with_zero = [
+            0x80, 0, 0, 0, 0, // Long header, Version Negotiation marker
+            0, // Empty destination CID
+            0, // Empty source CID
+            0, 0, 0, 0, // Invalid supported version 0
+        ];
+        assert!(VersionNegotiationPacket::decode(&encoded_with_zero).is_err());
+    }
+
+    #[test]
+    fn test_validate_server_response_discards_attempted_version() {
+        let packet = VersionNegotiationPacket::new(
+            Bytes::from_static(b"original_dest"),
+            Bytes::from_static(b"original_source"),
+            vec![QuicVersion::V1 as u32],
+        );
+
+        let result = VersionNegotiation::validate_server_response(
+            &packet,
+            b"original_dest",
+            b"original_source",
+            QuicVersion::V1 as u32,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_server_response_accepts_supported_alternative() {
+        let packet = VersionNegotiationPacket::new(
+            Bytes::from_static(b"original_dest"),
+            Bytes::from_static(b"original_source"),
+            vec![QuicVersion::V1 as u32],
+        );
+
+        let result = VersionNegotiation::validate_server_response(
+            &packet,
+            b"original_dest",
+            b"original_source",
+            0xabcdef00,
+        );
+
+        assert!(result.is_ok());
     }
 }
