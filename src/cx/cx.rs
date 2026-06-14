@@ -8,8 +8,11 @@
 //!
 //! # Capability Model
 //!
-//! All effectful operations in Asupersync flow through explicit `Cx` tokens.
-//! This design prevents ambient authority and enables:
+//! Runtime-managed effectful operations in Asupersync flow through explicit
+//! `Cx` or narrower capability tokens. Host-boundary adapters and test support
+//! may use ambient OS services only when the boundary is documented and kept
+//! outside deterministic runtime guarantees unless reached through a
+//! capability-mediated path. This design narrows ambient authority and enables:
 //!
 //! - **Effect interception**: Production vs lab runtime can interpret effects differently
 //! - **Cancellation propagation**: Cx carries cancellation signals through the task tree
@@ -165,9 +168,10 @@ struct CxHandles {
 
 /// The capability context for a task.
 ///
-/// `Cx` provides access to runtime capabilities within Asupersync. All effectful
-/// operations flow through `Cx`, ensuring explicit capability security with no
-/// ambient authority.
+/// `Cx` provides access to runtime capabilities within Asupersync.
+/// Runtime-managed effectful operations flow through `Cx` or narrower
+/// capability tokens, ensuring explicit capability security for the runtime
+/// boundary while keeping any host-boundary exceptions documented and scoped.
 ///
 /// # Overview
 ///

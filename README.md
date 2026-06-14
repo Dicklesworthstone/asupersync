@@ -31,7 +31,7 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 
 **The Problem**: Rust's async ecosystem gives you *tools* but not *guarantees*. Cancellation silently drops data. Spawned tasks can orphan. Cleanup is best-effort. Testing concurrent code is non-deterministic. You write correct code by convention, and discover bugs in production.
 
-**The Solution**: Asupersync is an async runtime where **correctness is structural, not conventional**. Tasks are owned by regions that close to quiescence. Cancellation is a protocol with bounded cleanup. Effects require capabilities. The lab runtime makes concurrency deterministic and replayable.
+**The Solution**: Asupersync is an async runtime where **correctness is structural, not conventional**. Tasks are owned by regions that close to quiescence. Cancellation is a protocol with bounded cleanup. Runtime-managed effects require capabilities, with host-boundary exceptions documented explicitly. The lab runtime makes concurrency deterministic and replayable.
 
 ### Why Asupersync?
 
@@ -45,7 +45,7 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 | **Adaptive preemption fairness** | Deterministic EXP3/Hedge policy tunes cancel streak limits with regret-bounded updates |
 | **Drain progress certificates** | Variance-adaptive Azuma/Freedman bounds classify drain phase and confidence to quiescence |
 | **Spectral early warnings** | Wait-graph spectral monitor combines conformal bounds and anytime-valid evidence |
-| **Capability security** | All effects flow through explicit `Cx`; no ambient authority |
+| **Capability security** | Runtime effect APIs flow through explicit `Cx` or capability tokens; host-boundary and test-only exceptions stay named and scoped |
 
 ---
 
@@ -280,9 +280,9 @@ Dropping a permit aborts cleanly. Message never partially sent.
 
 This is not a blanket claim for every effect. Inherently partial I/O and adapter surfaces publish their own cancel-safety boundaries, including operations such as `read_exact` and `write_all` that are explicitly not cancel-safe.
 
-### 4. Capability Security (No Ambient Authority)
+### 4. Capability Security (Scoped Authority)
 
-All effects flow through explicit capability tokens:
+Runtime-managed effects flow through explicit capability tokens:
 
 ```rust
 async fn my_task(cx: &mut Cx) {
@@ -293,6 +293,11 @@ async fn my_task(cx: &mut Cx) {
 ```
 
 Swap `Cx` to change interpretation: production vs. lab vs. distributed.
+This is not a blanket claim that every internal helper is `Cx`-threaded:
+host-boundary code such as OS entropy for temporary file names, legacy sync DNS
+wall-clock timing, and test/support harnesses must keep their authority
+explicit, documented, and outside the deterministic runtime guarantee unless
+they are reached through a capability-mediated path.
 
 ### 5. Deterministic Testing is Default
 

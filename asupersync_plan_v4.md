@@ -380,7 +380,11 @@ Every kernel primitive has a deterministic lab interpretation.
 
 ### I7. No ambient authority
 
-All effects flow through explicit capabilities (`Cx`).
+Runtime-managed effects flow through explicit capabilities (`Cx` and narrower
+capability tokens). Host-boundary adapters, legacy sync helpers, and test
+support code may use ambient OS services only when the boundary is documented
+and excluded from deterministic runtime guarantees unless a capability-mediated
+path is used.
 
 ---
 
@@ -389,7 +393,7 @@ All effects flow through explicit capabilities (`Cx`).
 ### 5.1 Capability principles
 
 * No hidden globals required for correctness.
-* Effects require explicit capabilities.
+* Runtime-managed effects require explicit capabilities.
 * Deterministic substitution: swap `Cx` to change interpretation (prod vs lab vs remote).
 
 #### `Cx` as algebraic effects + handlers (spec level)
