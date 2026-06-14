@@ -309,19 +309,19 @@ impl<T> ChannelInner<T> {
         self.cancellation_count = self.cancellation_count.saturating_add(1);
     }
 
-    /// Efficiently removes the first occurrence of `token` from the waiter queue.
-    ///
-    /// This is an optimization over the pattern:
-    /// ```ignore
-    /// if let Some(pos) = waiter_queue.iter().position(|&t| t == token) {
-    ///     waiter_queue.remove(pos);
-    /// }
-    /// ```
-    ///
-    /// The above pattern is O(n) + O(n) = O(2n) due to separate find and remove operations.
-    /// This method finds and removes in a single O(n) pass, removing only the first occurrence.
+    /// Removes the first occurrence of `token` from the waiter queue.
     #[inline]
     fn remove_waiter_token(&mut self, token: crate::runtime::reactor::token::SlabToken) -> bool {
+        if self.waiter_queue.front().copied() == Some(token) {
+            self.waiter_queue.pop_front();
+            return true;
+        }
+
+        if self.waiter_queue.back().copied() == Some(token) {
+            self.waiter_queue.pop_back();
+            return true;
+        }
+
         let mut found = false;
         self.waiter_queue.retain(|&t| {
             if !found && t == token {
@@ -332,6 +332,44 @@ impl<T> ChannelInner<T> {
             }
         });
         found
+    }
+}
+
+/// Test/benchmark fixture for isolating MPSC waiter-queue cancellation cost.
+#[cfg(any(test, feature = "test-internals"))]
+#[doc(hidden)]
+pub struct MpscWaiterCancelFixture {
+    inner: ChannelInner<()>,
+    token: SlabToken,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl MpscWaiterCancelFixture {
+    /// Builds a queue where the cancellation target is the oldest waiter.
+    #[must_use]
+    pub fn oldest(waiter_count: usize) -> Self {
+        let waiter_count = waiter_count.max(1);
+        let mut inner = ChannelInner::new(usize::MAX);
+        let waker = Waker::noop().clone();
+        let mut target = None;
+
+        for index in 0..waiter_count {
+            let token = inner.send_wakers.insert(waker.clone());
+            if index == 0 {
+                target = Some(token);
+            }
+            inner.waiter_queue.push_back(token);
+        }
+
+        Self {
+            inner,
+            token: target.expect("oldest waiter fixture always inserts a target"),
+        }
+    }
+
+    /// Removes the target waiter and consumes the fixture.
+    pub fn remove_target(mut self) -> bool {
+        self.inner.remove_waiter_token(self.token)
     }
 }
 

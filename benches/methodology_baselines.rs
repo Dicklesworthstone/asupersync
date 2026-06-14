@@ -343,6 +343,22 @@ fn bench_channel_send_recv(c: &mut Criterion) {
         })
     });
 
+    // Pending reserve cancellation removes the sender's FIFO waiter token.
+    // The oldest waiter is the common cancellation/baton-pass case.
+    for &waiter_count in &[64usize, 512, 4096] {
+        group.bench_with_input(
+            BenchmarkId::new("mpsc_cancel_oldest_waiter", waiter_count),
+            &waiter_count,
+            |b, &waiter_count| {
+                b.iter_batched(
+                    || mpsc::MpscWaiterCancelFixture::oldest(waiter_count),
+                    |fixture| black_box(fixture.remove_target()),
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
     group.finish();
 }
 
