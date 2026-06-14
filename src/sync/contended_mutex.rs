@@ -58,7 +58,7 @@ pub struct LockMetricsSnapshot {
 #[cfg(feature = "lock-metrics")]
 mod inner {
     use super::LockMetricsSnapshot;
-    use crate::sync::lock_ordering::{self, LockRank};
+    use crate::sync::lock_ordering::{self, LockModule, LockRank};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
     use std::time::Instant;
@@ -190,17 +190,19 @@ mod inner {
         metrics: Metrics,
         name: &'static str,
         rank: Option<LockRank>,
+        module: LockModule,
     }
 
     impl<T> ContendedMutex<T> {
         /// Creates a new instrumented mutex with the given name and value.
         pub fn new(name: &'static str, value: T) -> Self {
-            let rank = LockRank::from_name(name);
+            let policy = lock_ordering::enforce_lock_name_policy(name);
             Self {
                 inner: Mutex::new(value),
                 metrics: Metrics::default(),
                 name,
-                rank,
+                rank: policy.rank(),
+                module: policy.module(),
             }
         }
 
@@ -208,7 +210,7 @@ mod inner {
         pub fn lock(&self) -> LockResult<ContendedMutexGuard<'_, T>> {
             // Check lock ordering before acquisition (debug builds only)
             if let Some(rank) = self.rank {
-                lock_ordering::check_acquire(self.name, rank);
+                lock_ordering::check_acquire_with_module(self.name, rank, self.module);
             }
 
             let start = Instant::now();
@@ -228,7 +230,7 @@ mod inner {
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = self.rank {
-                lock_ordering::record_acquire(self.name, rank);
+                lock_ordering::record_acquire_with_module(self.name, rank, self.module);
             }
 
             match result {
@@ -238,6 +240,7 @@ mod inner {
                     metrics: &self.metrics,
                     name: self.name,
                     rank: self.rank,
+                    module: self.module,
                 }),
                 Err(poison) => Err(PoisonError::new(ContendedMutexGuard {
                     guard: Some(poison.into_inner()),
@@ -245,6 +248,7 @@ mod inner {
                     metrics: &self.metrics,
                     name: self.name,
                     rank: self.rank,
+                    module: self.module,
                 })),
             }
         }
@@ -258,8 +262,8 @@ mod inner {
                 Ok(guard) => {
                     // Check and record lock ordering for successful try_lock
                     if let Some(rank) = self.rank {
-                        lock_ordering::check_acquire(self.name, rank);
-                        lock_ordering::record_acquire(self.name, rank);
+                        lock_ordering::check_acquire_with_module(self.name, rank, self.module);
+                        lock_ordering::record_acquire_with_module(self.name, rank, self.module);
                     }
 
                     let acquired_at = Instant::now();
@@ -270,6 +274,7 @@ mod inner {
                         metrics: &self.metrics,
                         name: self.name,
                         rank: self.rank,
+                        module: self.module,
                     })
                 }
                 Err(std::sync::TryLockError::WouldBlock) => {
@@ -277,8 +282,8 @@ mod inner {
                 }
                 Err(std::sync::TryLockError::Poisoned(poison)) => {
                     if let Some(rank) = self.rank {
-                        lock_ordering::check_acquire(self.name, rank);
-                        lock_ordering::record_acquire(self.name, rank);
+                        lock_ordering::check_acquire_with_module(self.name, rank, self.module);
+                        lock_ordering::record_acquire_with_module(self.name, rank, self.module);
                     }
                     let acquired_at = Instant::now();
                     self.metrics.record_acquire(0, false);
@@ -289,6 +294,7 @@ mod inner {
                             metrics: &self.metrics,
                             name: self.name,
                             rank: self.rank,
+                            module: self.module,
                         },
                     )))
                 }
@@ -318,6 +324,7 @@ mod inner {
         metrics: &'a Metrics,
         name: &'static str,
         rank: Option<LockRank>,
+        module: LockModule,
     }
 
     impl<T> std::ops::Deref for ContendedMutexGuard<'_, T> {
@@ -342,7 +349,7 @@ mod inner {
 
             // Record lock release for ordering tracking
             if let Some(rank) = self.rank {
-                lock_ordering::record_release(self.name, rank);
+                lock_ordering::record_release_with_module(self.name, rank, self.module);
             }
 
             self.metrics.record_hold(hold_ns);
@@ -378,7 +385,7 @@ mod inner {
         /// Creates a new mutex with the given name and value.
         #[inline]
         pub fn new(name: &'static str, value: T) -> Self {
-            let rank = LockRank::from_name(name);
+            let rank = lock_ordering::rank_for_lock_name(name);
             Self {
                 inner: Mutex::new(value),
                 name,
@@ -521,6 +528,8 @@ pub use inner::{ContendedMutex, ContendedMutexGuard};
 #[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
+    #[cfg(feature = "lock-metrics")]
+    use crate::sync::lock_ordering;
     use std::sync::Arc;
     #[cfg(feature = "lock-metrics")]
     use std::thread;
@@ -533,7 +542,7 @@ mod tests {
     #[test]
     fn basic_lock_unlock() {
         init_test("basic_lock_unlock");
-        let m = ContendedMutex::new("test", 42);
+        let m = ContendedMutex::new("unknown", 42);
         {
             let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             crate::assert_with_log!(*guard == 42, "value", 42, *guard);
@@ -545,7 +554,7 @@ mod tests {
     #[test]
     fn mutate_through_guard() {
         init_test("mutate_through_guard");
-        let m = ContendedMutex::new("test", 0);
+        let m = ContendedMutex::new("unknown", 0);
         {
             let mut guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = 99;
@@ -559,7 +568,7 @@ mod tests {
     #[test]
     fn try_lock_succeeds_when_free() {
         init_test("try_lock_succeeds_when_free");
-        let m = ContendedMutex::new("test", 42);
+        let m = ContendedMutex::new("unknown", 42);
         let guard = m.try_lock().expect("should succeed");
         crate::assert_with_log!(*guard == 42, "try_lock value", 42, *guard);
         drop(guard);
@@ -569,7 +578,7 @@ mod tests {
     #[test]
     fn try_lock_fails_when_held() {
         init_test("try_lock_fails_when_held");
-        let m = ContendedMutex::new("test", 42);
+        let m = ContendedMutex::new("unknown", 42);
         let _guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let is_err = m.try_lock().is_err();
         crate::assert_with_log!(is_err, "try_lock fails", true, is_err);
@@ -579,9 +588,9 @@ mod tests {
     #[test]
     fn snapshot_returns_name() {
         init_test("snapshot_returns_name");
-        let m = ContendedMutex::new("my-shard", 0);
+        let m = ContendedMutex::new("unknown", 0);
         let snap = m.snapshot();
-        crate::assert_with_log!(snap.name == "my-shard", "name", "my-shard", snap.name);
+        crate::assert_with_log!(snap.name == "unknown", "name", "unknown", snap.name);
         crate::test_complete!("snapshot_returns_name");
     }
 
@@ -596,7 +605,7 @@ mod tests {
     #[test]
     fn reset_metrics_no_panic() {
         init_test("reset_metrics_no_panic");
-        let m = ContendedMutex::new("test", 0);
+        let m = ContendedMutex::new("unknown", 0);
         {
             let _g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         }
@@ -616,7 +625,7 @@ mod tests {
     #[test]
     fn metrics_track_acquisitions() {
         init_test("metrics_track_acquisitions");
-        let m = ContendedMutex::new("test", 0);
+        let m = ContendedMutex::new("unknown", 0);
         for _ in 0..10 {
             let _g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         }
@@ -634,7 +643,7 @@ mod tests {
     #[test]
     fn metrics_track_hold_time() {
         init_test("metrics_track_hold_time");
-        let m = ContendedMutex::new("test", 0);
+        let m = ContendedMutex::new("unknown", 0);
         {
             let _g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -660,7 +669,7 @@ mod tests {
     #[test]
     fn metrics_track_contention() {
         init_test("metrics_track_contention");
-        let m = Arc::new(ContendedMutex::new("test", 0));
+        let m = Arc::new(ContendedMutex::new("unknown", 0));
 
         // Hold the lock while another thread tries to acquire
         let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -690,7 +699,7 @@ mod tests {
     #[test]
     fn reset_clears_all_metrics() {
         init_test("reset_clears_all_metrics");
-        let m = ContendedMutex::new("test", 0);
+        let m = ContendedMutex::new("unknown", 0);
         {
             let _g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         }
@@ -723,7 +732,7 @@ mod tests {
     #[test]
     fn poisoned_lock_does_not_count_as_contention() {
         init_test("poisoned_lock_does_not_count_as_contention");
-        let m = Arc::new(ContendedMutex::new("test", 0u8));
+        let m = Arc::new(ContendedMutex::new("unknown", 0u8));
         let m2 = Arc::clone(&m);
 
         let poisoner = thread::spawn(move || {
@@ -743,6 +752,54 @@ mod tests {
             snap.contentions
         );
         crate::test_complete!("poisoned_lock_does_not_count_as_contention");
+    }
+
+    #[cfg(feature = "lock-metrics")]
+    #[test]
+    fn poisoned_ranked_lock_release_clears_lock_order_state() {
+        init_test("poisoned_ranked_lock_release_clears_lock_order_state");
+        lock_ordering::clear_held_locks();
+
+        let m = Arc::new(ContendedMutex::new("tasks", 0u8));
+        let m2 = Arc::clone(&m);
+
+        let poisoner = thread::spawn(move || {
+            let _guard = m2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("intentional poison");
+        });
+        let _ = poisoner.join();
+
+        let poison_err = m.lock().expect_err("lock should be poisoned");
+        let guard = poison_err.into_inner();
+
+        let held_locks = lock_ordering::current_held_locks();
+        crate::assert_with_log!(
+            held_locks
+                .get(&lock_ordering::LockRank::Tasks)
+                .map_or(0, Vec::len)
+                == 1,
+            "poisoned guard acquire is tracked",
+            1usize,
+            held_locks
+                .get(&lock_ordering::LockRank::Tasks)
+                .map_or(0, Vec::len)
+        );
+
+        drop(guard);
+
+        crate::assert_with_log!(
+            lock_ordering::current_held_locks().is_empty(),
+            "poisoned guard drop clears held locks",
+            true,
+            lock_ordering::current_held_locks().is_empty()
+        );
+        crate::assert_with_log!(
+            lock_ordering::current_held_ranks().is_empty(),
+            "poisoned guard drop clears held ranks",
+            true,
+            lock_ordering::current_held_ranks().is_empty()
+        );
+        crate::test_complete!("poisoned_ranked_lock_release_clears_lock_order_state");
     }
 
     // =========================================================================
@@ -821,14 +878,14 @@ mod tests {
 
     #[test]
     fn contended_mutex_debug() {
-        let m = ContendedMutex::new("test", 42_i32);
+        let m = ContendedMutex::new("unknown", 42_i32);
         let dbg = format!("{m:?}");
         assert!(dbg.contains("ContendedMutex"));
     }
 
     #[test]
     fn contended_mutex_guard_debug() {
-        let m = ContendedMutex::new("test", 42_i32);
+        let m = ContendedMutex::new("unknown", 42_i32);
         let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dbg = format!("{guard:?}");
         assert!(dbg.contains("ContendedMutexGuard"));
@@ -838,7 +895,7 @@ mod tests {
     #[test]
     fn try_lock_returns_poisoned_after_panic() {
         init_test("try_lock_returns_poisoned_after_panic");
-        let m = Arc::new(ContendedMutex::new("test", 7u32));
+        let m = Arc::new(ContendedMutex::new("unknown", 7u32));
         let m2 = Arc::clone(&m);
         let poisoner = std::thread::spawn(move || {
             let _guard = m2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -862,7 +919,7 @@ mod tests {
     #[test]
     fn hold_time_recorded_on_panic_in_critical_section() {
         init_test("hold_time_recorded_on_panic_in_critical_section");
-        let m = Arc::new(ContendedMutex::new("test", 0u32));
+        let m = Arc::new(ContendedMutex::new("unknown", 0u32));
         let m2 = Arc::clone(&m);
 
         let handle = std::thread::spawn(move || {

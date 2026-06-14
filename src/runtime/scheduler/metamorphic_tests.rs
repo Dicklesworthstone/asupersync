@@ -876,7 +876,7 @@ mod validation_tests {
     #[test]
     fn validate_cancel_starvation_bound_infrastructure() {
         let state = Arc::new(ContendedMutex::new(
-            "test.runtime_state",
+            "test_runtime_state",
             RuntimeState::new(),
         ));
         let cancel_streak_limit = 4;

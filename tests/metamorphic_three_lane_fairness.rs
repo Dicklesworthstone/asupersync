@@ -286,7 +286,7 @@ fn test_adaptive_streak_convergence(
         .saturating_mul(epoch_steps as usize)
         .max(epoch_steps as usize + 1);
     let state = Arc::new(ContendedMutex::new(
-        "adaptive_streak_mr_state",
+        "metamorphic.runtime_state",
         RuntimeState::new(),
     ));
     let root_region = state

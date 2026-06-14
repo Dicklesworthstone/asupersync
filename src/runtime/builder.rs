@@ -5402,7 +5402,7 @@ mod tests {
         init_test_logging();
 
         let state = Arc::new(crate::sync::ContendedMutex::new(
-            "runtime-state",
+            "runtime_state",
             RuntimeState::new(),
         ));
         {

@@ -55,16 +55,51 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_rank_locks_no_enforcement() {
-        // Locks with unknown names should not have ordering enforced
-        let unknown_lock1 = Arc::new(ContendedMutex::new("unknown_lock", 0));
-        let unknown_lock2 = Arc::new(ContendedMutex::new("another_unknown", 0));
+    fn test_allowed_unranked_locks_no_order_enforcement() {
+        // The documented default unranked name does not participate in rank ordering.
+        let unknown_lock1 = Arc::new(ContendedMutex::new("unknown", 0));
+        let unknown_lock2 = Arc::new(ContendedMutex::new("unknown", 0));
         let config_lock = Arc::new(ContendedMutex::new("config_cache", 0));
 
-        // This should work regardless of order since unknown locks aren't tracked
+        // This works regardless of order because allowed unranked locks aren't tracked.
         let _unknown1 = unknown_lock1.lock().unwrap(); // ubs:ignore - test oracle
         let _config = config_lock.lock().unwrap(); // ubs:ignore - test oracle
         let _unknown2 = unknown_lock2.lock().unwrap(); // ubs:ignore - test oracle
+    }
+
+    #[test]
+    #[cfg(feature = "lock-metrics")]
+    #[should_panic(expected = "denied-unknown-lock-rank")]
+    fn undocumented_unknown_rank_lock_fails_closed_with_lock_metrics() {
+        let _lock = ContendedMutex::new("another_unknown", 0);
+    }
+
+    #[test]
+    #[cfg(feature = "lock-metrics")]
+    fn primitive_constructors_fail_closed_for_undocumented_unknown_names_with_lock_metrics() {
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _lock = crate::sync::Mutex::with_name("another_unknown", 0_u8);
+            })
+            .is_err(),
+            "Mutex::with_name should reject undocumented unknown lock names"
+        );
+
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _lock = crate::sync::RwLock::with_name("another_unknown", 0_u8);
+            })
+            .is_err(),
+            "RwLock::with_name should reject undocumented unknown lock names"
+        );
+
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _semaphore = crate::sync::Semaphore::with_name("another_unknown", 1);
+            })
+            .is_err(),
+            "Semaphore::with_name should reject undocumented unknown lock names"
+        );
     }
 
     #[test]

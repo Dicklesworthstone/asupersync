@@ -132,7 +132,7 @@ impl<T> Mutex<T> {
     #[inline]
     #[must_use]
     pub fn with_name(name: &'static str, value: T) -> Self {
-        let rank = LockRank::from_name(name);
+        let rank = lock_ordering::rank_for_lock_name(name);
         Self {
             data: UnsafeCell::new(value),
             poisoned: AtomicBool::new(false),

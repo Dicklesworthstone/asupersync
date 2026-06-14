@@ -232,7 +232,7 @@ impl Semaphore {
     /// Creates a new semaphore with the given permits and name for lock ordering.
     #[must_use]
     pub fn with_name(name: &'static str, permits: usize) -> Self {
-        let rank = LockRank::from_name(name);
+        let rank = lock_ordering::rank_for_lock_name(name);
         Self {
             state: ParkingMutex::new(SemaphoreState {
                 permits,

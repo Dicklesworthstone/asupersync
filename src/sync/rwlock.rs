@@ -213,7 +213,7 @@ impl<T> RwLock<T> {
     #[inline]
     #[must_use]
     pub fn with_name(name: &'static str, value: T) -> Self {
-        let rank = LockRank::from_name(name);
+        let rank = lock_ordering::rank_for_lock_name(name);
         Self {
             state: ParkingMutex::new(State::default()),
             data: UnsafeCell::new(value),

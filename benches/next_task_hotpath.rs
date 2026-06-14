@@ -34,7 +34,7 @@ fn setup_runtime_state(task_count: u32) -> Arc<ContendedMutex<RuntimeState>> {
         let idx = state.tasks.insert(record);
         assert_eq!(idx.index(), i);
     }
-    Arc::new(ContendedMutex::new("next_task_hotpath_state", state))
+    Arc::new(ContendedMutex::new("runtime_state", state))
 }
 
 /// Setup worker with various queue states for benchmarking

@@ -345,7 +345,7 @@ fn replay_scheduler_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>>
         let index = state.tasks.insert(record);
         assert_eq!(index.index(), id);
     }
-    Arc::new(ContendedMutex::new("bench_scheduler_feedback_state", state))
+    Arc::new(ContendedMutex::new("runtime_state", state))
 }
 
 fn apply_feedback_recommendation(

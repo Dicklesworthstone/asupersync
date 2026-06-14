@@ -27,6 +27,8 @@ pub const LOCK_ORDER_REASON_LEGACY_RUNTIME_STATE: &str = "allowed-legacy-runtime
 pub const LOCK_ORDER_REASON_ATP_REGISTRY: &str = "allowed-atp-transfer-registry-lock";
 /// Stable reason emitted for the ATP in-memory object-store lock.
 pub const LOCK_ORDER_REASON_ATP_OBJECT_STORE: &str = "allowed-atp-object-store-lock";
+/// Stable reason emitted for ATP-local transfer actor locks.
+pub const LOCK_ORDER_REASON_ATP_TRANSFER_ACTOR: &str = "allowed-atp-transfer-actor-lock";
 /// Stable reason emitted for the epoch-GC rate limiter lock.
 pub const LOCK_ORDER_REASON_EPOCH_GC_RATE_LIMITER: &str = "allowed-epoch-gc-rate-limiter-lock";
 /// Stable reason emitted for the service-adapter wrapper lock.
@@ -366,6 +368,7 @@ fn allowed_unranked_reason(name: &str) -> Option<&'static str> {
         | "test_state" => Some(LOCK_ORDER_REASON_LEGACY_RUNTIME_STATE),
         "atp_transfer_registry" => Some(LOCK_ORDER_REASON_ATP_REGISTRY),
         "atp_memory_object_store" => Some(LOCK_ORDER_REASON_ATP_OBJECT_STORE),
+        "transfer_actor" | "atp_transfer_actor" => Some(LOCK_ORDER_REASON_ATP_TRANSFER_ACTOR),
         "epoch_gc.last_advance" => Some(LOCK_ORDER_REASON_EPOCH_GC_RATE_LIMITER),
         "service_adapter" => Some(LOCK_ORDER_REASON_SERVICE_ADAPTER),
         "test_abandon_read" | "test_abandon_write" => Some(LOCK_ORDER_REASON_TEST_HELPER),
@@ -373,8 +376,8 @@ fn allowed_unranked_reason(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Thread-local storage for tracking held lock ranks and modules.
-/// Only compiled in debug builds.
+// Thread-local storage for tracking held lock ranks and modules.
+// Only compiled in debug builds.
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 thread_local! {
     static HELD_RANKS: RefCell<BTreeSet<LockRank>> = const { RefCell::new(BTreeSet::new()) };
@@ -638,8 +641,15 @@ pub fn record_release_with_module(lock_name: &str, rank: LockRank, module: LockM
                 let mut held_locks_mut = held_locks.borrow_mut();
 
                 if let Some(locks_at_rank) = held_locks_mut.get_mut(&rank) {
-                    // Remove the specific lock by name and module
-                    locks_at_rank.retain(|lock| !(lock.name == lock_name && lock.module == module));
+                    // Remove one matching held lock. Multiple guards can share
+                    // the same diagnostic name, so releasing one guard must not
+                    // erase the remaining acquisitions for that rank.
+                    if let Some(index) = locks_at_rank
+                        .iter()
+                        .rposition(|lock| lock.name == lock_name && lock.module == module)
+                    {
+                        locks_at_rank.remove(index);
+                    }
 
                     // If no more locks at this rank, remove the rank entirely
                     if locks_at_rank.is_empty() {
@@ -844,6 +854,8 @@ mod tests {
                 "atp_memory_object_store",
                 LOCK_ORDER_REASON_ATP_OBJECT_STORE,
             ),
+            ("transfer_actor", LOCK_ORDER_REASON_ATP_TRANSFER_ACTOR),
+            ("atp_transfer_actor", LOCK_ORDER_REASON_ATP_TRANSFER_ACTOR),
             ("test_abandon_read", LOCK_ORDER_REASON_TEST_HELPER),
         ] {
             let policy = classify_lock_name(name);
@@ -965,12 +977,22 @@ mod tests {
 
     #[test]
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-    #[should_panic(expected = "Lock ordering violation")]
     fn test_incorrect_lock_ordering() {
         clear_held_locks(); // Start with clean state
-        // This should panic - trying to acquire Config after Tasks
-        record_acquire("tasks_test", LockRank::Tasks);
-        check_acquire("config_test", LockRank::Config); // This should panic
+        let panic = std::panic::catch_unwind(|| {
+            // This should panic - trying to acquire Config after Tasks
+            record_acquire("tasks_test", LockRank::Tasks);
+            check_acquire("config_test", LockRank::Config);
+        })
+        .expect_err("rank-order inversion should panic");
+        let message = panic_payload_to_string(panic);
+
+        clear_held_locks();
+
+        assert!(
+            message.contains("Lock ordering violation"),
+            "rank-order panic should mention ordering violation: {message}"
+        );
     }
 
     #[test]
@@ -1030,18 +1052,28 @@ mod tests {
 
     #[test]
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-    #[should_panic(expected = "CROSS-MODULE DEADLOCK PREVENTION")]
     fn test_cross_module_obligation_cancel_violation() {
         clear_held_locks(); // Start with clean state
 
-        // Hold a Cancel module lock
-        record_acquire_with_module("cancel_token", LockRank::Tasks, LockModule::Cancel);
+        let panic = std::panic::catch_unwind(|| {
+            // Hold a Cancel module lock
+            record_acquire_with_module("cancel_token", LockRank::Tasks, LockModule::Cancel);
 
-        // This should panic - acquiring Obligation lock while holding Cancel lock
-        check_acquire_with_module(
-            "obligation_tracker",
-            LockRank::Obligations,
-            LockModule::Obligation,
+            // This should panic - acquiring Obligation lock while holding Cancel lock
+            check_acquire_with_module(
+                "obligation_tracker",
+                LockRank::Obligations,
+                LockModule::Obligation,
+            );
+        })
+        .expect_err("cancel-before-obligation pattern should panic");
+        let message = panic_payload_to_string(panic);
+
+        clear_held_locks();
+
+        assert!(
+            message.contains("CROSS-MODULE DEADLOCK PREVENTION"),
+            "cross-module panic should mention deadlock prevention: {message}"
         );
     }
 
@@ -1075,15 +1107,25 @@ mod tests {
     // Cancel lock while holding a higher-ranked Cx lock), emitting the
     // "DEADLOCK PREVENTION" message. Matching the shared prefix keeps this
     // robust whether the rank-order or the cross-module rule trips first.
-    #[should_panic(expected = "DEADLOCK PREVENTION")]
     fn test_cross_module_cx_cancel_violation() {
         clear_held_locks(); // Start with clean state
 
-        // Hold a higher-ranked Cx lock
-        record_acquire_with_module("cx_macaroon", LockRank::Obligations, LockModule::Cx);
+        let panic = std::panic::catch_unwind(|| {
+            // Hold a higher-ranked Cx lock
+            record_acquire_with_module("cx_macaroon", LockRank::Obligations, LockModule::Cx);
 
-        // This should panic - acquiring lower-ranked Cancel lock while holding higher-ranked Cx lock
-        check_acquire_with_module("cancel_token", LockRank::Tasks, LockModule::Cancel);
+            // This should panic - acquiring lower-ranked Cancel lock while holding higher-ranked Cx lock
+            check_acquire_with_module("cancel_token", LockRank::Tasks, LockModule::Cancel);
+        })
+        .expect_err("cx-before-cancel rank inversion should panic");
+        let message = panic_payload_to_string(panic);
+
+        clear_held_locks();
+
+        assert!(
+            message.contains("DEADLOCK PREVENTION"),
+            "cx/cancel panic should mention deadlock prevention: {message}"
+        );
     }
 
     #[test]
@@ -1092,19 +1134,29 @@ mod tests {
     // a plain rank-order inversion, so the basic guard fires first with the
     // "DEADLOCK PREVENTION" message before the Runtime/Obligation cross-module
     // rule is reached. Match the shared prefix.
-    #[should_panic(expected = "DEADLOCK PREVENTION")]
     fn test_cross_module_runtime_obligation_violation() {
         clear_held_locks(); // Start with clean state
 
-        // Hold an Obligation lock
-        record_acquire_with_module(
-            "obligation_ledger",
-            LockRank::Obligations,
-            LockModule::Obligation,
-        );
+        let panic = std::panic::catch_unwind(|| {
+            // Hold an Obligation lock
+            record_acquire_with_module(
+                "obligation_ledger",
+                LockRank::Obligations,
+                LockModule::Obligation,
+            );
 
-        // This should panic - acquiring Task lock while holding Obligation lock
-        check_acquire_with_module("runtime_tasks", LockRank::Tasks, LockModule::Runtime);
+            // This should panic - acquiring Task lock while holding Obligation lock
+            check_acquire_with_module("runtime_tasks", LockRank::Tasks, LockModule::Runtime);
+        })
+        .expect_err("runtime/obligation rank inversion should panic");
+        let message = panic_payload_to_string(panic);
+
+        clear_held_locks();
+
+        assert!(
+            message.contains("DEADLOCK PREVENTION"),
+            "runtime/obligation panic should mention deadlock prevention: {message}"
+        );
     }
 
     #[test]
@@ -1133,5 +1185,88 @@ mod tests {
 
         let held_locks_after = current_held_locks();
         assert_eq!(held_locks_after.len(), 0);
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn lock_order_atlas_records_instrumentation_edges_and_violations() {
+        clear_held_locks();
+
+        check_acquire_with_module("config_cache", LockRank::Config, LockModule::Runtime);
+        record_acquire_with_module("config_cache", LockRank::Config, LockModule::Runtime);
+        check_acquire_with_module(
+            "trace_buffer",
+            LockRank::Instrumentation,
+            LockModule::Runtime,
+        );
+        record_acquire_with_module(
+            "trace_buffer",
+            LockRank::Instrumentation,
+            LockModule::Runtime,
+        );
+
+        let snapshot = lock_order_atlas_snapshot();
+        assert_eq!(snapshot.instrumentation_mode, "debug_lock_ordering");
+        assert!(snapshot.order_violations.is_empty());
+        assert!(snapshot.order_edges_exercised.iter().any(|edge| {
+            edge.held_lock_name == "config_cache"
+                && edge.held_rank == LockRank::Config
+                && edge.held_module == LockModule::Runtime
+                && edge.acquired_lock_name == "trace_buffer"
+                && edge.acquired_rank == LockRank::Instrumentation
+                && edge.acquired_module == LockModule::Runtime
+        }));
+
+        clear_held_locks();
+        record_acquire_with_module("tasks_queue", LockRank::Tasks, LockModule::Runtime);
+
+        let inversion = std::panic::catch_unwind(|| {
+            check_acquire_with_module(
+                "trace_buffer",
+                LockRank::Instrumentation,
+                LockModule::Runtime,
+            );
+        });
+        assert!(inversion.is_err());
+
+        let snapshot = lock_order_atlas_snapshot();
+        assert!(snapshot.order_violations.iter().any(|violation| {
+            violation.lock_name == "trace_buffer"
+                && violation.lock_rank == LockRank::Instrumentation
+                && violation.lock_module == LockModule::Runtime
+                && violation.held_rank == LockRank::Tasks
+                && violation.reason == "rank-order"
+        }));
+
+        clear_held_locks();
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn duplicate_lock_name_release_preserves_remaining_acquisition() {
+        clear_held_locks();
+
+        record_acquire_with_module("tasks_duplicate", LockRank::Tasks, LockModule::Runtime);
+        record_acquire_with_module("tasks_duplicate", LockRank::Tasks, LockModule::Runtime);
+
+        let held_locks = current_held_locks();
+        assert_eq!(held_locks[&LockRank::Tasks].len(), 2);
+
+        record_release_with_module("tasks_duplicate", LockRank::Tasks, LockModule::Runtime);
+
+        let held_locks = current_held_locks();
+        assert_eq!(held_locks[&LockRank::Tasks].len(), 1);
+        assert!(current_held_ranks().contains(&LockRank::Tasks));
+
+        let lower_rank_result =
+            std::panic::catch_unwind(|| check_acquire("config_cache", LockRank::Config));
+        assert!(
+            lower_rank_result.is_err(),
+            "remaining same-name task lock must keep its rank active"
+        );
+
+        record_release_with_module("tasks_duplicate", LockRank::Tasks, LockModule::Runtime);
+        assert!(current_held_locks().is_empty());
+        assert!(current_held_ranks().is_empty());
     }
 }
