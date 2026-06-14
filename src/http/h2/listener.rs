@@ -2204,6 +2204,150 @@ mod tests {
     }
 
     #[test]
+    fn queue_h2_response_reports_goaway_push_rejection() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new()
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/index.html"),
+            (":authority", "push.example"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(matches!(
+            received,
+            Some(ReceivedFrame::Headers { stream_id: 1, .. })
+        ));
+
+        conn.goaway(
+            ErrorCode::NoError,
+            crate::bytes::Bytes::from_static(b"server draining"),
+        );
+        let response = Http2Response::new(Response::new(200, "OK", Vec::new())).with_push(
+            Http2ServerPush::get(
+                "/style.css",
+                "push.example",
+                Response::new(200, "OK", Vec::new()),
+            ),
+        );
+        let mut response_guards = HashMap::new();
+        let outcomes = queue_h2_response(
+            &mut conn,
+            1,
+            response,
+            InFlightRequestGuard::acquire(None),
+            false,
+            &mut response_guards,
+        );
+
+        assert_eq!(
+            outcomes,
+            vec![Http2PushOutcome::NotPushed {
+                associated_stream_id: 1,
+                reason: Http2PushRejection::ConnectionClosing
+            }]
+        );
+        assert!(conn.stream(2).is_none());
+        assert!(matches!(conn.next_frame(), Some(Frame::GoAway(_))));
+        match conn.next_frame().expect("parent response still queues") {
+            Frame::Headers(headers) => {
+                assert_eq!(headers.stream_id, 1);
+                assert!(headers.end_stream);
+            }
+            other => panic!("expected parent response HEADERS, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_h2_response_reports_max_concurrent_push_rejection() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                vec![crate::http::h2::frame::Setting::MaxConcurrentStreams(1)]
+            )))
+            .expect("max concurrent settings accepted")
+            .is_none()
+        );
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/index.html"),
+            (":authority", "push.example"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(matches!(
+            received,
+            Some(ReceivedFrame::Headers { stream_id: 1, .. })
+        ));
+
+        let response = Http2Response::new(Response::new(200, "OK", Vec::new())).with_push(
+            Http2ServerPush::get(
+                "/style.css",
+                "push.example",
+                Response::new(200, "OK", Vec::new()),
+            ),
+        );
+        let mut response_guards = HashMap::new();
+        let outcomes = queue_h2_response(
+            &mut conn,
+            1,
+            response,
+            InFlightRequestGuard::acquire(None),
+            false,
+            &mut response_guards,
+        );
+
+        assert_eq!(outcomes.len(), 1);
+        match &outcomes[0] {
+            Http2PushOutcome::NotPushed {
+                associated_stream_id,
+                reason:
+                    Http2PushRejection::Rejected {
+                        code,
+                        stream_id,
+                        message,
+                    },
+            } => {
+                assert_eq!(*associated_stream_id, 1);
+                assert_eq!(*code, ErrorCode::ProtocolError);
+                assert_eq!(*stream_id, None);
+                assert!(message.contains("max concurrent streams exceeded"));
+            }
+            other => panic!("expected typed max-concurrent push rejection, got {other:?}"),
+        }
+        assert!(conn.stream(2).is_none());
+        match conn.next_frame().expect("parent response still queues") {
+            Frame::Headers(headers) => {
+                assert_eq!(headers.stream_id, 1);
+                assert!(headers.end_stream);
+            }
+            other => panic!("expected parent response HEADERS, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn head_response_suppression_drops_body_and_synthesizes_length() {
         let mut response = Response::new(200, "OK", b"hello".to_vec())
             .with_header("Trailer", "X-Trace")
