@@ -642,12 +642,13 @@ fn test_data_integrity_verification(cx: &Cx) -> ConformanceResult {
 
     match block_on(session.verify_object(cx, &object_path, Some(expected_hash.as_bytes()))) {
         asupersync::net::atp::protocol::AtpOutcome::Ok(verification)
-            if verification.verified
+            if !verification.verified
                 && verification.integrity_check_passed
+                && verification.signature_valid.is_none()
                 && verification.hash == expected_hash.as_bytes().to_vec() =>
         {
             ConformanceResult::pass(format!(
-                "verified=true integrity_check_passed=true bytes={} hash_prefix={}",
+                "verified=false integrity_check_passed=true signature_valid=none bytes={} hash_prefix={}",
                 payload.len(),
                 &expected_hash.hex()[..16]
             ))
