@@ -12,7 +12,7 @@
 mod common;
 
 use asupersync::Cx;
-use asupersync::http::h1::{HttpClient, RedirectPolicy};
+use asupersync::http::h1::{ClientError, HttpClient, RedirectPolicy};
 use common::*;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -186,4 +186,84 @@ fn redirect_policy_none_returns_302_without_following() {
     );
 
     test_complete!("redirect_policy_none_returns_302_without_following");
+}
+
+#[test]
+fn redirect_policy_same_origin_follows_same_origin_redirect() {
+    init_test_logging();
+    test_phase!("redirect_policy_same_origin_follows_same_origin_redirect");
+
+    let (addr, server) = spawn_redirect_server(2);
+
+    run_test(|| async move {
+        let cx = Cx::for_testing();
+        let client = HttpClient::builder()
+            .redirect_policy(RedirectPolicy::SameOrigin(5))
+            .build();
+        let url = format!("http://{addr}/");
+
+        let resp = client
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(
+            resp.status, 200,
+            "SameOrigin policy should follow a same-origin 302 to the final 200"
+        );
+        assert_eq!(resp.body, b"ARRIVED");
+    });
+
+    let paths = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert_eq!(
+        paths,
+        vec!["/".to_string(), "/final".to_string()],
+        "SameOrigin should follow the same-origin Location to /final"
+    );
+
+    test_complete!("redirect_policy_same_origin_follows_same_origin_redirect");
+}
+
+#[test]
+fn redirect_policy_limited_zero_errors_too_many_redirects() {
+    init_test_logging();
+    test_phase!("redirect_policy_limited_zero_errors_too_many_redirects");
+
+    // With a budget of 0 redirects the first 302 immediately exceeds the cap,
+    // so the server only ever serves the initial `/` request.
+    let (addr, server) = spawn_redirect_server(1);
+
+    run_test(|| async move {
+        let cx = Cx::for_testing();
+        let client = HttpClient::builder()
+            .redirect_policy(RedirectPolicy::Limited(0))
+            .build();
+        let url = format!("http://{addr}/");
+
+        let err = client
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect_err("a 302 under Limited(0) must exceed the redirect cap");
+        assert!(
+            matches!(err, ClientError::TooManyRedirects { max: 0, .. }),
+            "expected TooManyRedirects {{ max: 0 }}, got {err:?}"
+        );
+    });
+
+    let paths = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert_eq!(
+        paths,
+        vec!["/".to_string()],
+        "Limited(0) must not follow the redirect"
+    );
+
+    test_complete!("redirect_policy_limited_zero_errors_too_many_redirects");
 }
