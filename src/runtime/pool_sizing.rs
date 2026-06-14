@@ -242,6 +242,20 @@ impl PoolSizingEstimator {
         self.sample_count
     }
 
+    /// Drop all accumulated EWMA state while preserving the configured alpha.
+    ///
+    /// This is the handoff point for future regime-change detectors: after a
+    /// confirmed workload phase change, integrations can clear stale learning
+    /// before feeding the first observation from the new regime. The next
+    /// positive observation is then accepted as the fresh baseline instead of
+    /// being blended with the old regime.
+    pub fn reset(&mut self) {
+        self.arrival_rate_per_sec_ppm = None;
+        self.service_time_mean_micros = None;
+        self.service_time_second_moment_micros2 = None;
+        self.sample_count = 0;
+    }
+
     /// Fold one observation batch into the EWMA state.
     ///
     /// Returns the current estimate when both arrival and service moments are
@@ -853,6 +867,42 @@ mod tests {
         assert_eq!(second.arrival_rate_per_sec_ppm, 15 * POOL_SIZING_SCALE);
         assert_eq!(second.service_time_mean_micros, 300_000);
         assert_eq!(second.service_time_variance_micros2, 10_000_000_000);
+    }
+
+    #[test]
+    fn estimator_reset_clears_old_regime_before_next_observation() {
+        let mut estimator = PoolSizingEstimator::new(500_000);
+        let old_regime = estimator
+            .observe(PoolSizingObservation::new(
+                1_000_000,
+                20,
+                20,
+                8_000_000,
+                3_200_000_000_000,
+            ))
+            .expect("old regime yields an estimate");
+        assert_eq!(old_regime.arrival_rate_per_sec_ppm, 20 * POOL_SIZING_SCALE);
+        assert_eq!(old_regime.service_time_mean_micros, 400_000);
+        assert_eq!(estimator.sample_count(), 1);
+
+        estimator.reset();
+        assert_eq!(estimator.sample_count(), 0);
+        assert_eq!(estimator.estimate(), None);
+
+        let new_regime = estimator
+            .observe(PoolSizingObservation::new(
+                1_000_000,
+                2,
+                2,
+                200_000,
+                20_000_000_000,
+            ))
+            .expect("first post-reset observation yields a fresh estimate");
+
+        assert_eq!(estimator.sample_count(), 1);
+        assert_eq!(new_regime.arrival_rate_per_sec_ppm, 2 * POOL_SIZING_SCALE);
+        assert_eq!(new_regime.service_time_mean_micros, 100_000);
+        assert_eq!(new_regime.service_time_variance_micros2, 0);
     }
 
     #[test]
