@@ -508,6 +508,9 @@ pub enum RedirectPolicy {
     None,
     /// Follow up to N redirects.
     Limited(u32),
+    /// Follow up to N redirects only when the target URL has the same
+    /// scheme, host, and port as the original request.
+    SameOrigin(u32),
 }
 
 impl Default for RedirectPolicy {
@@ -612,6 +615,14 @@ impl HttpClientBuilder {
     #[must_use]
     pub fn max_redirects(mut self, max: u32) -> Self {
         self.config.redirect_policy = RedirectPolicy::Limited(max);
+        self
+    }
+
+    /// Follows redirects only when the target has the same scheme, host, and
+    /// port as the original request.
+    #[must_use]
+    pub fn same_origin_redirects(mut self, max: u32) -> Self {
+        self.config.redirect_policy = RedirectPolicy::SameOrigin(max);
         self
     }
 
@@ -1295,7 +1306,7 @@ impl HttpClient {
             if is_redirect(resp.status) {
                 match &self.config.redirect_policy {
                     RedirectPolicy::None => return Ok(resp),
-                    RedirectPolicy::Limited(max) => {
+                    RedirectPolicy::Limited(max) | RedirectPolicy::SameOrigin(max) => {
                         if redirect_count >= *max {
                             return Err(ClientError::TooManyRedirects {
                                 count: redirect_count.saturating_add(1),
@@ -1306,6 +1317,13 @@ impl HttpClient {
                         if let Some(location) = get_header(&resp.headers, "Location") {
                             let next_url = resolve_redirect(&parsed, &location);
                             let next_parsed = ParsedUrl::parse(&next_url)?;
+                            if !redirect_policy_allows_target(
+                                &self.config.redirect_policy,
+                                &parsed,
+                                &next_parsed,
+                            ) {
+                                return Ok(resp);
+                            }
 
                             // 303 See Other always converts to GET
                             // 301/302 traditionally convert to GET for POST
@@ -1368,7 +1386,7 @@ impl HttpClient {
             if is_redirect(resp.head.status) {
                 match &self.config.redirect_policy {
                     RedirectPolicy::None => return Ok(resp),
-                    RedirectPolicy::Limited(max) => {
+                    RedirectPolicy::Limited(max) | RedirectPolicy::SameOrigin(max) => {
                         if redirect_count >= *max {
                             return Err(ClientError::TooManyRedirects {
                                 count: redirect_count.saturating_add(1),
@@ -1378,11 +1396,18 @@ impl HttpClient {
 
                         if let Some(location) = get_header(&resp.head.headers, "Location") {
                             let status = resp.head.status;
-                            // Drop streaming response (closes connection) before following.
-                            drop(resp);
-
                             let next_url = resolve_redirect(&parsed, &location);
                             let next_parsed = ParsedUrl::parse(&next_url)?;
+                            if !redirect_policy_allows_target(
+                                &self.config.redirect_policy,
+                                &parsed,
+                                &next_parsed,
+                            ) {
+                                return Ok(resp);
+                            }
+
+                            // Drop streaming response (closes connection) before following.
+                            drop(resp);
 
                             // 303 See Other always converts to GET
                             // 301/302 traditionally convert to GET for POST
@@ -2692,6 +2717,18 @@ fn same_origin(a: &ParsedUrl, b: &ParsedUrl) -> bool {
     a.scheme == b.scheme && a.port == b.port && a.host.eq_ignore_ascii_case(&b.host)
 }
 
+fn redirect_policy_allows_target(
+    policy: &RedirectPolicy,
+    from: &ParsedUrl,
+    to: &ParsedUrl,
+) -> bool {
+    match policy {
+        RedirectPolicy::None => false,
+        RedirectPolicy::Limited(_) => true,
+        RedirectPolicy::SameOrigin(_) => same_origin(from, to),
+    }
+}
+
 /// Strip security-sensitive headers when redirecting to a different origin.
 ///
 /// Per RFC 9110 and common HTTP client practice (curl, reqwest, browsers),
@@ -3383,6 +3420,16 @@ mod tests {
             .build();
         assert_eq!(client.pool_now().as_nanos(), 777);
         assert_eq!((client.config.time_getter())().as_nanos(), 777);
+    }
+
+    #[test]
+    fn builder_same_origin_redirects_sets_policy() {
+        let client = HttpClient::builder().same_origin_redirects(4).build();
+
+        assert!(matches!(
+            client.config.redirect_policy,
+            RedirectPolicy::SameOrigin(4)
+        ));
     }
 
     #[test]
@@ -4261,6 +4308,43 @@ mod tests {
         assert!(dbg.contains('5'));
         let dbg2 = format!("{b:?}");
         assert_eq!(dbg, dbg2);
+    }
+
+    #[test]
+    fn same_origin_redirect_policy_only_allows_matching_origin() {
+        let policy = RedirectPolicy::SameOrigin(5);
+        let current = ParsedUrl::parse("http://Example.com:8080/old").unwrap();
+        let same = ParsedUrl::parse("http://example.COM:8080/new").unwrap();
+        let different_host = ParsedUrl::parse("http://other.example:8080/new").unwrap();
+        let different_port = ParsedUrl::parse("http://example.com:9090/new").unwrap();
+        let different_scheme = ParsedUrl::parse("https://example.com:8080/new").unwrap();
+
+        assert!(redirect_policy_allows_target(&policy, &current, &same));
+        assert!(!redirect_policy_allows_target(
+            &policy,
+            &current,
+            &different_host
+        ));
+        assert!(!redirect_policy_allows_target(
+            &policy,
+            &current,
+            &different_port
+        ));
+        assert!(!redirect_policy_allows_target(
+            &policy,
+            &current,
+            &different_scheme
+        ));
+        assert!(redirect_policy_allows_target(
+            &RedirectPolicy::Limited(5),
+            &current,
+            &different_host
+        ));
+        assert!(!redirect_policy_allows_target(
+            &RedirectPolicy::None,
+            &current,
+            &same
+        ));
     }
 
     #[test]
