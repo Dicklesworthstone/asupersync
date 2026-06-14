@@ -336,7 +336,7 @@
       "code": "ASUP-E203",
       "name": "receive-cancelled",
       "area": "channels-sync",
-      "status": "reserved",
+      "status": "live",
       "summary": "A receive operation was cancelled before it could commit delivery.",
       "probable_causes": [
         "The caller's Cx was cancelled while waiting.",
@@ -347,8 +347,13 @@
         "Confirm the receive path preserves queued data on cancellation."
       ],
       "doc_path": "docs/error_codes/ASUP-E203.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/channel/mpsc.rs",
+        "src/channel/broadcast.rs",
+        "src/channel/oneshot.rs",
+        "src/channel/watch.rs"
+      ]
     },
     {
       "code": "ASUP-E204",

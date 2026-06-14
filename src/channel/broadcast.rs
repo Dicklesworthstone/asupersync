@@ -71,7 +71,7 @@ impl std::fmt::Display for RecvError {
         match self {
             Self::Lagged(n) => write!(f, "receiver lagged by {n} messages"),
             Self::Closed => write!(f, "broadcast channel closed"),
-            Self::Cancelled => write!(f, "receive operation cancelled"),
+            Self::Cancelled => write!(f, "[ASUP-E203] receive operation cancelled"),
             Self::PolledAfterCompletion => {
                 write!(f, "broadcast receive future polled after completion")
             }
@@ -2175,7 +2175,7 @@ mod tests {
         let expected_display = [
             "receiver lagged by 5 messages",
             "broadcast channel closed",
-            "receive operation cancelled",
+            "[ASUP-E203] receive operation cancelled",
             "broadcast receive future polled after completion",
         ];
         for (e, expected) in errors.iter().zip(expected_display.iter()) {

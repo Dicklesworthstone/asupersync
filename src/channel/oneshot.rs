@@ -92,7 +92,7 @@ impl std::fmt::Display for RecvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "receiving on a closed oneshot channel"),
-            Self::Cancelled => write!(f, "receive operation cancelled"),
+            Self::Cancelled => write!(f, "[ASUP-E203] receive operation cancelled"),
             Self::PolledAfterCompletion => write!(f, "oneshot recv future polled after completion"),
         }
     }
@@ -1637,9 +1637,9 @@ mod tests {
         );
         let cancelled = RecvError::Cancelled.to_string();
         crate::assert_with_log!(
-            cancelled == "receive operation cancelled",
+            cancelled == "[ASUP-E203] receive operation cancelled",
             "cancelled display",
-            "receive operation cancelled",
+            "[ASUP-E203] receive operation cancelled",
             cancelled
         );
         let polled_after_completion = RecvError::PolledAfterCompletion.to_string();

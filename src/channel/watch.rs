@@ -103,7 +103,7 @@ impl std::fmt::Display for RecvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed => write!(f, "receiving on a closed watch channel"),
-            Self::Cancelled => write!(f, "receive operation cancelled"),
+            Self::Cancelled => write!(f, "[ASUP-E203] receive operation cancelled"),
             Self::PolledAfterCompletion => write!(f, "watch future polled after completion"),
         }
     }
@@ -1346,9 +1346,9 @@ mod tests {
         );
         let cancelled_text = RecvError::Cancelled.to_string();
         crate::assert_with_log!(
-            cancelled_text == "receive operation cancelled",
+            cancelled_text == "[ASUP-E203] receive operation cancelled",
             "display",
-            "receive operation cancelled",
+            "[ASUP-E203] receive operation cancelled",
             cancelled_text
         );
         crate::test_complete!("recv_error_display");

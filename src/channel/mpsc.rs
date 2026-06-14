@@ -131,7 +131,7 @@ impl std::fmt::Display for RecvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disconnected => write!(f, "receiving on a closed mpsc channel"),
-            Self::Cancelled => write!(f, "receive operation cancelled"),
+            Self::Cancelled => write!(f, "[ASUP-E203] receive operation cancelled"),
             Self::Empty => write!(f, "mpsc channel is empty"),
         }
     }
@@ -1639,6 +1639,19 @@ mod tests {
         let result = std::panic::catch_unwind(|| channel::<i32>(0));
         crate::assert_with_log!(result.is_err(), "capacity 0 panics", true, result.is_err());
         crate::test_complete!("channel_capacity_must_be_nonzero");
+    }
+
+    #[test]
+    fn recv_cancelled_display_has_asup_e203() {
+        init_test("recv_cancelled_display_has_asup_e203");
+        let text = RecvError::Cancelled.to_string();
+        crate::assert_with_log!(
+            text == "[ASUP-E203] receive operation cancelled",
+            "cancelled display",
+            "[ASUP-E203] receive operation cancelled",
+            text
+        );
+        crate::test_complete!("recv_cancelled_display_has_asup_e203");
     }
 
     #[test]
