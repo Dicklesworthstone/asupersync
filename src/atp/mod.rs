@@ -40,6 +40,8 @@ pub mod profiles;
 pub mod proof;
 pub mod quota;
 pub mod repair_coordinator;
+#[cfg(test)]
+mod repair_coordinator_integration_test;
 pub mod repair_receiver;
 pub mod repair_roi;
 pub mod repair_scheduler;

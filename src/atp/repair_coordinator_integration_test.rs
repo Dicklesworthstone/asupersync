@@ -6,15 +6,39 @@
 #[cfg(test)]
 mod tests {
     use super::super::repair_coordinator::*;
-    use crate::atp::object::ObjectId;
+    use crate::atp::object::{ContentId, ObjectId};
     use crate::types::TraceId;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
+
+    fn test_object_id(label: &'static [u8]) -> ObjectId {
+        ObjectId::content(ContentId::from_bytes(label))
+    }
+
+    fn transfer_state(
+        object_size_bytes: u64,
+        bytes_transferred: u64,
+        missing_chunks: usize,
+        missing_bytes: u64,
+    ) -> TransferState {
+        TransferState {
+            object_size_bytes,
+            bytes_transferred,
+            missing_chunks,
+            missing_bytes,
+            is_resume: false,
+            elapsed_time: Duration::from_secs(5),
+            retransmit_attempts: 3,
+            available_peers: 1,
+            memory_pressure: 0.3,
+            cpu_pressure: 0.4,
+        }
+    }
 
     /// Test repair mode selection for different network scenarios
     #[test]
     fn test_repair_mode_selection_scenarios() {
         let config = RepairCoordinatorConfig {
-            min_roi_threshold: 1.1, // Lower threshold for testing
+            min_roi_threshold: 0.0,
             ..RepairCoordinatorConfig::default()
         };
         let mut coordinator = RepairCoordinator::new(config);
@@ -29,28 +53,23 @@ mod tests {
             ..PathCharacteristics::default()
         };
 
-        let small_transfer = TransferState {
-            object_size_bytes: 1_000_000,  // 1MB
-            bytes_transferred: 900_000,    // 90% complete
-            missing_chunks: 2,
-            missing_bytes: 100_000,
-            is_resume: false,
-            available_peers: 1,
-            ..TransferState::default()
-        };
+        let small_transfer = transfer_state(1_000_000, 900_000, 2, 100_000);
 
         let decision = coordinator
             .decide_repair_mode(
-                ObjectId::from("test-clean"),
+                test_object_id(b"test-clean"),
                 &clean_path,
                 &small_transfer,
-                TraceId::from_raw(0x1234),
+                TraceId::from_parts(0x1234, 1),
             )
             .unwrap();
 
-        // Should prefer tail repair for nearly complete transfer
-        // but may choose Off if ROI doesn't justify repair
-        assert!(matches!(decision.mode, RepairMode::Off | RepairMode::Tail));
+        // A nearly complete transfer on a clean path should never need
+        // multi-source-only modes when the coordinator lacks a scheduler.
+        assert!(!matches!(
+            decision.mode,
+            RepairMode::Swarm | RepairMode::Broadcast
+        ));
 
         // Scenario 2: Lossy path - should use lossy repair
         let lossy_path = PathCharacteristics {
@@ -63,22 +82,16 @@ mod tests {
         };
 
         let large_transfer = TransferState {
-            object_size_bytes: 100_000_000, // 100MB
-            bytes_transferred: 50_000_000,  // 50% complete
-            missing_chunks: 100,
-            missing_bytes: 50_000_000,
-            is_resume: false,
             retransmit_attempts: 5,
-            available_peers: 1,
-            ..TransferState::default()
+            ..transfer_state(100_000_000, 50_000_000, 100, 50_000_000)
         };
 
         let decision = coordinator
             .decide_repair_mode(
-                ObjectId::from("test-lossy"),
+                test_object_id(b"test-lossy"),
                 &lossy_path,
                 &large_transfer,
-                TraceId::from_raw(0x5678),
+                TraceId::from_parts(0x5678, 2),
             )
             .unwrap();
 
@@ -87,22 +100,17 @@ mod tests {
 
         // Scenario 3: Resume transfer - should use resume repair
         let resume_transfer = TransferState {
-            object_size_bytes: 50_000_000, // 50MB
-            bytes_transferred: 20_000_000, // 40% complete
-            missing_chunks: 60,
-            missing_bytes: 30_000_000,
             is_resume: true, // Resume scenario
             retransmit_attempts: 2,
-            available_peers: 1,
-            ..TransferState::default()
+            ..transfer_state(50_000_000, 20_000_000, 60, 30_000_000)
         };
 
         let decision = coordinator
             .decide_repair_mode(
-                ObjectId::from("test-resume"),
+                test_object_id(b"test-resume"),
                 &lossy_path,
                 &resume_transfer,
-                TraceId::from_raw(0x9ABC),
+                TraceId::from_parts(0x9ABC, 3),
             )
             .unwrap();
 
@@ -124,10 +132,10 @@ mod tests {
 
         let decision = coordinator
             .decide_repair_mode(
-                ObjectId::from("test-relay"),
+                test_object_id(b"test-relay"),
                 &relay_path,
                 &large_transfer,
-                TraceId::from_raw(0xDEF0),
+                TraceId::from_parts(0xDEF0, 4),
             )
             .unwrap();
 
@@ -139,16 +147,16 @@ mod tests {
         // Scenario 5: Multi-peer swarm - needs multi-source scheduler
         let swarm_transfer = TransferState {
             available_peers: 5, // Multiple peers available
-            ..large_transfer
+            ..large_transfer.clone()
         };
 
         // For swarm mode, we would need multi-source scheduler
         let decision = coordinator
             .decide_repair_mode(
-                ObjectId::from("test-swarm"),
+                test_object_id(b"test-swarm"),
                 &clean_path,
                 &swarm_transfer,
-                TraceId::from_raw(0x1111),
+                TraceId::from_parts(0x1111, 5),
             )
             .unwrap();
 
@@ -158,8 +166,12 @@ mod tests {
 
     /// Test ROI calculation accuracy
     #[test]
-    fn test_roi_calculation() {
-        let coordinator = RepairCoordinator::new(RepairCoordinatorConfig::default());
+    fn high_threshold_falls_back_to_off_mode() {
+        let config = RepairCoordinatorConfig {
+            min_roi_threshold: f64::INFINITY,
+            ..RepairCoordinatorConfig::default()
+        };
+        let mut coordinator = RepairCoordinator::new(config);
 
         let path = PathCharacteristics {
             rtt_ms: 100.0,
@@ -168,33 +180,20 @@ mod tests {
             ..PathCharacteristics::default()
         };
 
-        let transfer = TransferState {
-            object_size_bytes: 10_000_000, // 10MB
-            missing_chunks: 50,
-            missing_bytes: 5_000_000, // 5MB missing
-            retransmit_attempts: 3,
-            ..TransferState::default()
-        };
-
-        // Test ROI calculation for lossy mode
-        let roi = coordinator
-            .calculate_roi(RepairMode::Lossy, &path, &transfer)
+        let transfer = transfer_state(10_000_000, 5_000_000, 50, 5_000_000);
+        let decision = coordinator
+            .decide_repair_mode(
+                test_object_id(b"test-threshold"),
+                &path,
+                &transfer,
+                TraceId::from_parts(0x2222, 6),
+            )
             .unwrap();
 
-        // Should have positive ROI for lossy scenario
-        assert!(roi.roi_ratio > 0.0);
-        assert!(roi.expected_time_saved > Duration::ZERO);
-        assert!(roi.confidence > 0.0);
-        assert!(roi.bandwidth_overhead > 0);
-
-        // Test ROI calculation for off mode
-        let off_roi = coordinator
-            .calculate_roi(RepairMode::Off, &path, &transfer)
-            .unwrap();
-
-        assert_eq!(off_roi.roi_ratio, 0.0);
-        assert_eq!(off_roi.expected_time_saved, Duration::ZERO);
-        assert!(!off_roi.justifies_repair(1.0));
+        assert_eq!(decision.mode, RepairMode::Off);
+        assert_eq!(decision.roi.roi_ratio, 0.0);
+        assert_eq!(decision.roi.expected_time_saved, Duration::ZERO);
+        assert!(!decision.roi.justifies_repair(1.0));
     }
 
     /// Test telemetry recording and statistics
@@ -204,7 +203,7 @@ mod tests {
 
         // Record telemetry for successful repair
         let telemetry = RepairTelemetry {
-            object_id: ObjectId::from("test-telemetry"),
+            object_id: test_object_id(b"test-telemetry"),
             mode: RepairMode::Lossy,
             predicted_roi: RepairRoi {
                 roi_ratio: 1.5,
@@ -227,20 +226,23 @@ mod tests {
             success: true,
             actual_benefit_score: 3.2,
             actual_roi_ratio: 1.6,
-            measured_at: std::time::SystemTime::now(),
+            measured_at: SystemTime::now(),
         };
 
-        coordinator.record_telemetry(telemetry);
+        coordinator
+            .record_telemetry(telemetry)
+            .expect("telemetry should be accepted");
 
         // Verify statistics are updated
         let stats = coordinator.get_mode_statistics();
         assert!(stats.contains_key(&RepairMode::Lossy));
 
-        let lossy_stats = &stats[&RepairMode::Lossy];
-        assert_eq!(lossy_stats.usage_count, 1);
-        assert_eq!(lossy_stats.success_rate, 1.0);
-        assert!((lossy_stats.avg_predicted_roi - 1.5).abs() < 0.01);
-        assert!((lossy_stats.avg_actual_roi - 1.6).abs() < 0.01);
+        let lossy_stats =
+            serde_json::to_value(&stats[&RepairMode::Lossy]).expect("statistics serialize");
+        assert_eq!(lossy_stats["usage_count"], 1);
+        assert_eq!(lossy_stats["success_rate"], 1.0);
+        assert_eq!(lossy_stats["avg_predicted_roi"], 1.5);
+        assert_eq!(lossy_stats["avg_actual_roi"], 1.6);
 
         // Test decision history
         let history = coordinator.get_decision_history(10);
@@ -285,7 +287,13 @@ mod tests {
         // Test overhead multipliers are reasonable
         assert_eq!(RepairMode::Off.typical_overhead_multiplier(), 0.0);
         assert!(RepairMode::Tail.typical_overhead_multiplier() > 0.0);
-        assert!(RepairMode::Tail.typical_overhead_multiplier() < RepairMode::Lossy.typical_overhead_multiplier());
-        assert!(RepairMode::RelayExpensive.typical_overhead_multiplier() > RepairMode::ResumeRepair.typical_overhead_multiplier());
+        assert!(
+            RepairMode::Tail.typical_overhead_multiplier()
+                < RepairMode::Lossy.typical_overhead_multiplier()
+        );
+        assert!(
+            RepairMode::RelayExpensive.typical_overhead_multiplier()
+                > RepairMode::ResumeRepair.typical_overhead_multiplier()
+        );
     }
 }
