@@ -1222,6 +1222,49 @@ pub mod process_group {
         pub fn is_empty(&self) -> bool {
             self.recipients.is_empty()
         }
+
+        /// Builds deterministic accounting from immediate delivery attempts.
+        ///
+        /// The closure returns `true` when the member accepted the message at
+        /// the current policy boundary. A `false` result is classified from
+        /// the plan policy: [`BroadcastBackpressurePolicy::Skip`] records a
+        /// skipped recipient, while `Wait` and `Error` record backpressure
+        /// that the future async executor must surface to the caller.
+        #[must_use]
+        pub fn immediate_delivery_report<F>(&self, mut deliver: F) -> GroupBroadcastReport
+        where
+            F: FnMut(&GroupMemberId) -> bool,
+        {
+            let blocked_status = self.blocked_recipient_status();
+            let recipients = self
+                .recipients()
+                .iter()
+                .cloned()
+                .map(|member| {
+                    let status = if deliver(&member) {
+                        GroupBroadcastRecipientStatus::Delivered
+                    } else {
+                        blocked_status
+                    };
+                    GroupBroadcastRecipientReport::new(member, status)
+                })
+                .collect();
+
+            GroupBroadcastReport {
+                group: self.group.clone(),
+                policy: self.policy,
+                recipients,
+            }
+        }
+
+        fn blocked_recipient_status(&self) -> GroupBroadcastRecipientStatus {
+            match self.policy {
+                BroadcastBackpressurePolicy::Skip => GroupBroadcastRecipientStatus::Skipped,
+                BroadcastBackpressurePolicy::Wait | BroadcastBackpressurePolicy::Error => {
+                    GroupBroadcastRecipientStatus::Backpressured
+                }
+            }
+        }
     }
 
     /// Per-recipient outcome recorded by a broadcast executor.
@@ -2414,6 +2457,133 @@ mod tests {
         assert!(!backpressured.is_all_delivered());
 
         crate::test_complete!("process_group_broadcast_policy_reports_account_every_recipient");
+    }
+
+    #[test]
+    fn process_group_broadcast_plan_reports_immediate_delivery_in_order() {
+        init_test("process_group_broadcast_plan_reports_immediate_delivery_in_order");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let third = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-c"),
+            test_task_id(3),
+        );
+        state
+            .join(first.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(second.clone(), crate::types::Time::from_nanos(20))
+            .unwrap();
+        state
+            .join(third.clone(), crate::types::Time::from_nanos(30))
+            .unwrap();
+
+        let plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Skip);
+        let mut visited = Vec::new();
+        let report = plan.immediate_delivery_report(|member| {
+            visited.push(member.to_string());
+            member != &second
+        });
+
+        assert_eq!(
+            visited,
+            vec![
+                "Node(node-a):T1".to_string(),
+                "Node(node-b):T2".to_string(),
+                "Node(node-c):T3".to_string(),
+            ]
+        );
+        assert_eq!(
+            report
+                .recipients()
+                .iter()
+                .map(|recipient| (recipient.member().to_string(), recipient.status()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    first.to_string(),
+                    process_group::GroupBroadcastRecipientStatus::Delivered,
+                ),
+                (
+                    second.to_string(),
+                    process_group::GroupBroadcastRecipientStatus::Skipped,
+                ),
+                (
+                    third.to_string(),
+                    process_group::GroupBroadcastRecipientStatus::Delivered,
+                ),
+            ]
+        );
+        assert_eq!(
+            report.summary(),
+            process_group::GroupBroadcastSummary::new(2, 1, 0)
+        );
+
+        crate::test_complete!("process_group_broadcast_plan_reports_immediate_delivery_in_order");
+    }
+
+    #[test]
+    fn process_group_broadcast_plan_classifies_wait_and_error_backpressure() {
+        init_test("process_group_broadcast_plan_classifies_wait_and_error_backpressure");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        state
+            .join(first, crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(second, crate::types::Time::from_nanos(20))
+            .unwrap();
+
+        let wait_plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Wait);
+        let wait_report = wait_plan.immediate_delivery_report(|_| false);
+        assert_eq!(
+            wait_report.summary(),
+            process_group::GroupBroadcastSummary::new(0, 0, 2)
+        );
+        assert!(wait_report.summary().has_backpressured_recipients());
+
+        let error_plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Error);
+        let error_report =
+            error_plan.immediate_delivery_report(|member| member.to_string().ends_with(":T2"));
+        assert_eq!(
+            error_report.summary(),
+            process_group::GroupBroadcastSummary::new(1, 0, 1)
+        );
+        assert_eq!(
+            error_report
+                .recipients()
+                .iter()
+                .map(process_group::GroupBroadcastRecipientReport::status)
+                .collect::<Vec<_>>(),
+            vec![
+                process_group::GroupBroadcastRecipientStatus::Backpressured,
+                process_group::GroupBroadcastRecipientStatus::Delivered,
+            ]
+        );
+
+        crate::test_complete!(
+            "process_group_broadcast_plan_classifies_wait_and_error_backpressure"
+        );
     }
 
     #[test]
