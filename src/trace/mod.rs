@@ -66,6 +66,7 @@ pub mod independence;
 pub mod integrity;
 pub mod minimizer;
 pub mod raptorq_journal;
+pub mod raptorq_journal_writer;
 pub mod recorder;
 pub mod refinement_firewall;
 pub mod replay;
