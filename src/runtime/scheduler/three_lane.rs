@@ -282,7 +282,7 @@ impl LocalReadyQueueInner {
     }
 
     /// True when there are no *live* tasks (all queued ids are tombstoned).
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.present.len() == self.tombstones.len()
     }
 
