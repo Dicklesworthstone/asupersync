@@ -351,11 +351,14 @@ impl LossMatrix {
     ///
     /// # Panics
     ///
-    /// Panics if `posterior` does not have exactly [`Self::n_states`] entries.
-    /// A longer posterior would index past the loss values (OOB in [`Self::get`]),
-    /// and a shorter one would silently sum only the leading states and return a
-    /// plausible-but-wrong expected loss; both are caught here as a fail-loud
-    /// dimension violation, matching the crate's existing fail-loud style.
+    /// Panics if `posterior` does not have exactly [`Self::n_states`] entries,
+    /// or if `action` is not less than [`Self::n_actions`]. A longer posterior
+    /// (or an out-of-range `action` at the last state) would index past the loss
+    /// values (OOB in [`Self::get`]); a shorter posterior would silently sum only
+    /// the leading states, and an out-of-range `action` at an earlier state would
+    /// silently read a later state's loss row — both returning a
+    /// plausible-but-wrong expected loss. All are caught here as fail-loud
+    /// precondition violations, matching the crate's existing fail-loud style.
     pub fn expected_loss(&self, posterior: &Posterior, action: usize) -> f64 {
         assert_eq!(
             posterior.probs().len(),
@@ -363,6 +366,12 @@ impl LossMatrix {
             "posterior dimension ({}) must match loss-matrix state count ({})",
             posterior.probs().len(),
             self.n_states()
+        );
+        assert!(
+            action < self.n_actions(),
+            "action index ({}) out of range for {} actions",
+            action,
+            self.n_actions()
         );
         posterior
             .probs()
@@ -1090,6 +1099,17 @@ mod tests {
         let m = two_state_matrix();
         let long = Posterior::new(vec![0.3, 0.3, 0.4]).unwrap();
         let _ = m.expected_loss(&long, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "action index")]
+    fn expected_loss_panics_on_action_out_of_range() {
+        // A 2-action matrix queried with action index 2: previously read a later
+        // state's loss row (silent wrong value) or panicked OOB; now fails with a
+        // clear action-range message.
+        let m = two_state_matrix();
+        let p = Posterior::new(vec![0.5, 0.5]).unwrap();
+        let _ = m.expected_loss(&p, 2);
     }
 
     #[test]
