@@ -42,6 +42,8 @@
 //! bit is detected by the header or payload CRC — both let recovery skip a
 //! damaged frame and keep decoding the surviving symbols.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 /// Magic identifying a RaptorQ trace-journal frame.
 pub const JOURNAL_FRAME_MAGIC: [u8; 8] = *b"ASRQJRN1";
 
@@ -266,6 +268,94 @@ pub fn scan_frames(bytes: &[u8]) -> (Vec<JournalFrame>, usize) {
         }
     }
     (frames, offset)
+}
+
+/// Identifies a RaptorQ source block within a trace epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockKey {
+    /// Trace checkpoint epoch.
+    pub epoch: u64,
+    /// RaptorQ source block number within the epoch.
+    pub source_block_number: u32,
+}
+
+/// Recovery-side decodability summary for one source block, reconstructed from
+/// the surviving journal frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockRecovery {
+    /// Block this summary describes.
+    pub key: BlockKey,
+    /// Number of distinct encoding-symbol ids present for the block.
+    pub distinct_symbols: usize,
+    /// Source-symbol count K' required to RaptorQ-decode the block.
+    pub source_symbol_count: u32,
+}
+
+impl BlockRecovery {
+    /// Whether enough distinct symbols survived to RaptorQ-decode the block
+    /// (`distinct_symbols >= source_symbol_count`).
+    #[must_use]
+    pub fn is_decodable(&self) -> bool {
+        self.distinct_symbols as u64 >= u64::from(self.source_symbol_count)
+    }
+}
+
+/// Summarize per-block decodability across the surviving frames, deterministically
+/// ordered by `(epoch, source_block_number)` — `BTree`-backed so the result does
+/// not depend on `HashMap` iteration order (replay-stable).
+///
+/// Distinct symbols are counted by encoding-symbol id, and `source_symbol_count`
+/// takes the largest K' advertised by the block's frames (they should agree).
+#[must_use]
+pub fn summarize_blocks(frames: &[JournalFrame]) -> Vec<BlockRecovery> {
+    let mut blocks: BTreeMap<BlockKey, (BTreeSet<u32>, u32)> = BTreeMap::new();
+    for frame in frames {
+        let key = BlockKey {
+            epoch: frame.header.epoch,
+            source_block_number: frame.header.source_block_number,
+        };
+        let entry = blocks.entry(key).or_insert_with(|| (BTreeSet::new(), 0));
+        entry.0.insert(frame.header.encoding_symbol_id);
+        entry.1 = entry.1.max(frame.header.source_symbol_count);
+    }
+    blocks
+        .into_iter()
+        .map(|(key, (symbols, source_symbol_count))| BlockRecovery {
+            key,
+            distinct_symbols: symbols.len(),
+            source_symbol_count,
+        })
+        .collect()
+}
+
+/// The blocks that survived with enough symbols to decode, in deterministic order.
+#[must_use]
+pub fn decodable_blocks(frames: &[JournalFrame]) -> Vec<BlockKey> {
+    summarize_blocks(frames)
+        .into_iter()
+        .filter(BlockRecovery::is_decodable)
+        .map(|block| block.key)
+        .collect()
+}
+
+/// The highest epoch all of whose *present* blocks are decodable — the latest
+/// checkpoint a recovery tool can fully reconstruct from the surviving stripes.
+///
+/// Completeness is judged over the blocks that actually appear in the journal;
+/// detecting a wholly-missing block needs an epoch-manifest frame (a future
+/// slice), so this answers "is every block we saw recoverable" for the epoch.
+#[must_use]
+pub fn latest_recoverable_epoch(frames: &[JournalFrame]) -> Option<u64> {
+    let mut epoch_complete: BTreeMap<u64, bool> = BTreeMap::new();
+    for block in summarize_blocks(frames) {
+        let complete = epoch_complete.entry(block.key.epoch).or_insert(true);
+        *complete = *complete && block.is_decodable();
+    }
+    epoch_complete
+        .into_iter()
+        .filter(|&(_, complete)| complete)
+        .map(|(epoch, _)| epoch)
+        .next_back()
 }
 
 #[inline]
