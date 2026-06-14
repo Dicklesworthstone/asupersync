@@ -1102,16 +1102,20 @@ mod tests {
             "the interleaved stream should trigger at least one detector"
         );
         for detection in &first {
-            match detection.series {
-                RuntimeMetricSeries::ReadyQueueDepth => {
-                    assert_eq!(detection.detector, ChangePointDetectorKind::PageHinkley);
-                    assert_eq!(detection.direction, ChangeDirection::Increase);
-                }
-                RuntimeMetricSeries::DrainRate => {
-                    assert_eq!(detection.detector, ChangePointDetectorKind::Cusum);
-                    assert_eq!(detection.direction, ChangeDirection::Decrease);
-                }
-                other => panic!("unexpected routed series {other:?}"),
+            assert!(
+                matches!(
+                    detection.series,
+                    RuntimeMetricSeries::ReadyQueueDepth | RuntimeMetricSeries::DrainRate
+                ),
+                "unexpected routed series {:?}",
+                detection.series
+            );
+            if detection.series == RuntimeMetricSeries::ReadyQueueDepth {
+                assert_eq!(detection.detector, ChangePointDetectorKind::PageHinkley);
+                assert_eq!(detection.direction, ChangeDirection::Increase);
+            } else {
+                assert_eq!(detection.detector, ChangePointDetectorKind::Cusum);
+                assert_eq!(detection.direction, ChangeDirection::Decrease);
             }
         }
     }
@@ -1200,8 +1204,14 @@ mod tests {
                     RuntimeMetricSeries::ReadyQueueDepth,
                     MetricSample::from_units(value),
                 )
-            })
-            .expect("enabled conservative profile should detect a large step");
+            });
+        assert!(
+            detection.is_some(),
+            "enabled conservative profile should detect a large step"
+        );
+        let Some(detection) = detection else {
+            return;
+        };
 
         assert_eq!(detection.series, RuntimeMetricSeries::ReadyQueueDepth);
         assert_eq!(detection.detector, ChangePointDetectorKind::PageHinkley);
@@ -1218,15 +1228,19 @@ mod tests {
             .enable();
         let mut monitor = config.build_monitor();
 
-        let detection = [20, 19, 18, 15, 15, 15]
-            .into_iter()
-            .find_map(|value| {
-                monitor.observe(
-                    RuntimeMetricSeries::DrainRate,
-                    MetricSample::from_units(value),
-                )
-            })
-            .expect("custom CUSUM profile should detect a falling drain rate");
+        let detection = [20, 19, 18, 15, 15, 15].into_iter().find_map(|value| {
+            monitor.observe(
+                RuntimeMetricSeries::DrainRate,
+                MetricSample::from_units(value),
+            )
+        });
+        assert!(
+            detection.is_some(),
+            "custom CUSUM profile should detect a falling drain rate"
+        );
+        let Some(detection) = detection else {
+            return;
+        };
 
         assert_eq!(detection.detector, ChangePointDetectorKind::Cusum);
         assert_eq!(detection.direction, ChangeDirection::Decrease);
