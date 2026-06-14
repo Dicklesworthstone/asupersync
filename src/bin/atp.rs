@@ -23,6 +23,7 @@
 //! atp send ./my-folder user@receiver:/srv/inbox --transport rq --prefer tailscale
 //! ```
 
+use std::env;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
@@ -41,7 +42,10 @@ use asupersync::net::atp::transport_tcp::{
     self, DEFAULT_MAX_TRANSFER_BYTES, ReceiveReport, SendReport, TransferConfig, TransportError,
 };
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::security::{AUTH_KEY_SIZE, AuthKey, SecurityContext};
 use clap::{Parser, Subcommand, ValueEnum};
+
+const RQ_AUTH_ENV: &str = "ATP_RQ_AUTH_KEY_HEX";
 
 /// Standalone ATP transfer tool.
 #[derive(Parser)]
@@ -59,6 +63,9 @@ enum Command {
     Recv(RecvArgs),
     /// Alias for `recv` that listens persistently (daemon-style).
     Serve(RecvArgs),
+    /// Generate a validator-accepted RQ symbol-auth key as lowercase hex.
+    #[command(name = "rq-keygen")]
+    RqKeygen,
 }
 
 /// Which real transport to use.
@@ -142,6 +149,16 @@ struct SendArgs {
     /// Receiver quiet-drain window after each RQ round marker, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_ROUND_TAIL_DRAIN_MS)]
     rq_tail_drain_ms: u64,
+    /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    ///
+    /// Direct RQ transfers require this unless --rq-allow-unauthenticated-lab
+    /// is explicitly set. SSH bootstrap auto-generates a per-transfer key when
+    /// no key is supplied.
+    #[arg(long, value_name = "HEX")]
+    rq_auth_key_hex: Option<String>,
+    /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
+    #[arg(long)]
+    rq_allow_unauthenticated_lab: bool,
 }
 
 #[derive(Parser)]
@@ -175,6 +192,12 @@ struct RecvArgs {
     /// Receiver quiet-drain window after each RQ round marker, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_ROUND_TAIL_DRAIN_MS)]
     rq_tail_drain_ms: u64,
+    /// Hex-encoded 32-byte RQ symbol-auth key, or set ATP_RQ_AUTH_KEY_HEX.
+    #[arg(long, value_name = "HEX")]
+    rq_auth_key_hex: Option<String>,
+    /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
+    #[arg(long)]
+    rq_allow_unauthenticated_lab: bool,
 }
 
 fn tcp_config(max_bytes: u64) -> TransferConfig {
@@ -190,8 +213,10 @@ fn rq_config(
     streams: usize,
     repair_overhead: f64,
     tail_drain_ms: u64,
-) -> RqConfig {
-    RqConfig {
+    rq_auth_key_hex: Option<&str>,
+    rq_allow_unauthenticated_lab: bool,
+) -> Result<RqConfig, String> {
+    let config = RqConfig {
         symbol_size,
         udp_fanout: streams.max(1),
         repair_overhead: repair_overhead.max(1.0),
@@ -199,7 +224,102 @@ fn rq_config(
         max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
         round_tail_drain: Duration::from_millis(tail_drain_ms),
         ..RqConfig::default()
+    };
+    let auth = resolve_rq_auth_choice(rq_auth_key_hex, rq_allow_unauthenticated_lab, false)?;
+    config_with_rq_auth(config, &auth)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RqAuthChoice {
+    KeyHex(String),
+    UnauthenticatedLab,
+}
+
+fn resolve_rq_auth_choice(
+    explicit_key_hex: Option<&str>,
+    allow_unauthenticated_lab: bool,
+    generate_if_missing: bool,
+) -> Result<RqAuthChoice, String> {
+    let configured_key = explicit_key_hex
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            env::var(RQ_AUTH_ENV)
+                .ok()
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty())
+        });
+
+    if allow_unauthenticated_lab {
+        if configured_key.is_some() {
+            return Err(format!(
+                "--rq-allow-unauthenticated-lab conflicts with --rq-auth-key-hex/{RQ_AUTH_ENV}"
+            ));
+        }
+        return Ok(RqAuthChoice::UnauthenticatedLab);
     }
+
+    if let Some(key_hex) = configured_key {
+        return normalize_rq_auth_key_hex(&key_hex).map(RqAuthChoice::KeyHex);
+    }
+
+    if generate_if_missing {
+        return generate_rq_auth_key_hex().map(RqAuthChoice::KeyHex);
+    }
+
+    Err(format!(
+        "RQ transport requires symbol authentication: pass --rq-auth-key-hex <64-hex>, \
+         set {RQ_AUTH_ENV}, use SSH bootstrap so atp can generate a per-transfer key, \
+         or explicitly pass --rq-allow-unauthenticated-lab for loopback/lab only"
+    ))
+}
+
+fn config_with_rq_auth(config: RqConfig, auth: &RqAuthChoice) -> Result<RqConfig, String> {
+    match auth {
+        RqAuthChoice::KeyHex(key_hex) => {
+            let key = auth_key_from_hex(key_hex)?;
+            Ok(config.with_symbol_auth(SecurityContext::new(key)))
+        }
+        RqAuthChoice::UnauthenticatedLab => {
+            Ok(config.allow_unauthenticated_for_trusted_transport())
+        }
+    }
+}
+
+fn normalize_rq_auth_key_hex(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let key_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    let _ = auth_key_from_hex(key_hex)?;
+    Ok(key_hex.to_ascii_lowercase())
+}
+
+fn auth_key_from_hex(key_hex: &str) -> Result<AuthKey, String> {
+    if key_hex.len() != AUTH_KEY_SIZE * 2 {
+        return Err(format!(
+            "RQ auth key must be exactly {} hex characters for a {AUTH_KEY_SIZE}-byte key",
+            AUTH_KEY_SIZE * 2
+        ));
+    }
+    if !key_hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("RQ auth key must contain only hexadecimal characters".to_string());
+    }
+
+    let mut bytes = [0u8; AUTH_KEY_SIZE];
+    hex::decode_to_slice(key_hex, &mut bytes)
+        .map_err(|err| format!("decode RQ auth key hex: {err}"))?;
+    AuthKey::from_bytes(bytes).map_err(|err| format!("RQ auth key rejected: {err}"))
+}
+
+fn generate_rq_auth_key_hex() -> Result<String, String> {
+    for _ in 0..128 {
+        let mut bytes = [0u8; AUTH_KEY_SIZE];
+        getrandom::fill(&mut bytes).map_err(|err| format!("generate RQ auth key: {err}"))?;
+        if AuthKey::from_bytes(bytes).is_ok() {
+            return Ok(hex::encode(bytes));
+        }
+    }
+    Err("generated 128 candidate RQ auth keys, but all failed entropy validation".to_string())
 }
 
 fn build_runtime(workers: usize) -> Result<asupersync::runtime::Runtime, String> {
@@ -262,7 +382,9 @@ fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
                 args.streams,
                 args.repair_overhead,
                 args.rq_tail_drain_ms,
-            );
+                args.rq_auth_key_hex.as_deref(),
+                args.rq_allow_unauthenticated_lab,
+            )?;
             let report = runtime
                 .block_on(runtime.handle().spawn(async move {
                     let cx = Cx::current().expect("sender cx");
@@ -315,15 +437,29 @@ fn split_remote_target(target: &str) -> Option<(&str, &str)> {
     target.split_once(':')
 }
 
-fn run_send_via_ssh(args: SendArgs, remote: &RemoteTarget) -> Result<(), String> {
+fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), String> {
     if args.no_tailscale && args.prefer == PathPreference::Tailscale {
         return Err("--no-tailscale conflicts with --prefer tailscale".to_string());
     }
 
+    let rq_auth = if args.transport == Transport::Rq {
+        let auth = resolve_rq_auth_choice(
+            args.rq_auth_key_hex.as_deref(),
+            args.rq_allow_unauthenticated_lab,
+            true,
+        )?;
+        if let RqAuthChoice::KeyHex(key_hex) = &auth {
+            args.rq_auth_key_hex = Some(key_hex.clone());
+        }
+        Some(auth)
+    } else {
+        None
+    };
+
     let data_host = choose_data_host(&args, remote);
     let data_target = socket_target(&data_host, args.remote_listen.port());
     let addr = resolve(&data_target)?;
-    let mut child = spawn_remote_receiver(&args, remote)?;
+    let mut child = spawn_remote_receiver(&args, remote, rq_auth.as_ref())?;
     let stderr_log = wait_for_remote_ready(
         &mut child,
         Duration::from_secs(args.ssh_ready_timeout_secs.max(1)),
@@ -377,9 +513,13 @@ fn probe_remote_tailscale_ipv4(args: &SendArgs, ssh_host: &str) -> Option<String
     Some(candidate.to_string())
 }
 
-fn spawn_remote_receiver(args: &SendArgs, remote: &RemoteTarget) -> Result<Child, String> {
+fn spawn_remote_receiver(
+    args: &SendArgs,
+    remote: &RemoteTarget,
+    rq_auth: Option<&RqAuthChoice>,
+) -> Result<Child, String> {
     let receiver_peer_id = format!("{}-remote", args.peer_id);
-    let argv = vec![
+    let mut argv = vec![
         args.remote_atp.clone(),
         "recv".to_string(),
         remote.remote_path.clone(),
@@ -401,7 +541,16 @@ fn spawn_remote_receiver(args: &SendArgs, remote: &RemoteTarget) -> Result<Child
         "--rq-tail-drain-ms".to_string(),
         args.rq_tail_drain_ms.to_string(),
     ];
-    let remote_command = shell_command(&argv);
+    if matches!(rq_auth, Some(RqAuthChoice::UnauthenticatedLab)) {
+        argv.push("--rq-allow-unauthenticated-lab".to_string());
+    }
+
+    let remote_command = match rq_auth {
+        Some(RqAuthChoice::KeyHex(key_hex)) => {
+            shell_command_with_env(&[(RQ_AUTH_ENV, key_hex.as_str())], &argv)
+        }
+        _ => shell_command(&argv),
+    };
     let mut command = ssh_command(args, &remote.ssh_host);
     command
         .arg(remote_command)
@@ -509,6 +658,15 @@ fn shell_command(argv: &[String]) -> String {
         .join(" ")
 }
 
+fn shell_command_with_env(env_vars: &[(&str, &str)], argv: &[String]) -> String {
+    let mut parts = env_vars
+        .iter()
+        .map(|(name, value)| format!("{name}={}", shell_quote(value)))
+        .collect::<Vec<_>>();
+    parts.push(shell_command(argv));
+    parts.join(" ")
+}
+
 fn shell_quote(arg: &str) -> String {
     if arg.is_empty() {
         return "''".to_string();
@@ -594,7 +752,9 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 1,
                 args.repair_overhead,
                 args.rq_tail_drain_ms,
-            );
+                args.rq_auth_key_hex.as_deref(),
+                args.rq_allow_unauthenticated_lab,
+            )?;
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");
                 asupersync::fs::create_dir_all(&dest)
@@ -698,12 +858,88 @@ fn rq_send_json(report: &transport_rq::SendReport) -> serde_json::Value {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID_KEY_HEX: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[test]
+    fn rq_auth_key_hex_accepts_valid_32_byte_key_and_normalizes_case() {
+        let upper = VALID_KEY_HEX.to_ascii_uppercase();
+
+        assert_eq!(
+            normalize_rq_auth_key_hex(&upper),
+            Ok(VALID_KEY_HEX.to_string())
+        );
+        assert!(auth_key_from_hex(VALID_KEY_HEX).is_ok());
+    }
+
+    #[test]
+    fn rq_auth_key_hex_rejects_wrong_length_non_hex_and_weak_keys() {
+        assert!(normalize_rq_auth_key_hex("abcd").is_err());
+        assert!(normalize_rq_auth_key_hex(&"g".repeat(AUTH_KEY_SIZE * 2)).is_err());
+        assert!(normalize_rq_auth_key_hex(&"00".repeat(AUTH_KEY_SIZE)).is_err());
+    }
+
+    #[test]
+    fn direct_rq_requires_auth_or_explicit_lab_override() {
+        let missing = match rq_config(1024, 1024, 1, 1.0, 2, None, false) {
+            Ok(_) => panic!("direct rq without auth must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            missing
+                .contains("requires symbol authentication")
+        );
+
+        assert!(rq_config(1024, 1024, 1, 1.0, 2, Some(VALID_KEY_HEX), false).is_ok());
+        assert!(rq_config(1024, 1024, 1, 1.0, 2, None, true).is_ok());
+    }
+
+    #[test]
+    fn lab_override_conflicts_with_configured_key() {
+        let err = resolve_rq_auth_choice(Some(VALID_KEY_HEX), true, false)
+            .expect_err("explicit unauthenticated lab mode must not accept a key too");
+        assert!(err.contains("conflicts"));
+    }
+
+    #[test]
+    fn ssh_bootstrap_can_generate_transfer_local_auth_key() {
+        match resolve_rq_auth_choice(None, false, true) {
+            Ok(RqAuthChoice::KeyHex(key_hex)) => {
+                assert_eq!(key_hex.len(), AUTH_KEY_SIZE * 2);
+                assert!(auth_key_from_hex(&key_hex).is_ok());
+            }
+            other => panic!("expected generated key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_env_shell_command_quotes_key_outside_argv() {
+        let argv = vec![
+            "atp".to_string(),
+            "recv".to_string(),
+            "/srv/in box".to_string(),
+        ];
+        let command = shell_command_with_env(&[(RQ_AUTH_ENV, VALID_KEY_HEX)], &argv);
+
+        assert!(command.starts_with("ATP_RQ_AUTH_KEY_HEX='000102"));
+        assert!(command.contains("'atp' 'recv' '/srv/in box'"));
+        assert!(!command.contains("--rq-auth-key-hex"));
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Send(args) => run_send(args),
         Command::Recv(args) => run_recv(args, false),
         Command::Serve(args) => run_recv(args, true),
+        Command::RqKeygen => generate_rq_auth_key_hex().map(|key| {
+            println!("{key}");
+        }),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
