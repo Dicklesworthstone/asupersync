@@ -587,8 +587,7 @@ impl SwarmCoordinator {
         peer_id: &PeerId,
         error: String,
     ) -> SwarmResult<()> {
-        let base_timeout = self.config.piece_request_timeout;
-        let retry_remaining = {
+        {
             let transfer =
                 self.active_transfers
                     .get_mut(transfer_id)
@@ -596,36 +595,19 @@ impl SwarmCoordinator {
                         transfer_id: *transfer_id,
                     })?;
 
-            let mut retry_remaining = false;
-            if let Some(mut request) = transfer.active_requests.remove(&piece_id) {
-                request.retry_count = request.retry_count.saturating_add(1);
-
-                if request.retry_count < 3 {
-                    request.requested_at = Instant::now();
-                    request.timeout =
-                        Instant::now() + base_timeout.mul_f64(1.0 + f64::from(request.retry_count));
-                    request.priority = request.priority.saturating_add(25);
-                    transfer.active_requests.insert(piece_id, request);
-                    retry_remaining = true;
-                }
-            }
+            transfer.active_requests.remove(&piece_id);
             transfer.status.pending_pieces = transfer.active_requests.len() as u64;
             transfer.last_activity = Instant::now();
-            retry_remaining
-        };
-
-        if !retry_remaining {
-            self.piece_tracker
-                .mark_piece_failed(transfer_id, piece_id, error.clone())?;
         }
+
+        self.piece_tracker
+            .mark_piece_failed(transfer_id, piece_id, error.clone())?;
         self.quality_metrics
             .record_verification_failure(transfer_id);
 
         // Update peer quality
         if let Some(peer) = self.peers.get_mut(peer_id) {
-            if !retry_remaining {
-                peer.pending_requests.remove(&piece_id);
-            }
+            peer.pending_requests.remove(&piece_id);
             peer.quality.verification_failures =
                 peer.quality.verification_failures.saturating_add(1);
             peer.quality.failed_transfers = peer.quality.failed_transfers.saturating_add(1);
@@ -1025,6 +1007,8 @@ impl PiecePicker for EndgameStrategy {
 mod tests {
     use super::*;
     use crate::atp::swarm::{PeerCapabilities, PeerReputation};
+    use crate::cx::Cx;
+    use futures_lite::future::block_on;
     use std::collections::BTreeSet;
 
     fn test_peer(id: &str, pieces: impl IntoIterator<Item = PieceId>) -> SwarmPeer {
@@ -1111,6 +1095,93 @@ mod tests {
 
         SwarmCoordinator::validate_piece_count_matches_map(3, &piece_map)
             .expect("matching transfer and piece-map metadata must be accepted");
+    }
+
+    #[test]
+    fn verification_failure_releases_piece_for_reassignment() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let mut coordinator = SwarmCoordinator::new(SwarmConfig {
+                peer_quality_threshold: 0.0,
+                max_pieces_per_peer: 1,
+                ..SwarmConfig::default()
+            });
+            let piece_id = PieceId::new(0);
+            let peer_a = test_peer("peer-a", [piece_id]);
+            let peer_b = test_peer("peer-b", [piece_id]);
+            let mut piece_map = PieceMap::new(1, 1024, "test-hash".to_string());
+            piece_map.add_peer_pieces(peer_a.peer_id.clone(), [piece_id].into_iter().collect());
+            piece_map.add_peer_pieces(peer_b.peer_id.clone(), [piece_id].into_iter().collect());
+
+            let transfer_id = coordinator
+                .start_swarm_transfer(
+                    &cx,
+                    "object".to_string(),
+                    1024,
+                    1,
+                    vec![peer_a.clone(), peer_b.clone()],
+                    piece_map,
+                )
+                .await
+                .unwrap();
+            let first_assignments = coordinator.assign_pieces(&cx, &transfer_id).await.unwrap();
+            assert_eq!(first_assignments.len(), 1);
+            assert_eq!(first_assignments[0].peer_id, peer_a.peer_id);
+            assert!(
+                coordinator
+                    .peers
+                    .get(&peer_a.peer_id)
+                    .unwrap()
+                    .pending_requests
+                    .contains(&piece_id)
+            );
+
+            coordinator
+                .handle_piece_verification_failed(
+                    &cx,
+                    &transfer_id,
+                    piece_id,
+                    &peer_a.peer_id,
+                    "digest mismatch".to_string(),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                coordinator
+                    .active_transfers
+                    .get(&transfer_id)
+                    .unwrap()
+                    .active_requests
+                    .is_empty()
+            );
+            assert!(
+                !coordinator
+                    .peers
+                    .get(&peer_a.peer_id)
+                    .unwrap()
+                    .pending_requests
+                    .contains(&piece_id)
+            );
+            assert!(matches!(
+                coordinator
+                    .piece_tracker
+                    .get_piece_status(&transfer_id, &piece_id)
+                    .unwrap(),
+                PieceStatus::Failed { peer_id, .. } if peer_id == peer_a.peer_id
+            ));
+
+            let retry_assignments = coordinator.assign_pieces(&cx, &transfer_id).await.unwrap();
+            assert_eq!(retry_assignments.len(), 1);
+            assert_eq!(retry_assignments[0].peer_id, peer_b.peer_id);
+            assert!(matches!(
+                coordinator
+                    .piece_tracker
+                    .get_piece_status(&transfer_id, &piece_id)
+                    .unwrap(),
+                PieceStatus::Requested { peer_id, .. } if peer_id == peer_b.peer_id
+            ));
+        });
     }
 
     #[test]
