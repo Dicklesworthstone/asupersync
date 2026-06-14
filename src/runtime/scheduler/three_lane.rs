@@ -248,6 +248,11 @@ impl LocalReadyQueueInner {
         }
     }
 
+    // br-asupersync MAIN-BREAKAGE fix: the only callers are in the
+    // `#[cfg(test)] mod tests` below, so gate this to cfg(test). Ungated it
+    // tripped `deny(dead_code)` in normal and test-internals lib builds
+    // (no non-test caller), breaking every lib build tree-wide.
+    #[cfg(test)]
     fn contains(&self, task: &TaskId) -> bool {
         self.present.contains(task) && !self.tombstones.contains(task)
     }
@@ -258,7 +263,11 @@ impl LocalReadyQueueInner {
             .filter(|task| !self.tombstones.contains(task))
     }
 
-    #[cfg(any(test, feature = "test-internals"))]
+    // br-asupersync MAIN-BREAKAGE fix: callers live in `#[cfg(test)] mod tests`,
+    // not behind the `test-internals` feature, so the prior
+    // `any(test, feature = "test-internals")` gate left this dead under
+    // `deny(dead_code)` in test-internals-only builds.
+    #[cfg(test)]
     fn drain(&mut self, _range: std::ops::RangeFull) -> std::vec::IntoIter<TaskId> {
         let mut live = Vec::with_capacity(self.len());
         while let Some(task) = self.pop_front() {
