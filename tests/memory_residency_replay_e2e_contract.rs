@@ -438,18 +438,22 @@ fn runner_and_docs_capture_artifacts_failure_contract_and_no_deletion_policy() {
             "memory_residency_replay_e2e",
             "memory_residency_replay_e2e_contract_v1.json",
             "memory_residency_replay_e2e.py",
-            "Summary:",
-            "Artifacts:",
             "copy-paste RCH command",
         ],
     );
+    // The runner delegates output formatting to the helper, so the human-facing
+    // "Summary:" / "Artifacts:" labels and the report-file wiring live in the
+    // helper source (report filenames themselves come from the contract suite
+    // block and are asserted in the docs needle list / helper_replays test).
     assert_contains_all(
         &helper,
         &[
             "memory-residency-replay-e2e-event-v1",
             "e2e-suite-summary-v3",
-            "scenario_report.json",
-            "operator_report.md",
+            "scenario_report_file",
+            "operator_report_file",
+            "Summary:",
+            "Artifacts:",
             "missing input scenario_id=",
             "stale input scenario_id=stale_topology_fallback",
             "copy-paste RCH command",

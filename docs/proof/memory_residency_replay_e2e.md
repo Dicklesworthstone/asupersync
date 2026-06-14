@@ -53,8 +53,9 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target
 ```
 
 This proof covers the M4 replay/e2e contract, runner artifacts, orchestrator
-registration, manifest/status rows, and no-claim boundaries only. It does not
-prove live host throughput, p50/p95/p999 improvement, memory reduction, cache
-hit-rate improvement, scheduler performance, production-on-by-default behavior,
-broad workspace health, release readiness, live RCH fleet availability, or
-source correctness outside this replay/e2e contract.
+registration, manifest/status rows, and no-claim boundaries only.
+It does not prove live host throughput, p50/p95/p999 improvement,
+memory reduction, cache hit-rate improvement, scheduler performance,
+production-on-by-default behavior, broad workspace health, release
+readiness, live RCH fleet availability, or source correctness outside
+this replay/e2e contract.
