@@ -10,16 +10,11 @@ use syn::{
     ReturnType, Token, Type, parse_macro_input,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum RuntimeFlavor {
+    #[default]
     CurrentThread,
     MultiThread,
-}
-
-impl Default for RuntimeFlavor {
-    fn default() -> Self {
-        Self::CurrentThread
-    }
 }
 
 #[derive(Default)]
@@ -77,7 +72,7 @@ impl Parse for EntryArgs {
 pub fn main_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as EntryArgs);
     let input = parse_macro_input!(item as ItemFn);
-    expand_entry(args, input, EntryKind::Main)
+    expand_entry(&args, input, EntryKind::Main)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
@@ -85,7 +80,7 @@ pub fn main_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn test_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as EntryArgs);
     let input = parse_macro_input!(item as ItemFn);
-    expand_entry(args, input, EntryKind::Test)
+    expand_entry(&args, input, EntryKind::Test)
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
@@ -96,7 +91,7 @@ enum EntryKind {
     Test,
 }
 
-fn expand_entry(args: EntryArgs, mut function: ItemFn, kind: EntryKind) -> Result<TokenStream2> {
+fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Result<TokenStream2> {
     validate_entry_signature(&function, kind)?;
     let cx_ident = take_optional_cx_arg(&mut function)?;
 
@@ -108,7 +103,7 @@ fn expand_entry(args: EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resul
     } = function;
     sig.asyncness = None;
 
-    let builder = builder_tokens(&args);
+    let builder = builder_tokens(args);
     let cx_binding = cx_ident.map(|ident| {
         quote! {
             let __asupersync_entry_cx =
@@ -331,7 +326,7 @@ mod tests {
             async fn main() {}
         })
         .unwrap();
-        let tokens = expand_entry(EntryArgs::default(), input, EntryKind::Main)
+        let tokens = expand_entry(&EntryArgs::default(), input, EntryKind::Main)
             .unwrap()
             .to_string();
         assert!(tokens.contains("RuntimeBuilder :: current_thread"));
@@ -346,7 +341,7 @@ mod tests {
             }
         })
         .unwrap();
-        let tokens = expand_entry(EntryArgs::default(), input, EntryKind::Test)
+        let tokens = expand_entry(&EntryArgs::default(), input, EntryKind::Test)
             .unwrap()
             .to_string();
         assert!(tokens.contains("# [test]"));
@@ -360,7 +355,7 @@ mod tests {
             fn main() {}
         })
         .unwrap();
-        let err = expand_entry(EntryArgs::default(), input, EntryKind::Main).unwrap_err();
+        let err = expand_entry(&EntryArgs::default(), input, EntryKind::Main).unwrap_err();
         assert!(
             err.to_string()
                 .contains("entry macros require an async function")
@@ -375,7 +370,7 @@ mod tests {
             }
         })
         .unwrap();
-        let err = expand_entry(EntryArgs::default(), input, EntryKind::Main).unwrap_err();
+        let err = expand_entry(&EntryArgs::default(), input, EntryKind::Main).unwrap_err();
         assert!(
             err.to_string()
                 .contains("support only `()` or `Result<(), E>` return types")
