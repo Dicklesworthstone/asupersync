@@ -618,29 +618,46 @@ fn erlang_c_wait_probability_ppm(offered_load: u128, size: usize) -> u128 {
         return POOL_SIZING_SCALE_U128;
     }
 
-    let mut erlang_b = POOL_SIZING_SCALE_U128;
+    // Run the Erlang-B/C recursion at a higher internal precision than the ppm
+    // output scale. The earlier ppm-only recursion truncated on every step and
+    // accumulated a ~2 ppm error, enough to under-report the wait probability
+    // and tip the recommended server count down by one. Working in 1e12 units
+    // with round-to-nearest divisions keeps the final ppm value accurate to a
+    // sub-ppm tolerance (M/M/3 with R=2 now resolves to 4/9 = 444_444 ppm).
+    const HP: u128 = 1_000_000_000_000;
+    let hp_per_ppm = HP / POOL_SIZING_SCALE_U128;
+    let offered_hp = offered_load.saturating_mul(hp_per_ppm);
+
+    // Erlang-B recursion in HP units; B starts at 1.0 == HP.
+    let mut erlang_b = HP;
     for server in 1..=size {
-        let load_times_b = offered_load.saturating_mul(erlang_b) / POOL_SIZING_SCALE_U128;
-        let denominator = (server as u128).saturating_mul(POOL_SIZING_SCALE_U128) + load_times_b;
+        let load_times_b = offered_hp.saturating_mul(erlang_b) / HP;
+        let denominator = (server as u128)
+            .saturating_mul(HP)
+            .saturating_add(load_times_b);
         erlang_b = if denominator == 0 {
             0
         } else {
-            load_times_b.saturating_mul(POOL_SIZING_SCALE_U128) / denominator
+            load_times_b
+                .saturating_mul(HP)
+                .saturating_add(denominator / 2)
+                / denominator
         };
     }
 
-    let load_times_b = offered_load.saturating_mul(erlang_b) / POOL_SIZING_SCALE_U128;
-    let numerator = (size as u128)
-        .saturating_mul(erlang_b)
-        .saturating_mul(POOL_SIZING_SCALE_U128);
-    let denominator = capacity
-        .saturating_sub(offered_load)
+    // Erlang-C: C = (size*B) / (size - a + a*B), all in HP units.
+    let load_times_b = offered_hp.saturating_mul(erlang_b) / HP;
+    let capacity_hp = (size as u128).saturating_mul(HP);
+    let numerator = (size as u128).saturating_mul(erlang_b).saturating_mul(HP);
+    let denominator = capacity_hp
+        .saturating_sub(offered_hp)
         .saturating_add(load_times_b);
     if denominator == 0 {
-        POOL_SIZING_SCALE_U128
-    } else {
-        (numerator / denominator).min(POOL_SIZING_SCALE_U128)
+        return POOL_SIZING_SCALE_U128;
     }
+    let wait_hp = numerator.saturating_add(denominator / 2) / denominator;
+    // Downscale HP -> ppm with round-to-nearest.
+    (wait_hp.saturating_add(hp_per_ppm / 2) / hp_per_ppm).min(POOL_SIZING_SCALE_U128)
 }
 
 fn crosses_hysteresis(current_size: usize, recommended_size: usize, hysteresis_bps: u16) -> bool {
