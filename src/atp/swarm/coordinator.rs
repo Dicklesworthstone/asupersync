@@ -1073,7 +1073,7 @@ impl PiecePicker for EndgameStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::swarm::{PeerCapabilities, PeerReputation};
+    use crate::atp::swarm::{PeerCapabilities, PeerReputation, PieceStatus};
     use crate::channel::mpsc;
     use crate::cx::Cx;
     use futures_lite::future::block_on;
