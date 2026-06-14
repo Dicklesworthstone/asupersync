@@ -22,8 +22,14 @@ pub struct PieceTracker {
     /// Per-transfer piece maps
     transfer_maps: HashMap<MailboxTransferId, TransferPieceMap>,
 
-    /// Global piece availability across all peers
-    global_availability: HashMap<PieceId, HashSet<PeerId>>,
+    /// Transfer-scoped piece availability across all peers.
+    global_availability: HashMap<AvailabilityKey, HashSet<PeerId>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct AvailabilityKey {
+    transfer_id: MailboxTransferId,
+    piece_id: PieceId,
 }
 
 /// Piece availability and progress for a single transfer.
@@ -288,7 +294,10 @@ impl PieceTracker {
         for (peer_id, pieces) in &piece_map.peer_availability {
             for piece_id in pieces {
                 self.global_availability
-                    .entry(*piece_id)
+                    .entry(AvailabilityKey {
+                        transfer_id: *transfer_id,
+                        piece_id: *piece_id,
+                    })
                     .or_default()
                     .insert(peer_id.clone());
             }
@@ -570,23 +579,25 @@ impl PieceTracker {
     /// Clean up completed transfers.
     pub fn cleanup_transfer(&mut self, transfer_id: &MailboxTransferId) {
         if let Some(transfer_map) = self.transfer_maps.remove(transfer_id) {
-            let mut empty_piece_entries = Vec::new();
-
-            for pieces in transfer_map.peer_pieces.values() {
+            for (peer_id, pieces) in transfer_map.peer_pieces {
                 for piece_id in pieces {
-                    if let Some(peer_set) = self.global_availability.get_mut(piece_id) {
-                        for peer_id in transfer_map.peer_pieces.keys() {
-                            peer_set.remove(peer_id);
-                        }
-                        if peer_set.is_empty() {
-                            empty_piece_entries.push(*piece_id);
-                        }
+                    let availability_key = AvailabilityKey {
+                        transfer_id: *transfer_id,
+                        piece_id,
+                    };
+                    let entry_is_empty = if let Some(peer_set) =
+                        self.global_availability.get_mut(&availability_key)
+                    {
+                        peer_set.remove(&peer_id);
+                        peer_set.is_empty()
+                    } else {
+                        false
+                    };
+
+                    if entry_is_empty {
+                        self.global_availability.remove(&availability_key);
                     }
                 }
-            }
-
-            for piece_id in empty_piece_entries {
-                self.global_availability.remove(&piece_id);
             }
         }
     }
@@ -826,6 +837,45 @@ mod tests {
         assert_eq!(progress.failed, 0);
         assert_eq!(progress.needed, 9);
         assert_eq!(progress.completion_percentage, 10.0);
+    }
+
+    #[test]
+    fn cleanup_transfer_preserves_other_transfer_availability_for_same_piece() {
+        let mut tracker = PieceTracker::new();
+        let transfer_a = MailboxTransferId::new();
+        let transfer_b = MailboxTransferId::new();
+        let piece_id = PieceId::new(0);
+        let peer_a = PeerId::new("peer-a");
+        let peer_b = PeerId::new("peer-b");
+
+        let mut map_a = PieceMap::new(1, 1024, "hash-a".to_string());
+        map_a.add_peer_pieces(peer_a.clone(), [piece_id].into_iter().collect());
+        let mut map_b = PieceMap::new(1, 1024, "hash-b".to_string());
+        map_b.add_peer_pieces(peer_b.clone(), [piece_id].into_iter().collect());
+
+        tracker.initialize_transfer(&transfer_a, &map_a).unwrap();
+        tracker.initialize_transfer(&transfer_b, &map_b).unwrap();
+        assert_eq!(tracker.global_availability.len(), 2);
+
+        tracker.cleanup_transfer(&transfer_a);
+
+        assert!(!tracker.transfer_maps.contains_key(&transfer_a));
+        assert!(tracker.transfer_maps.contains_key(&transfer_b));
+        assert!(!tracker.global_availability.contains_key(&AvailabilityKey {
+            transfer_id: transfer_a,
+            piece_id,
+        }));
+
+        let remaining_peers = tracker
+            .global_availability
+            .get(&AvailabilityKey {
+                transfer_id: transfer_b,
+                piece_id,
+            })
+            .expect("second transfer availability must remain");
+        assert_eq!(remaining_peers.len(), 1);
+        assert!(remaining_peers.contains(&peer_b));
+        assert!(!remaining_peers.contains(&peer_a));
     }
 
     #[test]
