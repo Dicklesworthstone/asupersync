@@ -97,7 +97,6 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(unix)]
 use std::task::Waker;
 use std::time::Duration;
 
