@@ -84,6 +84,9 @@ impl VerificationStage {
 pub struct VerifierConfig {
     /// Maximum chunk payload accepted by a single chunk verification call.
     pub max_chunk_bytes: usize,
+    /// Maximum inline file-object payload accepted by a single object
+    /// verification call.
+    pub max_object_bytes: usize,
     /// Maximum repair-symbol payload accepted by a single verification call.
     pub max_repair_symbol_bytes: usize,
     /// Maximum number of proof bundle entries accepted before bounded replay.
@@ -94,6 +97,7 @@ impl Default for VerifierConfig {
     fn default() -> Self {
         Self {
             max_chunk_bytes: 16 * 1024 * 1024,
+            max_object_bytes: 16 * 1024 * 1024,
             max_repair_symbol_bytes: 16 * 1024 * 1024,
             max_proof_entries: 4096,
         }
@@ -994,6 +998,13 @@ impl AtpVerifier {
                 .ok_or_else(|| VerificationError::MissingObjectContent {
                     object_id: object.id.clone(),
                 })?;
+        if content.len() > self.config.max_object_bytes {
+            return Err(VerificationError::InputTooLarge {
+                stage: VerificationStage::ObjectContent,
+                len: content.len(),
+                limit: self.config.max_object_bytes,
+            });
+        }
         if let Some(declared) = object.metadata.size_bytes {
             let actual = content.len() as u64;
             if declared != actual {
@@ -1166,6 +1177,26 @@ mod tests {
             err.redacted_reason(),
             "object kind file carried unexpected children"
         );
+    }
+
+    #[test]
+    fn object_verifier_rejects_file_payload_above_configured_limit() {
+        let verifier = AtpVerifier::new(VerifierConfig {
+            max_object_bytes: 4,
+            ..VerifierConfig::default()
+        });
+        let object = Object::file(b"oversized".to_vec());
+
+        let err = verifier
+            .verify_object(&object)
+            .expect_err("oversized file object must fail before hashing");
+
+        assert_eq!(err.stage(), VerificationStage::ObjectContent);
+        assert_eq!(
+            err.redacted_reason(),
+            "input length 9 exceeds verifier limit 4"
+        );
+        assert!(!err.to_string().contains("oversized"));
     }
 
     #[test]
