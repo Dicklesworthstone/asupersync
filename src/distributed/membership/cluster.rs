@@ -66,6 +66,9 @@ pub struct VirtualCluster {
     partition: BTreeMap<NodeId, u8>,
     events: BTreeMap<NodeId, Vec<MembershipEvent>>,
     rng: DetRng,
+    /// A degraded node and the extra one-way latency (ms) applied to every
+    /// message to or from it — models induced local slowness for Lifeguard tests.
+    slow_node: Option<(NodeId, Millis)>,
 }
 
 impl VirtualCluster {
@@ -105,7 +108,14 @@ impl VirtualCluster {
             events,
             // Decorrelate the loss PRNG from the per-node Swim seeds.
             rng: DetRng::new(seed ^ 0xA7C3_5E91_D24B_8F60),
+            slow_node: None,
         }
+    }
+
+    /// Marks `node` as locally degraded: every message to or from it incurs
+    /// `extra_ms` of additional one-way latency (induced local slowness).
+    pub fn set_slow_node(&mut self, node: &NodeId, extra_ms: Millis) {
+        self.slow_node = Some((node.clone(), extra_ms));
     }
 
     /// The current virtual time.
@@ -271,16 +281,23 @@ impl VirtualCluster {
     }
 
     fn enqueue(&mut self, from: &NodeId, outgoing: Vec<Outgoing>) {
-        let deliver_at = self.now.saturating_add(self.config.latency_ms);
         for packet in outgoing {
-            if self.reachable(from, &packet.to) {
-                self.queue.push(InFlight {
-                    deliver_at,
-                    from: from.clone(),
-                    to: packet.to,
-                    packet: packet.packet,
-                });
+            if !self.reachable(from, &packet.to) {
+                continue;
             }
+            let mut latency = self.config.latency_ms;
+            if let Some((slow, extra)) = self.slow_node.as_ref() {
+                if from == slow || &packet.to == slow {
+                    latency = latency.saturating_add(*extra);
+                }
+            }
+            let deliver_at = self.now.saturating_add(latency);
+            self.queue.push(InFlight {
+                deliver_at,
+                from: from.clone(),
+                to: packet.to,
+                packet: packet.packet,
+            });
         }
     }
 
