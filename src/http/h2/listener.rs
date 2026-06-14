@@ -23,6 +23,7 @@ use crate::http::h2::error::{ErrorCode, H2Error};
 use crate::http::h2::frame::Frame;
 use crate::http::h2::hpack::Header;
 use crate::http::h2::settings::Settings;
+use crate::http::h2::stream::StreamState;
 use crate::io::AsyncReadExt as _;
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
@@ -517,6 +518,8 @@ pub enum Http2PushOutcome {
 pub enum Http2PushRejection {
     /// Peer advertised `SETTINGS_ENABLE_PUSH = 0`.
     PeerDisabled,
+    /// Associated request stream was cancelled or closed before push could start.
+    ParentCancelled,
     /// GOAWAY or drain state prevents opening new promised streams.
     ConnectionClosing,
     /// Any other H2 rejection, captured without requiring `H2Error: Clone`.
@@ -533,6 +536,8 @@ pub enum Http2PushRejection {
 fn classify_push_rejection(err: &H2Error) -> Http2PushRejection {
     if err.code == ErrorCode::RefusedStream && err.message == "peer disabled server push" {
         Http2PushRejection::PeerDisabled
+    } else if err.code == ErrorCode::StreamClosed && err.message.contains("PUSH_PROMISE on") {
+        Http2PushRejection::ParentCancelled
     } else if err.message.contains("GOAWAY") {
         Http2PushRejection::ConnectionClosing
     } else {
@@ -647,6 +652,16 @@ fn queue_h2_server_pushes(
     associated_stream_id: u32,
     pushes: &[Http2ServerPush],
 ) -> Vec<Http2PushOutcome> {
+    if !associated_stream_accepts_push(conn, associated_stream_id) {
+        return pushes
+            .iter()
+            .map(|_| Http2PushOutcome::NotPushed {
+                associated_stream_id,
+                reason: Http2PushRejection::ParentCancelled,
+            })
+            .collect();
+    }
+
     let mut outcomes = Vec::with_capacity(pushes.len());
     for push in pushes {
         let promised_stream_id =
@@ -691,6 +706,53 @@ fn queue_h2_server_pushes(
         });
     }
     outcomes
+}
+
+fn associated_stream_accepts_push(conn: &Connection, stream_id: u32) -> bool {
+    conn.stream(stream_id).is_some_and(|stream| {
+        matches!(
+            stream.state(),
+            StreamState::Open | StreamState::HalfClosedRemote
+        )
+    })
+}
+
+fn record_promised_pushes(
+    associated_pushes: &mut HashMap<u32, Vec<u32>>,
+    outcomes: &[Http2PushOutcome],
+) {
+    for outcome in outcomes {
+        if let Http2PushOutcome::Promised {
+            associated_stream_id,
+            promised_stream_id,
+        } = outcome
+        {
+            associated_pushes
+                .entry(*associated_stream_id)
+                .or_default()
+                .push(*promised_stream_id);
+        }
+    }
+}
+
+fn reset_associated_pushes(
+    conn: &mut Connection,
+    associated_pushes: &mut HashMap<u32, Vec<u32>>,
+    associated_stream_id: u32,
+) {
+    let Some(promised_streams) = associated_pushes.remove(&associated_stream_id) else {
+        return;
+    };
+
+    for promised_stream_id in promised_streams {
+        let should_reset = conn
+            .stream(promised_stream_id)
+            .is_some_and(|stream| !stream.state().is_closed())
+            || conn.has_pending_frames_for_stream(promised_stream_id);
+        if should_reset {
+            conn.reset_stream(promised_stream_id, ErrorCode::Cancel);
+        }
+    }
 }
 
 fn replace_or_insert_header(resp: &mut Response, header_name: &str, header_value: String) {
@@ -941,6 +1003,7 @@ where
     // Fixed stage-2 GOAWAY deadline, armed once when stage-1 is outstanding.
     let mut finalize_at: Option<Time> = None;
     let mut response_guards: HashMap<u32, InFlightRequestGuard> = HashMap::new();
+    let mut associated_pushes: HashMap<u32, Vec<u32>> = HashMap::new();
 
     loop {
         pump_writes(&mut conn, &mut framed).await?;
@@ -1022,6 +1085,7 @@ where
                     if let Some(stream_id) = protocol_error.stream_id {
                         conn.reset_stream(stream_id, protocol_error.code);
                         pending_requests.remove(&stream_id);
+                        reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                     } else {
                         conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
                         pump_writes(&mut conn, &mut framed).await?;
@@ -1108,11 +1172,12 @@ where
                 }
                 Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
                     pending_requests.remove(&stream_id);
+                    reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                 }
                 Ok(_) => {}
             },
             DriverEvent::Response((stream_id, response, guard, suppress_response_body)) => {
-                queue_h2_response(
+                let outcomes = queue_h2_response(
                     &mut conn,
                     stream_id,
                     response,
@@ -1120,6 +1185,7 @@ where
                     suppress_response_body,
                     &mut response_guards,
                 );
+                record_promised_pushes(&mut associated_pushes, &outcomes);
             }
         }
     }
@@ -2356,6 +2422,163 @@ mod tests {
             }
             other => panic!("expected parent response HEADERS, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn queue_h2_response_reports_parent_cancelled_without_promising() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new()
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+        expect_settings_ack(&mut conn);
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/index.html"),
+            (":authority", "push.example"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(matches!(
+            received,
+            Some(ReceivedFrame::Headers { stream_id: 1, .. })
+        ));
+        let reset = conn
+            .process_frame(Frame::RstStream(
+                crate::http::h2::frame::RstStreamFrame::new(1, ErrorCode::Cancel),
+            ))
+            .expect("parent reset accepted");
+        assert!(matches!(
+            reset,
+            Some(ReceivedFrame::Reset {
+                stream_id: 1,
+                error_code: ErrorCode::Cancel
+            })
+        ));
+
+        let response = Http2Response::new(Response::new(200, "OK", b"html".to_vec())).with_push(
+            Http2ServerPush::get(
+                "/style.css",
+                "push.example",
+                Response::new(200, "OK", b"css".to_vec()),
+            ),
+        );
+        let mut response_guards = HashMap::new();
+        let outcomes = queue_h2_response(
+            &mut conn,
+            1,
+            response,
+            InFlightRequestGuard::acquire(None),
+            false,
+            &mut response_guards,
+        );
+
+        assert_eq!(
+            outcomes,
+            vec![Http2PushOutcome::NotPushed {
+                associated_stream_id: 1,
+                reason: Http2PushRejection::ParentCancelled
+            }]
+        );
+        assert!(conn.stream(2).is_none());
+        assert!(conn.next_frame().is_none());
+    }
+
+    #[test]
+    fn parent_reset_cancels_queued_promised_stream_frames() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new()
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+        expect_settings_ack(&mut conn);
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/index.html"),
+            (":authority", "push.example"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(matches!(
+            received,
+            Some(ReceivedFrame::Headers { stream_id: 1, .. })
+        ));
+
+        let response = Http2Response::new(Response::new(200, "OK", b"html".to_vec())).with_push(
+            Http2ServerPush::get(
+                "/style.css",
+                "push.example",
+                Response::new(200, "OK", b"css".to_vec()),
+            ),
+        );
+        let mut response_guards = HashMap::new();
+        let outcomes = queue_h2_response(
+            &mut conn,
+            1,
+            response,
+            InFlightRequestGuard::acquire(None),
+            false,
+            &mut response_guards,
+        );
+        assert_eq!(
+            outcomes,
+            vec![Http2PushOutcome::Promised {
+                associated_stream_id: 1,
+                promised_stream_id: 2
+            }]
+        );
+
+        let mut associated_pushes = HashMap::new();
+        record_promised_pushes(&mut associated_pushes, &outcomes);
+        assert!(conn.has_pending_frames_for_stream(2));
+
+        let reset = conn
+            .process_frame(Frame::RstStream(
+                crate::http::h2::frame::RstStreamFrame::new(1, ErrorCode::Cancel),
+            ))
+            .expect("parent reset accepted");
+        assert!(matches!(
+            reset,
+            Some(ReceivedFrame::Reset {
+                stream_id: 1,
+                error_code: ErrorCode::Cancel
+            })
+        ));
+        reset_associated_pushes(&mut conn, &mut associated_pushes, 1);
+
+        match conn
+            .next_frame()
+            .expect("promised stream reset should flush")
+        {
+            Frame::RstStream(reset) => {
+                assert_eq!(reset.stream_id, 2);
+                assert_eq!(reset.error_code, ErrorCode::Cancel);
+            }
+            other => panic!("expected promised-stream RST_STREAM, got {other:?}"),
+        }
+        assert!(conn.next_frame().is_none());
     }
 
     #[test]
