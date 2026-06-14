@@ -31,7 +31,11 @@ impl DataSegment {
 
     /// Get the end offset of this segment (exclusive)
     pub fn end_offset(&self) -> u64 {
-        self.offset + self.data.len() as u64
+        self.checked_end_offset().unwrap_or(u64::MAX)
+    }
+
+    fn checked_end_offset(&self) -> Option<u64> {
+        self.offset.checked_add(self.data.len() as u64)
     }
 
     /// Check if this segment overlaps with another
@@ -77,9 +81,19 @@ impl ReassemblyBuffer {
 
     /// Insert a data segment into the buffer
     pub fn insert_segment(&mut self, mut segment: DataSegment) -> Outcome<Vec<Bytes>, StreamError> {
+        let mut segment_end = match segment.checked_end_offset() {
+            Some(end) => end,
+            None => {
+                return Outcome::err(StreamError::InvalidState {
+                    stream_id: StreamId::new(0),
+                    state: "Stream segment offset overflow".to_string(),
+                });
+            }
+        };
+
         // Handle overlap with already delivered data
         if segment.offset < self.next_offset {
-            if segment.end_offset() <= self.next_offset {
+            if segment_end <= self.next_offset {
                 // Completely duplicate (already delivered), ignore it
                 return Outcome::ok(Vec::new());
             }
@@ -87,11 +101,20 @@ impl ReassemblyBuffer {
             let duplicate_len = (self.next_offset - segment.offset) as usize;
             segment.data = segment.data.slice(duplicate_len..);
             segment.offset = self.next_offset;
+            segment_end = match segment.checked_end_offset() {
+                Some(end) => end,
+                None => {
+                    return Outcome::err(StreamError::InvalidState {
+                        stream_id: StreamId::new(0),
+                        state: "Stream segment offset overflow".to_string(),
+                    });
+                }
+            };
         }
 
         // Check for final size consistency
-        if segment.is_final {
-            let segment_final_size = segment.end_offset();
+        let pending_final_size = if segment.is_final {
+            let segment_final_size = segment_end;
             if let Some(existing_final_size) = self.final_size {
                 if segment_final_size != existing_final_size {
                     return Outcome::err(StreamError::FinalSizeMismatch {
@@ -100,11 +123,11 @@ impl ReassemblyBuffer {
                         actual: segment_final_size,
                     });
                 }
-            } else {
-                self.final_size = Some(segment_final_size);
             }
-            self.received_final = true;
-        }
+            Some(segment_final_size)
+        } else {
+            None
+        };
 
         let uncovered_segments = match self.uncovered_segments(segment) {
             Ok(segments) => segments,
@@ -112,13 +135,28 @@ impl ReassemblyBuffer {
         };
 
         // Check if this would exceed our buffering limit
-        let new_data_size = uncovered_segments
-            .iter()
-            .fold(0_u64, |sum, segment| sum + segment.data.len() as u64);
-        if self.buffered_data_size + new_data_size > self.max_buffered_data {
+        let new_data_size = uncovered_segments.iter().try_fold(0_u64, |sum, segment| {
+            sum.checked_add(segment.data.len() as u64)
+        });
+        let Some(new_data_size) = new_data_size else {
+            return Outcome::err(StreamError::ConnectionError {
+                reason: "Reassembly buffer size overflow".to_string(),
+            });
+        };
+        let Some(buffered_after_insert) = self.buffered_data_size.checked_add(new_data_size) else {
+            return Outcome::err(StreamError::ConnectionError {
+                reason: "Reassembly buffer size overflow".to_string(),
+            });
+        };
+        if buffered_after_insert > self.max_buffered_data {
             return Outcome::err(StreamError::ConnectionError {
                 reason: "Reassembly buffer limit exceeded".to_string(),
             });
+        }
+
+        if let Some(final_size) = pending_final_size {
+            self.final_size = Some(final_size);
+            self.received_final = true;
         }
 
         for uncovered in uncovered_segments {
@@ -402,5 +440,66 @@ mod tests {
 
         let result = buffer.insert_segment(large_segment);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejected_final_segment_does_not_poison_final_size() {
+        let mut buffer = ReassemblyBuffer::new(4);
+
+        let rejected_final = DataSegment::new(5, Bytes::from("final"), true);
+        let rejected = buffer.insert_segment(rejected_final);
+        assert!(rejected.is_err());
+        assert_eq!(buffer.final_size(), None);
+        assert!(!buffer.received_final_segment());
+
+        let accepted_final = DataSegment::new(0, Bytes::from("ok"), true);
+        let delivered = buffer.insert_segment(accepted_final).unwrap(); // ubs:ignore - test oracle
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(&delivered[0][..], b"ok");
+        assert_eq!(buffer.final_size(), Some(2));
+        assert!(buffer.received_final_segment());
+        assert!(buffer.is_complete());
+    }
+
+    #[test]
+    fn conflicting_final_overlap_does_not_poison_final_size() {
+        let mut buffer = ReassemblyBuffer::new(10000);
+
+        let buffered = DataSegment::new(5, Bytes::from("world"), false);
+        buffer.insert_segment(buffered).unwrap(); // ubs:ignore - test oracle
+
+        let conflicting_final = DataSegment::new(5, Bytes::from("WORLD"), true);
+        let rejected = buffer.insert_segment(conflicting_final);
+        assert!(rejected.is_err());
+        assert_eq!(buffer.final_size(), None);
+        assert!(!buffer.received_final_segment());
+
+        let matching_final = DataSegment::new(5, Bytes::from("world"), true);
+        let duplicate = buffer.insert_segment(matching_final).unwrap(); // ubs:ignore - test oracle
+        assert!(duplicate.is_empty());
+        assert_eq!(buffer.final_size(), Some(10));
+        assert!(buffer.received_final_segment());
+
+        let prefix = DataSegment::new(0, Bytes::from("hello"), false);
+        let delivered = buffer.insert_segment(prefix).unwrap(); // ubs:ignore - test oracle
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(&delivered[0][..], b"hello");
+        assert_eq!(&delivered[1][..], b"world");
+        assert!(buffer.is_complete());
+    }
+
+    #[test]
+    fn segment_offset_overflow_is_rejected() {
+        let mut buffer = ReassemblyBuffer::new(10000);
+
+        let overflowing = DataSegment::new(u64::MAX - 1, Bytes::from_static(b"abcd"), false);
+        let result = buffer.insert_segment(overflowing);
+
+        assert!(result.is_err());
+        assert_eq!(buffer.next_expected_offset(), 0);
+        assert_eq!(buffer.buffered_segments(), 0);
+        assert_eq!(buffer.buffered_data_size(), 0);
+        assert_eq!(buffer.final_size(), None);
+        assert!(!buffer.received_final_segment());
     }
 }
