@@ -9,6 +9,13 @@ use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// Upper bound for the in-memory piece tracker.
+///
+/// `PieceTracker` currently materializes one status and one redundancy entry
+/// per piece, so untrusted `total_pieces` values must be capped before
+/// allocation.
+const MAX_TRACKED_PIECES_PER_TRANSFER: u64 = 1_000_000;
+
 /// Tracks piece availability and download state across transfers.
 #[derive(Debug)]
 pub struct PieceTracker {
@@ -227,21 +234,49 @@ impl PieceTracker {
         transfer_id: &MailboxTransferId,
         piece_map: &PieceMap,
     ) -> SwarmResult<()> {
+        let total_pieces = piece_map.total_pieces;
+
+        if total_pieces > MAX_TRACKED_PIECES_PER_TRANSFER {
+            return Err(SwarmError::ConfigurationError {
+                details: format!(
+                    "piece map declares {total_pieces} pieces, exceeding tracker limit {MAX_TRACKED_PIECES_PER_TRANSFER}"
+                ),
+            });
+        }
+
+        for (peer_id, pieces) in &piece_map.peer_availability {
+            if let Some(piece_id) = pieces
+                .iter()
+                .find(|piece_id| piece_id.as_u64() >= total_pieces)
+            {
+                return Err(SwarmError::ConfigurationError {
+                    details: format!(
+                        "peer {peer_id:?} advertises piece {piece_id} outside declared range 0..{total_pieces}"
+                    ),
+                });
+            }
+        }
+
+        let piece_capacity =
+            usize::try_from(total_pieces).map_err(|_| SwarmError::ConfigurationError {
+                details: format!("piece map declares {total_pieces} pieces, exceeding usize"),
+            })?;
+
         // Create piece status map
-        let mut piece_status = HashMap::new();
-        for piece_id in 0..piece_map.total_pieces {
+        let mut piece_status = HashMap::with_capacity(piece_capacity);
+        for piece_id in 0..total_pieces {
             piece_status.insert(PieceId::new(piece_id), PieceStatus::Needed);
         }
 
         // Build redundancy map
-        let mut redundancy = HashMap::new();
-        for piece_id in 0..piece_map.total_pieces {
+        let mut redundancy = HashMap::with_capacity(piece_capacity);
+        for piece_id in 0..total_pieces {
             let piece_id = PieceId::new(piece_id);
             redundancy.insert(piece_id, piece_map.get_piece_redundancy(&piece_id));
         }
 
         let transfer_map = TransferPieceMap {
-            total_pieces: piece_map.total_pieces,
+            total_pieces,
             piece_status,
             peer_pieces: piece_map.peer_availability.clone(),
             redundancy,
@@ -659,6 +694,50 @@ mod tests {
         let result = tracker.initialize_transfer(&transfer_id, &piece_map);
         assert!(result.is_ok());
         assert!(tracker.transfer_maps.contains_key(&transfer_id));
+    }
+
+    #[test]
+    fn initialize_transfer_rejects_excessive_piece_count_before_allocation() {
+        let mut tracker = PieceTracker::new();
+        let piece_map = PieceMap::new(
+            MAX_TRACKED_PIECES_PER_TRANSFER + 1,
+            1024,
+            "test-hash".to_string(),
+        );
+        let transfer_id = MailboxTransferId::new();
+
+        let err = tracker
+            .initialize_transfer(&transfer_id, &piece_map)
+            .expect_err("excessive piece count must be rejected");
+
+        assert!(
+            matches!(&err, SwarmError::ConfigurationError { details } if details.contains("exceeding tracker limit")),
+            "unexpected error: {err}"
+        );
+        assert!(tracker.transfer_maps.is_empty());
+        assert!(tracker.global_availability.is_empty());
+    }
+
+    #[test]
+    fn initialize_transfer_rejects_out_of_range_peer_piece() {
+        let mut tracker = PieceTracker::new();
+        let mut piece_map = PieceMap::new(2, 1024, "test-hash".to_string());
+        piece_map.add_peer_pieces(
+            PeerId::new("peer1"),
+            [PieceId::new(0), PieceId::new(2)].into_iter().collect(),
+        );
+        let transfer_id = MailboxTransferId::new();
+
+        let err = tracker
+            .initialize_transfer(&transfer_id, &piece_map)
+            .expect_err("out-of-range advertised piece must be rejected");
+
+        assert!(
+            matches!(&err, SwarmError::ConfigurationError { details } if details.contains("outside declared range 0..2")),
+            "unexpected error: {err}"
+        );
+        assert!(tracker.transfer_maps.is_empty());
+        assert!(tracker.global_availability.is_empty());
     }
 
     #[test]
