@@ -25,7 +25,7 @@
 //! }
 //! ```
 
-use super::client::{Message, MessageAssembler, WebSocketConfig};
+use super::client::{Message, MessageAssembler, SlowConsumerPolicy, WebSocketConfig};
 use super::close::{CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{AcceptResponse, HandshakeError, HttpRequest, ServerHandshake};
@@ -105,6 +105,20 @@ impl WebSocketAcceptor {
     #[must_use]
     pub fn max_message_size(mut self, size: usize) -> Self {
         self.config.max_message_size = size;
+        self
+    }
+
+    /// Set maximum encoded bytes retained for a pending outbound frame.
+    #[must_use]
+    pub fn max_pending_write_bytes(mut self, bytes: usize) -> Self {
+        self.config.max_pending_write_bytes = bytes;
+        self
+    }
+
+    /// Set the slow-consumer policy for outbound write-buffer overflow.
+    #[must_use]
+    pub fn slow_consumer_policy(mut self, policy: SlowConsumerPolicy) -> Self {
+        self.config.slow_consumer_policy = policy;
         self
     }
 
@@ -709,6 +723,13 @@ where
 
         let _ = buf.split_to(n);
         if !buf.is_empty() {
+            if let Err(err) = self
+                .config
+                .check_outbound_write_budget(self.write_buf.len(), buf.len())
+            {
+                self.close_after_outbound_backpressure();
+                return Err(err);
+            }
             self.write_buf.extend_from_slice(&buf[..]);
             buf.clear();
             return self.flush_write_buf_with_cx(op_cx).await;
@@ -741,7 +762,20 @@ where
         }
         let mut encoded = BytesMut::new();
         self.codec.encode(frame, &mut encoded)?;
+        if let Err(err) = self
+            .config
+            .check_outbound_write_budget(self.write_buf.len(), encoded.len())
+        {
+            self.close_after_outbound_backpressure();
+            return Err(err);
+        }
         self.write_buf_to_io_with_cx(op_cx, &mut encoded).await
+    }
+
+    fn close_after_outbound_backpressure(&mut self) {
+        if let Some(reason) = self.config.slow_consumer_close_reason() {
+            self.close_handshake.force_close(reason);
+        }
     }
 
     /// Internal: read more data into buffer.
@@ -1024,10 +1058,17 @@ mod tests {
             .protocol("chat")
             .protocol("superchat")
             .max_frame_size(1024 * 1024)
+            .max_pending_write_bytes(4096)
+            .slow_consumer_policy(SlowConsumerPolicy::CloseWithTryAgainLater)
             .ping_interval(Some(Duration::from_secs(30)))
             .close_timeout(Duration::from_secs(10));
 
         assert_eq!(acceptor.config.max_frame_size, 1024 * 1024);
+        assert_eq!(acceptor.config.max_pending_write_bytes, 4096);
+        assert_eq!(
+            acceptor.config.slow_consumer_policy,
+            SlowConsumerPolicy::CloseWithTryAgainLater
+        );
         assert_eq!(acceptor.config.ping_interval, Some(Duration::from_secs(30)));
         assert_eq!(
             acceptor.config.close_config.close_timeout,
@@ -1122,11 +1163,13 @@ mod tests {
             .extension("permessage-deflate")
             .max_frame_size(512)
             .max_message_size(2048)
+            .max_pending_write_bytes(1024)
             .ping_interval(Some(Duration::from_secs(15)))
             .close_timeout(Duration::from_secs(5));
 
         assert_eq!(acceptor.config.max_frame_size, 512);
         assert_eq!(acceptor.config.max_message_size, 2048);
+        assert_eq!(acceptor.config.max_pending_write_bytes, 1024);
         assert_eq!(acceptor.config.ping_interval, Some(Duration::from_secs(15)));
         assert_eq!(
             acceptor.config.close_config.close_timeout,
@@ -1215,6 +1258,51 @@ mod tests {
             assert!(
                 matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::NotConnected),
                 "expected NotConnected after close initiation, got {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn send_rejects_frame_larger_than_pending_write_budget_before_writing() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let config = WebSocketConfig::default()
+                .max_pending_write_bytes(4)
+                .slow_consumer_policy(SlowConsumerPolicy::CloseWithTryAgainLater);
+            let mut ws = ServerWebSocket::from_upgraded(TestIo::new(), config, accept, &[]);
+            let cx = Cx::for_testing();
+
+            let err = ws
+                .send(&cx, Message::text("hello"))
+                .await
+                .expect_err("oversize encoded frame must be rejected before writing");
+
+            assert!(
+                matches!(
+                    err,
+                    WsError::OutboundBufferFull {
+                        pending: 0,
+                        attempted,
+                        max: 4,
+                        action: "close-with-1013",
+                    } if attempted > 4
+                ),
+                "expected outbound buffer cap error, got {err:?}"
+            );
+            assert!(
+                ws.io.written.is_empty(),
+                "budget rejection must not commit a partial server frame"
+            );
+            assert!(ws.is_closed(), "close policy must close the connection");
+            assert_eq!(
+                ws.close_handshake
+                    .our_reason()
+                    .and_then(|reason| reason.code),
+                Some(crate::net::websocket::CloseCode::TryAgainLater)
             );
         });
     }

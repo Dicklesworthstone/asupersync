@@ -55,7 +55,7 @@ mod split;
 #[cfg(test)]
 mod masking_conformance_tests;
 
-pub use client::{Message, WebSocket, WebSocketConfig, WsConnectError};
+pub use client::{Message, SlowConsumerPolicy, WebSocket, WebSocketConfig, WsConnectError};
 pub use close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
 pub use frame::{CloseCode, Frame, FrameCodec, Opcode, Role, WsError, apply_mask};
 pub use handshake::{

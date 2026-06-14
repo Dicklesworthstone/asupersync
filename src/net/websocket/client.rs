@@ -23,7 +23,7 @@
 //! ```
 
 use super::close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
-use super::frame::{Frame, FrameCodec, Opcode, WsError};
+use super::frame::{CloseCode, Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{ClientHandshake, HandshakeError, HttpResponse, WsUrl};
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
@@ -245,12 +245,40 @@ pub struct WebSocketConfig {
     pub ping_interval: Option<Duration>,
     /// Close handshake configuration.
     pub close_config: CloseConfig,
+    /// Maximum encoded bytes that may be retained in the outbound write buffer.
+    pub max_pending_write_bytes: usize,
+    /// Policy used when an outbound frame cannot fit in the bounded write buffer.
+    pub slow_consumer_policy: SlowConsumerPolicy,
     /// Requested subprotocols.
     pub protocols: Vec<String>,
     /// Connection timeout.
     pub connect_timeout: Option<Duration>,
     /// Enable TCP_NODELAY.
     pub nodelay: bool,
+}
+
+/// Default cap for the retained outbound write buffer.
+///
+/// The cap admits one default maximum-payload frame plus the largest RFC 6455
+/// header (64-bit length + client mask). Larger application frames must opt in.
+pub const DEFAULT_MAX_PENDING_WRITE_BYTES: usize = FrameCodec::DEFAULT_MAX_PAYLOAD_SIZE + 14;
+
+/// Policy applied when an outbound frame would exceed the retained write-buffer cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlowConsumerPolicy {
+    /// Keep the connection open and report a typed error to the caller.
+    Wait,
+    /// Fail the connection with 1013 (Try Again Later) and report a typed error.
+    CloseWithTryAgainLater,
+}
+
+impl SlowConsumerPolicy {
+    const fn action(self) -> &'static str {
+        match self {
+            Self::Wait => "wait",
+            Self::CloseWithTryAgainLater => "close-with-1013",
+        }
+    }
 }
 
 impl Default for WebSocketConfig {
@@ -260,6 +288,8 @@ impl Default for WebSocketConfig {
             max_message_size: 64 * 1024 * 1024, // 64 MB
             ping_interval: Some(Duration::from_secs(30)),
             close_config: CloseConfig::default(),
+            max_pending_write_bytes: DEFAULT_MAX_PENDING_WRITE_BYTES,
+            slow_consumer_policy: SlowConsumerPolicy::Wait,
             protocols: Vec::new(),
             connect_timeout: Some(Duration::from_secs(30)),
             nodelay: true,
@@ -295,6 +325,24 @@ impl WebSocketConfig {
         self
     }
 
+    /// Set the maximum encoded bytes retained for a pending outbound frame.
+    ///
+    /// This is a cancellation-safety bound: if a write partially commits a
+    /// frame, the remaining bytes must stay owned by the connection so a retry
+    /// cannot interleave a second frame or silently drop bytes.
+    #[must_use]
+    pub fn max_pending_write_bytes(mut self, bytes: usize) -> Self {
+        self.max_pending_write_bytes = bytes;
+        self
+    }
+
+    /// Set the policy used when the outbound write-buffer bound is exceeded.
+    #[must_use]
+    pub fn slow_consumer_policy(mut self, policy: SlowConsumerPolicy) -> Self {
+        self.slow_consumer_policy = policy;
+        self
+    }
+
     /// Add a requested subprotocol.
     #[must_use]
     pub fn protocol(mut self, protocol: impl Into<String>) -> Self {
@@ -314,6 +362,34 @@ impl WebSocketConfig {
     pub fn nodelay(mut self, enabled: bool) -> Self {
         self.nodelay = enabled;
         self
+    }
+
+    pub(crate) fn check_outbound_write_budget(
+        &self,
+        pending: usize,
+        attempted: usize,
+    ) -> Result<(), WsError> {
+        let total = pending.saturating_add(attempted);
+        if total <= self.max_pending_write_bytes {
+            return Ok(());
+        }
+
+        Err(WsError::OutboundBufferFull {
+            pending,
+            attempted,
+            max: self.max_pending_write_bytes,
+            action: self.slow_consumer_policy.action(),
+        })
+    }
+
+    pub(crate) fn slow_consumer_close_reason(&self) -> Option<CloseReason> {
+        match self.slow_consumer_policy {
+            SlowConsumerPolicy::Wait => None,
+            SlowConsumerPolicy::CloseWithTryAgainLater => Some(CloseReason::with_text(
+                CloseCode::TryAgainLater,
+                "outbound write buffer full",
+            )),
+        }
     }
 }
 
@@ -818,6 +894,13 @@ where
 
         let _ = buf.split_to(n);
         if !buf.is_empty() {
+            if let Err(err) = self
+                .config
+                .check_outbound_write_budget(self.write_buf.len(), buf.len())
+            {
+                self.close_after_outbound_backpressure();
+                return Err(err);
+            }
             self.write_buf.extend_from_slice(&buf[..]);
             buf.clear();
             return self.flush_write_buf_with_cx(op_cx).await;
@@ -845,6 +928,13 @@ where
             self.flush_write_buf_with_cx(op_cx).await?;
         }
         let mut encoded = self.encode_frame_bytes_with_entropy(frame, entropy)?;
+        if let Err(err) = self
+            .config
+            .check_outbound_write_budget(self.write_buf.len(), encoded.len())
+        {
+            self.close_after_outbound_backpressure();
+            return Err(err);
+        }
         self.write_frame_bytes_to_io_with_cx(op_cx, &mut encoded)
             .await
     }
@@ -857,6 +947,12 @@ where
         let entropy = Arc::clone(&self.entropy);
         self.send_frame_with_entropy_with_cx(op_cx, frame, entropy.as_ref())
             .await
+    }
+
+    fn close_after_outbound_backpressure(&mut self) {
+        if let Some(reason) = self.config.slow_consumer_close_reason() {
+            self.close_handshake.force_close(reason);
+        }
     }
 
     /// Internal: read more data into buffer.
@@ -1375,15 +1471,99 @@ mod tests {
         let config = WebSocketConfig::new()
             .max_frame_size(1024)
             .max_message_size(4096)
+            .max_pending_write_bytes(2048)
+            .slow_consumer_policy(SlowConsumerPolicy::CloseWithTryAgainLater)
             .ping_interval(Some(Duration::from_secs(60)))
             .protocol("chat")
             .nodelay(false);
 
         assert_eq!(config.max_frame_size, 1024);
         assert_eq!(config.max_message_size, 4096);
+        assert_eq!(config.max_pending_write_bytes, 2048);
+        assert_eq!(
+            config.slow_consumer_policy,
+            SlowConsumerPolicy::CloseWithTryAgainLater
+        );
         assert_eq!(config.ping_interval, Some(Duration::from_secs(60)));
         assert_eq!(config.protocols, vec!["chat".to_string()]);
         assert!(!config.nodelay);
+    }
+
+    #[test]
+    fn send_rejects_frame_larger_than_pending_write_budget_before_writing() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0xAB, 0xCD, 0xEF, 0x01]));
+            let config = WebSocketConfig::default().max_pending_write_bytes(4);
+            let mut ws =
+                WebSocket::from_upgraded_with_entropy(TestIo::new(), config, Arc::clone(&entropy));
+            let cx = test_cx_with_entropy(entropy);
+
+            let err = ws
+                .send(&cx, Message::text("hello"))
+                .await
+                .expect_err("oversize encoded frame must be rejected before writing");
+
+            assert!(
+                matches!(
+                    err,
+                    WsError::OutboundBufferFull {
+                        pending: 0,
+                        attempted,
+                        max: 4,
+                        action: "wait",
+                    } if attempted > 4
+                ),
+                "expected bounded-buffer error, got {err:?}"
+            );
+            assert!(
+                ws.io.written.is_empty(),
+                "budget rejection must not commit a partial frame"
+            );
+            assert!(
+                ws.is_open(),
+                "wait policy reports the error without closing the connection"
+            );
+        });
+    }
+
+    #[test]
+    fn close_policy_records_1013_when_outbound_budget_is_exceeded() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0xAB, 0xCD, 0xEF, 0x01]));
+            let config = WebSocketConfig::default()
+                .max_pending_write_bytes(4)
+                .slow_consumer_policy(SlowConsumerPolicy::CloseWithTryAgainLater);
+            let mut ws =
+                WebSocket::from_upgraded_with_entropy(TestIo::new(), config, Arc::clone(&entropy));
+            let cx = test_cx_with_entropy(entropy);
+
+            let err = ws
+                .send(&cx, Message::text("hello"))
+                .await
+                .expect_err("close policy must reject oversize retained frames");
+
+            assert!(matches!(
+                err,
+                WsError::OutboundBufferFull {
+                    action: "close-with-1013",
+                    ..
+                }
+            ));
+            assert!(
+                ws.is_closed(),
+                "close policy must force the connection closed after rejecting the frame"
+            );
+            assert_eq!(
+                ws.close_handshake
+                    .our_reason()
+                    .and_then(|reason| reason.code),
+                Some(CloseCode::TryAgainLater)
+            );
+            assert!(
+                ws.io.written.is_empty(),
+                "close-policy rejection still must not write a partial data frame"
+            );
+        });
     }
 
     #[test]

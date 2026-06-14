@@ -291,6 +291,7 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     if buf.is_empty() {
         return Ok(());
     }
+    check_shared_outbound_write_budget(shared, 0, buf.len())?;
 
     let is_open = shared.lock().close_handshake.is_open();
     let n = poll_fn(|poll_cx| {
@@ -316,6 +317,13 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     if !buf.is_empty() {
         {
             let mut guard = shared.lock();
+            let budget = guard
+                .config
+                .check_outbound_write_budget(guard.write_buf.len(), buf.len());
+            if let Err(err) = budget {
+                close_shared_after_outbound_backpressure(&mut guard);
+                return Err(err);
+            }
             guard.write_buf.extend_from_slice(&buf[..]);
             buf.clear();
         }
@@ -336,6 +344,25 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     .await?;
 
     Ok(())
+}
+
+fn check_shared_outbound_write_budget<IO>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    pending: usize,
+    attempted: usize,
+) -> Result<(), WsError> {
+    let mut guard = shared.lock();
+    if let Err(err) = guard.config.check_outbound_write_budget(pending, attempted) {
+        close_shared_after_outbound_backpressure(&mut guard);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn close_shared_after_outbound_backpressure<IO>(shared: &mut WebSocketShared<IO>) {
+    if let Some(reason) = shared.config.slow_consumer_close_reason() {
+        shared.close_handshake.force_close(reason);
+    }
 }
 
 /// The read half of a split WebSocket.
@@ -1065,6 +1092,49 @@ mod tests {
             assert!(
                 written == read_then_write || written == write_then_read,
                 "concurrent writes must preserve full-frame atomicity"
+            );
+        });
+    }
+
+    #[test]
+    fn split_write_rejects_frame_larger_than_pending_write_budget_before_writing() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0xAB, 0xCD, 0xEF, 0x01]));
+            let config = WebSocketConfig::default().max_pending_write_bytes(4);
+            let ws = WebSocket::from_upgraded_with_entropy(
+                TestIo::new(vec![]),
+                config,
+                Arc::clone(&entropy),
+            );
+            let (read, mut write) = ws.split();
+            let cx = test_cx_with_entropy(entropy);
+
+            let err = write
+                .send(&cx, Message::text("hello"))
+                .await
+                .expect_err("split write must enforce the outbound buffer cap");
+
+            assert!(
+                matches!(
+                    err,
+                    WsError::OutboundBufferFull {
+                        pending: 0,
+                        attempted,
+                        max: 4,
+                        action: "wait",
+                    } if attempted > 4
+                ),
+                "expected outbound buffer cap error, got {err:?}"
+            );
+
+            let ws = read.reunite(write).expect("split halves must reunite");
+            assert!(
+                ws.io.written.is_empty(),
+                "split budget rejection must not commit a partial frame"
+            );
+            assert!(
+                ws.is_open(),
+                "wait policy must leave the split connection open"
             );
         });
     }

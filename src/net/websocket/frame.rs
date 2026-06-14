@@ -259,6 +259,17 @@ pub enum WsError {
     InvalidUtf8,
     /// Invalid close frame payload.
     InvalidClosePayload,
+    /// Outbound frame cannot fit within the bounded retained write buffer.
+    OutboundBufferFull {
+        /// Bytes already pending in the retained write buffer.
+        pending: usize,
+        /// Additional encoded bytes attempted.
+        attempted: usize,
+        /// Configured maximum retained bytes.
+        max: usize,
+        /// Stable policy action string.
+        action: &'static str,
+    },
 }
 
 impl WsError {
@@ -271,6 +282,7 @@ impl WsError {
             }
             Self::InvalidUtf8 => CloseCode::InvalidPayload,
             Self::Io(_) => CloseCode::Abnormal,
+            Self::OutboundBufferFull { .. } => CloseCode::TryAgainLater,
             _ => CloseCode::ProtocolError,
         }
     }
@@ -297,6 +309,15 @@ impl std::fmt::Display for WsError {
             Self::MaskedServerFrame => write!(f, "server frame should not be masked"),
             Self::InvalidUtf8 => write!(f, "invalid UTF-8 in text frame"),
             Self::InvalidClosePayload => write!(f, "invalid close frame payload"),
+            Self::OutboundBufferFull {
+                pending,
+                attempted,
+                max,
+                action,
+            } => write!(
+                f,
+                "outbound WebSocket write buffer full: pending {pending} bytes + attempted {attempted} bytes exceeds max {max}; action={action}"
+            ),
         }
     }
 }
