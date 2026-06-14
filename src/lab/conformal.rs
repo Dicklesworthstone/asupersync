@@ -533,8 +533,12 @@ fn conformity_score(entry: &OracleEntryReport, cal: &InvariantCalibration) -> f6
 
 /// Compute the conformal quantile from calibration scores.
 ///
-/// Returns the `ceil((1-alpha)(1+1/n))`-th smallest value from the
-/// sorted scores, which gives the finite-sample coverage guarantee.
+/// Returns the `ceil((1-alpha)(n+1))`-th smallest calibration score (1-indexed),
+/// which yields the split-conformal finite-sample guarantee
+/// `P(score_{n+1} <= threshold) >= 1 - alpha` under exchangeability. When that
+/// rank exceeds `n` (i.e. `alpha < 1/(n+1)`), no finite score attains the
+/// target coverage, so the threshold is `+inf` (cover everything) — the same
+/// convention as the empty-calibration case.
 fn conformal_quantile(scores: &[f64], alpha: f64) -> f64 {
     if scores.is_empty() {
         return f64::INFINITY;
@@ -544,13 +548,19 @@ fn conformal_quantile(scores: &[f64], alpha: f64) -> f64 {
     let mut sorted = scores.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    // The conformal quantile level: ceil((1-alpha)(n+1)/n) mapped to index.
-    // Equivalently: the ceil((1-alpha)(n+1))-th order statistic.
+    // The conformal threshold is the ceil((1-alpha)(n+1))-th order statistic
+    // (1-indexed). br-asupersync-mdym3s: when that rank exceeds n the correct
+    // threshold is +inf — clamping to the largest score (min(n)) instead only
+    // attains n/(n+1) < 1-alpha worst-case coverage (the test point can be the
+    // new maximum) and silently violates the finite-sample guarantee.
     let level = (1.0 - alpha) * (count_to_f64(n) + 1.0);
     #[allow(clippy::cast_sign_loss)]
-    let idx = (level.ceil() as usize).min(n).saturating_sub(1);
+    let rank = level.ceil() as usize;
+    if rank > n {
+        return f64::INFINITY;
+    }
 
-    sorted[idx]
+    sorted[rank.saturating_sub(1)]
 }
 
 // ============================================================================
@@ -942,21 +952,50 @@ mod tests {
 
     #[test]
     fn conformal_quantile_single() {
+        // n=1, alpha=0.05: rank = ceil(0.95*2) = ceil(1.9) = 2 > n=1, so no
+        // finite score attains 95% coverage with a single calibration point
+        // (alpha < 1/(n+1) = 0.5) — the threshold is +inf (cover everything).
         let scores = [0.5];
-        let q = conformal_quantile(&scores, 0.05);
+        assert!(conformal_quantile(&scores, 0.05).is_infinite());
+
+        // n=1, alpha=0.5: rank = ceil(0.5*2) = 1 <= n, so the single score is
+        // the (finite) threshold.
+        let q = conformal_quantile(&scores, 0.5);
         assert!((q - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
     fn conformal_quantile_sorted() {
         let scores = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-        let q95 = conformal_quantile(&scores, 0.05);
-        // (1-0.05)(10+1) = 10.45, ceil = 11, min(10)-1 = 9 => scores[9] = 1.0
-        assert!((q95 - 1.0).abs() < f64::EPSILON);
+        // (1-0.05)(10+1) = 10.45, ceil = 11 > n=10 => +inf (no finite score
+        // attains 95% coverage; clamping to the max would only give 10/11).
+        assert!(conformal_quantile(&scores, 0.05).is_infinite());
 
         let q80 = conformal_quantile(&scores, 0.20);
-        // (1-0.20)(10+1) = 8.8, ceil = 9, -1 = 8 => scores[8] = 0.9
+        // (1-0.20)(10+1) = 8.8, ceil = 9 <= n=10, -1 = 8 => scores[8] = 0.9
         assert!((q80 - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn conformal_quantile_infinite_when_rank_exceeds_n() {
+        // br-asupersync-mdym3s boundary: the finite-sample guarantee needs the
+        // ceil((n+1)(1-alpha))-th order statistic; when that rank exceeds n the
+        // threshold must be +inf, not the largest score. Both levels below are
+        // clearly non-integer to avoid float-edge fragility.
+        let twenty: Vec<f64> = (1..=20).map(f64::from).collect();
+        // n=20, alpha=0.05: rank = ceil(0.95*21) = ceil(19.95) = 20 == n =>
+        // finite (the 20th order statistic).
+        let q = conformal_quantile(&twenty, 0.05);
+        assert!(
+            (q - 20.0).abs() < f64::EPSILON,
+            "rank==n is finite, got {q}"
+        );
+
+        // n=20, alpha=0.04: rank = ceil(0.96*21) = ceil(20.16) = 21 > n => +inf.
+        assert!(
+            conformal_quantile(&twenty, 0.04).is_infinite(),
+            "rank>n must be +inf to preserve >= 1-alpha coverage"
+        );
     }
 
     #[test]

@@ -232,7 +232,12 @@ fn conformal_binary_upper_bound(novelty: &[bool], alpha: f64, min_samples: usize
         .iter()
         .map(|&is_new| if is_new { 1.0 } else { 0.0 })
         .collect();
-    conformal_quantile(&scores, alpha)
+    let threshold = conformal_quantile(&scores, alpha);
+    if threshold.is_infinite() {
+        1.0
+    } else {
+        threshold
+    }
 }
 
 fn conformal_quantile(scores: &[f64], alpha: f64) -> f64 {
@@ -244,8 +249,12 @@ fn conformal_quantile(scores: &[f64], alpha: f64) -> f64 {
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let level = (1.0 - alpha) * (scores.len() as f64 + 1.0);
-    let idx = (level.ceil() as usize).min(scores.len()).saturating_sub(1);
-    sorted[idx]
+    let rank = level.ceil() as usize;
+    if rank > scores.len() {
+        return f64::INFINITY;
+    }
+
+    sorted[rank.saturating_sub(1)]
 }
 
 fn recommended_existing_class_runs(novelty: &[bool], config: ExplorationBudgetConfig) -> usize {
@@ -306,6 +315,33 @@ mod tests {
         assert_eq!(estimate.recommended_additional_runs, 0);
         assert!(estimate.target_met);
         assert!(!estimate.exhausted_recommendation);
+    }
+
+    #[test]
+    fn conformal_quantile_is_infinite_when_rank_exceeds_samples() {
+        let scores: Vec<f64> = (1..=18).map(f64::from).collect();
+
+        assert!(
+            conformal_quantile(&scores, 0.05).is_infinite(),
+            "n=18, alpha=0.05 gives rank ceil(0.95*19)=19 > n"
+        );
+
+        let scores: Vec<f64> = (1..=19).map(f64::from).collect();
+        assert_eq!(conformal_quantile(&scores, 0.05), 19.0);
+    }
+
+    #[test]
+    fn binary_bound_fails_closed_when_rank_exceeds_samples() {
+        let estimate = ExplorationBudget::estimate_from_novelty(
+            [false; 18],
+            ExplorationBudgetConfig::new(0.05, 0.95)
+                .min_samples(5)
+                .max_additional_runs(3),
+        );
+
+        assert_eq!(estimate.conformal_upper_bound, 1.0);
+        assert!(!estimate.target_met);
+        assert_eq!(estimate.recommended_additional_runs, 1);
     }
 
     #[test]
