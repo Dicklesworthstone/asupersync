@@ -199,6 +199,12 @@ pub enum PendingOp {
         headers: Vec<Header>,
         end_stream: bool,
     },
+    /// Push promise to send.
+    PushPromise {
+        stream_id: u32,
+        promised_stream_id: u32,
+        headers: Vec<Header>,
+    },
     /// Continuation of header block.
     Continuation {
         stream_id: u32,
@@ -608,6 +614,72 @@ impl Connection {
         });
 
         Ok(())
+    }
+
+    /// Send a server push promise on an existing peer-initiated stream.
+    pub fn send_push_promise(
+        &mut self,
+        stream_id: u32,
+        headers: Vec<Header>,
+    ) -> Result<u32, H2Error> {
+        if self.is_client {
+            return Err(H2Error::protocol("clients cannot send PUSH_PROMISE"));
+        }
+        if self.goaway_received || self.goaway_sent {
+            return Err(H2Error::protocol("cannot send PUSH_PROMISE after GOAWAY"));
+        }
+        if !self.remote_settings.enable_push {
+            return Err(H2Error::stream(
+                stream_id,
+                ErrorCode::RefusedStream,
+                "peer disabled server push",
+            ));
+        }
+        if stream_id == 0 || stream_id.is_multiple_of(2) {
+            return Err(H2Error::protocol(
+                "PUSH_PROMISE requires a client-initiated associated stream",
+            ));
+        }
+        if let Err(why) = validate_h2_pseudo_headers(
+            &headers, /* is_request = */ true, /* is_trailers = */ false,
+        ) {
+            return Err(H2Error::stream(stream_id, ErrorCode::ProtocolError, why));
+        }
+
+        let assoc_state = match self.streams.get(stream_id) {
+            Some(stream) => stream.state(),
+            None => {
+                return Err(H2Error::stream(
+                    stream_id,
+                    ErrorCode::StreamClosed,
+                    "PUSH_PROMISE on unknown associated stream",
+                ));
+            }
+        };
+        if !matches!(
+            assoc_state,
+            StreamState::Open | StreamState::HalfClosedRemote
+        ) {
+            let code = if assoc_state.is_closed() {
+                ErrorCode::StreamClosed
+            } else {
+                ErrorCode::ProtocolError
+            };
+            return Err(H2Error::stream(
+                stream_id,
+                code,
+                "PUSH_PROMISE on stream not in open or half-closed (remote) state",
+            ));
+        }
+
+        let promised_stream_id = self.streams.reserve_local_stream()?;
+        self.pending_ops.push_back(PendingOp::PushPromise {
+            stream_id,
+            promised_stream_id,
+            headers,
+        });
+
+        Ok(promised_stream_id)
     }
 
     /// Reset a stream.
@@ -1591,6 +1663,59 @@ impl Connection {
                     )));
                     break;
                 }
+                PendingOp::PushPromise {
+                    stream_id,
+                    promised_stream_id,
+                    headers,
+                } => {
+                    if !self.stream_can_emit_queued_frames(stream_id)
+                        || !self.stream_can_emit_queued_frames(promised_stream_id)
+                    {
+                        continue;
+                    }
+
+                    let mut encoded = BytesMut::new();
+                    self.hpack_encoder.encode(&headers, &mut encoded);
+                    let encoded = encoded.freeze();
+
+                    let max_frame_size = self.remote_settings.max_frame_size as usize;
+                    debug_assert!(max_frame_size > 4);
+                    let first_chunk_limit = max_frame_size - 4;
+
+                    if encoded.len() <= first_chunk_limit {
+                        returned_frame = Some(Frame::PushPromise(PushPromiseFrame {
+                            stream_id,
+                            promised_stream_id,
+                            header_block: encoded,
+                            end_headers: true,
+                        }));
+                        break;
+                    }
+
+                    let first_chunk = encoded.slice(..first_chunk_limit);
+                    let remaining = encoded.slice(first_chunk_limit..);
+
+                    let mut offset = 0;
+                    while offset < remaining.len() {
+                        let chunk_end = (offset + max_frame_size).min(remaining.len());
+                        let chunk = remaining.slice(offset..chunk_end);
+                        let is_last = chunk_end == remaining.len();
+                        newly_queued_ops.push_back(PendingOp::Continuation {
+                            stream_id,
+                            header_block: chunk,
+                            end_headers: is_last,
+                        });
+                        offset = chunk_end;
+                    }
+
+                    returned_frame = Some(Frame::PushPromise(PushPromiseFrame {
+                        stream_id,
+                        promised_stream_id,
+                        header_block: first_chunk,
+                        end_headers: false,
+                    }));
+                    break;
+                }
                 PendingOp::Continuation {
                     stream_id,
                     header_block,
@@ -2124,6 +2249,15 @@ mod tests {
             (":path", path),
             (":authority", "example.com"),
         ])
+    }
+
+    fn test_request_header_vec(path: &str) -> Vec<Header> {
+        vec![
+            Header::new(":method", "GET"),
+            Header::new(":scheme", "https"),
+            Header::new(":path", path),
+            Header::new(":authority", "example.com"),
+        ]
     }
 
     fn test_response_headers(status: &str) -> Bytes {
@@ -2767,6 +2901,194 @@ mod tests {
             "should have at least one CONTINUATION"
         );
         assert!(last_end_headers, "last frame should have end_headers=true");
+    }
+
+    #[test]
+    fn send_push_promise_queues_frame_and_reserves_local_stream() {
+        let mut conn = Connection::server(Settings::server());
+        conn.state = ConnectionState::Open;
+
+        let request = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/index"),
+            false,
+            true,
+        ));
+        let _ = conn.process_frame(request).unwrap();
+
+        let promised_stream_id = conn
+            .send_push_promise(1, test_request_header_vec("/style.css"))
+            .unwrap();
+        assert_eq!(promised_stream_id, 2);
+        assert_eq!(
+            conn.stream(promised_stream_id).unwrap().state(),
+            StreamState::ReservedLocal
+        );
+
+        match conn.next_frame().expect("PUSH_PROMISE should be queued") {
+            Frame::PushPromise(push) => {
+                assert_eq!(push.stream_id, 1);
+                assert_eq!(push.promised_stream_id, promised_stream_id);
+                assert!(push.end_headers);
+                assert!(!push.header_block.is_empty());
+            }
+            other => panic!("expected PUSH_PROMISE frame, got {other:?}"),
+        }
+
+        conn.send_headers(
+            promised_stream_id,
+            vec![Header::new(":status", "200")],
+            true,
+        )
+        .unwrap();
+        match conn
+            .next_frame()
+            .expect("promised response HEADERS should be queued")
+        {
+            Frame::Headers(headers) => {
+                assert_eq!(headers.stream_id, promised_stream_id);
+                assert!(headers.end_stream);
+            }
+            other => panic!("expected promised response HEADERS, got {other:?}"),
+        }
+        assert_eq!(
+            conn.stream(promised_stream_id).unwrap().state(),
+            StreamState::Closed
+        );
+    }
+
+    #[test]
+    fn send_push_promise_large_headers_use_continuation_frames() {
+        let mut conn = Connection::server(Settings::server());
+        conn.state = ConnectionState::Open;
+        conn.remote_settings.max_frame_size = 50;
+
+        let request = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/index"),
+            false,
+            true,
+        ));
+        let _ = conn.process_frame(request).unwrap();
+
+        let mut push_headers = test_request_header_vec("/large-pushed-resource");
+        for i in 0..10 {
+            push_headers.push(Header::new(
+                format!("x-push-header-{i}"),
+                format!("push-value-{i}"),
+            ));
+        }
+
+        let promised_stream_id = conn.send_push_promise(1, push_headers).unwrap();
+        match conn.next_frame().expect("PUSH_PROMISE should be queued") {
+            Frame::PushPromise(push) => {
+                assert_eq!(push.stream_id, 1);
+                assert_eq!(push.promised_stream_id, promised_stream_id);
+                assert!(!push.end_headers);
+                assert_eq!(
+                    push.header_block.len(),
+                    46,
+                    "PUSH_PROMISE payload reserves four bytes for promised_stream_id"
+                );
+            }
+            other => panic!("expected PUSH_PROMISE frame, got {other:?}"),
+        }
+
+        let mut continuation_count = 0;
+        let mut last_end_headers = false;
+        while let Some(frame) = conn.next_frame() {
+            match frame {
+                Frame::Continuation(c) => {
+                    assert_eq!(c.stream_id, 1);
+                    continuation_count += 1;
+                    last_end_headers = c.end_headers;
+                    if c.end_headers {
+                        break;
+                    }
+                }
+                other => panic!("expected CONTINUATION frame, got {other:?}"),
+            }
+        }
+
+        assert!(
+            continuation_count >= 1,
+            "large PUSH_PROMISE should emit CONTINUATION"
+        );
+        assert!(last_end_headers, "last continuation must end headers");
+    }
+
+    #[test]
+    fn send_push_promise_rejects_peer_disabled_push_without_reservation() {
+        let mut conn = Connection::server(Settings::server());
+        conn.state = ConnectionState::Open;
+        conn.remote_settings.enable_push = false;
+
+        let request = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/index"),
+            false,
+            true,
+        ));
+        let _ = conn.process_frame(request).unwrap();
+
+        let err = conn
+            .send_push_promise(1, test_request_header_vec("/style.css"))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::RefusedStream);
+        assert_eq!(err.stream_id, Some(1));
+        assert!(
+            conn.stream(2).is_none(),
+            "disabled push must not reserve a promised stream"
+        );
+    }
+
+    #[test]
+    fn send_push_promise_rejects_after_goaway_without_reservation() {
+        let mut conn = Connection::server(Settings::server());
+        conn.state = ConnectionState::Open;
+
+        let request = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/index"),
+            false,
+            true,
+        ));
+        let _ = conn.process_frame(request).unwrap();
+        conn.begin_graceful_shutdown(Bytes::new());
+
+        let err = conn
+            .send_push_promise(1, test_request_header_vec("/style.css"))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(
+            conn.stream(2).is_none(),
+            "GOAWAY rejection must not reserve a promised stream"
+        );
+    }
+
+    #[test]
+    fn send_push_promise_enforces_peer_max_concurrent_streams() {
+        let mut conn = Connection::server(Settings::server());
+        conn.state = ConnectionState::Open;
+        conn.streams.set_max_concurrent_streams(1);
+
+        let request = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/index"),
+            false,
+            true,
+        ));
+        let _ = conn.process_frame(request).unwrap();
+
+        let err = conn
+            .send_push_promise(1, test_request_header_vec("/style.css"))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(err.message.contains("max concurrent streams exceeded"));
+        assert!(
+            conn.stream(2).is_none(),
+            "max-concurrent rejection must not reserve a promised stream"
+        );
     }
 
     #[test]

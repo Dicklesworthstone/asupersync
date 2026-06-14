@@ -279,6 +279,18 @@ impl Stream {
         stream
     }
 
+    /// Create a new reserved (local) stream.
+    #[must_use]
+    pub fn new_reserved_local(
+        id: u32,
+        initial_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let mut stream = Self::new(id, initial_window_size, max_header_list_size);
+        stream.state = StreamState::ReservedLocal;
+        stream
+    }
+
     /// Compute maximum accumulated header fragment size for a given limit.
     pub(crate) fn max_header_fragment_size_for(max_header_list_size: u32) -> usize {
         let max_list_size = usize::try_from(max_header_list_size).unwrap_or(usize::MAX);
@@ -1214,6 +1226,21 @@ impl StreamStore {
                 "reserved stream missing after insert",
             )
         })
+    }
+
+    /// Reserve a locally-initiated stream (e.g., outbound PUSH_PROMISE).
+    pub fn reserve_local_stream(&mut self) -> Result<u32, H2Error> {
+        let id = self.allocate_stream_id()?;
+        let initial_window_size = self.initial_window_size;
+        let max_header_list_size = self.max_header_list_size;
+        let stream = self.get_mut(id).ok_or_else(|| {
+            H2Error::connection(
+                ErrorCode::InternalError,
+                "allocated stream missing from store",
+            )
+        })?;
+        *stream = Stream::new_reserved_local(id, initial_window_size, max_header_list_size);
+        Ok(id)
     }
 
     /// Allocate a new stream ID.
