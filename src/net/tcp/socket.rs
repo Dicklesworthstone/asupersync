@@ -1,4 +1,8 @@
 //! TCP socket configuration.
+//!
+//! Socket options are opt-in per handle: unset options defer to operating-system
+//! defaults, while explicit keepalive `None` disables probes without relying on
+//! ambient process-wide state.
 
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::{KeepaliveConfig, TcpKeepaliveConfig, TcpStream};
@@ -439,6 +443,64 @@ mod tests {
         crate::assert_with_log!(accepted, "accepted connection", true, accepted);
         handle.join().expect("join accept thread");
         crate::test_complete!("test_connect_applies_nodelay_and_keepalive_options");
+    }
+
+    #[test]
+    fn test_connect_applies_nodelay_and_keepalive_options_ipv6_when_available() {
+        init_test("test_connect_applies_nodelay_and_keepalive_options_ipv6_when_available");
+        let listener = match net::TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, 0))) {
+            Ok(listener) => listener,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::AddrNotAvailable | io::ErrorKind::Unsupported
+                ) =>
+            {
+                crate::test_complete!(
+                    "test_connect_applies_nodelay_and_keepalive_options_ipv6_when_available"
+                );
+                return;
+            }
+            Err(err) => panic!("bind IPv6 listener: {err}"),
+        };
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept().expect("accept");
+            let _ = tx.send(());
+        });
+
+        futures_lite::future::block_on(async {
+            let socket = TcpSocket::new_v6().expect("new_v6");
+            socket.set_nodelay(true).expect("set nodelay");
+            socket
+                .set_keepalive(Some(Duration::from_secs(30)))
+                .expect("set keepalive");
+
+            let stream = socket.connect(addr).await.expect("connect");
+            let std_stream = stream.try_as_std().expect("std tcp stream");
+            crate::assert_with_log!(
+                std_stream.nodelay().expect("read nodelay"),
+                "connected IPv6 stream nodelay",
+                true,
+                std_stream.nodelay().expect("read nodelay")
+            );
+
+            let sock = socket2::SockRef::from(std_stream);
+            crate::assert_with_log!(
+                sock.keepalive().expect("read keepalive"),
+                "connected IPv6 stream keepalive",
+                true,
+                sock.keepalive().expect("read keepalive")
+            );
+        });
+
+        let accepted = rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        crate::assert_with_log!(accepted, "accepted IPv6 connection", true, accepted);
+        handle.join().expect("join accept thread");
+        crate::test_complete!(
+            "test_connect_applies_nodelay_and_keepalive_options_ipv6_when_available"
+        );
     }
 
     #[cfg(all(not(target_arch = "wasm32"), target_os = "linux"))]
