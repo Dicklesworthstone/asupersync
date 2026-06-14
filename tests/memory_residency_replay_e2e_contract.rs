@@ -388,17 +388,17 @@ fn replay_scenarios_match_policy_and_accounting_outputs() {
 
         assert_eq!(
             decision.selected_tier.as_str(),
-            expected["policy_tier"].as_str(),
+            string_field(expected, "policy_tier"),
             "{scenario_id}: policy tier drift"
         );
         assert_eq!(
             snapshot.status.as_str(),
-            expected["snapshot_status"].as_str(),
+            string_field(expected, "snapshot_status"),
             "{scenario_id}: snapshot status drift"
         );
         assert_eq!(
             decision.live_task_action.as_str(),
-            expected["live_task_action"].as_str(),
+            string_field(expected, "live_task_action"),
             "{scenario_id}: live-task action drift"
         );
         assert_eq!(snapshot.selected_tier, decision.selected_tier);
