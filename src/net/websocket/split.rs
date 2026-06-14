@@ -44,6 +44,7 @@ use crate::util::EntropySource;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::io;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -381,6 +382,54 @@ pub struct WebSocketWrite<IO> {
     shared: Arc<Mutex<WebSocketShared<IO>>>,
 }
 
+/// Type marker for a split WebSocket write half that can still send data.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WebSocketWriteOpen;
+
+/// Type marker for a split WebSocket write half after local close initiation.
+///
+/// This state intentionally has no data-send methods. Code that initiates a
+/// close through an open [`TypedWebSocketWrite`] receives this type back, so a
+/// later text/binary send is rejected by the compiler instead of by the dynamic
+/// `connection is closing` guard.
+///
+/// ```compile_fail
+/// # async fn no_data_after_close<IO>(
+/// #     write: asupersync::net::websocket::WebSocketWrite<IO>,
+/// #     cx: &asupersync::cx::Cx,
+/// # ) -> Result<(), asupersync::net::websocket::WsError>
+/// # where
+/// #     IO: asupersync::io::AsyncRead + asupersync::io::AsyncWrite + Unpin,
+/// # {
+/// use asupersync::net::websocket::CloseReason;
+///
+/// let open = write.into_typed_open();
+/// let mut closing = open.close(cx, CloseReason::normal()).await?;
+/// closing.send_text(cx, "late payload").await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WebSocketWriteCloseSent;
+
+/// Opt-in typestate wrapper for the split WebSocket write half.
+///
+/// The dynamic [`WebSocketWrite`] API remains available for protocol
+/// dispatchers that must handle arbitrary state. This wrapper narrows the
+/// common local lifecycle at compile time: data-send methods exist only for
+/// [`WebSocketWriteOpen`], while local close initiation consumes that state and
+/// returns [`WebSocketWriteCloseSent`].
+pub struct TypedWebSocketWrite<IO, State> {
+    write: WebSocketWrite<IO>,
+    _state: PhantomData<fn() -> State>,
+}
+
+/// Split write half that is statically known to be open for local data sends.
+pub type OpenWebSocketWrite<IO> = TypedWebSocketWrite<IO, WebSocketWriteOpen>;
+
+/// Split write half after local close initiation.
+pub type CloseSentWebSocketWrite<IO> = TypedWebSocketWrite<IO, WebSocketWriteCloseSent>;
+
 /// Error returned when attempting to reunite mismatched halves.
 pub struct ReuniteError<IO> {
     /// The read half that couldn't be reunited.
@@ -704,6 +753,20 @@ impl<IO> WebSocketWrite<IO>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Convert this dynamic write half into the opt-in typestate API.
+    ///
+    /// Call this at the point where the caller knows it owns an open write
+    /// lifecycle. Existing runtime close checks are retained underneath, so
+    /// this is a compile-time narrowing layer rather than a replacement for
+    /// protocol validation.
+    #[must_use]
+    pub fn into_typed_open(self) -> OpenWebSocketWrite<IO> {
+        TypedWebSocketWrite {
+            write: self,
+            _state: PhantomData,
+        }
+    }
+
     /// Send a message.
     ///
     /// # Cancel-Safety
@@ -842,6 +905,80 @@ where
     async fn send_frame_with_cx(&self, op_cx: Option<&Cx>, frame: &Frame) -> Result<(), WsError> {
         let entropy = { Arc::clone(&self.shared.lock().entropy) };
         self.send_frame_with_entropy_impl(op_cx, frame, entropy.as_ref())
+            .await
+    }
+}
+
+impl<IO, State> TypedWebSocketWrite<IO, State>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Return to the dynamic split write API.
+    #[must_use]
+    pub fn into_dynamic(self) -> WebSocketWrite<IO> {
+        self.write
+    }
+
+    /// Check if the close handshake is complete.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.write.is_closed()
+    }
+
+    /// Get the underlying dynamic close-handshake state.
+    #[must_use]
+    pub fn close_state(&self) -> CloseState {
+        self.write.close_state()
+    }
+}
+
+impl<IO> TypedWebSocketWrite<IO, WebSocketWriteOpen>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Send a text message while the local write side is statically open.
+    pub async fn send_text(&mut self, cx: &Cx, text: impl Into<String>) -> Result<(), WsError> {
+        self.write.send(cx, Message::Text(text.into())).await
+    }
+
+    /// Send a binary message while the local write side is statically open.
+    pub async fn send_binary(&mut self, cx: &Cx, data: impl Into<Bytes>) -> Result<(), WsError> {
+        self.write.send(cx, Message::Binary(data.into())).await
+    }
+
+    /// Send a ping frame while the local write side is statically open.
+    pub async fn ping(&mut self, payload: impl Into<Bytes>) -> Result<(), WsError> {
+        self.write.ping(payload).await
+    }
+
+    /// Initiate the close handshake and consume the open write state.
+    pub async fn close(
+        self,
+        cx: &Cx,
+        reason: CloseReason,
+    ) -> Result<CloseSentWebSocketWrite<IO>, WsError> {
+        self.write.initiate_close_with_cx(Some(cx), reason).await?;
+        Ok(TypedWebSocketWrite {
+            write: self.write,
+            _state: PhantomData,
+        })
+    }
+
+    /// Check if the dynamic close handshake still reports open.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.write.is_open()
+    }
+}
+
+impl<IO> TypedWebSocketWrite<IO, WebSocketWriteCloseSent>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    /// Flush a previously initiated close frame without reopening data sends.
+    pub async fn flush_close(&mut self, cx: &Cx) -> Result<(), WsError> {
+        self.write
+            .initiate_close_with_cx(Some(cx), CloseReason::normal())
             .await
     }
 }
@@ -1473,6 +1610,44 @@ mod tests {
                 matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::NotConnected),
                 "expected NotConnected after close initiation, got {err:?}"
             );
+        });
+    }
+
+    #[test]
+    fn typed_write_close_consumes_open_state() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, write) = ws.split();
+            let cx = Cx::for_testing();
+
+            let mut open = write.into_typed_open();
+            assert!(open.is_open(), "typed write should start in open state");
+
+            open.send_text(&cx, "typed hello")
+                .await
+                .expect("typed open write must send data");
+
+            let mut closing = open
+                .close(&cx, CloseReason::going_away())
+                .await
+                .expect("typed close should initiate the dynamic close handshake");
+            assert_eq!(
+                closing.close_state(),
+                CloseState::CloseSent,
+                "typed close must leave the underlying handshake in CloseSent"
+            );
+
+            closing
+                .flush_close(&cx)
+                .await
+                .expect("typed CloseSent retry should flush without new data methods");
+
+            let write = closing.into_dynamic();
+            assert!(
+                !write.is_open(),
+                "dynamic escape hatch must preserve close-handshake state"
+            );
+            let _ws = read.reunite(write).expect("split halves must reunite");
         });
     }
 

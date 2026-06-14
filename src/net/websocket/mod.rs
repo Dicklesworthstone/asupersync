@@ -63,4 +63,8 @@ pub use handshake::{
     WsUrl, compute_accept_key,
 };
 pub use server::{ServerWebSocket, WebSocketAcceptor, WsAcceptError};
-pub use split::{ReuniteError as WsReuniteError, WebSocketRead, WebSocketWrite};
+pub use split::{
+    CloseSentWebSocketWrite, OpenWebSocketWrite, ReuniteError as WsReuniteError,
+    TypedWebSocketWrite, WebSocketRead, WebSocketWrite, WebSocketWriteCloseSent,
+    WebSocketWriteOpen,
+};
