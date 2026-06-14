@@ -373,10 +373,7 @@ mod tests {
             seq: 1,
             target: node("a-very-long-node-identifier-that-will-not-fit"),
         });
-        assert_eq!(
-            encode_packet(&packet, 8),
-            Err(WireError::PayloadExceedsMtu)
-        );
+        assert_eq!(encode_packet(&packet, 8), Err(WireError::PayloadExceedsMtu));
     }
 
     #[test]
