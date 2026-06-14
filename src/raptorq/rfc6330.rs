@@ -476,7 +476,9 @@ pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize
     let Some(expected_p1) = next_prime_ge(p) else {
         return Vec::new();
     };
-    let valid = w > 1
+    // Match `try_tuple`'s fail-closed FEC-OTI gate: `W <= 2`
+    // would cap the LT degree to zero before tuple expansion.
+    let valid = w > 2
         && p > 0
         && p1 >= p
         && p1 == expected_p1
@@ -1120,6 +1122,28 @@ mod tests {
                 b1: 10,
             },
             "tuple_indices should reject zero PI step instead of risking a non-terminating PI-side walk",
+        );
+    }
+
+    #[test]
+    fn tuple_indices_reject_width_two_before_legacy_schedule_escape() {
+        let result = tuple_indices(
+            LtTuple {
+                d: 1,
+                a: 1,
+                b: 0,
+                d1: 2,
+                a1: 1,
+                b1: 0,
+            },
+            2,
+            2,
+            2,
+        );
+
+        assert!(
+            result.is_empty(),
+            "tuple_indices should reject W=2 to match try_tuple's fail-closed RFC tuple gate"
         );
     }
 
