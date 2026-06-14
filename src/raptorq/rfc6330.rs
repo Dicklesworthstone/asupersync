@@ -1801,14 +1801,44 @@ mod tests {
         );
     }
 
-    fn source_imports_legacy_tuple(source: &str) -> bool {
+    fn source_references_legacy_tuple(source: &str) -> bool {
+        fn is_ident_byte(byte: u8) -> bool {
+            byte == b'_' || byte.is_ascii_alphanumeric()
+        }
+
+        fn calls_unqualified_legacy_tuple(source: &str) -> bool {
+            let bytes = source.as_bytes();
+            let mut start = 0usize;
+            while let Some(offset) = source[start..].find("tuple") {
+                let idx = start + offset;
+                let prev = idx.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+                let mut next = idx + "tuple".len();
+                while bytes.get(next).is_some_and(u8::is_ascii_whitespace) {
+                    next += 1;
+                }
+                if bytes.get(next) == Some(&b'(')
+                    && !prev.is_some_and(|byte| is_ident_byte(byte) || byte == b'.' || byte == b':')
+                {
+                    return true;
+                }
+                start = idx + "tuple".len();
+            }
+            false
+        }
+
+        let mut commentless = String::with_capacity(source.len());
         let mut compact = String::with_capacity(source.len());
         for line in source.lines() {
             let code = line.split("//").next().unwrap_or("");
+            commentless.push_str(code);
+            commentless.push('\n');
             compact.extend(code.chars().filter(|ch| !ch.is_whitespace()));
         }
 
         if compact.contains("rfc6330::tuple") {
+            return true;
+        }
+        if compact.contains("rfc6330::*") {
             return true;
         }
 
@@ -1818,13 +1848,41 @@ mod tests {
             let Some(end) = imports.find('}') else {
                 break;
             };
-            if imports[..end].split(',').any(|name| name == "tuple") {
+            if imports[..end]
+                .split(',')
+                .any(|name| name == "*" || name == "tuple" || name.starts_with("tupleas"))
+            {
                 return true;
             }
             rest = &imports[end + 1..];
         }
 
-        false
+        calls_unqualified_legacy_tuple(&commentless)
+    }
+
+    #[test]
+    fn legacy_tuple_source_guard_detects_import_alias_and_direct_calls() {
+        assert!(source_references_legacy_tuple(
+            "use crate::raptorq::rfc6330::{try_tuple, tuple};"
+        ));
+        assert!(source_references_legacy_tuple(
+            "use crate::raptorq::rfc6330::{tuple as legacy_tuple};"
+        ));
+        assert!(source_references_legacy_tuple(
+            "use crate::raptorq::rfc6330::*;"
+        ));
+        assert!(source_references_legacy_tuple(
+            "let legacy = crate::raptorq::rfc6330::tuple(1, 3, 1, 2, 0);"
+        ));
+        assert!(source_references_legacy_tuple(
+            "let legacy = tuple(1, 3, 1, 2, 0);"
+        ));
+        assert!(source_references_legacy_tuple(
+            "let legacy = tuple (1, 3, 1, 2, 0);"
+        ));
+        assert!(!source_references_legacy_tuple(
+            "let live = try_tuple(1, 3, 1, 2, 0);"
+        ));
     }
 
     /// bd-10hic: keep the legacy sentinel tuple helper quarantined to this
@@ -1848,7 +1906,7 @@ mod tests {
 
         for (path, source) in checked_sources {
             assert!(
-                !source_imports_legacy_tuple(source),
+                !source_references_legacy_tuple(source),
                 "{path} must use try_tuple or repair_indices_for_esi instead of legacy tuple()"
             );
         }
