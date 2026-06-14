@@ -51,11 +51,14 @@ accounted for. That avoids spending budget on permutations that differ only by
 commuting independent events.
 
 The CLI uses a logical minimizer clock for scenario YAML minimization, stable
-index sorting, and deterministic JSON field construction. The same input and
-budget must therefore produce identical minimized indices, reduction ratio, and
-budget-exhaustion flag. Budget exhaustion is fail-closed: the command reports
-the best verified still-failing subset it has found and marks the result
-exhausted instead of claiming a fully minimal repro.
+index sorting, and deterministic JSON field construction. The `--timeout N`
+flag is intentionally a virtual scheduler-step cap (`N` steps) applied to each
+candidate rerun, not a wall-clock timer; if the source scenario already has a
+smaller `lab.max_steps`, the smaller cap wins. The same input and budget must
+therefore produce identical minimized indices, reduction ratio,
+per-replay-step-cap field, and budget-exhaustion flag. Budget exhaustion is
+fail-closed: the command reports the best verified still-failing subset it has
+found and marks the result exhausted instead of claiming a fully minimal repro.
 
 ### Incident Replay Package / Crashpack-Family Minimization
 
@@ -76,9 +79,11 @@ with a built-in stable oracle:
 
 The `--max-replays` flag maps to the incident minimizer's shrink-step budget
 for this input kind; `0` means unbounded over the finite source and feature-flag
-sets. A package that cannot satisfy the crashpack-preservation oracle emits a
-typed blocked/inconclusive outcome and exits non-zero rather than pretending it
-found a repro.
+sets. The `--timeout N` flag is preserved in the stable report as the intended
+per-rerun scheduler-step cap so downstream replay tooling can apply the same
+deterministic budget when it executes the emitted repro. A package that cannot
+satisfy the crashpack-preservation oracle emits a typed blocked/inconclusive
+outcome and exits non-zero rather than pretending it found a repro.
 
 Package minimization uses a stable JSON report projection:
 `schema_version`, `input_kind=incident_replay_package_json`,

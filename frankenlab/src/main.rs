@@ -112,6 +112,10 @@ struct MinimizeArgs {
     /// Maximum scenario reruns or incident shrink steps; 0 means unlimited
     #[arg(long, default_value_t = 128)]
     max_replays: usize,
+
+    /// Deterministic per-rerun scheduler-step cap for scenario minimization
+    #[arg(long = "timeout", value_name = "STEPS")]
+    timeout_steps: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -195,6 +199,17 @@ fn scenario_with_fault_indices(scenario: &Scenario, fault_indices: &[usize]) -> 
         .filter_map(|&index| scenario.faults.get(index).cloned())
         .collect();
     reduced
+}
+
+fn apply_per_replay_step_cap(scenario: &mut Scenario, per_replay_step_cap: Option<u64>) {
+    if let Some(cap) = per_replay_step_cap {
+        scenario.lab.max_steps = Some(
+            scenario
+                .lab
+                .max_steps
+                .map_or(cap, |existing| existing.min(cap)),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +393,7 @@ struct MinimizeScenarioReport {
     minimized_surface: &'static str,
     scenario: String,
     scenario_id: String,
+    per_replay_step_cap: Option<u64>,
     outcome: FaultMinimizeOutcome,
     minimized_scenario: Scenario,
 }
@@ -395,6 +411,7 @@ struct MinimizeIncidentReplayPackageReport {
     minimized_surface: &'static str,
     package: String,
     package_id: String,
+    per_replay_step_cap: Option<u64>,
     oracle: IncidentReplayOracle,
     config: IncidentReplayMinimizationConfig,
     verification: IncidentReplayPackageVerification,
@@ -524,10 +541,12 @@ fn minimize_scenario_report(
     scenario_path: &Path,
     scenario: &Scenario,
     max_replays: usize,
+    per_replay_step_cap: Option<u64>,
     mut fails_with_scenario: impl FnMut(&Scenario) -> bool,
 ) -> Result<MinimizeScenarioReport, String> {
     let outcome = minimize_fault_indices(scenario.faults.len(), max_replays, |indices| {
-        let reduced = scenario_with_fault_indices(scenario, indices);
+        let mut reduced = scenario_with_fault_indices(scenario, indices);
+        apply_per_replay_step_cap(&mut reduced, per_replay_step_cap);
         fails_with_scenario(&reduced)
     })?;
 
@@ -535,8 +554,9 @@ fn minimize_scenario_report(
         return Err("minimized scenario did not reproduce the original failure".into());
     }
 
-    let minimized_scenario =
+    let mut minimized_scenario =
         scenario_with_fault_indices(scenario, &outcome.minimized_fault_indices);
+    apply_per_replay_step_cap(&mut minimized_scenario, per_replay_step_cap);
 
     Ok(MinimizeScenarioReport {
         schema_version: 1,
@@ -544,6 +564,7 @@ fn minimize_scenario_report(
         minimized_surface: "faults",
         scenario: scenario_path.display().to_string(),
         scenario_id: scenario.id.clone(),
+        per_replay_step_cap,
         outcome,
         minimized_scenario,
     })
@@ -578,6 +599,7 @@ fn minimize_incident_replay_package_report(
     package_path: &Path,
     package: &IncidentReplayPackage,
     max_replays: usize,
+    per_replay_step_cap: Option<u64>,
 ) -> MinimizeIncidentReplayPackageReport {
     let oracle = crashpack_replay_oracle(package);
     let config = IncidentReplayMinimizationConfig {
@@ -593,6 +615,7 @@ fn minimize_incident_replay_package_report(
         minimized_surface: "replay_package_sources",
         package: package_path.display().to_string(),
         package_id: package.package_id.clone(),
+        per_replay_step_cap,
         oracle,
         config,
         verification,
@@ -724,6 +747,10 @@ fn format_incident_minimize_result(report: &MinimizeIncidentReplayPackageReport)
         ),
     ];
 
+    if let Some(cap) = report.per_replay_step_cap {
+        lines.push(format!("Per-rerun step cap: {cap}"));
+    }
+
     if let Some(repro) = &report.outcome.repro {
         lines.push(format!(
             "Replay units: {} -> {}",
@@ -764,10 +791,13 @@ fn cmd_minimize_scenario(
     json: bool,
     scenario: &Scenario,
 ) -> Result<(), String> {
-    let report =
-        minimize_scenario_report(&args.scenario, scenario, args.max_replays, |candidate| {
-            ScenarioRunner::run(candidate).is_ok_and(|result| !result.passed())
-        })?;
+    let report = minimize_scenario_report(
+        &args.scenario,
+        scenario,
+        args.max_replays,
+        args.timeout_steps,
+        |candidate| ScenarioRunner::run(candidate).is_ok_and(|result| !result.passed()),
+    )?;
 
     if json {
         println!("{}", pretty_json_or(&report, "{}"));
@@ -795,6 +825,9 @@ fn cmd_minimize_scenario(
                 ""
             }
         );
+        if let Some(cap) = report.per_replay_step_cap {
+            println!("Per-rerun step cap: {cap}");
+        }
         println!("Verified still failing: yes");
     }
 
@@ -806,7 +839,12 @@ fn cmd_minimize_incident_replay_package(
     json: bool,
     package: &IncidentReplayPackage,
 ) -> Result<(), String> {
-    let report = minimize_incident_replay_package_report(&args.scenario, package, args.max_replays);
+    let report = minimize_incident_replay_package_report(
+        &args.scenario,
+        package,
+        args.max_replays,
+        args.timeout_steps,
+    );
 
     if json {
         println!("{}", pretty_json_or(&report, "{}"));
@@ -1099,26 +1137,32 @@ mod tests {
             ..Scenario::default()
         };
 
-        let report =
-            minimize_scenario_report(Path::new("synthetic.yaml"), &scenario, 0, |candidate| {
-                candidate.faults.iter().any(|fault| fault.at_ms == 20)
-            })
-            .expect("required synthetic fault should keep scenario failing");
+        let report = minimize_scenario_report(
+            Path::new("synthetic.yaml"),
+            &scenario,
+            0,
+            Some(77),
+            |candidate| candidate.faults.iter().any(|fault| fault.at_ms == 20),
+        )
+        .expect("required synthetic fault should keep scenario failing");
 
         assert_eq!(report.schema_version, 1);
         assert_eq!(report.input_kind, "scenario_yaml");
         assert_eq!(report.minimized_surface, "faults");
         assert_eq!(report.scenario, "synthetic.yaml");
         assert_eq!(report.scenario_id, "synthetic-minimize-schema");
+        assert_eq!(report.per_replay_step_cap, Some(77));
         assert_eq!(report.outcome.minimized_fault_indices, vec![1]);
         assert_eq!(report.minimized_scenario.faults.len(), 1);
         assert_eq!(report.minimized_scenario.faults[0].at_ms, 20);
+        assert_eq!(report.minimized_scenario.lab.max_steps, Some(77));
 
         let json = serde_json::to_value(&report).expect("report serializes");
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["input_kind"], "scenario_yaml");
         assert_eq!(json["minimized_surface"], "faults");
         assert_eq!(json["scenario_id"], "synthetic-minimize-schema");
+        assert_eq!(json["per_replay_step_cap"], 77);
         assert_eq!(
             json["outcome"]["minimized_fault_indices"],
             serde_json::json!([1])
@@ -1218,6 +1262,7 @@ mod tests {
             Path::new("synthetic-incident-package.json"),
             &package,
             0,
+            None,
         );
         let repro = report.outcome.repro.expect("repro emitted");
 
@@ -1241,11 +1286,13 @@ mod tests {
             Path::new("synthetic-incident-package.json"),
             &package,
             8,
+            Some(55),
         );
         let second = minimize_incident_replay_package_report(
             Path::new("synthetic-incident-package.json"),
             &package,
             8,
+            Some(55),
         );
 
         let first_json = serde_json::to_string_pretty(&first).expect("report serializes");
@@ -1259,6 +1306,7 @@ mod tests {
         assert_eq!(value["minimized_surface"], "replay_package_sources");
         assert_eq!(value["package"], "synthetic-incident-package.json");
         assert_eq!(value["package_id"], "incident-replay-v1:synthetic");
+        assert_eq!(value["per_replay_step_cap"], 55);
         assert_eq!(value["oracle"]["kind"], "panic");
         assert_eq!(
             value["oracle"]["expected_signal"],
@@ -1290,6 +1338,7 @@ mod tests {
             Path::new("synthetic-incident-package.json"),
             &package,
             1,
+            None,
         );
         let repro = report.outcome.repro.expect("budgeted repro emitted");
 
@@ -1333,6 +1382,7 @@ mod tests {
             Path::new("synthetic-incident-package.json"),
             &package,
             8,
+            None,
         );
         let output = format_incident_minimize_result(&report);
 
@@ -1404,6 +1454,7 @@ mod tests {
             minimized_surface: "replay_package_sources",
             package: "synthetic-incident-package.json".to_string(),
             package_id: package.package_id,
+            per_replay_step_cap: None,
             oracle,
             config,
             verification,
