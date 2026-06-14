@@ -151,7 +151,7 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
@@ -183,7 +183,97 @@ const IDLE_IO_POLL_MAX_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(any(test, feature = "test-internals"))]
 const DEFAULT_SCHEDULER_EVIDENCE_MAX_INFLIGHT_MULTIPLIER: usize = 4;
 
-type LocalReadyQueue = Mutex<VecDeque<TaskId>>;
+/// Per-worker non-stealable ready queue with O(1) lazy-tombstone cancellation.
+///
+/// br-asupersync-ayg4ot: cancel-injection previously did `iter().position()`
+/// (O(n) scan) + `VecDeque::remove(pos)` (O(n) shift) per cancel, so mass
+/// cancellation (region close, FailFast, shutdown) of `K` tasks in a queue of
+/// depth `n` was O(K·n) ≈ O(n²). Instead, [`Self::tombstone`] marks a cancelled
+/// task O(1) (the task is authoritatively re-queued into the cancel lane by the
+/// caller's `move_to_cancel_lane`), and [`Self::pop_front`] drops the stale
+/// entry O(1)-amortized when it surfaces. The `present` set bounds the tombstone
+/// set to tasks actually in `ready`, so it never leaks, and dedups pushes.
+#[derive(Debug)]
+pub(crate) struct LocalReadyQueueInner {
+    /// Physical FIFO order of pending local task ids (may hold tombstoned ids
+    /// until they surface in `pop_front`).
+    ready: VecDeque<TaskId>,
+    /// Membership index mirroring distinct ids in `ready` (O(1) presence test;
+    /// keeps `ready` duplicate-free and bounds `tombstones`).
+    present: HashSet<TaskId>,
+    /// Cancelled ids still physically present in `ready`. A subset of `present`.
+    tombstones: HashSet<TaskId>,
+}
+
+impl LocalReadyQueueInner {
+    fn new(ready: VecDeque<TaskId>) -> Self {
+        let present: HashSet<TaskId> = ready.iter().copied().collect();
+        Self {
+            ready,
+            present,
+            tombstones: HashSet::new(),
+        }
+    }
+
+    /// Enqueue a local task. Duplicate-safe: a task already present is not
+    /// re-pushed, but a prior tombstone on it is cleared (it is live again).
+    fn push_back(&mut self, task: TaskId) {
+        if self.present.insert(task) {
+            self.ready.push_back(task);
+        } else {
+            // Already queued (a stale, possibly-tombstoned entry exists): revive it.
+            self.tombstones.remove(&task);
+        }
+    }
+
+    /// Dequeue the next *live* local task, dropping any tombstoned (cancelled)
+    /// stale entries it skips over.
+    fn pop_front(&mut self) -> Option<TaskId> {
+        while let Some(task) = self.ready.pop_front() {
+            self.present.remove(&task);
+            if self.tombstones.remove(&task) {
+                // Cancelled: already authoritative in the cancel lane; drop stale entry.
+                continue;
+            }
+            return Some(task);
+        }
+        None
+    }
+
+    /// O(1) cancel: mark a queued task so `pop_front` drops its stale entry.
+    /// Only marks tasks actually present, so the tombstone set never leaks.
+    fn tombstone(&mut self, task: TaskId) {
+        if self.present.contains(&task) {
+            self.tombstones.insert(task);
+        }
+    }
+
+    /// Number of *live* (non-tombstoned) queued tasks.
+    fn len(&self) -> usize {
+        self.present.len().saturating_sub(self.tombstones.len())
+    }
+
+    /// True when there are no *live* tasks (all queued ids are tombstoned).
+    fn is_empty(&self) -> bool {
+        self.present.len() == self.tombstones.len()
+    }
+
+    /// Snapshot of the *live* queued task ids in FIFO order (for diagnostics).
+    fn snapshot(&self) -> Vec<TaskId> {
+        self.ready
+            .iter()
+            .copied()
+            .filter(|t| !self.tombstones.contains(t))
+            .collect()
+    }
+}
+
+type LocalReadyQueue = Mutex<LocalReadyQueueInner>;
+
+/// Construct a [`LocalReadyQueue`] seeded with `initial` pending task ids.
+fn local_ready_queue(initial: VecDeque<TaskId>) -> LocalReadyQueue {
+    Mutex::new(LocalReadyQueueInner::new(initial))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IoPhaseOutcome {
@@ -1223,11 +1313,10 @@ fn move_local_ready_task_to_cancel_lane(
     priority: u8,
 ) {
     let mut local_guard = local.lock();
-    let mut local_ready_guard = local_ready.lock();
-    if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
-        local_ready_guard.remove(pos);
-    }
-    drop(local_ready_guard);
+    // br-asupersync-ayg4ot: O(1) tombstone instead of O(n) position-scan + O(n)
+    // VecDeque::remove. The task is authoritatively re-queued into the cancel
+    // lane below; pop_front drops its stale local_ready entry when it surfaces.
+    local_ready.lock().tombstone(task);
     local_guard.move_to_cancel_lane(task, priority);
 }
 
@@ -1243,11 +1332,8 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
         let mut local_guard = local.lock();
         CURRENT_LOCAL_READY.with(|lr_cell| {
             if let Some(queue) = lr_cell.borrow().as_ref() {
-                let mut local_ready_guard = queue.lock();
-                if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
-                    local_ready_guard.remove(pos);
-                }
-                drop(local_ready_guard);
+                // br-asupersync-ayg4ot: O(1) tombstone, not O(n) scan + remove.
+                queue.lock().tombstone(task);
             }
         });
         local_guard.move_to_cancel_lane(task, priority);
@@ -1495,7 +1581,7 @@ impl ThreeLaneScheduler {
         }
         // Create non-stealable local queues for !Send tasks
         for _ in 0..worker_count {
-            local_ready.push(Arc::new(LocalReadyQueue::new(VecDeque::with_capacity(32))));
+            local_ready.push(Arc::new(local_ready_queue(VecDeque::with_capacity(32))));
         }
 
         // Create parkers first
@@ -2178,11 +2264,8 @@ impl ThreeLaneScheduler {
                     // br-asupersync-3hazwm: Corrected lock ordering to prevent deadlock
                     let mut local_guard = local.lock();
                     if let Some(local_ready) = self.local_ready.get(worker_id) {
-                        let mut local_ready_guard = local_ready.lock();
-                        if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
-                            local_ready_guard.remove(pos);
-                        }
-                        drop(local_ready_guard);
+                        // br-asupersync-ayg4ot: O(1) tombstone, not O(n) scan + remove.
+                        local_ready.lock().tombstone(task);
                     }
                     local_guard.move_to_cancel_lane(task, priority);
                     drop(local_guard);
@@ -3877,7 +3960,7 @@ impl ThreeLaneWorker {
         // Verify local queue consistency
         {
             let local_ready_guard = self.local_ready.lock();
-            let local_ready_tasks: Vec<_> = local_ready_guard.iter().copied().collect();
+            let local_ready_tasks: Vec<_> = local_ready_guard.snapshot();
 
             let ready_snapshot = super::invariant_monitor::QueueSnapshot {
                 name: "local_ready_queue".to_string(),
@@ -8888,7 +8971,7 @@ mod tests {
     #[test]
     fn test_local_cancel_removes_from_local_ready() {
         let task_id = TaskId::new_for_test(1, 0);
-        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::from([task_id])));
+        let local_ready = Arc::new(local_ready_queue(VecDeque::from([task_id])));
         let local = Arc::new(Mutex::new(PriorityScheduler::new()));
         let wake_state = Arc::new(TaskWakeState::new());
         let cx_inner = Arc::new(RwLock::new(CxInner::new(
@@ -8934,7 +9017,7 @@ mod tests {
     #[test]
     fn local_cancel_promotion_waits_on_local_before_local_ready() {
         let task_id = TaskId::new_for_test(1, 2);
-        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::from([task_id])));
+        let local_ready = Arc::new(local_ready_queue(VecDeque::from([task_id])));
         let local = Arc::new(Mutex::new(PriorityScheduler::new()));
         let local_guard = local.lock();
         let worker_local = Arc::clone(&local);
@@ -8977,7 +9060,7 @@ mod tests {
     #[test]
     fn ordinary_local_waker_promotes_cancelled_task_out_of_local_ready() {
         let task_id = TaskId::new_for_test(1, 3);
-        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::from([task_id])));
+        let local_ready = Arc::new(local_ready_queue(VecDeque::from([task_id])));
         let local = Arc::new(Mutex::new(PriorityScheduler::new()));
         let wake_state = Arc::new(TaskWakeState::new());
         let cx_inner = Arc::new(RwLock::new(CxInner::new(
@@ -9024,7 +9107,7 @@ mod tests {
     #[test]
     fn schedule_cancel_on_current_local_removes_local_ready() {
         let task_id = TaskId::new_for_test(1, 0);
-        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::from([task_id])));
+        let local_ready = Arc::new(local_ready_queue(VecDeque::from([task_id])));
         let local = Arc::new(Mutex::new(PriorityScheduler::new()));
 
         let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&local_ready));
@@ -12480,7 +12563,7 @@ mod tests {
         let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
         let parker = Parker::new();
 
-        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::new()));
+        let local_ready = Arc::new(local_ready_queue(VecDeque::new()));
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
@@ -12522,7 +12605,7 @@ mod tests {
         let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
         let parker = Parker::new();
 
-        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::new()));
+        let local_ready = Arc::new(local_ready_queue(VecDeque::new()));
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
@@ -12871,7 +12954,7 @@ mod tests {
 
     #[test]
     fn schedule_local_task_uses_tls() {
-        let queue = Arc::new(LocalReadyQueue::new(VecDeque::new()));
+        let queue = Arc::new(local_ready_queue(VecDeque::new()));
         let _guard = ScopedLocalReady::new(Arc::clone(&queue));
 
         let task = TaskId::new_for_test(1, 1);
@@ -13145,7 +13228,7 @@ mod tests {
         };
 
         // 3. Simulate being Worker 1
-        let worker_1_ready = Arc::new(LocalReadyQueue::new(VecDeque::new()));
+        let worker_1_ready = Arc::new(local_ready_queue(VecDeque::new()));
         let _tls_guard = ScopedLocalReady::new(worker_1_ready.clone());
         let _worker_guard = ScopedWorkerId::new(1);
 
