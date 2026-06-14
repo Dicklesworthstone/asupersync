@@ -206,6 +206,12 @@ pub enum ReloadOutcome<E> {
         /// Error returned by the handler.
         error: E,
     },
+    /// Reload handling was cancelled before completion.
+    Cancelled {
+        /// Reload sequence that was cancelled, or `None` if shutdown won
+        /// before a reload request was selected.
+        sequence: Option<u64>,
+    },
 }
 
 /// Receiver for reload notifications.
@@ -275,6 +281,86 @@ impl ReloadReceiver {
                 guard.finish();
                 warn!(reload_sequence = sequence, "reload failed");
                 ReloadOutcome::Failed { sequence, error }
+            }
+        }
+    }
+
+    /// Waits for the next reload request unless shutdown is signalled first.
+    ///
+    /// Returns `Some(sequence)` when a reload request is selected and `None`
+    /// when shutdown wins the race. Both underlying waits are cancel-safe, so
+    /// dropping this future does not consume either notification.
+    pub async fn wait_or_shutdown(&mut self, shutdown: &mut ShutdownReceiver) -> Option<u64> {
+        let mut reload_wait = std::pin::pin!(self.wait());
+        let mut shutdown_wait = std::pin::pin!(shutdown.wait());
+
+        std::future::poll_fn(|cx| {
+            if let std::task::Poll::Ready(sequence) = Future::poll(reload_wait.as_mut(), cx) {
+                return std::task::Poll::Ready(Some(sequence));
+            }
+
+            if Future::poll(shutdown_wait.as_mut(), cx).is_ready() {
+                return std::task::Poll::Ready(None);
+            }
+
+            std::task::Poll::Pending
+        })
+        .await
+    }
+
+    /// Waits for one reload request and runs the handler unless shutdown wins.
+    ///
+    /// Shutdown before a reload request returns [`ReloadOutcome::Cancelled`]
+    /// with no sequence. Shutdown while a handler is running cancels that
+    /// handler future, records a structured cancellation event, and returns
+    /// [`ReloadOutcome::Cancelled`] for the selected sequence.
+    pub async fn handle_next_reload_or_shutdown<F, Fut, E>(
+        &mut self,
+        shutdown: &mut ShutdownReceiver,
+        handler: F,
+    ) -> ReloadOutcome<E>
+    where
+        F: FnOnce(u64) -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+    {
+        let Some(sequence) = self.wait_or_shutdown(shutdown).await else {
+            warn!(reload_sequence = 0_u64, "reload cancelled");
+            return ReloadOutcome::Cancelled { sequence: None };
+        };
+
+        let mut guard = ReloadAttemptGuard::new(sequence);
+        let mut handler = std::pin::pin!(handler(sequence));
+        let mut shutdown_wait = std::pin::pin!(shutdown.wait());
+
+        match std::future::poll_fn(|cx| {
+            if let std::task::Poll::Ready(result) = Future::poll(handler.as_mut(), cx) {
+                return std::task::Poll::Ready(Some(result));
+            }
+
+            if Future::poll(shutdown_wait.as_mut(), cx).is_ready() {
+                return std::task::Poll::Ready(None);
+            }
+
+            std::task::Poll::Pending
+        })
+        .await
+        {
+            Some(Ok(())) => {
+                guard.finish();
+                info!(reload_sequence = sequence, "reload completed");
+                ReloadOutcome::Completed { sequence }
+            }
+            Some(Err(error)) => {
+                guard.finish();
+                warn!(reload_sequence = sequence, "reload failed");
+                ReloadOutcome::Failed { sequence, error }
+            }
+            None => {
+                guard.finish();
+                warn!(reload_sequence = sequence, "reload cancelled");
+                ReloadOutcome::Cancelled {
+                    sequence: Some(sequence),
+                }
             }
         }
     }
@@ -873,6 +959,59 @@ mod tests {
             failed
         );
         crate::test_complete!("reload_receiver_invokes_handler_and_reports_outcome");
+    }
+
+    #[test]
+    fn reload_wait_or_shutdown_returns_none_when_shutdown_wins() {
+        init_test("reload_wait_or_shutdown_returns_none_when_shutdown_wins");
+        let reload = ReloadController::new();
+        let shutdown = ShutdownController::new();
+        let mut reload_rx = reload.subscribe();
+        let mut shutdown_rx = shutdown.subscribe();
+
+        shutdown.shutdown();
+
+        let observed = futures_lite::future::block_on(reload_rx.wait_or_shutdown(&mut shutdown_rx));
+        crate::assert_with_log!(
+            observed.is_none(),
+            "shutdown wins before reload request",
+            None::<u64>,
+            observed
+        );
+        crate::assert_with_log!(
+            reload_rx.seen_reload_count() == 0,
+            "no reload sequence consumed",
+            0,
+            reload_rx.seen_reload_count()
+        );
+        crate::test_complete!("reload_wait_or_shutdown_returns_none_when_shutdown_wins");
+    }
+
+    #[test]
+    fn reload_handler_reports_cancelled_when_shutdown_wins() {
+        init_test("reload_handler_reports_cancelled_when_shutdown_wins");
+        let reload = ReloadController::new();
+        let shutdown = ShutdownController::new();
+        let mut reload_rx = reload.subscribe();
+        let mut shutdown_rx = shutdown.subscribe();
+
+        reload.request_reload();
+        shutdown.shutdown();
+
+        let outcome = futures_lite::future::block_on(reload_rx.handle_next_reload_or_shutdown(
+            &mut shutdown_rx,
+            |sequence| {
+                crate::assert_with_log!(sequence == 1, "handler sequence", 1, sequence);
+                std::future::pending::<Result<(), &'static str>>()
+            },
+        ));
+        crate::assert_with_log!(
+            outcome == ReloadOutcome::<&'static str>::Cancelled { sequence: Some(1) },
+            "shutdown cancels pending reload handler",
+            ReloadOutcome::<&'static str>::Cancelled { sequence: Some(1) },
+            outcome
+        );
+        crate::test_complete!("reload_handler_reports_cancelled_when_shutdown_wins");
     }
 
     #[cfg(unix)]
