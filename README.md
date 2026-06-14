@@ -263,7 +263,7 @@ Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelle
 - **Finalize**: finalizers run (masked, budgeted)
 - **Complete**: outcome is `Cancelled(reason)`
 
-Primitives publish *cancellation responsiveness bounds*. Budgets are sufficient conditions for completion.
+Some primitives and proof surfaces publish explicit cancellation responsiveness bounds, such as bounded commit sections, mask-depth limits, scheduler cancel-streak fairness, static plan analysis, and lab cancellation oracles. A blanket per-primitive responsiveness-bound registry is still a design requirement, not a universal runtime guarantee today; budgets are sufficient conditions only for paths with a concrete published bound.
 
 Cancellation progress is continuously certifiable. `ProgressCertificate` tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and emits variance-adaptive concentration bounds (Freedman with Azuma as a conservative baseline). This turns "is shutdown actually converging?" into a measurable claim instead of a guess.
 

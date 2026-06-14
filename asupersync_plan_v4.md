@@ -527,6 +527,8 @@ Think of it as a two‑player game with bounded resources:
 
 Spec requirement (the real "math" promise): primitives must publish a **cancellation responsiveness bound**—at least "max polls between checkpoints" and "max masking depth." Budgets are then not vibes; they are **sufficient conditions** for the system to have a winning strategy (LaSalle/Lyapunov style arguments in §11.5 can mechanize this).
 
+Implementation status: this is not yet a blanket public/runtime registry. Today the code enforces or models bounded cancellation on specific surfaces, including bounded commit sections, mask-depth limits, scheduler fairness bounds, static plan analysis, and lab cancellation oracles. New primitive claims should cite a concrete bound and test before presenting budgets as sufficient conditions.
+
 **Theorem (Cancellation Completeness):**
 For any task with mask depth `M` and checkpoint interval `C`, if `cleanup_budget ≥ M × C × poll_cost`, then System wins (task reaches terminal state within budget under fair scheduling).
 
