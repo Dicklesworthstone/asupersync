@@ -478,6 +478,27 @@ impl DurableTraceJournal {
         decode_epoch_frames(record, &frames)
     }
 
+    /// Restore the newest still-recoverable checkpoint from the journal
+    /// directory, decoding its original bytes.
+    ///
+    /// This is the one-call entry point a trace-recover tool uses given only a
+    /// directory: it finds the highest epoch that still recovers from its
+    /// surviving stripes (see [`Self::latest_recoverable_epoch`]) and decodes it
+    /// (see [`Self::recover_epoch`]), returning `(epoch, bytes)`. `None` when no
+    /// recorded epoch still recovers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableJournalError`] for a directory/stripe read failure or a
+    /// decode failure on the selected epoch.
+    pub async fn recover_latest(&self) -> Result<Option<(u64, Vec<u8>)>, DurableJournalError> {
+        let Some(epoch) = self.latest_recoverable_epoch().await? else {
+            return Ok(None);
+        };
+        let bytes = self.recover_epoch(epoch).await?;
+        Ok(Some((epoch, bytes)))
+    }
+
     /// Whether `epoch` still fully recovers from the surviving stripe files,
     /// judged against its persisted manifest.
     ///

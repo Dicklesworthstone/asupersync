@@ -288,3 +288,54 @@ fn object_params_record_roundtrips_and_detects_corruption() {
     bytes[14] ^= 0xFF;
     assert!(ObjectParamsRecord::decode(&bytes).is_err());
 }
+
+#[test]
+fn recover_latest_returns_newest_recoverable_bytes_after_damage() {
+    // The one-call recovery entry point: given only a directory, restore the
+    // newest checkpoint that still decodes. Damaging the newest epoch falls back
+    // to the previous one, decoded byte-exact.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let ok = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 4,
+            stripe_count: 3,
+        });
+
+        let data30 = varied_payload(700);
+        journal
+            .record_epoch(20, &varied_payload(500))
+            .await
+            .expect("record 20");
+        journal.record_epoch(30, &data30).await.expect("record 30");
+
+        // Newest (30) recovers, decoded exactly.
+        let (epoch, bytes) = journal
+            .recover_latest()
+            .await
+            .expect("recover")
+            .expect("some");
+        assert_eq!(epoch, 30);
+        assert_eq!(bytes, data30);
+
+        // Wipe 2 of epoch 30's 3 stripes -> it drops below K' -> fall back to 20.
+        std::fs::remove_file(dir_path.join(stripe_file_name(30, 0))).expect("rm 30/0");
+        std::fs::remove_file(dir_path.join(stripe_file_name(30, 1))).expect("rm 30/1");
+
+        let (epoch_after, bytes_after) = journal
+            .recover_latest()
+            .await
+            .expect("recover after")
+            .expect("some");
+        epoch_after == 20 && bytes_after == varied_payload(500)
+    }));
+
+    assert!(
+        ok,
+        "recover_latest must restore the newest recoverable checkpoint and fall back on damage"
+    );
+}
