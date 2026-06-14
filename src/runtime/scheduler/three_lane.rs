@@ -206,7 +206,7 @@ pub(crate) struct LocalReadyQueueInner {
 }
 
 impl LocalReadyQueueInner {
-    fn new(ready: VecDeque<TaskId>) -> Self {
+    pub(crate) fn new(ready: VecDeque<TaskId>) -> Self {
         let present: HashSet<TaskId> = ready.iter().copied().collect();
         Self {
             ready,
@@ -228,7 +228,7 @@ impl LocalReadyQueueInner {
 
     /// Dequeue the next *live* local task, dropping any tombstoned (cancelled)
     /// stale entries it skips over.
-    fn pop_front(&mut self) -> Option<TaskId> {
+    pub(crate) fn pop_front(&mut self) -> Option<TaskId> {
         while let Some(task) = self.ready.pop_front() {
             self.present.remove(&task);
             if self.tombstones.remove(&task) {
@@ -248,6 +248,25 @@ impl LocalReadyQueueInner {
         }
     }
 
+    fn contains(&self, task: &TaskId) -> bool {
+        self.present.contains(task) && !self.tombstones.contains(task)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &TaskId> {
+        self.ready
+            .iter()
+            .filter(|task| !self.tombstones.contains(task))
+    }
+
+    #[cfg(any(test, feature = "test-internals"))]
+    fn drain(&mut self, _range: std::ops::RangeFull) -> std::vec::IntoIter<TaskId> {
+        let mut live = Vec::with_capacity(self.len());
+        while let Some(task) = self.pop_front() {
+            live.push(task);
+        }
+        live.into_iter()
+    }
+
     /// Number of *live* (non-tombstoned) queued tasks.
     fn len(&self) -> usize {
         self.present.len().saturating_sub(self.tombstones.len())
@@ -265,6 +284,27 @@ impl LocalReadyQueueInner {
             .copied()
             .filter(|t| !self.tombstones.contains(t))
             .collect()
+    }
+}
+
+impl Extend<TaskId> for LocalReadyQueueInner {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = TaskId>,
+    {
+        for task in iter {
+            self.push_back(task);
+        }
+    }
+}
+
+impl std::ops::Index<usize> for LocalReadyQueueInner {
+    type Output = TaskId;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.iter()
+            .nth(index)
+            .expect("local-ready live index out of bounds")
     }
 }
 

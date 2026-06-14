@@ -2466,7 +2466,11 @@ mod tests {
     fn cx_spawn_local_owner_worker_runs_non_send_future() {
         clear_local_spawn_lane_for_test();
         let (mut lab, parent_cx, root) = lab_with_parent_cx();
-        let local_ready = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
+        let local_ready = Arc::new(parking_lot::Mutex::new(
+            crate::runtime::scheduler::three_lane::LocalReadyQueueInner::new(
+                std::collections::VecDeque::new(),
+            ),
+        ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
         let _ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
@@ -2546,7 +2550,11 @@ mod tests {
     fn cx_spawn_local_into_closing_region_resolves_cancelled() {
         clear_local_spawn_lane_for_test();
         let (mut lab, parent_cx, root) = lab_with_parent_cx();
-        let local_ready = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
+        let local_ready = Arc::new(parking_lot::Mutex::new(
+            crate::runtime::scheduler::three_lane::LocalReadyQueueInner::new(
+                std::collections::VecDeque::new(),
+            ),
+        ));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
         let _ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
