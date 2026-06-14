@@ -1575,7 +1575,10 @@ impl CompiledSupervisor {
     /// turns the whole boot into a deterministic supervisor spawn failure.
     /// Restart semantics are specified by [`RestartPolicy`] and computed by
     /// [`CompiledSupervisor::restart_plan_for`]; wiring it into a live restart loop is layered
-    /// on top by follow-up beads (bd-1yv7a, bd-35iz1).
+    /// on top by follow-up work (asupersync-8y37kz.2; the earlier bd-1yv7a / bd-35iz1 ids are
+    /// stale and no longer tracked). Today only per-actor supervision (`src/actor.rs`) drives
+    /// live restart-on-failure — a child crash under a `CompiledSupervisor` tree is NOT restarted
+    /// at runtime (asupersync-u2vgjg).
     ///
     /// # Why this keeps `&mut RuntimeState` (br-asupersync-c6uw5y)
     ///

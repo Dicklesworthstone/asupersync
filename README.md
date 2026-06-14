@@ -1196,7 +1196,7 @@ deterministic lab runtime.
 | OTP Concept | Spork / Asupersync Interpretation |
 |------------|-----------------------------------|
 | Process | A region-owned task/actor (cannot orphan) |
-| Supervisor | A compiled, deterministic restart topology over regions |
+| Supervisor | A compiled, deterministic restart *topology* over regions — boot ordering + restart-plan computation; tree-level live restart-on-failure is pending (`asupersync-8y37kz.2`), so today live restart is per-actor (`src/actor.rs`) |
 | Link | Failure propagation rule (sibling/parent coupling; deterministic) |
 | Monitor + DOWN | Observation without coupling: deterministic notifications |
 | Registry | Names as lease obligations: reserve/commit or abort (no stale names) |
@@ -1754,7 +1754,7 @@ for the JS/TS package line while keeping the Rust browser API preview-only.
 | **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
 | **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 native core with default static-only QPACK plus opt-in dynamic field-section context; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
-| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
+| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete for live per-actor supervision (`src/actor.rs` drives restart-on-failure with backoff/intensity); the Spork `CompiledSupervisor` tree computes restart *plans* but its tree-level live restart loop is pending (`asupersync-8y37kz.2` / `asupersync-u2vgjg`) |
 | **Phase 4** | Distributed structured concurrency | ✅ Core primitives complete; production remote network adapters remain support-class scoped |
 | **Phase 5** | DPOR + formal tooling | ⚠️ Partial (DPOR landed; TLA+ export and Lean-checked core invariants exist; broader adapter/protocol/runtime refinement proof remains active and lane-specific) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |
