@@ -344,14 +344,26 @@ impl ResourceManager {
         self.peer_usage.get(peer_id).map_or(0, |u| u.pending_frames)
     }
 
-    /// Clean up peers with no outstanding resource obligations.
-    pub fn cleanup_inactive_peers(&mut self, _timeout: Duration) {
+    /// Clean up peers with no outstanding resource obligations or live admission history.
+    pub fn cleanup_inactive_peers(&mut self, timeout: Duration) {
+        let now = Instant::now();
+        let rate_window = Duration::from_secs(u64::from(self.limits.rate_limit_window));
         self.peer_usage.retain(|_, usage| {
-            // Keep peers while they still own resources that must be released.
-            usage.memory_usage > 0
+            let has_outstanding_resources = usage.memory_usage > 0
                 || usage.pending_frames > 0
                 || usage.active_sessions > 0
-                || usage.pending_requests > 0
+                || usage.pending_requests > 0;
+            let recently_active = now
+                .checked_duration_since(usage.last_activity)
+                .unwrap_or_default()
+                < timeout;
+            let has_recent_frame_history = !rate_window.is_zero()
+                && usage
+                    .frame_timestamps
+                    .iter()
+                    .any(|&ts| now.checked_duration_since(ts).unwrap_or_default() < rate_window);
+
+            has_outstanding_resources || recently_active || has_recent_frame_history
         });
     }
 
@@ -611,6 +623,40 @@ mod tests {
         manager.deallocate_memory(&peer_id, 1000);
         manager.cleanup_inactive_peers(Duration::from_secs(0));
         assert_eq!(manager.peer_count(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_respects_inactivity_timeout() {
+        let mut manager = ResourceManager::new();
+        let peer_id = PeerId::from_label("recent-peer");
+
+        assert!(manager.allocate_memory(peer_id, 1000));
+        manager.deallocate_memory(&peer_id, 1000);
+
+        manager.cleanup_inactive_peers(Duration::from_secs(300));
+        assert_eq!(manager.peer_count(), 1);
+
+        manager.cleanup_inactive_peers(Duration::from_secs(0));
+        assert_eq!(manager.peer_count(), 0);
+    }
+
+    #[test]
+    fn test_cleanup_preserves_recent_rate_limit_history() {
+        let limits = ResourceLimits {
+            max_frame_rate: 1,
+            rate_limit_window: 60,
+            ..ResourceLimits::default()
+        };
+        let mut manager = ResourceManager::with_limits(limits);
+        let peer_id = PeerId::from_label("rate-history-peer");
+
+        assert!(manager.record_frame(peer_id));
+        manager.frame_processed(&peer_id);
+        assert_eq!(manager.peer_pending_frames(&peer_id), 0);
+
+        manager.cleanup_inactive_peers(Duration::from_secs(0));
+        assert_eq!(manager.peer_count(), 1);
+        assert!(!manager.record_frame(peer_id));
     }
 
     #[test]
