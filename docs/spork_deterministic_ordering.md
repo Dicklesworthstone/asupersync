@@ -530,3 +530,5 @@ Canonical taxonomy markers:
 - `exit_delivered` => `link_ref, from, to, failure_vt, reason`
 - `task_spawn_enqueued` => `task, region`
 - `task_admitted` => `task, region`
+- `budget_installed` => `task, region, protocol, deadline_ns, poll_quota, cost_quota, priority, source`
+- `budget_consumed` => `task, region, protocol, deadline_ns, elapsed_ns, outcome`

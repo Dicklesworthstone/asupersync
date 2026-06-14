@@ -102,12 +102,14 @@ mod trace_event_schema_stability_tests {
             );
         }
 
-        // Test 1.2: Event kind count remains stable (43 variants: 41 as of
+        // Test 1.2: Event kind count remains stable (45 variants: 41 as of
         // schema v1, plus task_spawn_enqueued / task_admitted added with the
-        // spawn mailbox — br-asupersync-dx-core-api-v2-u1z5hn.1.1 / .1.3)
+        // spawn mailbox — br-asupersync-dx-core-api-v2-u1z5hn.1.1 / .1.3 — plus
+        // budget_installed / budget_consumed promoting the server budget trace
+        // events to first-class kinds, br-asupersync-x6wffh)
         assert_eq!(
             TraceEventKind::ALL.len(),
-            43,
+            45,
             "TraceEventKind count changed - this breaks schema compatibility"
         );
 
@@ -135,7 +137,7 @@ mod trace_event_schema_stability_tests {
         // Test 1.4: Browser trace schema validation succeeds
         let schema = browser_trace_schema_v1();
         assert_eq!(schema.schema_version, "browser-trace-schema-v1");
-        assert_eq!(schema.event_specs.len(), 43);
+        assert_eq!(schema.event_specs.len(), 45);
 
         validate_browser_trace_schema(&schema)
             .expect("Browser trace schema validation should succeed");
@@ -706,6 +708,33 @@ mod trace_event_schema_stability_tests {
             base_time,
             task_id(1),
             region_id(1),
+        ));
+        seq += 1;
+        events.push(TraceEvent::budget_installed(
+            seq,
+            base_time,
+            task_id(1),
+            region_id(1),
+            "h1",
+            Some(1_000_000),
+            128,
+            None,
+            0,
+            "config",
+        ));
+        seq += 1;
+        events.push(TraceEvent::budget_consumed(
+            seq,
+            base_time,
+            task_id(1),
+            region_id(1),
+            "h1",
+            Some(1_000_000),
+            128,
+            None,
+            0,
+            Some(42),
+            "ok",
         ));
         seq += 1;
         events.push(TraceEvent::schedule(

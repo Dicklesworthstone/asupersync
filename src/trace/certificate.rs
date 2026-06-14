@@ -348,6 +348,33 @@ fn hash_runtime_trace_data<H: Hasher>(hasher: &mut H, data: &TraceData) -> bool 
             active_regions.hash(hasher);
             true
         }
+        // Append-only discriminant (next free after supervision's 22) to keep
+        // certificate hashes stable for pre-existing traces.
+        TraceData::Budget {
+            task,
+            region,
+            protocol,
+            deadline_ns,
+            poll_quota,
+            cost_quota,
+            priority,
+            source,
+            elapsed_ns,
+            outcome,
+        } => {
+            23_u8.hash(hasher);
+            task.hash(hasher);
+            region.hash(hasher);
+            protocol.hash(hasher);
+            deadline_ns.hash(hasher);
+            poll_quota.hash(hasher);
+            cost_quota.hash(hasher);
+            priority.hash(hasher);
+            source.hash(hasher);
+            elapsed_ns.hash(hasher);
+            outcome.hash(hasher);
+            true
+        }
         _ => false,
     }
 }

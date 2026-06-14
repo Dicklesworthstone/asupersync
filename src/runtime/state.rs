@@ -5689,6 +5689,10 @@ pub enum EventKindSnapshot {
     TaskSpawnEnqueued,
     /// A mailbox spawn request was admitted into its region (task created).
     TaskAdmitted,
+    /// A server request region installed its request budget.
+    BudgetInstalled,
+    /// A server request region's budget was consumed/resolved.
+    BudgetConsumed,
 }
 
 impl From<TraceEventKind> for EventKindSnapshot {
@@ -5737,6 +5741,8 @@ impl From<TraceEventKind> for EventKindSnapshot {
             TraceEventKind::ExitDelivered => Self::ExitDelivered,
             TraceEventKind::TaskSpawnEnqueued => Self::TaskSpawnEnqueued,
             TraceEventKind::TaskAdmitted => Self::TaskAdmitted,
+            TraceEventKind::BudgetInstalled => Self::BudgetInstalled,
+            TraceEventKind::BudgetConsumed => Self::BudgetConsumed,
         }
     }
 }
@@ -5943,6 +5949,29 @@ pub enum EventDataSnapshot {
         /// Originating obligation identifier.
         obligation: IdSnapshot,
     },
+    /// Server request-region budget data.
+    Budget {
+        /// Request task.
+        task: IdSnapshot,
+        /// Request region.
+        region: IdSnapshot,
+        /// Transport protocol token.
+        protocol: String,
+        /// Deadline in nanoseconds, if any.
+        deadline_ns: Option<u64>,
+        /// Poll quota.
+        poll_quota: u64,
+        /// Cost quota, if any.
+        cost_quota: Option<u64>,
+        /// Scheduling priority.
+        priority: u8,
+        /// Budget source token (install events).
+        source: Option<String>,
+        /// Elapsed nanoseconds (consume events).
+        elapsed_ns: Option<u64>,
+        /// Outcome token (consume events).
+        outcome: Option<String>,
+    },
 }
 
 impl EventDataSnapshot {
@@ -5953,6 +5982,29 @@ impl EventDataSnapshot {
             TraceData::Task { task, region } => Self::Task {
                 task: (*task).into(),
                 region: (*region).into(),
+            },
+            TraceData::Budget {
+                task,
+                region,
+                protocol,
+                deadline_ns,
+                poll_quota,
+                cost_quota,
+                priority,
+                source,
+                elapsed_ns,
+                outcome,
+            } => Self::Budget {
+                task: (*task).into(),
+                region: (*region).into(),
+                protocol: protocol.clone(),
+                deadline_ns: *deadline_ns,
+                poll_quota: *poll_quota,
+                cost_quota: *cost_quota,
+                priority: *priority,
+                source: source.clone(),
+                elapsed_ns: *elapsed_ns,
+                outcome: outcome.clone(),
             },
             TraceData::Region { region, parent } => Self::Region {
                 region: (*region).into(),

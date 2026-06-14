@@ -482,6 +482,10 @@ fn kind_discriminant(kind: TraceEventKind) -> u8 {
         TraceEventKind::WorkerFinalizeCompleted => 40,
         TraceEventKind::TaskSpawnEnqueued => 41,
         TraceEventKind::TaskAdmitted => 42,
+        // Append-only: never renumber existing discriminants (fingerprint
+        // stability). Next free after TaskAdmitted=42.
+        TraceEventKind::BudgetInstalled => 43,
+        TraceEventKind::BudgetConsumed => 44,
     }
 }
 
@@ -500,7 +504,8 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
     match &event.data {
         TraceData::Task { task, region }
         | TraceData::Cancel { task, region, .. }
-        | TraceData::Futurelock { task, region, .. } => {
+        | TraceData::Futurelock { task, region, .. }
+        | TraceData::Budget { task, region, .. } => {
             (k, pack_arena(task.0), pack_arena(region.0), 0)
         }
         TraceData::Region { region, parent } => (

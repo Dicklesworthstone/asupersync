@@ -43,6 +43,7 @@ use std::time::Duration;
 use crate::cx::scope::CatchUnwind;
 use crate::cx::{Cx, cap};
 use crate::error::Error;
+use crate::trace::event::TraceEvent;
 use crate::types::{Budget, CancelKind, Time};
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
@@ -826,22 +827,35 @@ impl ServerRequestRegion {
     }
 
     fn emit_installed(&self, source: RequestBudgetSource) {
+        let Some(trace) = self.cx.trace_buffer() else {
+            return;
+        };
         let budget = self.cx.budget();
-        let deadline = budget
-            .deadline
-            .map_or_else(|| "none".to_string(), |d| d.as_nanos().to_string());
-        let cost_quota = budget
-            .cost_quota
-            .map_or_else(|| "none".to_string(), |q| q.to_string());
-        self.cx.trace(&format!(
-            "server.budget_installed proto={} source={} deadline_ns={} poll_quota={} cost_quota={} priority={}",
-            self.protocol,
-            source.as_str(),
-            deadline,
-            budget.poll_quota,
-            cost_quota,
-            budget.priority,
-        ));
+        let task = self.cx.task_id();
+        let region = self.cx.region_id();
+        let now = region_now(&self.cx);
+        let logical_time = self.cx.logical_tick();
+        let protocol = self.protocol;
+        let deadline_ns = budget.deadline.map(Time::as_nanos);
+        let poll_quota = u64::from(budget.poll_quota);
+        let cost_quota = budget.cost_quota;
+        let priority = budget.priority;
+        let source = source.as_str();
+        trace.record_event(move |seq| {
+            TraceEvent::budget_installed(
+                seq,
+                now,
+                task,
+                region,
+                protocol,
+                deadline_ns,
+                poll_quota,
+                cost_quota,
+                priority,
+                source,
+            )
+            .with_logical_time(logical_time)
+        });
     }
 
     fn emit_consumed(&self, outcome: &'static str) {
@@ -852,17 +866,36 @@ impl ServerRequestRegion {
         if self.consumed.swap(true, Ordering::AcqRel) {
             return;
         }
+        let Some(trace) = self.cx.trace_buffer() else {
+            return;
+        };
         let now = region_now(&self.cx);
         let elapsed_ns = now.duration_since(self.started_at);
-        let remaining = self
-            .cx
-            .budget()
-            .deadline
-            .map_or_else(|| "none".to_string(), |d| d.duration_since(now).to_string());
-        self.cx.trace(&format!(
-            "server.budget_consumed proto={} outcome={outcome} elapsed_ns={elapsed_ns} deadline_remaining_ns={remaining}",
-            self.protocol,
-        ));
+        let budget = self.cx.budget();
+        let task = self.cx.task_id();
+        let region = self.cx.region_id();
+        let logical_time = self.cx.logical_tick();
+        let protocol = self.protocol;
+        let deadline_ns = budget.deadline.map(Time::as_nanos);
+        let poll_quota = u64::from(budget.poll_quota);
+        let cost_quota = budget.cost_quota;
+        let priority = budget.priority;
+        trace.record_event(move |seq| {
+            TraceEvent::budget_consumed(
+                seq,
+                now,
+                task,
+                region,
+                protocol,
+                deadline_ns,
+                poll_quota,
+                cost_quota,
+                priority,
+                Some(elapsed_ns),
+                outcome,
+            )
+            .with_logical_time(logical_time)
+        });
     }
 
     /// Runs `fut` (the handler) inside this request region with the full
@@ -2144,16 +2177,18 @@ mod tests {
                 .block_on(fut)
         }
 
-        fn budget_trace_messages(events: &[crate::trace::event::TraceEvent]) -> Vec<String> {
+        fn budget_events(
+            events: &[crate::trace::event::TraceEvent],
+        ) -> Vec<(TraceEventKind, TraceData)> {
             events
                 .iter()
-                .filter(|e| e.kind == TraceEventKind::UserTrace)
-                .filter_map(|e| match &e.data {
-                    TraceData::Message(msg) if msg.starts_with("server.budget_") => {
-                        Some(msg.clone())
-                    }
-                    _ => None,
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        TraceEventKind::BudgetInstalled | TraceEventKind::BudgetConsumed
+                    )
                 })
+                .map(|e| (e.kind, e.data.clone()))
                 .collect()
         }
 
@@ -2173,12 +2208,26 @@ mod tests {
                     .await;
                 assert!(matches!(outcome, ServerHopOutcome::Ok(7)));
 
-                let messages = budget_trace_messages(&trace.snapshot());
-                assert_eq!(messages.len(), 2, "installed + consumed: {messages:?}");
-                assert!(messages[0].starts_with("server.budget_installed proto=test "));
-                assert!(messages[0].contains("source=inherited"));
-                assert!(messages[1].starts_with("server.budget_consumed proto=test "));
-                assert!(messages[1].contains("outcome=ok"));
+                let events = budget_events(&trace.snapshot());
+                assert_eq!(events.len(), 2, "installed + consumed: {events:?}");
+                assert_eq!(events[0].0, TraceEventKind::BudgetInstalled);
+                let TraceData::Budget {
+                    protocol, source, ..
+                } = &events[0].1
+                else {
+                    panic!("expected Budget data, got {:?}", events[0].1);
+                };
+                assert_eq!(protocol, "test");
+                assert_eq!(source.as_deref(), Some("inherited"));
+                assert_eq!(events[1].0, TraceEventKind::BudgetConsumed);
+                let TraceData::Budget {
+                    protocol, outcome, ..
+                } = &events[1].1
+                else {
+                    panic!("expected Budget data, got {:?}", events[1].1);
+                };
+                assert_eq!(protocol, "test");
+                assert_eq!(outcome.as_deref(), Some("ok"));
             });
         }
 
@@ -2213,24 +2262,25 @@ mod tests {
                 // Force-close: drop the in-flight future before it resolves.
                 drop(fut);
 
-                let messages = budget_trace_messages(&trace.snapshot());
+                let events = budget_events(&trace.snapshot());
                 assert!(
-                    messages
+                    events
                         .iter()
-                        .any(|m| m.starts_with("server.budget_installed proto=test ")),
-                    "installed event present: {messages:?}"
+                        .any(|(kind, _)| *kind == TraceEventKind::BudgetInstalled),
+                    "installed event present: {events:?}"
                 );
-                let consumed: Vec<&String> = messages
+                let consumed: Vec<&TraceData> = events
                     .iter()
-                    .filter(|m| m.starts_with("server.budget_consumed"))
+                    .filter(|(kind, _)| *kind == TraceEventKind::BudgetConsumed)
+                    .map(|(_, data)| data)
                     .collect();
+                assert_eq!(consumed.len(), 1, "exactly one consumed event: {events:?}");
+                let TraceData::Budget { outcome, .. } = consumed[0] else {
+                    panic!("expected Budget data, got {:?}", consumed[0]);
+                };
                 assert_eq!(
-                    consumed.len(),
-                    1,
-                    "exactly one consumed event: {messages:?}"
-                );
-                assert!(
-                    consumed[0].contains("outcome=force_closed"),
+                    outcome.as_deref(),
+                    Some("force_closed"),
                     "force-closed outcome: {consumed:?}"
                 );
             });

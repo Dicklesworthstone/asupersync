@@ -288,6 +288,18 @@ impl TraceEventSummary {
             TraceData::Task { task, region } => {
                 format!("task={task} region={region}")
             }
+            TraceData::Budget {
+                task,
+                region,
+                protocol,
+                source,
+                outcome,
+                ..
+            } => {
+                format!(
+                    "budget task={task} region={region} protocol={protocol} source={source:?} outcome={outcome:?}"
+                )
+            }
             TraceData::Region { region, parent } => parent.as_ref().map_or_else(
                 || format!("region={region} parent=None"),
                 |p| format!("region={region} parent={p}"),

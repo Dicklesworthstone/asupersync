@@ -2416,27 +2416,40 @@ mod tests {
             .unwrap()
             .clone()
             .expect("request cx must carry the runtime trace buffer");
-        let messages: Vec<String> = trace
+        use crate::trace::event::{TraceData, TraceEventKind};
+        let events: Vec<(TraceEventKind, TraceData)> = trace
             .snapshot()
             .iter()
-            .filter(|e| e.kind == crate::trace::TraceEventKind::UserTrace)
-            .filter_map(|e| match &e.data {
-                crate::trace::event::TraceData::Message(msg)
-                    if msg.starts_with("server.budget_") =>
-                {
-                    Some(msg.clone())
-                }
-                _ => None,
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    TraceEventKind::BudgetInstalled | TraceEventKind::BudgetConsumed
+                )
             })
+            .map(|e| (e.kind, e.data.clone()))
             .collect();
         assert_eq!(
-            messages.len(),
+            events.len(),
             2,
-            "expected installed + consumed events, got {messages:?}"
+            "expected installed + consumed events, got {events:?}"
         );
-        assert!(messages[0].starts_with("server.budget_installed proto=h1 "));
-        assert!(messages[0].contains("source=config"));
-        assert!(messages[1].starts_with("server.budget_consumed proto=h1 "));
-        assert!(messages[1].contains("outcome=ok"));
+        assert_eq!(events[0].0, TraceEventKind::BudgetInstalled);
+        let TraceData::Budget {
+            protocol, source, ..
+        } = &events[0].1
+        else {
+            panic!("expected Budget data, got {:?}", events[0].1);
+        };
+        assert_eq!(protocol, "h1");
+        assert_eq!(source.as_deref(), Some("config"));
+        assert_eq!(events[1].0, TraceEventKind::BudgetConsumed);
+        let TraceData::Budget {
+            protocol, outcome, ..
+        } = &events[1].1
+        else {
+            panic!("expected Budget data, got {:?}", events[1].1);
+        };
+        assert_eq!(protocol, "h1");
+        assert_eq!(outcome.as_deref(), Some("ok"));
     }
 }

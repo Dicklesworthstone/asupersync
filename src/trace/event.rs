@@ -193,6 +193,12 @@ pub enum TraceEventKind {
     TaskSpawnEnqueued,
     /// A mailbox spawn request was admitted into its region (task created).
     TaskAdmitted,
+    /// A server request region installed its request budget (per-request
+    /// deadline / poll / cost quota minted at the runtime boundary).
+    BudgetInstalled,
+    /// A server request region's budget was consumed/resolved (the request
+    /// finished on some path, including the force-closed backstop).
+    BudgetConsumed,
 }
 
 impl TraceEventKind {
@@ -200,7 +206,7 @@ impl TraceEventKind {
     ///
     /// Keep this list in sync with the enum definition and
     /// `docs/spork_deterministic_ordering.md` taxonomy section.
-    pub const ALL: [Self; 43] = [
+    pub const ALL: [Self; 45] = [
         Self::Spawn,
         Self::Schedule,
         Self::Yield,
@@ -244,6 +250,8 @@ impl TraceEventKind {
         Self::ExitDelivered,
         Self::TaskSpawnEnqueued,
         Self::TaskAdmitted,
+        Self::BudgetInstalled,
+        Self::BudgetConsumed,
     ];
 
     /// Stable, grep-friendly taxonomy name.
@@ -293,6 +301,8 @@ impl TraceEventKind {
             Self::ExitDelivered => "exit_delivered",
             Self::TaskSpawnEnqueued => "task_spawn_enqueued",
             Self::TaskAdmitted => "task_admitted",
+            Self::BudgetInstalled => "budget_installed",
+            Self::BudgetConsumed => "budget_consumed",
         }
     }
 
@@ -346,6 +356,10 @@ impl TraceEventKind {
             Self::DownDelivered => "monitor_ref, watcher, monitored, completion_vt, reason",
             Self::LinkCreated | Self::LinkDropped => "link_ref, task_a, region_a, task_b, region_b",
             Self::ExitDelivered => "link_ref, from, to, failure_vt, reason",
+            Self::BudgetInstalled => {
+                "task, region, protocol, deadline_ns, poll_quota, cost_quota, priority, source"
+            }
+            Self::BudgetConsumed => "task, region, protocol, deadline_ns, elapsed_ns, outcome",
         }
     }
 }
@@ -363,7 +377,9 @@ pub const fn browser_trace_category_for_kind(kind: TraceEventKind) -> BrowserTra
         | TraceEventKind::Checkpoint
         | TraceEventKind::FuturelockDetected
         | TraceEventKind::TaskSpawnEnqueued
-        | TraceEventKind::TaskAdmitted => BrowserTraceCategory::Scheduler,
+        | TraceEventKind::TaskAdmitted
+        | TraceEventKind::BudgetInstalled
+        | TraceEventKind::BudgetConsumed => BrowserTraceCategory::Scheduler,
         TraceEventKind::TimeAdvance
         | TraceEventKind::TimerScheduled
         | TraceEventKind::TimerFired
@@ -952,6 +968,31 @@ fn redact_browser_trace_data(data: &TraceData) -> TraceData {
             task: *task,
             detail: "<redacted>".to_string(),
         },
+        // Budget payloads are task/region ids, budget quotas, and stable
+        // source/outcome tokens — no free-form/user data to redact.
+        TraceData::Budget {
+            task,
+            region,
+            protocol,
+            deadline_ns,
+            poll_quota,
+            cost_quota,
+            priority,
+            source,
+            elapsed_ns,
+            outcome,
+        } => TraceData::Budget {
+            task: *task,
+            region: *region,
+            protocol: protocol.clone(),
+            deadline_ns: *deadline_ns,
+            poll_quota: *poll_quota,
+            cost_quota: *cost_quota,
+            priority: *priority,
+            source: source.clone(),
+            elapsed_ns: *elapsed_ns,
+            outcome: outcome.clone(),
+        },
     }
 }
 
@@ -1049,6 +1090,41 @@ fn insert_browser_trace_payload_fields(fields: &mut BTreeMap<String, String>, ev
         TraceData::Task { task, region } => {
             fields.insert("task".to_string(), task.to_string());
             fields.insert("region".to_string(), region.to_string());
+        }
+        TraceData::Budget {
+            task,
+            region,
+            protocol,
+            deadline_ns,
+            poll_quota,
+            cost_quota,
+            priority,
+            source,
+            elapsed_ns,
+            outcome,
+        } => {
+            fields.insert("task".to_string(), task.to_string());
+            fields.insert("region".to_string(), region.to_string());
+            fields.insert("protocol".to_string(), protocol.clone());
+            fields.insert(
+                "deadline_ns".to_string(),
+                optional_display_field(*deadline_ns),
+            );
+            fields.insert("poll_quota".to_string(), poll_quota.to_string());
+            fields.insert(
+                "cost_quota".to_string(),
+                optional_display_field(*cost_quota),
+            );
+            fields.insert("priority".to_string(), priority.to_string());
+            if let Some(source) = source {
+                fields.insert("source".to_string(), source.clone());
+            }
+            if let Some(elapsed_ns) = elapsed_ns {
+                fields.insert("elapsed_ns".to_string(), elapsed_ns.to_string());
+            }
+            if let Some(outcome) = outcome {
+                fields.insert("outcome".to_string(), outcome.clone());
+            }
         }
         TraceData::Region { region, parent } => {
             fields.insert("region".to_string(), region.to_string());
@@ -1247,7 +1323,8 @@ fn browser_trace_sequence_group(event: &TraceEvent) -> String {
     let raw = match &event.data {
         TraceData::Task { task, .. }
         | TraceData::Cancel { task, .. }
-        | TraceData::Futurelock { task, .. } => format!("task:{task}"),
+        | TraceData::Futurelock { task, .. }
+        | TraceData::Budget { task, .. } => format!("task:{task}"),
         TraceData::Region { region, .. } | TraceData::RegionCancel { region, .. } => {
             format!("region:{region}")
         }
@@ -1600,6 +1677,32 @@ pub enum TraceData {
         /// Additional detail.
         detail: String,
     },
+    /// Server request-region budget data for [`TraceEventKind::BudgetInstalled`]
+    /// and [`TraceEventKind::BudgetConsumed`].
+    Budget {
+        /// The request task.
+        task: TaskId,
+        /// The request region.
+        region: RegionId,
+        /// Transport protocol token (e.g. `h1`, `h2`, `grpc`).
+        protocol: String,
+        /// Budget deadline in nanoseconds, if any.
+        deadline_ns: Option<u64>,
+        /// Poll quota.
+        poll_quota: u64,
+        /// Cost quota, if any.
+        cost_quota: Option<u64>,
+        /// Scheduling priority.
+        priority: u8,
+        /// Budget source token (install events; `None` for consume).
+        source: Option<String>,
+        /// Elapsed nanoseconds at consumption (`None` for install).
+        elapsed_ns: Option<u64>,
+        /// Outcome token at consumption (`None` for install): one of
+        /// `ok`/`err`/`cancelled`/`panicked`/`deadline_exceeded`/
+        /// `connection_lost`/`force_closed`.
+        outcome: Option<String>,
+    },
 }
 
 /// A trace event in the runtime.
@@ -1721,6 +1824,77 @@ impl TraceEvent {
         /// Creates a cancel request event.
         cancel_request(task: TaskId, region: RegionId, reason: CancelReason) => CancelRequest,
             TraceData::Cancel { task, region, reason };
+    }
+
+    /// Creates a server-budget-installed event (per-request budget minted at the
+    /// runtime boundary).
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn budget_installed(
+        seq: u64,
+        time: Time,
+        task: TaskId,
+        region: RegionId,
+        protocol: impl Into<String>,
+        deadline_ns: Option<u64>,
+        poll_quota: u64,
+        cost_quota: Option<u64>,
+        priority: u8,
+        source: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::BudgetInstalled,
+            TraceData::Budget {
+                task,
+                region,
+                protocol: protocol.into(),
+                deadline_ns,
+                poll_quota,
+                cost_quota,
+                priority,
+                source: Some(source.into()),
+                elapsed_ns: None,
+                outcome: None,
+            },
+        )
+    }
+
+    /// Creates a server-budget-consumed event (request resolved on some path,
+    /// including the force-closed Drop backstop).
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn budget_consumed(
+        seq: u64,
+        time: Time,
+        task: TaskId,
+        region: RegionId,
+        protocol: impl Into<String>,
+        deadline_ns: Option<u64>,
+        poll_quota: u64,
+        cost_quota: Option<u64>,
+        priority: u8,
+        elapsed_ns: Option<u64>,
+        outcome: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            seq,
+            time,
+            TraceEventKind::BudgetConsumed,
+            TraceData::Budget {
+                task,
+                region,
+                protocol: protocol.into(),
+                deadline_ns,
+                poll_quota,
+                cost_quota,
+                priority,
+                source: None,
+                elapsed_ns,
+                outcome: Some(outcome.into()),
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1928,6 +2102,18 @@ impl fmt::Display for TraceEvent {
         match &self.data {
             TraceData::None => {}
             TraceData::Task { task, region } => write!(f, " {task} in {region}")?,
+            TraceData::Budget {
+                task,
+                region,
+                protocol,
+                outcome,
+                ..
+            } => {
+                write!(f, " {task} in {region} [{protocol}]")?;
+                if let Some(outcome) = outcome {
+                    write!(f, " outcome={outcome}")?;
+                }
+            }
             TraceData::Region { region, parent } => {
                 write!(f, " {region}")?;
                 if let Some(p) = parent {
@@ -2170,7 +2356,7 @@ mod tests {
 
     #[test]
     fn all_array_has_42_kinds() {
-        assert_eq!(TraceEventKind::ALL.len(), 43);
+        assert_eq!(TraceEventKind::ALL.len(), 45);
     }
 
     #[test]
