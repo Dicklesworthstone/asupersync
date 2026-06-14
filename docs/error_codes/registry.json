@@ -284,19 +284,23 @@
       "code": "ASUP-E105",
       "name": "obligation-drain-timeout",
       "area": "obligations",
-      "status": "reserved",
-      "summary": "Drain waited too long for obligation resolution.",
+      "status": "live",
+      "summary": "Drain or recovery waited too long for obligation resolution and aborted a stale reserved obligation.",
       "probable_causes": [
         "A holder task did not observe cancellation.",
-        "A blocking section prevented finalizer progress."
+        "A blocking section prevented finalizer progress.",
+        "A remote replica retained a Reserved obligation past the recovery stale-timeout budget."
       ],
       "remediation": [
         "Inspect holder task, obligation kind, and age in the audit snapshot.",
-        "Move blocking cleanup into a bounded drain path."
+        "Move blocking cleanup into a bounded drain path.",
+        "For CRDT recovery, compare the stale-abort age against RecoveryConfig::stale_timeout_ns and verify the holder node either committed or aborted before partition heal."
       ],
       "doc_path": "docs/error_codes/ASUP-E105.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/obligation/recovery.rs"
+      ]
     },
     {
       "code": "ASUP-E201",

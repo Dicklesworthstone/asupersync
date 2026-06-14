@@ -146,7 +146,7 @@ impl fmt::Display for RecoveryAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StaleAbort { id, age_ns } => {
-                write!(f, "stale-abort {id:?} (age={age_ns}ns)")
+                write!(f, "[ASUP-E105] stale-abort {id:?} (age={age_ns}ns)")
             }
             Self::ConflictResolved { id } => {
                 write!(f, "conflict-resolved {id:?}")
@@ -732,6 +732,7 @@ mod tests {
             age_ns: 5000,
         };
         let display = format!("{action}");
+        assert!(display.starts_with("[ASUP-E105]"));
         assert!(display.contains("stale-abort"));
         assert!(display.contains("5000"));
     }
