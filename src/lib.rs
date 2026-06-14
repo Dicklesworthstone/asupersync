@@ -195,6 +195,7 @@ pub mod net;
 pub mod obligation;
 pub mod observability;
 pub mod plan;
+pub mod prelude;
 pub mod raptorq;
 pub mod record;
 pub mod remote;
