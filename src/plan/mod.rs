@@ -601,6 +601,7 @@ impl EGraph {
 
 pub mod analysis;
 pub mod certificate;
+pub mod execute;
 pub mod extractor;
 pub mod fixtures;
 pub mod latency_algebra;
