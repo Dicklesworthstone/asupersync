@@ -22,6 +22,7 @@
 //! - [`consensus`]: Byzantine fault tolerant consensus algorithms
 //! - [`membership`]: SWIM-style cluster membership and failure detection
 
+pub mod adaptive_layout;
 pub mod assignment;
 pub mod bridge;
 pub mod computation_schema;
@@ -47,6 +48,7 @@ pub use distribution::{
     DistributionConfig, DistributionMetrics, DistributionResult, ReplicaAck, ReplicaFailure,
     SymbolDistributor,
 };
+pub use adaptive_layout::{AdaptiveLayoutConfig, BlockLayoutChoice, PathQuality};
 pub use computation_schema::{
     HasSchema, SchemaDescriptor, SchemaFingerprint, SchemaMismatch, SchemaMismatchKind,
 };
