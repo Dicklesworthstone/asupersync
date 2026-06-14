@@ -1169,6 +1169,16 @@ fn parse_dns_answer(packet: &[u8], offset: &mut usize) -> Result<Option<DnsAnswe
                 let len = usize::from(packet[txt_offset]);
                 txt_offset += 1;
                 let end = txt_offset.saturating_add(len);
+                // A TXT character-string must stay within this record's RDATA.
+                // Bounding only by packet.len() would let an oversized length
+                // prefix absorb bytes from the following record (cross-RDATA
+                // over-read), the way CNAME/MX/SRV already reject via
+                // ensure_rdata_consumed.
+                if end > rdata_end {
+                    return Err(DnsError::Protocol(
+                        "TXT character-string exceeds DNS RDATA length".to_string(),
+                    ));
+                }
                 let chunk = packet
                     .get(txt_offset..end)
                     .ok_or_else(|| DnsError::Protocol("truncated TXT record".to_string()))?;
@@ -2311,6 +2321,76 @@ mod tests {
         );
 
         crate::test_complete!("parse_dns_answer_rejects_srv_rdata_with_trailing_bytes");
+    }
+
+    #[test]
+    fn parse_dns_answer_rejects_txt_rdata_that_overruns_rdlen() {
+        init_test("parse_dns_answer_rejects_txt_rdata_that_overruns_rdlen");
+
+        // A TXT record whose character-string length prefix points past the
+        // declared RDLENGTH must be rejected rather than absorbing bytes from
+        // the following record. Here rdlen=4 but the length prefix claims 8.
+        let mut packet = vec![0u8; 12];
+        encode_dns_name("example.test", &mut packet).expect("encode owner name");
+        packet.extend_from_slice(&DnsQueryType::Txt.code().to_be_bytes());
+        packet.extend_from_slice(&DnsQueryType::DNS_CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&4u16.to_be_bytes());
+        packet.push(8); // overruns the 4-byte RDATA
+        packet.extend_from_slice(b"abc");
+        // Trailing bytes belong to a notional following record; the TXT parser
+        // must not read them.
+        packet.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xFF]);
+
+        let mut offset = 12usize;
+        let err = parse_dns_answer(&packet, &mut offset).unwrap_err();
+
+        crate::assert_with_log!(
+            matches!(err, DnsError::Protocol(ref msg) if msg.contains("TXT character-string exceeds DNS RDATA length")),
+            "TXT parser rejects character-strings that read past rdlen",
+            true,
+            format!("{err:?}")
+        );
+
+        crate::test_complete!("parse_dns_answer_rejects_txt_rdata_that_overruns_rdlen");
+    }
+
+    #[test]
+    fn parse_dns_answer_accepts_txt_rdata_within_rdlen() {
+        init_test("parse_dns_answer_accepts_txt_rdata_within_rdlen");
+
+        // Two well-formed character-strings ("ab" + "cd") packed exactly into
+        // rdlen=6 must decode to the concatenated text.
+        let mut packet = vec![0u8; 12];
+        encode_dns_name("example.test", &mut packet).expect("encode owner name");
+        packet.extend_from_slice(&DnsQueryType::Txt.code().to_be_bytes());
+        packet.extend_from_slice(&DnsQueryType::DNS_CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&6u16.to_be_bytes());
+        packet.push(2);
+        packet.extend_from_slice(b"ab");
+        packet.push(2);
+        packet.extend_from_slice(b"cd");
+
+        let mut offset = 12usize;
+        let answer = parse_dns_answer(&packet, &mut offset)
+            .expect("parse TXT answer")
+            .expect("TXT answer present");
+
+        crate::assert_with_log!(
+            matches!(answer.data, DnsRecordData::Txt(ref text) if text == "abcd"),
+            "TXT parser concatenates character-strings within rdlen",
+            "abcd".to_string(),
+            format!("{:?}", answer.data)
+        );
+        crate::assert_with_log!(
+            offset == packet.len(),
+            "offset advances to end of TXT RDATA",
+            packet.len(),
+            offset
+        );
+
+        crate::test_complete!("parse_dns_answer_accepts_txt_rdata_within_rdlen");
     }
 
     #[test]
