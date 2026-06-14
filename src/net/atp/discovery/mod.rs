@@ -1024,9 +1024,7 @@ fn validate_endpoint_basics(
 
 fn is_lan_address(address: IpAddr) -> bool {
     match address {
-        IpAddr::V4(address) => {
-            address.is_private() || address.is_link_local() || address.octets()[0] == 169
-        }
+        IpAddr::V4(address) => address.is_private() || address.is_link_local(),
         IpAddr::V6(address) => is_unique_local_ipv6(address) || is_unicast_link_local_ipv6(address),
     }
 }
@@ -1054,7 +1052,8 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
         || address.is_multicast()
         || is_unique_local_ipv6(address)
         || is_unicast_link_local_ipv6(address)
-        || is_documentation_ipv6(address))
+        || is_documentation_ipv6(address)
+        || is_ipv4_embedded_ipv6(address))
 }
 
 fn is_multicast(address: IpAddr) -> bool {
@@ -1075,6 +1074,12 @@ fn is_unicast_link_local_ipv6(address: Ipv6Addr) -> bool {
 fn is_documentation_ipv6(address: Ipv6Addr) -> bool {
     let segments = address.segments();
     segments[0] == 0x2001 && segments[1] == 0x0db8
+}
+
+fn is_ipv4_embedded_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    let first_five_zero = segments[0..5].iter().all(|segment| *segment == 0);
+    first_five_zero && (segments[5] == 0 || segments[5] == 0xffff)
 }
 
 fn endpoint_scope(endpoint: SocketAddr) -> String {
@@ -1399,6 +1404,46 @@ mod tests {
         assert_eq!(
             report.rejections[1].reason,
             DirectCandidateRejection::Ipv6Unavailable
+        );
+    }
+
+    #[test]
+    fn lan_discovery_rejects_non_link_local_169_space() {
+        let policy = PathDiscoveryPolicy::safe_default().with_lan_discovery(true);
+        let err =
+            LanPeerAdvertisement::maybe_new(policy, "peer-a", socket("169.1.2.3:41641"), 1, 1)
+                .expect_err("only 169.254/16 is IPv4 link-local");
+
+        assert_eq!(err.candidate_source, DirectCandidateSource::LanDiscovery);
+        assert_eq!(err.reason, DirectCandidateRejection::NotLanAddress);
+        assert_eq!(err.detail, "public-ipv4:41641");
+    }
+
+    #[test]
+    fn public_ipv6_rejects_ipv4_embedded_addresses() {
+        let report = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default(),
+            PathDiscoveryInputs {
+                local_udp_endpoints: vec![
+                    socket("[::ffff:10.0.0.1]:41641"),
+                    socket("[::c000:0201]:41641"),
+                ],
+                platform_ipv6_available: true,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+
+        assert!(report.candidates.is_empty());
+        assert_eq!(
+            report
+                .rejections
+                .iter()
+                .filter(|rejection| {
+                    rejection.source == DirectCandidateSource::PublicIpv6
+                        && rejection.reason == DirectCandidateRejection::NotPublicIpv6
+                })
+                .count(),
+            2
         );
     }
 
