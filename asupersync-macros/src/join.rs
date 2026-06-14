@@ -1,24 +1,39 @@
-//! Implementation of the `join!` macro.
+//! Implementation of the `join!` and `join_all!` macros.
 //!
-//! The join macro runs multiple futures concurrently and waits for all
-//! to complete, collecting their results into a tuple.
+//! Both macros run their branch futures **concurrently** inside the current
+//! task and wait for all of them to complete, collecting the results into a
+//! tuple (`join!`) or an array (`join_all!`).
 //!
 //! # Syntax
 //!
 //! ```ignore
-//! // Tuple form - await multiple futures/handles
-//! let (r1, r2, r3) = join!(h1, h2, h3);
+//! // Tuple form - join multiple futures/handles concurrently
+//! let (r1, r2, r3) = join!(h1, h2, h3).await... // (the macro expands to an awaited future)
 //!
-//! // With cx for cancellation propagation
+//! // With cx in scope for cancellation propagation
 //! let (r1, r2, r3) = join!(cx; h1, h2, h3);
 //! ```
 //!
 //! # Semantics
 //!
-//! 1. All futures are awaited (in Phase 0, sequentially; in Phase 1+, concurrently)
-//! 2. Results are returned as a tuple matching input order
-//! 3. If any future returns Panicked, the aggregate outcome reflects the worst severity
-//! 4. When `cx` is provided, it can be used for cancellation propagation (future enhancement)
+//! 1. All branches are polled concurrently within the enclosing task: a branch
+//!    that returns `Pending` never blocks the others from making progress, so
+//!    three 10ms sleeps complete in ~10ms, not ~30ms.
+//! 2. Results are returned as a tuple (`join!`) / array (`join_all!`) in input
+//!    order.
+//! 3. Each branch's output type is preserved (`join!` may mix types; the
+//!    `join_all!` array form requires a single shared type).
+//! 4. When `cx` is provided it is type-checked and reserved for cancellation
+//!    propagation; the concurrent polling itself needs no scheduler support.
+//!
+//! # Concurrency model
+//!
+//! The expansion mirrors the standard structure-preserving concurrent join: each
+//! branch is pinned once, then a single [`core::future::poll_fn`] drives every
+//! not-yet-complete branch on each wake. This is true concurrency *within one
+//! task* — it requires neither a multi-threaded scheduler nor any allocation —
+//! and replaces the earlier placeholder that awaited the branches one-by-one
+//! (which silently serialized every caller).
 //!
 //! # Algebraic Laws
 //!
@@ -75,34 +90,24 @@ impl Parse for JoinInput {
 ///
 /// # Generated Code
 ///
-/// For `join!(h1, h2, h3)`, generates:
+/// For `join!(h1, h2, h3)`, generates a single concurrent future:
 /// ```ignore
 /// {
-///     let __join_fut_0 = h1;
-///     let __join_fut_1 = h2;
-///     let __join_fut_2 = h3;
-///     let __join_result_0 = __join_fut_0.await;
-///     let __join_result_1 = __join_fut_1.await;
-///     let __join_result_2 = __join_fut_2.await;
-///     (__join_result_0, __join_result_1, __join_result_2)
+///     let mut __join_fut_0 = ::core::pin::pin!(h1);
+///     let mut __join_fut_1 = ::core::pin::pin!(h2);
+///     let mut __join_fut_2 = ::core::pin::pin!(h3);
+///     let mut __join_out_0 = ::core::option::Option::None;
+///     let mut __join_out_1 = ::core::option::Option::None;
+///     let mut __join_out_2 = ::core::option::Option::None;
+///     ::core::future::poll_fn(|__join_cx| {
+///         let mut __join_pending = false;
+///         // poll each not-yet-ready branch every wake
+///         ...
+///         if __join_pending { Poll::Pending } else { Poll::Ready(()) }
+///     }).await;
+///     (__join_out_0.unwrap(), __join_out_1.unwrap(), __join_out_2.unwrap())
 /// }
 /// ```
-///
-/// For `join!(cx; h1, h2, h3)`, generates similar code with cx available
-/// for future cancellation propagation enhancements.
-///
-/// # Phase 0 Implementation
-///
-/// In Phase 0 (single-threaded), futures are awaited sequentially.
-/// This is correct because true concurrent polling requires the
-/// multi-threaded scheduler from Phase 1.
-///
-/// # Phase 1+ Enhancement
-///
-/// When the multi-threaded runtime is available, this can be enhanced to:
-/// - Use `futures::join!` or custom concurrent polling
-/// - Propagate cancellation through cx
-/// - Support fail-fast semantics on panic
 pub fn join_impl(input: TokenStream) -> TokenStream {
     let JoinInput { cx, futures } = parse_macro_input!(input as JoinInput);
 
@@ -124,7 +129,7 @@ fn generate_join(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> To
         };
     }
 
-    // Handle single future case - just await it directly
+    // Handle single future case - just await it directly (already concurrent-trivial)
     if future_count == 1 {
         let fut = futures
             .first()
@@ -137,76 +142,31 @@ fn generate_join(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> To
         };
     }
 
-    // Generate unique identifiers for futures and results
-    let fut_idents: Vec<_> = (0..future_count)
-        .map(|i| syn::Ident::new(&format!("__join_fut_{i}"), proc_macro2::Span::call_site()))
-        .collect();
-
-    let result_idents: Vec<_> = (0..future_count)
-        .map(|i| {
-            syn::Ident::new(
-                &format!("__join_result_{i}"),
-                proc_macro2::Span::call_site(),
-            )
-        })
-        .collect();
-
-    // Generate bindings for each future (evaluate immediately, don't await yet)
-    let fut_bindings: Vec<_> = futures
-        .iter()
-        .zip(fut_idents.iter())
-        .map(|(future, ident)| {
-            quote! { let #ident = #future; }
-        })
-        .collect();
-
-    // Generate await statements for each future
-    let await_stmts: Vec<_> = fut_idents
-        .iter()
-        .zip(result_idents.iter())
-        .map(|(fut_ident, result_ident)| {
-            quote! { let #result_ident = #fut_ident.await; }
-        })
-        .collect();
-
-    // Generate the result tuple
-    let result_tuple: Vec<_> = result_idents
-        .iter()
-        .map(|ident| quote! { #ident })
-        .collect();
+    let (bindings, decls, polls, idents) = concurrent_branch_tokens(futures);
 
     quote! {
         {
             #cx_ack
-            // Bind all futures first (ensures evaluation order is left-to-right)
-            #(#fut_bindings)*
-            // Await all futures (Phase 0: sequential, Phase 1+: concurrent)
-            #(#await_stmts)*
-            // Return results as tuple
-            (#(#result_tuple),*)
+            #(#bindings)*
+            #(#decls)*
+            ::core::future::poll_fn(|__join_cx| {
+                let mut __join_pending = false;
+                #(#polls)*
+                if __join_pending {
+                    ::core::task::Poll::Pending
+                } else {
+                    ::core::task::Poll::Ready(())
+                }
+            })
+            .await;
+            ( #(#idents.expect("join! branch completed before the join resolved")),* )
         }
     }
 }
 
 /// Generates the `join_all` implementation for array form.
 ///
-/// # Generated Code
-///
-/// For `join_all!(h1, h2, h3)`, generates:
-/// ```ignore
-/// {
-///     let __join_fut_0 = h1;
-///     let __join_fut_1 = h2;
-///     let __join_fut_2 = h3;
-///     let __join_result_0 = __join_fut_0.await;
-///     let __join_result_1 = __join_fut_1.await;
-///     let __join_result_2 = __join_fut_2.await;
-///     [__join_result_0, __join_result_1, __join_result_2]
-/// }
-/// ```
-///
-/// Unlike `join!` which returns a tuple, `join_all!` returns an array.
-/// All futures must return the same type.
+/// Like [`generate_join`] but returns an array (all branches must share a type).
 pub fn join_all_impl(input: TokenStream) -> TokenStream {
     let JoinInput { cx, futures } = parse_macro_input!(input as JoinInput);
 
@@ -241,62 +201,92 @@ fn generate_join_all(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -
         };
     }
 
-    // Generate unique identifiers for futures and results
-    let fut_idents: Vec<_> = (0..future_count)
-        .map(|i| syn::Ident::new(&format!("__join_fut_{i}"), proc_macro2::Span::call_site()))
-        .collect();
-
-    let result_idents: Vec<_> = (0..future_count)
-        .map(|i| {
-            syn::Ident::new(
-                &format!("__join_result_{i}"),
-                proc_macro2::Span::call_site(),
-            )
-        })
-        .collect();
-
-    // Generate bindings for each future (evaluate immediately, don't await yet)
-    let fut_bindings: Vec<_> = futures
-        .iter()
-        .zip(fut_idents.iter())
-        .map(|(future, ident)| {
-            quote! { let #ident = #future; }
-        })
-        .collect();
-
-    // Generate await statements for each future
-    let await_stmts: Vec<_> = fut_idents
-        .iter()
-        .zip(result_idents.iter())
-        .map(|(fut_ident, result_ident)| {
-            quote! { let #result_ident = #fut_ident.await; }
-        })
-        .collect();
-
-    // Generate the result array
-    let result_array: Vec<_> = result_idents
-        .iter()
-        .map(|ident| quote! { #ident })
-        .collect();
+    let (bindings, decls, polls, idents) = concurrent_branch_tokens(futures);
 
     quote! {
         {
             #cx_ack
-            // Bind all futures first (ensures evaluation order is left-to-right)
-            #(#fut_bindings)*
-            // Await all futures (Phase 0: sequential, Phase 1+: concurrent)
-            #(#await_stmts)*
-            // Return results as array
-            [#(#result_array),*]
+            #(#bindings)*
+            #(#decls)*
+            ::core::future::poll_fn(|__join_cx| {
+                let mut __join_pending = false;
+                #(#polls)*
+                if __join_pending {
+                    ::core::task::Poll::Pending
+                } else {
+                    ::core::task::Poll::Ready(())
+                }
+            })
+            .await;
+            [ #(#idents.expect("join_all! branch completed before the join resolved")),* ]
         }
     }
+}
+
+/// Builds the shared concurrent-polling tokens for the >= 2 branch case.
+///
+/// Returns `(pin bindings, output-slot declarations, per-branch poll arms,
+/// output-slot identifiers)`. Each branch is pinned once; every `poll_fn` wake
+/// polls only the branches that have not yet produced a value, so a `Pending`
+/// branch never starves the others.
+fn concurrent_branch_tokens(
+    futures: &Punctuated<Expr, Token![,]>,
+) -> (
+    Vec<TokenStream2>,
+    Vec<TokenStream2>,
+    Vec<TokenStream2>,
+    Vec<syn::Ident>,
+) {
+    let future_count = futures.len();
+
+    let fut_idents: Vec<_> = (0..future_count)
+        .map(|i| syn::Ident::new(&format!("__join_fut_{i}"), proc_macro2::Span::call_site()))
+        .collect();
+    let out_idents: Vec<syn::Ident> = (0..future_count)
+        .map(|i| syn::Ident::new(&format!("__join_out_{i}"), proc_macro2::Span::call_site()))
+        .collect();
+
+    let bindings = futures
+        .iter()
+        .zip(fut_idents.iter())
+        .map(|(future, ident)| quote! { let mut #ident = ::core::pin::pin!(#future); })
+        .collect();
+
+    let decls = out_idents
+        .iter()
+        .map(|ident| quote! { let mut #ident = ::core::option::Option::None; })
+        .collect();
+
+    let polls = fut_idents
+        .iter()
+        .zip(out_idents.iter())
+        .map(|(fut_ident, out_ident)| {
+            quote! {
+                if ::core::option::Option::is_none(&#out_ident) {
+                    match ::core::future::Future::poll(
+                        ::core::pin::Pin::as_mut(&mut #fut_ident),
+                        __join_cx,
+                    ) {
+                        ::core::task::Poll::Ready(__join_value) => {
+                            #out_ident = ::core::option::Option::Some(__join_value);
+                        }
+                        ::core::task::Poll::Pending => {
+                            __join_pending = true;
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    (bindings, decls, polls, out_idents)
 }
 
 fn generate_cx_ack(cx: Option<&Expr>) -> TokenStream2 {
     if cx.is_some() {
         quote! {
             // Capability context provided for cancellation propagation
-            // (Phase 1+ will use this for concurrent polling with cancellation)
+            // (type-checked here; concurrent polling itself needs no scheduler).
             let _ = &#cx;
         }
     } else {
@@ -374,6 +364,51 @@ mod tests {
         assert!(
             tokens.contains("make_cx"),
             "empty join_all must still typecheck the cx expression"
+        );
+    }
+
+    #[test]
+    fn join_multi_polls_branches_concurrently() {
+        let input: JoinInput = syn::parse2(quote! { a, b, c }).unwrap();
+        let tokens = generate_join(input.cx.as_ref(), &input.futures).to_string();
+        assert!(
+            tokens.contains("poll_fn"),
+            "multi-branch join! must drive a concurrent poll_fn, not sequential awaits"
+        );
+        assert!(
+            tokens.contains("Future :: poll") || tokens.contains("Future::poll"),
+            "multi-branch join! must poll each branch directly"
+        );
+        // The old sequential expansion bound one `__join_result_i = fut.await;` per
+        // branch; the concurrent expansion must not reintroduce that pattern.
+        assert!(
+            !tokens.contains("__join_result_"),
+            "join! must not fall back to the sequential await chain"
+        );
+    }
+
+    #[test]
+    fn join_all_multi_polls_branches_concurrently() {
+        let input: JoinInput = syn::parse2(quote! { a, b, c }).unwrap();
+        let tokens = generate_join_all(input.cx.as_ref(), &input.futures).to_string();
+        assert!(
+            tokens.contains("poll_fn"),
+            "multi-branch join_all! must drive a concurrent poll_fn"
+        );
+        assert!(
+            tokens.contains("Pin :: as_mut") || tokens.contains("Pin::as_mut"),
+            "concurrent join_all! must re-poll pinned branches via Pin::as_mut"
+        );
+    }
+
+    #[test]
+    fn join_multi_pins_each_branch_once() {
+        let input: JoinInput = syn::parse2(quote! { a, b }).unwrap();
+        let tokens = generate_join(input.cx.as_ref(), &input.futures).to_string();
+        let pins = tokens.matches("pin !").count() + tokens.matches("pin!").count();
+        assert!(
+            pins >= 2,
+            "each branch must be pinned exactly once: {tokens}"
         );
     }
 }
