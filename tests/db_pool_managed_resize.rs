@@ -15,12 +15,19 @@
 #![cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
+use asupersync::cx::Cx;
+use asupersync::database::pool::{
+    AsyncConnectionManager, AsyncDbPool, ConnectionManager, DbPool, DbPoolConfig, DbPoolError,
+};
 use asupersync::runtime::pool_sizing::{
     PoolSizingAction, PoolSizingBounds, PoolSizingControllerState, PoolSizingPolicy,
     PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing,
 };
+use asupersync::runtime::{Runtime, RuntimeConfig};
+use asupersync::time::{timeout, wall_now};
+use asupersync::types::Outcome;
 
 #[derive(Debug)]
 struct MockConn {
@@ -168,4 +175,112 @@ fn apply_pool_sizing_decision_drives_the_live_cap() {
         1,
         "advisory apply left the cap unchanged"
     );
+}
+
+// ─── AsyncDbPool (yj2nxx.7 slice 2) ──────────────────────────────────────────
+
+/// Minimal async connection manager: connects instantly, always valid.
+struct InstantAsyncManager;
+
+impl AsyncConnectionManager for InstantAsyncManager {
+    type Connection = ();
+    type Error = std::io::Error;
+
+    async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+        Outcome::Ok(())
+    }
+
+    async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
+        true
+    }
+}
+
+#[test]
+fn async_set_max_size_clamps_into_configured_bounds() {
+    // The sizing methods are synchronous, so this needs no runtime.
+    let pool = AsyncDbPool::new(InstantAsyncManager, DbPoolConfig::with_max_size(8));
+    assert_eq!(pool.current_max_size(), 8);
+    assert_eq!(pool.set_max_size(100), 8, "above ceiling clamps down");
+    assert_eq!(
+        pool.set_max_size(0),
+        1,
+        "below floor (min_idle=1) clamps up"
+    );
+    assert_eq!(pool.set_max_size(5), 5, "in-range applied verbatim");
+    assert_eq!(pool.current_max_size(), 5);
+    assert_eq!(
+        pool.stats().max_size,
+        8,
+        "stats keeps reporting the ceiling"
+    );
+}
+
+#[test]
+fn async_apply_pool_sizing_decision_drives_the_live_cap() {
+    let pool = AsyncDbPool::new(InstantAsyncManager, DbPoolConfig::with_max_size(8));
+    let bounds = PoolSizingBounds::new(1, 8);
+    let policy =
+        PoolSizingPolicy::managed(bounds, PoolSizingTarget::conservative_wait_probability());
+    let state = PoolSizingControllerState {
+        current_size: pool.current_max_size(),
+        last_resize_epoch: 0,
+    };
+    let idle_estimate = PoolWorkloadEstimate::new(0, 0, 0);
+    let decision = decide_pool_sizing(policy, state, idle_estimate, 5);
+    assert!(matches!(decision.action, PoolSizingAction::Resize { .. }));
+    assert_eq!(pool.apply_pool_sizing_decision(&decision), Some(1));
+    assert_eq!(pool.current_max_size(), 1);
+
+    let advisory_decision = decide_pool_sizing(
+        PoolSizingPolicy::advisory(bounds),
+        PoolSizingControllerState {
+            current_size: 1,
+            last_resize_epoch: 0,
+        },
+        idle_estimate,
+        6,
+    );
+    assert_eq!(pool.apply_pool_sizing_decision(&advisory_decision), None);
+    assert_eq!(pool.current_max_size(), 1);
+}
+
+#[test]
+fn async_shrink_blocks_new_create() {
+    let runtime = Runtime::with_config(RuntimeConfig::default()).expect("runtime");
+    runtime.block_on(async {
+        let pool = AsyncDbPool::new(
+            InstantAsyncManager,
+            DbPoolConfig::with_max_size(4)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_millis(25)),
+        );
+        let cx = Cx::for_testing();
+
+        // Shrink the live cap to 2, then hold two connections to exhaust it.
+        assert_eq!(pool.set_max_size(2), 2);
+        let c1 = pool.get(&cx).await.expect("first create under cap");
+        let c2 = pool.get(&cx).await.expect("second create under cap");
+        assert_eq!(pool.stats().total, 2);
+
+        // A third checkout cannot create past the shrunk cap; the async path
+        // waits and is bounded here so the test stays fast. Either way, no
+        // third connection is created.
+        let third = pool.get(&cx);
+        let _ = timeout(wall_now(), Duration::from_millis(200), third).await;
+        assert_eq!(
+            pool.stats().total,
+            2,
+            "shrunk cap must block a third connection create"
+        );
+
+        // Grow back to the ceiling and a new create succeeds.
+        assert_eq!(pool.set_max_size(4), 4);
+        let c3 = pool
+            .get(&cx)
+            .await
+            .expect("create allowed after growing the cap");
+        assert_eq!(pool.stats().total, 3);
+
+        drop((c1, c2, c3));
+    });
 }

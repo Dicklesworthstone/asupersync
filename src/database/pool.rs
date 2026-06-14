@@ -1897,6 +1897,13 @@ pub struct AsyncDbPool<M: AsyncConnectionManager> {
     config: DbPoolConfig,
     inner: Mutex<PoolInner<M::Connection>>,
     stats: PoolStatCounters,
+    /// Live maximum pool size enforced by capacity checks (yj2nxx.7).
+    ///
+    /// Async twin of [`DbPool::live_max_size`]: starts at `config.max_size`,
+    /// adjustable within `[config.min_idle, config.max_size]` by managed pool
+    /// sizing. A shrink only blocks new creates / waiter admission; live
+    /// connections drain naturally.
+    live_max_size: AtomicUsize,
 }
 
 struct AsyncValidationGuard<'a, M: AsyncConnectionManager> {
@@ -1938,6 +1945,7 @@ impl<M: AsyncConnectionManager> Drop for AsyncCreationGuard<'_, M> {
 impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     /// Create a new async connection pool.
     pub fn new(manager: M, config: DbPoolConfig) -> Self {
+        let live_max_size = AtomicUsize::new(config.max_size);
         Self {
             manager: Arc::new(manager),
             config,
@@ -1951,12 +1959,53 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 client_retry_state: HashMap::new(),
             }),
             stats: PoolStatCounters::default(),
+            live_max_size,
         }
     }
 
     /// Create a pool with default configuration.
     pub fn with_manager(manager: M) -> Self {
         Self::new(manager, DbPoolConfig::default())
+    }
+
+    /// The live maximum pool size currently enforced by capacity checks.
+    ///
+    /// Async twin of [`DbPool::current_max_size`] (yj2nxx.7). Adjusted by
+    /// [`set_max_size`](Self::set_max_size) within
+    /// `[config.min_idle, config.max_size]`; `DbPoolStats::max_size` keeps
+    /// reporting the configured ceiling.
+    #[must_use]
+    pub fn current_max_size(&self) -> usize {
+        self.effective_max_size()
+    }
+
+    fn effective_max_size(&self) -> usize {
+        self.live_max_size.load(Ordering::Relaxed)
+    }
+
+    /// Set the live maximum pool size, clamped into `[min_idle, config.max_size]`.
+    ///
+    /// The configured `max_size` is the hard ceiling. A shrink only blocks new
+    /// creates and waiter admission; live connections drain naturally. Returns
+    /// the clamped value actually applied.
+    pub fn set_max_size(&self, requested: usize) -> usize {
+        let applied = requested
+            .max(self.config.min_idle)
+            .min(self.config.max_size);
+        self.live_max_size.store(applied, Ordering::Relaxed);
+        applied
+    }
+
+    /// Apply a managed pool-sizing decision to the live maximum size.
+    ///
+    /// Only [`PoolSizingAction::Resize`] mutates the cap (clamped into the
+    /// configured bounds); advisory mode and hysteresis/cadence holds are
+    /// no-ops. Returns the applied size when a resize was taken.
+    pub fn apply_pool_sizing_decision(&self, decision: &PoolSizingDecision) -> Option<usize> {
+        match decision.action {
+            PoolSizingAction::Resize { to_size, .. } => Some(self.set_max_size(to_size)),
+            _ => None,
+        }
     }
 
     /// Get the pool configuration.
@@ -2015,7 +2064,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     }
 
     fn async_pool_capacity_available_locked(&self, inner: &PoolInner<M::Connection>) -> bool {
-        !inner.idle.is_empty() || inner.total < self.config.max_size
+        !inner.idle.is_empty() || inner.total < self.effective_max_size()
     }
 
     fn prune_cancelled_async_pool_waiters_locked(&self, inner: &mut PoolInner<M::Connection>) {
@@ -2110,7 +2159,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     ) -> Result<(), DbPoolError<M::Error>> {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-        if self.config.max_size == 0 {
+        if self.effective_max_size() == 0 {
             trace_async_pool_event(cx, "wait", "full", client_scope);
             return Err(DbPoolError::Full);
         }
@@ -2208,7 +2257,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     let granted_waiter = waiter.take();
                     self.complete_async_pool_turn_locked(&mut inner, granted_waiter.as_ref());
                     AsyncAcquireStep::Idle(idle)
-                } else if inner.total >= self.config.max_size {
+                } else if inner.total >= self.effective_max_size() {
                     AsyncAcquireStep::Wait
                 } else {
                     inner.total += 1;
@@ -2435,7 +2484,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             .entry(client_id_owned.clone())
                             .or_insert(0) += 1;
                         AsyncAcquireStep::Idle(idle)
-                    } else if inner.total >= self.config.max_size {
+                    } else if inner.total >= self.effective_max_size() {
                         AsyncAcquireStep::Wait
                     } else {
                         inner.total += 1;
