@@ -158,17 +158,29 @@ impl EarlyDataReplayProtection {
     ///
     /// `Ok(())` if the request should be allowed, `Err(reason)` if rejected.
     ///
-    /// # Example
+    /// # Status (br-asupersync-snv902)
+    ///
+    /// This helper is **not yet wired into the server request pipeline**, and
+    /// `TlsStream` exposes no early-data signal (there is no
+    /// `received_early_data()` accessor). Because the per-request gate is
+    /// therefore unreachable, [`TlsAcceptorBuilder::build`] **refuses** to
+    /// enable 0-RTT for `SafeMethodsOnly` / `IdempotencyKeys` /
+    /// `NonceValidation` (fail closed) until enforcement is wired — so 0-RTT
+    /// early data is never accepted un-screened. The helper remains available
+    /// for callers that surface an early-data flag themselves and want to apply
+    /// the policy manually.
+    ///
+    /// # Example (manual application)
     ///
     /// ```ignore
-    /// // In your HTTP handler:
-    /// if tls_stream.received_early_data() {
-    ///     if let Err(reason) = acceptor.early_data_replay_protection()
-    ///         .validate_request_for_early_data("POST", true, false) {
-    ///         return Response::builder()
-    ///             .status(425) // Too Early
-    ///             .body(format!("0-RTT rejected: {}", reason))?;
-    ///     }
+    /// // Once you can detect early-data requests, screen them with the
+    /// // acceptor's configured strategy and map a rejection to 425 Too Early:
+    /// if let Err(reason) = acceptor.early_data_replay_protection()
+    ///     .validate_request_for_early_data("POST", true, false)
+    /// {
+    ///     return Response::builder()
+    ///         .status(425) // Too Early
+    ///         .body(format!("0-RTT rejected: {}", reason))?;
     /// }
     /// ```
     pub fn validate_request_for_early_data(
@@ -1014,12 +1026,34 @@ impl TlsAcceptorBuilder {
                 EarlyDataReplayProtection::SafeMethodsOnly
                 | EarlyDataReplayProtection::IdempotencyKeys
                 | EarlyDataReplayProtection::NonceValidation => {
-                    #[cfg(feature = "tracing-integration")]
-                    tracing::info!(
-                        max_early_data_bytes = self.early_data_max_bytes,
-                        protection_strategy = ?self.early_data_replay_protection,
-                        "TLS 1.3 0-RTT enabled with replay protection strategy"
-                    );
+                    // SECURITY: br-asupersync-snv902 — these strategies are
+                    // only effective when EarlyDataReplayProtection::
+                    // validate_request_for_early_data() runs PER REQUEST, but
+                    // that gate is NOT wired into the server request pipeline
+                    // (h1/h2/h3) and TlsStream exposes no early-data signal
+                    // (received_early_data() does not exist). Enabling 0-RTT on
+                    // the wire here would accept replayable early data that
+                    // NOTHING screens — a phantom control that manufactures a
+                    // false sense of replay protection (a captured 0-RTT POST
+                    // would be processed on replay). Fail CLOSED: refuse to
+                    // build a 0-RTT-enabled acceptor for a strategy whose
+                    // per-request enforcement is unreachable, rather than ship
+                    // un-enforced 0-RTT. (The build-time gate is the only place
+                    // this can be caught fail-closed until enforcement is wired;
+                    // tracked as the real-fix follow-up on the bead.)
+                    return Err(TlsError::Configuration(format!(
+                        "TLS 1.3 0-RTT enabled (max_bytes={}) with replay strategy \
+                         {:?}, but per-request replay enforcement is NOT wired into \
+                         the server request pipeline: validate_request_for_early_data() \
+                         has no production caller and TlsStream exposes no early-data \
+                         signal, so early data would be accepted on the wire and \
+                         processed WITHOUT any replay screening — a false sense of \
+                         protection. Until per-request enforcement is wired, either do \
+                         not enable 0-RTT, or, for tests that explicitly accept NO replay \
+                         protection, select EarlyDataReplayProtection::UnprotectedForTesting \
+                         (asupersync-snv902).",
+                        self.early_data_max_bytes, self.early_data_replay_protection
+                    )));
                 }
             }
         }
@@ -2522,7 +2556,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
 
     #[cfg(feature = "tls")]
     #[test]
-    fn test_early_data_with_safe_methods_protection_succeeds() {
+    fn test_early_data_with_safe_methods_rejected_until_enforcement_wired() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
         let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
 
@@ -2531,23 +2565,20 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .enable_early_data_with_protection(16384)
             .build();
 
+        // br-asupersync-snv902: SafeMethodsOnly only protects when
+        // validate_request_for_early_data() runs per request, which is not
+        // wired into the server pipeline. Building 0-RTT here would be a
+        // phantom control, so build() must fail closed.
         assert!(
-            result.is_ok(),
-            "0-RTT with safe methods protection should succeed: {:?}",
-            result
+            result.is_err(),
+            "0-RTT with SafeMethodsOnly must fail closed until per-request \
+             enforcement is wired (asupersync-snv902): {result:?}"
         );
-
-        let acceptor = result.unwrap();
-        assert_eq!(acceptor.config.max_early_data_size, 16384);
-        assert!(matches!(
-            acceptor.early_data_replay_protection(),
-            EarlyDataReplayProtection::SafeMethodsOnly
-        ));
     }
 
     #[cfg(feature = "tls")]
     #[test]
-    fn test_early_data_with_idempotency_protection_succeeds() {
+    fn test_early_data_with_idempotency_rejected_until_enforcement_wired() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
         let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
 
@@ -2556,22 +2587,18 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .enable_early_data_with_protection(8192)
             .build();
 
+        // br-asupersync-snv902: idempotency-key enforcement is per-request and
+        // unwired; 0-RTT must fail closed at build.
         assert!(
-            result.is_ok(),
-            "0-RTT with idempotency protection should succeed"
+            result.is_err(),
+            "0-RTT with IdempotencyKeys must fail closed until per-request \
+             enforcement is wired (asupersync-snv902): {result:?}"
         );
-
-        let acceptor = result.unwrap();
-        assert_eq!(acceptor.config.max_early_data_size, 8192);
-        assert!(matches!(
-            acceptor.early_data_replay_protection(),
-            EarlyDataReplayProtection::IdempotencyKeys
-        ));
     }
 
     #[cfg(feature = "tls")]
     #[test]
-    fn test_early_data_with_nonce_protection_succeeds() {
+    fn test_early_data_with_nonce_rejected_until_enforcement_wired() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
         let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
 
@@ -2580,14 +2607,13 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .enable_early_data_with_protection(32768)
             .build();
 
-        assert!(result.is_ok(), "0-RTT with nonce protection should succeed");
-
-        let acceptor = result.unwrap();
-        assert_eq!(acceptor.config.max_early_data_size, 32768);
-        assert!(matches!(
-            acceptor.early_data_replay_protection(),
-            EarlyDataReplayProtection::NonceValidation
-        ));
+        // br-asupersync-snv902: nonce validation is per-request and unwired;
+        // 0-RTT must fail closed at build.
+        assert!(
+            result.is_err(),
+            "0-RTT with NonceValidation must fail closed until per-request \
+             enforcement is wired (asupersync-snv902): {result:?}"
+        );
     }
 
     #[cfg(feature = "tls")]
