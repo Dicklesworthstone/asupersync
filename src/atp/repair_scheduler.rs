@@ -282,6 +282,7 @@ pub struct MultiSourceRepairScheduler {
     peers: BTreeMap<PeerId, PeerInfo>,
     received_symbols: HashSet<u32>,
     pending_requests: HashMap<u32, RepairSymbolRequest>,
+    symbol_retry_counts: HashMap<u32, u32>,
     rejected_requests: VecDeque<(RepairSymbolRequest, RejectionReason)>,
     /// Lifetime count of rejected symbol requests (not bounded by retention).
     rejected_total: u64,
@@ -305,6 +306,7 @@ impl MultiSourceRepairScheduler {
             peers: BTreeMap::new(),
             received_symbols: HashSet::new(),
             pending_requests: HashMap::new(),
+            symbol_retry_counts: HashMap::new(),
             rejected_requests: VecDeque::new(),
             rejected_total: 0,
             decode_matrix: DecodeMatrix::new(k_prime),
@@ -377,13 +379,14 @@ impl MultiSourceRepairScheduler {
                 can_add_new_peer,
             ) {
                 let decode_usefulness = self.calculate_symbol_decode_usefulness(symbol_index);
+                let retry_count = self.retry_count_for_symbol(symbol_index);
 
                 let request = RepairSymbolRequest {
                     symbol_index,
                     peer_id: best_peer.clone(),
                     requested_at: now,
                     decode_usefulness,
-                    retry_count: 0,
+                    retry_count,
                     timeout_at: now + self.config.symbol_timeout_duration,
                 };
 
@@ -428,7 +431,7 @@ impl MultiSourceRepairScheduler {
             if matches!(reason, RejectionReason::MaliciousPeer { .. }) {
                 self.update_peer_trust(from_peer, false);
             } else if let Some(request) = self.pending_requests.remove(&symbol_index) {
-                self.record_rejection(request, reason.clone());
+                self.record_request_failure(request, reason.clone());
             }
 
             return Ok(SymbolProcessResult::Rejected { reason });
@@ -437,6 +440,7 @@ impl MultiSourceRepairScheduler {
         // Accept the symbol
         self.received_symbols.insert(symbol_index);
         self.pending_requests.remove(&symbol_index);
+        self.symbol_retry_counts.remove(&symbol_index);
 
         // Update decode matrix
         let decode_contribution = self.decode_matrix.add_symbol(symbol_index, symbol_data)?;
@@ -638,6 +642,7 @@ impl MultiSourceRepairScheduler {
             for &symbol in &peer.available_symbols {
                 if !self.received_symbols.contains(&symbol)
                     && !self.pending_requests.contains_key(&symbol)
+                    && self.symbol_has_retries_remaining(symbol)
                 {
                     let usefulness = self.calculate_symbol_decode_usefulness(symbol);
                     if usefulness >= self.config.min_decode_usefulness_threshold {
@@ -699,9 +704,30 @@ impl MultiSourceRepairScheduler {
                 let reason = RejectionReason::StaleSymbol {
                     age_ms: now.duration_since(request.requested_at) / 1_000_000,
                 };
-                self.record_rejection(request, reason);
+                self.record_request_failure(request, reason);
             }
         }
+    }
+
+    fn retry_count_for_symbol(&self, symbol_index: u32) -> u32 {
+        self.symbol_retry_counts
+            .get(&symbol_index)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn symbol_has_retries_remaining(&self, symbol_index: u32) -> bool {
+        self.retry_count_for_symbol(symbol_index) <= self.config.max_symbol_retries
+    }
+
+    fn record_request_failure(&mut self, request: RepairSymbolRequest, reason: RejectionReason) {
+        let next_retry_count = self
+            .retry_count_for_symbol(request.symbol_index)
+            .max(request.retry_count)
+            .saturating_add(1);
+        self.symbol_retry_counts
+            .insert(request.symbol_index, next_retry_count);
+        self.record_rejection(request, reason);
     }
 
     /// Record a rejected symbol request for diagnostics while bounding the
@@ -1407,6 +1433,57 @@ mod tests {
             requests.len(),
             "every timed-out request is counted as rejected"
         );
+    }
+
+    #[test]
+    fn timed_out_symbol_stops_after_configured_retries() {
+        let config = RepairSchedulerConfig {
+            max_symbol_retries: 1,
+            ..RepairSchedulerConfig::default()
+        };
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            config,
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            1,
+        );
+
+        let peer_id = create_test_peer_id(8001);
+        let peer_info = create_test_peer_info(&scheduler, peer_id, vec![1]);
+        scheduler.register_peer(peer_info).unwrap();
+
+        let first_start = Time::from_secs(10);
+        let first = scheduler.schedule_next_batch_at(first_start).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].symbol_index, 1);
+        assert_eq!(first[0].retry_count, 0);
+
+        scheduler.cleanup_timed_out_requests(
+            first_start + scheduler.config.symbol_timeout_duration + Duration::from_secs(1),
+        );
+
+        let retry_start = Time::from_secs(50);
+        let retry = scheduler.schedule_next_batch_at(retry_start).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].symbol_index, 1);
+        assert_eq!(
+            retry[0].retry_count, 1,
+            "the next request must carry the preserved retry count"
+        );
+
+        scheduler.cleanup_timed_out_requests(
+            retry_start + scheduler.config.symbol_timeout_duration + Duration::from_secs(1),
+        );
+
+        let exhausted = scheduler
+            .schedule_next_batch_at(Time::from_secs(90))
+            .unwrap();
+        assert!(
+            exhausted.is_empty(),
+            "symbol 1 already had its initial attempt plus one configured retry"
+        );
+        assert_eq!(scheduler.retry_count_for_symbol(1), 2);
+        assert_eq!(scheduler.get_decode_progress().rejected_symbols, 2);
     }
 
     #[test]
