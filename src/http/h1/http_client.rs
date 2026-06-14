@@ -517,7 +517,7 @@ impl Default for RedirectPolicy {
 }
 
 /// Retry policy for the HTTP client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RetryPolicy {
     /// Do not retry failed requests automatically.
     None,
@@ -526,6 +526,7 @@ pub enum RetryPolicy {
     /// This covers the common keep-alive race where the peer closed an idle
     /// connection after it was returned to the pool. Non-safe methods are not
     /// retried by this policy because the server may have observed the request.
+    #[default]
     SafeMethodsOnStaleReuse,
 }
 
@@ -534,12 +535,6 @@ impl RetryPolicy {
         matches!(self, Self::SafeMethodsOnStaleReuse)
             && method_is_safe_to_retry_after_stale_reuse(method)
             && client_error_looks_like_stale_reuse(err)
-    }
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self::SafeMethodsOnStaleReuse
     }
 }
 
@@ -829,28 +824,24 @@ impl<'a> ClientRequestBuilder<'a> {
     }
 
     /// Set the HTTP method.
-    #[must_use]
     pub fn method(mut self, method: Method) -> Self {
         self.method = method;
         self
     }
 
     /// Set the absolute request URL.
-    #[must_use]
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = url.into();
         self
     }
 
     /// Add a request header.
-    #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
     }
 
     /// Add multiple request headers.
-    #[must_use]
     pub fn headers<I, N, V>(mut self, headers: I) -> Self
     where
         I: IntoIterator<Item = (N, V)>,
@@ -866,7 +857,6 @@ impl<'a> ClientRequestBuilder<'a> {
     }
 
     /// Set request body bytes.
-    #[must_use]
     pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
         self.body = body.into();
         self
@@ -875,7 +865,6 @@ impl<'a> ClientRequestBuilder<'a> {
     /// Append URL-encoded query parameters to the request URL.
     ///
     /// Existing query strings are preserved and extended with `&`.
-    #[must_use]
     pub fn query<I, K, V>(mut self, params: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -904,7 +893,6 @@ impl<'a> ClientRequestBuilder<'a> {
 
     /// Set a URL-encoded form body and add
     /// `Content-Type: application/x-www-form-urlencoded`.
-    #[must_use]
     pub fn form<I, K, V>(mut self, params: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -921,7 +909,6 @@ impl<'a> ClientRequestBuilder<'a> {
     }
 
     /// Set a multipart form-data body and content type.
-    #[must_use]
     pub fn multipart(mut self, form: &MultipartForm) -> Self {
         self.body = form.to_body();
         self.headers
@@ -930,13 +917,11 @@ impl<'a> ClientRequestBuilder<'a> {
     }
 
     /// Set `Authorization: Bearer <token>`.
-    #[must_use]
     pub fn bearer_auth(self, token: impl AsRef<str>) -> Self {
         self.header("Authorization", format!("Bearer {}", token.as_ref()))
     }
 
     /// Set `Authorization: Basic <credentials>`.
-    #[must_use]
     pub fn basic_auth(self, username: impl AsRef<str>, password: Option<&str>) -> Self {
         let credentials = password.map_or_else(
             || format!("{}:", username.as_ref()),
@@ -947,13 +932,11 @@ impl<'a> ClientRequestBuilder<'a> {
     }
 
     /// Set the `Content-Type` header.
-    #[must_use]
     pub fn content_type(self, content_type: impl Into<String>) -> Self {
         self.header("Content-Type", content_type)
     }
 
     /// Set the `Accept` header.
-    #[must_use]
     pub fn accept(self, accept: impl Into<String>) -> Self {
         self.header("Accept", accept)
     }
@@ -962,7 +945,6 @@ impl<'a> ClientRequestBuilder<'a> {
     ///
     /// The timeout is meet-composed with the client's configured timeout and
     /// the remaining ambient [`Cx`] budget by [`HttpClient::request_with_timeout`].
-    #[must_use]
     pub fn timeout(mut self, timeout: std::time::Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -1033,7 +1015,6 @@ impl HttpClient {
     }
 
     /// Create a fluent request builder bound to this client.
-    #[must_use]
     pub fn request_builder(
         &self,
         method: Method,
@@ -1043,43 +1024,36 @@ impl HttpClient {
     }
 
     /// Create a fluent `GET` request builder.
-    #[must_use]
     pub fn get(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Get, url)
     }
 
     /// Create a fluent `POST` request builder.
-    #[must_use]
     pub fn post(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Post, url)
     }
 
     /// Create a fluent `PUT` request builder.
-    #[must_use]
     pub fn put(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Put, url)
     }
 
     /// Create a fluent `PATCH` request builder.
-    #[must_use]
     pub fn patch(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Patch, url)
     }
 
     /// Create a fluent `DELETE` request builder.
-    #[must_use]
     pub fn delete(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Delete, url)
     }
 
     /// Create a fluent `HEAD` request builder.
-    #[must_use]
     pub fn head(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Head, url)
     }
 
     /// Create a fluent `OPTIONS` request builder.
-    #[must_use]
     pub fn options(&self, url: impl Into<String>) -> ClientRequestBuilder<'_> {
         self.request_builder(Method::Options, url)
     }
