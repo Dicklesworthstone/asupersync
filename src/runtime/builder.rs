@@ -2730,7 +2730,9 @@ impl RuntimeBuilder {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
         })?;
         let mut config = RuntimeConfig::default();
-        crate::runtime::env_config::apply_toml_config(&mut config, &toml_config);
+        crate::runtime::env_config::apply_toml_config(&mut config, &toml_config).map_err(|e| {
+            Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
+        })?;
         Ok(Self {
             config,
             reactor: None,
@@ -2766,7 +2768,9 @@ impl RuntimeBuilder {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
         })?;
         let mut config = RuntimeConfig::default();
-        crate::runtime::env_config::apply_toml_config(&mut config, &toml_config);
+        crate::runtime::env_config::apply_toml_config(&mut config, &toml_config).map_err(|e| {
+            Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
+        })?;
         Ok(Self {
             config,
             reactor: None,

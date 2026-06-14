@@ -222,6 +222,7 @@ pub fn apply_env_overrides(
         config.thread_stack_size = parse_usize(ENV_THREAD_STACK_SIZE, &val)?;
     }
     if let Some(val) = env_reader.read_env(ENV_THREAD_NAME_PREFIX) {
+        validate_thread_name_prefix(ENV_THREAD_NAME_PREFIX, &val)?;
         config.thread_name_prefix = val;
     }
     if let Some(val) = env_reader.read_env(ENV_STEAL_BATCH_SIZE) {
@@ -288,6 +289,16 @@ fn parse_bool(var_name: &str, val: &str) -> Result<bool, BuildError> {
             "invalid value for {var_name}: expected bool (true/false/1/0/yes/no), got {val:?}"
         ))),
     }
+}
+
+fn validate_thread_name_prefix(field_name: &'static str, val: &str) -> Result<(), BuildError> {
+    if val.contains('\0') {
+        return Err(BuildError::invalid_value(
+            field_name,
+            "must not contain NUL bytes",
+        ));
+    }
+    Ok(())
 }
 
 // =========================================================================
@@ -373,7 +384,10 @@ pub struct BlockingToml {
 ///
 /// Only fields that are `Some` in the TOML struct override the config.
 #[cfg(feature = "config-file")]
-pub fn apply_toml_config(config: &mut RuntimeConfig, toml: &RuntimeTomlConfig) {
+pub fn apply_toml_config(
+    config: &mut RuntimeConfig,
+    toml: &RuntimeTomlConfig,
+) -> Result<(), BuildError> {
     if let Some(v) = toml.scheduler.worker_threads {
         config.worker_threads = v;
     }
@@ -408,6 +422,7 @@ pub fn apply_toml_config(config: &mut RuntimeConfig, toml: &RuntimeTomlConfig) {
         config.thread_stack_size = v;
     }
     if let Some(ref v) = toml.scheduler.thread_name_prefix {
+        validate_thread_name_prefix("scheduler.thread_name_prefix", v)?;
         config.thread_name_prefix.clone_from(v);
     }
     if let Some(v) = toml.blocking.min_threads {
@@ -416,6 +431,7 @@ pub fn apply_toml_config(config: &mut RuntimeConfig, toml: &RuntimeTomlConfig) {
     if let Some(v) = toml.blocking.max_threads {
         config.blocking.max_threads = v;
     }
+    Ok(())
 }
 
 /// Parse a TOML string into a [`RuntimeTomlConfig`].
@@ -622,6 +638,15 @@ mod tests {
             let mut config = RuntimeConfig::default();
             apply_env_overrides(&mut config).expect("should apply thread_name_prefix env override");
             assert_eq!(config.thread_name_prefix, "myapp-worker");
+        });
+    }
+
+    #[test]
+    fn env_rejects_thread_name_prefix_with_nul() {
+        with_env(ENV_THREAD_NAME_PREFIX, "bad\0prefix", || {
+            let mut config = RuntimeConfig::default();
+            let err = apply_env_overrides(&mut config).expect_err("NUL prefix must be rejected");
+            assert!(err.to_string().contains("NUL"), "unexpected error: {err}");
         });
     }
 
@@ -909,7 +934,7 @@ max_threads = 128
 ";
         let parsed = parse_toml_str(toml_str).unwrap();
         let mut config = RuntimeConfig::default();
-        apply_toml_config(&mut config, &parsed);
+        apply_toml_config(&mut config, &parsed).unwrap();
 
         assert_eq!(config.worker_threads, 16);
         assert_eq!(config.poll_budget, 512);
@@ -952,9 +977,23 @@ poll_budget = 64
 
         let parsed = parse_toml_file(&path, &SystemEnvReader::new()).unwrap();
         let mut config = RuntimeConfig::default();
-        apply_toml_config(&mut config, &parsed);
+        apply_toml_config(&mut config, &parsed).unwrap();
         assert_eq!(config.worker_threads, 2);
         assert_eq!(config.poll_budget, 64);
+    }
+
+    #[test]
+    fn toml_rejects_thread_name_prefix_with_nul() {
+        let parsed = parse_toml_str(
+            r#"
+[scheduler]
+thread_name_prefix = "bad\u0000prefix"
+"#,
+        )
+        .unwrap();
+        let mut config = RuntimeConfig::default();
+        let err = apply_toml_config(&mut config, &parsed).expect_err("NUL prefix must be rejected");
+        assert!(err.to_string().contains("NUL"), "unexpected error: {err}");
     }
 }
 
