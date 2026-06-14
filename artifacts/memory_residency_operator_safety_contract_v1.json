@@ -1,0 +1,168 @@
+{
+  "schema_version": "memory-residency-operator-safety-contract-v1",
+  "bead_id": "asupersync-memory-residency-control-ho2itz.5",
+  "parent_bead_id": "asupersync-memory-residency-control-ho2itz",
+  "status": "contract_guarded",
+  "generated_on": "2026-06-14",
+  "source_of_truth": {
+    "contract": "artifacts/memory_residency_operator_safety_contract_v1.json",
+    "runbook": "docs/proof/memory_residency_operator_safety.md",
+    "contract_test": "tests/memory_residency_operator_safety_contract.rs",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "m1_inventory": "artifacts/memory_residency_inventory_v1.json",
+    "m2_policy": "artifacts/memory_residency_policy_contract_v1.json",
+    "m3_accounting": "artifacts/memory_residency_accounting_snapshot_v1.json",
+    "m4_replay": "artifacts/memory_residency_replay_e2e_contract_v1.json"
+  },
+  "proof_lane": {
+    "lane_id": "memory-residency-operator-safety-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_operator_safety_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_operator_safety_contract -- --nocapture",
+    "covers": "Memory-residency M5 operator runbook, enablement prerequisites, rollback path, fail-closed safety gates for M1-M4 evidence, Agent Mail handoff template, bead closeout checklist, README/AGENTS markers, proof manifest/status mapping, and no-claim boundaries.",
+    "explicit_not_covered": "Does not prove runtime correctness, broad workspace health, release readiness, allocator replacement, live host throughput, p50/p95/p999 improvement, memory-use reduction, NUMA performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval."
+  },
+  "enablement": {
+    "default_off": true,
+    "profile_source": "MemoryResidencyPolicy::experimental_opt_in()",
+    "default_source": "MemoryResidencyPolicy::default()",
+    "operator_prerequisites": [
+      "M1 inventory contract is present and points at the current M2 child bead.",
+      "M2 policy contract schema is known and exports recommendation-only live-task action.",
+      "M3 accounting contract is available and exposes fresh/stale/unknown status vocabulary.",
+      "M4 replay e2e contract is present with deterministic artifacts and no benchmark claim.",
+      "The focused M5 proof command is run through RCH_REQUIRE_REMOTE=1 with no local Cargo fallback."
+    ],
+    "configuration_knobs": [
+      "trace_storage_profile",
+      "arena_temperature_policy",
+      "locality_report_age_seconds",
+      "artifact_cache_pressure",
+      "runtime_pressure_snapshot",
+      "proof_pack_warmth",
+      "record_pool_counters"
+    ],
+    "operator_decision_rule": "Enable only as an explicit experimental profile after all safety gates report pass. Any missing, stale, unknown, contradictory, or locally-proven evidence keeps the runtime on the default disabled policy."
+  },
+  "safety_gates": [
+    {
+      "gate_id": "m1_inventory_fresh",
+      "required_source": "artifacts/memory_residency_inventory_v1.json",
+      "required_schema": "memory-residency-inventory-v1",
+      "fail_closed_if": [
+        "missing artifact",
+        "unknown schema",
+        "wrong parent bead",
+        "missing next child pointer"
+      ],
+      "operator_message": "M1 inventory evidence is missing or stale; keep memory residency disabled.",
+      "rollback_action": "Keep MemoryResidencyPolicy::default() and rerun the M1 inventory contract before enabling.",
+      "fail_closed": true
+    },
+    {
+      "gate_id": "m2_policy_known",
+      "required_source": "artifacts/memory_residency_policy_contract_v1.json",
+      "required_schema": "memory-residency-policy-contract-v1",
+      "fail_closed_if": [
+        "missing artifact",
+        "unknown schema",
+        "missing recommendation_only_live_task_action",
+        "missing rch_only_cargo_proof"
+      ],
+      "operator_message": "M2 policy evidence is unavailable or unknown; do not enable the experimental policy.",
+      "rollback_action": "Use the disabled default policy and rerun the M2 policy contract through RCH.",
+      "fail_closed": true
+    },
+    {
+      "gate_id": "m3_accounting_available",
+      "required_source": "artifacts/memory_residency_accounting_snapshot_v1.json",
+      "required_schema": "memory-residency-accounting-snapshot-contract-v1",
+      "fail_closed_if": [
+        "missing artifact",
+        "unknown schema",
+        "debug provider unavailable",
+        "record pool counters unavailable"
+      ],
+      "operator_message": "M3 accounting is unavailable or unknown; do not trust residency decisions.",
+      "rollback_action": "Return to unified allocation and rerun the M3 accounting snapshot contract through RCH.",
+      "fail_closed": true
+    },
+    {
+      "gate_id": "m4_replay_artifacts_fresh",
+      "required_source": "artifacts/memory_residency_replay_e2e_contract_v1.json",
+      "required_schema": "memory-residency-replay-e2e-contract-v1",
+      "fail_closed_if": [
+        "missing artifact",
+        "unknown schema",
+        "missing deterministic scenario",
+        "missing required replay artifact",
+        "benchmark claim present without benchmark evidence"
+      ],
+      "operator_message": "M4 replay artifacts are missing, stale, or overclaiming; keep the profile disabled.",
+      "rollback_action": "Disable the experimental profile and rerun the M4 replay e2e contract through RCH.",
+      "fail_closed": true
+    },
+    {
+      "gate_id": "no_local_cargo_fallback",
+      "required_source": "artifacts/proof_lane_manifest_v1.json",
+      "required_schema": "proof-lane-manifest-v1",
+      "fail_closed_if": [
+        "proof command lacks RCH_REQUIRE_REMOTE=1",
+        "proof command lacks isolated CARGO_TARGET_DIR",
+        "local fallback marker appears"
+      ],
+      "operator_message": "Local Cargo output is not acceptable evidence for the memory-residency safety packet.",
+      "rollback_action": "Refuse the evidence and rerun the exact manifest lane remotely.",
+      "fail_closed": true
+    }
+  ],
+  "rollback": {
+    "primary_path": "Return to MemoryResidencyPolicy::default() and the existing unified allocation behavior.",
+    "restart_required": false,
+    "operator_steps": [
+      "Remove the explicit experimental opt-in from the caller or operator profile.",
+      "Treat stale topology, unknown accounting, and missing proof-pack warmth as fallback evidence.",
+      "Keep existing runtime records and trace artifacts intact; do not delete files or clean worktrees.",
+      "Rerun the focused M5 proof lane through RCH before re-enabling."
+    ],
+    "incident_checklist": [
+      "Capture the failing gate_id and operator_message.",
+      "Attach the exact proof command and RCH admission/result state.",
+      "Send Agent Mail on thread asupersync-memory-residency-control-ho2itz.5.",
+      "Record whether M1, M2, M3, or M4 evidence was missing, stale, unknown, or contradictory.",
+      "Do not cite broad workspace health, release readiness, or performance improvement."
+    ]
+  },
+  "agent_mail_handoff_template": {
+    "thread_id": "asupersync-memory-residency-control-ho2itz.5",
+    "subject": "[asupersync-memory-residency-control-ho2itz.5] Memory-residency safety gate handoff",
+    "body_required_fields": [
+      "gate_id",
+      "status",
+      "proof_command",
+      "rch_worker_or_refusal",
+      "dirty_frontier",
+      "rollback_action",
+      "no_claim_boundaries"
+    ]
+  },
+  "bead_closeout_checklist": [
+    "All source_of_truth paths exist.",
+    "Runbook includes prerequisites, default-off posture, rollback path, incident checklist, Agent Mail handoff, and no-claim boundaries.",
+    "Safety gates fail closed for stale M1 inventory, unknown M2 policy version, unavailable M3 accounting, missing/stale M4 proof artifacts, and local Cargo fallback.",
+    "README.md and AGENTS.md contain the memory-residency operator safety contract marker.",
+    "Proof manifest and proof-status snapshot map the focused lane without broad claims.",
+    "Focused Cargo proof uses RCH_REQUIRE_REMOTE=1 rch exec with an isolated CARGO_TARGET_DIR."
+  ],
+  "no_claim_boundaries": [
+    "No permission to delete files, clean worktrees, create branches, or create worktrees.",
+    "No release-readiness claim.",
+    "No broad workspace-health claim.",
+    "No allocator replacement or broad allocator-performance claim.",
+    "No live host throughput, p50, p95, p999, memory-use, NUMA performance, cache hit-rate, or no-regression benchmark claim.",
+    "No runtime correctness claim outside the memory-residency policy/accounting/operator-safety surfaces.",
+    "No live RCH fleet availability claim.",
+    "No local Cargo fallback approval."
+  ]
+}

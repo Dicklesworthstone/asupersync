@@ -16,6 +16,7 @@
 //! - [`region_heap`]: Region-owned heap allocator with quiescent reclamation
 //! - [`cache`]: Content-addressed artifact cache and zero-copy handoff policy
 //! - [`rch_health`]: Deterministic RCH worker health and cache-warm admission
+//! - [`pool_sizing`]: Pure queueing-theoretic pool sizing recommendations
 //!
 //! # Runtime Builder
 //!
@@ -142,6 +143,7 @@ pub mod kernel;
 pub mod memory_residency;
 pub mod obligation_table;
 pub mod panic_isolation;
+pub mod pool_sizing;
 pub mod rch_health;
 pub mod reactor;
 pub mod region_heap;
@@ -196,9 +198,9 @@ pub use cache::{
     CacheStatistics, EvictionPolicy,
 };
 pub use changepoint::{
-    ChangeDirection, ChangePointDetection, ChangePointDetectorKind, ChangePointSnapshot,
-    CusumConfig, CusumDetector, MetricSample, PageHinkleyConfig, PageHinkleyDetector,
-    RuntimeMetricSeries,
+    ChangeDirection, ChangePointDetection, ChangePointDetectorKind, ChangePointMonitor,
+    ChangePointSnapshot, CusumConfig, CusumDetector, MetricSample, PageHinkleyConfig,
+    PageHinkleyDetector, RuntimeMetricSeries, SeriesDetector,
 };
 pub use config::{BlockingPoolConfig, RuntimeConfig, TraceStorageBudget, TraceStorageProfile};
 pub use deadline_monitor::{
@@ -226,6 +228,13 @@ pub use obligation_table::{
 pub use panic_isolation::{
     CleanupPhase, FinalizerType, MetricsProviderPanicExt, PanicContext, PanicIsolationConfig,
     PanicIsolationResult, PanicIsolator, PanicLocation,
+};
+pub use pool_sizing::{
+    POOL_SIZING_SCALE, PoolSizingAction, PoolSizingBounds, PoolSizingCandidateMetrics,
+    PoolSizingControllerState, PoolSizingDecision, PoolSizingEstimator, PoolSizingMode,
+    PoolSizingObservation, PoolSizingPolicy, PoolSizingReason, PoolSizingRecommendation,
+    PoolSizingTarget, PoolWorkloadEstimate, decide_pool_sizing, pool_sizing_candidate_metrics,
+    recommend_pool_size, square_root_staffing_size,
 };
 pub use reactor::{
     BrowserReactor, BrowserReactorConfig, Event, Events, Interest, LabReactor, Reactor,

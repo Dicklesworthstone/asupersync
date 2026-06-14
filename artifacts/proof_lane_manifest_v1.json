@@ -476,6 +476,7 @@
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
     "memory-residency-replay-e2e-contract",
+    "memory-residency-operator-safety-contract",
     "fourth-wave-governor-schema-contract",
     "fourth-wave-governor-policy-engine",
     "fourth-wave-swarm-replay-corpus",
@@ -2388,6 +2389,58 @@
       }
     },
     {
+      "lane_id": "memory-residency-operator-safety-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_operator_safety_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_operator_safety_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "memory-residency-operator-safety-contract"
+      ],
+      "covers": "Memory-residency M5 operator safety artifact, runbook, enablement prerequisites, fail-closed M1-M4 safety gates, rollback guidance, Agent Mail handoff template, closeout checklist, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not prove runtime correctness, broad workspace health, release readiness, allocator replacement, live host throughput, p50/p95/p999 improvement, memory-use reduction, NUMA performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval.",
+      "expected_signal": "memory_residency_operator_safety_contract tests pass",
+      "source_paths": [
+        "artifacts/memory_residency_operator_safety_contract_v1.json",
+        "docs/proof/memory_residency_operator_safety.md",
+        "tests/memory_residency_operator_safety_contract.rs",
+        "README.md",
+        "AGENTS.md",
+        "artifacts/memory_residency_inventory_v1.json",
+        "artifacts/memory_residency_policy_contract_v1.json",
+        "artifacts/memory_residency_accounting_snapshot_v1.json",
+        "artifacts/memory_residency_replay_e2e_contract_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "memory-residency upstream artifact drift",
+        "operator runbook no-claim drift",
+        "manifest projection golden drift",
+        "proof-status row drift"
+      ],
+      "escalation_notes": "Use this lane only for the M5 operator safety packet. It cannot be cited as release readiness, broad workspace health, runtime correctness, performance evidence, live RCH fleet availability, permission to delete files, or permission to use local Cargo fallback.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "memory-residency-operator-safety-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability",
+          "performance-improvement",
+          "local-cargo-fallback"
+        ]
+      }
+    },
+    {
       "lane_id": "artifact-governance-final-signoff",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -2730,6 +2783,13 @@
       "description": "Memory-residency M4 deterministic replay/e2e artifact, runner, orchestrator registration, manifest/status mapping, stale/missing input failures, and no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "memory-residency-replay-e2e-contract"
+      ]
+    },
+    {
+      "guarantee_id": "memory-residency-operator-safety-contract",
+      "description": "Memory-residency M5 operator safety artifact, runbook, fail-closed M1-M4 gates, rollback guidance, Agent Mail handoff, closeout checklist, manifest/status rows, README/AGENTS markers, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "memory-residency-operator-safety-contract"
       ]
     },
     {

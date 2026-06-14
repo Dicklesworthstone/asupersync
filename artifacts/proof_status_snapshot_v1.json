@@ -84,6 +84,7 @@
     "rustdoc/API examples",
     "downstream consumer proof",
     "memory residency replay e2e contract",
+    "memory residency operator safety contract",
     "lab-live support-claim report",
     "browser GA final signoff",
     "validation frontier final signoff",
@@ -771,6 +772,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped replay/e2e contract evidence only; does not prove broad workspace health, release readiness, runtime correctness outside the memory-residency policy/accounting surfaces, performance improvement, live RCH fleet availability, or local Cargo fallback approval."
+    },
+    {
+      "claim_id": "memory-residency-operator-safety-contract",
+      "category": "memory residency operator safety contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "memory-residency operator safety contract",
+          "memory-residency-operator-safety-contract"
+        ],
+        "AGENTS.md": [
+          "memory-residency operator safety contract",
+          "memory-residency-operator-safety-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "memory-residency-operator-safety-contract"
+      ],
+      "manifest_lane_ids": [
+        "memory-residency-operator-safety-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_operator_safety_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_operator_safety_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped operator safety contract evidence only; does not prove broad workspace health, release readiness, runtime correctness outside the memory-residency policy/accounting/operator-safety surfaces, performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval."
     },
     {
       "claim_id": "lab-live-support-claim-report",
