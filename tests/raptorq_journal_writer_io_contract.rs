@@ -7,13 +7,21 @@
 
 use asupersync::config::EncodingConfig;
 use asupersync::runtime::RuntimeBuilder;
-use asupersync::trace::raptorq_journal::{latest_complete_epoch, scan_frames};
+use asupersync::trace::raptorq_journal::{ObjectParamsRecord, latest_complete_epoch, scan_frames};
 use asupersync::trace::raptorq_journal_writer::{
-    DurableTraceJournal, DurableTraceJournalConfig, encode_and_serialize_epoch,
-    read_epoch_manifest, read_epoch_stripes, stripe_file_name, write_epoch_manifest,
-    write_epoch_stripes,
+    DurableJournalError, DurableTraceJournal, DurableTraceJournalConfig,
+    encode_and_serialize_epoch, read_epoch_manifest, read_epoch_stripes, stripe_file_name,
+    write_epoch_manifest, write_epoch_stripes,
 };
 use tempfile::tempdir;
+
+/// Varied (non-constant) test payload so byte-exact recovery is meaningful — a
+/// constant fill would "recover" trivially.
+fn varied_payload(len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
+        .collect()
+}
 
 #[test]
 fn striped_files_persist_and_recover_after_losing_a_stripe() {
@@ -189,4 +197,94 @@ fn journal_discovers_epochs_and_finds_latest_recoverable() {
         ok,
         "journal must discover epochs and fall back to the latest still-recoverable one"
     );
+}
+
+#[test]
+fn recover_epoch_reconstructs_original_bytes_through_stripe_loss() {
+    // AC1/AC5: the journal must reconstruct the EXACT original checkpoint bytes
+    // from the surviving stripes (real RaptorQ decode), not merely confirm that
+    // enough symbols survived — including after losing a whole failure domain.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let ok = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 4,
+            stripe_count: 3,
+        });
+
+        let data = varied_payload(600);
+        journal.record_epoch(42, &data).await.expect("record epoch");
+
+        // Full recovery decodes the exact original bytes.
+        let full = journal.recover_epoch(42).await.expect("recover full");
+        assert_eq!(
+            full, data,
+            "full recovery must reproduce the original bytes"
+        );
+
+        // Lose one whole stripe file (a failure domain) — still byte-exact.
+        std::fs::remove_file(dir_path.join(stripe_file_name(42, 0))).expect("remove stripe 0");
+        let after_loss = journal
+            .recover_epoch(42)
+            .await
+            .expect("recover after losing a stripe");
+        after_loss == data
+    }));
+
+    assert!(
+        ok,
+        "recover_epoch must reconstruct the exact original bytes after losing one of three stripes"
+    );
+}
+
+#[test]
+fn recover_epoch_without_params_record_reports_missing_params() {
+    // An epoch with no persisted params record cannot be byte-decoded; recovery
+    // surfaces a typed MissingParams error rather than guessing.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let ok = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 4,
+            stripe_count: 3,
+        });
+        matches!(
+            journal.recover_epoch(999).await,
+            Err(DurableJournalError::MissingParams)
+        )
+    }));
+
+    assert!(
+        ok,
+        "recovering an unrecorded epoch must report MissingParams"
+    );
+}
+
+#[test]
+fn object_params_record_roundtrips_and_detects_corruption() {
+    // Pure on-disk record contract: encode→decode is identity; a flipped byte is
+    // caught by the CRC; the block layout matches the decoder's planner.
+    let record = ObjectParamsRecord {
+        epoch: 7,
+        object_size: 600,
+        symbol_size: 256,
+        max_block_size: 1024 * 1024,
+    };
+    let mut bytes = record.encode().to_vec();
+    assert_eq!(ObjectParamsRecord::decode(&bytes).expect("decode"), record);
+
+    // 600 bytes / 256 = ceil 3 symbols, single block under a 1 MiB block size.
+    assert_eq!(record.block_layout(), (1, 3));
+
+    // Corrupt a payload byte -> CRC mismatch.
+    bytes[14] ^= 0xFF;
+    assert!(ObjectParamsRecord::decode(&bytes).is_err());
 }

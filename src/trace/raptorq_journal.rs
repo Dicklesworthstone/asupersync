@@ -428,6 +428,109 @@ impl EpochManifest {
     }
 }
 
+/// Self-describing decode metadata for an epoch.
+///
+/// The journal frames carry per-symbol `symbol_size` and per-block
+/// `source_symbol_count`, but RaptorQ decode also needs the original object's
+/// transfer length (`object_size`) to strip the last source block's symbol
+/// padding, plus the `max_block_size` that fixed the source-block layout. None
+/// of those three are recoverable from the surviving symbol frames alone, so a
+/// writer persists this record next to the manifest. With it, recovery can
+/// rebuild the exact [`crate::types::ObjectParams`] and decode the original
+/// checkpoint bytes from any surviving `>= K'` symbols — not merely confirm
+/// that enough survived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectParamsRecord {
+    /// Trace checkpoint epoch this record describes.
+    pub epoch: u64,
+    /// Total size of the original checkpoint object in bytes (transfer length).
+    pub object_size: u64,
+    /// RaptorQ symbol size T in bytes (must match the frames).
+    pub symbol_size: u16,
+    /// Maximum source-block size that fixed the block layout during encode.
+    pub max_block_size: u32,
+}
+
+/// Magic identifying a persisted object-params record (decode metadata).
+pub const OBJECT_PARAMS_MAGIC: [u8; 4] = *b"ASRP";
+
+/// Length of a persisted object-params record (magic + version + epoch +
+/// object-size + symbol-size + max-block-size + CRC-32).
+pub const OBJECT_PARAMS_RECORD_LEN: usize = 4 + 2 + 8 + 8 + 2 + 4 + 4;
+
+impl ObjectParamsRecord {
+    /// Serialize to the CRC-protected on-disk record. Big-endian; shares the
+    /// journal version and CRC-32 with the frame and manifest formats.
+    #[must_use]
+    pub fn encode(&self) -> [u8; OBJECT_PARAMS_RECORD_LEN] {
+        let mut out = [0u8; OBJECT_PARAMS_RECORD_LEN];
+        out[0..4].copy_from_slice(&OBJECT_PARAMS_MAGIC);
+        out[4..6].copy_from_slice(&JOURNAL_FRAME_VERSION.to_be_bytes());
+        out[6..14].copy_from_slice(&self.epoch.to_be_bytes());
+        out[14..22].copy_from_slice(&self.object_size.to_be_bytes());
+        out[22..24].copy_from_slice(&self.symbol_size.to_be_bytes());
+        out[24..28].copy_from_slice(&self.max_block_size.to_be_bytes());
+        let crc = crc32(&out[0..28]);
+        out[28..32].copy_from_slice(&crc.to_be_bytes());
+        out
+    }
+
+    /// Parse an object-params record, validating magic, version, and CRC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalFrameError`] for a short, mis-magicked, future-versioned,
+    /// or corrupt record.
+    pub fn decode(bytes: &[u8]) -> Result<Self, JournalFrameError> {
+        if bytes.len() < OBJECT_PARAMS_RECORD_LEN {
+            return Err(JournalFrameError::Truncated);
+        }
+        if bytes[0..4] != OBJECT_PARAMS_MAGIC {
+            return Err(JournalFrameError::BadMagic);
+        }
+        let version = u16::from_be_bytes([bytes[4], bytes[5]]);
+        if version > JOURNAL_FRAME_VERSION {
+            return Err(JournalFrameError::UnsupportedVersion(version));
+        }
+        let stored_crc = u32::from_be_bytes(read4(bytes, 28));
+        if stored_crc != crc32(&bytes[0..28]) {
+            return Err(JournalFrameError::HeaderChecksumMismatch);
+        }
+        Ok(Self {
+            epoch: u64::from_be_bytes(read8(bytes, 6)),
+            object_size: u64::from_be_bytes(read8(bytes, 14)),
+            symbol_size: u16::from_be_bytes([bytes[22], bytes[23]]),
+            max_block_size: u32::from_be_bytes(read4(bytes, 24)),
+        })
+    }
+
+    /// The RaptorQ source-block layout `(source_blocks, symbols_per_block)` this
+    /// object decodes with, mirroring the decoder's own block planner (a block
+    /// per `max_block_size` chunk; `symbols_per_block` is the max `K` across
+    /// blocks). Used to build the exact [`crate::types::ObjectParams`] for
+    /// decode. Returns `(0, 0)` for an empty object.
+    #[must_use]
+    pub fn block_layout(&self) -> (u16, u16) {
+        let object_size = self.object_size;
+        let symbol_size = u64::from(self.symbol_size);
+        let max_block_size = u64::from(self.max_block_size);
+        if object_size == 0 || symbol_size == 0 || max_block_size == 0 {
+            return (0, 0);
+        }
+        let mut blocks: u16 = 0;
+        let mut max_k: u64 = 0;
+        let mut offset: u64 = 0;
+        while offset < object_size {
+            let len = max_block_size.min(object_size - offset);
+            let k = len.div_ceil(symbol_size);
+            max_k = max_k.max(k);
+            offset += len;
+            blocks = blocks.saturating_add(1);
+        }
+        (blocks, u16::try_from(max_k).unwrap_or(u16::MAX))
+    }
+}
+
 /// Whether every source block `0..manifest.source_block_count` in the epoch is
 /// present *and* decodable among `frames`.
 ///

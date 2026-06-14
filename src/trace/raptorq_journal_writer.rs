@@ -9,13 +9,15 @@
 //! remain the caller's responsibility — this is the encode→serialize core.
 
 use crate::config::EncodingConfig;
+use crate::decoding::{DecodingConfig, DecodingError, DecodingPipeline};
 use crate::encoding::{EncodingError, EncodingPipeline};
+use crate::security::AuthenticatedSymbol;
 use crate::trace::raptorq_journal::{
-    BlockSymbols, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, latest_complete_epoch,
-    scan_frames, serialize_epoch,
+    BlockSymbols, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, JournalFrame,
+    ObjectParamsRecord, latest_complete_epoch, scan_frames, serialize_epoch,
 };
-use crate::types::ObjectId;
 use crate::types::resource::{PoolConfig, SymbolPool};
+use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use std::collections::BTreeMap;
 
 /// Encode `data` for checkpoint `epoch` into one [`BlockSymbols`] per RaptorQ
@@ -196,23 +198,159 @@ pub async fn read_epoch_manifest(
     }
 }
 
+/// File name for an epoch's persisted object-params record within a journal directory.
+#[must_use]
+pub fn params_file_name(epoch: u64) -> String {
+    format!("epoch-{epoch}-params.rqp")
+}
+
+/// Durably persist an epoch's [`ObjectParamsRecord`] (CRC-protected, atomic).
+///
+/// The record carries the decode metadata (transfer length + layout) recovery
+/// needs to rebuild the exact RaptorQ object params and decode the original
+/// checkpoint bytes from the surviving symbols.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if the directory or params file
+/// cannot be created or synced.
+pub async fn write_epoch_params(
+    dir: &std::path::Path,
+    record: ObjectParamsRecord,
+) -> std::io::Result<std::path::PathBuf> {
+    crate::fs::create_dir_all(dir).await?;
+    let path = dir.join(params_file_name(record.epoch));
+    crate::fs::write_atomic(&path, &record.encode()).await?;
+    Ok(path)
+}
+
+/// Read an epoch's persisted [`ObjectParamsRecord`], returning `None` if its file
+/// is absent (recovery then cannot reconstruct the original bytes).
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] for a read failure other than a missing file, or
+/// `InvalidData` if the record is corrupt / mis-versioned.
+pub async fn read_epoch_params(
+    dir: &std::path::Path,
+    epoch: u64,
+) -> std::io::Result<Option<ObjectParamsRecord>> {
+    let path = dir.join(params_file_name(epoch));
+    match crate::fs::read(&path).await {
+        Ok(bytes) => ObjectParamsRecord::decode(&bytes)
+            .map(Some)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Decode the original checkpoint bytes for `record`'s epoch from the surviving
+/// `frames`, running the real RaptorQ [`DecodingPipeline`].
+///
+/// Each surviving frame is turned back into a RaptorQ symbol (source ESIs
+/// `< source_symbol_count` are source symbols, the rest repair) and fed to a
+/// decoder whose object params — rebuilt from `record` — reproduce the exact
+/// source-block layout, so [`DecodingPipeline::into_data`] returns the original
+/// bytes with the last block's symbol padding stripped. The decode is
+/// erasure-only — journal frames carry no per-symbol auth tag — so it uses
+/// [`DecodingConfig::without_auth`] deliberately (the journal's integrity comes
+/// from the per-frame CRCs validated in [`scan_frames`], not symbol auth).
+///
+/// # Errors
+///
+/// Returns [`DurableJournalError::Decoding`] if the object params are
+/// inconsistent or a symbol is malformed, or [`DurableJournalError::Incomplete`]
+/// if fewer than `K'` symbols survived for some block (the epoch is not
+/// recoverable from what remains).
+pub fn decode_epoch_frames(
+    record: ObjectParamsRecord,
+    frames: &[JournalFrame],
+) -> Result<Vec<u8>, DurableJournalError> {
+    if record.object_size == 0 {
+        return Ok(Vec::new());
+    }
+    let object_id = ObjectId::new(record.epoch, 0);
+    let (source_blocks, symbols_per_block) = record.block_layout();
+
+    let mut config = DecodingConfig::without_auth();
+    config.symbol_size = record.symbol_size;
+    config.max_block_size = record.max_block_size as usize;
+    let mut decoder = DecodingPipeline::new(config);
+    decoder.set_object_params(ObjectParams::new(
+        object_id,
+        record.object_size,
+        record.symbol_size,
+        source_blocks,
+        symbols_per_block,
+    ))?;
+
+    for frame in frames {
+        if frame.header.epoch != record.epoch {
+            continue;
+        }
+        let sbn = u8::try_from(frame.header.source_block_number).map_err(|_| {
+            DurableJournalError::Decoding(DecodingError::InconsistentMetadata {
+                sbn: 0,
+                details: format!(
+                    "source block number {} exceeds RaptorQ SBN range",
+                    frame.header.source_block_number
+                ),
+            })
+        })?;
+        let kind = if frame.header.encoding_symbol_id < frame.header.source_symbol_count {
+            SymbolKind::Source
+        } else {
+            SymbolKind::Repair
+        };
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, sbn, frame.header.encoding_symbol_id),
+            frame.payload.clone(),
+            kind,
+        );
+        // A rejected/duplicate symbol is fine (Ok(_)); only a hard DecodingError
+        // (inconsistent metadata / size mismatch) propagates.
+        decoder.feed(AuthenticatedSymbol::new_unauthenticated(symbol))?;
+    }
+
+    if !decoder.is_complete() {
+        return Err(DurableJournalError::Incomplete);
+    }
+    decoder.into_data().map_err(DurableJournalError::Decoding)
+}
+
 /// Error from a [`DurableTraceJournal`] operation.
 #[derive(Debug)]
 pub enum DurableJournalError {
     /// RaptorQ encoding failed.
     Encoding(EncodingError),
+    /// RaptorQ decoding failed (inconsistent object params or a malformed symbol).
+    Decoding(DecodingError),
     /// A filesystem operation failed.
     Io(std::io::Error),
     /// The journal was configured with zero stripes.
     NoStripes,
+    /// The epoch's persisted object-params record is absent, so the original
+    /// bytes cannot be reconstructed (only a recoverability check is possible).
+    MissingParams,
+    /// Fewer than `K'` symbols survived for some source block, so the epoch's
+    /// original bytes cannot be reconstructed from what remains on disk.
+    Incomplete,
 }
 
 impl core::fmt::Display for DurableJournalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Encoding(error) => write!(f, "durable journal encode error: {error}"),
+            Self::Decoding(error) => write!(f, "durable journal decode error: {error}"),
             Self::Io(error) => write!(f, "durable journal I/O error: {error}"),
             Self::NoStripes => f.write_str("durable journal configured with zero stripes"),
+            Self::MissingParams => {
+                f.write_str("durable journal object-params record missing; cannot decode epoch")
+            }
+            Self::Incomplete => f.write_str(
+                "durable journal epoch incomplete; fewer than K' symbols survived to decode",
+            ),
         }
     }
 }
@@ -222,6 +360,12 @@ impl std::error::Error for DurableJournalError {}
 impl From<EncodingError> for DurableJournalError {
     fn from(error: EncodingError) -> Self {
         Self::Encoding(error)
+    }
+}
+
+impl From<DecodingError> for DurableJournalError {
+    fn from(error: DecodingError) -> Self {
+        Self::Decoding(error)
     }
 }
 
@@ -293,7 +437,45 @@ impl DurableTraceJournal {
         .ok_or(DurableJournalError::NoStripes)?;
         write_epoch_stripes(&self.config.directory, epoch, &stripes).await?;
         write_epoch_manifest(&self.config.directory, manifest).await?;
+        // Persist the decode metadata (transfer length + layout) so recovery can
+        // reconstruct the original bytes, not merely confirm enough symbols
+        // survived. symbol_size/max_block_size come from the encode config.
+        let record = ObjectParamsRecord {
+            epoch,
+            object_size: data.len() as u64,
+            symbol_size: self.config.encoding.symbol_size,
+            max_block_size: u32::try_from(self.config.encoding.max_block_size).unwrap_or(u32::MAX),
+        };
+        write_epoch_params(&self.config.directory, record).await?;
         Ok(manifest)
+    }
+
+    /// Recover and decode the original checkpoint bytes for `epoch` from the
+    /// surviving stripe files on disk, running the real RaptorQ decoder.
+    ///
+    /// This is the byte-exact recovery a trace-recover tool returns: it reads the
+    /// persisted object-params record (transfer length + layout) and the
+    /// surviving stripes, scans their CRC-validated frames, and decodes. Unlike
+    /// [`Self::epoch_recoverable`] (which only confirms that enough symbols
+    /// survived), this reconstructs and returns the actual bytes — so it tolerates
+    /// the loss of any minority of stripes as long as `>= K'` symbols per block
+    /// remain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableJournalError::Io`] for a read failure,
+    /// [`DurableJournalError::MissingParams`] if the epoch's params record is
+    /// absent, or [`DurableJournalError::Decoding`] /
+    /// [`DurableJournalError::Incomplete`] if the surviving symbols cannot
+    /// reconstruct the object.
+    pub async fn recover_epoch(&self, epoch: u64) -> Result<Vec<u8>, DurableJournalError> {
+        let record = read_epoch_params(&self.config.directory, epoch)
+            .await?
+            .ok_or(DurableJournalError::MissingParams)?;
+        let survivors =
+            read_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
+        let (frames, _) = scan_frames(&survivors);
+        decode_epoch_frames(record, &frames)
     }
 
     /// Whether `epoch` still fully recovers from the surviving stripe files,
