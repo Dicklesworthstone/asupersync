@@ -7,7 +7,7 @@
 
 use super::ChunkingProfileError;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// Parameters for content-defined chunking.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -512,6 +512,14 @@ pub struct ChunkCacheStats {
     pub cache_misses: u64,
 }
 
+/// br-asupersync-7tcipb item 4: default upper bound on the number of distinct
+/// transfers whose per-transfer chunk/stat state [`ChunkReuseManager`] retains.
+/// `transfer_chunks` / `transfer_stats` are keyed by `transfer_id`, which can be
+/// attacker-influenced, so without a bound a peer that issues a flood of unique
+/// transfer ids would grow these maps without limit (memory DoS). The cache
+/// itself is already LRU-capped; this bounds the per-transfer key space.
+const DEFAULT_MAX_TRACKED_TRANSFERS: usize = 4096;
+
 /// Cross-transfer chunk reuse manager.
 pub struct ChunkReuseManager {
     /// Chunk cache.
@@ -520,6 +528,12 @@ pub struct ChunkReuseManager {
     transfer_chunks: BTreeMap<String, Vec<ChunkIdentity>>,
     /// Reuse statistics per transfer.
     transfer_stats: BTreeMap<String, TransferReuseStats>,
+    /// br-asupersync-7tcipb item 4: FIFO insertion order of distinct tracked
+    /// transfer ids (each id appears at most once). Drives oldest-first eviction
+    /// once the tracked-transfer count would exceed `max_tracked_transfers`.
+    transfer_order: VecDeque<String>,
+    /// br-asupersync-7tcipb item 4: upper bound on distinct tracked transfers.
+    max_tracked_transfers: usize,
 }
 
 /// Reuse statistics for a transfer.
@@ -533,11 +547,56 @@ pub struct TransferReuseStats {
 impl ChunkReuseManager {
     /// Create new chunk reuse manager.
     pub fn new() -> Self {
+        Self::with_max_tracked_transfers(DEFAULT_MAX_TRACKED_TRANSFERS)
+    }
+
+    /// br-asupersync-7tcipb item 4: create a manager that retains per-transfer
+    /// state for at most `max_tracked_transfers` distinct transfers. Once that
+    /// bound would be exceeded, the oldest-registered transfer is evicted from
+    /// both `transfer_chunks` and `transfer_stats` (FIFO), so a peer flooding
+    /// the manager with unique transfer ids cannot grow them without bound.
+    /// `max_tracked_transfers` is clamped to at least 1.
+    #[must_use]
+    pub fn with_max_tracked_transfers(max_tracked_transfers: usize) -> Self {
         Self {
             cache: ChunkCache::new(100 * 1024 * 1024), // 100MB default cache
             transfer_chunks: BTreeMap::new(),
             transfer_stats: BTreeMap::new(),
+            transfer_order: VecDeque::new(),
+            max_tracked_transfers: max_tracked_transfers.max(1),
         }
+    }
+
+    /// br-asupersync-7tcipb item 4: number of distinct transfers currently
+    /// tracked, always `<= max_tracked_transfers`. Exposed for observability so
+    /// operators can confirm the dedupe manager is not growing without bound.
+    #[must_use]
+    pub fn tracked_transfer_count(&self) -> usize {
+        self.transfer_order.len()
+    }
+
+    /// br-asupersync-7tcipb item 4: record a (possibly new) transfer id in FIFO
+    /// order, evicting the oldest transfer(s) from both per-transfer maps if
+    /// tracking a new id would exceed `max_tracked_transfers`.
+    ///
+    /// MUST be called BEFORE inserting `transfer_id` into either map: "absent
+    /// from both maps" is how a first-seen id is detected, which keeps each id
+    /// enqueued exactly once and prevents an id present in only one map from
+    /// being double-counted.
+    fn note_transfer(&mut self, transfer_id: &str) {
+        let already_tracked = self.transfer_chunks.contains_key(transfer_id)
+            || self.transfer_stats.contains_key(transfer_id);
+        if already_tracked {
+            return;
+        }
+        while self.transfer_order.len() >= self.max_tracked_transfers {
+            let Some(oldest) = self.transfer_order.pop_front() else {
+                break;
+            };
+            self.transfer_chunks.remove(&oldest);
+            self.transfer_stats.remove(&oldest);
+        }
+        self.transfer_order.push_back(transfer_id.to_string());
     }
 
     /// Register a chunk for a transfer.
@@ -546,6 +605,8 @@ impl ChunkReuseManager {
         transfer_id: &str,
         identity: &ChunkIdentity,
     ) -> Result<(), ChunkingProfileError> {
+        // br-asupersync-7tcipb item 4: bound tracked transfers before inserting.
+        self.note_transfer(transfer_id);
         self.transfer_chunks
             .entry(transfer_id.to_string())
             .or_default()
@@ -609,6 +670,8 @@ impl ChunkReuseManager {
         identity: &ChunkIdentity,
         _source_transfer_id: &str,
     ) -> Result<(), ChunkingProfileError> {
+        // br-asupersync-7tcipb item 4: bound tracked transfers before inserting.
+        self.note_transfer(transfer_id);
         let stats = self
             .transfer_stats
             .entry(transfer_id.to_string())
