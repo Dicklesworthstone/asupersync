@@ -611,6 +611,342 @@ pub fn decide_pool_sizing(
     }
 }
 
+/// Default advisory-divergence threshold: warn when the live size differs from
+/// the recommendation by a factor of two or more in either direction
+/// (`20_000` basis points == 2.0x).
+pub const DEFAULT_DIVERGENCE_WARN_BPS: u32 = 20_000;
+
+/// Direction of an advisory divergence between the live size and the recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolSizingDivergenceDirection {
+    /// The live pool is smaller than the recommendation (under-provisioned).
+    Undersized,
+    /// The live pool is larger than the recommendation (over-provisioned).
+    Oversized,
+}
+
+/// An advisory divergence between the recommended and the live pool size.
+///
+/// This is the AC2 signal: integrations compute it each epoch in advisory mode
+/// and, when present, emit an operator warning / metric. It carries no logging
+/// of its own so the policy layer stays pure and deterministic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolSizingDivergence {
+    /// The size the controller recommends.
+    pub recommended_size: usize,
+    /// The live pool size that diverged from the recommendation.
+    pub actual_size: usize,
+    /// Divergence magnitude as the larger-over-smaller ratio in basis points
+    /// (`BPS_SCALE` == 1.0x). A zero on the smaller side saturates to `u32::MAX`.
+    pub factor_bps: u32,
+    /// Whether the live pool is under- or over-provisioned versus the recommendation.
+    pub direction: PoolSizingDivergenceDirection,
+}
+
+/// Compute an advisory divergence warning when the live size differs from the
+/// recommendation by at least `warn_bps` (measured as the larger-over-smaller
+/// ratio). Returns `None` when within tolerance.
+///
+/// Pure and side-effect free: an integration decides whether to log or expose a
+/// metric. The default threshold [`DEFAULT_DIVERGENCE_WARN_BPS`] fires at a 2x
+/// gap, matching the bead's "diverges >=2x from recommended" acceptance rule.
+#[must_use]
+pub fn pool_sizing_divergence(
+    recommended_size: usize,
+    actual_size: usize,
+    warn_bps: u32,
+) -> Option<PoolSizingDivergence> {
+    if recommended_size == actual_size {
+        return None;
+    }
+    let (smaller, larger, direction) = if actual_size < recommended_size {
+        (
+            actual_size,
+            recommended_size,
+            PoolSizingDivergenceDirection::Undersized,
+        )
+    } else {
+        (
+            recommended_size,
+            actual_size,
+            PoolSizingDivergenceDirection::Oversized,
+        )
+    };
+    // A zero on the smaller side is an unbounded ratio; saturate so any positive
+    // gap from zero always trips the warning.
+    let factor_bps = if smaller == 0 {
+        u32::MAX
+    } else {
+        let ratio = (larger as u128).saturating_mul(BPS_SCALE) / (smaller as u128);
+        u32::try_from(ratio).unwrap_or(u32::MAX)
+    };
+    if factor_bps >= warn_bps {
+        Some(PoolSizingDivergence {
+            recommended_size,
+            actual_size,
+            factor_bps,
+            direction,
+        })
+    } else {
+        None
+    }
+}
+
+/// Stateful managed pool-sizing controller — the "brain" of managed mode.
+///
+/// The controller owns an EWMA [`PoolSizingEstimator`], a [`PoolSizingPolicy`],
+/// and the live controller state (tracked size + last resize epoch). On each
+/// [`observe`](Self::observe) it folds the sample, evaluates [`decide_pool_sizing`],
+/// and — in managed mode — applies an allowed [`PoolSizingAction::Resize`] to its
+/// tracked size, advancing `last_resize_epoch` and counting the resize. The
+/// hysteresis and cadence gates bound the number of resizes so a load ramp does
+/// not flap (AC3); the tracked size is always clamped into the policy bounds so
+/// floors and ceilings always win (AC5).
+///
+/// The controller never touches a real pool. An integration seeds it from
+/// `pool.pool_sizing_bounds()` / `pool.pool_sizing_controller_state()`, feeds
+/// already-collected observations, and reads [`current_size`](Self::current_size)
+/// (or the returned decision) to apply the size through its own config surface.
+/// Keeping application out of the controller keeps managed mode opt-in and the
+/// controller deterministic for lab replay (AC4): identical observation/epoch
+/// sequences produce identical size trajectories.
+#[derive(Debug, Clone)]
+pub struct ManagedPoolSizingController {
+    policy: PoolSizingPolicy,
+    estimator: PoolSizingEstimator,
+    current_size: usize,
+    last_resize_epoch: u64,
+    applied_resizes: u64,
+}
+
+impl ManagedPoolSizingController {
+    /// Build a controller from a policy, EWMA smoothing factor (parts per
+    /// million), and the initial live pool size. The initial size is clamped
+    /// into the policy bounds.
+    ///
+    /// Epochs passed to [`observe`](Self::observe) / [`tick`](Self::tick) must be
+    /// monotonically non-decreasing; the first managed resize is permitted once
+    /// `epoch >= policy.resize_cadence_epochs` (the cadence gate measures elapsed
+    /// epochs since the last resize, treating construction as epoch zero).
+    #[must_use]
+    pub fn new(policy: PoolSizingPolicy, alpha_ppm: u32, initial_size: usize) -> Self {
+        Self {
+            estimator: PoolSizingEstimator::new(alpha_ppm),
+            current_size: clamp_size_to_bounds(initial_size, policy.bounds),
+            last_resize_epoch: 0,
+            applied_resizes: 0,
+            policy,
+        }
+    }
+
+    /// The live size the controller currently tracks.
+    #[must_use]
+    pub const fn current_size(&self) -> usize {
+        self.current_size
+    }
+
+    /// The epoch at which the controller last applied a resize.
+    #[must_use]
+    pub const fn last_resize_epoch(&self) -> u64 {
+        self.last_resize_epoch
+    }
+
+    /// Number of resize actions applied over this controller's lifetime. A
+    /// flapping controller would inflate this; a hysteresis proof bounds it.
+    #[must_use]
+    pub const fn applied_resizes(&self) -> u64 {
+        self.applied_resizes
+    }
+
+    /// The policy bounds enforced on every decision.
+    #[must_use]
+    pub const fn bounds(&self) -> PoolSizingBounds {
+        self.policy.bounds
+    }
+
+    /// The controller's behavior mode.
+    #[must_use]
+    pub const fn mode(&self) -> PoolSizingMode {
+        self.policy.mode
+    }
+
+    /// The current EWMA workload estimate, if enough load has been observed.
+    #[must_use]
+    pub fn estimate(&self) -> Option<PoolWorkloadEstimate> {
+        self.estimator.estimate()
+    }
+
+    /// Clear EWMA state after a confirmed workload regime change so the next
+    /// observation seeds a fresh baseline. The live size is preserved, so a
+    /// regime reset never itself resizes the pool (AC7 handoff for the
+    /// change-point detector / H5 interference harness).
+    pub fn reset_estimator(&mut self) {
+        self.estimator.reset();
+    }
+
+    /// Controller state snapshot used by [`decide_pool_sizing`].
+    #[must_use]
+    pub const fn controller_state(&self) -> PoolSizingControllerState {
+        PoolSizingControllerState {
+            current_size: self.current_size,
+            last_resize_epoch: self.last_resize_epoch,
+        }
+    }
+
+    /// Fold one observation and evaluate a controller tick at `epoch`.
+    ///
+    /// In managed mode an allowed [`PoolSizingAction::Resize`] is applied to the
+    /// tracked size and counted; hysteresis/cadence holds leave the size
+    /// unchanged. Advisory mode never mutates state. The decision is returned so
+    /// callers can publish the recommendation regardless of mode.
+    pub fn observe(
+        &mut self,
+        observation: PoolSizingObservation,
+        epoch: u64,
+    ) -> PoolSizingDecision {
+        self.estimator.observe(observation);
+        self.tick(epoch)
+    }
+
+    /// Re-evaluate a controller tick against the current estimate without folding
+    /// a new observation (e.g. on a cadence tick between observation windows).
+    pub fn tick(&mut self, epoch: u64) -> PoolSizingDecision {
+        let Some(estimate) = self.estimator.estimate() else {
+            // Cold start: no estimate yet. Recommend the floor but take no
+            // action — a managed controller must not resize on zero data.
+            let recommendation = recommend_pool_size(
+                PoolWorkloadEstimate::new(0, 0, 0),
+                self.policy.bounds,
+                self.policy.target,
+            );
+            return PoolSizingDecision {
+                recommendation,
+                action: PoolSizingAction::ObserveOnly,
+            };
+        };
+        let decision = decide_pool_sizing(self.policy, self.controller_state(), estimate, epoch);
+        if let PoolSizingAction::Resize { to_size, .. } = decision.action {
+            // `decide_pool_sizing` only emits `Resize` in managed mode and only
+            // when `to_size != current_size`. Clamp defensively so the bounds
+            // win even if a caller mutated the policy fields directly (AC5).
+            self.current_size = clamp_size_to_bounds(to_size, self.policy.bounds);
+            self.last_resize_epoch = epoch;
+            self.applied_resizes = self.applied_resizes.saturating_add(1);
+        }
+        decision
+    }
+
+    /// Advisory divergence between the live size and the latest recommendation,
+    /// using [`DEFAULT_DIVERGENCE_WARN_BPS`]. Returns `None` before any estimate
+    /// exists or when within tolerance (AC2).
+    #[must_use]
+    pub fn divergence(&self) -> Option<PoolSizingDivergence> {
+        self.divergence_with_threshold(DEFAULT_DIVERGENCE_WARN_BPS)
+    }
+
+    /// Advisory divergence with an explicit threshold in basis points.
+    #[must_use]
+    pub fn divergence_with_threshold(&self, warn_bps: u32) -> Option<PoolSizingDivergence> {
+        let estimate = self.estimator.estimate()?;
+        let recommendation = recommend_pool_size(estimate, self.policy.bounds, self.policy.target);
+        pool_sizing_divergence(recommendation.recommended_size, self.current_size, warn_bps)
+    }
+
+    /// Render the galaxy-brain transparency card for the latest estimate (AC6).
+    #[must_use]
+    pub fn explain(&self) -> String {
+        match self.estimator.estimate() {
+            Some(estimate) => {
+                let recommendation =
+                    recommend_pool_size(estimate, self.policy.bounds, self.policy.target);
+                explain_pool_sizing(estimate, recommendation)
+            }
+            None => {
+                String::from("pool-sizing card - no observed load yet; holding configured bounds")
+            }
+        }
+    }
+}
+
+/// Render a plain-English "why N workers" transparency card (AC6).
+///
+/// The card states the live offered load, the square-root staffing formula with
+/// substituted values, the Erlang-C wait probability at the selected size, the
+/// target, and the selection reason. It is an operator artifact; integrations
+/// log or surface it next to the recommendation.
+#[must_use]
+pub fn explain_pool_sizing(
+    estimate: PoolWorkloadEstimate,
+    recommendation: PoolSizingRecommendation,
+) -> String {
+    let metrics = recommendation.selected_metrics;
+    let offered_load = format_ppm_units(estimate.offered_load_ppm());
+    let arrival = format_ppm_units(estimate.arrival_rate_per_sec_ppm);
+    let cv2 = format_ppm_units(estimate.service_cv2_ppm());
+    let bounds = recommendation.bounds;
+    let target = match recommendation.target {
+        PoolSizingTarget::MaxWaitProbabilityPpm(p) => {
+            format!("P(wait) <= {}", format_ppm_percent(p))
+        }
+        PoolSizingTarget::MaxMeanWaitMicros(w) => format!("E[wait] <= {w}us"),
+    };
+    let reason = match recommendation.reason {
+        PoolSizingReason::NoObservedLoad => "no observed load; floor wins",
+        PoolSizingReason::TargetMet => "first candidate meeting the target",
+        PoolSizingReason::ClampedToFloor => "target met below floor; clamped up to floor",
+        PoolSizingReason::TargetUnmetAtCeiling => "target unmet at ceiling; clamped to ceiling",
+    };
+    format!(
+        "pool-sizing card - recommend {size} workers (bounds {min}..={max}, reason: {reason})\n  \
+         offered load R = {offered_load} workers (arrival {arrival}/s x mean service {service_micros}us)\n  \
+         square-root staffing k0 = R + beta*sqrt(R) = {staffing} workers\n  \
+         at {size} workers: utilization {util}, P(wait) ~= {wait} (target {target}), mean wait ~= {mean_wait}us\n  \
+         service variability multiplier {variability_x} (Allen-Cunneen, CV^2 = {cv2}){met}",
+        size = recommendation.recommended_size,
+        min = bounds.min_size,
+        max = bounds.max_size,
+        staffing = recommendation.square_root_staffing_size,
+        service_micros = estimate.service_time_mean_micros,
+        util = format_ppm_percent(metrics.utilization_ppm),
+        wait = format_ppm_percent(metrics.wait_probability_ppm),
+        mean_wait = metrics.mean_wait_micros,
+        variability_x = format_bps_multiplier(metrics.service_variability_bps),
+        met = if recommendation.target_met {
+            ""
+        } else {
+            "\n  WARNING: target NOT met at the configured ceiling"
+        },
+    )
+}
+
+/// Clamp a size into bounds without risking `usize::clamp`'s min>max panic.
+fn clamp_size_to_bounds(size: usize, bounds: PoolSizingBounds) -> usize {
+    let bounds = PoolSizingBounds::new(bounds.min_size, bounds.max_size);
+    size.max(bounds.min_size).min(bounds.max_size)
+}
+
+/// Format a [`POOL_SIZING_SCALE`]-scaled value as a 3-decimal-place number.
+fn format_ppm_units(value_ppm: u64) -> String {
+    let whole = value_ppm / POOL_SIZING_SCALE;
+    let frac = (value_ppm % POOL_SIZING_SCALE) / 1_000;
+    format!("{whole}.{frac:03}")
+}
+
+/// Format a [`POOL_SIZING_SCALE`]-scaled probability/utilization as a percentage.
+fn format_ppm_percent(value_ppm: u32) -> String {
+    let value = u64::from(value_ppm);
+    let whole = value / 10_000;
+    let frac = (value % 10_000) / 100;
+    format!("{whole}.{frac:02}%")
+}
+
+/// Format a basis-point multiplier (10_000 == 1.0x) as a 2-decimal-place factor.
+fn format_bps_multiplier(value_bps: u64) -> String {
+    let whole = value_bps / 10_000;
+    let frac = (value_bps % 10_000) / 100;
+    format!("{whole}.{frac:02}x")
+}
+
 fn beta_bps_for_target(target: PoolSizingTarget) -> u32 {
     match target.wait_probability_ppm().unwrap_or(100_000) {
         0..=100 => 37_200,
@@ -972,5 +1308,237 @@ mod tests {
         };
 
         assert_eq!(run(), run());
+    }
+
+    fn ramp_observation(arrivals_per_second: u64, service_micros: u64) -> PoolSizingObservation {
+        // One-second window: arrivals == arrivals/sec, completions match arrivals.
+        PoolSizingObservation::new(
+            1_000_000,
+            arrivals_per_second,
+            arrivals_per_second,
+            u128::from(arrivals_per_second).saturating_mul(u128::from(service_micros)),
+            u128::from(arrivals_per_second)
+                .saturating_mul(u128::from(service_micros))
+                .saturating_mul(u128::from(service_micros)),
+        )
+    }
+
+    #[test]
+    fn divergence_fires_at_two_x_and_is_silent_within_tolerance() {
+        // 4 vs 2 is exactly 2x => fires (undersized).
+        let under = pool_sizing_divergence(4, 2, DEFAULT_DIVERGENCE_WARN_BPS)
+            .expect("2x undersize must warn");
+        assert_eq!(under.direction, PoolSizingDivergenceDirection::Undersized);
+        assert_eq!(under.factor_bps, 20_000);
+
+        // 2 vs 4 is 2x the other way => fires (oversized).
+        let over = pool_sizing_divergence(2, 4, DEFAULT_DIVERGENCE_WARN_BPS)
+            .expect("2x oversize must warn");
+        assert_eq!(over.direction, PoolSizingDivergenceDirection::Oversized);
+
+        // 4 vs 3 is ~1.33x => within tolerance.
+        assert_eq!(
+            pool_sizing_divergence(4, 3, DEFAULT_DIVERGENCE_WARN_BPS),
+            None
+        );
+        // Equality never warns.
+        assert_eq!(
+            pool_sizing_divergence(5, 5, DEFAULT_DIVERGENCE_WARN_BPS),
+            None
+        );
+        // Any positive size vs a zero floor is an unbounded divergence.
+        let from_zero = pool_sizing_divergence(8, 0, DEFAULT_DIVERGENCE_WARN_BPS)
+            .expect("nonzero recommendation vs zero size warns");
+        assert_eq!(from_zero.factor_bps, u32::MAX);
+        assert_eq!(
+            from_zero.direction,
+            PoolSizingDivergenceDirection::Undersized
+        );
+    }
+
+    #[test]
+    fn advisory_controller_warns_on_deliberate_undersizing() {
+        // AC2: advisory mode publishes a divergence when the pool is far below
+        // the recommendation under a heavy load, and never acts.
+        let policy = PoolSizingPolicy::advisory(PoolSizingBounds::new(1, 32));
+        let mut controller = ManagedPoolSizingController::new(policy, 1_000_000, 2);
+        let decision = controller.observe(ramp_observation(40, 500_000), 1);
+        assert_eq!(decision.action, PoolSizingAction::ObserveOnly);
+        assert_eq!(controller.current_size(), 2, "advisory mode never resizes");
+        let divergence = controller
+            .divergence()
+            .expect("a 2-worker pool under R=20 load must diverge from the recommendation");
+        assert_eq!(
+            divergence.direction,
+            PoolSizingDivergenceDirection::Undersized
+        );
+        assert!(divergence.recommended_size >= 2 * divergence.actual_size);
+    }
+
+    #[test]
+    fn managed_controller_follows_load_ramp_without_flapping() {
+        // AC3: under a monotone load ramp the managed pool grows toward the
+        // recommendation, settles, and the resize count stays small (no flap).
+        let policy = PoolSizingPolicy::managed(
+            PoolSizingBounds::new(1, 32),
+            PoolSizingTarget::MaxWaitProbabilityPpm(100_000),
+        );
+        // alpha = 1.0 so the EWMA tracks each window exactly for a clean proof.
+        let mut controller = ManagedPoolSizingController::new(policy, 1_000_000, 1);
+
+        let mut sizes = Vec::new();
+        // Ramp up over several epochs, then hold at the peak load.
+        let ramp = [4_u64, 8, 12, 16, 20, 20, 20, 20];
+        for (i, arrivals) in ramp.iter().enumerate() {
+            let epoch = (i as u64) + 1;
+            controller.observe(ramp_observation(*arrivals, 500_000), epoch);
+            sizes.push(controller.current_size());
+        }
+
+        // Size grows monotonically during the ramp.
+        for pair in sizes.windows(2) {
+            assert!(
+                pair[1] >= pair[0],
+                "managed size should not shrink mid-ramp"
+            );
+        }
+        // It actually grew above the floor.
+        assert!(
+            *sizes.last().unwrap() > 1,
+            "managed pool should scale up under load"
+        );
+        // Once load is steady the controller stops acting (hysteresis holds).
+        let resizes_after_ramp = controller.applied_resizes();
+        controller.observe(ramp_observation(20, 500_000), 9);
+        controller.observe(ramp_observation(20, 500_000), 10);
+        assert_eq!(
+            controller.applied_resizes(),
+            resizes_after_ramp,
+            "steady load must not trigger further resizes"
+        );
+        // Action count is bounded well below the number of ticks (no flapping).
+        assert!(
+            controller.applied_resizes() <= ramp.len() as u64,
+            "resize count {} should be bounded by the ramp length",
+            controller.applied_resizes()
+        );
+    }
+
+    #[test]
+    fn managed_controller_replays_identically() {
+        // AC4: identical observation/epoch sequences yield identical trajectories.
+        let policy = PoolSizingPolicy::managed(
+            PoolSizingBounds::new(1, 32),
+            PoolSizingTarget::MaxWaitProbabilityPpm(100_000),
+        );
+        let ramp = [3_u64, 9, 15, 21, 21, 21];
+        let run = || {
+            let mut controller = ManagedPoolSizingController::new(policy, 400_000, 1);
+            let mut trace = Vec::new();
+            for (i, arrivals) in ramp.iter().enumerate() {
+                controller.observe(ramp_observation(*arrivals, 400_000), (i as u64) + 1);
+                trace.push(controller.current_size());
+            }
+            (
+                trace,
+                controller.applied_resizes(),
+                controller.last_resize_epoch(),
+            )
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn managed_controller_respects_floor_and_ceiling() {
+        // AC5: a crushing load can never push the pool past the ceiling, and a
+        // trickle of load can never pull it below the floor.
+        let policy = PoolSizingPolicy::managed(
+            PoolSizingBounds::new(4, 8),
+            PoolSizingTarget::MaxWaitProbabilityPpm(10_000),
+        );
+        let mut controller = ManagedPoolSizingController::new(policy, 1_000_000, 4);
+        for epoch in 1..=6 {
+            controller.observe(ramp_observation(1_000, 1_000_000), epoch);
+            assert!(
+                controller.current_size() <= 8,
+                "ceiling must always win, got {}",
+                controller.current_size()
+            );
+            assert!(controller.current_size() >= 4, "floor must always hold");
+        }
+        assert_eq!(
+            controller.current_size(),
+            8,
+            "crushing load pins at the ceiling"
+        );
+
+        // Now a near-idle workload: the floor still holds.
+        let mut idle = ManagedPoolSizingController::new(policy, 1_000_000, 8);
+        for epoch in 1..=4 {
+            idle.observe(ramp_observation(1, 1_000), epoch);
+            assert!(idle.current_size() >= 4, "floor must hold under idle load");
+        }
+    }
+
+    #[test]
+    fn controller_cold_start_observes_only() {
+        // No estimate yet on the very first tick (no observation folded).
+        let policy = PoolSizingPolicy::managed(
+            PoolSizingBounds::new(1, 16),
+            PoolSizingTarget::conservative_wait_probability(),
+        );
+        let mut controller = ManagedPoolSizingController::new(policy, 500_000, 4);
+        let decision = controller.tick(5);
+        assert_eq!(decision.action, PoolSizingAction::ObserveOnly);
+        assert_eq!(controller.current_size(), 4);
+        assert_eq!(controller.applied_resizes(), 0);
+    }
+
+    #[test]
+    fn reset_estimator_preserves_live_size() {
+        // AC7: a regime reset clears learning but never resizes the pool itself.
+        let policy = PoolSizingPolicy::managed(
+            PoolSizingBounds::new(1, 32),
+            PoolSizingTarget::MaxWaitProbabilityPpm(100_000),
+        );
+        let mut controller = ManagedPoolSizingController::new(policy, 1_000_000, 1);
+        for epoch in 1..=4 {
+            controller.observe(ramp_observation(16, 500_000), epoch);
+        }
+        let size_before = controller.current_size();
+        assert!(size_before > 1);
+        controller.reset_estimator();
+        assert_eq!(
+            controller.current_size(),
+            size_before,
+            "reset must not resize"
+        );
+        assert_eq!(controller.estimate(), None, "reset clears the estimate");
+    }
+
+    #[test]
+    fn explain_card_substitutes_live_values() {
+        // AC6: the galaxy-brain card names the recommendation and the inputs.
+        let policy = PoolSizingPolicy::advisory(PoolSizingBounds::new(1, 32));
+        let mut controller = ManagedPoolSizingController::new(policy, 1_000_000, 1);
+        controller.observe(ramp_observation(16, 400_000), 1);
+        let card = controller.explain();
+        assert!(card.contains("pool-sizing card"), "card header: {card}");
+        assert!(
+            card.contains("offered load R ="),
+            "card shows offered load: {card}"
+        );
+        assert!(
+            card.contains("square-root staffing"),
+            "card shows the formula: {card}"
+        );
+        assert!(
+            card.contains("P(wait)"),
+            "card shows wait probability: {card}"
+        );
+
+        // Cold-start card is explicit about the lack of data.
+        let cold = ManagedPoolSizingController::new(policy, 1_000_000, 1).explain();
+        assert!(cold.contains("no observed load"), "cold card: {cold}");
     }
 }
