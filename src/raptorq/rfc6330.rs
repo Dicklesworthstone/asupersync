@@ -419,10 +419,11 @@ pub fn try_tuple(
 }
 
 /// Compute RFC 6330 LT tuple using `P1 = smallest_prime_ge(P)`.
-/// Returns `None` if prime computation overflows.
+/// Returns `None` if prime computation overflows or the derived tuple
+/// parameters fail the RFC 6330 validity gate.
 #[must_use]
 pub fn tuple_with_prime_p1(j: usize, w: usize, p: usize, x: u32) -> Option<LtTuple> {
-    Some(tuple(j, w, p, next_prime_ge(p)?, x))
+    try_tuple(j, w, p, next_prime_ge(p)?, x)
 }
 
 /// Build RFC 6330 repair-symbol intermediate indices for an ESI.
@@ -439,13 +440,15 @@ pub fn repair_indices_for_esi(
     let Some(pi_modulus) = next_prime_ge(pi_count) else {
         return Vec::new();
     };
-    let lt_tuple = tuple(
+    let Some(lt_tuple) = try_tuple(
         systematic_index,
         lt_width,
         pi_count,
         pi_modulus,
         encoding_symbol_id,
-    );
+    ) else {
+        return Vec::new();
+    };
     tuple_indices(lt_tuple, lt_width, pi_count, pi_modulus)
 }
 
@@ -1739,6 +1742,51 @@ mod tests {
         assert!(try_tuple(0, 4, 1, 1, 0).is_none());
         // P1 must equal smallest_prime_ge(P).
         assert!(try_tuple(0, 4, 4, 7, 0).is_none()); // 7 != 5 = smallest_prime_ge(4)
+    }
+
+    /// bd-10hic: the convenience helper is fallible, so it must not
+    /// smuggle the legacy zero-sentinel tuple through `Some(...)`.
+    #[test]
+    fn tuple_with_prime_p1_rejects_malformed_inputs_instead_of_returning_sentinel() {
+        let sentinel = tuple(0, 0, 1, 2, 0);
+        assert_eq!(
+            sentinel,
+            LtTuple::default(),
+            "tuple() keeps the historical fail-closed sentinel contract"
+        );
+        assert!(
+            tuple_with_prime_p1(0, 0, 1, 0).is_none(),
+            "tuple_with_prime_p1 must expose malformed W as None, not Some(sentinel)"
+        );
+        assert!(
+            tuple_with_prime_p1(0, 1, 1, 0).is_none(),
+            "tuple_with_prime_p1 must reject W=1 through try_tuple"
+        );
+        assert!(
+            tuple_with_prime_p1(0, 4, 0, 0).is_none(),
+            "tuple_with_prime_p1 must reject P=0 through try_tuple"
+        );
+    }
+
+    /// bd-10hic: production repair-index construction uses the fallible tuple
+    /// gate directly, keeping sentinel tuples quarantined to the compatibility
+    /// helper and tests.
+    #[test]
+    fn repair_indices_for_esi_rejects_malformed_inputs_before_sentinel_schedule() {
+        assert!(
+            repair_indices_for_esi(0, 0, 1, 0).is_empty(),
+            "malformed W must fail closed before tuple_indices sees a sentinel"
+        );
+
+        let valid = repair_indices_for_esi(5, 32, 7, 42);
+        assert!(
+            !valid.is_empty(),
+            "test sanity: a valid RFC tuple input should still produce indices"
+        );
+        assert!(
+            valid.iter().all(|index| *index < 32 + 7),
+            "repair indices stay inside the LT+PI symbol domain"
+        );
     }
 
     /// br-asupersync-pphjvo: for any input that try_tuple rejects,
