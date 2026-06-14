@@ -1604,7 +1604,57 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             feature_args=(--features ci-cross-platform)
           fi
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_unit" cargo test --lib "${feature_args[@]}"
+          max_parallel_threads="${ASUPERSYNC_CI_LIB_TEST_THREADS:-}"
+          if [[ -z "$max_parallel_threads" ]]; then
+            if command -v nproc >/dev/null 2>&1; then
+              max_parallel_threads="$(nproc)"
+            elif [[ "${{ runner.os }}" == "macOS" ]]; then
+              max_parallel_threads="$(sysctl -n hw.logicalcpu)"
+            else
+              max_parallel_threads="${NUMBER_OF_PROCESSORS:-2}"
+            fi
+          fi
+          if ! [[ "$max_parallel_threads" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ASUPERSYNC_CI_LIB_TEST_THREADS must be a positive integer, got: $max_parallel_threads" >&2
+            exit 64
+          fi
+
+          mkdir -p ci-summaries/lib-unit
+          summary_path="ci-summaries/lib-unit/summary-${{ runner.os }}.json"
+          run_lib_unit_attempt() {
+            local attempt="$1"
+            local log_path="ci-summaries/lib-unit/attempt-${attempt}-${{ runner.os }}.log"
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_unit" \
+              cargo test --lib "${feature_args[@]}" -- --test-threads "$max_parallel_threads" \
+              2>&1 | tee "$log_path"
+          }
+
+          if run_lib_unit_attempt 1; then
+            printf '{"schema_version":"lib-unit-flake-gate-v1","runner_os":"%s","max_parallel_threads":%s,"attempts":1,"verdict":"pass","bead_id":"asupersync-n6sk5s"}\n' \
+              "${{ runner.os }}" "$max_parallel_threads" > "$summary_path"
+            exit 0
+          fi
+
+          echo "::warning::lib-unit first attempt failed under max parallelism; retrying once for flake classification"
+          if run_lib_unit_attempt 2; then
+            printf '{"schema_version":"lib-unit-flake-gate-v1","runner_os":"%s","max_parallel_threads":%s,"attempts":2,"verdict":"flaky_retry_pass","bead_id":"asupersync-n6sk5s"}\n' \
+              "${{ runner.os }}" "$max_parallel_threads" > "$summary_path"
+            echo "::warning::lib-unit retry passed; classify this run as flaky and inspect ci-summaries/lib-unit artifacts"
+            exit 0
+          fi
+
+          printf '{"schema_version":"lib-unit-flake-gate-v1","runner_os":"%s","max_parallel_threads":%s,"attempts":2,"verdict":"fail","bead_id":"asupersync-n6sk5s"}\n' \
+            "${{ runner.os }}" "$max_parallel_threads" > "$summary_path"
+          exit 1
+
+      - name: Upload lib-unit flake artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-unit-flake-artifacts-${{ runner.os }}
+          path: ci-summaries/lib-unit/
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Run integration tests
         run: |

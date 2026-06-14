@@ -88,6 +88,23 @@ Use `ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts/agent-lane` when a test
 emits repro bundles. E2E suites should write under their
 `target/e2e-results/$SUITE` directory.
 
+## Load-Isolation Policy
+
+The CI lib-unit lane runs `cargo test --lib` with explicit max-parallel
+`--test-threads` and one retry for flake classification. A retry-pass is still a
+flake signal: inspect the uploaded `ci-summaries/lib-unit` artifacts and fix or
+quarantine the root cause instead of treating the retry as proof of health.
+
+New tests must be isolated enough to survive that lane:
+
+- use virtual clocks or per-test time sources instead of wall-clock fallbacks;
+- keep counters, snapshots, and registries per instance or per test, not
+  process-global;
+- assert deltas, ordering, or deterministic fingerprints rather than absolute
+  elapsed wall-clock values;
+- mark true stress tests `#[ignore]` and give an explicit repro command instead
+  of letting them run in the default lib-unit graph.
+
 ## Recipe 1: Oracle Unit Test
 
 Use this for local invariants that do not need real scheduler interleavings.
