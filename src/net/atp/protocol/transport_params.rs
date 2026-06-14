@@ -258,6 +258,7 @@ impl TransportParameterValue {
     /// Decode from buffer
     pub fn decode(
         buf: &mut BytesMut,
+        parameter: TransportParameterId,
         expected_type: TransportParameterValueType,
     ) -> Result<Self, TransportParameterError> {
         let length = match VarInt::decode(buf) {
@@ -270,20 +271,27 @@ impl TransportParameterValue {
             }
         };
 
-        if buf.len() < length.value() as usize {
+        let length = usize::try_from(length.value()).map_err(|_| {
+            TransportParameterError::ParameterLengthTooLarge {
+                parameter: format!("{parameter:?}"),
+                length: length.value(),
+            }
+        })?;
+
+        if buf.len() < length {
             return Err(TransportParameterError::UnexpectedEof);
         }
 
         match expected_type {
             TransportParameterValueType::VarInt => {
-                if length.value() == 0 {
+                if length == 0 {
                     return Err(TransportParameterError::InvalidParameterLength {
-                        parameter: "varint parameter".to_string(),
+                        parameter: format!("{parameter:?}"),
                         expected_min: 1,
                         actual: 0,
                     });
                 }
-                let mut param_buf = buf.split_to(length.value() as usize);
+                let mut param_buf = buf.split_to(length);
                 let varint = match VarInt::decode(&mut param_buf) {
                     Outcome::Ok(Some(varint)) => varint,
                     Outcome::Ok(None) => return Err(TransportParameterError::UnexpectedEof),
@@ -293,18 +301,25 @@ impl TransportParameterValue {
                         ));
                     }
                 };
+                if !param_buf.is_empty() {
+                    return Err(TransportParameterError::InvalidParameterValue {
+                        parameter,
+                        value: varint.value(),
+                        reason: "varint parameter value has trailing bytes".to_string(),
+                    });
+                }
                 Ok(TransportParameterValue::VarInt(varint))
             }
             TransportParameterValueType::Bytes => {
-                let bytes = buf.split_to(length.value() as usize).freeze();
+                let bytes = buf.split_to(length).freeze();
                 Ok(TransportParameterValue::Bytes(bytes))
             }
             TransportParameterValueType::Empty => {
-                if length.value() != 0 {
+                if length != 0 {
                     return Err(TransportParameterError::InvalidParameterLength {
-                        parameter: "empty parameter".to_string(),
+                        parameter: format!("{parameter:?}"),
                         expected_min: 0,
-                        actual: length.value() as usize,
+                        actual: length,
                     });
                 }
                 Ok(TransportParameterValue::Empty)
@@ -598,7 +613,7 @@ impl TransportParameters {
             if let Some(known_id) = TransportParameterId::from_varint(param_id_varint) {
                 // Known parameter
                 let value_type = get_parameter_value_type(known_id);
-                let value = TransportParameterValue::decode(&mut data_buf, value_type)?;
+                let value = TransportParameterValue::decode(&mut data_buf, known_id, value_type)?;
                 params.set_parameter(known_id, value);
             } else {
                 // Unknown parameter - preserve as extension
@@ -612,11 +627,18 @@ impl TransportParameters {
                     }
                 };
 
-                if data_buf.len() < length.value() as usize {
+                let length = usize::try_from(length.value()).map_err(|_| {
+                    TransportParameterError::ParameterLengthTooLarge {
+                        parameter: format!("unknown({param_id})"),
+                        length: length.value(),
+                    }
+                })?;
+
+                if data_buf.len() < length {
                     return Err(TransportParameterError::UnexpectedEof);
                 }
 
-                let value = data_buf.split_to(length.value() as usize).freeze();
+                let value = data_buf.split_to(length).freeze();
                 params.set_unknown_parameter(param_id, value);
             }
         }
@@ -703,6 +725,15 @@ pub enum TransportParameterError {
         expected_min: usize,
         /// Actual body length.
         actual: usize,
+    },
+
+    /// Parameter length cannot be represented by the current target.
+    #[error("transport parameter {parameter} length {length} exceeds addressable memory")]
+    ParameterLengthTooLarge {
+        /// Rejected transport parameter name.
+        parameter: String,
+        /// Unrepresentable advertised body length.
+        length: u64,
     },
 
     /// Conflicting parameters
@@ -976,6 +1007,50 @@ mod tests {
         assert!(matches!(
             result,
             Err(TransportParameterError::DuplicateParameter(_))
+        ));
+    }
+
+    #[test]
+    fn test_decode_rejects_malformed_varint_parameter_values() {
+        let ack_delay_id = TransportParameterId::AckDelayExponent.to_varint();
+
+        let mut empty = BytesMut::new();
+        ack_delay_id
+            .encode_to_buf_for(TransportParameterId::AckDelayExponent, &mut empty)
+            .unwrap();
+        VarInt::new(0).unwrap().encode(&mut empty).unwrap();
+        assert!(matches!(
+            TransportParameters::decode(empty.freeze()),
+            Err(TransportParameterError::InvalidParameterLength { .. })
+        ));
+
+        let mut trailing = BytesMut::new();
+        ack_delay_id
+            .encode_to_buf_for(TransportParameterId::AckDelayExponent, &mut trailing)
+            .unwrap();
+        VarInt::new(2).unwrap().encode(&mut trailing).unwrap();
+        trailing.put_u8(0x01);
+        trailing.put_u8(0x00);
+        assert!(matches!(
+            TransportParameters::decode(trailing.freeze()),
+            Err(TransportParameterError::InvalidParameterValue {
+                parameter: TransportParameterId::AckDelayExponent,
+                ..
+            })
+        ));
+
+        let mut non_canonical = BytesMut::new();
+        ack_delay_id
+            .encode_to_buf_for(TransportParameterId::AckDelayExponent, &mut non_canonical)
+            .unwrap();
+        VarInt::new(2).unwrap().encode(&mut non_canonical).unwrap();
+        non_canonical.put_u8(0x40);
+        non_canonical.put_u8(0x01);
+        assert!(matches!(
+            TransportParameters::decode(non_canonical.freeze()),
+            Err(TransportParameterError::VarInt(
+                VarIntError::InvalidEncoding
+            ))
         ));
     }
 
