@@ -30,6 +30,7 @@ use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::outcome::Outcome;
+use crate::distributed::membership::{LeaseAction, MembershipLeaseReactor, MembershipView};
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
 use serde::{Deserialize, Serialize};
@@ -1360,6 +1361,106 @@ impl Lease {
         }
         self.state = LeaseState::Expired;
         Ok(())
+    }
+}
+
+// ===========================================================================
+// Membership-driven lease manager (bead 8y37kz.4.3 — suspicion → obligation
+// revocation)
+// ===========================================================================
+
+/// A lease the [`MembershipLeaseManager`] revoked because its node was confirmed
+/// dead or left. The caller aborts the underlying obligation
+/// (`ObligationAbortReason::Cancel`) through `RuntimeState`, which triggers any
+/// saga compensation attached to that obligation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedLease {
+    /// The node whose membership transition caused the revocation.
+    pub node: NodeId,
+    /// The lease's underlying obligation, to be aborted by the caller.
+    pub obligation_id: ObligationId,
+}
+
+/// Drives the remote lease lifecycle from SWIM membership (bead
+/// `asupersync-dist-otp-completeness-8y37kz.4.3`).
+///
+/// It holds a per-node registry of outstanding [`Lease`]s and a
+/// [`MembershipLeaseReactor`]. Feed it the watchable membership stream via
+/// [`sync`](Self::sync): while a node is suspected, new grants to it are paused
+/// ([`try_grant`](Self::try_grant) rejects them so a refutation can still rescue
+/// existing leases); when a node is confirmed dead/left, each of its leases is
+/// marked expired and surfaced as a [`RevokedLease`] so the caller aborts the
+/// obligation through the normal protocol — death is just another reason an
+/// obligation is aborted, so saga compensation flows through the existing path
+/// with no novel failure handling (the parent's novel contribution).
+#[derive(Debug, Default)]
+pub struct MembershipLeaseManager {
+    reactor: MembershipLeaseReactor,
+    leases: std::collections::BTreeMap<NodeId, Vec<Lease>>,
+}
+
+impl MembershipLeaseManager {
+    /// A manager with no observed membership and no registered leases.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers `lease` as held for `node`. Rejected — returning the lease so
+    /// the caller can abort it — if the node is currently suspected (grants
+    /// paused) or already revoked (dead/left).
+    pub fn try_grant(&mut self, node: &NodeId, lease: Lease) -> Result<(), Lease> {
+        if self.reactor.is_paused(node) || self.reactor.is_revoked(node) {
+            return Err(lease);
+        }
+        self.leases.entry(node.clone()).or_default().push(lease);
+        Ok(())
+    }
+
+    /// Number of leases currently held for `node`.
+    #[must_use]
+    pub fn active_leases(&self, node: &NodeId) -> usize {
+        self.leases.get(node).map_or(0, Vec::len)
+    }
+
+    /// Whether new grants to `node` are paused (the node is suspected).
+    #[must_use]
+    pub fn is_paused(&self, node: &NodeId) -> bool {
+        self.reactor.is_paused(node)
+    }
+
+    /// Whether `node`'s leases have been revoked (the node is confirmed dead).
+    #[must_use]
+    pub fn is_revoked(&self, node: &NodeId) -> bool {
+        self.reactor.is_revoked(node)
+    }
+
+    /// Applies pending membership transitions. For each node newly confirmed
+    /// dead/left, marks its leases expired and returns them as [`RevokedLease`]s
+    /// for the caller to abort through the obligation protocol (which triggers
+    /// attached saga compensation). Suspicion/refutation transitions update the
+    /// grant-pause state consulted by [`try_grant`](Self::try_grant).
+    pub fn sync(&mut self, view: &MembershipView) -> Vec<RevokedLease> {
+        let mut revoked = Vec::new();
+        for (node, action) in self.reactor.poll(view) {
+            if action != LeaseAction::Revoke {
+                continue;
+            }
+            if let Some(mut leases) = self.leases.remove(&node) {
+                for lease in &mut leases {
+                    let obligation_id = lease.obligation_id();
+                    // Revoke via the obligation protocol: mark the lease expired
+                    // so the caller aborts the obligation (Cancel) and any saga
+                    // compensation attached to it runs.
+                    let _ = lease.mark_expired();
+                    revoked.push(RevokedLease {
+                        node: node.clone(),
+                        obligation_id,
+                    });
+                }
+            }
+        }
+        revoked
     }
 }
 
