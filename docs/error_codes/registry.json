@@ -576,6 +576,28 @@
       ]
     },
     {
+      "code": "ASUP-E601",
+      "name": "database-pool-acquire-timeout",
+      "area": "database",
+      "status": "live",
+      "summary": "A database connection-pool acquire waited the full FIFO acquire budget without being granted a connection.",
+      "probable_causes": [
+        "The pool is saturated: all max_size connections are checked out and none were released before the acquire deadline.",
+        "Connections are held too long (slow queries or leaked PooledConnection guards), so FIFO waiters never reach the head within budget.",
+        "DbPoolConfig::max_size or connection_timeout is too low for the offered concurrency."
+      ],
+      "remediation": [
+        "Raise DbPoolConfig::max_size or shorten connection hold time so the FIFO waiter queue drains within the budget.",
+        "Increase DbPoolConfig::connection_timeout if the workload legitimately needs a longer acquire budget.",
+        "Treat AcquireTimeout as backpressure: shed or retry the request at a higher layer rather than retrying the acquire immediately."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E601.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "src/database/pool.rs"
+      ]
+    },
+    {
       "code": "ASUP-E701",
       "name": "atp-not-implemented",
       "area": "distributed-remote",

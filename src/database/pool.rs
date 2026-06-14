@@ -443,6 +443,16 @@ pub enum DbPoolError<E: std::error::Error> {
     Full,
     /// Connection timed out.
     Timeout,
+    /// The async FIFO acquire budget was exhausted while waiting for an
+    /// available connection.
+    ///
+    /// Distinct from [`DbPoolError::Timeout`] (which also covers cancellation
+    /// and connection-creation timeouts): the caller waited in the pool's FIFO
+    /// waiter queue for the full [`DbPoolConfig::connection_timeout`] budget
+    /// without a connection being released. Emits the stable `[ASUP-E601]`
+    /// token so callers can treat acquire backpressure as a distinct, typed
+    /// failure rather than retrying immediately.
+    AcquireTimeout,
     /// Connection creation failed.
     Connect(E),
     /// Connection validation failed.
@@ -468,6 +478,10 @@ impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
             Self::Closed => write!(f, "pool closed"),
             Self::Full => write!(f, "pool at capacity"),
             Self::Timeout => write!(f, "connection acquisition timed out"),
+            Self::AcquireTimeout => write!(
+                f,
+                "[ASUP-E601] pool connection acquisition timed out after exhausting the acquire budget while waiting in the FIFO waiter queue"
+            ),
             Self::Connect(e) => write!(f, "connection failed: {e}"),
             Self::ValidationFailed => write!(f, "connection validation failed"),
             Self::ClientQuotaExceeded(client) => write!(f, "client quota exceeded for '{client}'"),
@@ -1989,7 +2003,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 waiter_slot.take();
                 self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                 trace_async_pool_event(cx, "wait", "timeout", client_scope);
-                return Err(DbPoolError::Timeout);
+                return Err(DbPoolError::AcquireTimeout);
             }
             let chunk = remaining.min(CANCEL_POLL_INTERVAL);
             let _ = crate::time::timeout(cx.now(), chunk, waiter.notify.notified()).await;
@@ -3831,6 +3845,49 @@ mod tests {
         assert_eq!(stats.idle, 1);
         assert_eq!(stats.active, 0);
         crate::test_complete!("async_get_waiter_queue_admits_direct_waiters_fifo");
+    }
+
+    #[test]
+    fn async_get_waiter_budget_exhaustion_returns_acquire_timeout() {
+        init_test("async_get_waiter_budget_exhaustion_returns_acquire_timeout");
+        let pool = AsyncDbPool::new(
+            AsyncTestManager::new(),
+            DbPoolConfig::with_max_size(1)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_millis(120)),
+        );
+        let holder_cx = Cx::for_testing();
+        let holder = block_on(pool.get(&holder_cx)).expect("holder acquires the only slot");
+
+        let waiter_cx = Cx::for_testing();
+        let started = Instant::now();
+        let outcome = block_on(pool.get(&waiter_cx));
+        let elapsed = started.elapsed();
+
+        let err = match outcome {
+            Err(err) => err,
+            Ok(_) => panic!("waiter must not acquire while the only slot is held"),
+        };
+        assert!(
+            matches!(err, DbPoolError::AcquireTimeout),
+            "exhausting the FIFO acquire budget must yield AcquireTimeout"
+        );
+        assert!(
+            err.to_string().starts_with("[ASUP-E601]"),
+            "AcquireTimeout Display must lead with the ASUP-E601 token, got: {err}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(90),
+            "acquire should wait close to the full budget before timing out, observed {elapsed:?}"
+        );
+        assert_eq!(
+            pool.stats().total_timeouts,
+            1,
+            "budget exhaustion records exactly one acquire timeout"
+        );
+
+        holder.return_to_pool();
+        crate::test_complete!("async_get_waiter_budget_exhaustion_returns_acquire_timeout");
     }
 
     #[test]

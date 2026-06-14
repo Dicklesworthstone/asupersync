@@ -47,6 +47,7 @@ lands.
 | ASUP-E501 | live | net-http | [HTTP deadline exhausted](./ASUP-E501.md) |
 | ASUP-E502 | live | net-http | [Web handler panic recovered](./ASUP-E502.md) |
 | ASUP-E503 | live | net-http | [Web header rejected](./ASUP-E503.md) |
+| ASUP-E601 | live | database | [Database pool acquire timeout](./ASUP-E601.md) |
 | ASUP-E701 | live | distributed-remote | [ATP command not implemented](./ASUP-E701.md) |
 | ASUP-E702 | live | distributed-remote | [ATP transfer listener bind failed](./ASUP-E702.md) |
 | ASUP-E901 | live | config-build | [Config invalid](./ASUP-E901.md) |
