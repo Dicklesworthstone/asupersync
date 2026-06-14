@@ -339,3 +339,37 @@ fn recover_latest_returns_newest_recoverable_bytes_after_damage() {
         "recover_latest must restore the newest recoverable checkpoint and fall back on damage"
     );
 }
+
+#[test]
+fn recover_epoch_byte_exact_after_losing_any_single_stripe() {
+    // AC2 (byte-exact form): losing *any one* of the three stripe files must
+    // still recover the exact original bytes — round-robin striping spreads
+    // symbols so no single failure domain holds more than its even share.
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    for dropped in 0..3usize {
+        let dir = tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
+        let ok = runtime.block_on(runtime.handle().spawn(async move {
+            let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+                directory: dir_path.clone(),
+                encoding: EncodingConfig::default(),
+                repair_count: 4,
+                stripe_count: 3,
+            });
+
+            let data = varied_payload(800);
+            journal.record_epoch(7, &data).await.expect("record epoch");
+
+            std::fs::remove_file(dir_path.join(stripe_file_name(7, dropped)))
+                .expect("remove the chosen stripe");
+
+            journal.recover_epoch(7).await.expect("recover") == data
+        }));
+
+        assert!(
+            ok,
+            "recover_epoch must reproduce the exact original bytes after losing stripe {dropped}"
+        );
+    }
+}
