@@ -9,7 +9,7 @@
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
-//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupEventSubscriber`, `GroupEventBatch`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
+//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupEventSubscriber`, `GroupEventBatch`, `GroupMonitorDelivery`, `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -722,6 +722,53 @@ pub mod process_group {
             state.event_batch(self.cursor)
         }
 
+        /// Delivers pending events into a broadcast monitor stream.
+        ///
+        /// The subscriber cursor advances only after the batch has reserved a
+        /// broadcast send permit and committed to at least one live receiver.
+        /// This is the synchronous two-phase core for the future async
+        /// `monitor_group` surface.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`GroupMonitorDeliveryError::Closed`] if no monitor
+        /// receiver can accept the batch, and
+        /// [`GroupMonitorDeliveryError::Cancelled`] if `cx` is cancelled
+        /// before the broadcast permit is granted.
+        pub fn deliver_pending_to(
+            &mut self,
+            cx: &crate::Cx,
+            state: &ProcessGroupState,
+            sender: &crate::channel::broadcast::Sender<GroupEventBatch>,
+        ) -> Result<GroupMonitorDelivery, GroupMonitorDeliveryError> {
+            let batch = self.pending_batch(state);
+            if batch.is_empty() {
+                return Ok(GroupMonitorDelivery::new(batch, 0, false));
+            }
+
+            let permit = match sender.reserve(cx) {
+                Ok(permit) => permit,
+                Err(crate::channel::broadcast::SendError::Closed(())) => {
+                    return Err(GroupMonitorDeliveryError::Closed(batch));
+                }
+                Err(crate::channel::broadcast::SendError::Cancelled(())) => {
+                    return Err(GroupMonitorDeliveryError::Cancelled(batch));
+                }
+            };
+
+            let delivered_receiver_count = permit.send(batch.clone());
+            if delivered_receiver_count == 0 {
+                return Err(GroupMonitorDeliveryError::Closed(batch));
+            }
+
+            let cursor_advanced = self.commit(&batch);
+            Ok(GroupMonitorDelivery::new(
+                batch,
+                delivered_receiver_count,
+                cursor_advanced,
+            ))
+        }
+
         /// Commits a delivered batch cursor.
         ///
         /// Returns `true` if the subscriber advanced. Stale batches are ignored
@@ -735,6 +782,104 @@ pub mod process_group {
             true
         }
     }
+
+    /// Result of delivering a process-group monitor batch.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GroupMonitorDelivery {
+        batch: GroupEventBatch,
+        delivered_receiver_count: usize,
+        cursor_advanced: bool,
+    }
+
+    impl GroupMonitorDelivery {
+        #[must_use]
+        fn new(
+            batch: GroupEventBatch,
+            delivered_receiver_count: usize,
+            cursor_advanced: bool,
+        ) -> Self {
+            Self {
+                batch,
+                delivered_receiver_count,
+                cursor_advanced,
+            }
+        }
+
+        /// Returns the delivered batch.
+        #[must_use]
+        pub fn batch(&self) -> &GroupEventBatch {
+            &self.batch
+        }
+
+        /// Consumes this result and returns the delivered batch.
+        #[must_use]
+        pub fn into_batch(self) -> GroupEventBatch {
+            self.batch
+        }
+
+        /// Returns the number of live receivers that accepted the batch.
+        #[must_use]
+        pub fn delivered_receiver_count(&self) -> usize {
+            self.delivered_receiver_count
+        }
+
+        /// Returns true when delivery advanced the subscriber cursor.
+        #[must_use]
+        pub fn cursor_advanced(&self) -> bool {
+            self.cursor_advanced
+        }
+    }
+
+    /// Failure to deliver a monitor batch.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum GroupMonitorDeliveryError {
+        /// No monitor receiver was live when the batch was reserved or
+        /// committed.
+        Closed(GroupEventBatch),
+        /// The sender context was cancelled before reservation.
+        Cancelled(GroupEventBatch),
+    }
+
+    impl GroupMonitorDeliveryError {
+        /// Returns the batch that was not delivered.
+        #[must_use]
+        pub fn batch(&self) -> &GroupEventBatch {
+            match self {
+                Self::Closed(batch) | Self::Cancelled(batch) => batch,
+            }
+        }
+
+        /// Consumes this error and returns the undelivered batch.
+        #[must_use]
+        pub fn into_batch(self) -> GroupEventBatch {
+            match self {
+                Self::Closed(batch) | Self::Cancelled(batch) => batch,
+            }
+        }
+    }
+
+    impl fmt::Display for GroupMonitorDeliveryError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Closed(batch) => {
+                    write!(
+                        f,
+                        "process group monitor stream closed before delivering {} event(s)",
+                        batch.len()
+                    )
+                }
+                Self::Cancelled(batch) => {
+                    write!(
+                        f,
+                        "process group monitor delivery cancelled before delivering {} event(s)",
+                        batch.len()
+                    )
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for GroupMonitorDeliveryError {}
 
     /// Owned membership-event batch for monitor-style consumers.
     ///
@@ -1255,8 +1400,8 @@ pub mod crash {
 ///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
 /// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`,
-///   `GroupEventSubscriber`, `GroupEventBatch`, `GroupBroadcastPlan`,
-///   `GroupBroadcastReport`, `GroupBroadcastSummary`
+///   `GroupEventSubscriber`, `GroupEventBatch`, `GroupMonitorDelivery`,
+///   `GroupBroadcastPlan`, `GroupBroadcastReport`, `GroupBroadcastSummary`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -1284,8 +1429,8 @@ pub mod prelude {
         BroadcastBackpressurePolicy, GroupBroadcastPlan, GroupBroadcastRecipientReport,
         GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupBroadcastSummary, GroupEvent,
         GroupEventBatch, GroupEventCursor, GroupEventKind, GroupEventSubscriber, GroupMember,
-        GroupMemberId, GroupName, GroupNameError, GroupSnapshot, ProcessGroupError,
-        ProcessGroupState,
+        GroupMemberId, GroupMonitorDelivery, GroupMonitorDeliveryError, GroupName, GroupNameError,
+        GroupSnapshot, ProcessGroupError, ProcessGroupState,
     };
 
     // -- Monitor --
@@ -1606,6 +1751,8 @@ mod tests {
         let _ = std::any::type_name::<prelude::GroupBroadcastRecipientReport>();
         let _ = std::any::type_name::<prelude::GroupBroadcastRecipientStatus>();
         let _ = std::any::type_name::<prelude::BroadcastBackpressurePolicy>();
+        let _ = std::any::type_name::<prelude::GroupMonitorDelivery>();
+        let _ = std::any::type_name::<prelude::GroupMonitorDeliveryError>();
         let _ = std::any::type_name::<prelude::MonitorRef>();
         let _ = std::any::type_name::<prelude::DownReason>();
         let _ = std::any::type_name::<prelude::DownNotification>();
@@ -1669,6 +1816,8 @@ mod tests {
         let _ = std::any::type_name::<process_group::GroupBroadcastRecipientReport>();
         let _ = std::any::type_name::<process_group::GroupBroadcastRecipientStatus>();
         let _ = std::any::type_name::<process_group::GroupEventKind>();
+        let _ = std::any::type_name::<process_group::GroupMonitorDelivery>();
+        let _ = std::any::type_name::<process_group::GroupMonitorDeliveryError>();
         let _ = std::any::type_name::<process_group::ProcessGroupState>();
         let _ = std::any::type_name::<process_group::ProcessGroupError>();
         let _ = std::any::type_name::<process_group::BroadcastBackpressurePolicy>();
@@ -2449,6 +2598,136 @@ mod tests {
         assert_eq!(restored.cursor().next_sequence(), 0);
 
         crate::test_complete!("process_group_event_subscriber_commits_batches_monotonically");
+    }
+
+    #[test]
+    fn process_group_event_subscriber_delivers_after_broadcast_commit() {
+        init_test("process_group_event_subscriber_delivers_after_broadcast_commit");
+
+        let cx = crate::Cx::for_testing();
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let (tx, mut rx) = crate::channel::broadcast::channel(4);
+        let mut subscriber = process_group::GroupEventSubscriber::new();
+
+        state
+            .join(first.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(second.clone(), crate::types::Time::from_nanos(20))
+            .unwrap();
+
+        let delivery = subscriber.deliver_pending_to(&cx, &state, &tx).unwrap();
+        assert_eq!(delivery.delivered_receiver_count(), 1);
+        assert!(delivery.cursor_advanced());
+        assert_eq!(delivery.batch().len(), 2);
+        assert_eq!(subscriber.cursor().next_sequence(), 2);
+
+        let received = rx.try_recv().unwrap();
+        assert_eq!(
+            received
+                .events()
+                .iter()
+                .map(|event| (event.sequence(), event.member().to_string()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "Node(node-a):T1".to_string()),
+                (1, "Node(node-b):T2".to_string()),
+            ]
+        );
+
+        let empty_delivery = subscriber.deliver_pending_to(&cx, &state, &tx).unwrap();
+        assert!(empty_delivery.batch().is_empty());
+        assert_eq!(empty_delivery.delivered_receiver_count(), 0);
+        assert!(!empty_delivery.cursor_advanced());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(crate::channel::broadcast::TryRecvError::Empty)
+        ));
+
+        crate::test_complete!("process_group_event_subscriber_delivers_after_broadcast_commit");
+    }
+
+    #[test]
+    fn process_group_event_subscriber_keeps_cursor_when_monitor_closed() {
+        init_test("process_group_event_subscriber_keeps_cursor_when_monitor_closed");
+
+        let cx = crate::Cx::for_testing();
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let member = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let (tx, rx) = crate::channel::broadcast::channel(4);
+        drop(rx);
+        let mut subscriber = process_group::GroupEventSubscriber::new();
+
+        state
+            .join(member, crate::types::Time::from_nanos(10))
+            .unwrap();
+
+        let err = subscriber
+            .deliver_pending_to(&cx, &state, &tx)
+            .expect_err("closed monitor should not advance cursor");
+        assert!(matches!(
+            &err,
+            process_group::GroupMonitorDeliveryError::Closed(_)
+        ));
+        assert_eq!(err.batch().len(), 1);
+        assert_eq!(subscriber.cursor().next_sequence(), 0);
+
+        crate::test_complete!("process_group_event_subscriber_keeps_cursor_when_monitor_closed");
+    }
+
+    #[test]
+    fn process_group_event_subscriber_keeps_cursor_when_send_cancelled() {
+        init_test("process_group_event_subscriber_keeps_cursor_when_send_cancelled");
+
+        let cx = crate::Cx::for_testing();
+        cx.cancel_with(
+            crate::types::CancelKind::User,
+            Some("process group monitor delivery test"),
+        );
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let member = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let (tx, mut rx) = crate::channel::broadcast::channel(4);
+        let mut subscriber = process_group::GroupEventSubscriber::new();
+
+        state
+            .join(member, crate::types::Time::from_nanos(10))
+            .unwrap();
+
+        let err = subscriber
+            .deliver_pending_to(&cx, &state, &tx)
+            .expect_err("cancelled monitor send should not advance cursor");
+        assert!(matches!(
+            &err,
+            process_group::GroupMonitorDeliveryError::Cancelled(_)
+        ));
+        assert_eq!(err.batch().len(), 1);
+        assert_eq!(subscriber.cursor().next_sequence(), 0);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(crate::channel::broadcast::TryRecvError::Empty)
+        ));
+
+        crate::test_complete!("process_group_event_subscriber_keeps_cursor_when_send_cancelled");
     }
 
     #[test]
