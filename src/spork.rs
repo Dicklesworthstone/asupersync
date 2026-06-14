@@ -1052,16 +1052,27 @@ pub mod process_group {
         /// Builds an all-delivered report for the common successful path.
         #[must_use]
         pub fn all_delivered(plan: &GroupBroadcastPlan) -> Self {
+            Self::uniform(plan, GroupBroadcastRecipientStatus::Delivered)
+        }
+
+        /// Builds an all-skipped report for skip-policy backpressure.
+        #[must_use]
+        pub fn all_skipped(plan: &GroupBroadcastPlan) -> Self {
+            Self::uniform(plan, GroupBroadcastRecipientStatus::Skipped)
+        }
+
+        /// Builds an all-backpressured report for fail/wait policy boundaries.
+        #[must_use]
+        pub fn all_backpressured(plan: &GroupBroadcastPlan) -> Self {
+            Self::uniform(plan, GroupBroadcastRecipientStatus::Backpressured)
+        }
+
+        fn uniform(plan: &GroupBroadcastPlan, status: GroupBroadcastRecipientStatus) -> Self {
             let recipients = plan
                 .recipients()
                 .iter()
                 .cloned()
-                .map(|member| {
-                    GroupBroadcastRecipientReport::new(
-                        member,
-                        GroupBroadcastRecipientStatus::Delivered,
-                    )
-                })
+                .map(|member| GroupBroadcastRecipientReport::new(member, status))
                 .collect();
 
             Self {
@@ -1989,6 +2000,74 @@ mod tests {
         assert!(all_delivered.is_all_delivered());
 
         crate::test_complete!("process_group_broadcast_summary_separates_policy_outcomes");
+    }
+
+    #[test]
+    fn process_group_broadcast_policy_reports_account_every_recipient() {
+        init_test("process_group_broadcast_policy_reports_account_every_recipient");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        state
+            .join(first, crate::types::Time::from_nanos(10))
+            .unwrap();
+        state
+            .join(second, crate::types::Time::from_nanos(20))
+            .unwrap();
+
+        let skip_plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Skip);
+        let skipped = process_group::GroupBroadcastReport::all_skipped(&skip_plan);
+        assert_eq!(
+            skipped.policy(),
+            process_group::BroadcastBackpressurePolicy::Skip
+        );
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(skipped.skipped_count(), 2);
+        assert_eq!(
+            skipped.summary(),
+            process_group::GroupBroadcastSummary::new(0, 2, 0)
+        );
+        assert_eq!(
+            skipped
+                .recipients()
+                .iter()
+                .map(|recipient| (recipient.member().to_string(), recipient.status()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "Node(node-a):T1".to_string(),
+                    process_group::GroupBroadcastRecipientStatus::Skipped,
+                ),
+                (
+                    "Node(node-b):T2".to_string(),
+                    process_group::GroupBroadcastRecipientStatus::Skipped,
+                ),
+            ]
+        );
+
+        let error_plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Error);
+        let backpressured = process_group::GroupBroadcastReport::all_backpressured(&error_plan);
+        assert_eq!(
+            backpressured.policy(),
+            process_group::BroadcastBackpressurePolicy::Error
+        );
+        assert_eq!(backpressured.backpressured_count(), 2);
+        assert_eq!(
+            backpressured.summary(),
+            process_group::GroupBroadcastSummary::new(0, 0, 2)
+        );
+        assert!(!backpressured.is_all_delivered());
+
+        crate::test_complete!("process_group_broadcast_policy_reports_account_every_recipient");
     }
 
     #[test]

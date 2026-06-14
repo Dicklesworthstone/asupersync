@@ -216,6 +216,91 @@ impl PlanDag {
     }
 }
 
+/// Builder facade for capturing a combinator-shaped [`PlanDag`].
+///
+/// `PlanBuilder` is intentionally thin: it records plan structure only and
+/// does not execute, poll, spawn, cancel, or rewrite anything. That keeps plan
+/// capture zero-cost when unused and preserves the existing direct combinator
+/// execution path until an explicit interpreter is selected.
+///
+/// ```
+/// use asupersync::plan::{PlanNode, capture};
+/// use std::time::Duration;
+///
+/// let plan = capture(|p| {
+///     let fast = p.leaf("fast");
+///     let slow_leaf = p.leaf("slow");
+///     let slow = p.timeout(slow_leaf, Duration::from_millis(50));
+///     p.race([fast, slow])
+/// }).expect("captured plan should validate");
+///
+/// assert_eq!(plan.node_count(), 4);
+/// assert!(matches!(plan.root().and_then(|id| plan.node(id)), Some(PlanNode::Race { .. })));
+/// ```
+#[derive(Debug, Default, Clone)]
+pub struct PlanBuilder {
+    dag: PlanDag,
+}
+
+impl PlanBuilder {
+    /// Creates an empty plan builder.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Captures a leaf computation placeholder.
+    pub fn leaf(&mut self, label: impl Into<String>) -> PlanId {
+        self.dag.leaf(label)
+    }
+
+    /// Captures a join node.
+    pub fn join(&mut self, children: impl IntoIterator<Item = PlanId>) -> PlanId {
+        self.dag.join(children.into_iter().collect())
+    }
+
+    /// Captures a race node.
+    pub fn race(&mut self, children: impl IntoIterator<Item = PlanId>) -> PlanId {
+        self.dag.race(children.into_iter().collect())
+    }
+
+    /// Captures a timeout wrapper.
+    pub fn timeout(&mut self, child: PlanId, duration: Duration) -> PlanId {
+        self.dag.timeout(child, duration)
+    }
+
+    /// Sets the plan root explicitly.
+    pub fn set_root(&mut self, root: PlanId) {
+        self.dag.set_root(root);
+    }
+
+    /// Returns a read-only view of the partially captured DAG.
+    #[inline]
+    #[must_use]
+    pub const fn dag(&self) -> &PlanDag {
+        &self.dag
+    }
+
+    /// Finishes capture after validating the root-reachable DAG.
+    pub fn build(self) -> Result<PlanDag, PlanError> {
+        self.dag.validate()?;
+        Ok(self.dag)
+    }
+}
+
+/// Captures a combinator-shaped plan with the returned node as the root.
+///
+/// The closure records structure through [`PlanBuilder`] and returns the root
+/// node. Validation runs before the DAG is returned, so empty joins/races,
+/// missing child ids, and cycles fail at capture time.
+pub fn capture(build: impl FnOnce(&mut PlanBuilder) -> PlanId) -> Result<PlanDag, PlanError> {
+    let mut builder = PlanBuilder::new();
+    let root = build(&mut builder);
+    builder.set_root(root);
+    builder.build()
+}
+
 // ---------------------------------------------------------------------------
 // E-graph core (deterministic hashcons + union-find)
 // ---------------------------------------------------------------------------
@@ -568,6 +653,70 @@ mod tests {
 
         assert!(dag.validate().is_ok());
         crate::test_complete!("build_join_race_timeout_plan");
+    }
+
+    #[test]
+    fn capture_builder_sets_returned_root_and_preserves_structure() {
+        init_test("capture_builder_sets_returned_root_and_preserves_structure");
+        let dag = capture(|p| {
+            let fast = p.leaf("fast");
+            let slow = p.leaf("slow");
+            let joined = p.join([fast, slow]);
+            p.timeout(joined, Duration::from_millis(25))
+        })
+        .expect("captured plan should validate");
+
+        assert_eq!(dag.node_count(), 4);
+        let root = dag
+            .root()
+            .expect("capture should set returned node as root");
+        assert!(matches!(
+            dag.node(root),
+            Some(PlanNode::Timeout {
+                child,
+                duration
+            }) if *child == PlanId::new(2) && *duration == Duration::from_millis(25)
+        ));
+        assert!(matches!(
+            dag.node(PlanId::new(2)),
+            Some(PlanNode::Join { children })
+                if children.as_slice() == [PlanId::new(0), PlanId::new(1)]
+        ));
+        crate::test_complete!("capture_builder_sets_returned_root_and_preserves_structure");
+    }
+
+    #[test]
+    fn capture_builder_rejects_empty_children_at_capture_time() {
+        init_test("capture_builder_rejects_empty_children_at_capture_time");
+        let err = capture(|p| p.race(std::iter::empty::<PlanId>()))
+            .expect_err("empty race should fail validation");
+        assert_eq!(
+            err,
+            PlanError::EmptyChildren {
+                parent: PlanId::new(0)
+            }
+        );
+        crate::test_complete!("capture_builder_rejects_empty_children_at_capture_time");
+    }
+
+    #[test]
+    fn plan_builder_allows_explicit_root_before_build() {
+        init_test("plan_builder_allows_explicit_root_before_build");
+        let mut builder = PlanBuilder::new();
+        let left = builder.leaf("left");
+        let right = builder.leaf("right");
+        let root = builder.race([left, right]);
+        assert_eq!(builder.dag().node_count(), 3);
+
+        builder.set_root(root);
+        let dag = builder.build().expect("explicit root should validate");
+
+        assert_eq!(dag.root(), Some(root));
+        assert!(matches!(
+            dag.node(root),
+            Some(PlanNode::Race { children }) if children.as_slice() == [left, right]
+        ));
+        crate::test_complete!("plan_builder_allows_explicit_root_before_build");
     }
 
     #[test]
@@ -1342,12 +1491,10 @@ mod tests {
         assert!(matches!(dag.node(a), Some(PlanNode::Leaf { label }) if label == "alpha"));
         assert!(matches!(dag.node(join), Some(PlanNode::Join { children }) if children.len() == 2));
 
-        // node_mut
-        if let Some(PlanNode::Leaf { label }) = dag.node_mut(b) {
-            assert_eq!(label, "beta");
-        } else {
-            panic!("expected Leaf");
-        }
+        assert!(matches!(
+            dag.node_mut(b),
+            Some(PlanNode::Leaf { label }) if label.as_str() == "beta"
+        ));
 
         // out of bounds
         assert!(dag.node(PlanId::new(100)).is_none());

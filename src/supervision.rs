@@ -1978,6 +1978,15 @@ impl DynamicChildTable {
         Some(record)
     }
 
+    /// Remove a live child by name.
+    ///
+    /// This is the pure bookkeeping half of `terminate_child(name)`: runtime
+    /// wiring still has to drive cancellation/drain for the removed record.
+    pub fn remove_by_name(&mut self, name: &str) -> Option<DynamicChildRecord> {
+        let id = *self.by_name.get(name)?;
+        self.remove(id)
+    }
+
     /// Look up a child by handle id.
     #[must_use]
     pub fn get(&self, id: ChildId) -> Option<&DynamicChildRecord> {
@@ -4837,6 +4846,67 @@ mod tests {
 
         crate::test_complete!(
             "dynamic_child_table_rejects_duplicate_names_and_keeps_lookup_stable"
+        );
+    }
+
+    #[test]
+    fn dynamic_child_table_removes_by_name_for_terminate_child_bookkeeping() {
+        init_test("dynamic_child_table_removes_by_name_for_terminate_child_bookkeeping");
+
+        let mut table = DynamicChildTable::new();
+        let first = table
+            .insert_started(
+                "first",
+                test_task_id(),
+                SupervisionStrategy::Restart(RestartConfig::default()),
+                Budget::with_deadline_at_secs(3),
+            )
+            .expect("first child should insert");
+        let second = table
+            .insert_started(
+                "second",
+                test_task_id(),
+                SupervisionStrategy::Stop,
+                Budget::INFINITE,
+            )
+            .expect("second child should insert");
+
+        let removed = table
+            .remove_by_name("first")
+            .expect("name removal should find live child");
+        assert_eq!(removed.id(), first.id());
+        assert_eq!(removed.shutdown_budget(), Budget::with_deadline_at_secs(3));
+        assert!(table.get(first.id()).is_none());
+        assert!(table.get_by_name("first").is_none());
+        assert!(table.remove_by_name("first").is_none());
+
+        let names = table
+            .which_children()
+            .into_iter()
+            .map(|record| record.name().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["second"]);
+
+        let third = table
+            .insert_started(
+                "third",
+                test_task_id(),
+                SupervisionStrategy::Escalate,
+                Budget::INFINITE,
+            )
+            .expect("freed slot should be reusable after name removal");
+        assert_eq!(third.id().slot(), first.id().slot());
+        assert_ne!(third.id().generation(), first.id().generation());
+        assert_eq!(
+            table
+                .get_by_name("second")
+                .expect("second child remains live")
+                .id(),
+            second.id()
+        );
+
+        crate::test_complete!(
+            "dynamic_child_table_removes_by_name_for_terminate_child_bookkeeping"
         );
     }
 
