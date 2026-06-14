@@ -23,6 +23,7 @@
 //! - [`membership`]: SWIM-style cluster membership and failure detection
 
 pub mod adaptive_layout;
+pub mod anti_entropy;
 pub mod assignment;
 pub mod bridge;
 pub mod computation_schema;
@@ -49,6 +50,7 @@ pub use distribution::{
     SymbolDistributor,
 };
 pub use adaptive_layout::{AdaptiveLayoutConfig, BlockLayoutChoice, PathQuality};
+pub use anti_entropy::{DiffKind, DiffReport, KeyDiff, MerkleRangeTree};
 pub use computation_schema::{
     HasSchema, SchemaDescriptor, SchemaFingerprint, SchemaMismatch, SchemaMismatchKind,
 };
