@@ -326,6 +326,7 @@ declare -A SUITES=(
     [combinators]="test_combinators.sh"
     [cancel-attribution]="test_cancel_attribution.sh"
     [scheduler]="test_scheduler_wakeup_e2e.sh"
+    [stable-rust-lane]="run_stable_lane_e2e.sh"
     [memory-residency-replay]="run_memory_residency_replay_e2e.sh"
     [wasm-packaged-bootstrap]="test_wasm_packaged_bootstrap_e2e.sh"
     [wasm-packaged-cancellation]="test_wasm_packaged_cancellation_e2e.sh"
@@ -357,6 +358,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [combinators]="test_logs"
     [cancel-attribution]="target/test-results/cancel-attribution"
     [scheduler]="target/e2e-results/scheduler"
+    [stable-rust-lane]="target/e2e-results/stable_rust_lane_e2e"
     [memory-residency-replay]="target/e2e-results/memory_residency_replay_e2e"
     [wasm-packaged-bootstrap]="target/e2e-results/wasm_packaged_bootstrap"
     [wasm-packaged-cancellation]="target/e2e-results/wasm_packaged_cancellation"
@@ -388,6 +390,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [combinators]="summary.json"
     [cancel-attribution]="summary_*.json"
     [scheduler]="summary.json"
+    [stable-rust-lane]="summary.json"
     [memory-residency-replay]="summary.json"
     [wasm-packaged-bootstrap]="summary.json"
     [wasm-packaged-cancellation]="summary.json"
@@ -419,6 +422,7 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [combinators]="combinators_*"
     [cancel-attribution]=""
     [scheduler]="20*"
+    [stable-rust-lane]="20*"
     [memory-residency-replay]="artifacts_*"
     [wasm-packaged-bootstrap]="e2e-runs"
     [wasm-packaged-cancellation]="e2e-runs"
@@ -450,6 +454,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [combinators]="E2E-SUITE-COMBINATORS"
     [cancel-attribution]="E2E-SUITE-CANCEL-ATTRIBUTION"
     [scheduler]="E2E-SUITE-SCHEDULER-WAKEUP"
+    [stable-rust-lane]="E2E-SUITE-STABLE-RUST-LANE"
     [memory-residency-replay]="E2E-SUITE-MEMORY-RESIDENCY-REPLAY"
     [wasm-packaged-bootstrap]="E2E-SUITE-WASM-PACKAGED-BOOTSTRAP"
     [wasm-packaged-cancellation]="E2E-SUITE-WASM-PACKAGED-CANCELLATION"
@@ -482,7 +487,7 @@ RAPTORQ_REQUIRED_SCENARIOS=(
 SUITE_ORDER=(
     websocket http messaging fabric transport database distributed
     h2-security net-hardening redis
-    combinators cancel-attribution scheduler memory-residency-replay wasm-packaged-bootstrap wasm-packaged-cancellation wasm-cross-framework wasm-incident-forensics wasm-qa-evidence-smoke doctor-workspace-scan
+    combinators cancel-attribution scheduler stable-rust-lane memory-residency-replay wasm-packaged-bootstrap wasm-packaged-cancellation wasm-cross-framework wasm-incident-forensics wasm-qa-evidence-smoke doctor-workspace-scan
     doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs doctor-stress-soak
     doctor-frankensuite-export doctor-e2e-proof-lane
     phase6
