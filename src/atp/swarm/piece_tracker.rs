@@ -451,8 +451,10 @@ impl PieceTracker {
                     transfer_id: *transfer_id,
                 })?;
 
-        // Get peer ID from current status
+        // Completed pieces are terminal: a late failure report must not put a
+        // verified piece back into the retry set or regress transfer progress.
         let peer_id = match transfer_map.piece_status.get(&piece_id) {
+            Some(PieceStatus::Completed { .. }) => return Ok(()),
             Some(
                 PieceStatus::Downloading { peer_id, .. }
                 | PieceStatus::Verifying { peer_id, .. }
@@ -703,6 +705,48 @@ mod tests {
             .unwrap();
         let status = tracker.get_piece_status(&transfer_id, &piece_id).unwrap();
         assert!(matches!(status, PieceStatus::Completed { .. }));
+    }
+
+    #[test]
+    fn completed_piece_cannot_be_regressed_to_failed() {
+        let mut tracker = PieceTracker::new();
+        let piece_map = create_test_piece_map();
+        let transfer_id = MailboxTransferId::new();
+        let piece_id = PieceId::new(0);
+        let peer_id = PeerId::new("peer1");
+
+        tracker
+            .initialize_transfer(&transfer_id, &piece_map)
+            .unwrap();
+        tracker
+            .mark_piece_downloading(&transfer_id, piece_id, peer_id.clone())
+            .unwrap();
+        tracker
+            .mark_piece_completed(&transfer_id, piece_id)
+            .unwrap();
+
+        tracker
+            .mark_piece_failed(
+                &transfer_id,
+                piece_id,
+                "late verification failure".to_string(),
+            )
+            .unwrap();
+
+        let status = tracker.get_piece_status(&transfer_id, &piece_id).unwrap();
+        assert!(
+            matches!(status, PieceStatus::Completed { peer_id: completed_by, .. } if completed_by == peer_id)
+        );
+        let needed = tracker.get_needed_pieces(&transfer_id).unwrap();
+        assert!(
+            !needed.contains(&piece_id),
+            "completed piece must not re-enter the retry set"
+        );
+        let progress = tracker.get_transfer_progress(&transfer_id).unwrap();
+        assert_eq!(progress.completed, 1);
+        assert_eq!(progress.failed, 0);
+        assert_eq!(progress.needed, 9);
+        assert_eq!(progress.completion_percentage, 10.0);
     }
 
     #[test]
