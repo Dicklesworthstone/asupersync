@@ -337,9 +337,12 @@ fn is_prime(n: usize) -> bool {
 /// the encoder/decoder naturally surfaces an "invalid encoding"
 /// error at the public boundary instead of crashing.
 ///
-/// Callers that need to OBSERVE the invalid input (rather than
-/// silently fall through to an empty schedule) should call
-/// [`try_tuple`] which returns `Option<LtTuple>`.
+/// Compatibility note (bd-10hic): this is the quarantined sentinel
+/// helper for legacy conformance/golden-vector surfaces. Production
+/// encoder/decoder paths and generators should use [`try_tuple`] or
+/// [`repair_indices_for_esi`] so malformed inputs stay observable as
+/// `None` or an empty schedule instead of being hidden behind the
+/// sentinel tuple.
 #[must_use]
 pub fn tuple(
     systematic_index: usize,
@@ -1787,6 +1790,54 @@ mod tests {
             valid.iter().all(|index| *index < 32 + 7),
             "repair indices stay inside the LT+PI symbol domain"
         );
+    }
+
+    fn source_imports_legacy_tuple(source: &str) -> bool {
+        let mut compact = String::with_capacity(source.len());
+        for line in source.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            compact.extend(code.chars().filter(|ch| !ch.is_whitespace()));
+        }
+
+        if compact.contains("rfc6330::tuple") {
+            return true;
+        }
+
+        let mut rest = compact.as_str();
+        while let Some(start) = rest.find("rfc6330::{") {
+            let imports = &rest[start + "rfc6330::{".len()..];
+            let Some(end) = imports.find('}') else {
+                break;
+            };
+            if imports[..end].split(',').any(|name| name == "tuple") {
+                return true;
+            }
+            rest = &imports[end + 1..];
+        }
+
+        false
+    }
+
+    /// bd-10hic: keep the legacy sentinel tuple helper quarantined to this
+    /// module's compatibility/conformance tests. Live production code and the
+    /// vector generator must use the fallible tuple path instead.
+    #[test]
+    fn legacy_tuple_sentinel_is_quarantined_from_production_and_generator_sources() {
+        let checked_sources = [
+            ("src/raptorq/systematic.rs", include_str!("systematic.rs")),
+            ("src/raptorq/decoder.rs", include_str!("decoder.rs")),
+            (
+                "scripts/generate_rfc6330_vectors.rs",
+                include_str!("../../scripts/generate_rfc6330_vectors.rs"),
+            ),
+        ];
+
+        for (path, source) in checked_sources {
+            assert!(
+                !source_imports_legacy_tuple(source),
+                "{path} must use try_tuple or repair_indices_for_esi instead of legacy tuple()"
+            );
+        }
     }
 
     /// br-asupersync-pphjvo: for any input that try_tuple rejects,

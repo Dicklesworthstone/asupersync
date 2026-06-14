@@ -7,7 +7,7 @@
 //!   cargo run --quiet --bin generate_rfc6330_vectors > conformance/fixtures/rfc6330_vectors.json
 
 use asupersync::raptorq::{
-    rfc6330::{LtTuple, deg, next_prime_ge, rand, repair_indices_for_esi, tuple},
+    rfc6330::{LtTuple, deg, next_prime_ge, rand, repair_indices_for_esi, try_tuple},
     systematic::SystematicParams,
 };
 use serde::{Deserialize, Serialize};
@@ -91,7 +91,8 @@ fn build_tuple_vector(
     let params = SystematicParams::try_for_source_block(k, 1024)
         .expect("tuple test case must derive RFC parameters");
     let pi_modulus = next_prime_ge(params.p).expect("tuple test case P1 must fit");
-    let live_tuple = tuple(params.j, params.w, params.p, pi_modulus, x);
+    let live_tuple = try_tuple(params.j, params.w, params.p, pi_modulus, x)
+        .expect("tuple test case must satisfy RFC tuple preconditions");
     let indices = repair_indices_for_esi(params.j, params.w, params.p, x);
 
     TestVector {
