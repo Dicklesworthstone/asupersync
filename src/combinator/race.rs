@@ -560,7 +560,7 @@ pub fn verify_losers_drained<T, E>(
 fn assert_losers_drained<T, E>(losers: &[&Outcome<T, E>]) -> LosersDrainedWitness {
     match verify_losers_drained(losers) {
         Ok(witness) => witness,
-        Err(violation) => panic!("L-LOSER-DRAINED invariant violated: {violation}"),
+        Err(violation) => panic!("[ASUP-E302] L-LOSER-DRAINED invariant violated: {violation}"),
     }
 }
 
@@ -1237,6 +1237,25 @@ mod tests {
             }
             _ => panic!("expected RaceAllError::Error"),
         }
+    }
+
+    #[test]
+    fn loser_drain_violation_panic_has_asup_e302() {
+        let panic = std::panic::catch_unwind(|| {
+            let winner: Outcome<i32, &str> = Outcome::Ok(42);
+            let loser =
+                Outcome::Cancelled(CancelReason::new(crate::types::cancel::CancelKind::User));
+            let _ = race2_outcomes(RaceWinner::First, winner, loser);
+        })
+        .expect_err("weak loser cancel kind must panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic payload should be text");
+
+        assert!(message.starts_with("[ASUP-E302]"));
+        assert!(message.contains("L-LOSER-DRAINED invariant violated"));
     }
 
     #[test]

@@ -20,6 +20,10 @@ branches.
 For `race(a, b)`, once `a` wins, request cancellation of `b` and continue
 polling `b` until its cleanup completes.
 
+Current invariant assertions lead with:
+
+`[ASUP-E302] L-LOSER-DRAINED invariant violated: ...`
+
 ## Related
 
 - `ASUP-E203`

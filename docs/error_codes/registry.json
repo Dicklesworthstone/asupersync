@@ -425,7 +425,7 @@
       "code": "ASUP-E302",
       "name": "race-loser-not-drained",
       "area": "cancellation-drain",
-      "status": "reserved",
+      "status": "live",
       "summary": "A race combinator returned before fully draining losing branches.",
       "probable_causes": [
         "The winner path forgot to await loser cancellation.",
@@ -436,8 +436,10 @@
         "Assert zero obligation leaks after race completion in lab tests."
       ],
       "doc_path": "docs/error_codes/ASUP-E302.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/combinator/race.rs"
+      ]
     },
     {
       "code": "ASUP-E303",
