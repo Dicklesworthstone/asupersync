@@ -1,0 +1,548 @@
+{
+  "schema_version": "asupersync.examples.metadata.v1",
+  "bead_id": "asupersync-agent-native-dx-zxqaqs.4",
+  "generated_by": "SnowyFortress",
+  "scope": {
+    "metadata_only": true,
+    "executes_examples": false
+  },
+  "examples": [
+    {
+      "name": "atp_daemon_basic",
+      "file": "examples/atp_daemon_basic.rs",
+      "loc": {
+        "start": 1,
+        "end": 497
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "atp-daemon-configuration",
+        "peer-directory",
+        "transfer-accounting"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example atp_daemon_basic",
+      "description": "Basic ATP daemon setup with in-process peer and transfer state."
+    },
+    {
+      "name": "atp_dogfood_demo",
+      "file": "examples/atp_dogfood_demo.sh",
+      "loc": {
+        "start": 1,
+        "end": 315
+      },
+      "kind": "shell",
+      "demonstrates": [
+        "atp-cli-workflow",
+        "dogfood-script",
+        "operator-transcript"
+      ],
+      "feature_flags": [],
+      "run_command": "manual: bash examples/atp_dogfood_demo.sh",
+      "description": "Shell-driven ATP dogfood workflow for manual operator validation."
+    },
+    {
+      "name": "atp_j5_cli_examples",
+      "file": "examples/atp_j5_cli_examples.md",
+      "loc": {
+        "start": 1,
+        "end": 554
+      },
+      "kind": "markdown",
+      "demonstrates": [
+        "atp-cli-journeys",
+        "operator-recipes",
+        "workflow-documentation"
+      ],
+      "feature_flags": [],
+      "run_command": "manual: read examples/atp_j5_cli_examples.md",
+      "description": "Markdown catalog of ATP J5 CLI journeys and expected operator flows."
+    },
+    {
+      "name": "cancellation_injection",
+      "file": "examples/cancellation_injection.rs",
+      "loc": {
+        "start": 1,
+        "end": 333
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "lab-runtime",
+        "cancellation-injection",
+        "deterministic-await-point-testing"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example cancellation_injection",
+      "description": "Cancellation-injection walkthrough for await-point failure exploration."
+    },
+    {
+      "name": "channel_mpsc_select_e2e",
+      "file": "examples/channel_mpsc_select_e2e.rs",
+      "loc": {
+        "start": 1,
+        "end": 3
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "channel-mpsc",
+        "select-combinator",
+        "real-service-e2e"
+      ],
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "run_command": "cargo run --example channel_mpsc_select_e2e --features channel-mpsc-select-e2e",
+      "description": "Thin example target that dispatches the real channel MPSC select E2E harness."
+    },
+    {
+      "name": "chaos_testing",
+      "file": "examples/chaos_testing.rs",
+      "loc": {
+        "start": 1,
+        "end": 264
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "chaos-injection",
+        "lab-runtime",
+        "deterministic-reproduction"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example chaos_testing",
+      "description": "Chaos-mode examples for deterministic fault, delay, and budget injection."
+    },
+    {
+      "name": "demo_benchmark",
+      "file": "examples/demo_benchmark.rs",
+      "loc": {
+        "start": 1,
+        "end": 665
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "time-travel-debugging",
+        "golden-checksums",
+        "trace-minimization"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
+      "run_command": "cargo run --example demo_benchmark --features test-internals",
+      "description": "Reproducible time-travel demo benchmark with golden checksum validation."
+    },
+    {
+      "name": "demo_delta_debug",
+      "file": "examples/demo_delta_debug.rs",
+      "loc": {
+        "start": 1,
+        "end": 366
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "delta-debugging",
+        "trace-minimizer",
+        "failure-narrative"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
+      "run_command": "cargo run --example demo_delta_debug --features test-internals",
+      "description": "Hierarchical delta-debugging demo over recorded structured-concurrency traces."
+    },
+    {
+      "name": "demo_record_nondeterministic",
+      "file": "examples/demo_record_nondeterministic.rs",
+      "loc": {
+        "start": 1,
+        "end": 433
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "nondeterministic-replay",
+        "obligation-leak-search",
+        "trace-recording"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example demo_record_nondeterministic",
+      "description": "Seed sweep that records a cancel and obligation race for deterministic replay."
+    },
+    {
+      "name": "external_consumer",
+      "file": "examples/external_consumer.rs",
+      "loc": {
+        "start": 1,
+        "end": 25
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "public-api",
+        "runtime-builder",
+        "external-consumer-smoke"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example external_consumer",
+      "description": "Small public-API consumer smoke example for runtime and lab entry points."
+    },
+    {
+      "name": "grafana_dashboard",
+      "file": "examples/grafana_dashboard.json",
+      "loc": {
+        "start": 1,
+        "end": 744
+      },
+      "kind": "json",
+      "demonstrates": [
+        "observability-dashboard",
+        "grafana-import",
+        "metrics-visualization"
+      ],
+      "feature_flags": [],
+      "run_command": "manual: import examples/grafana_dashboard.json into Grafana",
+      "description": "Grafana dashboard JSON for visualizing Asupersync observability metrics."
+    },
+    {
+      "name": "hello",
+      "file": "examples/hello.rs",
+      "loc": {
+        "start": 1,
+        "end": 5
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "main-macro",
+        "cx-checkpoint",
+        "minimal-runtime"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example hello",
+      "description": "Minimal async entry point using Asupersync's main macro and Cx checkpoint."
+    },
+    {
+      "name": "macros_basic",
+      "file": "examples/macros_basic.rs",
+      "loc": {
+        "start": 1,
+        "end": 72
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "proc-macros",
+        "scope-macro",
+        "spawn-join-basics"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example macros_basic",
+      "description": "Basic structured-concurrency macro usage with scope and spawned work."
+    },
+    {
+      "name": "macros_error_handling",
+      "file": "examples/macros_error_handling.rs",
+      "loc": {
+        "start": 1,
+        "end": 24
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "proc-macros",
+        "error-propagation",
+        "scope-failure"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example macros_error_handling",
+      "description": "Structured-concurrency macro error-handling example."
+    },
+    {
+      "name": "macros_nested",
+      "file": "examples/macros_nested.rs",
+      "loc": {
+        "start": 1,
+        "end": 74
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "proc-macros",
+        "nested-scopes",
+        "structured-concurrency-tree"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example macros_nested",
+      "description": "Nested macro scopes demonstrating tree-shaped task ownership."
+    },
+    {
+      "name": "macros_race",
+      "file": "examples/macros_race.rs",
+      "loc": {
+        "start": 1,
+        "end": 67
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "proc-macros",
+        "race-macro",
+        "loser-drain"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example macros_race",
+      "description": "Race macro example focused on winner selection and loser cleanup."
+    },
+    {
+      "name": "prometheus_metrics",
+      "file": "examples/prometheus_metrics.rs",
+      "loc": {
+        "start": 1,
+        "end": 158
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "metrics",
+        "opentelemetry",
+        "prometheus-export-shape"
+      ],
+      "feature_flags": [
+        "metrics"
+      ],
+      "run_command": "cargo run --example prometheus_metrics --features metrics",
+      "description": "Metrics-provider example showing OpenTelemetry integration for Prometheus-style export."
+    },
+    {
+      "name": "scenario_cancellation_exhaustive",
+      "file": "examples/scenarios/cancellation_exhaustive.yaml",
+      "loc": {
+        "start": 1,
+        "end": 30
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "cancellation-exhaustive",
+        "lab-scenario-runner"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/cancellation_exhaustive.yaml",
+      "description": "Scenario fixture for exhaustive cancellation behavior checks."
+    },
+    {
+      "name": "scenario_chaos_sendpermit_ack",
+      "file": "examples/scenarios/chaos_sendpermit_ack.yaml",
+      "loc": {
+        "start": 1,
+        "end": 34
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "send-permit",
+        "ack-obligation"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/chaos_sendpermit_ack.yaml",
+      "description": "Chaos scenario covering send-permit and ack obligation interactions."
+    },
+    {
+      "name": "scenario_clock_skew_lease",
+      "file": "examples/scenarios/clock_skew_lease.yaml",
+      "loc": {
+        "start": 1,
+        "end": 42
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "clock-skew",
+        "lease-obligation"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/clock_skew_lease.yaml",
+      "description": "Clock-skew scenario for lease obligation behavior."
+    },
+    {
+      "name": "scenario_composable_base",
+      "file": "examples/scenarios/composable_base.yaml",
+      "loc": {
+        "start": 1,
+        "end": 25
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "composition-base",
+        "reusable-scenario"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/composable_base.yaml",
+      "description": "Base scenario fixture used by composed scenario workflows."
+    },
+    {
+      "name": "scenario_composed_partition_test",
+      "file": "examples/scenarios/composed_partition_test.yaml",
+      "loc": {
+        "start": 1,
+        "end": 31
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "partition",
+        "scenario-composition"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/composed_partition_test.yaml",
+      "description": "Composed scenario fixture for partition behavior."
+    },
+    {
+      "name": "scenario_custom_latency_model",
+      "file": "examples/scenarios/custom_latency_model.yaml",
+      "loc": {
+        "start": 1,
+        "end": 64
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "latency-model",
+        "network-simulation"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/custom_latency_model.yaml",
+      "description": "Scenario fixture with a custom latency model for network simulation."
+    },
+    {
+      "name": "scenario_host_crash_restart",
+      "file": "examples/scenarios/host_crash_restart.yaml",
+      "loc": {
+        "start": 1,
+        "end": 46
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "host-crash",
+        "restart-recovery"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/host_crash_restart.yaml",
+      "description": "Scenario fixture for host crash and restart recovery behavior."
+    },
+    {
+      "name": "scenario_partition_heal",
+      "file": "examples/scenarios/partition_heal.yaml",
+      "loc": {
+        "start": 1,
+        "end": 62
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "network-partition",
+        "partition-healing"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/partition_heal.yaml",
+      "description": "Scenario fixture for network partition and healing behavior."
+    },
+    {
+      "name": "scenario_smoke_happy_path",
+      "file": "examples/scenarios/smoke_happy_path.yaml",
+      "loc": {
+        "start": 1,
+        "end": 24
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "smoke-test",
+        "happy-path"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/smoke_happy_path.yaml",
+      "description": "Small happy-path scenario fixture for runner smoke tests."
+    },
+    {
+      "name": "scenario_stress_10k_tasks",
+      "file": "examples/scenarios/stress_10k_tasks.yaml",
+      "loc": {
+        "start": 1,
+        "end": 44
+      },
+      "kind": "scenario-yaml",
+      "demonstrates": [
+        "scenario-fixture",
+        "stress",
+        "task-scale"
+      ],
+      "feature_flags": [],
+      "run_command": "scenario: examples/scenarios/stress_10k_tasks.yaml",
+      "description": "Stress scenario fixture for a high task-count workload."
+    },
+    {
+      "name": "session_typed_channel",
+      "file": "examples/session_typed_channel.rs",
+      "loc": {
+        "start": 1,
+        "end": 121
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "session-types",
+        "obligation-proofs",
+        "typed-channel-protocol"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example session_typed_channel",
+      "description": "Obligation session facade examples covering send permit, lease, and two-phase commit."
+    },
+    {
+      "name": "spawn_fanout",
+      "file": "examples/spawn_fanout.rs",
+      "loc": {
+        "start": 1,
+        "end": 15
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "cx-spawn",
+        "fanout",
+        "join"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example spawn_fanout",
+      "description": "Small fanout example spawning and joining child tasks through Cx."
+    },
+    {
+      "name": "spork_minimal_supervised_app",
+      "file": "examples/spork_minimal_supervised_app.rs",
+      "loc": {
+        "start": 1,
+        "end": 244
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "spork",
+        "supervision-tree",
+        "named-gen-server"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
+      "run_command": "cargo run --example spork_minimal_supervised_app --features test-internals",
+      "description": "Minimal supervised application example with a named GenServer child."
+    },
+    {
+      "name": "test_manual",
+      "file": "examples/test_manual.rs",
+      "loc": {
+        "start": 1,
+        "end": 67
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "io",
+        "read-line",
+        "manual-smoke"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example test_manual",
+      "description": "Manual smoke example for buffered read_line behavior over split UTF-8 input."
+    }
+  ]
+}
