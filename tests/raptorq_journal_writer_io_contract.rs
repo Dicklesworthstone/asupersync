@@ -143,3 +143,50 @@ fn durable_trace_journal_handle_records_and_recovers() {
         "DurableTraceJournal must record an epoch and report it recoverable through one stripe loss"
     );
 }
+
+#[test]
+fn journal_discovers_epochs_and_finds_latest_recoverable() {
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let ok = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 4,
+            stripe_count: 3,
+        });
+
+        for epoch in [10u64, 20, 30] {
+            journal
+                .record_epoch(epoch, &vec![0x22u8; 600])
+                .await
+                .expect("record epoch");
+        }
+
+        let discovered = journal.recorded_epochs().await.expect("discover epochs");
+        assert_eq!(discovered, vec![10, 20, 30]);
+        let latest = journal
+            .latest_recoverable_epoch()
+            .await
+            .expect("latest recoverable");
+        assert_eq!(latest, Some(30));
+
+        // Damage the newest epoch: remove two of its three stripe files so fewer
+        // than K' symbols survive -> it drops out of the recoverable set.
+        std::fs::remove_file(dir_path.join(stripe_file_name(30, 0))).expect("remove 30/0");
+        std::fs::remove_file(dir_path.join(stripe_file_name(30, 1))).expect("remove 30/1");
+
+        let latest_after = journal
+            .latest_recoverable_epoch()
+            .await
+            .expect("latest recoverable after damage");
+        latest_after == Some(20)
+    }));
+
+    assert!(
+        ok,
+        "journal must discover epochs and fall back to the latest still-recoverable one"
+    );
+}

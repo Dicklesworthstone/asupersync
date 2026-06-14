@@ -315,4 +315,68 @@ impl DurableTraceJournal {
         let (frames, _) = scan_frames(&survivors);
         Ok(latest_complete_epoch(&frames, &[manifest]) == Some(epoch))
     }
+
+    /// Every recorded epoch (one with a persisted manifest) in the journal
+    /// directory, ascending. Empty if the directory does not exist yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`std::io::Error`] for a directory read failure
+    /// other than the directory being absent.
+    pub async fn recorded_epochs(&self) -> std::io::Result<Vec<u64>> {
+        discover_epochs(&self.config.directory).await
+    }
+
+    /// The highest recorded epoch that still fully recovers from its surviving
+    /// stripe files on disk — the latest checkpoint a recovery tool can restore.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`std::io::Error`] for a directory or stripe read
+    /// failure.
+    pub async fn latest_recoverable_epoch(&self) -> std::io::Result<Option<u64>> {
+        let mut epochs = discover_epochs(&self.config.directory).await?;
+        epochs.sort_unstable_by(|left, right| right.cmp(left)); // descending
+        for epoch in epochs {
+            if self.epoch_recoverable(epoch).await? {
+                return Ok(Some(epoch));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Parse the epoch number out of a `epoch-<N>-manifest.rqm` file name.
+fn parse_manifest_epoch(file_name: &str) -> Option<u64> {
+    file_name
+        .strip_prefix("epoch-")?
+        .strip_suffix("-manifest.rqm")?
+        .parse::<u64>()
+        .ok()
+}
+
+/// Discover every epoch with a persisted manifest record in `dir`, ascending.
+///
+/// A missing directory yields an empty list (nothing recorded yet) rather than
+/// an error, so a fresh recovery target is handled cleanly.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] for a read failure other than the
+/// directory being absent.
+pub async fn discover_epochs(dir: &std::path::Path) -> std::io::Result<Vec<u64>> {
+    let mut entries = match crate::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut epochs = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        if let Some(epoch) = parse_manifest_epoch(&name.to_string_lossy()) {
+            epochs.push(epoch);
+        }
+    }
+    epochs.sort_unstable();
+    Ok(epochs)
 }
