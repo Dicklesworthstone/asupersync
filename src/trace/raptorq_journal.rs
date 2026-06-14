@@ -252,8 +252,10 @@ impl JournalFrame {
 }
 
 /// Decode every intact frame in `bytes`, stopping at the first damaged/torn
-/// frame. Returns the recovered frames and the offset where scanning stopped,
-/// so a caller can report how much of a striped journal survived.
+/// frame.
+///
+/// Returns the recovered frames and the offset where scanning stopped, so a
+/// caller can report how much of a striped journal survived.
 #[must_use]
 pub fn scan_frames(bytes: &[u8]) -> (Vec<JournalFrame>, usize) {
     let mut frames = Vec::new();
@@ -300,9 +302,10 @@ impl BlockRecovery {
     }
 }
 
-/// Summarize per-block decodability across the surviving frames, deterministically
-/// ordered by `(epoch, source_block_number)` — `BTree`-backed so the result does
-/// not depend on `HashMap` iteration order (replay-stable).
+/// Summarize per-block decodability across the surviving frames.
+///
+/// Deterministically ordered by `(epoch, source_block_number)` — `BTree`-backed
+/// so the result does not depend on `HashMap` iteration order (replay-stable).
 ///
 /// Distinct symbols are counted by encoding-symbol id, and `source_symbol_count`
 /// takes the largest K' advertised by the block's frames (they should agree).
@@ -607,8 +610,10 @@ fn read8(bytes: &[u8], at: usize) -> [u8; 8] {
 }
 
 /// CRC-32/ISO-HDLC (the standard zlib/PNG CRC, reflected polynomial
-/// `0xEDB88320`). Bitwise so the table never needs to be carried; the journal
-/// frame sizes make table lookup unnecessary on the cold checkpoint path.
+/// `0xEDB88320`).
+///
+/// Bitwise so the table never needs to be carried; the journal frame sizes make
+/// table lookup unnecessary on the cold checkpoint path.
 #[must_use]
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;

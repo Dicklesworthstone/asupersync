@@ -64,8 +64,9 @@ pub fn encode_checkpoint_blocks(
 }
 
 /// Encode and serialize a whole checkpoint epoch into `stripe_count` per-stripe
-/// journal byte streams plus the [`EpochManifest`], ready for a striped writer
-/// to flush each stream to a distinct failure domain.
+/// journal byte streams plus the [`EpochManifest`].
+///
+/// Ready for a striped writer to flush each stream to a distinct failure domain.
 ///
 /// Returns `Ok(None)` if `stripe_count` is zero.
 ///
