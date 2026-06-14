@@ -166,6 +166,7 @@ pub mod process_group {
     use crate::monitor::DownReason;
     use crate::remote::NodeId;
     use crate::types::{TaskId, Time};
+    use std::collections::BTreeMap;
     use std::fmt;
 
     /// Validation failure for process-group names.
@@ -279,6 +280,35 @@ pub mod process_group {
         }
     }
 
+    /// Process-group state transition failure.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ProcessGroupError {
+        /// A join attempted to add an already-active member.
+        DuplicateMember(GroupMemberId),
+        /// A leave/down transition targeted a member not present in the group.
+        MemberNotFound(GroupMemberId),
+        /// The deterministic join sequence counter has no remaining values.
+        JoinSequenceExhausted,
+    }
+
+    impl fmt::Display for ProcessGroupError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::DuplicateMember(member) => {
+                    write!(f, "process group member already joined: {member}")
+                }
+                Self::MemberNotFound(member) => {
+                    write!(f, "process group member not found: {member}")
+                }
+                Self::JoinSequenceExhausted => {
+                    write!(f, "process group join sequence exhausted")
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for ProcessGroupError {}
+
     /// A single active process-group member.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct GroupMember {
@@ -370,6 +400,150 @@ pub mod process_group {
         #[must_use]
         pub fn is_empty(&self) -> bool {
             self.members.is_empty()
+        }
+    }
+
+    /// Deterministic in-memory membership state for one process group.
+    ///
+    /// This is the synchronous core that future async `join`, `leave`,
+    /// `monitor_group`, and broadcast surfaces use. It does not spawn tasks or
+    /// touch global registries; callers provide the already-authorized member
+    /// IDs and timestamps.
+    #[derive(Debug, Clone)]
+    pub struct ProcessGroupState {
+        group: GroupName,
+        members: BTreeMap<GroupMemberId, GroupMember>,
+        next_join_sequence: u64,
+    }
+
+    impl ProcessGroupState {
+        /// Creates an empty process-group state.
+        #[must_use]
+        pub fn new(group: GroupName) -> Self {
+            Self {
+                group,
+                members: BTreeMap::new(),
+                next_join_sequence: 0,
+            }
+        }
+
+        /// Returns the process-group name.
+        #[must_use]
+        pub fn group(&self) -> &GroupName {
+            &self.group
+        }
+
+        /// Returns the number of active members.
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.members.len()
+        }
+
+        /// Returns whether there are no active members.
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.members.is_empty()
+        }
+
+        /// Returns whether the member is active.
+        #[must_use]
+        pub fn contains_member(&self, member: &GroupMemberId) -> bool {
+            self.members.contains_key(member)
+        }
+
+        /// Returns the deterministic sequence that will be assigned next.
+        #[must_use]
+        pub fn next_join_sequence(&self) -> u64 {
+            self.next_join_sequence
+        }
+
+        /// Returns an active member record.
+        #[must_use]
+        pub fn member(&self, member: &GroupMemberId) -> Option<&GroupMember> {
+            self.members.get(member)
+        }
+
+        /// Adds a member and returns the corresponding joined event.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ProcessGroupError::DuplicateMember`] if `member` is
+        /// already active, or [`ProcessGroupError::JoinSequenceExhausted`] if
+        /// no deterministic join sequence values remain.
+        pub fn join(
+            &mut self,
+            member: GroupMemberId,
+            at: Time,
+        ) -> Result<GroupEvent, ProcessGroupError> {
+            if self.members.contains_key(&member) {
+                return Err(ProcessGroupError::DuplicateMember(member));
+            }
+
+            let join_sequence = self.next_join_sequence;
+            self.next_join_sequence = self
+                .next_join_sequence
+                .checked_add(1)
+                .ok_or(ProcessGroupError::JoinSequenceExhausted)?;
+
+            let record = GroupMember::new(member.clone(), at, join_sequence);
+            self.members.insert(member.clone(), record);
+            Ok(GroupEvent::new(
+                self.group.clone(),
+                member,
+                GroupEventKind::Joined,
+                at,
+            ))
+        }
+
+        /// Removes a member through the explicit leave path.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ProcessGroupError::MemberNotFound`] if `member` is not
+        /// active.
+        pub fn leave(
+            &mut self,
+            member: &GroupMemberId,
+            at: Time,
+        ) -> Result<GroupEvent, ProcessGroupError> {
+            self.members
+                .remove(member)
+                .ok_or_else(|| ProcessGroupError::MemberNotFound(member.clone()))?;
+            Ok(GroupEvent::new(
+                self.group.clone(),
+                member.clone(),
+                GroupEventKind::Left,
+                at,
+            ))
+        }
+
+        /// Removes a member through monitor/region cleanup.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`ProcessGroupError::MemberNotFound`] if `member` is not
+        /// active.
+        pub fn mark_down(
+            &mut self,
+            member: &GroupMemberId,
+            reason: DownReason,
+            at: Time,
+        ) -> Result<GroupEvent, ProcessGroupError> {
+            self.members
+                .remove(member)
+                .ok_or_else(|| ProcessGroupError::MemberNotFound(member.clone()))?;
+            Ok(GroupEvent::new(
+                self.group.clone(),
+                member.clone(),
+                GroupEventKind::Down(reason),
+                at,
+            ))
+        }
+
+        /// Returns a deterministic snapshot of active members.
+        #[must_use]
+        pub fn snapshot(&self) -> GroupSnapshot {
+            GroupSnapshot::new(self.group.clone(), self.members.values().cloned().collect())
         }
     }
 
@@ -527,7 +701,7 @@ pub mod prelude {
     // -- Process groups --
     pub use super::process_group::{
         BroadcastBackpressurePolicy, GroupEvent, GroupEventKind, GroupMember, GroupMemberId,
-        GroupName, GroupNameError, GroupSnapshot,
+        GroupName, GroupNameError, GroupSnapshot, ProcessGroupError, ProcessGroupState,
     };
 
     // -- Monitor --
@@ -837,6 +1011,8 @@ mod tests {
         let _ = std::any::type_name::<prelude::GroupMemberId>();
         let _ = std::any::type_name::<prelude::GroupSnapshot>();
         let _ = std::any::type_name::<prelude::GroupEvent>();
+        let _ = std::any::type_name::<prelude::ProcessGroupState>();
+        let _ = std::any::type_name::<prelude::ProcessGroupError>();
         let _ = std::any::type_name::<prelude::BroadcastBackpressurePolicy>();
         let _ = std::any::type_name::<prelude::MonitorRef>();
         let _ = std::any::type_name::<prelude::DownReason>();
@@ -893,6 +1069,8 @@ mod tests {
         let _ = std::any::type_name::<process_group::GroupSnapshot>();
         let _ = std::any::type_name::<process_group::GroupEvent>();
         let _ = std::any::type_name::<process_group::GroupEventKind>();
+        let _ = std::any::type_name::<process_group::ProcessGroupState>();
+        let _ = std::any::type_name::<process_group::ProcessGroupError>();
         let _ = std::any::type_name::<process_group::BroadcastBackpressurePolicy>();
 
         // Monitor sub-module
@@ -1048,6 +1226,106 @@ mod tests {
         );
 
         crate::test_complete!("process_group_backpressure_default_waits");
+    }
+
+    #[test]
+    fn process_group_state_join_leave_and_down_events_are_exact() {
+        init_test("process_group_state_join_leave_and_down_events_are_exact");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+
+        let joined_first = state
+            .join(first.clone(), crate::types::Time::from_nanos(10))
+            .unwrap();
+        let joined_second = state
+            .join(second.clone(), crate::types::Time::from_nanos(5))
+            .unwrap();
+        assert!(matches!(
+            joined_first.kind(),
+            process_group::GroupEventKind::Joined
+        ));
+        assert!(matches!(
+            joined_second.kind(),
+            process_group::GroupEventKind::Joined
+        ));
+        assert_eq!(state.next_join_sequence(), 2);
+
+        let ordered: Vec<String> = state
+            .snapshot()
+            .member_ids()
+            .map(std::string::ToString::to_string)
+            .collect();
+        assert_eq!(ordered, vec!["Node(node-a):T1", "Node(node-b):T2"]);
+
+        let left = state
+            .leave(&first, crate::types::Time::from_nanos(30))
+            .unwrap();
+        assert!(matches!(left.kind(), process_group::GroupEventKind::Left));
+        assert!(!state.contains_member(&first));
+
+        let down = state
+            .mark_down(
+                &second,
+                monitor::DownReason::Error("crashed".into()),
+                crate::types::Time::from_nanos(40),
+            )
+            .unwrap();
+        assert!(matches!(
+            down.kind(),
+            process_group::GroupEventKind::Down(monitor::DownReason::Error(message))
+                if message == "crashed"
+        ));
+        assert!(state.is_empty());
+
+        crate::test_complete!("process_group_state_join_leave_and_down_events_are_exact");
+    }
+
+    #[test]
+    fn process_group_state_rejects_duplicate_and_missing_members() {
+        init_test("process_group_state_rejects_duplicate_and_missing_members");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let member = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        state
+            .join(member.clone(), crate::types::Time::from_nanos(1))
+            .unwrap();
+
+        assert_eq!(
+            state
+                .join(member.clone(), crate::types::Time::from_nanos(2))
+                .unwrap_err(),
+            process_group::ProcessGroupError::DuplicateMember(member.clone())
+        );
+        state
+            .leave(&member, crate::types::Time::from_nanos(3))
+            .unwrap();
+        assert_eq!(
+            state
+                .mark_down(
+                    &member,
+                    monitor::DownReason::Normal,
+                    crate::types::Time::from_nanos(4)
+                )
+                .unwrap_err(),
+            process_group::ProcessGroupError::MemberNotFound(member)
+        );
+
+        crate::test_complete!("process_group_state_rejects_duplicate_and_missing_members");
     }
 
     // =====================================================================
