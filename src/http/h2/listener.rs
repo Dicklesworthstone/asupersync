@@ -1441,6 +1441,78 @@ mod tests {
     }
 
     #[test]
+    fn continuation_split_headers_map_to_listener_request() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new()
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+
+        let encoded = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/split-continuation"),
+            (":authority", "split.example"),
+            ("x-trace", "split-block"),
+        ]);
+        assert!(encoded.len() > 1, "test header block must be splittable");
+        let split = encoded.len() / 2;
+
+        assert!(
+            conn.process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                encoded.slice(..split),
+                true,
+                false
+            )))
+            .expect("partial HEADERS accepted")
+            .is_none()
+        );
+
+        let received = conn
+            .process_frame(Frame::Continuation(
+                crate::http::h2::frame::ContinuationFrame {
+                    stream_id: 1,
+                    header_block: encoded.slice(split..),
+                    end_headers: true,
+                },
+            ))
+            .expect("CONTINUATION completes header block")
+            .expect("decoded header block emitted");
+
+        let ReceivedFrame::Headers {
+            stream_id,
+            headers,
+            end_stream,
+        } = received
+        else {
+            panic!("expected decoded request headers");
+        };
+
+        assert_eq!(stream_id, 1);
+        assert!(end_stream, "END_STREAM survives split header assembly");
+
+        let peer = "127.0.0.1:8443".parse().expect("test peer parses");
+        let request = request_from_h2_headers(headers, Vec::new(), Some(peer))
+            .expect("listener accepts decoded split header block");
+
+        assert_eq!(request.method, Method::Get);
+        assert_eq!(request.uri, "/split-continuation");
+        assert_eq!(request.version, Version::Http2);
+        assert_eq!(request.peer_addr, Some(peer));
+        assert_eq!(
+            request.headers,
+            vec![
+                ("host".to_owned(), "split.example".to_owned()),
+                ("x-trace".to_owned(), "split-block".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn response_guard_lives_until_queued_stream_frames_flush() {
         let mut conn = Connection::server(Settings::default());
         assert!(
