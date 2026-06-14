@@ -210,13 +210,9 @@ impl JsonlExporter {
     fn rotate(&mut self) -> io::Result<()> {
         self.writer.flush()?;
 
-        // Generate rotated filename: path.<secs>.jsonl
+        // Generate a rotated filename guaranteed not to clobber an existing one.
         let secs = self.clock.now_secs();
-        let rotated_name = format!(
-            "{}.{secs}.jsonl",
-            self.path.file_stem().unwrap_or_default().to_string_lossy()
-        );
-        let rotated_path = self.path.with_file_name(rotated_name);
+        let rotated_path = self.unique_rotated_path(secs);
 
         // Rename current file.
         fs::rename(&self.path, &rotated_path)?;
@@ -234,6 +230,41 @@ impl JsonlExporter {
         self.bytes_written = header.len() as u64;
 
         Ok(())
+    }
+
+    /// Build a rotated filename for the current file that is guaranteed not to
+    /// overwrite an existing file.
+    ///
+    /// br-asupersync-mrik11 — [`RotationClock::now_secs`] is documented as
+    /// requiring uniqueness, but neither bundled clock guarantees it:
+    /// deterministic / virtual clocks (the whole reason [`RotationClock`]
+    /// exists, added in `ies02a`) repeat values across a batch, and
+    /// [`WallClock`] repeats under sub-second rotation. Renaming onto a
+    /// colliding `{stem}.{secs}.jsonl` would let `fs::rename` silently
+    /// overwrite the previously-rotated file, destroying append-only evidence.
+    /// The first rotation at a given `secs` keeps the canonical
+    /// `{stem}.{secs}.jsonl` name; any subsequent collision is disambiguated
+    /// with an incrementing `{stem}.{secs}.N.jsonl` suffix so no rotated file
+    /// is ever clobbered.
+    fn unique_rotated_path(&self, secs: u64) -> PathBuf {
+        let stem = self
+            .path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let canonical = self.path.with_file_name(format!("{stem}.{secs}.jsonl"));
+        if !canonical.exists() {
+            return canonical;
+        }
+        let mut n: u64 = 1;
+        loop {
+            let candidate = self.path.with_file_name(format!("{stem}.{secs}.{n}.jsonl"));
+            if !candidate.exists() {
+                return candidate;
+            }
+            n += 1;
+        }
     }
 }
 
@@ -470,6 +501,57 @@ mod tests {
         assert!(
             expected_rotated.exists(),
             "expected deterministic rotated filename {expected_rotated:?}"
+        );
+    }
+
+    /// br-asupersync-mrik11 — multiple rotations at the SAME clock value must
+    /// not overwrite earlier rotated files. A fixed clock makes every rotation
+    /// target the same `secs`; pre-fix, each `fs::rename` clobbered the prior
+    /// rotated file and silently dropped its entries. Every appended entry must
+    /// survive across the current file plus all rotated files.
+    #[test]
+    fn rotation_with_repeating_clock_preserves_all_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evidence.jsonl");
+
+        // Clock that always returns the same second: every rotation would
+        // otherwise land on `evidence.1700000000.jsonl` and clobber the prior.
+        let config = ExporterConfig {
+            max_bytes: 200,
+            buf_capacity: 64,
+            clock: Arc::new(|| 1_700_000_000u64),
+        };
+        let mut exporter = JsonlExporter::open_with_config(path, &config).unwrap();
+
+        let total = 50usize;
+        for i in 0..total {
+            exporter.append(&test_entry(&format!("entry-{i}"))).unwrap();
+        }
+        exporter.flush().unwrap();
+        drop(exporter);
+
+        // Collect entries from EVERY jsonl file in the directory (current +
+        // all rotated). No entry may be lost to an overwrite.
+        let mut seen = std::collections::BTreeSet::new();
+        for dirent in fs::read_dir(dir.path()).unwrap() {
+            let p = dirent.unwrap().path();
+            if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                for entry in read_jsonl(&p).unwrap() {
+                    seen.insert(entry.component);
+                }
+            }
+        }
+
+        for i in 0..total {
+            assert!(
+                seen.contains(&format!("entry-{i}")),
+                "entry-{i} was lost across same-second rotations (data loss)"
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            total,
+            "expected all {total} entries to survive rotation"
         );
     }
 
