@@ -623,7 +623,8 @@ impl MultiSourceRepairScheduler {
 
         // Sort by usefulness (descending)
         symbol_usefulness.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        symbol_usefulness.dedup_by_key(|&mut (symbol, _)| symbol);
+        let mut seen_symbols = HashSet::new();
+        symbol_usefulness.retain(|(symbol, _)| seen_symbols.insert(*symbol));
 
         symbol_usefulness
             .into_iter()
@@ -1078,6 +1079,32 @@ mod tests {
             rarity_1 > rarity_2,
             "Symbol 1 should be rarer than symbol 2"
         );
+    }
+
+    #[test]
+    fn most_useful_symbols_deduplicates_non_adjacent_peer_overlap() {
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            4,
+        );
+
+        let peer1 = create_test_peer_info(&scheduler, create_test_peer_id(8101), vec![1, 3]);
+        let peer2 = create_test_peer_info(&scheduler, create_test_peer_id(8102), vec![1, 2]);
+
+        scheduler.register_peer(peer1).unwrap();
+        scheduler.register_peer(peer2).unwrap();
+
+        let useful_symbols = scheduler.get_most_useful_symbols(4);
+        let unique_symbols: BTreeSet<u32> = useful_symbols.iter().copied().collect();
+
+        assert_eq!(
+            useful_symbols.len(),
+            unique_symbols.len(),
+            "overlapping peers must not schedule the same symbol twice"
+        );
+        assert_eq!(unique_symbols, BTreeSet::from([1, 2, 3]));
     }
 
     #[test]
