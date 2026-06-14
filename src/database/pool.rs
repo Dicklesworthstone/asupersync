@@ -934,6 +934,14 @@ impl<M: ConnectionManager> DbPool<M> {
                                         inner.client_connections.remove(&client_id_owned);
                                     }
                                 }
+                                // br-asupersync-c5d0q: this connection was popped via the
+                                // needs_validation=true path (total NOT decremented at pop) and
+                                // taken out of the ValidationGuard above, so the guard's Drop
+                                // rollback no longer applies. Disconnecting it without
+                                // decrementing `total` permanently leaks a capacity slot
+                                // (eventually -> DbPoolError::Full forever). The async twin
+                                // decrements here; mirror it for the sync path.
+                                inner.total = inner.total.saturating_sub(1);
                                 drop(inner);
 
                                 self.stats
@@ -963,6 +971,11 @@ impl<M: ConnectionManager> DbPool<M> {
                                             inner.client_connections.remove(&client_id_owned);
                                         }
                                     }
+                                    // br-asupersync-c5d0q: same leak as the mismatch arm above
+                                    // -- the connection was taken out of the ValidationGuard, so
+                                    // disconnecting it here without decrementing `total` leaks a
+                                    // capacity slot. Mirror the async twin's decrement.
+                                    inner.total = inner.total.saturating_sub(1);
                                     drop(inner);
 
                                     self.stats
@@ -3041,6 +3054,154 @@ mod tests {
         fn disconnect(&self, _conn: Self::Connection) {
             self.disconnects.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    // br-asupersync-c5d0q: a connection manager whose reported authentication
+    // state can be driven to drift between return-time and the next checkout,
+    // with a toggle for clear_authentication_state success. This exercises the
+    // two auth-validation failure arms of the sync `get_for_client` that
+    // previously leaked a pool capacity slot (the connection is taken out of the
+    // ValidationGuard, so the guard's Drop rollback no longer applies).
+    struct AuthDriftManager {
+        next_id: Arc<AtomicUsize>,
+        auth_state: Arc<Mutex<Option<String>>>,
+        clear_ok: Arc<AtomicBool>,
+        disconnects: Arc<AtomicUsize>,
+    }
+
+    impl AuthDriftManager {
+        fn new() -> Self {
+            Self {
+                next_id: Arc::new(AtomicUsize::new(1)),
+                auth_state: Arc::new(Mutex::new(None)),
+                clear_ok: Arc::new(AtomicBool::new(true)),
+                disconnects: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn set_auth_state(&self, state: Option<&str>) {
+            *self.auth_state.lock() = state.map(str::to_string);
+        }
+
+        fn set_clear_ok(&self, ok: bool) {
+            self.clear_ok.store(ok, Ordering::SeqCst);
+        }
+    }
+
+    impl ConnectionManager for AuthDriftManager {
+        type Connection = TestConnection;
+        type Error = TestError;
+
+        fn connect(&self) -> Result<Self::Connection, Self::Error> {
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            Ok(TestConnection {
+                id,
+                valid: Arc::new(AtomicBool::new(true)),
+            })
+        }
+
+        fn is_valid(&self, _conn: &Self::Connection) -> bool {
+            true
+        }
+
+        fn disconnect(&self, _conn: Self::Connection) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn authentication_state(&self, _conn: &Self::Connection) -> Option<String> {
+            self.auth_state.lock().clone()
+        }
+
+        fn clear_authentication_state(&self, _conn: &mut Self::Connection) -> bool {
+            self.clear_ok.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn get_for_client_auth_mismatch_does_not_leak_capacity_slot() {
+        init_test("get_for_client_auth_mismatch_does_not_leak_capacity_slot");
+        let pool = DbPool::new(
+            AuthDriftManager::new(),
+            DbPoolConfig::with_max_size(1)
+                .validate_on_checkout(true)
+                .validate_authentication_state(true),
+        );
+
+        // Seed the idle list with a connection authenticated for "c1" (return
+        // records manager.authentication_state()).
+        pool.manager.set_auth_state(Some("c1"));
+        {
+            let _conn = pool
+                .get_for_client("c1")
+                .expect("first acquire creates a connection");
+        }
+        assert_eq!(pool.stats().idle, 1, "connection should return to idle");
+        assert_eq!(pool.stats().total, 1);
+
+        // Auth state drifts to a different client between return and checkout.
+        pool.manager.set_auth_state(Some("c2"));
+        let err = pool
+            .get_for_client("c1")
+            .expect_err("auth-state mismatch must be rejected");
+        assert!(
+            matches!(err, DbPoolError::AuthenticationMismatch { .. }),
+            "expected AuthenticationMismatch, got {err:?}"
+        );
+
+        // Regression: the rejected connection must free its capacity slot. With
+        // the leak, total stays pinned at max_size with zero live connections,
+        // so every later acquire fails with Full forever.
+        assert_eq!(
+            pool.stats().total,
+            0,
+            "auth-mismatch rejection must not leak a pool capacity slot"
+        );
+        pool.manager.set_auth_state(Some("c1"));
+        assert!(
+            pool.get_for_client("c1").is_ok(),
+            "pool must be usable again after an auth-mismatch rejection"
+        );
+        crate::test_complete!("get_for_client_auth_mismatch_does_not_leak_capacity_slot");
+    }
+
+    #[test]
+    fn get_for_client_clear_auth_failure_does_not_leak_capacity_slot() {
+        init_test("get_for_client_clear_auth_failure_does_not_leak_capacity_slot");
+        let pool = DbPool::new(
+            AuthDriftManager::new(),
+            DbPoolConfig::with_max_size(1)
+                .validate_on_checkout(true)
+                .validate_authentication_state(true),
+        );
+
+        // Seed the idle list with a connection that has no recorded auth client
+        // (authenticated_for = None).
+        pool.manager.set_auth_state(None);
+        {
+            let _conn = pool
+                .get_for_client("c1")
+                .expect("first acquire creates a connection");
+        }
+        assert_eq!(pool.stats().total, 1);
+
+        // On checkout the connection now reports an unexpected client and the
+        // manager cannot scrub it, driving the clear-auth-failure discard arm.
+        // (The auth state is read at validation time; the idle conn's recorded
+        // authenticated_for is None, so the (Some, None) clear arm fires.)
+        pool.manager.set_auth_state(Some("intruder"));
+        pool.manager.set_clear_ok(false);
+
+        // With the slot leaked, the retry inside get_for_client observes a full
+        // pool (total == max_size) and returns Full forever. With the slot
+        // freed, the retry takes the create path (which does not re-validate
+        // auth) and succeeds.
+        let result = pool.get_for_client("c1");
+        assert!(
+            result.is_ok(),
+            "clear-auth-failure discard must free the slot so the pool stays usable, got {:?}",
+            result.err()
+        );
+        crate::test_complete!("get_for_client_clear_auth_failure_does_not_leak_capacity_slot");
     }
 
     struct AsyncTestManager {
