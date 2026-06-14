@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
+const MAX_QUIC_V1_CONNECTION_ID_LEN: usize = 20;
+
 /// Retry packet structure
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPacket {
@@ -41,6 +43,14 @@ impl RetryPacket {
 
     /// Encode packet to wire format
     pub fn encode(&self, retry_key: &[u8; 32]) -> Outcome<Bytes, HandshakeError> {
+        if let Outcome::Err(error) = validate_connection_id_len("destination", self.dest_cid.len())
+        {
+            return Outcome::err(error);
+        }
+        if let Outcome::Err(error) = validate_connection_id_len("source", self.source_cid.len()) {
+            return Outcome::err(error);
+        }
+
         let mut buf = BytesMut::new();
 
         // Long header with Retry packet type
@@ -49,20 +59,10 @@ impl RetryPacket {
         buf.put_u32(self.version);
 
         // Destination Connection ID
-        if self.dest_cid.len() > 255 {
-            return Outcome::err(HandshakeError::ConnectionIdError {
-                reason: "destination CID too long".to_string(),
-            });
-        }
         buf.put_u8(self.dest_cid.len() as u8);
         buf.put_slice(&self.dest_cid);
 
         // Source Connection ID
-        if self.source_cid.len() > 255 {
-            return Outcome::err(HandshakeError::ConnectionIdError {
-                reason: "source CID too long".to_string(),
-            });
-        }
         buf.put_u8(self.source_cid.len() as u8);
         buf.put_slice(&self.source_cid);
 
@@ -108,6 +108,9 @@ impl RetryPacket {
 
         // Destination Connection ID
         let dest_cid_len = buf.get_u8() as usize;
+        if let Outcome::Err(error) = validate_connection_id_len("destination", dest_cid_len) {
+            return Outcome::err(error);
+        }
         if buf.remaining() < dest_cid_len {
             return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "insufficient data for destination CID".to_string(),
@@ -123,6 +126,9 @@ impl RetryPacket {
             });
         }
         let source_cid_len = buf.get_u8() as usize;
+        if let Outcome::Err(error) = validate_connection_id_len("source", source_cid_len) {
+            return Outcome::err(error);
+        }
         if buf.remaining() < source_cid_len {
             return Outcome::err(HandshakeError::InvalidPacket {
                 reason: "insufficient data for source CID".to_string(),
@@ -204,6 +210,16 @@ impl RetryPacket {
     }
 }
 
+fn validate_connection_id_len(field: &str, len: usize) -> Outcome<(), HandshakeError> {
+    if len > MAX_QUIC_V1_CONNECTION_ID_LEN {
+        return Outcome::err(HandshakeError::ConnectionIdError {
+            reason: format!("{field} CID too long: {len} bytes"),
+        });
+    }
+
+    Outcome::ok(())
+}
+
 /// Retry token generator and validator
 pub struct RetryTokenHandler {
     /// Secret key for token generation
@@ -227,6 +243,12 @@ impl RetryTokenHandler {
         client_addr: std::net::SocketAddr,
         original_dest_cid: &[u8],
     ) -> Outcome<Bytes, HandshakeError> {
+        if let Outcome::Err(error) =
+            validate_connection_id_len("original destination", original_dest_cid.len())
+        {
+            return Outcome::err(error);
+        }
+
         let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(duration) => duration.as_secs(),
             Err(_) => {
@@ -364,6 +386,9 @@ impl RetryTokenHandler {
             return Outcome::err(HandshakeError::InvalidRetryToken);
         }
         let cid_len = buf.get_u8() as usize;
+        if cid_len > MAX_QUIC_V1_CONNECTION_ID_LEN {
+            return Outcome::err(HandshakeError::InvalidRetryToken);
+        }
         if buf.len() < cid_len {
             return Outcome::err(HandshakeError::InvalidRetryToken);
         }
@@ -401,6 +426,52 @@ mod tests {
     }
 
     #[test]
+    fn test_retry_packet_rejects_oversized_connection_ids() {
+        let retry_key = [0u8; 32];
+        let oversized_cid = Bytes::from(vec![0xab; MAX_QUIC_V1_CONNECTION_ID_LEN + 1]);
+
+        let oversized_dest = RetryPacket::new(
+            QuicVersion::V1 as u32,
+            Bytes::from_static(b"server_cid"),
+            oversized_cid.clone(),
+            Bytes::from_static(b"retry_token_data"),
+        );
+        assert!(oversized_dest.encode(&retry_key).is_err());
+
+        let oversized_source = RetryPacket::new(
+            QuicVersion::V1 as u32,
+            oversized_cid,
+            Bytes::from_static(b"client_cid"),
+            Bytes::from_static(b"retry_token_data"),
+        );
+        assert!(oversized_source.encode(&retry_key).is_err());
+    }
+
+    #[test]
+    fn test_retry_packet_decode_rejects_oversized_connection_ids() {
+        let retry_key = [0u8; 32];
+        let oversized_cid = vec![0xab; MAX_QUIC_V1_CONNECTION_ID_LEN + 1];
+
+        let mut oversized_dest = BytesMut::new();
+        oversized_dest.put_u8(0xf0);
+        oversized_dest.put_u32(QuicVersion::V1 as u32);
+        oversized_dest.put_u8(oversized_cid.len() as u8);
+        oversized_dest.put_slice(&oversized_cid);
+        oversized_dest.put_u8(0);
+        oversized_dest.put_slice(&[0; 16]);
+        assert!(RetryPacket::decode(&oversized_dest, &retry_key).is_err());
+
+        let mut oversized_source = BytesMut::new();
+        oversized_source.put_u8(0xf0);
+        oversized_source.put_u32(QuicVersion::V1 as u32);
+        oversized_source.put_u8(0);
+        oversized_source.put_u8(oversized_cid.len() as u8);
+        oversized_source.put_slice(&oversized_cid);
+        oversized_source.put_slice(&[0; 16]);
+        assert!(RetryPacket::decode(&oversized_source, &retry_key).is_err());
+    }
+
+    #[test]
     fn test_retry_token_roundtrip() {
         let secret_key = [1u8; 32];
         let handler = RetryTokenHandler::new(secret_key, 300); // 5 minute lifetime
@@ -414,6 +485,23 @@ mod tests {
         let result = handler.validate_token(&token, client_addr, original_dest_cid);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_retry_token_rejects_oversized_original_destination_cid() {
+        let secret_key = [1u8; 32];
+        let handler = RetryTokenHandler::new(secret_key, 300);
+        let client_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 12345);
+        let oversized_cid = [0xab; MAX_QUIC_V1_CONNECTION_ID_LEN + 1];
+
+        assert!(handler.generate_token(client_addr, &oversized_cid).is_err());
+
+        let forged_token = forge_retry_token(&secret_key, client_addr, &oversized_cid);
+        assert!(
+            handler
+                .validate_token(&forged_token, client_addr, &oversized_cid)
+                .is_err()
+        );
     }
 
     #[test]
@@ -448,5 +536,41 @@ mod tests {
         let result = handler.validate_token(&token, client_addr, original_dest_cid2);
 
         assert!(result.is_err());
+    }
+
+    fn forge_retry_token(
+        secret_key: &[u8; 32],
+        client_addr: SocketAddr,
+        original_dest_cid: &[u8],
+    ) -> Bytes {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_secs();
+
+        let mut token = BytesMut::new();
+        token.put_u64(now);
+
+        match client_addr {
+            SocketAddr::V4(addr) => {
+                token.put_u8(4);
+                token.put_slice(&addr.ip().octets());
+                token.put_u16(addr.port());
+            }
+            SocketAddr::V6(addr) => {
+                token.put_u8(6);
+                token.put_slice(&addr.ip().octets());
+                token.put_u16(addr.port());
+            }
+        }
+
+        token.put_u8(original_dest_cid.len() as u8);
+        token.put_slice(original_dest_cid);
+
+        let mut mac = HmacSha256::new_from_slice(secret_key).expect("valid hmac key");
+        mac.update(&token);
+        token.put_slice(&mac.finalize().into_bytes());
+
+        token.freeze()
     }
 }

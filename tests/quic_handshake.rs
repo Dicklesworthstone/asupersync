@@ -1,6 +1,6 @@
 //! Integration tests for QUIC handshake implementation
 
-use asupersync::bytes::Bytes;
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::cx::Cx;
 use asupersync::net::atp::handshake::{
     EndpointRole, HandshakeEvent, HandshakeState, HandshakeTracer, KeyDerivation, KeySchedule,
@@ -147,6 +147,41 @@ fn test_retry_packet_integrity() {
     let wrong_key = [124u8; 32];
     let result = RetryPacket::decode(&encoded, &wrong_key);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_retry_rejects_oversized_connection_ids() {
+    let retry_key = [123u8; 32];
+    let oversized_cid = Bytes::from(vec![0xab; 21]);
+
+    let oversized_dest = RetryPacket::new(
+        QuicVersion::V1 as u32,
+        Bytes::from_static(b"server_cid"),
+        oversized_cid.clone(),
+        Bytes::from_static(b"retry_token_data"),
+    );
+    assert!(oversized_dest.encode(&retry_key).is_err());
+
+    let oversized_source = RetryPacket::new(
+        QuicVersion::V1 as u32,
+        oversized_cid.clone(),
+        Bytes::from_static(b"client_cid"),
+        Bytes::from_static(b"retry_token_data"),
+    );
+    assert!(oversized_source.encode(&retry_key).is_err());
+
+    let mut encoded_oversized_dest = BytesMut::new();
+    encoded_oversized_dest.put_u8(0xf0);
+    encoded_oversized_dest.put_u32(QuicVersion::V1 as u32);
+    encoded_oversized_dest.put_u8(oversized_cid.len() as u8);
+    encoded_oversized_dest.put_slice(&oversized_cid);
+    encoded_oversized_dest.put_u8(0);
+    encoded_oversized_dest.put_slice(&[0; 16]);
+    assert!(RetryPacket::decode(&encoded_oversized_dest, &retry_key).is_err());
+
+    let handler = RetryTokenHandler::new([42u8; 32], 300);
+    let client_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 12345);
+    assert!(handler.generate_token(client_addr, &oversized_cid).is_err());
 }
 
 #[test]
