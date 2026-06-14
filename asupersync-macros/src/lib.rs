@@ -11,6 +11,7 @@
 //! - [`join!`] - Join multiple futures, waiting for all to complete
 //! - [`join_all!`] - Join multiple futures into an array
 //! - [`race!`] - Race multiple futures, returning the first to complete
+//! - [`#[main]`](macro@main) / [`#[test]`](macro@test) - Production runtime entry attributes
 //! - [`session_protocol!`] - Generate typestate session protocols
 //! - [`conformance`] - Annotate conformance tests
 //! - [`lab_test`] / [`explore_seeds`] - Run deterministic lab-runtime tests
@@ -41,6 +42,7 @@
 //! }
 //! ```
 
+mod entry;
 mod instrument;
 mod join;
 mod lab_test;
@@ -51,6 +53,34 @@ mod spawn;
 mod util;
 
 use proc_macro::TokenStream;
+
+/// Runs an async `main` function on an asupersync production runtime.
+///
+/// Supported signatures:
+///
+/// ```ignore
+/// #[asupersync::main]
+/// async fn main() {}
+///
+/// #[asupersync::main(flavor = "current_thread", workers = 1, budget = 128)]
+/// async fn main(cx: &asupersync::Cx) -> Result<(), asupersync::Error> {
+///     Ok(())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
+    entry::main_impl(attr, item)
+}
+
+/// Runs an async test function on an asupersync production runtime.
+///
+/// This is distinct from [`#[lab_test]`](macro@lab_test): `#[asupersync::test]`
+/// uses the production runtime, while `#[lab_test]` uses deterministic lab
+/// runtime seed matrices.
+#[proc_macro_attribute]
+pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
+    entry::test_impl(attr, item)
+}
 
 /// Creates a structured concurrency scope.
 ///

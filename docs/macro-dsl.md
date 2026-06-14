@@ -1,7 +1,7 @@
 # Structured Concurrency Macro DSL
 
 This document describes the Asupersync macro DSL for structured concurrency:
-`scope!`, `spawn!`, `join!`, `join_all!`, and `race!`.
+`#[main]`, `#[test]`, `scope!`, `spawn!`, `join!`, `join_all!`, and `race!`.
 
 The macros are designed to reduce boilerplate while preserving Asupersync
 invariants: structured concurrency, cancellation correctness, and deterministic
@@ -23,7 +23,7 @@ asupersync = { path = ".", default-features = false, features = ["proc-macros"] 
 ```
 
 ```rust
-use asupersync::proc_macros::{scope, spawn, join, join_all, race};
+use asupersync::proc_macros::{join, join_all, main, race, scope, spawn, test};
 ```
 
 ## Supported Contract
@@ -35,10 +35,38 @@ use asupersync::proc_macros::{scope, spawn, join, join_all, race};
 | `join!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Awaits branches sequentially today |
 | `join_all!` | Supported and re-exported by `asupersync` | Unavailable | Awaits branches sequentially today |
 | `race!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Expands to `Cx::race*`; losers are dropped, not drained |
+| `#[main]` / `#[test]` | Supported and re-exported by `asupersync` | Unavailable | Runs async entry functions on the production runtime and optionally injects the installed root `Cx` |
 | `#[lab_test]` | Supported and re-exported by `asupersync` | Unavailable | Runs deterministic lab tests under one seed or a seed matrix and fails with seed/rerun details |
 
 `session_protocol!` and `#[conformance]` exist in `asupersync-macros`, but they
 are not part of the root `asupersync` macro contract.
+
+`#[main]` and `#[test]` are production-runtime entry attributes. They build an
+`asupersync::runtime::Runtime`, call `block_on`, and allow an optional
+`cx: &Cx` parameter that is bound from the root context installed by `block_on`.
+They accept `flavor`, `workers`, and `budget` arguments and reject unsupported
+signatures at macro expansion time.
+
+```rust
+use asupersync::{Cx, main};
+
+#[main(flavor = "current_thread", workers = 1, budget = 128)]
+async fn main(cx: &Cx) -> Result<(), asupersync::Error> {
+    cx.checkpoint()?;
+    Ok(())
+}
+```
+
+`#[test]` uses the same production runtime path under the Rust test harness:
+
+```rust
+use asupersync::{Cx, test};
+
+#[test(flavor = "multi_thread", workers = 2)]
+async fn production_runtime_smoke(cx: &Cx) {
+    cx.checkpoint().expect("checkpoint");
+}
+```
 
 `#[lab_test]` wraps deterministic lab tests in a fixed seed or seed matrix,
 initializes test logging, drives the lab to quiescence, and fails with the exact
@@ -78,22 +106,15 @@ block.
 
 ## Quick Start (Runnable)
 
-This snippet is fully runnable today because it only uses `join!`.
+This snippet is runnable as an example binary through the production runtime
+entry macro:
 
 ```rust
-use asupersync::proc_macros::join;
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::{Cx, main};
 
-fn main() {
-    let rt = RuntimeBuilder::current_thread()
-        .build()
-        .expect("runtime");
-
-    let (a, b) = rt.block_on(async {
-        join!(async { 1 }, async { 2 })
-    });
-
-    assert_eq!(a + b, 3);
+#[main]
+async fn main(cx: &Cx) {
+    cx.checkpoint().expect("checkpoint");
 }
 ```
 

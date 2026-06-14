@@ -1,0 +1,5 @@
+error: unsupported asupersync entry argument `flavour`; valid arguments are `flavor`, `workers`, and `budget`; did you mean `flavor`?
+ --> tests/compile_fail/entry_bad_arg.rs:3:8
+  |
+3 | #[main(flavour = "current_thread")]
+  |        ^^^^^^^

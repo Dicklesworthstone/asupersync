@@ -1,0 +1,5 @@
+error: asupersync entry macros support only `()` or `(cx: &Cx)` parameters
+ --> tests/compile_fail/entry_bad_signature.rs:4:20
+  |
+4 | async fn takes_two(cx: &asupersync::Cx, other: u8) {}
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

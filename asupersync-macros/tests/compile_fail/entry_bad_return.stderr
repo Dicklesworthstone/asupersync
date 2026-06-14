@@ -1,0 +1,5 @@
+error: asupersync entry macros support only `()` or `Result<(), E>` return types
+ --> tests/compile_fail/entry_bad_return.rs:4:26
+  |
+4 | async fn returns_u8() -> u8 {
+  |                          ^^

@@ -1,0 +1,5 @@
+error: asupersync entry macros require an async function
+ --> tests/compile_fail/entry_non_async_main.rs:4:1
+  |
+4 | fn main() {}
+  | ^^
