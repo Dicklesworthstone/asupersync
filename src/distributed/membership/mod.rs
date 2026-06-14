@@ -47,6 +47,7 @@
 
 pub mod cluster;
 pub mod gossip;
+pub mod lease_reactor;
 pub mod lifeguard;
 pub mod swim;
 pub mod udp;
@@ -55,6 +56,7 @@ pub mod wire;
 
 pub use cluster::{ClusterConfig, VirtualCluster};
 pub use gossip::GossipBuffer;
+pub use lease_reactor::{LeaseAction, MembershipLeaseReactor, lease_action_for};
 pub use udp::{UdpMembershipError, UdpMembershipTransport};
 pub use view::MembershipView;
 pub use lifeguard::{
