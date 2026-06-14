@@ -21,9 +21,9 @@
 //!   suspicion-window shrink).
 //! - [`gossip`] — the bounded, retransmission-limited piggyback buffer.
 //!
-//! The lab virtual-transport integration, the watchable membership-event stream
-//! + peer process-group, the `remote.rs` lease-manager subscription, and the
-//! UDP adapter are layered *on top of* this core in sibling beads
+//! The lab virtual-transport integration, the watchable membership-event
+//! stream plus peer process-group, the `remote.rs` lease-manager subscription,
+//! and the UDP adapter are layered *on top of* this core in sibling beads
 //! (`.4.2`–`.4.4`); none of them belong in this transport-free state machine.
 //!
 //! # Design note: suspicion → obligation-revocation (the novel contribution)
