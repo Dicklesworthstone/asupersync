@@ -100,6 +100,10 @@ impl HandshakeTracer {
     /// Add a trace entry
     pub fn trace(&mut self, entry: TraceEntry) {
         if entry.level <= self.min_level {
+            if self.max_entries == 0 {
+                return;
+            }
+
             // Remove oldest entries if at capacity
             if self.entries.len() >= self.max_entries {
                 self.entries.remove(0);
@@ -441,7 +445,7 @@ impl HandshakeTracer {
 
 impl Default for HandshakeTracer {
     fn default() -> Self {
-        Self::default()
+        Self::new(TraceLevel::Info, 10000)
     }
 }
 
@@ -555,6 +559,62 @@ mod tests {
         tracer.trace(verbose_entry); // Should be filtered out
 
         assert_eq!(tracer.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_zero_capacity_trace_drops_entries_without_panic() {
+        let mut tracer = HandshakeTracer::new(TraceLevel::Verbose, 0);
+
+        tracer.trace(TraceEntry::new(
+            0,
+            TraceLevel::Error,
+            "test",
+            "dropped_event",
+            json!({}),
+        ));
+        tracer.trace_packet_protection("rx", PacketSpace::Initial, 0, 1200);
+
+        assert!(tracer.entries().is_empty());
+        assert_eq!(tracer.summary()["total_events"], 0);
+    }
+
+    #[test]
+    fn test_trace_capacity_eviction_keeps_newest_entries() {
+        let mut tracer = HandshakeTracer::new(TraceLevel::Verbose, 2);
+
+        tracer.trace(TraceEntry::new(
+            0,
+            TraceLevel::Info,
+            "test",
+            "first_event",
+            json!({}),
+        ));
+        tracer.trace(TraceEntry::new(
+            1,
+            TraceLevel::Info,
+            "test",
+            "second_event",
+            json!({}),
+        ));
+        tracer.trace(TraceEntry::new(
+            2,
+            TraceLevel::Info,
+            "test",
+            "third_event",
+            json!({}),
+        ));
+
+        assert_eq!(tracer.entries().len(), 2);
+        assert_eq!(tracer.entries()[0].event, "second_event");
+        assert_eq!(tracer.entries()[1].event, "third_event");
+    }
+
+    #[test]
+    fn test_default_tracer_uses_info_threshold_and_capacity() {
+        let tracer = HandshakeTracer::default();
+
+        assert_eq!(tracer.min_level, TraceLevel::Info);
+        assert_eq!(tracer.max_entries, 10000);
     }
 
     #[test]
