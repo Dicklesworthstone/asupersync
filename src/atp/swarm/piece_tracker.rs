@@ -504,7 +504,14 @@ impl PieceTracker {
                 | PieceStatus::Verifying { peer_id, .. }
                 | PieceStatus::Requested { peer_id, .. },
             ) => peer_id.clone(),
-            _ => PeerId::new("unknown"),
+            Some(PieceStatus::Failed { peer_id, .. }) => peer_id.clone(),
+            Some(PieceStatus::Needed) => {
+                return Err(SwarmError::InvalidPieceState {
+                    piece_id,
+                    current_state: "needed".to_string(),
+                });
+            }
+            None => return Err(SwarmError::PieceNotFound { piece_id }),
         };
 
         transfer_map.piece_status.insert(
@@ -837,6 +844,56 @@ mod tests {
         assert_eq!(progress.failed, 0);
         assert_eq!(progress.needed, 9);
         assert_eq!(progress.completion_percentage, 10.0);
+    }
+
+    #[test]
+    fn failed_piece_does_not_synthesize_unknown_peer() {
+        let mut tracker = PieceTracker::new();
+        let piece_map = create_test_piece_map();
+        let transfer_id = MailboxTransferId::new();
+        let unassigned_piece = PieceId::new(1);
+        let requested_piece = PieceId::new(0);
+        let real_unknown_peer = PeerId::new("unknown");
+
+        tracker
+            .initialize_transfer(&transfer_id, &piece_map)
+            .unwrap();
+
+        let err = tracker
+            .mark_piece_failed(
+                &transfer_id,
+                unassigned_piece,
+                "failure before request".to_string(),
+            )
+            .expect_err("unassigned failures must not invent a peer id");
+        assert!(
+            matches!(&err, SwarmError::InvalidPieceState { piece_id, current_state } if *piece_id == unassigned_piece && current_state == "needed"),
+            "unexpected error: {err}"
+        );
+        assert!(matches!(
+            tracker
+                .get_piece_status(&transfer_id, &unassigned_piece)
+                .unwrap(),
+            PieceStatus::Needed
+        ));
+
+        tracker
+            .mark_piece_requested(&transfer_id, requested_piece, real_unknown_peer.clone())
+            .unwrap();
+        tracker
+            .mark_piece_failed(
+                &transfer_id,
+                requested_piece,
+                "real peer named unknown failed".to_string(),
+            )
+            .unwrap();
+
+        let status = tracker
+            .get_piece_status(&transfer_id, &requested_piece)
+            .unwrap();
+        assert!(
+            matches!(status, PieceStatus::Failed { peer_id, .. } if peer_id == real_unknown_peer)
+        );
     }
 
     #[test]
