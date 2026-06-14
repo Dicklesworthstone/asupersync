@@ -393,14 +393,16 @@ impl MultiSourceRepairScheduler {
                 reason
             );
 
-            // Record rejection
-            if let Some(request) = self.pending_requests.remove(&symbol_index) {
-                self.rejected_requests.push((request, reason.clone()));
-            }
-
-            // Update peer trust if malicious behavior detected
+            // An unauthorized sender (wrong peer or unregistered) must NOT
+            // consume the legitimate outstanding request — otherwise a forged
+            // response could cancel an honest peer's pending symbol. Penalize
+            // the forging sender's trust instead and leave the request intact.
+            // Request-level rejections (e.g. a low-trust assigned peer) do
+            // retire the request so it can be rescheduled.
             if matches!(reason, RejectionReason::MaliciousPeer { .. }) {
                 self.update_peer_trust(from_peer, false);
+            } else if let Some(request) = self.pending_requests.remove(&symbol_index) {
+                self.rejected_requests.push((request, reason.clone()));
             }
 
             return Ok(SymbolProcessResult::Rejected { reason });
@@ -663,19 +665,41 @@ impl MultiSourceRepairScheduler {
         _symbol_data: &[u8],
         from_peer: &PeerId,
     ) -> std::result::Result<(), RejectionReason> {
-        // Check if we were expecting this symbol
-        if !self.pending_requests.contains_key(&symbol_index) {
+        // We must have an outstanding request for this symbol; otherwise it is
+        // unsolicited (or a duplicate of one already resolved).
+        let Some(request) = self.pending_requests.get(&symbol_index) else {
             return Err(RejectionReason::DuplicateSymbol);
+        };
+
+        // Bind the response to the peer the symbol was actually requested from.
+        // Accepting a symbol from any other sender lets an attacker hijack an
+        // honest peer's request and poison the decode matrix for that index.
+        if &request.peer_id != from_peer {
+            return Err(RejectionReason::MaliciousPeer {
+                evidence: format!(
+                    "symbol {symbol_index} was requested from {} but delivered by {}",
+                    request.peer_id.as_string(),
+                    from_peer.as_string()
+                ),
+            });
         }
 
-        // Check peer trust
-        if let Some(peer_info) = self.peers.get(from_peer) {
-            if peer_info.trust_score < 0.1 {
-                return Err(RejectionReason::LowTrustScore {
-                    score: peer_info.trust_score,
-                    threshold: 0.1,
-                });
-            }
+        // The sender must be a registered peer. An unknown sender would
+        // otherwise bypass trust gating entirely (the previous `if let Some`
+        // silently skipped the trust check whenever the peer was absent).
+        let Some(peer_info) = self.peers.get(from_peer) else {
+            return Err(RejectionReason::MaliciousPeer {
+                evidence: format!(
+                    "symbol {symbol_index} delivered by unregistered peer {}",
+                    from_peer.as_string()
+                ),
+            });
+        };
+        if peer_info.trust_score < 0.1 {
+            return Err(RejectionReason::LowTrustScore {
+                score: peer_info.trust_score,
+                threshold: 0.1,
+            });
         }
 
         // Additional validation would go here (manifest verification, etc.)
@@ -1205,6 +1229,72 @@ mod tests {
         }
 
         assert!(scheduler.received_symbols.contains(&1));
+    }
+
+    #[test]
+    fn received_symbol_from_unrequested_peer_is_rejected_without_poisoning_decode() {
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            3,
+        );
+
+        // Every scheduled request is assigned to the only registered peer.
+        let requested_peer = create_test_peer_id(8001);
+        let requested_info =
+            create_test_peer_info(&scheduler, requested_peer.clone(), vec![1, 2, 3]);
+        scheduler.register_peer(requested_info).unwrap();
+
+        let requests = scheduler.schedule_next_batch().unwrap();
+        assert!(!requests.is_empty(), "expected scheduled requests");
+        let hijacked_index = requests[0].symbol_index;
+        assert!(
+            requests[0].peer_id == requested_peer,
+            "request must be assigned to the registered peer"
+        );
+
+        // A different, registered peer tries to answer that request. Even a
+        // known peer must not be able to hijack another peer's symbol.
+        let attacker = create_test_peer_id(9999);
+        let attacker_info = create_test_peer_info(&scheduler, attacker.clone(), vec![1, 2, 3]);
+        scheduler.register_peer(attacker_info).unwrap();
+
+        let symbol_data = vec![7u8; 100];
+        let result = scheduler
+            .process_received_symbol(hijacked_index, &symbol_data, &attacker)
+            .unwrap();
+
+        match result {
+            SymbolProcessResult::Rejected { reason } => assert!(
+                matches!(reason, RejectionReason::MaliciousPeer { .. }),
+                "hijacked symbol must be flagged malicious, got {reason:?}"
+            ),
+            SymbolProcessResult::Accepted { .. } => {
+                panic!("a symbol delivered by a peer it was not requested from must be rejected")
+            }
+        }
+
+        // The decode matrix must not be poisoned by the hijack attempt...
+        assert!(
+            !scheduler.received_symbols.contains(&hijacked_index),
+            "rejected hijack must not be recorded as received"
+        );
+        // ...and the legitimate outstanding request must remain so the honest
+        // peer can still deliver the symbol.
+        assert!(
+            scheduler.pending_requests.contains_key(&hijacked_index),
+            "forged response must not cancel the honest peer's pending request"
+        );
+
+        // The honest peer's later delivery is still accepted.
+        let honest = scheduler
+            .process_received_symbol(hijacked_index, &symbol_data, &requested_peer)
+            .unwrap();
+        assert!(
+            matches!(honest, SymbolProcessResult::Accepted { .. }),
+            "the requested peer's delivery must still be accepted"
+        );
     }
 
     #[test]
