@@ -1,0 +1,31 @@
+{
+  "schema_version": "clean-overlay-proof-planner-input-v1",
+  "agent_name": "SapphireHill",
+  "head": "7777777777777777777777777777777777777777",
+  "selected_paths": ["tests/clean_overlay_proof_planner_contract.rs"],
+  "dirty_entries": [
+    {"path": "tests/clean_overlay_proof_planner_contract.rs", "status": "??"},
+    {"path": "src/grpc/client.rs", "status": " M"}
+  ],
+  "reservations": [
+    {
+      "id": 14,
+      "agent_name": "SapphireHill",
+      "path_pattern": "tests/clean_overlay_proof_planner_contract.rs",
+      "exclusive": true,
+      "expires_ts": "2026-06-15T00:00:00Z"
+    },
+    {
+      "id": 15,
+      "agent_name": "SnowyFortress",
+      "path_pattern": "src/grpc/client.rs",
+      "exclusive": true,
+      "expires_ts": "2026-06-15T00:00:00Z"
+    }
+  ],
+  "command_intent": {
+    "description": "peer dirt outside selected overlay blocks default proof",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_peer_dirty cargo test -p asupersync --test clean_overlay_proof_planner_contract -- --nocapture",
+    "remote_required": true
+  }
+}

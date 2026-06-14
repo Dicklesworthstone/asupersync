@@ -1,0 +1,23 @@
+{
+  "schema_version": "clean-overlay-proof-planner-input-v1",
+  "agent_name": "SapphireHill",
+  "head": "2222222222222222222222222222222222222222",
+  "selected_paths": ["src/runtime/pool_sizing.rs"],
+  "dirty_entries": [
+    {"path": "src/runtime/pool_sizing.rs", "status": " M"}
+  ],
+  "reservations": [
+    {
+      "id": 38590,
+      "agent_name": "SapphireHill",
+      "path_pattern": "src/runtime/pool_sizing.rs",
+      "exclusive": true,
+      "expires_ts": "2026-06-15T00:00:00Z"
+    }
+  ],
+  "command_intent": {
+    "description": "focused pool sizing proof",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_pool cargo test -p asupersync --lib pool_sizing -- --nocapture",
+    "remote_required": true
+  }
+}
