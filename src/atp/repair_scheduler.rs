@@ -308,10 +308,8 @@ impl MultiSourceRepairScheduler {
             peer_info.available_symbols.len()
         );
 
-        // Update symbol rarity map
-        self.update_symbol_rarity(&peer_info.available_symbols);
-
         self.peers.insert(peer_info.peer_id.clone(), peer_info);
+        self.recalculate_symbol_rarity();
         Ok(())
     }
 
@@ -564,22 +562,6 @@ impl MultiSourceRepairScheduler {
         best_peer
     }
 
-    /// Update symbol rarity map when peers change
-    fn update_symbol_rarity(&mut self, symbols: &BTreeSet<u32>) {
-        for &symbol in symbols {
-            let peer_count = self
-                .peers
-                .values()
-                .filter(|peer| peer.available_symbols.contains(&symbol))
-                .count() as f64
-                + 1.0; // +1 for the new peer
-
-            // Rarity is inverse of availability (rare = fewer peers have it)
-            let rarity = 1.0 / peer_count;
-            self.symbol_rarity_map.insert(symbol, rarity);
-        }
-    }
-
     /// Recalculate symbol rarity for all symbols
     fn recalculate_symbol_rarity(&mut self) {
         let mut all_symbols = HashSet::new();
@@ -587,6 +569,7 @@ impl MultiSourceRepairScheduler {
             all_symbols.extend(&peer.available_symbols);
         }
 
+        self.symbol_rarity_map.clear();
         for &symbol in &all_symbols {
             let peer_count = self
                 .peers
@@ -1101,6 +1084,43 @@ mod tests {
         assert!(
             rarity_1 > rarity_2,
             "Symbol 1 should be rarer than symbol 2"
+        );
+    }
+
+    #[test]
+    fn peer_reregistration_recalculates_symbol_rarity_without_stale_counts() {
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            10,
+        );
+
+        let peer1_id = create_test_peer_id(8104);
+        let peer2_id = create_test_peer_id(8105);
+
+        let peer1_initial = create_test_peer_info(&scheduler, peer1_id.clone(), vec![1, 2]);
+        let peer2_initial = create_test_peer_info(&scheduler, peer2_id.clone(), vec![2]);
+        scheduler.register_peer(peer1_initial).unwrap();
+        scheduler.register_peer(peer2_initial).unwrap();
+
+        assert_eq!(scheduler.symbol_rarity_map.get(&2), Some(&0.5));
+
+        let peer1_updated = create_test_peer_info(&scheduler, peer1_id, vec![1]);
+        scheduler.register_peer(peer1_updated).unwrap();
+
+        assert_eq!(
+            scheduler.symbol_rarity_map.get(&2),
+            Some(&1.0),
+            "re-registering a peer must drop its old symbol inventory before recounting rarity"
+        );
+
+        let peer2_updated = create_test_peer_info(&scheduler, peer2_id, vec![3]);
+        scheduler.register_peer(peer2_updated).unwrap();
+
+        assert!(
+            !scheduler.symbol_rarity_map.contains_key(&2),
+            "symbols no current peer advertises must not remain in the rarity map"
         );
     }
 
