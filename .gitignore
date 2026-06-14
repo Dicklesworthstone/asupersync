@@ -534,3 +534,5 @@ opencode.json
 /MODES_*.md
 /perf_scenario_*.md
 /bug_report_*.md
+
+.sbh-protect
