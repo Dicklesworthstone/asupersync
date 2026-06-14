@@ -435,6 +435,7 @@
     "doctor-e2e-proof-lane-contract",
     "semantic-lint-proof-lane-contract",
     "rust-crate-release-provenance-contract",
+    "artifact-governance-validation-harness",
     "artifact-governance-final-signoff"
   ],
   "lanes": [
@@ -1407,6 +1408,29 @@
       ]
     },
     {
+      "lane_id": "artifact-governance-validation-harness",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_validation_harness CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract -- --nocapture",
+      "guarantee_ids": [
+        "artifact-governance-validation-harness"
+      ],
+      "feature_flags": [],
+      "expected_signal": "artifact_governance_validation_harness_contract and artifact_governance_ledger_contract pass",
+      "source_paths": [
+        "artifacts/artifact_governance_validation_harness_v1.json",
+        "docs/proof/artifact_governance_validation_harness.md",
+        "tests/artifact_governance_validation_harness_contract.rs",
+        "artifacts/artifact_governance_ledger_v1.json",
+        "artifacts/artifact_governance_scanner_v1.json",
+        "artifacts/artifact_governance_operator_report_v1.json",
+        "artifacts/artifact_governance_producer_checklist_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ]
+    },
+    {
       "lane_id": "artifact-governance-final-signoff",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1713,6 +1737,12 @@
       "guarantee_id": "rust-crate-release-provenance-contract",
       "lane_ids": [
         "rust-crate-release-provenance-contract"
+      ]
+    },
+    {
+      "guarantee_id": "artifact-governance-validation-harness",
+      "lane_ids": [
+        "artifact-governance-validation-harness"
       ]
     },
     {
