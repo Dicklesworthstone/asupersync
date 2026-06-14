@@ -16,6 +16,10 @@
 //!   - `h2_drain_escalates_stragglers`: handlers that never finish are
 //!     escalated at the soft deadline; clients never see a 200 and the
 //!     listener still stops cleanly with a truthful report.
+//!   - `h2_lb_compat_keeps_socket_until_drain_completes` (br-asupersync-1kcwfd
+//!     item 3; h1 D2.4 AC5 parity): with `lb_compat_keep_socket`, the listening
+//!     socket stays bound (TCP handshakes succeed, nothing is served) for the
+//!     whole drain window and closes only once the drain is over.
 
 #![cfg(feature = "test-internals")]
 
@@ -414,5 +418,114 @@ fn h2_drain_escalates_stragglers() {
                 "straggler must not complete: {outcome:?}"
             );
         }
+    });
+}
+
+/// br-asupersync-1kcwfd item 3 (h1 D2.4 AC5 parity, mirrors
+/// `tests/e2e_h1_graceful_drain.rs::lb_compat_keeps_socket_until_drain_completes`):
+/// with `lb_compat_keep_socket`, the listening socket stays bound and keeps
+/// completing TCP handshakes for the whole drain window (load balancers can
+/// still probe it), serves nothing new, and closes only once the drain has
+/// finished. The in-flight request that held the window open still completes.
+#[test]
+fn h2_lb_compat_keeps_socket_until_drain_completes() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let release = Arc::new(Notify::new());
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_release = Arc::clone(&release);
+        let handler_released = Arc::clone(&released);
+
+        let listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            move |_req| {
+                let release = Arc::clone(&handler_release);
+                let released = Arc::clone(&handler_released);
+                async move {
+                    release
+                        .wait_until(|| released.load(Ordering::Acquire))
+                        .await;
+                    Response::new(200, "OK", b"drained".to_vec())
+                }
+            },
+            drain_config(Duration::from_secs(10), Duration::from_secs(20))
+                .lb_compat_keep_socket(true),
+        )
+        .await
+        .expect("bind listener");
+
+        let addr = listener.local_addr().expect("local addr");
+        let manager = listener.connection_manager().clone();
+        let in_flight = listener.in_flight_requests();
+
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .expect("spawn listener run");
+
+        // One request parked in its handler keeps the drain window open.
+        let client = h2_blocking_client(addr, "/parked", true);
+        while in_flight.load(Ordering::Acquire) < 1 {
+            asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
+        }
+
+        assert!(
+            manager.begin_drain(Duration::from_secs(10)),
+            "begin_drain transitions Running -> Draining"
+        );
+
+        // Give the accept loop time to observe the drain and park the socket,
+        // then prove the socket still completes TCP handshakes mid-drain.
+        asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(100)).await;
+        let probe = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500));
+        assert!(
+            probe.is_ok(),
+            "lb_compat keeps the socket connectable during the drain: {probe:?}"
+        );
+        drop(probe);
+
+        // Release the parked handler so the drain completes.
+        released.store(true, Ordering::Release);
+        release.notify_waiters();
+        let stats = run_handle.await.expect("listener run result");
+        let report = stats.drain_report.expect("request-aware drain report");
+        assert!(
+            report.reached_quiescence,
+            "drain reached quiescence: {report}"
+        );
+
+        // The parked socket is closed once the drain is over: connection
+        // attempts now fail (allow a short window for the OS to tear down).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+                Err(_) => break,
+                Ok(stream) => {
+                    drop(stream);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "socket must close after the drain completes"
+                    );
+                    asupersync::time::sleep(
+                        asupersync::time::wall_now(),
+                        Duration::from_millis(50),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        let outcome = client.join().expect("client thread");
+        assert_eq!(
+            outcome.status.as_deref(),
+            Some("200"),
+            "the in-flight request completed during the lb_compat drain: {outcome:?}"
+        );
+        assert_eq!(outcome.body, b"drained", "{outcome:?}");
     });
 }
