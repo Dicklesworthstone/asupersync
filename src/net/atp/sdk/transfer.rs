@@ -275,11 +275,6 @@ impl AtpSession {
         cx: &Cx,
         request: TransferRequest,
     ) -> AtpOutcome<ActiveTransfer> {
-        let transfer_id = request
-            .options
-            .transfer_id
-            .clone()
-            .unwrap_or_else(TransferId::generate);
         if cx.checkpoint().is_err() {
             return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
         }
@@ -292,38 +287,7 @@ impl AtpSession {
             AtpOutcome::Panicked(p) => return AtpOutcome::Panicked(p),
         }
 
-        // Create progress and cancellation channels
-        let (progress_tx, progress_rx) = mpsc::channel(100);
-        let (cancel_tx, cancel_rx) = mpsc::channel(1);
-
-        let total_bytes = match self.calculate_transfer_size(&request.source).await {
-            AtpOutcome::Ok(total_bytes) => total_bytes,
-            AtpOutcome::Err(error) => return AtpOutcome::Err(error),
-            AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
-            AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
-        };
-        let initial_progress = TransferProgress {
-            transfer_id: transfer_id.clone(),
-            bytes_transferred: 0,
-            total_bytes,
-            speed_bytes_per_sec: 0,
-            eta_ms: None,
-            phase: TransferPhase::Initializing,
-            active_paths: 1,
-            repair_symbols_active: false,
-        };
-
-        // Send initial progress - ignore if receiver is gone
-        let _ = progress_tx.try_send(initial_progress);
-
-        AtpOutcome::Ok(ActiveTransfer {
-            transfer_id,
-            progress_rx,
-            cancel_tx,
-            _cancel_rx: cancel_rx,
-            cancel_requested: AtomicBool::new(false),
-            options: request.options,
-        })
+        AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
 
     async fn receive_object_in_process(
@@ -744,13 +708,28 @@ impl AtpSession {
         else {
             return false;
         };
-        if envelope.algorithm != OBJECT_SIGNATURE_ALGORITHM {
+        if !bool::from(
+            envelope
+                .algorithm
+                .as_bytes()
+                .ct_eq(OBJECT_SIGNATURE_ALGORITHM.as_bytes()),
+        ) {
             return false;
         }
-        if envelope.size_bytes != size_bytes {
+        if !bool::from(
+            envelope
+                .size_bytes
+                .to_be_bytes()
+                .ct_eq(&size_bytes.to_be_bytes()),
+        ) {
             return false;
         }
-        if envelope.session_id_hex != hex::encode(self.session_id().as_bytes()) {
+        if !bool::from(
+            envelope
+                .session_id_hex
+                .as_bytes()
+                .ct_eq(hex::encode(self.session_id().as_bytes()).as_bytes()),
+        ) {
             return false;
         }
 
@@ -801,7 +780,7 @@ impl AtpSession {
 }
 
 fn decode_hex_32(input: &str) -> Result<[u8; 32], hex::FromHexError> {
-    let bytes = hex::decode(input)?;
+    let bytes = hex::decode(input)?; // ubs:ignore - hex decode helper, not JWT parsing
     if bytes.len() != 32 {
         return Err(hex::FromHexError::InvalidStringLength);
     }
@@ -921,11 +900,11 @@ mod tests {
     }
 
     #[test]
-    fn active_transfer_lifecycle() {
+    fn in_process_send_object_fails_closed_after_source_validation() {
         futures_lite::future::block_on(async {
             let config = SessionConfig::default();
             let peer = PeerId::from_label("test_peer");
-            let session_options = granted_direct_options(&config, peer, "active-transfer");
+            let session_options = granted_direct_options(&config, peer, "send-fail-closed");
             let sdk = AtpSdk::new_in_process(config);
             let cx = Cx::for_testing();
 
@@ -944,48 +923,127 @@ mod tests {
                 options: TransferOptions::default(),
             };
 
-            let mut transfer = session.send_object(&cx, request).await.unwrap();
-
-            // Wait for some progress updates
-            let mut progress_count = 0;
-            while let Some(progress) = transfer.next_progress().await {
-                progress_count += 1;
-                if progress.is_complete() || progress_count > 10 {
-                    break;
-                }
-            }
-
-            assert!(progress_count > 0);
+            let result = session.send_object(&cx, request).await;
+            assert!(
+                matches!(
+                    result,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+                ),
+                "in-process SDK send must not fabricate an active transfer: {result:?}"
+            );
         });
     }
 
     #[test]
-    fn transfer_cancellation() {
+    fn in_process_send_file_fails_closed_but_missing_file_still_validates_first() {
         futures_lite::future::block_on(async {
             let config = SessionConfig::default();
-            let peer = PeerId::from_label("test_peer");
-            let session_options = granted_direct_options(&config, peer, "transfer-cancel");
-            let sdk = AtpSdk::new_in_process(config);
+            let sdk = AtpSdk::new_in_process(config.clone());
             let cx = Cx::for_testing();
+            let peer = PeerId::from_label("send_file_peer");
+            let session = sdk
+                .open_session(&cx, granted_direct_options(&config, peer, "send-file"))
+                .await
+                .unwrap();
 
-            let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let valid_request = TransferRequest {
+                source: TransferSource::File {
+                    path: PathBuf::from("src/net/atp/sdk/transfer.rs"),
+                },
+                destination: TransferDestination::Object {
+                    object_id: "transfer-rs".to_string(),
+                },
+                options: TransferOptions::default(),
+            };
+            let result = session.send_object(&cx, valid_request).await;
+            assert!(
+                matches!(
+                    result,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+                ),
+                "valid file send must fail closed without a worker: {result:?}"
+            );
 
-            let source = TransferSource::Object {
-                data: vec![0u8; 1024 * 1024], // 1MB
-                content_type: None,
+            let missing_request = TransferRequest {
+                source: TransferSource::File {
+                    path: PathBuf::from("__asupersync_missing_sdk_send_source__"),
+                },
+                destination: TransferDestination::Stream,
+                options: TransferOptions::default(),
             };
-            let destination = TransferDestination::Object {
-                object_id: "large_object".to_string(),
-            };
-            let request = TransferRequest {
-                source,
-                destination,
+            let result = session.send_object(&cx, missing_request).await;
+            assert!(
+                matches!(
+                    result,
+                    AtpOutcome::Err(AtpError::Disk(DiskError::FileNotFound))
+                ),
+                "missing source must be rejected before fail-closed send: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn in_process_sync_tree_and_stream_buffer_fail_closed() {
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::for_testing();
+            let peer = PeerId::from_label("send_wrapper_peer");
+            let session = sdk
+                .open_session(&cx, granted_direct_options(&config, peer, "send-wrappers"))
+                .await
+                .unwrap();
+
+            let result = session
+                .sync_tree(
+                    &cx,
+                    Path::new("src/net/atp/sdk"),
+                    "/remote/sdk",
+                    TransferOptions::default(),
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+                ),
+                "sync_tree must not fabricate transfer success: {result:?}"
+            );
+
+            let result = session
+                .stream_large_buffer(
+                    &cx,
+                    vec![1, 2, 3, 4],
+                    TransferDestination::Object {
+                        object_id: "buffer".to_string(),
+                    },
+                    TransferOptions::default(),
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+                ),
+                "stream_large_buffer must not fabricate transfer success: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn active_transfer_cancel_is_idempotent_for_real_transfer_handles() {
+        futures_lite::future::block_on(async {
+            let (_progress_tx, progress_rx) = mpsc::channel(1);
+            let (cancel_tx, cancel_rx) = mpsc::channel(1);
+            let transfer = ActiveTransfer {
+                transfer_id: TransferId::new("test-transfer"),
+                progress_rx,
+                cancel_tx,
+                _cancel_rx: cancel_rx,
+                cancel_requested: AtomicBool::new(false),
                 options: TransferOptions::default(),
             };
 
-            let transfer = session.send_object(&cx, request).await.unwrap();
-
-            // Cancel the transfer
             let cancel_result = transfer.cancel().await;
             assert!(cancel_result.is_ok());
             let repeated_cancel_result = transfer.cancel().await;
@@ -1173,17 +1231,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let nonce = std::time::SystemTime::now() // ubs:ignore
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
             let source = TransferSource::File {
-                path: std::env::temp_dir().join(format!(
-                    // ubs:ignore
-                    "asupersync_missing_size_{}_{}",
-                    std::process::id(), // ubs:ignore
-                    nonce
-                )),
+                path: PathBuf::from("__asupersync_missing_size_source__"),
             };
 
             match session.calculate_transfer_size(&source).await {
