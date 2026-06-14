@@ -281,14 +281,31 @@ impl Decoder for LengthDelimitedCodec {
                             // sized to drain the offending frame's body
                             // across however many decode() calls it
                             // takes for the body to arrive on the wire.
-                            // The body skip-count is the RAW length
-                            // (pre-adjustment) because that's what the
-                            // peer claims to have written — adjustment
-                            // is a length-field semantic, not a wire
-                            // count. Saturate to u64::MAX defensively
-                            // if the raw length is somehow nonsense.
+                            //
+                            // The body skip-count must be the ADJUSTED body
+                            // length (`raw_len + length_adjustment`) — the
+                            // actual number of body bytes the peer wrote after
+                            // the header, exactly what the success path consumes
+                            // as `total_frame_len - header_len`. Using the RAW
+                            // (pre-adjustment) length here desynchronizes the
+                            // stream whenever `length_adjustment != 0`: it
+                            // under-drains for a positive adjustment (leaving
+                            // body bytes that are then mis-parsed as the next
+                            // frame's header) and over-drains into the next
+                            // frame's header for a negative one. Fall back to
+                            // draining everything (u64::MAX) only when the
+                            // adjusted length is genuinely ill-defined
+                            // (length/adjustment overflow, or negative).
+                            let body_skip = i64::try_from(self.builder.length_adjustment)
+                                .ok()
+                                .and_then(|adj| {
+                                    i64::try_from(raw_len).ok().and_then(|l| l.checked_add(adj))
+                                })
+                                .filter(|&adjusted| adjusted >= 0)
+                                .and_then(|adjusted| u64::try_from(adjusted).ok())
+                                .unwrap_or(u64::MAX);
                             let _ = src.split_to(header_len);
-                            self.state = DecodeState::Skip(raw_len);
+                            self.state = DecodeState::Skip(body_skip);
                             return Err(e);
                         }
                     };
