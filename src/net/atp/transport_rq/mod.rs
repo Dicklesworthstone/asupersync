@@ -70,12 +70,14 @@ use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::{TcpListener, TcpStream, UdpBufferConfig, UdpSocket};
 use crate::security::authenticated::AuthenticatedSymbol;
+use crate::security::tag::TAG_SIZE;
+use crate::security::{AuthenticationTag, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
 /// changes.
-pub const ATP_RQ_PROTOCOL: u32 = 1;
+pub const ATP_RQ_PROTOCOL: u32 = 2;
 
 /// Magic prefix on every UDP symbol datagram (`"ATRQ"`).
 const SYMBOL_MAGIC: u32 = 0x4154_5251;
@@ -118,6 +120,9 @@ pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROU
 /// len), big-endian.
 const DGRAM_HEADER: usize = 4 + 8 + 4 + 1 + 4 + 1 + 2;
 
+/// UDP datagram header plus the authenticated-symbol tag.
+const AUTH_DGRAM_HEADER: usize = DGRAM_HEADER + TAG_SIZE;
+
 /// Opt-in stderr tracing for transport bring-up/diagnosis. Off unless the
 /// `ATP_RQ_TRACE` env var is set, so the production path stays silent.
 macro_rules! rqtrace {
@@ -129,7 +134,7 @@ macro_rules! rqtrace {
 }
 
 /// Transport tuning knobs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RqConfig {
     /// RaptorQ symbol payload size in bytes.
     pub symbol_size: u16,
@@ -152,6 +157,15 @@ pub struct RqConfig {
     /// Test-only: deterministically drop 1-in-N sprayed source symbols on the
     /// sender to exercise the repair/feedback path. 0 disables.
     pub debug_drop_one_in: u32,
+    /// Optional per-symbol authentication context for UDP RaptorQ datagrams.
+    ///
+    /// When present, senders append a tag for each symbol and receivers verify
+    /// every symbol before decoding. The TCP control channel and manifest still
+    /// need their own authenticated transport to claim full anti-forgery.
+    pub symbol_auth_context: Option<SecurityContext>,
+    /// Explicit escape hatch for loopback/lab callers that run over a trusted
+    /// transport and accept integrity-vs-manifest only.
+    pub allow_unauthenticated_symbols: bool,
 }
 
 impl Default for RqConfig {
@@ -165,7 +179,42 @@ impl Default for RqConfig {
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
             round_tail_drain: DEFAULT_ROUND_TAIL_DRAIN,
             debug_drop_one_in: 0,
+            symbol_auth_context: None,
+            allow_unauthenticated_symbols: false,
         }
+    }
+}
+
+impl RqConfig {
+    /// Require per-symbol authentication with this context.
+    #[must_use]
+    pub fn with_symbol_auth(mut self, context: SecurityContext) -> Self {
+        self.symbol_auth_context = Some(context);
+        self.allow_unauthenticated_symbols = false;
+        self
+    }
+
+    /// Explicitly allow unauthenticated symbols for trusted loopback/lab links.
+    #[must_use]
+    pub fn allow_unauthenticated_for_trusted_transport(mut self) -> Self {
+        self.symbol_auth_context = None;
+        self.allow_unauthenticated_symbols = true;
+        self
+    }
+
+    fn symbol_auth_context(&self) -> Result<Option<SecurityContext>, RqError> {
+        if let Some(context) = &self.symbol_auth_context {
+            return Ok(Some(context.clone()));
+        }
+        if self.allow_unauthenticated_symbols {
+            return Ok(None);
+        }
+        Err(RqError::Authentication(
+            "ATP RaptorQ transport requires symbol_auth_context; call \
+             with_symbol_auth(...) or explicitly opt into \
+             allow_unauthenticated_for_trusted_transport() for loopback/lab use"
+                .to_string(),
+        ))
     }
 }
 
@@ -217,6 +266,9 @@ pub enum RqError {
     /// Integrity verification failed (SHA-256 or merkle-root mismatch).
     #[error("integrity verification failed: {0}")]
     Integrity(String),
+    /// Symbol authentication is missing, mismatched, or invalid.
+    #[error("symbol authentication failed: {0}")]
+    Authentication(String),
     /// The source path was invalid (missing, unsupported type).
     #[error("invalid source path: {0}")]
     Source(String),
@@ -234,6 +286,8 @@ struct Hello {
     peer_id: String,
     symbol_size: u16,
     max_block_size: u64,
+    #[serde(default)]
+    symbol_auth: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -572,9 +626,15 @@ fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -
 
 // ─── UDP symbol datagram framing ─────────────────────────────────────────────
 
-fn encode_symbol_datagram(tag: u64, entry: u32, sym: &Symbol) -> Vec<u8> {
+fn encode_symbol_datagram(
+    tag: u64,
+    entry: u32,
+    sym: &Symbol,
+    auth_tag: Option<&AuthenticationTag>,
+) -> Vec<u8> {
     let data = sym.data();
-    let mut out = Vec::with_capacity(DGRAM_HEADER + data.len());
+    let auth_len = auth_tag.map_or(0, |_| TAG_SIZE);
+    let mut out = Vec::with_capacity(DGRAM_HEADER + auth_len + data.len());
     out.extend_from_slice(&SYMBOL_MAGIC.to_be_bytes());
     out.extend_from_slice(&tag.to_be_bytes());
     out.extend_from_slice(&entry.to_be_bytes());
@@ -582,6 +642,9 @@ fn encode_symbol_datagram(tag: u64, entry: u32, sym: &Symbol) -> Vec<u8> {
     out.extend_from_slice(&sym.id().esi().to_be_bytes());
     out.push(u8::from(sym.kind().is_repair()));
     out.extend_from_slice(&u16::try_from(data.len()).unwrap_or(u16::MAX).to_be_bytes());
+    if let Some(auth_tag) = auth_tag {
+        out.extend_from_slice(auth_tag.as_bytes());
+    }
     out.extend_from_slice(data);
     out
 }
@@ -591,12 +654,18 @@ struct ParsedDatagram {
     sbn: u8,
     esi: u32,
     kind: SymbolKind,
+    auth_tag: Option<AuthenticationTag>,
     payload_len: usize,
     header_len: usize,
 }
 
-fn parse_symbol_header(buf: &[u8], expect_tag: u64) -> Option<ParsedDatagram> {
-    if buf.len() < DGRAM_HEADER {
+fn parse_symbol_header(buf: &[u8], expect_tag: u64, auth_required: bool) -> Option<ParsedDatagram> {
+    let header_len = if auth_required {
+        AUTH_DGRAM_HEADER
+    } else {
+        DGRAM_HEADER
+    };
+    if buf.len() < header_len {
         return None;
     }
     if u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) != SYMBOL_MAGIC {
@@ -617,7 +686,14 @@ fn parse_symbol_header(buf: &[u8], expect_tag: u64) -> Option<ParsedDatagram> {
         SymbolKind::Repair
     };
     let payload_len = usize::from(u16::from_be_bytes([buf[22], buf[23]]));
-    if buf.len() < DGRAM_HEADER + payload_len {
+    let auth_tag = if auth_required {
+        let mut tag_bytes = [0u8; TAG_SIZE];
+        tag_bytes.copy_from_slice(&buf[DGRAM_HEADER..AUTH_DGRAM_HEADER]);
+        Some(AuthenticationTag::from_bytes(tag_bytes))
+    } else {
+        None
+    };
+    if buf.len() < header_len + payload_len {
         return None;
     }
     Some(ParsedDatagram {
@@ -625,8 +701,9 @@ fn parse_symbol_header(buf: &[u8], expect_tag: u64) -> Option<ParsedDatagram> {
         sbn,
         esi,
         kind,
+        auth_tag,
         payload_len,
-        header_len: DGRAM_HEADER,
+        header_len,
     })
 }
 
@@ -679,6 +756,8 @@ pub async fn send_path(
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    let symbol_auth = config.symbol_auth_context()?;
+    let symbol_auth_enabled = symbol_auth.is_some();
 
     let (root_name, is_directory, entries) = collect_entries(source).await?;
     let total_bytes: u64 = entries.iter().map(|(_, b)| b.len() as u64).sum();
@@ -724,6 +803,7 @@ pub async fn send_path(
                 peer_id: peer_id.to_string(),
                 symbol_size: config.symbol_size,
                 max_block_size: config.max_block_size as u64,
+                symbol_auth: symbol_auth_enabled,
             },
         )?)
         .await?;
@@ -799,7 +879,8 @@ pub async fn send_path(
         tag,
         &mut encoders,
         &pending,
-        config,
+        &config,
+        symbol_auth.as_ref(),
         /* with_source */ true,
     )
     .await?;
@@ -870,7 +951,8 @@ pub async fn send_path(
                     tag,
                     &mut encoders,
                     &pending,
-                    config,
+                    &config,
+                    symbol_auth.as_ref(),
                     /* with_source */ false,
                 )
                 .await?;
@@ -887,7 +969,7 @@ pub async fn send_path(
 
 /// Per-round repair batch size: how many *additional* repair symbols (per block)
 /// each feedback round mints. A generous batch keeps convergence fast under loss.
-fn repair_batch_per_block(config: RqConfig) -> usize {
+fn repair_batch_per_block(config: &RqConfig) -> usize {
     let block_k = config
         .max_block_size
         .div_ceil(usize::from(config.symbol_size.max(1)))
@@ -913,7 +995,8 @@ async fn spray_round(
     tag: u64,
     encoders: &mut [EntryEncoder],
     pending: &BTreeSet<u32>,
-    config: RqConfig,
+    config: &RqConfig,
+    symbol_auth: Option<&SecurityContext>,
     with_source: bool,
 ) -> Result<(), RqError> {
     let fanout = sockets.len().max(1);
@@ -985,8 +1068,15 @@ async fn spray_round(
                 }
             }
 
-            // Emit the symbol VERBATIM (true ESI preserved).
-            let dgram = encode_symbol_datagram(tag, enc.index, sym);
+            // Emit the symbol VERBATIM (true ESI preserved), with an
+            // authenticated tag when this transport was configured with one.
+            let auth = symbol_auth.map(|ctx| ctx.sign_symbol(sym));
+            let dgram = encode_symbol_datagram(
+                tag,
+                enc.index,
+                sym,
+                auth.as_ref().map(AuthenticatedSymbol::tag),
+            );
             let sock = &mut sockets[*rr % fanout];
             *rr = rr.wrapping_add(1);
             sock.send(&dgram).await?;
@@ -1033,6 +1123,8 @@ pub async fn receive_connection(
     peer_id: &str,
 ) -> Result<ReceiveReport, RqError> {
     let mut control = FrameTransport::new(stream);
+    let symbol_auth = config.symbol_auth_context()?;
+    let symbol_auth_enabled = symbol_auth.is_some();
 
     // Handshake.
     let hello_frame = control.recv().await?;
@@ -1043,7 +1135,7 @@ pub async fn receive_connection(
         });
     }
     let hello: Hello = parse_json(&hello_frame)?;
-    let accepted = hello.protocol == ATP_RQ_PROTOCOL;
+    let accepted = hello.protocol == ATP_RQ_PROTOCOL && hello.symbol_auth == symbol_auth_enabled;
 
     // Bind the UDP data socket before acking so the sender can spray immediately.
     // Build an owned `SocketAddr` (Copy + 'static) so it satisfies
@@ -1069,20 +1161,35 @@ pub async fn receive_connection(
                 udp_port,
                 reason: if accepted {
                     None
-                } else {
+                } else if hello.protocol != ATP_RQ_PROTOCOL {
                     Some(format!(
                         "unsupported protocol {} (this peer speaks {ATP_RQ_PROTOCOL})",
                         hello.protocol
                     ))
+                } else if hello.symbol_auth != symbol_auth_enabled {
+                    Some(format!(
+                        "symbol authentication mismatch: sender={}, receiver={symbol_auth_enabled}",
+                        hello.symbol_auth
+                    ))
+                } else {
+                    Some("handshake rejected".to_string())
                 },
             },
         )?)
         .await?;
     if !accepted {
-        return Err(RqError::HandshakeRejected(format!(
-            "unsupported protocol {}",
-            hello.protocol
-        )));
+        return Err(RqError::HandshakeRejected(
+            if hello.protocol != ATP_RQ_PROTOCOL {
+                format!("unsupported protocol {}", hello.protocol)
+            } else if hello.symbol_auth != symbol_auth_enabled {
+                format!(
+                    "symbol authentication mismatch: sender={}, receiver={symbol_auth_enabled}",
+                    hello.symbol_auth
+                )
+            } else {
+                "handshake rejected".to_string()
+            },
+        ));
     }
 
     // Manifest.
@@ -1115,9 +1222,13 @@ pub async fn receive_connection(
                 min_overhead: 0,
                 max_buffered_symbols: 0,
                 block_timeout: std::time::Duration::from_secs(0),
-                verify_auth: false,
+                verify_auth: symbol_auth_enabled,
             };
-            let mut pipeline = DecodingPipeline::new(dconfig);
+            let mut pipeline = if let Some(context) = &symbol_auth {
+                DecodingPipeline::with_auth(dconfig, context.clone())
+            } else {
+                DecodingPipeline::new(dconfig)
+            };
             let params = object_params_for(object_id, e.size, symbol_size, hello.max_block_size);
             // set_object_params failure is a metadata bug, surfaced on first feed.
             if let Err(err) = pipeline.set_object_params(params) {
@@ -1143,7 +1254,12 @@ pub async fn receive_connection(
     let tag = transfer_tag(&manifest.transfer_id);
     let mut symbols_accepted: u64 = 0;
     let mut feedback_rounds: u32 = 0;
-    let mut rbuf = vec![0u8; usize::from(symbol_size) + DGRAM_HEADER + 64];
+    let datagram_header_len = if symbol_auth_enabled {
+        AUTH_DGRAM_HEADER
+    } else {
+        DGRAM_HEADER
+    };
+    let mut rbuf = vec![0u8; usize::from(symbol_size) + datagram_header_len + 64];
 
     // Drive: alternate between draining UDP symbols and responding to the
     // sender's ObjectComplete on the control channel. We pump UDP between
@@ -1163,6 +1279,7 @@ pub async fn receive_connection(
             &mut control,
             &mut udp,
             tag,
+            symbol_auth_enabled,
             &mut rbuf,
             |parsed, payload| {
                 if let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) {
@@ -1184,6 +1301,7 @@ pub async fn receive_connection(
                     cx,
                     &mut udp,
                     tag,
+                    symbol_auth_enabled,
                     &mut rbuf,
                     config.round_tail_drain,
                     |parsed, payload| {
@@ -1335,7 +1453,11 @@ fn feed_symbol(
         payload.to_vec(),
         parsed.kind,
     );
-    let auth = AuthenticatedSymbol::new_unauthenticated(sym);
+    let auth = if let Some(tag) = parsed.auth_tag {
+        AuthenticatedSymbol::from_parts(sym, tag)
+    } else {
+        AuthenticatedSymbol::new_unauthenticated(sym)
+    };
     match pipeline.feed(auth) {
         Ok(SymbolAcceptResult::Accepted { received, needed }) => {
             if received >= needed || received % 64 == 0 {
@@ -1534,11 +1656,17 @@ async fn verify_and_commit(
     })
 }
 
-fn parse_and_deliver_datagram<F>(buf: &[u8], n: usize, tag: u64, on_symbol: &mut F) -> bool
+fn parse_and_deliver_datagram<F>(
+    buf: &[u8],
+    n: usize,
+    tag: u64,
+    auth_required: bool,
+    on_symbol: &mut F,
+) -> bool
 where
     F: FnMut(&ParsedDatagram, &[u8]),
 {
-    let Some(parsed) = parse_symbol_header(&buf[..n], tag) else {
+    let Some(parsed) = parse_symbol_header(&buf[..n], tag, auth_required) else {
         return false;
     };
     let start = parsed.header_len;
@@ -1561,6 +1689,7 @@ async fn pump_until_control<S, F>(
     control: &mut FrameTransport<S>,
     udp: &mut UdpSocket,
     tag: u64,
+    auth_required: bool,
     rbuf: &mut [u8],
     mut on_symbol: F,
 ) -> Result<Frame, RqError>
@@ -1620,7 +1749,7 @@ where
 
         match ready {
             Ready::Udp(n) => {
-                if parse_and_deliver_datagram(rbuf, n, tag, &mut on_symbol) {
+                if parse_and_deliver_datagram(rbuf, n, tag, auth_required, &mut on_symbol) {
                     pumped += 1;
                 }
             }
@@ -1654,6 +1783,7 @@ async fn drain_round_tail<F>(
     cx: &Cx,
     udp: &mut UdpSocket,
     tag: u64,
+    auth_required: bool,
     rbuf: &mut [u8],
     quiet_window: Duration,
     mut on_symbol: F,
@@ -1700,7 +1830,7 @@ where
             return Ok(drained);
         };
 
-        if parse_and_deliver_datagram(rbuf, n, tag, &mut on_symbol) {
+        if parse_and_deliver_datagram(rbuf, n, tag, auth_required, &mut on_symbol) {
             drained += 1;
             quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
         }
@@ -1733,8 +1863,16 @@ where
             return Ok(());
         }
         let (stream, peer) = control_listener.accept().await?;
-        let result =
-            receive_connection(cx, stream, peer, &udp_bind_ip, &dest_dir, config, &peer_id).await;
+        let result = receive_connection(
+            cx,
+            stream,
+            peer,
+            &udp_bind_ip,
+            &dest_dir,
+            config.clone(),
+            &peer_id,
+        )
+        .await;
         on_result(result);
     }
 }
@@ -1852,25 +1990,72 @@ mod tests {
             vec![9u8; 1024],
             SymbolKind::Repair,
         );
-        let dg = encode_symbol_datagram(0xABCD, 42, &sym);
-        let parsed = parse_symbol_header(&dg, 0xABCD).expect("parse");
+        let dg = encode_symbol_datagram(0xABCD, 42, &sym, None);
+        let parsed = parse_symbol_header(&dg, 0xABCD, false).expect("parse");
         assert_eq!(parsed.entry, 42);
         assert_eq!(parsed.sbn, 3);
+        assert_eq!(parsed.esi, 7);
+        assert!(matches!(parsed.kind, SymbolKind::Repair));
+        assert_eq!(parsed.auth_tag, None);
+        assert_eq!(parsed.payload_len, 1024);
+        assert_eq!(
+            &dg[parsed.header_len..parsed.header_len + 1024],
+            &[9u8; 1024]
+        );
+    }
+
+    #[test]
+    fn signed_datagram_roundtrips() {
+        let ctx = SecurityContext::for_testing(99);
         let sym = Symbol::new(
             SymbolId::new(ObjectId::new(1, 2), 3, 7),
             vec![9u8; 1024],
             SymbolKind::Repair,
         );
-        let dg = encode_symbol_datagram(0xABCD, 42, &sym);
-        let parsed = parse_symbol_header(&dg, 0xABCD).expect("parse");
+        let auth = ctx.sign_symbol(&sym);
+        let dg = encode_symbol_datagram(0xABCD, 42, &sym, Some(auth.tag()));
+        let parsed = parse_symbol_header(&dg, 0xABCD, true).expect("parse signed");
         assert_eq!(parsed.entry, 42);
         assert_eq!(parsed.sbn, 3);
-        assert_eq!(parsed.esi, 7);
-        assert!(matches!(parsed.kind, SymbolKind::Repair));
-        assert_eq!(parsed.payload_len, 1024);
-        assert_eq!(
-            &dg[parsed.header_len..parsed.header_len + 1024],
-            &[9u8; 1024]
+        assert_eq!(parsed.auth_tag, Some(*auth.tag()));
+        assert_eq!(parsed.header_len, AUTH_DGRAM_HEADER);
+
+        let mut received = AuthenticatedSymbol::from_parts(sym, parsed.auth_tag.expect("tag"));
+        ctx.verify_authenticated_symbol(&mut received)
+            .expect("tag verifies");
+        assert!(received.is_verified());
+    }
+
+    #[test]
+    fn signed_datagram_rejects_missing_tag() {
+        let sym = Symbol::new(
+            SymbolId::new(ObjectId::new(1, 2), 3, 7),
+            vec![9u8; 1024],
+            SymbolKind::Repair,
+        );
+        let dg = encode_symbol_datagram(0xABCD, 42, &sym, None);
+        assert!(parse_symbol_header(&dg, 0xABCD, true).is_none());
+    }
+
+    #[test]
+    fn default_config_requires_symbol_auth_or_trusted_mode() {
+        let err = RqConfig::default()
+            .symbol_auth_context()
+            .expect_err("default config must fail closed");
+        assert!(matches!(err, RqError::Authentication(_)));
+        assert!(
+            RqConfig::default()
+                .allow_unauthenticated_for_trusted_transport()
+                .symbol_auth_context()
+                .expect("explicit trusted mode")
+                .is_none()
+        );
+        assert!(
+            RqConfig::default()
+                .with_symbol_auth(SecurityContext::for_testing(7))
+                .symbol_auth_context()
+                .expect("explicit auth context")
+                .is_some()
         );
     }
 
@@ -1881,8 +2066,8 @@ mod tests {
             vec![0u8; 8],
             SymbolKind::Source,
         );
-        let dg = encode_symbol_datagram(0x1111, 0, &sym);
-        assert!(parse_symbol_header(&dg, 0x2222).is_none());
+        let dg = encode_symbol_datagram(0x1111, 0, &sym, None);
+        assert!(parse_symbol_header(&dg, 0x2222, false).is_none());
     }
 
     #[test]
@@ -1895,9 +2080,10 @@ mod tests {
                 vec![0u8; 8],
                 SymbolKind::Source,
             ),
+            None,
         );
         dg[0] ^= 0xFF;
-        assert!(parse_symbol_header(&dg, 0x1111).is_none());
+        assert!(parse_symbol_header(&dg, 0x1111, false).is_none());
     }
 
     #[test]

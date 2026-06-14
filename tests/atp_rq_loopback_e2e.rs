@@ -39,6 +39,7 @@ fn test_config() -> RqConfig {
         max_block_size: 64 * 1024,
         ..RqConfig::default()
     }
+    .allow_unauthenticated_for_trusted_transport()
 }
 
 /// Spawn a receiver on its own runtime/thread; returns the bound control address
