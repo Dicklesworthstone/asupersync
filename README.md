@@ -217,7 +217,12 @@ The key differences: `reserve`/`send` two-phase pattern prevents message loss on
 
 ### 1. Structured Concurrency by Construction
 
-Tasks don't float free. Every task is owned by a region. Regions form a tree. When a region closes, it *guarantees* all children are complete, all finalizers have run, all obligations are resolved. This is the "no orphans" invariant, enforced by the type system and runtime rather than by discipline.
+Tasks don't float free. Every runtime-spawned task is owned by a region.
+Regions form a tree. When a region closes, it *guarantees* all children are
+complete, all finalizers have run, and all registered obligations are resolved.
+This is the "no orphans" invariant, enforced by the public API shape, region
+accounting, and runtime/oracle checks rather than by discipline. It is not a
+claim that Rust's type system alone proves every adapter or host-boundary path.
 
 ```rust
 // Typical executors: what happens when this scope exits?
