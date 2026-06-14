@@ -210,7 +210,7 @@ impl Http1Config {
 ///
 /// `None` always means "fall back to the server-configured budget"; a
 /// malformed header can never weaken or extend anything.
-fn parse_request_timeout_header(headers: &[(String, String)]) -> Option<Duration> {
+pub(crate) fn parse_request_timeout_header(headers: &[(String, String)]) -> Option<Duration> {
     let mut found: Option<&str> = None;
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("request-timeout") {
@@ -299,7 +299,7 @@ fn single_host_header_value(headers: &[(String, String)]) -> Result<Option<&str>
 /// the host policy. Returns `Ok(())` if validation passes (or is
 /// disabled); `Err(host_value)` carrying the offending host string
 /// for logging if the header is missing or not allow-listed.
-fn validate_host_header(
+pub(crate) fn validate_host_header(
     headers: &[(String, String)],
     host_policy: &HostPolicy,
 ) -> Result<(), String> {

@@ -6,6 +6,9 @@
 //! a raw frame-speaking std-TCP client (preface + SETTINGS + HEADERS):
 //!   - `h2_serves_request_response_round_trip`: sanity — one request, one
 //!     200 response with the response body on a DATA frame.
+//!   - `h2_rejects_disallowed_host_with_421`: a request whose host is not on
+//!     the allow-list gets a per-stream 421 and the handler never runs
+//!     (br-asupersync-mfqfst M8).
 //!   - `h2_drain_completes_in_flight_requests`: requests parked in handlers
 //!     when the drain begins complete under a generous soft budget; clients
 //!     observe the two-stage GOAWAY (warning 2^31-1, then the ratcheted
@@ -24,6 +27,7 @@ use std::time::Duration;
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder as _;
+use asupersync::http::h1::server::HostPolicy;
 use asupersync::http::h1::types::Response;
 use asupersync::http::h2::connection::CLIENT_PREFACE;
 use asupersync::http::h2::frame::{Frame, HeadersFrame, SettingsFrame};
@@ -37,6 +41,10 @@ fn drain_config(drain: Duration, hard: Duration) -> Http2ListenerConfig {
     Http2ListenerConfig::default()
         .drain_timeout(drain)
         .hard_drain_timeout(hard)
+        // br-asupersync-mfqfst M8: the h2 listener is now secure-by-default
+        // (RejectUnknown host policy). These e2e clients send `:authority
+        // localhost`, so allow it explicitly.
+        .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
 }
 
 /// What one raw h2 client observed before the connection closed.
@@ -179,6 +187,61 @@ fn h2_serves_request_response_round_trip() {
         let stats = run_handle.await.expect("listener run result");
         let report = stats.drain_report.expect("drain report");
         assert!(report.reached_quiescence, "{report}");
+    });
+}
+
+/// br-asupersync-mfqfst M8: a request whose `:authority`/host is not on the
+/// listener's allow-list is answered with a per-stream 421 Misdirected
+/// Request, and the handler never runs.
+#[test]
+fn h2_rejects_disallowed_host_with_421() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+
+    runtime.block_on(async move {
+        let handler_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_flag = std::sync::Arc::clone(&handler_ran);
+        // The client sends `:authority localhost`, which is NOT on this
+        // allow-list, so the request must be rejected before the handler.
+        let config = Http2ListenerConfig::default()
+            .drain_timeout(Duration::from_secs(10))
+            .hard_drain_timeout(Duration::from_secs(20))
+            .host_policy(HostPolicy::allow_list(vec!["other.example".to_owned()]));
+        let listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            move |_req| {
+                let handler_flag = std::sync::Arc::clone(&handler_flag);
+                async move {
+                    handler_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Response::new(200, "OK", Vec::new())
+                }
+            },
+            config,
+        )
+        .await
+        .expect("bind listener");
+
+        let addr = listener.local_addr().expect("local addr");
+        let manager = listener.connection_manager().clone();
+
+        let run_handle = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .expect("spawn listener run");
+
+        let client = h2_blocking_client(addr, "/blocked", false);
+        let outcome = client.join().expect("client thread");
+        assert_eq!(outcome.status.as_deref(), Some("421"), "{outcome:?}");
+        assert!(
+            !handler_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "handler must not run for a rejected host"
+        );
+
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let _ = run_handle.await.expect("listener run result");
     });
 }
 

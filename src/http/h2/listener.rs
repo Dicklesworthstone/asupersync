@@ -17,6 +17,7 @@
 use crate::channel::mpsc;
 use crate::codec::Framed;
 use crate::cx::Cx;
+use crate::http::h1::server::{HostPolicy, parse_request_timeout_header, validate_host_header};
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::http::h2::connection::{CLIENT_PREFACE, Connection, FrameCodec, ReceivedFrame};
 use crate::http::h2::error::{ErrorCode, H2Error};
@@ -36,6 +37,7 @@ use crate::server::shutdown::{
 use crate::stream::Stream;
 use crate::tracing_compat::error;
 use crate::types::Time;
+use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_request_budget};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
@@ -901,6 +903,10 @@ fn dispatch_h2_request<F, Fut, R>(
     shutdown_signal: &ShutdownSignal,
     in_flight_requests: &Arc<AtomicUsize>,
     runtime: &RuntimeHandle,
+    host_policy: &HostPolicy,
+    request_timeout: Option<Duration>,
+    request_timeout_header_cap: Option<Duration>,
+    request_drain_grace: Duration,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = R> + Send + 'static,
@@ -918,34 +924,127 @@ fn dispatch_h2_request<F, Fut, R>(
     let handler = Arc::clone(handler);
     let resp_tx = resp_tx.clone();
     let signal = shutdown_signal.clone();
+    let host_policy = host_policy.clone();
     let spawned = runtime.try_spawn(async move {
         let Some(cx) = Cx::current() else {
             drop(guard);
             return;
         };
-        let Some(handler_result) = race_force_close(
-            &signal,
-            CatchUnwind {
-                inner: handler(request),
-            },
-        )
-        .await
-        else {
-            drop(guard);
+
+        // br-asupersync-mfqfst M8: enforce the host allow-list BEFORE the
+        // handler runs (h1 parity). h2 carries the effective authority in the
+        // synthesized `host` header (see `request_from_h2_headers`); a request
+        // whose host isn't allow-listed (or is missing) gets a per-stream 421
+        // Misdirected Request (RFC 9113 §9.1.2) instead of reaching the
+        // handler, eliminating the host-injection attack surface for
+        // absolute-URL emission / OAuth redirect_uri / cache-key computation.
+        // Unlike h1 (one request per connection -> connection close), h2 is
+        // multiplexed, so only the offending stream is answered with 421; the
+        // rest of the connection keeps serving.
+        if let Err(rejected_host) = validate_host_header(&request.headers, &host_policy) {
+            let body_msg = if rejected_host.is_empty() {
+                "Missing required Host header".to_string()
+            } else {
+                format!("Host '{rejected_host}' not in allowed-hosts allow-list")
+            };
+            let reject = Response::new(421, "Misdirected Request", body_msg.into_bytes())
+                .with_header("content-type", "text/plain; charset=utf-8")
+                .into_h2_response();
+            if let Ok(permit) = resp_tx.reserve(&cx).await {
+                permit.send((stream_id, reject, guard, suppress_response_body));
+            }
             return;
-        };
-        let response = match handler_result {
-            Ok(response) => response.into_h2_response(),
-            Err(payload) => {
-                // Match h1's panic isolation contract: the connection driver
-                // survives the handler panic and completes the stream with a
-                // deterministic 500 instead of leaving it active forever.
-                let _ = &payload;
-                error!(
-                    message = %crate::cx::scope::payload_to_string(&payload),
-                    "h2 handler task panicked"
-                );
-                Response::new(500, "Internal Server Error", Vec::new()).into_h2_response()
+        }
+
+        // br-asupersync-mfqfst M8: run the handler inside a server-hop request
+        // region so the h2 dispatch path actually has the request budget +
+        // deadline + cancel backstop the driver comment promised (h1 parity
+        // via `ServerRequestRegion`). The request budget is the connection
+        // budget tightened by the configured request timeout and the (opt-in,
+        // cap-clamped) client `Request-Timeout` header (meet semantics — it
+        // can only tighten, never extend). When no runtime is installed (mint
+        // returns `None`) the legacy direct-call path is preserved unchanged.
+        let request_now = cx
+            .timer_driver()
+            .map_or_else(crate::time::wall_now, |timer| timer.now());
+        let base_budget = cx.budget();
+        let header_timeout = parse_request_timeout_header(&request.headers);
+        let (request_budget, budget_source) = derive_request_budget(
+            base_budget,
+            request_now,
+            request_timeout,
+            header_timeout,
+            request_timeout_header_cap,
+        );
+
+        let response = match ServerRequestRegion::mint("h2", request_budget, request_now) {
+            Some(region) => {
+                // Race the whole hop against ForceClosing so a slow handler
+                // cannot block shutdown (drop is the backstop, h1 parity).
+                let hop = race_force_close(
+                    &signal,
+                    region.run_with_protocol_drain(
+                        budget_source,
+                        None,
+                        request_drain_grace,
+                        handler(request),
+                    ),
+                )
+                .await;
+                match hop {
+                    None => {
+                        // Force-close interrupted the handler.
+                        drop(guard);
+                        return;
+                    }
+                    Some(ServerHopOutcome::Ok(response)) => response.into_h2_response(),
+                    Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
+                        // The request was cancelled before producing a
+                        // response; nothing useful can be written back. The
+                        // stream is torn down with the connection.
+                        drop(guard);
+                        return;
+                    }
+                    Some(ServerHopOutcome::Panicked(message)) => {
+                        // Panic isolation (h1 parity): the connection driver
+                        // survives and the stream completes with a 500 instead
+                        // of staying active forever.
+                        error!(message = %message, "h2 handler task panicked");
+                        Response::new(500, "Internal Server Error", Vec::new()).into_h2_response()
+                    }
+                    Some(ServerHopOutcome::DeadlineExceeded) => Response::new(
+                        503,
+                        "Service Unavailable",
+                        b"request budget deadline exceeded".to_vec(),
+                    )
+                    .into_h2_response(),
+                }
+            }
+            None => {
+                // No runtime installed on this thread: preserve the legacy
+                // direct-call path (force-close race + panic isolation, no
+                // request region).
+                let Some(handler_result) = race_force_close(
+                    &signal,
+                    CatchUnwind {
+                        inner: handler(request),
+                    },
+                )
+                .await
+                else {
+                    drop(guard);
+                    return;
+                };
+                match handler_result {
+                    Ok(response) => response.into_h2_response(),
+                    Err(payload) => {
+                        error!(
+                            message = %crate::cx::scope::payload_to_string(&payload),
+                            "h2 handler task panicked"
+                        );
+                        Response::new(500, "Internal Server Error", Vec::new()).into_h2_response()
+                    }
+                }
             }
         };
         if let Ok(permit) = resp_tx.reserve(&cx).await {
@@ -968,6 +1067,7 @@ fn dispatch_h2_request<F, Fut, R>(
 /// tick later, transport close at
 /// [`Connection::graceful_shutdown_complete`].
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn serve_h2_connection<F, Fut, R>(
     mut stream: TcpStream,
     peer_addr: Option<SocketAddr>,
@@ -977,6 +1077,10 @@ async fn serve_h2_connection<F, Fut, R>(
     in_flight_requests: Arc<AtomicUsize>,
     runtime: RuntimeHandle,
     max_body_size: usize,
+    host_policy: HostPolicy,
+    request_timeout: Option<Duration>,
+    request_timeout_header_cap: Option<Duration>,
+    request_drain_grace: Duration,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -1116,6 +1220,10 @@ where
                             &shutdown_signal,
                             &in_flight_requests,
                             &runtime,
+                            &host_policy,
+                            request_timeout,
+                            request_timeout_header_cap,
+                            request_drain_grace,
                         );
                     } else if end_stream {
                         dispatch_h2_request(
@@ -1129,6 +1237,10 @@ where
                             &shutdown_signal,
                             &in_flight_requests,
                             &runtime,
+                            &host_policy,
+                            request_timeout,
+                            request_timeout_header_cap,
+                            request_drain_grace,
                         );
                     } else {
                         pending_requests.insert(stream_id, (headers, Vec::new()));
@@ -1165,6 +1277,10 @@ where
                                     &shutdown_signal,
                                     &in_flight_requests,
                                     &runtime,
+                                    &host_policy,
+                                    request_timeout,
+                                    request_timeout_header_cap,
+                                    request_drain_grace,
                                 );
                             }
                         }
@@ -1210,6 +1326,27 @@ pub struct Http2ListenerConfig {
     /// (h1 parity with `Http1Config::max_body_size`). Bounds receiver memory
     /// because HTTP/2 flow control auto-replenishes windows.
     pub max_body_size: usize,
+    /// br-asupersync-mfqfst M8: host allow-list policy (h1 parity with
+    /// `Http1Config::allowed_hosts`). SECURITY: defends against Host header
+    /// injection. The effective h2 authority (`:authority`) is checked through
+    /// the synthesized `host` header. Secure by default (`RejectUnknown`);
+    /// set `AllowList`/`AllowAll` explicitly. Rejected requests get a
+    /// per-stream 421 Misdirected Request (the connection keeps serving).
+    pub allowed_hosts: HostPolicy,
+    /// br-asupersync-mfqfst M8: server-default per-request timeout (h1 parity
+    /// with `Http1Config::request_timeout`). When set, every request budget is
+    /// tightened by this duration at the dispatch hop (meet semantics — it can
+    /// only tighten, never extend). `None` means no server-imposed deadline.
+    pub request_timeout: Option<Duration>,
+    /// br-asupersync-mfqfst M8: opt-in cap for the client-supplied
+    /// `Request-Timeout` header (h1 parity). `None` ignores the header
+    /// entirely; when set, a parseable header tightens the budget by
+    /// `min(header, cap)` — a client can never extend the budget past the cap.
+    pub request_timeout_header_cap: Option<Duration>,
+    /// br-asupersync-mfqfst M8: bounded drain grace after a request-budget
+    /// deadline or a connection cancel — the handler gets this long to observe
+    /// the cancel and finish cleanly before the drop backstop (h1 parity).
+    pub request_drain_grace: Duration,
     /// Time source for shutdown bookkeeping and drain supervision.
     pub time_getter: fn() -> Time,
 }
@@ -1229,6 +1366,10 @@ impl Default for Http2ListenerConfig {
             hard_drain_timeout: Duration::from_secs(60),
             lb_compat_keep_socket: false,
             max_body_size: DEFAULT_H2_MAX_BODY_SIZE,
+            allowed_hosts: HostPolicy::default(), // Secure by default: RejectUnknown
+            request_timeout: None,
+            request_timeout_header_cap: None,
+            request_drain_grace: Duration::from_millis(500),
             time_getter: default_h2_listener_time_getter,
         }
     }
@@ -1275,6 +1416,38 @@ impl Http2ListenerConfig {
     #[must_use]
     pub fn max_body_size(mut self, size: usize) -> Self {
         self.max_body_size = size;
+        self
+    }
+
+    /// Set the host allow-list policy (br-asupersync-mfqfst M8). Use
+    /// [`HostPolicy::allow_list`], [`HostPolicy::reject_unknown`], or
+    /// [`HostPolicy::allow_all`] (insecure legacy mode).
+    #[must_use]
+    pub fn host_policy(mut self, policy: HostPolicy) -> Self {
+        self.allowed_hosts = policy;
+        self
+    }
+
+    /// Set the server-default per-request timeout (br-asupersync-mfqfst M8).
+    #[must_use]
+    pub fn request_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Set the opt-in cap for the client `Request-Timeout` header
+    /// (br-asupersync-mfqfst M8).
+    #[must_use]
+    pub fn request_timeout_header_cap(mut self, cap: Option<Duration>) -> Self {
+        self.request_timeout_header_cap = cap;
+        self
+    }
+
+    /// Set the bounded drain grace after a request-budget deadline or
+    /// connection cancel (br-asupersync-mfqfst M8).
+    #[must_use]
+    pub fn request_drain_grace(mut self, grace: Duration) -> Self {
+        self.request_drain_grace = grace;
         self
     }
 
@@ -1474,6 +1647,10 @@ where
             let in_flight_requests = Arc::clone(&self.in_flight_requests);
             let runtime_for_conn = runtime.clone();
             let max_body_size = self.config.max_body_size;
+            let host_policy = self.config.allowed_hosts.clone();
+            let request_timeout = self.config.request_timeout;
+            let request_timeout_header_cap = self.config.request_timeout_header_cap;
+            let request_drain_grace = self.config.request_drain_grace;
             let spawn_result = runtime.try_spawn(async move {
                 let peer_addr = Some(addr);
                 if let Err(err) = serve_h2_connection(
@@ -1485,6 +1662,10 @@ where
                     in_flight_requests,
                     runtime_for_conn,
                     max_body_size,
+                    host_policy,
+                    request_timeout,
+                    request_timeout_header_cap,
+                    request_drain_grace,
                 )
                 .await
                 {
@@ -1975,6 +2156,10 @@ mod tests {
                 &shutdown_signal,
                 &in_flight,
                 &handle,
+                &HostPolicy::allow_list(vec!["panic.example".to_owned()]),
+                None,
+                None,
+                Duration::from_millis(500),
             );
 
             let (response_stream, response, guard, suppress_response_body) = resp_rx
@@ -2015,6 +2200,128 @@ mod tests {
                 0,
                 "handler-panic guard releases after the synthesized response flushes"
             );
+        });
+    }
+
+    #[test]
+    fn disallowed_host_returns_421_without_invoking_handler() {
+        // br-asupersync-mfqfst M8: a request whose :authority/host is not on
+        // the allow-list gets a per-stream 421 Misdirected Request and the
+        // handler never runs.
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime installs Cx for block_on");
+            let mut conn = Connection::server(Settings::default());
+
+            let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
+            let shutdown_signal = ShutdownSignal::new();
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let invoked_for_handler = Arc::clone(&invoked);
+            let handler = Arc::new(move |_req: Request| {
+                let invoked = Arc::clone(&invoked_for_handler);
+                async move {
+                    invoked.store(true, Ordering::SeqCst);
+                    Response::new(200, "OK", Vec::new())
+                }
+            });
+
+            // request_block carries `:authority example.com:8443` -> host
+            // `example.com`, which is NOT on this allow-list.
+            dispatch_h2_request(
+                &mut conn,
+                1,
+                request_block(&[]),
+                Vec::new(),
+                None,
+                &handler,
+                &resp_tx,
+                &shutdown_signal,
+                &in_flight,
+                &handle,
+                &HostPolicy::allow_list(vec!["allowed.example".to_owned()]),
+                None,
+                None,
+                Duration::from_millis(500),
+            );
+
+            let (stream_id, response, guard, _suppress) = resp_rx
+                .recv(&cx)
+                .await
+                .expect("421 response must be sent through funnel");
+            assert_eq!(stream_id, 1);
+            assert_eq!(response.response.status, 421);
+            assert!(
+                String::from_utf8_lossy(&response.response.body).contains("example.com"),
+                "421 body should name the rejected host: {:?}",
+                response.response.body
+            );
+            assert!(
+                !invoked.load(Ordering::SeqCst),
+                "handler must not run for a rejected host"
+            );
+            drop(guard);
+        });
+    }
+
+    #[test]
+    fn allowed_host_runs_handler() {
+        // br-asupersync-mfqfst M8: a request whose host is on the allow-list
+        // reaches the handler and its response is funneled back.
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime installs Cx for block_on");
+            let mut conn = Connection::server(Settings::default());
+
+            let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
+            let shutdown_signal = ShutdownSignal::new();
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let invoked_for_handler = Arc::clone(&invoked);
+            let handler = Arc::new(move |_req: Request| {
+                let invoked = Arc::clone(&invoked_for_handler);
+                async move {
+                    invoked.store(true, Ordering::SeqCst);
+                    Response::new(200, "OK", b"hi".to_vec())
+                }
+            });
+
+            dispatch_h2_request(
+                &mut conn,
+                1,
+                request_block(&[]),
+                Vec::new(),
+                None,
+                &handler,
+                &resp_tx,
+                &shutdown_signal,
+                &in_flight,
+                &handle,
+                &HostPolicy::allow_list(vec!["example.com".to_owned()]),
+                None,
+                None,
+                Duration::from_millis(500),
+            );
+
+            let (stream_id, response, guard, _suppress) = resp_rx
+                .recv(&cx)
+                .await
+                .expect("handler response must be sent through funnel");
+            assert_eq!(stream_id, 1);
+            assert_eq!(response.response.status, 200);
+            assert!(
+                invoked.load(Ordering::SeqCst),
+                "handler must run for an allow-listed host"
+            );
+            drop(guard);
         });
     }
 
