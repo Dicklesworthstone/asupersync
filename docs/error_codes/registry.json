@@ -1,7 +1,7 @@
 {
   "schema_version": "asupersync-error-code-registry-v1",
   "namespace": "ASUP-Exxx",
-  "updated": "2026-06-12",
+  "updated": "2026-06-13",
   "ranges": [
     {
       "range": "ASUP-E0xx",
@@ -375,14 +375,16 @@
       "name": "lock-order-violation",
       "area": "channels-sync",
       "status": "live",
-      "summary": "A code path acquired runtime locks outside the required order.",
+      "summary": "A code path violated runtime lock-order or lock-name policy.",
       "probable_causes": [
         "Nested runtime/obligation locks were introduced in the wrong order.",
-        "A diagnostic query held one shard lock while entering another domain."
+        "A diagnostic query held one shard lock while entering another domain.",
+        "The lock-metrics policy rejected an undocumented unranked lock name."
       ],
       "remediation": [
         "Reorder acquisition to E(Config), D(Instrumentation), B(Regions), A(Tasks), C(Obligations).",
-        "Snapshot data under one lock and release it before querying another domain."
+        "Snapshot data under one lock and release it before querying another domain.",
+        "Rename the lock with a ranked prefix or document a stable LOCK_ORDER_REASON allowance."
       ],
       "doc_path": "docs/error_codes/ASUP-E205.md",
       "since": "0.3.4",
@@ -546,6 +548,26 @@
       "since": "0.3.4",
       "source_refs": [
         "src/web/middleware.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E503",
+      "name": "web-header-rejected",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A typed web header extractor rejected a missing or malformed request header.",
+      "probable_causes": [
+        "A required typed request header was absent.",
+        "A header value was empty, carried forbidden control characters, or did not match the typed header grammar."
+      ],
+      "remediation": [
+        "Send the required header with a syntactically valid value.",
+        "Use Header<T> or TypedHeader<T> in handlers instead of indexing request headers directly."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E503.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "src/web/extract.rs"
       ]
     },
     {

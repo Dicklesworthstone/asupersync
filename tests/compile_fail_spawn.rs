@@ -8,6 +8,7 @@
 fn compile_fail() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/spawn_without_capability.rs");
+    t.compile_fail("tests/compile_fail/handler_arity_9.rs");
 
     if cfg!(feature = "postgres") {
         t.compile_fail("tests/compile_fail/database_transaction_consumes_self.rs");

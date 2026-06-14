@@ -5,46 +5,72 @@ expression: dump
 === Web Router Route Table Dump ===
 
 Summary:
-  Total routes: 40
-  Direct routes: 26
+  Total route entries: 50
+  Direct route entries: 36
+  Nested route entries: 14
+  Direct route patterns: 26
   Nested routers: 3
-  Parameter routes: 13
-  Wildcard routes: 1
+  Parameter route entries: 25
+  Wildcard route entries: 1
   Has fallback: true
 
 Routes by HTTP Method:
-  DELETE: 3 routes
-  GET: 22 routes
-  POST: 9 routes
-  PUT: 2 routes
+  DELETE: 3 route entries
+  GET: 33 route entries
+  POST: 10 route entries
+  PUT: 4 route entries
 
-Route Patterns (stable sort):
-[1] / -> [GET]
-[17] /assets/css/:file -> [GET]
-[16] /assets/js/:file -> [GET]
-[5] /blog -> [GET]
-[11] /blog/:slug -> [GET]
-[29] /blog/:year/:month/:day/:slug -> [GET]
-[21] /categories/:category -> [GET]
-[8] /contact -> [GET, POST]
-[18] /download/:file_id -> [GET]
-[12] /favicon.ico -> [GET]
-[19] /files/:bucket/:key -> [GET, DELETE]
-[6] /login -> [GET, POST]
-[7] /logout -> [POST]
-[21] /newsletter/subscribe -> [POST]
-[23] /newsletter/unsubscribe -> [POST]
-[6] /posts -> [GET, POST]
-[10] /posts/:id -> [GET, PUT, DELETE]
-[19] /posts/:id/comments -> [GET, POST]
-[31] /posts/:id/comments/:comment_id -> [GET, PUT, DELETE]
-[9] /register -> [GET, POST]
-[9] /static/* -> [GET]
-[10] /tags/:tag -> [GET]
-[7] /upload -> [POST]
-[3] /ws -> [GET]
-[14] /ws/chat/:room -> [GET]
-[26] /ws/notifications/:user_id -> [GET]
+Route Entries (stable sort):
+  [GET] / -> FnHandler (mount: -)
+  [GET] /admin/config -> FnHandler (mount: /admin)
+  [PUT] /admin/config/:section -> FnHandler (mount: /admin)
+  [GET] /admin/dashboard -> FnHandler (mount: /admin)
+  [GET] /admin/users -> FnHandler (mount: /admin)
+  [POST] /admin/users/:id/ban -> FnHandler (mount: /admin)
+  [GET] /api/v1/search -> FnHandler (mount: /api/v1)
+  [GET] /api/v1/users -> FnHandler (mount: /api/v1)
+  [GET] /api/v1/users/:id -> FnHandler (mount: /api/v1)
+  [GET] /api/v1/users/:id/posts -> FnHandler (mount: /api/v1)
+  [GET] /api/v1/users/:id/posts/:post_id -> FnHandler (mount: /api/v1)
+  [PUT] /api/v1/users/:id/profile -> FnHandler (mount: /api/v1)
+  [GET] /assets/css/:file -> FnHandler (mount: -)
+  [GET] /assets/js/:file -> FnHandler (mount: -)
+  [GET] /blog -> FnHandler (mount: -)
+  [GET] /blog/:slug -> FnHandler (mount: -)
+  [GET] /blog/:year/:month/:day/:slug -> FnHandler (mount: -)
+  [GET] /categories/:category -> FnHandler (mount: -)
+  [GET] /contact -> FnHandler (mount: -)
+  [POST] /contact -> FnHandler (mount: -)
+  [GET] /download/:file_id -> FnHandler (mount: -)
+  [GET] /favicon.ico -> FnHandler (mount: -)
+  [GET] /files/:bucket/:key -> FnHandler (mount: -)
+  [DELETE] /files/:bucket/:key -> FnHandler (mount: -)
+  [GET] /health/metrics -> FnHandler (mount: /health)
+  [GET] /health/ping -> FnHandler (mount: /health)
+  [GET] /health/ready -> FnHandler (mount: /health)
+  [GET] /login -> FnHandler (mount: -)
+  [POST] /login -> FnHandler (mount: -)
+  [POST] /logout -> FnHandler (mount: -)
+  [POST] /newsletter/subscribe -> FnHandler (mount: -)
+  [POST] /newsletter/unsubscribe -> FnHandler (mount: -)
+  [GET] /posts -> FnHandler (mount: -)
+  [POST] /posts -> FnHandler (mount: -)
+  [GET] /posts/:id -> FnHandler (mount: -)
+  [PUT] /posts/:id -> FnHandler (mount: -)
+  [DELETE] /posts/:id -> FnHandler (mount: -)
+  [GET] /posts/:id/comments -> FnHandler (mount: -)
+  [POST] /posts/:id/comments -> FnHandler (mount: -)
+  [GET] /posts/:id/comments/:comment_id -> FnHandler (mount: -)
+  [PUT] /posts/:id/comments/:comment_id -> FnHandler (mount: -)
+  [DELETE] /posts/:id/comments/:comment_id -> FnHandler (mount: -)
+  [GET] /register -> FnHandler (mount: -)
+  [POST] /register -> FnHandler (mount: -)
+  [GET] /static/* -> FnHandler (mount: -)
+  [GET] /tags/:tag -> FnHandler (mount: -)
+  [POST] /upload -> FnHandler (mount: -)
+  [GET] /ws -> FnHandler (mount: -)
+  [GET] /ws/chat/:room -> FnHandler (mount: -)
+  [GET] /ws/notifications/:user_id -> FnHandler (mount: -)
 
 Parameter Extraction Patterns:
   params[1]: :category
@@ -52,28 +78,30 @@ Parameter Extraction Patterns:
   params[1]: :file_id
   params[1]: :id
   params[1]: :room
+  params[1]: :section
   params[1]: :slug
   params[1]: :tag
   params[1]: :user_id
   params[2]: :bucket, :key
   params[2]: :id, :comment_id
+  params[2]: :id, :post_id
   params[4]: :year, :month, :day, :slug
 
 Nested Router Structure:
-/api/v1 -> 6 routes
-  /api/v1/users
-  /api/v1/users/:id
-  /api/v1/users/:id/posts
-  /api/v1/users/:id/posts/:post_id
-  /api/v1/users/:id/profile
-  /api/v1/search
-/admin -> 5 routes
-  /admin/dashboard
-  /admin/users
-  /admin/users/:id/ban
-  /admin/config
-  /admin/config/:section
-/health -> 3 routes
-  /health/ping
-  /health/ready
-  /health/metrics
+/admin -> 5 route entries
+  [GET] /admin/config
+  [PUT] /admin/config/:section
+  [GET] /admin/dashboard
+  [GET] /admin/users
+  [POST] /admin/users/:id/ban
+/api/v1 -> 6 route entries
+  [GET] /api/v1/search
+  [GET] /api/v1/users
+  [GET] /api/v1/users/:id
+  [GET] /api/v1/users/:id/posts
+  [GET] /api/v1/users/:id/posts/:post_id
+  [PUT] /api/v1/users/:id/profile
+/health -> 3 route entries
+  [GET] /health/metrics
+  [GET] /health/ping
+  [GET] /health/ready

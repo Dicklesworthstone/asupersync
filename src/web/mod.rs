@@ -30,6 +30,7 @@
 //! - [`Path<T>`]: URL path parameters
 //! - [`Query<T>`]: Query string parameters
 //! - [`Json<T>`]: JSON request body
+//! - [`Header<T>`] / [`TypedHeader<T>`]: Typed request headers
 //! - [`Cookie`]: Raw `Cookie` request header
 //! - [`CookieJar`]: Parsed request cookies
 //! - [`State<T>`]: Shared application state
@@ -69,16 +70,19 @@ pub mod static_files_path_traversal_audit;
 pub mod websocket;
 
 pub use extract::{
-    Cookie, CookieJar, Extension, Form, FromRequest, FromRequestParts, Json as JsonExtract, Path,
-    Query, State,
+    Accept, Authorization, ContentType, Cookie, CookieJar, Extension, Form, FromHeaderValue,
+    FromRequest, FromRequestParts, Header, HeaderParseError, Json as JsonExtract, Path, Query,
+    State, TypedHeader, UserAgent,
 };
 pub use handler::{
     AsyncCxFnHandler, AsyncCxFnHandler1, AsyncCxFnHandler2, AsyncCxFnHandler3, AsyncCxFnHandler4,
-    FnHandler, FnHandler1, FnHandler2, FnHandler3, FnHandler4, Handler,
+    AsyncCxFnHandler5, AsyncCxFnHandler6, AsyncCxFnHandler7, AsyncCxFnHandler8, FnHandler,
+    FnHandler1, FnHandler2, FnHandler3, FnHandler4, FnHandler5, FnHandler6, FnHandler7, FnHandler8,
+    FnHandler9, Handler,
 };
 pub use nextjs_bootstrap::{
     BootstrapCommand, BootstrapLogEvent, BootstrapRecoveryAction, NextjsBootstrapConfig,
     NextjsBootstrapError, NextjsBootstrapSnapshot, NextjsBootstrapState,
 };
 pub use response::{Html, IntoResponse, Json, Redirect, Response, StatusCode};
-pub use router::{MethodRouter, Router, delete, get, patch, post, put};
+pub use router::{MethodRouter, RouteInfo, Router, delete, get, patch, post, put};

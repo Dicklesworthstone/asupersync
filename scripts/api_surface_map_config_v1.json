@@ -123,6 +123,12 @@
       "example_path": "src/web/router.rs"
     },
     {
+      "use_case": "web_router_routes",
+      "symbol": "web::Router::routes + web::RouteInfo",
+      "summary": "Expose deterministic route metadata for API-surface, debug, and startup-report consumers.",
+      "example_path": "tests/web_router_dump_format.rs"
+    },
+    {
       "use_case": "web_request_trace",
       "symbol": "web::middleware::RequestTraceLayer",
       "summary": "Structured request/response logging with outcome severity, duration, and 499-on-cancel.",

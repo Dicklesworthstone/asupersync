@@ -1,6 +1,6 @@
 {
   "counts": {
-    "entry_points": 16,
+    "entry_points": 17,
     "modules": 119,
     "root_exports": 294
   },
@@ -139,6 +139,15 @@
       "summary": "Stack middleware onion-style onto a router via the unified Layer trait.",
       "symbol": "web::Router::layer + web::middleware::Layer",
       "use_case": "web_router_middleware"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "tests/web_router_dump_format.rs"
+      },
+      "summary": "Expose deterministic route metadata for API-surface, debug, and startup-report consumers.",
+      "symbol": "web::Router::routes + web::RouteInfo",
+      "use_case": "web_router_routes"
     },
     {
       "example": {

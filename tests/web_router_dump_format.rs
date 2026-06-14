@@ -6,7 +6,7 @@
 
 use asupersync::web::handler::FnHandler;
 use asupersync::web::response::StatusCode;
-use asupersync::web::router::Router;
+use asupersync::web::router::{RouteInfo, Router};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
@@ -143,19 +143,41 @@ fn generate_router_dump(router: &Router) -> String {
     let analysis = analyze_router_structure(router);
 
     writeln!(&mut output, "Summary:").unwrap();
-    writeln!(&mut output, "  Total routes: {}", analysis.total_routes).unwrap();
-    writeln!(&mut output, "  Direct routes: {}", analysis.direct_routes).unwrap();
-    writeln!(&mut output, "  Nested routers: {}", analysis.nested_routers).unwrap();
     writeln!(
         &mut output,
-        "  Parameter routes: {}",
-        analysis.parameter_routes
+        "  Total route entries: {}",
+        analysis.total_route_entries
     )
     .unwrap();
     writeln!(
         &mut output,
-        "  Wildcard routes: {}",
-        analysis.wildcard_routes
+        "  Direct route entries: {}",
+        analysis.direct_route_entries
+    )
+    .unwrap();
+    writeln!(
+        &mut output,
+        "  Nested route entries: {}",
+        analysis.nested_route_entries
+    )
+    .unwrap();
+    writeln!(
+        &mut output,
+        "  Direct route patterns: {}",
+        analysis.direct_route_patterns
+    )
+    .unwrap();
+    writeln!(&mut output, "  Nested routers: {}", analysis.nested_routers).unwrap();
+    writeln!(
+        &mut output,
+        "  Parameter route entries: {}",
+        analysis.parameter_route_entries
+    )
+    .unwrap();
+    writeln!(
+        &mut output,
+        "  Wildcard route entries: {}",
+        analysis.wildcard_route_entries
     )
     .unwrap();
     writeln!(&mut output, "  Has fallback: {}", analysis.has_fallback).unwrap();
@@ -163,12 +185,12 @@ fn generate_router_dump(router: &Router) -> String {
 
     writeln!(&mut output, "Routes by HTTP Method:").unwrap();
     for (method, count) in &analysis.methods_count {
-        writeln!(&mut output, "  {}: {} routes", method, count).unwrap();
+        writeln!(&mut output, "  {}: {} route entries", method, count).unwrap();
     }
     writeln!(&mut output).unwrap();
 
-    writeln!(&mut output, "Route Patterns (stable sort):").unwrap();
-    dump_router_routes(&mut output, router, 0, "");
+    writeln!(&mut output, "Route Entries (stable sort):").unwrap();
+    dump_router_routes(&mut output, router);
 
     writeln!(&mut output).unwrap();
     writeln!(&mut output, "Parameter Extraction Patterns:").unwrap();
@@ -178,110 +200,77 @@ fn generate_router_dump(router: &Router) -> String {
 
     writeln!(&mut output).unwrap();
     writeln!(&mut output, "Nested Router Structure:").unwrap();
-    dump_nested_structure(&mut output, router, 0);
+    dump_nested_structure(&mut output, router);
 
     output
 }
 
-/// Analyze router structure for summary statistics
+/// Analyze router structure for summary statistics.
 fn analyze_router_structure(router: &Router) -> RouterAnalysis {
+    let routes = router.routes();
     let mut analysis = RouterAnalysis {
-        total_routes: 0,
-        direct_routes: router.route_count(),
-        nested_routers: 0,
-        parameter_routes: 0,
-        wildcard_routes: 0,
-        has_fallback: true,
+        total_route_entries: routes.len(),
+        direct_route_entries: routes
+            .iter()
+            .filter(|route| route.mount_prefix.is_none())
+            .count(),
+        nested_route_entries: routes
+            .iter()
+            .filter(|route| route.mount_prefix.is_some())
+            .count(),
+        direct_route_patterns: router.route_count(),
+        nested_routers: router.nested_router_count(),
+        parameter_route_entries: 0,
+        wildcard_route_entries: 0,
+        has_fallback: router.has_fallback(),
         methods_count: BTreeMap::new(),
         parameter_patterns: BTreeSet::new(),
     };
 
-    // Analyze direct routes
-    // Note: We can't access private fields directly, so we'll simulate based on
-    // the router we built and count patterns we know about
-
-    // Count methods and patterns based on our known router structure
-    let known_routes = get_known_route_patterns();
-
-    for (pattern, methods) in known_routes {
-        if pattern.contains(':') {
-            analysis.parameter_routes += 1;
+    for route in routes {
+        if route.pattern.contains(':') {
+            analysis.parameter_route_entries += 1;
             analysis
                 .parameter_patterns
-                .insert(extract_parameter_pattern(&pattern));
+                .insert(extract_parameter_pattern(&route.pattern));
         }
-        if pattern.contains('*') {
-            analysis.wildcard_routes += 1;
+        if route.pattern.contains('*') {
+            analysis.wildcard_route_entries += 1;
         }
 
-        for method in methods {
-            *analysis.methods_count.entry(method).or_insert(0) += 1;
-        }
+        *analysis.methods_count.entry(route.method).or_insert(0) += 1;
     }
-
-    // Count nested routers
-    analysis.nested_routers = 3; // We know we have 3 nested routers
-    analysis.total_routes = analysis.direct_routes + estimate_nested_routes();
 
     analysis
 }
 
-/// Dump router routes with indentation and stable ordering
-fn dump_router_routes(output: &mut String, _router: &Router, depth: usize, prefix: &str) {
-    let indent = "  ".repeat(depth);
-
-    // We can't access private router fields, so we'll document the structure
-    // we built based on our knowledge
-    let routes = get_known_routes_for_prefix(prefix);
-
-    for (pattern, methods) in routes {
-        let methods_str = methods.join(", ");
+/// Dump router routes with stable ordering.
+fn dump_router_routes(output: &mut String, router: &Router) {
+    for route in router.routes() {
+        let mount = route.mount_prefix.as_deref().unwrap_or("-");
         writeln!(
             output,
-            "{}[{}] {} -> [{}]",
-            indent,
-            pattern.len(),
-            pattern,
-            methods_str
+            "  [{}] {} -> {} (mount: {})",
+            route.method, route.pattern, route.handler_name, mount
         )
         .unwrap();
     }
 }
 
-/// Dump nested router structure
-fn dump_nested_structure(output: &mut String, _router: &Router, depth: usize) {
-    let indent = "  ".repeat(depth);
+/// Dump nested router structure from route metadata.
+fn dump_nested_structure(output: &mut String, router: &Router) {
+    let mut nested: BTreeMap<String, Vec<RouteInfo>> = BTreeMap::new();
 
-    // Document known nested structure
-    let nested = vec![
-        (
-            "/api/v1",
-            vec![
-                "/users",
-                "/users/:id",
-                "/users/:id/posts",
-                "/users/:id/posts/:post_id",
-                "/users/:id/profile",
-                "/search",
-            ],
-        ),
-        (
-            "/admin",
-            vec![
-                "/dashboard",
-                "/users",
-                "/users/:id/ban",
-                "/config",
-                "/config/:section",
-            ],
-        ),
-        ("/health", vec!["/ping", "/ready", "/metrics"]),
-    ];
+    for route in router.routes() {
+        if let Some(prefix) = &route.mount_prefix {
+            nested.entry(prefix.clone()).or_default().push(route);
+        }
+    }
 
     for (prefix, routes) in nested {
-        writeln!(output, "{}{} -> {} routes", indent, prefix, routes.len()).unwrap();
+        writeln!(output, "{} -> {} route entries", prefix, routes.len()).unwrap();
         for route in routes {
-            writeln!(output, "{}  {}{}", indent, prefix, route).unwrap();
+            writeln!(output, "  [{}] {}", route.method, route.pattern).unwrap();
         }
     }
 }
@@ -295,71 +284,16 @@ fn extract_parameter_pattern(pattern: &str) -> String {
     format!("params[{}]: {}", params.len(), params.join(", "))
 }
 
-fn known_route<const N: usize>(pattern: &str, methods: [&str; N]) -> (String, Vec<String>) {
-    (
-        pattern.to_string(),
-        methods.into_iter().map(str::to_owned).collect(),
-    )
-}
-
-/// Get known route patterns for analysis
-fn get_known_route_patterns() -> Vec<(String, Vec<String>)> {
-    vec![
-        known_route("/", ["GET"]),
-        known_route("/favicon.ico", ["GET"]),
-        known_route("/static/*", ["GET"]),
-        known_route("/assets/css/:file", ["GET"]),
-        known_route("/assets/js/:file", ["GET"]),
-        known_route("/login", ["GET", "POST"]),
-        known_route("/logout", ["POST"]),
-        known_route("/register", ["GET", "POST"]),
-        known_route("/blog", ["GET"]),
-        known_route("/blog/:slug", ["GET"]),
-        known_route("/blog/:year/:month/:day/:slug", ["GET"]),
-        known_route("/categories/:category", ["GET"]),
-        known_route("/tags/:tag", ["GET"]),
-        known_route("/posts", ["GET", "POST"]),
-        known_route("/posts/:id", ["GET", "PUT", "DELETE"]),
-        known_route("/posts/:id/comments", ["GET", "POST"]),
-        known_route("/posts/:id/comments/:comment_id", ["GET", "PUT", "DELETE"]),
-        known_route("/contact", ["GET", "POST"]),
-        known_route("/newsletter/subscribe", ["POST"]),
-        known_route("/newsletter/unsubscribe", ["POST"]),
-        known_route("/upload", ["POST"]),
-        known_route("/download/:file_id", ["GET"]),
-        known_route("/files/:bucket/:key", ["GET", "DELETE"]),
-        known_route("/ws", ["GET"]),
-        known_route("/ws/chat/:room", ["GET"]),
-        known_route("/ws/notifications/:user_id", ["GET"]),
-    ]
-}
-
-/// Get known routes for a specific prefix (for nested routers)
-fn get_known_routes_for_prefix(prefix: &str) -> Vec<(String, Vec<String>)> {
-    if prefix.is_empty() {
-        // Return main router routes in stable order
-        let mut routes = get_known_route_patterns();
-        routes.sort_by(|a, b| a.0.cmp(&b.0)); // Stable alphabetical ordering
-        routes
-    } else {
-        // Return nested router routes
-        vec![]
-    }
-}
-
-/// Estimate total nested routes
-fn estimate_nested_routes() -> usize {
-    6 + 5 + 3 // api_v1 + admin + health routes
-}
-
 /// Router analysis structure
 #[derive(Debug)]
 struct RouterAnalysis {
-    total_routes: usize,
-    direct_routes: usize,
+    total_route_entries: usize,
+    direct_route_entries: usize,
+    nested_route_entries: usize,
+    direct_route_patterns: usize,
     nested_routers: usize,
-    parameter_routes: usize,
-    wildcard_routes: usize,
+    parameter_route_entries: usize,
+    wildcard_route_entries: usize,
     has_fallback: bool,
     methods_count: BTreeMap<String, usize>,
     parameter_patterns: BTreeSet<String>,

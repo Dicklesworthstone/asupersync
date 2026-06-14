@@ -193,6 +193,19 @@ fn api_surface_entry_points_are_actionable() {
             "entry point {use_case} must record existing example"
         );
     }
+
+    let route_entry = entry_points
+        .iter()
+        .find(|entry| entry["use_case"] == "web_router_routes")
+        .expect("web router route introspection must be a curated entry point");
+    assert_eq!(
+        route_entry["symbol"],
+        "web::Router::routes + web::RouteInfo"
+    );
+    assert_eq!(
+        route_entry["example"]["path"],
+        "tests/web_router_dump_format.rs"
+    );
 }
 
 #[test]

@@ -10,6 +10,7 @@
 //! - [`Query<T>`]: Query string parameters
 //! - [`Json<T>`]: JSON request body
 //! - [`Form<T>`]: URL-encoded form body
+//! - [`Header<T>`] / [`TypedHeader<T>`]: Typed request headers
 //! - [`Cookie`]: Raw `Cookie` request header
 //! - [`CookieJar`]: Parsed request cookies
 //! - [`State<T>`]: Shared application state
@@ -25,6 +26,8 @@ use serde::de::{
     self, DeserializeOwned, DeserializeSeed, IntoDeserializer, SeqAccess, Unexpected, Visitor,
 };
 use serde::forward_to_deserialize_any;
+
+const MALFORMED_HEADER_CODE: &str = "[ASUP-E503]";
 
 // ─── Request Type ────────────────────────────────────────────────────────────
 
@@ -770,6 +773,291 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+// ─── Header<T> / TypedHeader<T> ─────────────────────────────────────────────
+
+/// Error returned by a typed header parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderParseError {
+    message: String,
+}
+
+impl HeaderParseError {
+    /// Create a typed header parse error.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Human-readable parse failure.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for HeaderParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HeaderParseError {}
+
+/// Convert one request header value into a typed extractor value.
+pub trait FromHeaderValue: Sized {
+    /// Canonical header name used by the extractor.
+    const NAME: &'static str;
+
+    /// Parse a header value.
+    fn from_header_value(value: &str) -> Result<Self, HeaderParseError>;
+}
+
+/// Extract a typed request header.
+///
+/// ```
+/// use asupersync::web::extract::{
+///     ContentType, FromRequestParts, Header, Request,
+/// };
+///
+/// let req = Request::new("POST", "/items")
+///     .with_header("Content-Type", "application/json; charset=utf-8");
+///
+/// let Header(content_type) =
+///     Header::<ContentType>::from_request_parts(&req).expect("content type");
+/// assert_eq!(content_type.media_type(), "application/json");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Header<T>(pub T);
+
+impl<T> FromRequestParts for Header<T>
+where
+    T: FromHeaderValue,
+{
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        extract_typed_header::<T>(req).map(Self)
+    }
+}
+
+/// Extract a typed request header.
+///
+/// This is a naming alias in behavior, not a global header map. It extracts
+/// exactly one typed header through [`FromHeaderValue`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedHeader<T>(pub T);
+
+impl<T> FromRequestParts for TypedHeader<T>
+where
+    T: FromHeaderValue,
+{
+    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
+        extract_typed_header::<T>(req).map(Self)
+    }
+}
+
+/// `Content-Type` request header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentType(pub String);
+
+impl ContentType {
+    /// Full header value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Media type without parameters.
+    #[must_use]
+    pub fn media_type(&self) -> &str {
+        self.0.split(';').next().unwrap_or("").trim()
+    }
+}
+
+impl FromHeaderValue for ContentType {
+    const NAME: &'static str = "content-type";
+
+    fn from_header_value(value: &str) -> Result<Self, HeaderParseError> {
+        let trimmed = checked_header_value(Self::NAME, value)?;
+        let media_type = trimmed.split(';').next().unwrap_or("").trim();
+        validate_media_range(media_type, false)?;
+        Ok(Self(trimmed.to_string()))
+    }
+}
+
+/// `Authorization` request header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Authorization {
+    /// Authorization scheme, e.g. `Bearer`.
+    pub scheme: String,
+    /// Scheme credentials.
+    pub credentials: String,
+}
+
+impl Authorization {
+    /// Reconstruct the header value.
+    #[must_use]
+    pub fn as_str(&self) -> String {
+        format!("{} {}", self.scheme, self.credentials)
+    }
+}
+
+impl FromHeaderValue for Authorization {
+    const NAME: &'static str = "authorization";
+
+    fn from_header_value(value: &str) -> Result<Self, HeaderParseError> {
+        let trimmed = checked_header_value(Self::NAME, value)?;
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let scheme = parts.next().unwrap_or("");
+        let credentials = parts.next().unwrap_or("").trim();
+
+        if scheme.is_empty() || !scheme.bytes().all(is_http_token_char) {
+            return Err(HeaderParseError::new(
+                "Authorization scheme must be a non-empty HTTP token",
+            ));
+        }
+        if credentials.is_empty() {
+            return Err(HeaderParseError::new(
+                "Authorization credentials must be present",
+            ));
+        }
+
+        Ok(Self {
+            scheme: scheme.to_string(),
+            credentials: credentials.to_string(),
+        })
+    }
+}
+
+/// `User-Agent` request header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAgent(pub String);
+
+impl UserAgent {
+    /// Full header value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromHeaderValue for UserAgent {
+    const NAME: &'static str = "user-agent";
+
+    fn from_header_value(value: &str) -> Result<Self, HeaderParseError> {
+        Ok(Self(checked_header_value(Self::NAME, value)?.to_string()))
+    }
+}
+
+/// `Accept` request header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accept(pub String);
+
+impl Accept {
+    /// Full header value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromHeaderValue for Accept {
+    const NAME: &'static str = "accept";
+
+    fn from_header_value(value: &str) -> Result<Self, HeaderParseError> {
+        let trimmed = checked_header_value(Self::NAME, value)?;
+        for raw_range in trimmed.split(',') {
+            let media_range = raw_range.split(';').next().unwrap_or("").trim();
+            validate_media_range(media_range, true)?;
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+}
+
+fn extract_typed_header<T>(req: &Request) -> Result<T, ExtractionError>
+where
+    T: FromHeaderValue,
+{
+    let value = header_value_ci(req, T::NAME)
+        .ok_or_else(|| malformed_header_rejection(T::NAME, "missing header"))?;
+    T::from_header_value(value).map_err(|err| malformed_header_rejection(T::NAME, err.message()))
+}
+
+fn malformed_header_rejection(header_name: &str, reason: impl fmt::Display) -> ExtractionError {
+    ExtractionError::new(
+        super::response::StatusCode::BAD_REQUEST,
+        format!("{MALFORMED_HEADER_CODE} malformed request header `{header_name}`: {reason}"),
+    )
+}
+
+fn checked_header_value<'a>(
+    header_name: &str,
+    value: &'a str,
+) -> Result<&'a str, HeaderParseError> {
+    if value
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(*byte, b'\r' | b'\n' | 0))
+    {
+        return Err(HeaderParseError::new(format!(
+            "{header_name} contains a forbidden control character"
+        )));
+    }
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(HeaderParseError::new(format!(
+            "{header_name} must not be empty"
+        )));
+    }
+    Ok(trimmed)
+}
+
+fn validate_media_range(media_range: &str, allow_wildcards: bool) -> Result<(), HeaderParseError> {
+    let Some((ty, subtype)) = media_range.split_once('/') else {
+        return Err(HeaderParseError::new(
+            "media range must contain type and subtype",
+        ));
+    };
+    let ty = ty.trim();
+    let subtype = subtype.trim();
+
+    let type_ok =
+        (ty == "*" && allow_wildcards) || (!ty.is_empty() && ty.bytes().all(is_http_token_char));
+    let subtype_ok = subtype == "*" && allow_wildcards
+        || !subtype.is_empty() && subtype.bytes().all(is_http_token_char);
+    if !type_ok || !subtype_ok {
+        return Err(HeaderParseError::new(
+            "media range type and subtype must be HTTP tokens",
+        ));
+    }
+    Ok(())
+}
+
+fn is_http_token_char(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'0'..=b'9'
+            | b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+    )
+}
+
 // ─── Cookie / CookieJar ─────────────────────────────────────────────────────
 
 /// Extract the raw `Cookie` request header.
@@ -1475,6 +1763,69 @@ mod tests {
         assert_eq!(req.header("authorization"), Some("Bearer token"));
         assert_eq!(req.header("AUTHORIZATION"), Some("Bearer token"));
         assert_eq!(req.header("missing"), None);
+    }
+
+    #[test]
+    fn typed_header_content_type_extracts_case_insensitively() {
+        let req = Request::new("POST", "/items")
+            .with_header("Content-Type", "application/json; charset=utf-8");
+
+        let Header(content_type) = Header::<ContentType>::from_request_parts(&req).unwrap();
+        assert_eq!(content_type.as_str(), "application/json; charset=utf-8");
+        assert_eq!(content_type.media_type(), "application/json");
+    }
+
+    #[test]
+    fn typed_header_alias_extracts_authorization() {
+        let req = Request::new("GET", "/admin").with_header("Authorization", "Bearer token-123");
+
+        let TypedHeader(auth) = TypedHeader::<Authorization>::from_request_parts(&req).unwrap();
+        assert_eq!(auth.scheme, "Bearer");
+        assert_eq!(auth.credentials, "token-123");
+        assert_eq!(auth.as_str(), "Bearer token-123");
+    }
+
+    #[test]
+    fn shipped_typed_headers_cover_user_agent_and_accept() {
+        let req = Request::new("GET", "/")
+            .with_header("User-Agent", "asupersync-test/1")
+            .with_header("Accept", "application/json, text/plain;q=0.8, */*;q=0.1");
+
+        let Header(user_agent) = Header::<UserAgent>::from_request_parts(&req).unwrap();
+        let Header(accept) = Header::<Accept>::from_request_parts(&req).unwrap();
+        assert_eq!(user_agent.as_str(), "asupersync-test/1");
+        assert_eq!(
+            accept.as_str(),
+            "application/json, text/plain;q=0.8, */*;q=0.1"
+        );
+    }
+
+    #[test]
+    fn missing_typed_header_rejects_with_asup_code() {
+        let req = Request::new("GET", "/");
+
+        let err = Header::<ContentType>::from_request_parts(&req).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert!(err.message.starts_with("[ASUP-E503]"));
+        assert!(err.message.contains("content-type"));
+        assert!(err.message.contains("missing header"));
+    }
+
+    #[test]
+    fn malformed_typed_header_rejects_with_asup_code() {
+        let bad_content_type =
+            Request::new("POST", "/items").with_header("content-type", "application");
+        let err = Header::<ContentType>::from_request_parts(&bad_content_type).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert!(err.message.starts_with("[ASUP-E503]"));
+        assert!(err.message.contains("media range"));
+
+        let bad_authorization =
+            Request::new("GET", "/admin").with_header("authorization", "Bearer   ");
+        let err = TypedHeader::<Authorization>::from_request_parts(&bad_authorization).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert!(err.message.starts_with("[ASUP-E503]"));
+        assert!(err.message.contains("credentials"));
     }
 
     #[test]

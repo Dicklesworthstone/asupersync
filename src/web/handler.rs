@@ -16,7 +16,7 @@ use super::response::{IntoResponse, Response};
 
 /// A request handler.
 ///
-/// This trait is implemented for async functions with up to 4 extractor
+/// This trait is implemented for functions with up to 8 extractor
 /// parameters. The last parameter may consume the request body.
 ///
 /// Phase 1: Now supports async handlers with asupersync runtime integration.
@@ -29,6 +29,12 @@ pub trait Handler: Send + Sync + 'static {
         cx: &Cx,
         req: Request,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>;
+
+    /// Return a stable diagnostic name for route introspection.
+    #[must_use]
+    fn handler_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 // Type-erased handlers remain handlers, so middleware layers can re-wrap the
@@ -38,12 +44,22 @@ impl<H: Handler + ?Sized> Handler for Box<H> {
     fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         (**self).call(cx, req)
     }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        (**self).handler_name()
+    }
 }
 
 impl<H: Handler + ?Sized> Handler for std::sync::Arc<H> {
     #[inline]
     fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         (**self).call(cx, req)
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        (**self).handler_name()
     }
 }
 
@@ -75,6 +91,11 @@ where
     fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let func = &self.func;
         Box::pin(async move { (func)().into_response() })
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler"
     }
 }
 
@@ -109,6 +130,11 @@ where
                 Err(e) => e.into_response(),
             }
         })
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler1"
     }
 }
 
@@ -150,6 +176,11 @@ where
             (func)(t1, t2).into_response()
         })
     }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler2"
+    }
 }
 
 /// Wrapper for handlers with 3 extractors.
@@ -186,6 +217,11 @@ where
             };
             (func)(t1, t2, t3).into_response()
         })
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler3"
     }
 }
 
@@ -224,6 +260,220 @@ where
             };
             (func)(t1, t2, t3, t4).into_response()
         })
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler4"
+    }
+}
+
+/// Wrapper for handlers with 5 extractors.
+pub struct FnHandler5<F, T1, T2, T3, T4, T5> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5)>,
+}
+
+impl<F, T1, T2, T3, T4, T5> FnHandler5<F, T1, T2, T3, T4, T5> {
+    /// Wrap a function with 5 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, T1, T2, T3, T4, T5, Res> Handler for FnHandler5<F, T1, T2, T3, T4, T5>
+where
+    F: Fn(T1, T2, T3, T4, T5) -> Res + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequestParts + Send + Sync + 'static,
+    T5: FromRequest + Send + Sync + 'static,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4, t5) = match extract_arg_5::<T1, T2, T3, T4, T5>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            (func)(t1, t2, t3, t4, t5).into_response()
+        })
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler5"
+    }
+}
+
+/// Wrapper for handlers with 6 extractors.
+pub struct FnHandler6<F, T1, T2, T3, T4, T5, T6> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6)>,
+}
+
+impl<F, T1, T2, T3, T4, T5, T6> FnHandler6<F, T1, T2, T3, T4, T5, T6> {
+    /// Wrap a function with 6 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, T1, T2, T3, T4, T5, T6, Res> Handler for FnHandler6<F, T1, T2, T3, T4, T5, T6>
+where
+    F: Fn(T1, T2, T3, T4, T5, T6) -> Res + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequestParts + Send + Sync + 'static,
+    T5: FromRequestParts + Send + Sync + 'static,
+    T6: FromRequest + Send + Sync + 'static,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4, t5, t6) = match extract_arg_6::<T1, T2, T3, T4, T5, T6>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            (func)(t1, t2, t3, t4, t5, t6).into_response()
+        })
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler6"
+    }
+}
+
+/// Wrapper for handlers with 7 extractors.
+pub struct FnHandler7<F, T1, T2, T3, T4, T5, T6, T7> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6, T7)>,
+}
+
+impl<F, T1, T2, T3, T4, T5, T6, T7> FnHandler7<F, T1, T2, T3, T4, T5, T6, T7> {
+    /// Wrap a function with 7 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, T1, T2, T3, T4, T5, T6, T7, Res> Handler for FnHandler7<F, T1, T2, T3, T4, T5, T6, T7>
+where
+    F: Fn(T1, T2, T3, T4, T5, T6, T7) -> Res + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequestParts + Send + Sync + 'static,
+    T5: FromRequestParts + Send + Sync + 'static,
+    T6: FromRequestParts + Send + Sync + 'static,
+    T7: FromRequest + Send + Sync + 'static,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4, t5, t6, t7) =
+                match extract_arg_7::<T1, T2, T3, T4, T5, T6, T7>(req) {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                };
+            (func)(t1, t2, t3, t4, t5, t6, t7).into_response()
+        })
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler7"
+    }
+}
+
+/// Wrapper for handlers with 8 extractors.
+pub struct FnHandler8<F, T1, T2, T3, T4, T5, T6, T7, T8> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6, T7, T8)>,
+}
+
+impl<F, T1, T2, T3, T4, T5, T6, T7, T8> FnHandler8<F, T1, T2, T3, T4, T5, T6, T7, T8> {
+    /// Wrap a function with 8 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, T1, T2, T3, T4, T5, T6, T7, T8, Res> Handler
+    for FnHandler8<F, T1, T2, T3, T4, T5, T6, T7, T8>
+where
+    F: Fn(T1, T2, T3, T4, T5, T6, T7, T8) -> Res + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequestParts + Send + Sync + 'static,
+    T5: FromRequestParts + Send + Sync + 'static,
+    T6: FromRequestParts + Send + Sync + 'static,
+    T7: FromRequestParts + Send + Sync + 'static,
+    T8: FromRequest + Send + Sync + 'static,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4, t5, t6, t7, t8) =
+                match extract_arg_8::<T1, T2, T3, T4, T5, T6, T7, T8>(req) {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                };
+            (func)(t1, t2, t3, t4, t5, t6, t7, t8).into_response()
+        })
+    }
+
+    #[inline]
+    fn handler_name(&self) -> &'static str {
+        "FnHandler8"
+    }
+}
+
+#[doc(hidden)]
+pub trait HandlerArityExceeded<F> {}
+
+#[doc(hidden)]
+pub struct HandlersSupportAtMostEightExtractorsGroupAdditionalInputsIntoARequestStruct;
+
+#[doc(hidden)]
+pub struct FnHandler9<F, T1, T2, T3, T4, T5, T6, T7, T8, T9> {
+    _marker: std::marker::PhantomData<(F, T1, T2, T3, T4, T5, T6, T7, T8, T9)>,
+}
+
+impl<F, T1, T2, T3, T4, T5, T6, T7, T8, T9> FnHandler9<F, T1, T2, T3, T4, T5, T6, T7, T8, T9> {
+    #[doc(hidden)]
+    pub fn new(_func: F) -> Self
+    where
+        HandlersSupportAtMostEightExtractorsGroupAdditionalInputsIntoARequestStruct:
+            HandlerArityExceeded<F>,
+    {
+        Self {
+            _marker: std::marker::PhantomData,
+        }
     }
 }
 
@@ -274,6 +524,90 @@ where
     let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
     let t4 = T4::from_request(req).map_err(IntoResponse::into_response)?;
     Ok((t1, t2, t3, t4))
+}
+
+#[inline]
+fn extract_arg_5<T1, T2, T3, T4, T5>(req: Request) -> Result<(T1, T2, T3, T4, T5), Response>
+where
+    T1: FromRequestParts,
+    T2: FromRequestParts,
+    T3: FromRequestParts,
+    T4: FromRequestParts,
+    T5: FromRequest,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t5 = T5::from_request(req).map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4, t5))
+}
+
+#[inline]
+fn extract_arg_6<T1, T2, T3, T4, T5, T6>(req: Request) -> Result<(T1, T2, T3, T4, T5, T6), Response>
+where
+    T1: FromRequestParts,
+    T2: FromRequestParts,
+    T3: FromRequestParts,
+    T4: FromRequestParts,
+    T5: FromRequestParts,
+    T6: FromRequest,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t5 = T5::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t6 = T6::from_request(req).map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4, t5, t6))
+}
+
+#[inline]
+fn extract_arg_7<T1, T2, T3, T4, T5, T6, T7>(
+    req: Request,
+) -> Result<(T1, T2, T3, T4, T5, T6, T7), Response>
+where
+    T1: FromRequestParts,
+    T2: FromRequestParts,
+    T3: FromRequestParts,
+    T4: FromRequestParts,
+    T5: FromRequestParts,
+    T6: FromRequestParts,
+    T7: FromRequest,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t5 = T5::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t6 = T6::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t7 = T7::from_request(req).map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4, t5, t6, t7))
+}
+
+#[inline]
+fn extract_arg_8<T1, T2, T3, T4, T5, T6, T7, T8>(
+    req: Request,
+) -> Result<(T1, T2, T3, T4, T5, T6, T7, T8), Response>
+where
+    T1: FromRequestParts,
+    T2: FromRequestParts,
+    T3: FromRequestParts,
+    T4: FromRequestParts,
+    T5: FromRequestParts,
+    T6: FromRequestParts,
+    T7: FromRequestParts,
+    T8: FromRequest,
+{
+    let t1 = T1::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t2 = T2::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t3 = T3::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t4 = T4::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t5 = T5::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t6 = T6::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t7 = T7::from_request_parts(&req).map_err(IntoResponse::into_response)?;
+    let t8 = T8::from_request(req).map_err(IntoResponse::into_response)?;
+    Ok((t1, t2, t3, t4, t5, t6, t7, t8))
 }
 
 /// Wrapper for async handlers that receive a [`Cx`] and no extractors.
@@ -511,6 +845,186 @@ where
     }
 }
 
+/// Wrapper for async handlers with 5 extractors.
+pub struct AsyncCxFnHandler5<F, T1, T2, T3, T4, T5> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5)>,
+}
+
+impl<F, T1, T2, T3, T4, T5> AsyncCxFnHandler5<F, T1, T2, T3, T4, T5> {
+    /// Wrap an async Cx-aware function with 5 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, Fut, Res, T1, T2, T3, T4, T5> Handler for AsyncCxFnHandler5<F, T1, T2, T3, T4, T5>
+where
+    F: Fn(Cx, T1, T2, T3, T4, T5) -> Fut + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequestParts + Send + Sync + 'static,
+    T5: FromRequest + Send + Sync + 'static,
+    Fut: Future<Output = Res> + Send,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4, t5) = match extract_arg_5::<T1, T2, T3, T4, T5>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            run_async_cx_handler(cx, |handler_cx| func(handler_cx, t1, t2, t3, t4, t5)).await
+        })
+    }
+}
+
+/// Wrapper for async handlers with 6 extractors.
+pub struct AsyncCxFnHandler6<F, T1, T2, T3, T4, T5, T6> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6)>,
+}
+
+impl<F, T1, T2, T3, T4, T5, T6> AsyncCxFnHandler6<F, T1, T2, T3, T4, T5, T6> {
+    /// Wrap an async Cx-aware function with 6 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, Fut, Res, T1, T2, T3, T4, T5, T6> Handler for AsyncCxFnHandler6<F, T1, T2, T3, T4, T5, T6>
+where
+    F: Fn(Cx, T1, T2, T3, T4, T5, T6) -> Fut + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequestParts + Send + Sync + 'static,
+    T5: FromRequestParts + Send + Sync + 'static,
+    T6: FromRequest + Send + Sync + 'static,
+    Fut: Future<Output = Res> + Send,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4, t5, t6) = match extract_arg_6::<T1, T2, T3, T4, T5, T6>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            run_async_cx_handler(cx, |handler_cx| func(handler_cx, t1, t2, t3, t4, t5, t6)).await
+        })
+    }
+}
+
+/// Wrapper for async handlers with 7 extractors.
+pub struct AsyncCxFnHandler7<F, T1, T2, T3, T4, T5, T6, T7> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6, T7)>,
+}
+
+impl<F, T1, T2, T3, T4, T5, T6, T7> AsyncCxFnHandler7<F, T1, T2, T3, T4, T5, T6, T7> {
+    /// Wrap an async Cx-aware function with 7 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, Fut, Res, T1, T2, T3, T4, T5, T6, T7> Handler
+    for AsyncCxFnHandler7<F, T1, T2, T3, T4, T5, T6, T7>
+where
+    F: Fn(Cx, T1, T2, T3, T4, T5, T6, T7) -> Fut + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequestParts + Send + Sync + 'static,
+    T5: FromRequestParts + Send + Sync + 'static,
+    T6: FromRequestParts + Send + Sync + 'static,
+    T7: FromRequest + Send + Sync + 'static,
+    Fut: Future<Output = Res> + Send,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4, t5, t6, t7) =
+                match extract_arg_7::<T1, T2, T3, T4, T5, T6, T7>(req) {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                };
+            run_async_cx_handler(cx, |handler_cx| {
+                func(handler_cx, t1, t2, t3, t4, t5, t6, t7)
+            })
+            .await
+        })
+    }
+}
+
+/// Wrapper for async handlers with 8 extractors.
+pub struct AsyncCxFnHandler8<F, T1, T2, T3, T4, T5, T6, T7, T8> {
+    func: F,
+    _marker: std::marker::PhantomData<(T1, T2, T3, T4, T5, T6, T7, T8)>,
+}
+
+impl<F, T1, T2, T3, T4, T5, T6, T7, T8> AsyncCxFnHandler8<F, T1, T2, T3, T4, T5, T6, T7, T8> {
+    /// Wrap an async Cx-aware function with 8 extractors.
+    pub fn new(func: F) -> Self {
+        Self {
+            func,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, Fut, Res, T1, T2, T3, T4, T5, T6, T7, T8> Handler
+    for AsyncCxFnHandler8<F, T1, T2, T3, T4, T5, T6, T7, T8>
+where
+    F: Fn(Cx, T1, T2, T3, T4, T5, T6, T7, T8) -> Fut + Send + Sync + 'static,
+    T1: FromRequestParts + Send + Sync + 'static,
+    T2: FromRequestParts + Send + Sync + 'static,
+    T3: FromRequestParts + Send + Sync + 'static,
+    T4: FromRequestParts + Send + Sync + 'static,
+    T5: FromRequestParts + Send + Sync + 'static,
+    T6: FromRequestParts + Send + Sync + 'static,
+    T7: FromRequestParts + Send + Sync + 'static,
+    T8: FromRequest + Send + Sync + 'static,
+    Fut: Future<Output = Res> + Send,
+    Res: IntoResponse,
+{
+    #[inline]
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4, t5, t6, t7, t8) =
+                match extract_arg_8::<T1, T2, T3, T4, T5, T6, T7, T8>(req) {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                };
+            run_async_cx_handler(cx, |handler_cx| {
+                func(handler_cx, t1, t2, t3, t4, t5, t6, t7, t8)
+            })
+            .await
+        })
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -532,7 +1046,7 @@ mod tests {
     use crate::runtime::RuntimeBuilder;
     use crate::time::TimerDriverHandle;
     use crate::types::Budget;
-    use crate::web::extract::{Json, Path, Query};
+    use crate::web::extract::{Accept, Header, Json, Path, Query, State, UserAgent};
     use crate::web::response::StatusCode;
 
     #[test]
@@ -654,6 +1168,127 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
             "req-123:green:42:created"
+        );
+    }
+
+    #[test]
+    fn handler_five_extractors() {
+        #[allow(clippy::needless_pass_by_value)]
+        fn audit(
+            Path(id): Path<String>,
+            Query(query): Query<HashMap<String, String>>,
+            Header(agent): Header<UserAgent>,
+            mut headers: HashMap<String, String>,
+            Json(payload): Json<HashMap<String, String>>,
+        ) -> String {
+            let req_id = headers
+                .remove("x-request-id")
+                .expect("x-request-id header present");
+            let tenant = query.get("tenant").expect("tenant query");
+            let event = payload.get("event").expect("event key");
+            format!("{req_id}:{tenant}:{id}:{}:{event}", agent.as_str())
+        }
+
+        let handler = FnHandler5::<
+            _,
+            Path<String>,
+            Query<HashMap<String, String>>,
+            Header<UserAgent>,
+            HashMap<String, String>,
+            Json<HashMap<String, String>>,
+        >::new(audit);
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "42".to_string());
+        let req = Request::new("POST", "/users/42/audit")
+            .with_path_params(params)
+            .with_query("tenant=green")
+            .with_header("user-agent", "asupersync-test/1")
+            .with_header("x-request-id", "req-123")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from_static(br#"{"event":"created"}"#));
+
+        let cx = Cx::for_testing();
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
+        assert_eq!(handler.handler_name(), "FnHandler5");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            std::str::from_utf8(&resp.body).expect("utf8"),
+            "req-123:green:42:asupersync-test/1:created"
+        );
+    }
+
+    #[test]
+    fn handler_eight_extractors() {
+        #[derive(Clone)]
+        struct TenantConfig {
+            name: &'static str,
+        }
+
+        #[derive(Clone)]
+        struct FeatureFlags {
+            audit_enabled: bool,
+        }
+
+        #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+        fn audit(
+            Path(id): Path<String>,
+            Query(query): Query<HashMap<String, String>>,
+            Header(agent): Header<UserAgent>,
+            Header(accept): Header<Accept>,
+            State(config): State<TenantConfig>,
+            State(flags): State<FeatureFlags>,
+            mut headers: HashMap<String, String>,
+            Json(payload): Json<HashMap<String, String>>,
+        ) -> String {
+            let req_id = headers
+                .remove("x-request-id")
+                .expect("x-request-id header present");
+            let tenant = query.get("tenant").expect("tenant query");
+            let event = payload.get("event").expect("event key");
+            format!(
+                "{req_id}:{tenant}:{id}:{}:{}:{}:{event}:{}",
+                agent.as_str(),
+                accept.as_str(),
+                config.name,
+                flags.audit_enabled
+            )
+        }
+
+        let handler = FnHandler8::<
+            _,
+            Path<String>,
+            Query<HashMap<String, String>>,
+            Header<UserAgent>,
+            Header<Accept>,
+            State<TenantConfig>,
+            State<FeatureFlags>,
+            HashMap<String, String>,
+            Json<HashMap<String, String>>,
+        >::new(audit);
+
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "42".to_string());
+        let mut req = Request::new("POST", "/users/42/audit")
+            .with_path_params(params)
+            .with_query("tenant=green")
+            .with_header("user-agent", "asupersync-test/2")
+            .with_header("accept", "application/json")
+            .with_header("x-request-id", "req-456")
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from_static(br#"{"event":"updated"}"#));
+        req.extensions.insert_typed(TenantConfig { name: "green" });
+        req.extensions.insert_typed(FeatureFlags {
+            audit_enabled: true,
+        });
+
+        let cx = Cx::for_testing();
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
+        assert_eq!(handler.handler_name(), "FnHandler8");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            std::str::from_utf8(&resp.body).expect("utf8"),
+            "req-456:green:42:asupersync-test/2:application/json:green:updated:true"
         );
     }
 

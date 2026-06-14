@@ -42,6 +42,25 @@ const METHOD_PATCH: &str = "PATCH";
 const METHOD_HEAD: &str = "HEAD";
 const METHOD_OPTIONS: &str = "OPTIONS";
 
+/// Public route metadata returned by [`Router::routes`].
+///
+/// Each value represents one concrete method handler. A route registered with
+/// `get(...).post(...)` therefore produces two entries with the same pattern
+/// and different methods.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RouteInfo {
+    /// HTTP method handled by this route entry.
+    pub method: String,
+    /// Full route pattern, including any nested router mount prefix.
+    pub pattern: String,
+    /// Stable diagnostic name reported by the registered handler.
+    pub handler_name: &'static str,
+    /// Full mount prefix when the route came from a nested router.
+    ///
+    /// Top-level routes use `None`.
+    pub mount_prefix: Option<String>,
+}
+
 // ─── MethodRouter ────────────────────────────────────────────────────────────
 
 /// A set of handlers for different HTTP methods on a single route.
@@ -55,7 +74,7 @@ impl MethodRouter {
     fn new() -> Self {
         Self {
             handlers: HashMap::with_capacity(4),
-            method_not_allowed: Box::new(MethodNotAllowedHandler),
+            method_not_allowed: Box::new(MethodNotAllowedHandler::new(String::new())),
         }
     }
 
@@ -63,6 +82,7 @@ impl MethodRouter {
     fn on(mut self, method: &str, handler: impl Handler) -> Self {
         self.handlers
             .insert(method.to_uppercase(), Box::new(handler));
+        self.method_not_allowed = Box::new(MethodNotAllowedHandler::new(self.allow_header()));
         self
     }
 
@@ -120,9 +140,37 @@ impl MethodRouter {
             .collect();
         let method_not_allowed = std::mem::replace(
             &mut self.method_not_allowed,
-            Box::new(MethodNotAllowedHandler),
+            Box::new(MethodNotAllowedHandler::new(String::new())),
         );
         self.method_not_allowed = wrap(method_not_allowed);
+    }
+
+    /// Return registered methods in deterministic HTTP-conventional order.
+    #[must_use]
+    pub fn methods(&self) -> Vec<String> {
+        sorted_methods(self.handlers.keys().map(String::as_str))
+    }
+
+    fn allow_header(&self) -> String {
+        self.methods().join(", ")
+    }
+
+    fn route_entries(&self, pattern: &str, mount_prefix: Option<&str>) -> Vec<RouteInfo> {
+        let mut entries = self
+            .handlers
+            .iter()
+            .map(|(method, handler)| RouteInfo {
+                method: method.clone(),
+                pattern: pattern.to_string(),
+                handler_name: handler.handler_name(),
+                mount_prefix: mount_prefix.map(ToOwned::to_owned),
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            compare_methods(&left.method, &right.method)
+                .then_with(|| left.handler_name.cmp(right.handler_name))
+        });
+        entries
     }
 
     /// Dispatch a request to the appropriate method handler.
@@ -140,7 +188,15 @@ impl MethodRouter {
     }
 }
 
-struct MethodNotAllowedHandler;
+struct MethodNotAllowedHandler {
+    allow: String,
+}
+
+impl MethodNotAllowedHandler {
+    fn new(allow: String) -> Self {
+        Self { allow }
+    }
+}
 
 impl Handler for MethodNotAllowedHandler {
     fn call(
@@ -148,7 +204,40 @@ impl Handler for MethodNotAllowedHandler {
         _cx: &Cx,
         _req: Request,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
-        Box::pin(async { StatusCode::METHOD_NOT_ALLOWED.into_response() })
+        let allow = self.allow.clone();
+        Box::pin(async move {
+            let mut resp = StatusCode::METHOD_NOT_ALLOWED.into_response();
+            if !allow.is_empty() {
+                resp.set_header("allow", allow);
+            }
+            resp
+        })
+    }
+}
+
+fn sorted_methods<'a>(methods: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut methods = methods
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<String>>();
+    methods.sort_by(|left, right| compare_methods(left, right));
+    methods
+}
+
+fn compare_methods(left: &str, right: &str) -> std::cmp::Ordering {
+    method_sort_key(left).cmp(&method_sort_key(right))
+}
+
+fn method_sort_key(method: &str) -> (u8, &str) {
+    match method {
+        METHOD_GET => (0, method),
+        METHOD_POST => (1, method),
+        METHOD_PUT => (2, method),
+        METHOD_DELETE => (3, method),
+        METHOD_PATCH => (4, method),
+        METHOD_HEAD => (5, method),
+        METHOD_OPTIONS => (6, method),
+        _ => (7, method),
     }
 }
 
@@ -670,6 +759,81 @@ impl Router {
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }
+
+    /// Return the number of top-level nested routers.
+    #[must_use]
+    pub fn nested_router_count(&self) -> usize {
+        self.nested.len()
+    }
+
+    /// Return whether this router has a fallback handler.
+    #[must_use]
+    pub fn has_fallback(&self) -> bool {
+        self.fallback.is_some()
+    }
+
+    /// Return a deterministic list of registered route method handlers.
+    ///
+    /// Nested router entries are reported with their full mount prefix in
+    /// [`RouteInfo::pattern`] and [`RouteInfo::mount_prefix`]. The final list is
+    /// sorted by full pattern, then by HTTP-conventional method order.
+    #[must_use]
+    pub fn routes(&self) -> Vec<RouteInfo> {
+        let mut entries = Vec::new();
+        self.collect_routes("", None, &mut entries);
+        entries.sort_by(|left, right| {
+            left.pattern
+                .cmp(&right.pattern)
+                .then_with(|| compare_methods(&left.method, &right.method))
+                .then_with(|| left.handler_name.cmp(right.handler_name))
+        });
+        entries
+    }
+
+    fn collect_routes(
+        &self,
+        prefix: &str,
+        mount_prefix: Option<&str>,
+        entries: &mut Vec<RouteInfo>,
+    ) {
+        for (pattern, method_router) in &self.routes {
+            let full_pattern = join_route_pattern(prefix, &pattern.raw);
+            entries.extend(method_router.route_entries(&full_pattern, mount_prefix));
+        }
+
+        for (nested_prefix, router) in &self.nested {
+            let full_prefix = join_route_pattern(prefix, nested_prefix);
+            router.collect_routes(&full_prefix, Some(&full_prefix), entries);
+        }
+    }
+}
+
+fn join_route_pattern(prefix: &str, pattern: &str) -> String {
+    let prefix = normalize_route_pattern(prefix);
+    let pattern = normalize_route_pattern(pattern);
+
+    if prefix == "/" {
+        return pattern;
+    }
+    if pattern == "/" {
+        return prefix;
+    }
+
+    format!(
+        "{}/{}",
+        prefix.trim_end_matches('/'),
+        pattern.trim_start_matches('/')
+    )
+}
+
+fn normalize_route_pattern(pattern: &str) -> String {
+    if pattern.is_empty() || pattern == "/" {
+        "/".to_string()
+    } else if pattern.starts_with('/') {
+        pattern.to_string()
+    } else {
+        format!("/{pattern}")
+    }
 }
 
 /// Strip a prefix from a path, returning the remainder.
@@ -754,6 +918,7 @@ mod tests {
 
         let resp = router.handle(Request::new("POST", "/"));
         assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(resp.header_value("allow"), Some("GET"));
     }
 
     #[test]
@@ -947,6 +1112,10 @@ mod tests {
 
         let resp_post = router.handle(Request::new("POST", "/items"));
         assert_eq!(resp_post.status, StatusCode::CREATED);
+
+        let resp_patch = router.handle(Request::new("PATCH", "/items"));
+        assert_eq!(resp_patch.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(resp_patch.header_value("allow"), Some("GET, POST"));
     }
 
     #[test]
@@ -1254,6 +1423,75 @@ mod tests {
             .route("/a", get(FnHandler::new(ok_handler)))
             .route("/b", get(FnHandler::new(ok_handler)));
         assert_eq!(router.route_count(), 2);
+    }
+
+    #[test]
+    fn router_routes_lists_direct_and_nested_entries_deterministically() {
+        let api = Router::new()
+            .route(
+                "/users",
+                post(FnHandler::new(created_handler)).get(FnHandler::new(ok_handler)),
+            )
+            .route("/", delete(FnHandler::new(not_found_handler)));
+
+        let router = Router::new()
+            .route(
+                "/items",
+                post(FnHandler::new(created_handler)).get(FnHandler::new(ok_handler)),
+            )
+            .route("/items/:id", delete(FnHandler::new(not_found_handler)))
+            .nest("/api", api);
+
+        let routes = router.routes();
+        let serialized = serde_json::to_value(&routes).expect("route info must serialize");
+        assert_eq!(serialized[0]["method"], "DELETE");
+        assert_eq!(serialized[0]["pattern"], "/api");
+        assert_eq!(serialized[0]["handler_name"], "FnHandler");
+        assert_eq!(serialized[0]["mount_prefix"], "/api");
+
+        let got = routes
+            .into_iter()
+            .map(|route| {
+                (
+                    route.method,
+                    route.pattern,
+                    route.handler_name,
+                    route.mount_prefix,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "DELETE".to_string(),
+                    "/api".to_string(),
+                    "FnHandler",
+                    Some("/api".to_string())
+                ),
+                (
+                    "GET".to_string(),
+                    "/api/users".to_string(),
+                    "FnHandler",
+                    Some("/api".to_string())
+                ),
+                (
+                    "POST".to_string(),
+                    "/api/users".to_string(),
+                    "FnHandler",
+                    Some("/api".to_string())
+                ),
+                ("GET".to_string(), "/items".to_string(), "FnHandler", None),
+                ("POST".to_string(), "/items".to_string(), "FnHandler", None),
+                (
+                    "DELETE".to_string(),
+                    "/items/:id".to_string(),
+                    "FnHandler",
+                    None
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1787,6 +2025,7 @@ mod tests {
 
             let resp = router.handle(Request::new("POST", "/traced"));
             assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(resp.header_value("allow"), Some("GET"));
             assert_eq!(
                 *log.lock().expect("log lock"),
                 vec!["enter:mw".to_string(), "exit:mw".to_string()],
@@ -2092,6 +2331,7 @@ mod tests {
 
             let _ = router.handle(Request::new("GET", "/ok"));
             let _ = router.handle(Request::new("GET", "/boom"));
+            let _ = router.handle(Request::new("POST", "/ok"));
             let _ = router.handle(Request::new("GET", "/missing"));
 
             let got =
@@ -2118,12 +2358,22 @@ mod tests {
                     "cancel_reason": null
                 },
                 {
+                    "method": "POST",
+                    "path": "/ok",
+                    "status": 405,
+                    "severity": "client_error",
+                    "duration_ms": 0,
+                    "request_id": "req-3",
+                    "cancelled": false,
+                    "cancel_reason": null
+                },
+                {
                     "method": "GET",
                     "path": "/missing",
                     "status": 404,
                     "severity": "client_error",
                     "duration_ms": 0,
-                    "request_id": "req-3",
+                    "request_id": "req-4",
                     "cancelled": false,
                     "cancel_reason": null
                 }
