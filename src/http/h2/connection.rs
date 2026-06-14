@@ -895,7 +895,7 @@ impl Connection {
         let max = self.local_settings.max_concurrent_streams as usize;
         let threshold = std::cmp::min(max, 16_384).saturating_mul(2);
         if self.streams.len() > threshold {
-            self.streams.prune_closed();
+            self.prune_closed_streams_without_pending_frames();
         }
 
         result
@@ -1890,6 +1890,13 @@ impl Connection {
             .any(|op| op.references_stream(stream_id))
     }
 
+    fn prune_closed_streams_without_pending_frames(&mut self) {
+        let pending_ops = &self.pending_ops;
+        self.streams.prune_closed_except(|stream_id| {
+            pending_ops.iter().any(|op| op.references_stream(stream_id))
+        });
+    }
+
     /// Send a WINDOW_UPDATE for connection-level flow control.
     ///
     /// # Errors
@@ -1948,7 +1955,7 @@ impl Connection {
 
     /// Prune closed streams.
     pub fn prune_closed_streams(&mut self) {
-        self.streams.prune_closed();
+        self.prune_closed_streams_without_pending_frames();
     }
 }
 
@@ -4924,6 +4931,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn prune_closed_streams_preserves_blocked_final_data() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        let request = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/blocked-final-data"),
+            false,
+            true,
+        ));
+        conn.process_frame(request).unwrap();
+
+        conn.send_headers(1, vec![Header::new(":status", "200")], false)
+            .unwrap();
+        conn.streams
+            .get_mut(1)
+            .unwrap()
+            .consume_send_window(DEFAULT_CONNECTION_WINDOW_SIZE as u32);
+        conn.send_data(1, Bytes::from_static(b"final"), true)
+            .unwrap();
+        assert_eq!(conn.stream(1).unwrap().state(), StreamState::Closed);
+
+        match conn
+            .next_frame()
+            .expect("response HEADERS should flush first")
+        {
+            Frame::Headers(frame) => assert_eq!(frame.stream_id, 1),
+            other => panic!("expected response HEADERS, got {other:?}"),
+        }
+        assert!(
+            conn.next_frame().is_none(),
+            "zero stream send window keeps final DATA queued"
+        );
+        assert!(conn.has_pending_frames_for_stream(1));
+
+        conn.prune_closed_streams();
+        assert!(
+            conn.stream(1).is_some(),
+            "closed stream with blocked final DATA must survive pruning"
+        );
+
+        conn.streams
+            .get_mut(1)
+            .unwrap()
+            .update_send_window(5)
+            .unwrap();
+        match conn.next_frame().expect("blocked final DATA should flush") {
+            Frame::Data(frame) => {
+                assert_eq!(frame.stream_id, 1);
+                assert_eq!(&frame.data[..], b"final");
+                assert!(frame.end_stream);
+            }
+            other => panic!("expected final DATA frame, got {other:?}"),
+        }
+
+        assert!(!conn.has_pending_frames_for_stream(1));
+        conn.prune_closed_streams();
+        assert!(
+            conn.stream(1).is_none(),
+            "closed stream is pruned after its queued frames flush"
+        );
     }
 
     #[test]

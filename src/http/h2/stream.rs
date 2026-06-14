@@ -1313,6 +1313,15 @@ impl StreamStore {
         self.retain_streams(|_, stream| !stream.state.is_closed());
     }
 
+    /// Remove closed streams unless the caller still needs their stream id
+    /// for queued connection-layer work.
+    pub fn prune_closed_except<F>(&mut self, mut keep_closed: F)
+    where
+        F: FnMut(u32) -> bool,
+    {
+        self.retain_streams(|id, stream| !stream.state.is_closed() || keep_closed(id));
+    }
+
     /// Get all active stream IDs.
     ///
     /// Uses the same `is_active()` predicate as [`active_count`] so
