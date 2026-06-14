@@ -838,7 +838,7 @@ This runtime got fast through many small, verified runtime changes by the projec
 
 ## Networking & Protocol Stack
 
-Asupersync ships a cancel-safe networking stack from raw sockets through application protocols. Every layer participates in structured concurrency: reads and writes respect region budgets, cancellation drains connections cleanly, and the lab runtime can substitute virtual TCP for deterministic network testing.
+Asupersync ships a structured networking stack from raw sockets through application protocols. Runtime-owned endpoints participate in structured concurrency, readiness/registration cleanup is explicit, and the lab runtime can substitute virtual TCP for deterministic network testing. Cancel-safety is operation-specific: atomic datagram sends and covered two-phase/adapter surfaces state their guarantees, while partial byte-stream reads and writes such as `read_exact` and `write_all` retain their documented cancellation boundaries.
 
 Reactor and I/O paths are also hardened for long-lived production behavior:
 
