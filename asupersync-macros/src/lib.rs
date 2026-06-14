@@ -159,10 +159,10 @@ pub fn spawn(input: TokenStream) -> TokenStream {
 
 /// Joins multiple futures, waiting for all to complete.
 ///
-/// The `join!` macro is a supported proc-macro convenience surface, but the
-/// current implementation still awaits branches sequentially. It preserves
-/// left-to-right evaluation and tuple ordering today; parallel polling remains
-/// future work.
+/// The `join!` macro polls all branches concurrently inside the enclosing task
+/// and returns their outputs as a tuple in input order. A pending branch never
+/// blocks ready branches from making progress, so same-duration sleeps complete
+/// in one duration rather than the sum of all durations.
 ///
 /// # Syntax
 ///
@@ -197,8 +197,9 @@ pub fn join(input: TokenStream) -> TokenStream {
 /// Joins multiple futures into an array, waiting for all to complete.
 ///
 /// The `join_all!` macro is like `join!` but returns an array instead of a
-/// tuple. Like `join!`, the current implementation still awaits branches
-/// sequentially.
+/// tuple. It uses the same concurrent polling expansion, so all branches are
+/// driven together within the enclosing task while preserving input order in
+/// the returned array.
 ///
 /// # Syntax
 ///

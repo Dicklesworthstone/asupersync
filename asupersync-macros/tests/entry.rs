@@ -1,3 +1,5 @@
+#![doc = "Integration tests for asupersync production-runtime entry macros."]
+
 #[asupersync_macros::test]
 async fn entry_asupersync_test_without_cx_runs() {
     assert_eq!(2 + 2, 4);
