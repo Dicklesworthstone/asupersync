@@ -4,7 +4,8 @@
 //! ([`crate::http::h2::connection::ReceivedFrame::Headers`] header blocks)
 //! and the shared [`crate::http::h1::types`] `Request`/`Response` handler
 //! types, so one `Fn(Request) -> impl Future<Output = Response>` handler
-//! serves both the HTTP/1.1 and HTTP/2 listener stacks.
+//! serves both the HTTP/1.1 and HTTP/2 listener stacks. H2-aware handlers can
+//! instead return [`Http2Response`] to opt into explicit server push.
 //!
 //! The accept-loop `Http2Listener` and per-connection frame-pump driver land
 //! in the next increments (full design recorded on the bead): preface +
@@ -374,6 +375,175 @@ pub(crate) fn h2_headers_from_response(response: &Response) -> Vec<Header> {
     out
 }
 
+/// H2-only response wrapper that can carry explicit server-push promises.
+///
+/// Plain [`Response`] handlers still work through [`IntoHttp2Response`]. A
+/// handler that wants HTTP/2 server push returns this wrapper and appends
+/// [`Http2ServerPush`] entries in deterministic order.
+#[derive(Debug, Clone)]
+pub struct Http2Response {
+    /// Main response for the associated request stream.
+    pub response: Response,
+    /// Ordered server-push entries to promise before the main response.
+    pub pushes: Vec<Http2ServerPush>,
+}
+
+impl Http2Response {
+    /// Create a response wrapper with no pushes.
+    #[must_use]
+    pub fn new(response: Response) -> Self {
+        Self {
+            response,
+            pushes: Vec::new(),
+        }
+    }
+
+    /// Add one server-push entry.
+    #[must_use]
+    pub fn with_push(mut self, push: Http2ServerPush) -> Self {
+        self.pushes.push(push);
+        self
+    }
+
+    /// Add multiple server-push entries in caller-provided order.
+    #[must_use]
+    pub fn with_pushes(mut self, pushes: impl IntoIterator<Item = Http2ServerPush>) -> Self {
+        self.pushes.extend(pushes);
+        self
+    }
+}
+
+impl From<Response> for Http2Response {
+    fn from(response: Response) -> Self {
+        Self::new(response)
+    }
+}
+
+/// Conversion trait accepted by the HTTP/2 listener handler.
+pub trait IntoHttp2Response {
+    /// Convert into the H2 response envelope consumed by the listener.
+    fn into_h2_response(self) -> Http2Response;
+}
+
+impl IntoHttp2Response for Response {
+    fn into_h2_response(self) -> Http2Response {
+        self.into()
+    }
+}
+
+impl IntoHttp2Response for Http2Response {
+    fn into_h2_response(self) -> Http2Response {
+        self
+    }
+}
+
+/// One server-push promise plus the response to send on the promised stream.
+#[derive(Debug, Clone)]
+pub struct Http2ServerPush {
+    /// Request header block carried by PUSH_PROMISE.
+    pub request_headers: Vec<Header>,
+    /// Response to send on the promised stream.
+    pub response: Response,
+}
+
+impl Http2ServerPush {
+    /// Create a server-push entry with a caller-supplied promised request block.
+    #[must_use]
+    pub fn new(request_headers: Vec<Header>, response: Response) -> Self {
+        Self {
+            request_headers,
+            response,
+        }
+    }
+
+    /// Create a GET push promise for an HTTPS resource.
+    #[must_use]
+    pub fn get(path: impl Into<String>, authority: impl Into<String>, response: Response) -> Self {
+        Self::get_with_scheme("https", path, authority, response)
+    }
+
+    /// Create a GET push promise with an explicit scheme.
+    #[must_use]
+    pub fn get_with_scheme(
+        scheme: impl Into<String>,
+        path: impl Into<String>,
+        authority: impl Into<String>,
+        response: Response,
+    ) -> Self {
+        Self {
+            request_headers: vec![
+                Header::new(":method", "GET"),
+                Header::new(":scheme", scheme),
+                Header::new(":path", path),
+                Header::new(":authority", authority),
+            ],
+            response,
+        }
+    }
+
+    /// Append a regular request header to the promised request block.
+    #[must_use]
+    pub fn with_request_header(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.request_headers.push(Header::new(name, value));
+        self
+    }
+}
+
+/// Outcome for each requested server push.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Http2PushOutcome {
+    /// PUSH_PROMISE was queued and a promised stream was reserved.
+    Promised {
+        /// Associated client-initiated request stream.
+        associated_stream_id: u32,
+        /// Reserved promised stream id.
+        promised_stream_id: u32,
+    },
+    /// Push was not queued; the main response can still proceed.
+    NotPushed {
+        /// Associated client-initiated request stream.
+        associated_stream_id: u32,
+        /// Reason the push was not emitted.
+        reason: Http2PushRejection,
+    },
+}
+
+/// Typed reason a server push could not be queued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Http2PushRejection {
+    /// Peer advertised `SETTINGS_ENABLE_PUSH = 0`.
+    PeerDisabled,
+    /// GOAWAY or drain state prevents opening new promised streams.
+    ConnectionClosing,
+    /// Any other H2 rejection, captured without requiring `H2Error: Clone`.
+    Rejected {
+        /// H2 error code.
+        code: ErrorCode,
+        /// Optional stream id attached by the connection layer.
+        stream_id: Option<u32>,
+        /// Human-readable reason from the connection layer.
+        message: String,
+    },
+}
+
+fn classify_push_rejection(err: &H2Error) -> Http2PushRejection {
+    if err.code == ErrorCode::RefusedStream && err.message == "peer disabled server push" {
+        Http2PushRejection::PeerDisabled
+    } else if err.message.contains("GOAWAY") {
+        Http2PushRejection::ConnectionClosing
+    } else {
+        Http2PushRejection::Rejected {
+            code: err.code,
+            stream_id: err.stream_id,
+            message: err.message.clone(),
+        }
+    }
+}
+
 /// RAII in-flight request counter guard (mirrors the HTTP/1.1 server's
 /// guard): acquired when a complete request is dispatched to its handler,
 /// released after the stream's response frames have left the connection queue.
@@ -422,7 +592,7 @@ async fn race_force_close<F: Future>(signal: &ShutdownSignal, fut: F) -> Option<
 /// the in-flight guard so accounting is released only after the response
 /// frames are queued. The trailing flag records whether the originating
 /// request was HEAD and therefore must not receive DATA frames.
-type FunnelItem = (u32, Response, InFlightRequestGuard, bool);
+type FunnelItem = (u32, Http2Response, InFlightRequestGuard, bool);
 
 fn release_flushed_response_guards(
     conn: &Connection,
@@ -434,16 +604,20 @@ fn release_flushed_response_guards(
 fn queue_h2_response(
     conn: &mut Connection,
     stream_id: u32,
-    mut response: Response,
+    response: impl IntoHttp2Response,
     guard: InFlightRequestGuard,
     suppress_response_body: bool,
     response_guards: &mut HashMap<u32, InFlightRequestGuard>,
-) {
+) -> Vec<Http2PushOutcome> {
+    let mut response = response.into_h2_response();
     if suppress_response_body {
-        suppress_response_body_for_head(&mut response);
+        suppress_response_body_for_head(&mut response.response);
     }
-    let header_block = h2_headers_from_response(&response);
-    let end_stream = response.body.is_empty();
+    let push_outcomes = queue_h2_server_pushes(conn, stream_id, &response.pushes);
+
+    let header_block = h2_headers_from_response(&response.response);
+    let body = std::mem::take(&mut response.response.body);
+    let end_stream = body.is_empty();
     let mut queued_response = false;
     if conn
         .send_headers(stream_id, header_block, end_stream)
@@ -451,7 +625,7 @@ fn queue_h2_response(
     {
         queued_response = true;
         if !end_stream {
-            let _ = conn.send_data(stream_id, crate::bytes::Bytes::from(response.body), true);
+            let _ = conn.send_data(stream_id, crate::bytes::Bytes::from(body), true);
         }
     }
 
@@ -464,6 +638,59 @@ fn queue_h2_response(
     } else {
         drop(guard);
     }
+
+    push_outcomes
+}
+
+fn queue_h2_server_pushes(
+    conn: &mut Connection,
+    associated_stream_id: u32,
+    pushes: &[Http2ServerPush],
+) -> Vec<Http2PushOutcome> {
+    let mut outcomes = Vec::with_capacity(pushes.len());
+    for push in pushes {
+        let promised_stream_id =
+            match conn.send_push_promise(associated_stream_id, push.request_headers.clone()) {
+                Ok(promised_stream_id) => promised_stream_id,
+                Err(err) => {
+                    outcomes.push(Http2PushOutcome::NotPushed {
+                        associated_stream_id,
+                        reason: classify_push_rejection(&err),
+                    });
+                    continue;
+                }
+            };
+
+        let mut pushed_response = push.response.clone();
+        let header_block = h2_headers_from_response(&pushed_response);
+        let body = std::mem::take(&mut pushed_response.body);
+        let end_stream = body.is_empty();
+        if let Err(err) = conn.send_headers(promised_stream_id, header_block, end_stream) {
+            conn.reset_stream(promised_stream_id, err.code);
+            outcomes.push(Http2PushOutcome::NotPushed {
+                associated_stream_id,
+                reason: classify_push_rejection(&err),
+            });
+            continue;
+        }
+        if !end_stream
+            && let Err(err) =
+                conn.send_data(promised_stream_id, crate::bytes::Bytes::from(body), true)
+        {
+            conn.reset_stream(promised_stream_id, err.code);
+            outcomes.push(Http2PushOutcome::NotPushed {
+                associated_stream_id,
+                reason: classify_push_rejection(&err),
+            });
+            continue;
+        }
+
+        outcomes.push(Http2PushOutcome::Promised {
+            associated_stream_id,
+            promised_stream_id,
+        });
+    }
+    outcomes
 }
 
 fn replace_or_insert_header(resp: &mut Response, header_name: &str, header_value: String) {
@@ -601,7 +828,7 @@ async fn next_driver_event(
 /// guard. Mapping failures reset the stream rather than killing the
 /// connection.
 #[allow(clippy::too_many_arguments)]
-fn dispatch_h2_request<F, Fut>(
+fn dispatch_h2_request<F, Fut, R>(
     conn: &mut Connection,
     stream_id: u32,
     headers: Vec<Header>,
@@ -614,7 +841,8 @@ fn dispatch_h2_request<F, Fut>(
     runtime: &RuntimeHandle,
 ) where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response> + Send + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp2Response + Send + 'static,
 {
     let request = match request_from_h2_headers(headers, body, peer_addr) {
         Ok(request) => request,
@@ -645,7 +873,7 @@ fn dispatch_h2_request<F, Fut>(
             return;
         };
         let response = match handler_result {
-            Ok(response) => response,
+            Ok(response) => response.into_h2_response(),
             Err(payload) => {
                 // Match h1's panic isolation contract: the connection driver
                 // survives the handler panic and completes the stream with a
@@ -655,7 +883,7 @@ fn dispatch_h2_request<F, Fut>(
                     message = %crate::cx::scope::payload_to_string(&payload),
                     "h2 handler task panicked"
                 );
-                Response::new(500, "Internal Server Error", Vec::new())
+                Response::new(500, "Internal Server Error", Vec::new()).into_h2_response()
             }
         };
         if let Ok(permit) = resp_tx.reserve(&cx).await {
@@ -678,7 +906,7 @@ fn dispatch_h2_request<F, Fut>(
 /// tick later, transport close at
 /// [`Connection::graceful_shutdown_complete`].
 #[allow(clippy::too_many_lines)]
-async fn serve_h2_connection<F, Fut>(
+async fn serve_h2_connection<F, Fut, R>(
     mut stream: TcpStream,
     peer_addr: Option<SocketAddr>,
     handler: Arc<F>,
@@ -690,7 +918,8 @@ async fn serve_h2_connection<F, Fut>(
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response> + Send + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp2Response + Send + 'static,
 {
     let task_cx = Cx::current()
         .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
@@ -1014,10 +1243,11 @@ pub struct Http2Listener<F> {
     in_flight_requests: Arc<AtomicUsize>,
 }
 
-impl<F, Fut> Http2Listener<F>
+impl<F, Fut, R> Http2Listener<F>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Response> + Send + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp2Response + Send + 'static,
 {
     /// Bind to the given address with default configuration.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A, handler: F) -> io::Result<Self> {
@@ -1679,9 +1909,9 @@ mod tests {
                 .await
                 .expect("panic response must be sent through funnel");
             assert_eq!(response_stream, 1);
-            assert_eq!(response.status, 500);
-            assert_eq!(response.reason, "Internal Server Error");
-            assert!(response.body.is_empty());
+            assert_eq!(response.response.status, 500);
+            assert_eq!(response.response.reason, "Internal Server Error");
+            assert!(response.response.body.is_empty());
             assert!(!suppress_response_body);
             assert_eq!(
                 in_flight.load(Ordering::Acquire),
@@ -1802,6 +2032,175 @@ mod tests {
         let block = h2_headers_from_response(&response);
         assert_eq!(block.len(), 2);
         assert_eq!(block[1], Header::new("te", "trailers"));
+    }
+
+    #[test]
+    fn plain_response_converts_to_h2_response_without_pushes() {
+        let response = Response::new(200, "OK", b"plain".to_vec());
+        let h2_response = response.into_h2_response();
+
+        assert_eq!(h2_response.response.status, 200);
+        assert!(h2_response.pushes.is_empty());
+    }
+
+    #[test]
+    fn queue_h2_response_promises_pushed_resource_before_parent_response() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new()
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/index.html"),
+            (":authority", "push.example"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(matches!(
+            received,
+            Some(ReceivedFrame::Headers { stream_id: 1, .. })
+        ));
+
+        let pushed = Http2ServerPush::get(
+            "/style.css",
+            "push.example",
+            Response::new(200, "OK", b"css".to_vec()).with_header("Content-Type", "text/css"),
+        );
+        let response =
+            Http2Response::new(Response::new(200, "OK", b"html".to_vec())).with_push(pushed);
+        let mut response_guards = HashMap::new();
+        let outcomes = queue_h2_response(
+            &mut conn,
+            1,
+            response,
+            InFlightRequestGuard::acquire(None),
+            false,
+            &mut response_guards,
+        );
+
+        assert_eq!(
+            outcomes,
+            vec![Http2PushOutcome::Promised {
+                associated_stream_id: 1,
+                promised_stream_id: 2
+            }]
+        );
+
+        match conn.next_frame().expect("PUSH_PROMISE should lead") {
+            Frame::PushPromise(push) => {
+                assert_eq!(push.stream_id, 1);
+                assert_eq!(push.promised_stream_id, 2);
+                assert!(push.end_headers);
+            }
+            other => panic!("expected PUSH_PROMISE, got {other:?}"),
+        }
+        match conn.next_frame().expect("promised response headers") {
+            Frame::Headers(headers) => {
+                assert_eq!(headers.stream_id, 2);
+                assert!(!headers.end_stream);
+            }
+            other => panic!("expected promised response HEADERS, got {other:?}"),
+        }
+        match conn.next_frame().expect("promised response body") {
+            Frame::Data(data) => {
+                assert_eq!(data.stream_id, 2);
+                assert_eq!(data.data, crate::bytes::Bytes::from_static(b"css"));
+                assert!(data.end_stream);
+            }
+            other => panic!("expected promised response DATA, got {other:?}"),
+        }
+        match conn.next_frame().expect("parent response headers") {
+            Frame::Headers(headers) => {
+                assert_eq!(headers.stream_id, 1);
+                assert!(!headers.end_stream);
+            }
+            other => panic!("expected parent response HEADERS, got {other:?}"),
+        }
+        match conn.next_frame().expect("parent response body") {
+            Frame::Data(data) => {
+                assert_eq!(data.stream_id, 1);
+                assert_eq!(data.data, crate::bytes::Bytes::from_static(b"html"));
+                assert!(data.end_stream);
+            }
+            other => panic!("expected parent response DATA, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_h2_response_reports_peer_disabled_no_push() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                vec![crate::http::h2::frame::Setting::EnablePush(false)]
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/index.html"),
+            (":authority", "push.example"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(matches!(
+            received,
+            Some(ReceivedFrame::Headers { stream_id: 1, .. })
+        ));
+
+        let response = Http2Response::new(Response::new(200, "OK", Vec::new())).with_push(
+            Http2ServerPush::get(
+                "/style.css",
+                "push.example",
+                Response::new(200, "OK", Vec::new()),
+            ),
+        );
+        let mut response_guards = HashMap::new();
+        let outcomes = queue_h2_response(
+            &mut conn,
+            1,
+            response,
+            InFlightRequestGuard::acquire(None),
+            false,
+            &mut response_guards,
+        );
+
+        assert_eq!(
+            outcomes,
+            vec![Http2PushOutcome::NotPushed {
+                associated_stream_id: 1,
+                reason: Http2PushRejection::PeerDisabled
+            }]
+        );
+        assert!(conn.stream(2).is_none());
+        match conn.next_frame().expect("parent response still queues") {
+            Frame::Headers(headers) => {
+                assert_eq!(headers.stream_id, 1);
+                assert!(headers.end_stream);
+            }
+            other => panic!("expected parent response HEADERS, got {other:?}"),
+        }
+        assert!(conn.next_frame().is_none());
     }
 
     #[test]
