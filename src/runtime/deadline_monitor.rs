@@ -86,6 +86,8 @@ pub struct DeadlineWarning {
     pub last_checkpoint: Option<Time>,
     /// Message from the last checkpoint.
     pub last_checkpoint_message: Option<String>,
+    /// Oldest-to-newest bounded checkpoint message trail.
+    pub checkpoint_history: Vec<(Time, String)>,
     /// Warning reason.
     pub reason: WarningReason,
 }
@@ -169,6 +171,7 @@ pub(crate) struct DeadlineTaskSnapshot {
     deadline: Option<Time>,
     last_checkpoint: Option<Time>,
     last_checkpoint_message: Option<String>,
+    checkpoint_history: Vec<(Time, String)>,
     checkpoint_count: u64,
     task_type: Option<String>,
 }
@@ -184,6 +187,7 @@ impl DeadlineTaskSnapshot {
         deadline: Option<Time>,
         last_checkpoint: Option<Time>,
         last_checkpoint_message: Option<String>,
+        checkpoint_history: Vec<(Time, String)>,
         checkpoint_count: u64,
         task_type: Option<String>,
     ) -> Self {
@@ -195,6 +199,7 @@ impl DeadlineTaskSnapshot {
             deadline,
             last_checkpoint,
             last_checkpoint_message,
+            checkpoint_history,
             checkpoint_count,
             task_type,
         }
@@ -202,24 +207,37 @@ impl DeadlineTaskSnapshot {
 
     #[must_use]
     pub(crate) fn from_task_record(task: &TaskRecord) -> Self {
-        let (deadline, last_checkpoint, last_checkpoint_message, checkpoint_count, task_type) =
-            task.cx_inner
-                .as_ref()
-                .map_or((None, None, None, 0, None), |inner| {
-                    let guard = inner.read();
-                    // Materialise: include any pending fast-path checkpoint
-                    // accounting so stuck-task detection is not fooled by
-                    // tasks that took the no-cancellation fast path in
-                    // Cx::checkpoint (br-asupersync-is2xg0).
-                    let materialised = guard.materialised_checkpoint_state();
-                    (
-                        guard.budget.deadline,
-                        materialised.last_checkpoint,
-                        materialised.last_message,
-                        materialised.checkpoint_count,
-                        guard.task_type.clone(),
-                    )
-                });
+        let (
+            deadline,
+            last_checkpoint,
+            last_checkpoint_message,
+            checkpoint_history,
+            checkpoint_count,
+            task_type,
+        ) = task
+            .cx_inner
+            .as_ref()
+            .map_or((None, None, None, Vec::new(), 0, None), |inner| {
+                let guard = inner.read();
+                // Materialise: include any pending fast-path checkpoint
+                // accounting so stuck-task detection is not fooled by
+                // tasks that took the no-cancellation fast path in
+                // Cx::checkpoint (br-asupersync-is2xg0).
+                let materialised = guard.materialised_checkpoint_state();
+                let checkpoint_history = materialised
+                    .history()
+                    .into_iter()
+                    .map(|entry| (entry.at, entry.message))
+                    .collect();
+                (
+                    guard.budget.deadline,
+                    materialised.last_checkpoint,
+                    materialised.last_message,
+                    checkpoint_history,
+                    materialised.checkpoint_count,
+                    guard.task_type.clone(),
+                )
+            });
 
         Self {
             task_id: task.id,
@@ -229,6 +247,7 @@ impl DeadlineTaskSnapshot {
             deadline,
             last_checkpoint,
             last_checkpoint_message,
+            checkpoint_history,
             checkpoint_count,
             task_type,
         }
@@ -544,6 +563,7 @@ impl DeadlineMonitor {
                             remaining,
                             last_checkpoint,
                             last_checkpoint_message: task.last_checkpoint_message.clone(),
+                            checkpoint_history: task.checkpoint_history.clone(),
                             reason,
                         };
                         warning_to_emit = Some((warning, reason, remaining));
@@ -593,6 +613,7 @@ pub fn default_warning_handler(warning: DeadlineWarning) {
             reason = ?warning.reason,
             last_checkpoint = ?warning.last_checkpoint,
             last_message = ?warning.last_checkpoint_message,
+            checkpoint_history = ?warning.checkpoint_history,
             "task approaching deadline"
         );
     }
@@ -702,9 +723,15 @@ mod tests {
         let budget = Budget::new().with_deadline(deadline);
         let mut record = TaskRecord::new_with_time(task_id, region_id, budget, created_at);
         let mut inner = CxInner::new(region_id, task_id, budget);
-        inner.checkpoint_state.last_checkpoint = last_checkpoint;
-        inner.checkpoint_state.last_message = last_message.map(std::string::ToString::to_string);
-        inner.checkpoint_state.checkpoint_count = u64::from(last_checkpoint.is_some());
+        if let Some(checkpoint) = last_checkpoint {
+            if let Some(message) = last_message {
+                inner
+                    .checkpoint_state
+                    .record_with_message_at(message.to_string(), checkpoint);
+            } else {
+                inner.checkpoint_state.record_at(checkpoint);
+            }
+        }
         inner.task_type = task_type.map(std::string::ToString::to_string);
         record.set_cx_inner(Arc::new(RwLock::new(inner)));
         record
@@ -1314,6 +1341,13 @@ mod tests {
             "checkpoint message",
             Some("checkpoint message"),
             warning.last_checkpoint_message.as_deref()
+        );
+        crate::assert_with_log!(
+            warning.checkpoint_history.as_slice()
+                == [(Time::from_secs(0), "checkpoint message".to_string())],
+            "checkpoint history trail",
+            vec![(Time::from_secs(0), "checkpoint message".to_string())],
+            warning.checkpoint_history.clone()
         );
         crate::test_complete!("warning_includes_checkpoint_message");
     }

@@ -52,7 +52,9 @@ mod timeout_future;
 mod wheel;
 
 pub use budget_ext::{BudgetTimeExt, budget_sleep, budget_timeout};
-pub use deadline::{with_deadline, with_timeout};
+pub use deadline::{
+    DeadlineJitterDecision, DeadlineJitterPolicy, DeadlineJitterScope, with_deadline, with_timeout,
+};
 pub use driver::{
     BrowserClockConfig, BrowserMonotonicClock, TimeSource, TimerDriver, TimerDriverApi,
     TimerDriverHandle, TimerHandle, VirtualClock, WallClock,

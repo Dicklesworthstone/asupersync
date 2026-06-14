@@ -54,6 +54,9 @@ impl DeadlineMonitorFixture {
             deadline,
             last_checkpoint,
             Some("test checkpoint".to_string()),
+            last_checkpoint
+                .map(|at| vec![(at, "test checkpoint".to_string())])
+                .unwrap_or_default(),
             checkpoint_count,
             Some("test".to_string()),
         )
