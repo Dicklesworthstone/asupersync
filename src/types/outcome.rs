@@ -98,8 +98,10 @@
 //! ```
 
 use super::cancel::CancelReason;
+#[cfg(feature = "nightly-outcome-try")]
 use core::convert::Infallible;
 use core::fmt;
+#[cfg(feature = "nightly-outcome-try")]
 use core::ops::{ControlFlow, FromResidual, Residual, Try};
 use serde::{Deserialize, Serialize};
 
@@ -691,6 +693,7 @@ impl<T, E> From<Result<T, E>> for Outcome<T, E> {
     }
 }
 
+#[cfg(feature = "nightly-outcome-try")]
 impl<T, E> Try for Outcome<T, E> {
     type Output = T;
     type Residual = Outcome<Infallible, E>;
@@ -711,10 +714,12 @@ impl<T, E> Try for Outcome<T, E> {
     }
 }
 
+#[cfg(feature = "nightly-outcome-try")]
 impl<T, E> Residual<T> for Outcome<Infallible, E> {
     type TryType = Outcome<T, E>;
 }
 
+#[cfg(feature = "nightly-outcome-try")]
 impl<T, E> FromResidual<Outcome<Infallible, E>> for Outcome<T, E> {
     #[inline]
     fn from_residual(residual: Outcome<Infallible, E>) -> Self {
@@ -727,6 +732,7 @@ impl<T, E> FromResidual<Outcome<Infallible, E>> for Outcome<T, E> {
     }
 }
 
+#[cfg(feature = "nightly-outcome-try")]
 impl<T, E> FromResidual<Result<Infallible, E>> for Outcome<T, E> {
     #[inline]
     fn from_residual(residual: Result<Infallible, E>) -> Self {
