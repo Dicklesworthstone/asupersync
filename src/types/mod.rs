@@ -95,7 +95,7 @@ pub use symbol::{DEFAULT_SYMBOL_SIZE, ObjectId, ObjectParams, Symbol, SymbolId, 
 pub use symbol_set::{
     BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig,
 };
-pub use task_context::{CheckpointState, CxInner, MAX_MASK_DEPTH};
+pub use task_context::{CheckpointHistoryEntry, CheckpointState, CxInner, MAX_MASK_DEPTH};
 pub use typed_symbol::{
     DeserializationError, Deserializer, SerdeCodec, SerializationError, SerializationFormat,
     Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TypeDescriptor, TypeMismatchError,

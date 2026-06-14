@@ -118,6 +118,26 @@ impl CheckpointState {
     }
 
     /// Returns the oldest-to-newest message checkpoint history.
+    ///
+    /// Only `checkpoint_with(msg)` calls append to this ring; messageless
+    /// `checkpoint()` calls update the count and time without touching the
+    /// history (see [`Self::record_at`]).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::types::{CheckpointState, Time};
+    ///
+    /// let mut state = CheckpointState::with_history_capacity(4);
+    /// state.record_with_message_at("connect".to_string(), Time::from_nanos(1));
+    /// state.record_with_message_at("auth".to_string(), Time::from_nanos(2));
+    /// state.record_with_message_at("query".to_string(), Time::from_nanos(3));
+    ///
+    /// let trail = state.history();
+    /// assert_eq!(trail.len(), 3);
+    /// assert_eq!(trail.first().map(|e| e.message.as_str()), Some("connect"));
+    /// assert_eq!(trail.last().map(|e| e.message.as_str()), Some("query"));
+    /// ```
     #[must_use]
     pub fn history(&self) -> Vec<CheckpointHistoryEntry> {
         self.history.iter().cloned().collect()
@@ -539,6 +559,40 @@ mod tests {
         assert_eq!(state.last_message.as_deref(), Some("hidden"));
         assert!(state.history().is_empty());
         crate::test_complete!("checkpoint_history_can_be_disabled");
+    }
+
+    #[test]
+    fn messageless_checkpoints_never_grow_history() {
+        // AC2: the messageless `checkpoint()` hot path must stay allocation-free
+        // with respect to the history ring — it records count/time only and
+        // never appends. Mixing messageless records around a single message
+        // proves only `record_with_message_at` touches the ring.
+        init_test("messageless_checkpoints_never_grow_history");
+        let mut state = CheckpointState::with_history_capacity(8);
+
+        for n in 0..100u64 {
+            state.record_at(Time::from_nanos(n));
+        }
+        assert!(
+            state.history().is_empty(),
+            "messageless checkpoints must not append history"
+        );
+
+        state.record_with_message_at("only-message".to_string(), Time::from_nanos(100));
+        for n in 101..200u64 {
+            state.record_at(Time::from_nanos(n));
+        }
+
+        let trail = state.history();
+        assert_eq!(trail.len(), 1, "exactly one message checkpoint retained");
+        assert_eq!(trail[0].message, "only-message");
+        assert_eq!(trail[0].at, Time::from_nanos(100));
+        assert_eq!(
+            state.checkpoint_count, 200,
+            "every checkpoint still counted"
+        );
+        assert_eq!(state.last_checkpoint, Some(Time::from_nanos(199)));
+        crate::test_complete!("messageless_checkpoints_never_grow_history");
     }
 
     #[test]

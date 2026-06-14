@@ -605,6 +605,7 @@ impl DeadlineMonitor {
 pub fn default_warning_handler(warning: DeadlineWarning) {
     #[cfg(feature = "tracing-integration")]
     {
+        let trail = warning.render_trail();
         crate::tracing_compat::warn!(
             task_id = ?warning.task_id,
             region_id = ?warning.region_id,
@@ -613,7 +614,7 @@ pub fn default_warning_handler(warning: DeadlineWarning) {
             reason = ?warning.reason,
             last_checkpoint = ?warning.last_checkpoint,
             last_message = ?warning.last_checkpoint_message,
-            checkpoint_history = ?warning.checkpoint_history,
+            checkpoint_trail = trail.as_deref().unwrap_or("<none>"),
             "task approaching deadline"
         );
     }
@@ -656,6 +657,85 @@ const fn reason_label(reason: WarningReason) -> &'static str {
         WarningReason::ApproachingDeadline => "approaching_deadline",
         WarningReason::NoProgress => "no_progress",
         WarningReason::ApproachingDeadlineNoProgress => "approaching_deadline_no_progress",
+    }
+}
+
+/// Defensive upper bound on trail entries rendered into one diagnostic line.
+///
+/// The per-task checkpoint ring is already bounded by
+/// [`crate::types::MAX_CHECKPOINT_HISTORY_CAPACITY`]; this is a second,
+/// independent bound so a render can never emit an unbounded line even if a
+/// caller passes a longer slice. Overflow is summarised as `… (+N more)`.
+const MAX_RENDERED_TRAIL_ENTRIES: usize = 16;
+
+/// Renders a checkpoint trail into a compact, single-line, replay-stable string
+/// for stall forensics, e.g. `[t=1ns] connect → [t=2ns] auth → [t=3ns] query`.
+///
+/// This is the headline observability win of the bounded checkpoint history:
+/// instead of "last said query" the deadline diagnostic can show that "the task
+/// progressed through connect → auth → query then went silent".
+///
+/// The output is a pure function of the logical [`Time`] values (not wall-clock
+/// — `Time` is a deterministic logical-nanos counter) and the
+/// already-length-bounded checkpoint messages, so it is byte-identical across
+/// lab replays and safe to assert against in golden tests. Control characters
+/// in messages are scrubbed to spaces so a checkpoint message can never inject
+/// newlines or terminal escapes into a diagnostic line. Returns `None` for an
+/// empty trail so callers can omit the field entirely.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::runtime::deadline_monitor::render_checkpoint_trail;
+/// use asupersync::types::Time;
+///
+/// let trail = vec![
+///     (Time::from_nanos(1), "connect".to_string()),
+///     (Time::from_nanos(2), "auth".to_string()),
+///     (Time::from_nanos(3), "query".to_string()),
+/// ];
+/// assert_eq!(
+///     render_checkpoint_trail(&trail).as_deref(),
+///     Some("[t=1ns] connect → [t=2ns] auth → [t=3ns] query"),
+/// );
+/// assert_eq!(render_checkpoint_trail(&[]), None);
+/// ```
+#[must_use]
+pub fn render_checkpoint_trail(trail: &[(Time, String)]) -> Option<String> {
+    if trail.is_empty() {
+        return None;
+    }
+    let shown = trail.len().min(MAX_RENDERED_TRAIL_ENTRIES);
+    let mut out = String::new();
+    for (idx, (at, message)) in trail.iter().take(shown).enumerate() {
+        if idx > 0 {
+            out.push_str(" → ");
+        }
+        out.push_str("[t=");
+        // `Time`'s Display is deterministic (logical nanos), never wall-clock.
+        out.push_str(&at.to_string());
+        out.push_str("] ");
+        // Scrub control characters so a message can never inject a newline or
+        // escape sequence into the diagnostic line (and keep goldens stable).
+        for ch in message.chars() {
+            out.push(if ch.is_control() { ' ' } else { ch });
+        }
+    }
+    if trail.len() > shown {
+        out.push_str(&format!(" … (+{} more)", trail.len() - shown));
+    }
+    Some(out)
+}
+
+impl DeadlineWarning {
+    /// Renders this warning's checkpoint trail via [`render_checkpoint_trail`].
+    ///
+    /// Returns `None` when the task has no message checkpoints (e.g. it only
+    /// used messageless `checkpoint()` calls, or history is disabled), letting
+    /// diagnostics omit the trail rather than print an empty one.
+    #[must_use]
+    pub fn render_trail(&self) -> Option<String> {
+        render_checkpoint_trail(&self.checkpoint_history)
     }
 }
 
@@ -1350,6 +1430,110 @@ mod tests {
             warning.checkpoint_history.clone()
         );
         crate::test_complete!("warning_includes_checkpoint_message");
+    }
+
+    #[test]
+    fn render_checkpoint_trail_golden() {
+        // AC3: golden rendering of the trail. Logical `Time` is deterministic,
+        // so the rendered string is fully scrubbed (no wall-clock content).
+        init_test("render_checkpoint_trail_golden");
+        let trail = vec![
+            (Time::from_nanos(1), "connect".to_string()),
+            (Time::from_nanos(2), "auth".to_string()),
+            (Time::from_nanos(5_000), "query".to_string()),
+        ];
+        let rendered = render_checkpoint_trail(&trail).expect("non-empty trail renders");
+        crate::assert_with_log!(
+            rendered == "[t=1ns] connect → [t=2ns] auth → [t=5us] query",
+            "golden trail rendering",
+            "[t=1ns] connect → [t=2ns] auth → [t=5us] query",
+            rendered
+        );
+        assert_eq!(
+            render_checkpoint_trail(&[]),
+            None,
+            "empty trail renders None"
+        );
+        crate::test_complete!("render_checkpoint_trail_golden");
+    }
+
+    #[test]
+    fn render_checkpoint_trail_scrubs_control_characters() {
+        // Scrubbing keeps the diagnostic single-line and injection-safe.
+        init_test("render_checkpoint_trail_scrubs_control_characters");
+        let trail = vec![(
+            Time::from_nanos(7),
+            "evil\nline\tbreak\r\u{1b}[31m".to_string(),
+        )];
+        let rendered = render_checkpoint_trail(&trail).expect("renders");
+        assert!(
+            !rendered.contains('\n') && !rendered.contains('\t') && !rendered.contains('\r'),
+            "control characters must be scrubbed: {rendered:?}"
+        );
+        crate::assert_with_log!(
+            rendered == "[t=7ns] evil line break  [31m",
+            "scrubbed trail rendering",
+            "[t=7ns] evil line break  [31m",
+            rendered
+        );
+        crate::test_complete!("render_checkpoint_trail_scrubs_control_characters");
+    }
+
+    #[test]
+    fn render_checkpoint_trail_bounds_overflow() {
+        // The defensive render bound summarises overflow rather than emitting
+        // an unbounded line, even if handed more than the per-task ring cap.
+        init_test("render_checkpoint_trail_bounds_overflow");
+        let trail: Vec<(Time, String)> = (0..(MAX_RENDERED_TRAIL_ENTRIES as u64 + 3))
+            .map(|n| (Time::from_nanos(n), format!("step{n}")))
+            .collect();
+        let rendered = render_checkpoint_trail(&trail).expect("renders");
+        assert!(
+            rendered.ends_with("… (+3 more)"),
+            "overflow summarised: {rendered}"
+        );
+        // Exactly MAX_RENDERED_TRAIL_ENTRIES separators-worth of entries shown.
+        assert_eq!(
+            rendered.matches(" → ").count(),
+            MAX_RENDERED_TRAIL_ENTRIES - 1
+        );
+        crate::test_complete!("render_checkpoint_trail_bounds_overflow");
+    }
+
+    #[test]
+    fn render_checkpoint_trail_is_byte_identical_across_replays() {
+        // AC4: lab determinism. The render is a pure function of logical time
+        // and bounded messages, so independently-built identical trails (as a
+        // deterministic replay would reproduce) render byte-for-byte the same.
+        init_test("render_checkpoint_trail_is_byte_identical_across_replays");
+        let build = || {
+            let mut state = crate::types::CheckpointState::with_history_capacity(8);
+            for (n, msg) in ["connect", "auth", "query", "write", "flush"]
+                .iter()
+                .enumerate()
+            {
+                state.record_with_message_at((*msg).to_string(), Time::from_nanos(n as u64 + 1));
+            }
+            let trail: Vec<(Time, String)> = state
+                .history()
+                .into_iter()
+                .map(|e| (e.at, e.message))
+                .collect();
+            render_checkpoint_trail(&trail)
+        };
+        let first = build();
+        let second = build();
+        crate::assert_with_log!(
+            first == second,
+            "byte-identical trail across replays",
+            first.clone(),
+            second.clone()
+        );
+        assert_eq!(
+            first.as_deref(),
+            Some("[t=1ns] connect → [t=2ns] auth → [t=3ns] query → [t=4ns] write → [t=5ns] flush")
+        );
+        crate::test_complete!("render_checkpoint_trail_is_byte_identical_across_replays");
     }
 
     #[derive(Default)]
