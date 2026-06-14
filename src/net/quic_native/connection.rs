@@ -172,6 +172,11 @@ pub struct NativeQuicConnection {
     migration_events: u64,
     drain_timeout_micros: u64,
     peer_address_validated: bool,
+    /// Whether a verifying TLS handshake has validated the server's certificate
+    /// chain against configured roots. Defaults to `false`; a client connection
+    /// fails closed at handshake confirmation unless this is set, so an
+    /// unauthenticated server identity can never be accepted (br-asupersync-7pwwwe).
+    server_identity_verified: bool,
     anti_amplification_bytes_received: u64,
     anti_amplification_bytes_sent: u64,
     pending_control_frames: VecDeque<QuicFrame>,
@@ -200,6 +205,7 @@ impl NativeQuicConnection {
             migration_events: 0,
             drain_timeout_micros: config.drain_timeout_micros,
             peer_address_validated: config.role == StreamRole::Client,
+            server_identity_verified: false,
             anti_amplification_bytes_received: 0,
             anti_amplification_bytes_sent: 0,
             pending_control_frames: VecDeque::new(),
@@ -272,12 +278,36 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Records that a verifying TLS handshake has validated the server's
+    /// certificate chain against the configured trust roots.
+    ///
+    /// This is the only way to clear the fail-closed server-identity gate on a
+    /// client connection. It must be called only after a genuine certificate
+    /// verification (chain + hostname + `CertificateVerify` signature) has
+    /// succeeded — there is deliberately no insecure "skip verify" toggle on the
+    /// production path (br-asupersync-7pwwwe).
+    pub fn record_verified_server_identity(&mut self) {
+        self.server_identity_verified = true;
+    }
+
     /// Confirm handshake and transition transport to `Established`.
     pub fn on_handshake_confirmed(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         if self.tls.level() != CryptoLevel::OneRtt {
             return Err(NativeQuicConnectionError::Tls(
                 QuicTlsError::HandshakeNotConfirmed,
+            ));
+        }
+        // SECURITY (br-asupersync-7pwwwe): a client MUST NOT treat the connection
+        // as authenticated/established without having verified the server's
+        // certificate chain against configured roots. The native QUIC TLS path
+        // performs no certificate exchange/verification, so confirming an
+        // unverified client connection would accept any server identity
+        // (MITM exposure). Fail closed unless a verifying handshake recorded a
+        // successful validation. (Servers do not verify a server certificate.)
+        if self.role == StreamRole::Client && !self.server_identity_verified {
+            return Err(NativeQuicConnectionError::Tls(
+                QuicTlsError::ServerCertificateUnverified,
             ));
         }
         self.transport.on_established()?;
@@ -1066,8 +1096,47 @@ mod tests {
         conn.begin_handshake(&cx).expect("begin");
         conn.on_handshake_keys_available(&cx).expect("hs keys");
         conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+        // A real verifying handshake would validate the server cert here; the
+        // helper records it so the fail-closed gate (br-7pwwwe) lets the
+        // state-machine tests reach the confirmed state.
+        conn.record_verified_server_identity();
         conn.on_handshake_confirmed(&cx).expect("confirmed");
         conn
+    }
+
+    #[test]
+    fn client_fails_closed_on_confirm_without_verified_server_identity() {
+        // br-asupersync-7pwwwe: the native QUIC TLS path performs no certificate
+        // exchange/verification, so a client that never recorded a verified
+        // server identity must fail closed at handshake confirmation instead of
+        // accepting an unauthenticated server (MITM exposure).
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx).expect("hs keys");
+        conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+        let err = conn
+            .on_handshake_confirmed(&cx)
+            .expect_err("client confirm must fail closed without a verified server identity");
+        assert!(
+            matches!(
+                err,
+                NativeQuicConnectionError::Tls(QuicTlsError::ServerCertificateUnverified)
+            ),
+            "expected ServerCertificateUnverified, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn client_confirms_after_recording_verified_server_identity() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx).expect("hs keys");
+        conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+        conn.record_verified_server_identity();
+        conn.on_handshake_confirmed(&cx)
+            .expect("client confirms once a verifying handshake has recorded server identity");
     }
 
     #[test]
@@ -1310,6 +1379,9 @@ mod tests {
         let cx = test_cx();
         let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
         conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+        // Record verification so this test exercises the transport-state guard
+        // rather than the br-7pwwwe server-identity gate.
+        conn.record_verified_server_identity();
         let err = conn.on_handshake_confirmed(&cx).expect_err("must fail");
         assert!(matches!(
             err,

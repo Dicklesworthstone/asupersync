@@ -94,6 +94,13 @@ pub enum KeyUpdateEvent {
 pub enum QuicTlsError {
     /// Operation requires handshake confirmation.
     HandshakeNotConfirmed,
+    /// A client connection reached handshake confirmation without verifying the
+    /// server's certificate chain against configured roots. The native QUIC TLS
+    /// path performs no certificate exchange/verification, so client connections
+    /// fail closed here rather than accepting an unauthenticated server identity
+    /// (MITM exposure). A verifying handshake must record success via
+    /// `NativeQuicConnection::record_verified_server_identity` before confirming.
+    ServerCertificateUnverified,
     /// Invalid crypto-level transition.
     InvalidTransition {
         /// Current crypto level.
@@ -202,6 +209,10 @@ impl fmt::Display for QuicTlsError {
                     "crypto provider failure: provider={provider}, code={code}"
                 )
             }
+            Self::ServerCertificateUnverified => write!(
+                f,
+                "server certificate chain was not verified against configured roots"
+            ),
         }
     }
 }
@@ -223,6 +234,7 @@ impl QuicTlsError {
             Self::TranscriptMismatch { .. } => "transcript_mismatch",
             Self::HeaderProtectionSampleTooShort { .. } => "header_sample_too_short",
             Self::CryptoProviderFailure { code, .. } => code,
+            Self::ServerCertificateUnverified => "server_certificate_unverified",
         }
     }
 }
