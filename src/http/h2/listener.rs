@@ -28,7 +28,8 @@ use crate::net::tcp::stream::TcpStream;
 use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::ConnectionManager;
 use crate::server::shutdown::{
-    DrainStep, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal, ShutdownStats,
+    DrainStep, GracefulDrainReport, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal,
+    ShutdownStats,
 };
 use crate::stream::Stream;
 use crate::tracing_compat::error;
@@ -39,7 +40,7 @@ use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -63,6 +64,182 @@ const TRANSIENT_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 
 /// Cap for the exponential accept-error backoff (h1 parity).
 const TRANSIENT_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(64);
+
+/// Low-overhead listener counters for diagnosing HTTP/2 accept-path stalls
+/// and observing graceful drains (h1 D2.4 AC6 parity).
+pub struct Http2ListenerStats {
+    accepted_total: AtomicU64,
+    transient_accept_errors_total: AtomicU64,
+    spawn_failures_total: AtomicU64,
+    last_accept_at_ms: AtomicU64,
+    drains_started_total: AtomicU64,
+    drain_escalations_total: AtomicU64,
+    drain_hard_deadline_hits_total: AtomicU64,
+    drains_quiescent_total: AtomicU64,
+    last_drain_requests_at_start: AtomicU64,
+    last_drain_requests_stranded: AtomicU64,
+    last_drain_duration_ms: AtomicU64,
+    time_getter: fn() -> Time,
+}
+
+/// Immutable snapshot of [`Http2ListenerStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Http2ListenerStatsSnapshot {
+    /// Total successful accepts observed by the listener.
+    pub accepted_total: u64,
+    /// Total transient accept errors that triggered listener backoff.
+    pub transient_accept_errors_total: u64,
+    /// Total failures to spawn a per-connection task after accept succeeded.
+    pub spawn_failures_total: u64,
+    /// Logical runtime time in milliseconds when the listener last accepted a connection.
+    pub last_accept_at_ms: u64,
+    /// Total request-aware drains started by this listener.
+    pub drains_started_total: u64,
+    /// Total drains whose soft budget elapsed and escalated stragglers.
+    pub drain_escalations_total: u64,
+    /// Total drains that ended on the hard deadline with requests stranded.
+    pub drain_hard_deadline_hits_total: u64,
+    /// Total drains that reached quiescence (zero in-flight requests).
+    pub drains_quiescent_total: u64,
+    /// In-flight request count when the most recent drain started.
+    pub last_drain_requests_at_start: u64,
+    /// Requests still in flight when the most recent drain ended.
+    pub last_drain_requests_stranded: u64,
+    /// Duration of the most recent drain in whole milliseconds.
+    pub last_drain_duration_ms: u64,
+}
+
+impl std::fmt::Debug for Http2ListenerStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Http2ListenerStats")
+            .field(
+                "accepted_total",
+                &self.accepted_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "transient_accept_errors_total",
+                &self.transient_accept_errors_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "spawn_failures_total",
+                &self.spawn_failures_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "last_accept_at_ms",
+                &self.last_accept_at_ms.load(Ordering::Relaxed),
+            )
+            .field(
+                "drains_started_total",
+                &self.drains_started_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "drain_escalations_total",
+                &self.drain_escalations_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "drain_hard_deadline_hits_total",
+                &self.drain_hard_deadline_hits_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "drains_quiescent_total",
+                &self.drains_quiescent_total.load(Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for Http2ListenerStats {
+    fn default() -> Self {
+        Self::new(default_h2_listener_time_getter)
+    }
+}
+
+impl Http2ListenerStats {
+    fn new(time_getter: fn() -> Time) -> Self {
+        Self {
+            accepted_total: AtomicU64::new(0),
+            transient_accept_errors_total: AtomicU64::new(0),
+            spawn_failures_total: AtomicU64::new(0),
+            last_accept_at_ms: AtomicU64::new(0),
+            drains_started_total: AtomicU64::new(0),
+            drain_escalations_total: AtomicU64::new(0),
+            drain_hard_deadline_hits_total: AtomicU64::new(0),
+            drains_quiescent_total: AtomicU64::new(0),
+            last_drain_requests_at_start: AtomicU64::new(0),
+            last_drain_requests_stranded: AtomicU64::new(0),
+            last_drain_duration_ms: AtomicU64::new(0),
+            time_getter,
+        }
+    }
+
+    fn record_accepted(&self) {
+        self.accepted_total.fetch_add(1, Ordering::Relaxed);
+        self.last_accept_at_ms
+            .store((self.time_getter)().as_millis(), Ordering::Relaxed);
+    }
+
+    fn record_transient_accept_error(&self) {
+        self.transient_accept_errors_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_spawn_failure(&self) {
+        self.spawn_failures_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_drain_started(&self, in_flight: usize) {
+        self.drains_started_total.fetch_add(1, Ordering::Relaxed);
+        self.last_drain_requests_at_start.store(
+            u64::try_from(in_flight).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn record_drain_escalated(&self) {
+        self.drain_escalations_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_drain_hard_deadline(&self) {
+        self.drain_hard_deadline_hits_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_drain_finished(&self, report: &GracefulDrainReport) {
+        if report.reached_quiescence {
+            self.drains_quiescent_total.fetch_add(1, Ordering::Relaxed);
+        }
+        self.last_drain_requests_stranded.store(
+            u64::try_from(report.requests_stranded).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.last_drain_duration_ms.store(
+            u64::try_from(report.drain_duration.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Returns a point-in-time copy of the listener counters.
+    #[must_use]
+    pub fn snapshot(&self) -> Http2ListenerStatsSnapshot {
+        Http2ListenerStatsSnapshot {
+            accepted_total: self.accepted_total.load(Ordering::Relaxed),
+            transient_accept_errors_total: self
+                .transient_accept_errors_total
+                .load(Ordering::Relaxed),
+            spawn_failures_total: self.spawn_failures_total.load(Ordering::Relaxed),
+            last_accept_at_ms: self.last_accept_at_ms.load(Ordering::Relaxed),
+            drains_started_total: self.drains_started_total.load(Ordering::Relaxed),
+            drain_escalations_total: self.drain_escalations_total.load(Ordering::Relaxed),
+            drain_hard_deadline_hits_total: self
+                .drain_hard_deadline_hits_total
+                .load(Ordering::Relaxed),
+            drains_quiescent_total: self.drains_quiescent_total.load(Ordering::Relaxed),
+            last_drain_requests_at_start: self.last_drain_requests_at_start.load(Ordering::Relaxed),
+            last_drain_requests_stranded: self.last_drain_requests_stranded.load(Ordering::Relaxed),
+            last_drain_duration_ms: self.last_drain_duration_ms.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Accept errors that are transient and should be retried (h1 parity).
 fn is_transient_accept_error(err: &io::Error) -> bool {
@@ -774,6 +951,7 @@ pub struct Http2Listener<F> {
     config: Http2ListenerConfig,
     shutdown_signal: ShutdownSignal,
     connection_manager: ConnectionManager,
+    stats: Arc<Http2ListenerStats>,
     in_flight_requests: Arc<AtomicUsize>,
 }
 
@@ -814,12 +992,14 @@ where
             shutdown_signal.clone(),
             config.time_getter,
         );
+        let stats = Arc::new(Http2ListenerStats::new(config.time_getter));
         Self {
             tcp_listener,
             handler: Arc::new(handler),
             config,
             shutdown_signal,
             connection_manager,
+            stats,
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -841,6 +1021,12 @@ where
     #[must_use]
     pub fn connection_manager(&self) -> &ConnectionManager {
         &self.connection_manager
+    }
+
+    /// Returns the accept-path and drain diagnostic counters for this listener.
+    #[must_use]
+    pub fn stats_handle(&self) -> Arc<Http2ListenerStats> {
+        Arc::clone(&self.stats)
     }
 
     /// Returns the listener-wide in-flight request counter.
@@ -901,6 +1087,7 @@ where
             let (stream, addr) = match result {
                 AcceptOrShutdown::Shutdown => break,
                 AcceptOrShutdown::Accept(Ok(conn)) => {
+                    self.stats.record_accepted();
                     transient_accept_streak = 0;
                     conn
                 }
@@ -908,6 +1095,7 @@ where
                     // Back off on a streak of transient errors so a persistent
                     // accept failure (e.g. EMFILE) does not busy-spin the
                     // accept loop (h1 parity).
+                    self.stats.record_transient_accept_error();
                     transient_accept_streak = transient_accept_streak.saturating_add(1);
                     let now = (self.config.time_getter)();
                     crate::time::sleep(
@@ -960,13 +1148,14 @@ where
                         tasks.retain(|h| !h.is_finished());
                     }
                 }
-                Err(err) if should_retry_after_spawn_failure(&err) => {
-                    // Connection-scoped capacity blip: drop this connection
-                    // (its guard is released when the dropped future is
-                    // collected) and keep accepting (h1 parity). Falling
-                    // through re-enters the accept loop.
-                }
                 Err(err) => {
+                    self.stats.record_spawn_failure();
+                    if should_retry_after_spawn_failure(&err) {
+                        // Connection-scoped capacity blip: drop this
+                        // connection (its guard is released when the dropped
+                        // future is collected) and keep accepting (h1 parity).
+                        continue;
+                    }
                     return Err(io::Error::other(format!(
                         "failed to spawn h2 connection task: {err}"
                     )));
@@ -992,8 +1181,10 @@ where
         // h1 listener, D2.2b).
         let supervise = async {
             let drain_start = (self.config.time_getter)();
+            let in_flight_at_start = self.in_flight_requests.load(Ordering::Acquire);
+            self.stats.record_drain_started(in_flight_at_start);
             let mut supervisor = GracefulDrainSupervisor::new(
-                self.in_flight_requests.load(Ordering::Acquire),
+                in_flight_at_start,
                 drain_start,
                 self.config.drain_timeout,
                 self.config.hard_drain_timeout,
@@ -1001,6 +1192,12 @@ where
             let mut hard_deadline_hit = false;
             loop {
                 let now = (self.config.time_getter)();
+                if self.shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+                    && now >= supervisor.drain_deadline()
+                    && supervisor.record_external_escalation()
+                {
+                    self.stats.record_drain_escalated();
+                }
                 match supervisor.observe(self.in_flight_requests.load(Ordering::Acquire), now) {
                     DrainStep::Continue => {
                         let sleep_now = Cx::current()
@@ -1009,17 +1206,21 @@ where
                         crate::time::sleep(sleep_now, DRAIN_SUPERVISION_TICK).await;
                     }
                     DrainStep::Escalate => {
+                        self.stats.record_drain_escalated();
                         let _ = self.shutdown_signal.begin_force_close();
                     }
                     DrainStep::Quiescent => break,
                     DrainStep::HardDeadline => {
                         hard_deadline_hit = true;
+                        self.stats.record_drain_hard_deadline();
                         let _ = self.shutdown_signal.begin_force_close();
                         break;
                     }
                 }
             }
-            supervisor.finish((self.config.time_getter)(), hard_deadline_hit)
+            let report = supervisor.finish((self.config.time_getter)(), hard_deadline_hit);
+            self.stats.record_drain_finished(&report);
+            report
         };
         let drain = self.connection_manager.drain_with_stats();
 
@@ -1107,6 +1308,18 @@ impl<F: Future> Future for CatchUnwind<F> {
 mod tests {
     use super::*;
 
+    thread_local! {
+        static H2_LISTENER_TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    fn set_h2_listener_test_time(time: Time) {
+        H2_LISTENER_TEST_NOW.with(|now| now.set(time.as_nanos()));
+    }
+
+    fn h2_listener_test_time() -> Time {
+        H2_LISTENER_TEST_NOW.with(|now| Time::from_nanos(now.get()))
+    }
+
     fn request_block(extra: &[(&str, &str)]) -> Vec<Header> {
         let mut headers = vec![
             Header::new(":method", "GET"),
@@ -1118,6 +1331,64 @@ mod tests {
             headers.push(Header::new(*name, *value));
         }
         headers
+    }
+
+    #[test]
+    fn stats_snapshot_records_accept_spawn_and_drain_counters() {
+        let stats = Http2ListenerStats::new(h2_listener_test_time);
+
+        set_h2_listener_test_time(Time::from_millis(321));
+        stats.record_accepted();
+        stats.record_transient_accept_error();
+        stats.record_spawn_failure();
+        stats.record_drain_started(3);
+        stats.record_drain_escalated();
+        stats.record_drain_hard_deadline();
+        stats.record_drain_finished(&GracefulDrainReport {
+            requests_at_drain_start: 3,
+            requests_completed: 1,
+            requests_stranded: 2,
+            requests_at_escalation: Some(2),
+            observations: 4,
+            final_phase: crate::cancel::DrainPhase::SlowTail,
+            converging: false,
+            confidence_bound: 0.25,
+            estimated_remaining_steps: Some(2.0),
+            stall_detected: true,
+            reached_quiescence: false,
+            hard_deadline_hit: true,
+            drain_duration: Duration::from_millis(77),
+        });
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.accepted_total, 1);
+        assert_eq!(snapshot.transient_accept_errors_total, 1);
+        assert_eq!(snapshot.spawn_failures_total, 1);
+        assert_eq!(snapshot.last_accept_at_ms, 321);
+        assert_eq!(snapshot.drains_started_total, 1);
+        assert_eq!(snapshot.drain_escalations_total, 1);
+        assert_eq!(snapshot.drain_hard_deadline_hits_total, 1);
+        assert_eq!(snapshot.drains_quiescent_total, 0);
+        assert_eq!(snapshot.last_drain_requests_at_start, 3);
+        assert_eq!(snapshot.last_drain_requests_stranded, 2);
+        assert_eq!(snapshot.last_drain_duration_ms, 77);
+    }
+
+    #[test]
+    fn stats_handle_uses_configured_time_getter() {
+        crate::test_utils::run_test(|| async {
+            let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+            let listener = Http2Listener::from_listener(
+                tcp,
+                |_req| async { Response::new(200, "OK", Vec::new()) },
+                Http2ListenerConfig::default().time_getter(h2_listener_test_time),
+            );
+
+            set_h2_listener_test_time(Time::from_millis(456));
+            listener.stats_handle().record_accepted();
+
+            assert_eq!(listener.stats_handle().snapshot().last_accept_at_ms, 456);
+        });
     }
 
     #[test]
