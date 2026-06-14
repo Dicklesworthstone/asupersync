@@ -277,9 +277,16 @@ impl TimingStatistics {
         }
     }
 
-    /// Simplified normal CDF approximation for p-value calculation.
+    /// Standard normal CDF via the Abramowitz & Stegun 7.1.26 erf approximation.
+    ///
+    /// `Φ(x) = (1 + erf(x/√2)) / 2`, where `erf(u) ≈ 1 - poly(t)·exp(-u²)` and
+    /// `t = 1/(1 + p·u)`. The erf argument is `u = |x|/√2`. A prior version fed
+    /// `|x|` straight into `t` (omitting the `1/√2` scaling) while still using
+    /// `exp(-x²/2) = exp(-u²)`, so the polynomial and the exponential used
+    /// inconsistent arguments and the CDF was biased — e.g. `Φ(1.96) ≈ 0.981`
+    /// instead of `0.975` — which skewed the Welch t-test p-values
+    /// (`2·(1 - Φ(|t|))`) toward over-sensitive side-channel detection.
     fn normal_cdf(&self, x: f64) -> f64 {
-        // Abramowitz and Stegun approximation
         let a1 = 0.254829592;
         let a2 = -0.284496736;
         let a3 = 1.421413741;
@@ -288,12 +295,12 @@ impl TimingStatistics {
         let p = 0.3275911;
 
         let sign = if x < 0.0 { -1.0 } else { 1.0 };
-        let x = x.abs();
+        let u = x.abs() / std::f64::consts::SQRT_2;
 
-        let t = 1.0 / (1.0 + p * x);
-        let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x / 2.0).exp();
+        let t = 1.0 / (1.0 + p * u);
+        let erf = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-u * u).exp();
 
-        f64::midpoint(1.0, sign * y)
+        f64::midpoint(1.0, sign * erf)
     }
 }
 
@@ -558,6 +565,30 @@ mod tests {
         assert_eq!(stats.min, 90);
         assert_eq!(stats.max, 120);
         assert!((stats.mean - 105.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn normal_cdf_matches_known_quantiles() {
+        // normal_cdf is a pure function of x; any instance works as the receiver.
+        let stats = TimingStatistics::from_samples(&[1]);
+        let close = |x: f64, expected: f64| {
+            let got = stats.normal_cdf(x);
+            assert!(
+                (got - expected).abs() < 1e-3,
+                "Φ({x}) = {got}, expected ≈ {expected}"
+            );
+        };
+        // Regression guard: a prior version omitted the 1/√2 erf scaling and
+        // returned Φ(1.96) ≈ 0.981 instead of 0.975.
+        close(0.0, 0.5);
+        close(1.0, 0.841_345);
+        close(-1.0, 0.158_655);
+        close(1.96, 0.975_002);
+        close(-1.96, 0.024_998);
+        close(2.576, 0.995_0);
+        // Bounded and saturating in the tails.
+        assert!(stats.normal_cdf(6.0) > 0.999 && stats.normal_cdf(6.0) <= 1.0);
+        assert!(stats.normal_cdf(-6.0) < 0.001 && stats.normal_cdf(-6.0) >= 0.0);
     }
 
     #[test]
