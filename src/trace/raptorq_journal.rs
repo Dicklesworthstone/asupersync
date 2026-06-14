@@ -358,6 +358,91 @@ pub fn latest_recoverable_epoch(frames: &[JournalFrame]) -> Option<u64> {
         .next_back()
 }
 
+/// Plan that assigns each of `symbol_count` encoding symbols to one of
+/// `stripe_count` striped journal files.
+///
+/// Symbols are round-robined by index, so every stripe carries an even
+/// `floor`/`ceil` share and the loss of any single stripe removes at most
+/// `ceil(symbol_count / stripe_count)` symbols. Striping across *different*
+/// files (ideally different disks/dirs = different failure domains) is what lets
+/// a RaptorQ block survive losing whole stripes: as long as at least the source
+/// symbol count `K'` survive, the block still decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StripePlan {
+    symbol_count: usize,
+    stripe_count: usize,
+}
+
+impl StripePlan {
+    /// Build a plan for `symbol_count` symbols across `stripe_count` stripes.
+    /// Returns `None` if `stripe_count` is zero.
+    #[must_use]
+    pub const fn new(symbol_count: usize, stripe_count: usize) -> Option<Self> {
+        if stripe_count == 0 {
+            None
+        } else {
+            Some(Self {
+                symbol_count,
+                stripe_count,
+            })
+        }
+    }
+
+    /// Number of stripe files in the plan.
+    #[must_use]
+    pub const fn stripe_count(&self) -> usize {
+        self.stripe_count
+    }
+
+    /// Stripe file index (0-based) the symbol at encoding position `index` is
+    /// written to.
+    #[must_use]
+    pub const fn stripe_of(&self, index: usize) -> usize {
+        index % self.stripe_count
+    }
+
+    /// Number of symbols that land on `stripe` (0 if `stripe` is out of range).
+    #[must_use]
+    pub const fn symbols_on_stripe(&self, stripe: usize) -> usize {
+        if stripe >= self.stripe_count {
+            return 0;
+        }
+        // positions stripe, stripe+S, stripe+2S, ... that are < symbol_count.
+        if stripe >= self.symbol_count {
+            0
+        } else {
+            // ceil((symbol_count - stripe) / stripe_count), const-friendly.
+            (self.symbol_count - stripe + self.stripe_count - 1) / self.stripe_count
+        }
+    }
+
+    /// Worst-case number of symbols still available after losing `lost` whole
+    /// stripes — i.e. losing the `lost` *fullest* stripes.
+    #[must_use]
+    pub const fn symbols_surviving_loss(&self, lost: usize) -> usize {
+        if lost >= self.stripe_count {
+            return 0;
+        }
+        // With round-robin, the `symbol_count % stripe_count` lowest-indexed
+        // stripes hold ceil(N/S); the rest hold floor(N/S). Losing the fullest
+        // means losing as many ceil-sized stripes as possible first.
+        let base = self.symbol_count / self.stripe_count; // floor share
+        let remainder = self.symbol_count % self.stripe_count; // # of ceil stripes
+        let ceil_lost = if lost < remainder { lost } else { remainder };
+        let floor_lost = lost - ceil_lost;
+        let lost_symbols = ceil_lost * (base + 1) + floor_lost * base;
+        self.symbol_count - lost_symbols
+    }
+
+    /// Whether at least `source_symbols` (K') survive the loss of any `lost`
+    /// stripes — i.e. the RaptorQ block still decodes after that failure-domain
+    /// loss.
+    #[must_use]
+    pub const fn survives_stripe_loss(&self, source_symbols: usize, lost: usize) -> bool {
+        self.symbols_surviving_loss(lost) >= source_symbols
+    }
+}
+
 #[inline]
 fn read4(bytes: &[u8], at: usize) -> [u8; 4] {
     [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]

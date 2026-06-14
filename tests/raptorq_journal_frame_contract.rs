@@ -9,7 +9,7 @@
 
 use asupersync::trace::raptorq_journal::{
     BlockKey, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, JOURNAL_FRAME_HEADER_LEN, JOURNAL_FRAME_MAGIC,
-    JOURNAL_FRAME_VERSION, JournalFrame, JournalFrameError, crc32, decodable_blocks,
+    JOURNAL_FRAME_VERSION, JournalFrame, JournalFrameError, StripePlan, crc32, decodable_blocks,
     latest_recoverable_epoch, scan_frames, summarize_blocks,
 };
 
@@ -226,4 +226,53 @@ fn summarize_blocks_is_deterministically_ordered() {
             },
         ]
     );
+}
+
+#[test]
+fn stripe_plan_round_robins_symbols_evenly() {
+    let plan = StripePlan::new(10, 4).expect("nonzero stripes");
+    assert_eq!(plan.stripe_count(), 4);
+    // Round-robin assignment by encoding position.
+    assert_eq!(plan.stripe_of(0), 0);
+    assert_eq!(plan.stripe_of(4), 0);
+    assert_eq!(plan.stripe_of(9), 1);
+    // 10 over 4 -> stripes 0,1 carry 3; stripes 2,3 carry 2.
+    assert_eq!(plan.symbols_on_stripe(0), 3);
+    assert_eq!(plan.symbols_on_stripe(1), 3);
+    assert_eq!(plan.symbols_on_stripe(2), 2);
+    assert_eq!(plan.symbols_on_stripe(3), 2);
+    assert_eq!(plan.symbols_on_stripe(4), 0); // out of range
+    let total: usize = (0..plan.stripe_count())
+        .map(|s| plan.symbols_on_stripe(s))
+        .sum();
+    assert_eq!(total, 10);
+
+    assert_eq!(StripePlan::new(5, 0), None);
+}
+
+#[test]
+fn stripe_plan_models_worst_case_failure_domain_loss() {
+    let plan = StripePlan::new(10, 4).expect("nonzero stripes");
+    // Worst case loses the fullest stripes first (the ceil-sized ones).
+    assert_eq!(plan.symbols_surviving_loss(0), 10);
+    assert_eq!(plan.symbols_surviving_loss(1), 7); // lose one size-3 stripe
+    assert_eq!(plan.symbols_surviving_loss(2), 4); // lose both size-3 stripes
+    assert_eq!(plan.symbols_surviving_loss(3), 2); // + one size-2 stripe
+    assert_eq!(plan.symbols_surviving_loss(4), 0); // all stripes gone
+
+    // With K'=4, the block still decodes after losing any 2 stripes (4 survive)
+    // but not after losing 3 (only 2 survive).
+    assert!(plan.survives_stripe_loss(4, 2));
+    assert!(!plan.survives_stripe_loss(4, 3));
+}
+
+#[test]
+fn stripe_plan_handles_fewer_symbols_than_stripes() {
+    let plan = StripePlan::new(2, 4).expect("nonzero stripes");
+    assert_eq!(plan.symbols_on_stripe(0), 1);
+    assert_eq!(plan.symbols_on_stripe(1), 1);
+    assert_eq!(plan.symbols_on_stripe(2), 0);
+    assert_eq!(plan.symbols_surviving_loss(1), 1);
+    assert_eq!(plan.symbols_surviving_loss(2), 0);
+    assert!(plan.survives_stripe_loss(1, 1));
 }
