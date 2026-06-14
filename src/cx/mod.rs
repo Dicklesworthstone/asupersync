@@ -54,7 +54,10 @@ pub use capacity_ticket::{
     CapacityTicketRefusal, CapacityTicketRequest, CapacityTicketWorkKind, request_capacity_ticket,
     request_capacity_ticket_from_budget,
 };
-pub use cx::{Cx, SpanGuard};
+pub use cx::{
+    BudgetStats, CapabilityLayerSnapshot, CapabilitySnapshot, CostBudgetStats, Cx,
+    DeadlineBudgetStats, PollBudgetStats, SpanGuard,
+};
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
     VerificationError,

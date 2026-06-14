@@ -222,6 +222,210 @@ impl<Caps> Clone for Cx<Caps> {
     }
 }
 
+/// Boolean view of one capability layer.
+///
+/// The five effect bits come from [`cap::CapMask`]. `trace` is intentionally
+/// always `true` today because tracing/logging is a diagnostic Cx operation,
+/// not a type-level or runtime-mask-gated effect.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityLayerSnapshot {
+    /// Task/region spawning.
+    pub spawn: bool,
+    /// Timers, timeouts, and runtime time.
+    pub time: bool,
+    /// Entropy/randomness.
+    pub entropy: bool,
+    /// Async I/O.
+    pub io: bool,
+    /// Remote task/effect authority.
+    pub remote: bool,
+    /// Diagnostic tracing/logging. This is not currently CapMask-gated.
+    pub trace: bool,
+}
+
+impl CapabilityLayerSnapshot {
+    #[inline]
+    #[must_use]
+    fn from_mask(mask: cap::CapMask) -> Self {
+        Self {
+            spawn: mask.has(cap::CapMask::SPAWN),
+            time: mask.has(cap::CapMask::TIME),
+            entropy: mask.has(cap::CapMask::RANDOM),
+            io: mask.has(cap::CapMask::IO),
+            remote: mask.has(cap::CapMask::REMOTE),
+            trace: true,
+        }
+    }
+}
+
+/// Point-in-time view of the capabilities visible through a [`Cx`].
+///
+/// The top-level booleans are the effective authority that cap-gated methods on
+/// this receiver can observe: the type-level [`cap::CapSet`] row intersected
+/// with the receiver's runtime mask. `type_level`, `runtime`, and `effective`
+/// expose the same calculation in verbose form for diagnostics.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilitySnapshot {
+    /// Effective task/region spawning authority.
+    pub spawn: bool,
+    /// Effective timer/time authority.
+    pub time: bool,
+    /// Effective entropy/randomness authority.
+    pub entropy: bool,
+    /// Effective async I/O authority.
+    pub io: bool,
+    /// Effective remote authority.
+    pub remote: bool,
+    /// Effective diagnostic tracing/logging authority.
+    pub trace: bool,
+    /// Capability row encoded by the `Cx<Caps>` type parameter.
+    pub type_level: CapabilityLayerSnapshot,
+    /// Runtime mask carried by this `Cx`.
+    pub runtime: CapabilityLayerSnapshot,
+    /// Intersection of `type_level` and `runtime`.
+    pub effective: CapabilityLayerSnapshot,
+}
+
+impl CapabilitySnapshot {
+    #[inline]
+    #[must_use]
+    fn new(type_mask: cap::CapMask, runtime_mask: cap::CapMask) -> Self {
+        let type_level = CapabilityLayerSnapshot::from_mask(type_mask);
+        let runtime = CapabilityLayerSnapshot::from_mask(runtime_mask);
+        let effective = CapabilityLayerSnapshot::from_mask(type_mask.intersect(runtime_mask));
+        Self {
+            spawn: effective.spawn,
+            time: effective.time,
+            entropy: effective.entropy,
+            io: effective.io,
+            remote: effective.remote,
+            trace: effective.trace,
+            type_level,
+            runtime,
+            effective,
+        }
+    }
+}
+
+/// Deadline component of [`BudgetStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeadlineBudgetStats {
+    /// Absolute logical deadline, if configured.
+    pub at: Option<Time>,
+    /// Duration remaining at snapshot time. `None` means no deadline or an
+    /// already elapsed deadline.
+    pub remaining: Option<Duration>,
+}
+
+/// Poll-quota component of [`BudgetStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollBudgetStats {
+    /// Original finite poll quota. `None` means effectively unlimited.
+    pub quota: Option<u32>,
+    /// Polls consumed since the context's baseline. `None` means unlimited.
+    pub used: Option<u32>,
+    /// Polls remaining. `None` means effectively unlimited.
+    pub remaining: Option<u32>,
+}
+
+/// Cost-quota component of [`BudgetStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CostBudgetStats {
+    /// Original finite cost quota. `None` means no cost quota was configured.
+    pub quota: Option<u64>,
+    /// Cost units consumed since the context's baseline.
+    pub used: Option<u64>,
+    /// Cost units remaining.
+    pub remaining: Option<u64>,
+}
+
+/// Point-in-time budget accounting snapshot for a [`Cx`].
+///
+/// The values are a diagnostic read: they are consistent at the moment of the
+/// call, and may be stale by the next poll. Calling [`Cx::budget_stats`] drains
+/// pending fast-path checkpoint counters into the authoritative checkpoint
+/// state before taking the budget snapshot, preserving the existing
+/// checkpoint-accounting invariant.
+///
+/// ```
+/// use asupersync::cx::{
+///     BudgetStats, CostBudgetStats, DeadlineBudgetStats, PollBudgetStats,
+/// };
+/// use std::time::Duration;
+///
+/// let stats = BudgetStats {
+///     deadline: DeadlineBudgetStats {
+///         at: None,
+///         remaining: Some(Duration::from_millis(75)),
+///     },
+///     polls: PollBudgetStats {
+///         quota: Some(8),
+///         used: Some(2),
+///         remaining: Some(6),
+///     },
+///     cost: CostBudgetStats {
+///         quota: None,
+///         used: None,
+///         remaining: None,
+///     },
+///     priority: 128,
+/// };
+///
+/// let has_time = stats
+///     .deadline
+///     .remaining
+///     .is_none_or(|left| left > std::time::Duration::from_millis(25));
+/// let has_polls = stats.polls.remaining.is_none_or(|left| left > 2);
+/// assert!(has_time && has_polls);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetStats {
+    /// Deadline headroom.
+    pub deadline: DeadlineBudgetStats,
+    /// Poll quota headroom.
+    pub polls: PollBudgetStats,
+    /// Cost quota headroom.
+    pub cost: CostBudgetStats,
+    /// Current scheduling priority.
+    pub priority: u8,
+}
+
+impl BudgetStats {
+    #[inline]
+    #[must_use]
+    fn from_budget_pair(budget: Budget, baseline: Budget, now: Time) -> Self {
+        Self {
+            deadline: DeadlineBudgetStats {
+                at: budget.deadline,
+                remaining: budget.remaining_time(now),
+            },
+            polls: PollBudgetStats {
+                quota: finite_poll_quota(baseline.poll_quota),
+                used: finite_poll_quota(baseline.poll_quota)
+                    .map(|quota| quota.saturating_sub(budget.poll_quota)),
+                remaining: finite_poll_quota(budget.poll_quota),
+            },
+            cost: CostBudgetStats {
+                quota: baseline.cost_quota,
+                used: match (baseline.cost_quota, budget.cost_quota) {
+                    (Some(quota), Some(remaining)) => Some(quota.saturating_sub(remaining)),
+                    _ => None,
+                },
+                remaining: budget.cost_quota,
+            },
+            priority: budget.priority,
+        }
+    }
+}
+
+#[inline]
+#[must_use]
+fn finite_poll_quota(quota: u32) -> Option<u32> {
+    if quota == u32::MAX { None } else { Some(quota) }
+}
+
 /// Internal observability state shared by `Cx` clones.
 #[derive(Debug, Clone)]
 pub struct ObservabilityState {
@@ -393,6 +597,38 @@ impl FullCx {
             .unwrap_or(false)
     }
 
+    /// Returns the current thread-local Cx restriction-stack depth.
+    ///
+    /// `0` means no ambient context is installed. A plain runtime
+    /// [`set_current`](Self::set_current) contributes one unrestricted frame;
+    /// nested [`Cx::set_current_restricted`] or [`push_restriction`](Self::push_restriction)
+    /// calls add frames that may narrow the ambient view observed by
+    /// [`current`](Self::current).
+    #[inline]
+    #[must_use]
+    pub fn restriction_depth() -> usize {
+        CURRENT_CX_STACK
+            .try_with(|slot| slot.borrow().len())
+            .unwrap_or(0)
+    }
+
+    /// Returns true when the ambient current Cx is currently mask-restricted.
+    ///
+    /// This reports the thread-local ambient stack state, not the type-level
+    /// `Caps` parameter of an arbitrary `Cx` value. To inspect a receiver's
+    /// effective type/runtime authority, use [`Cx::capabilities`].
+    #[inline]
+    #[must_use]
+    pub fn is_restricted() -> bool {
+        CURRENT_CX_STACK
+            .try_with(|slot| {
+                slot.borrow()
+                    .last()
+                    .is_some_and(|frame| frame.mask != cap::CapMask::all())
+            })
+            .unwrap_or(false)
+    }
+
     /// Borrows the current task context for the duration of the closure.
     ///
     /// br-asupersync-xqt7dj — zero-Arc-clone hot path for callers that
@@ -530,6 +766,20 @@ where
             pushed: true,
             _not_send: std::marker::PhantomData,
         }
+    }
+
+    /// Returns the capabilities visible through this context.
+    ///
+    /// The top-level booleans in the returned [`CapabilitySnapshot`] are the
+    /// effective authority of this receiver: the type-level capability row
+    /// intersected with the runtime mask carried by this `Cx`. When a context
+    /// is obtained via [`Cx::current`] under `set_current_restricted` or
+    /// [`Cx::push_restriction`], the runtime mask already includes that
+    /// ambient restriction.
+    #[inline]
+    #[must_use]
+    pub fn capabilities(&self) -> CapabilitySnapshot {
+        CapabilitySnapshot::new(<Caps as cap::CapSetRuntimeMask>::MASK, self.runtime_mask)
     }
 }
 
@@ -1706,6 +1956,22 @@ impl<Caps> Cx<Caps> {
     #[must_use]
     pub fn remaining_budget(&self) -> crate::types::RemainingBudget {
         self.budget().remaining(self.now_for_observability())
+    }
+
+    /// Returns point-in-time budget accounting for this context.
+    ///
+    /// The snapshot is consistent at call time only. Quotas and deadlines may
+    /// be consumed immediately after this method returns. Before copying the
+    /// budget fields, this drains pending fast-path checkpoint counters into
+    /// the authoritative checkpoint state so diagnostic budget reads do not
+    /// leave checkpoint accounting lagging behind fast-path progress.
+    #[inline]
+    #[must_use]
+    pub fn budget_stats(&self) -> BudgetStats {
+        let now = self.now_for_observability();
+        let mut inner = self.inner.write();
+        inner.drain_fast_path_checkpoint();
+        BudgetStats::from_budget_pair(inner.budget, inner.budget_baseline, now)
     }
 
     /// Computes the effective child capability budget without mutating this
@@ -4216,6 +4482,29 @@ mod tests {
         Cx::for_testing()
     }
 
+    fn clear_current_stack() {
+        CURRENT_CX_STACK.with(|stack| {
+            stack.borrow_mut().clear();
+        });
+    }
+
+    fn cap_layer(
+        spawn: bool,
+        time: bool,
+        entropy: bool,
+        io: bool,
+        remote: bool,
+    ) -> CapabilityLayerSnapshot {
+        CapabilityLayerSnapshot {
+            spawn,
+            time,
+            entropy,
+            io,
+            remote,
+            trace: true,
+        }
+    }
+
     fn lab_with_spawn_cx() -> (crate::lab::LabRuntime, Cx<cap::All>, RegionId) {
         let mut lab = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let root = lab.state.create_root_region(Budget::INFINITE);
@@ -4339,6 +4628,153 @@ mod tests {
             Some(TimerDriverHandle::with_virtual_clock(clock)),
             None,
         )
+    }
+
+    #[test]
+    fn introspection_capabilities_reflect_wrapper_type_level_masks() {
+        let full = Arc::new(Cx::for_testing());
+
+        let web: Arc<Cx<crate::cx::wrappers::WebCaps>> = crate::cx::wrappers::narrow(&full);
+        let grpc: Arc<Cx<crate::cx::wrappers::GrpcCaps>> = crate::cx::wrappers::narrow(&full);
+        let background: Arc<Cx<crate::cx::wrappers::BackgroundCaps>> =
+            crate::cx::wrappers::narrow(&full);
+        let pure: Arc<Cx<crate::cx::wrappers::PureCaps>> = crate::cx::wrappers::narrow(&full);
+        let entropy: Arc<Cx<crate::cx::wrappers::EntropyCaps>> = crate::cx::wrappers::narrow(&full);
+
+        let cases = [
+            (
+                web.capabilities(),
+                cap_layer(false, true, false, true, false),
+            ),
+            (
+                grpc.capabilities(),
+                cap_layer(true, true, false, true, false),
+            ),
+            (
+                background.capabilities(),
+                cap_layer(true, true, false, false, false),
+            ),
+            (
+                pure.capabilities(),
+                cap_layer(false, false, false, false, false),
+            ),
+            (
+                entropy.capabilities(),
+                cap_layer(false, false, true, false, false),
+            ),
+        ];
+
+        for (snapshot, expected_effective) in cases {
+            assert_eq!(snapshot.runtime, cap_layer(true, true, true, true, true));
+            assert_eq!(snapshot.effective, expected_effective);
+            assert_eq!(snapshot.type_level, expected_effective);
+            assert_eq!(snapshot.spawn, expected_effective.spawn);
+            assert_eq!(snapshot.time, expected_effective.time);
+            assert_eq!(snapshot.entropy, expected_effective.entropy);
+            assert_eq!(snapshot.io, expected_effective.io);
+            assert_eq!(snapshot.remote, expected_effective.remote);
+            assert!(snapshot.trace);
+        }
+    }
+
+    #[test]
+    fn introspection_capabilities_intersect_type_and_runtime_masks() {
+        clear_current_stack();
+
+        let full = Cx::for_testing();
+        let restricted_type: Cx<cap::None> = full.restrict::<cap::None>();
+        let type_snapshot = restricted_type.capabilities();
+
+        assert_eq!(
+            type_snapshot.type_level,
+            cap_layer(false, false, false, false, false)
+        );
+        assert_eq!(
+            type_snapshot.runtime,
+            cap_layer(true, true, true, true, true)
+        );
+        assert_eq!(
+            type_snapshot.effective,
+            cap_layer(false, false, false, false, false)
+        );
+
+        let _outer = Cx::set_current(Some(full.clone()));
+        assert_eq!(Cx::restriction_depth(), 1);
+        assert!(!Cx::is_restricted());
+
+        let _restricted = Cx::push_restriction(cap::CapMask::none());
+        assert_eq!(Cx::restriction_depth(), 2);
+        assert!(Cx::is_restricted());
+
+        let ambient = Cx::current().expect("ambient cx must be installed");
+        let ambient_snapshot = ambient.capabilities();
+        assert_eq!(
+            ambient_snapshot.type_level,
+            cap_layer(true, true, true, true, true)
+        );
+        assert_eq!(
+            ambient_snapshot.runtime,
+            cap_layer(false, false, false, false, false)
+        );
+        assert_eq!(
+            ambient_snapshot.effective,
+            cap_layer(false, false, false, false, false)
+        );
+    }
+
+    #[test]
+    fn introspection_budget_stats_reports_used_remaining_and_deadline() {
+        let budget = Budget::new()
+            .with_deadline(Time::from_secs(110))
+            .with_poll_quota(3)
+            .with_cost_quota(9)
+            .with_priority(77);
+        let cx = test_cx_with_virtual_time(budget, Time::from_secs(100));
+        {
+            let mut inner = cx.inner.write();
+            inner.budget.poll_quota = 1;
+            inner.budget.cost_quota = Some(4);
+        }
+
+        let stats = cx.budget_stats();
+
+        assert_eq!(stats.deadline.at, Some(Time::from_secs(110)));
+        assert_eq!(stats.deadline.remaining, Some(Duration::from_secs(10)));
+        assert_eq!(stats.polls.quota, Some(3));
+        assert_eq!(stats.polls.used, Some(2));
+        assert_eq!(stats.polls.remaining, Some(1));
+        assert_eq!(stats.cost.quota, Some(9));
+        assert_eq!(stats.cost.used, Some(5));
+        assert_eq!(stats.cost.remaining, Some(4));
+        assert_eq!(stats.priority, 77);
+    }
+
+    #[test]
+    fn introspection_budget_stats_drains_fast_path_checkpoint_counters() {
+        let cx = test_cx_with_virtual_time(Budget::new().with_poll_quota(10), Time::from_secs(100));
+
+        assert!(cx.checkpoint().is_ok());
+        assert!(cx.checkpoint().is_ok());
+        assert!(cx.checkpoint().is_ok());
+
+        assert_eq!(
+            cx.inner
+                .read()
+                .fast_path_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+
+        let _stats = cx.budget_stats();
+
+        let inner = cx.inner.read();
+        assert_eq!(
+            inner
+                .fast_path_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(inner.checkpoint_state.checkpoint_count, 3);
     }
 
     #[test]
