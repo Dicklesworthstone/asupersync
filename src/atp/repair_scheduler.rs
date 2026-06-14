@@ -7,7 +7,7 @@ use crate::atp::object::ObjectId;
 use crate::error::Result;
 use crate::error::{Error, ErrorKind};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
 #[cfg(feature = "tracing-integration")]
@@ -97,7 +97,7 @@ impl Default for PeerScoringWeights {
 }
 
 /// Unique identifier for a peer in the swarm
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PeerId {
     /// Peer's network address
     pub address: SocketAddr,
@@ -275,7 +275,10 @@ pub struct MultiSourceRepairScheduler {
     #[allow(dead_code)]
     repair_group_id: String,
     k_prime: u32, // Number of source symbols needed
-    peers: HashMap<PeerId, PeerInfo>,
+    // BTreeMap (not HashMap) so peer iteration — and therefore tie-broken peer
+    // selection in `select_best_peer_for_symbol` — is deterministic, satisfying
+    // the lab-runtime replayability convention (br-asupersync-yms9p9 F8).
+    peers: BTreeMap<PeerId, PeerInfo>,
     received_symbols: HashSet<u32>,
     pending_requests: HashMap<u32, RepairSymbolRequest>,
     rejected_requests: VecDeque<(RepairSymbolRequest, RejectionReason)>,
@@ -298,7 +301,7 @@ impl MultiSourceRepairScheduler {
             object_id,
             repair_group_id,
             k_prime,
-            peers: HashMap::new(),
+            peers: BTreeMap::new(),
             received_symbols: HashSet::new(),
             pending_requests: HashMap::new(),
             rejected_requests: VecDeque::new(),
@@ -1461,6 +1464,35 @@ mod tests {
             per_peer.len() <= 3,
             "no more than max_concurrent_peers=3 distinct peers may be used, got {}",
             per_peer.len()
+        );
+    }
+
+    #[test]
+    fn peer_selection_is_deterministic_on_tied_scores() {
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            3,
+        );
+
+        // Register peers out of address order; they share identical scoring
+        // inputs, so selection is a pure tie-break. With deterministic
+        // (BTreeMap) peer iteration the smallest PeerId must always win,
+        // independent of registration/hash order.
+        for port in [8003u16, 8001, 8002] {
+            let info = create_test_peer_info(&scheduler, create_test_peer_id(port), vec![1, 2, 3]);
+            scheduler.register_peer(info).unwrap();
+        }
+
+        let peer_scores = scheduler.calculate_peer_scores();
+        let selected = scheduler
+            .select_best_peer_for_symbol(1, &peer_scores, &HashMap::new(), true)
+            .expect("a peer must be selectable");
+        assert_eq!(
+            selected,
+            create_test_peer_id(8001),
+            "tied-score selection must be deterministic (smallest PeerId wins)"
         );
     }
 
