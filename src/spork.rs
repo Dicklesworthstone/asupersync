@@ -9,7 +9,7 @@
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
-//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot` |
+//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot`, `GroupBroadcastPlan` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -613,6 +613,15 @@ pub mod process_group {
         pub fn snapshot(&self) -> GroupSnapshot {
             GroupSnapshot::new(self.group.clone(), self.members.values().cloned().collect())
         }
+
+        /// Returns the deterministic recipient plan for a group broadcast.
+        ///
+        /// This does not deliver messages. It freezes the recipient order and
+        /// backpressure policy that the async broadcast surface must honor.
+        #[must_use]
+        pub fn broadcast_plan(&self, policy: BroadcastBackpressurePolicy) -> GroupBroadcastPlan {
+            GroupBroadcastPlan::from_snapshot(&self.snapshot(), policy)
+        }
     }
 
     /// Cursor into a process-group membership event log.
@@ -749,6 +758,60 @@ pub mod process_group {
             Self::Wait
         }
     }
+
+    /// Deterministic broadcast recipient plan for one process group.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GroupBroadcastPlan {
+        group: GroupName,
+        policy: BroadcastBackpressurePolicy,
+        recipients: Vec<GroupMemberId>,
+    }
+
+    impl GroupBroadcastPlan {
+        /// Creates a broadcast plan from a deterministic snapshot.
+        #[must_use]
+        pub fn from_snapshot(
+            snapshot: &GroupSnapshot,
+            policy: BroadcastBackpressurePolicy,
+        ) -> Self {
+            Self {
+                group: snapshot.group().clone(),
+                policy,
+                recipients: snapshot.member_ids().cloned().collect(),
+            }
+        }
+
+        /// Returns the target group.
+        #[must_use]
+        pub fn group(&self) -> &GroupName {
+            &self.group
+        }
+
+        /// Returns the policy to apply when a recipient cannot accept a
+        /// message immediately.
+        #[must_use]
+        pub fn policy(&self) -> BroadcastBackpressurePolicy {
+            self.policy
+        }
+
+        /// Returns the deterministic recipient order.
+        #[must_use]
+        pub fn recipients(&self) -> &[GroupMemberId] {
+            &self.recipients
+        }
+
+        /// Returns the number of planned recipients.
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.recipients.len()
+        }
+
+        /// Returns whether this plan has no recipients.
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.recipients.is_empty()
+        }
+    }
 }
 
 /// Unidirectional down notifications.
@@ -799,7 +862,8 @@ pub mod crash {
 /// - **GenServer**: `GenServer`, `GenServerHandle`, `Reply`,
 ///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
-/// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`
+/// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`,
+///   `GroupBroadcastPlan`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -824,9 +888,9 @@ pub mod prelude {
 
     // -- Process groups --
     pub use super::process_group::{
-        BroadcastBackpressurePolicy, GroupEvent, GroupEventCursor, GroupEventKind, GroupMember,
-        GroupMemberId, GroupName, GroupNameError, GroupSnapshot, ProcessGroupError,
-        ProcessGroupState,
+        BroadcastBackpressurePolicy, GroupBroadcastPlan, GroupEvent, GroupEventCursor,
+        GroupEventKind, GroupMember, GroupMemberId, GroupName, GroupNameError, GroupSnapshot,
+        ProcessGroupError, ProcessGroupState,
     };
 
     // -- Monitor --
@@ -1139,6 +1203,7 @@ mod tests {
         let _ = std::any::type_name::<prelude::ProcessGroupState>();
         let _ = std::any::type_name::<prelude::ProcessGroupError>();
         let _ = std::any::type_name::<prelude::GroupEventCursor>();
+        let _ = std::any::type_name::<prelude::GroupBroadcastPlan>();
         let _ = std::any::type_name::<prelude::BroadcastBackpressurePolicy>();
         let _ = std::any::type_name::<prelude::MonitorRef>();
         let _ = std::any::type_name::<prelude::DownReason>();
@@ -1195,6 +1260,7 @@ mod tests {
         let _ = std::any::type_name::<process_group::GroupSnapshot>();
         let _ = std::any::type_name::<process_group::GroupEvent>();
         let _ = std::any::type_name::<process_group::GroupEventCursor>();
+        let _ = std::any::type_name::<process_group::GroupBroadcastPlan>();
         let _ = std::any::type_name::<process_group::GroupEventKind>();
         let _ = std::any::type_name::<process_group::ProcessGroupState>();
         let _ = std::any::type_name::<process_group::ProcessGroupError>();
@@ -1354,6 +1420,65 @@ mod tests {
         );
 
         crate::test_complete!("process_group_backpressure_default_waits");
+    }
+
+    #[test]
+    fn process_group_broadcast_plan_preserves_join_order_and_policy() {
+        init_test("process_group_broadcast_plan_preserves_join_order_and_policy");
+
+        let mut state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let first = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-b"),
+            test_task_id(2),
+        );
+        let second = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(1),
+        );
+        state
+            .join(first, crate::types::Time::from_nanos(20))
+            .unwrap();
+        state
+            .join(second, crate::types::Time::from_nanos(10))
+            .unwrap();
+
+        let plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Skip);
+        let recipients: Vec<String> = plan
+            .recipients()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+
+        assert_eq!(plan.group().as_str(), "workers");
+        assert_eq!(
+            plan.policy(),
+            process_group::BroadcastBackpressurePolicy::Skip
+        );
+        assert_eq!(plan.len(), 2);
+        assert_eq!(recipients, vec!["Node(node-b):T2", "Node(node-a):T1"]);
+
+        crate::test_complete!("process_group_broadcast_plan_preserves_join_order_and_policy");
+    }
+
+    #[test]
+    fn process_group_broadcast_plan_allows_empty_groups() {
+        init_test("process_group_broadcast_plan_allows_empty_groups");
+
+        let state = process_group::ProcessGroupState::new(
+            process_group::GroupName::new("workers").unwrap(),
+        );
+        let plan = state.broadcast_plan(process_group::BroadcastBackpressurePolicy::Error);
+
+        assert!(plan.is_empty());
+        assert_eq!(plan.len(), 0);
+        assert_eq!(
+            plan.policy(),
+            process_group::BroadcastBackpressurePolicy::Error
+        );
+
+        crate::test_complete!("process_group_broadcast_plan_allows_empty_groups");
     }
 
     #[test]
