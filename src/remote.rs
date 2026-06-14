@@ -28,9 +28,9 @@
 
 use crate::channel::oneshot;
 use crate::cx::Cx;
+use crate::distributed::membership::{LeaseAction, MembershipLeaseReactor, MembershipView};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::types::outcome::Outcome;
-use crate::distributed::membership::{LeaseAction, MembershipLeaseReactor, MembershipView};
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
 use serde::{Deserialize, Serialize};
@@ -1370,7 +1370,9 @@ impl Lease {
 // ===========================================================================
 
 /// A lease the [`MembershipLeaseManager`] revoked because its node was confirmed
-/// dead or left. The caller aborts the underlying obligation
+/// dead or left.
+///
+/// The caller aborts the underlying obligation
 /// (`ObligationAbortReason::Cancel`) through `RuntimeState`, which triggers any
 /// saga compensation attached to that obligation.
 #[derive(Debug, Clone, PartialEq, Eq)]

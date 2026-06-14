@@ -230,9 +230,7 @@ impl<T> Shared<T> {
     fn is_message_ready_for(&self, next_index: u64) -> bool {
         let earliest = self.earliest_index();
         let delta = next_index.saturating_sub(earliest);
-        usize::try_from(delta)
-            .ok()
-            .is_some_and(|offset| self.buffer.get(offset).is_some())
+        usize::try_from(delta).is_ok_and(|offset| self.buffer.get(offset).is_some())
     }
 
     #[inline]
