@@ -1016,10 +1016,10 @@ Every combinator is cancel-safe. Losers drain after races. Outcomes aggregate vi
 | `systematic.rs` | Systematic encoder/decoder |
 | `gf256.rs` | GF(2^8) arithmetic (addition, multiplication, inversion) |
 | `linalg.rs` | Matrix operations over GF(256) |
-| `pipeline.rs` | Full sender/receiver pipelines with symbol authentication |
+| `pipeline.rs` | Full sender/receiver pipelines with *opt-in* symbol authentication (`verify_auth`; fail-closed when enabled, but disabled by default in the ATP transports — see `asupersync-e880xo`) |
 | `proof.rs` | Decode proof system for verifiable recovery |
 
-The implementation is deterministic (no randomness in lab mode) and integrates with the security layer (`src/security/`) for per-symbol authentication tags, preventing Byzantine symbol injection.
+The implementation is deterministic (no randomness in lab mode) and can integrate with the security layer (`src/security/`) for per-symbol authentication tags (fail-closed when `verify_auth` is enabled — forged/contextless symbols are rejected). **REALITY (`asupersync-e880xo`): per-symbol authentication is an OPT-IN capability and is NOT enabled by the default ATP RaptorQ transports (`src/net/atp/transport_rq`, `transport_tcp`), which run `verify_auth: false` and provide integrity-vs-manifest (SHA-256/merkle) only — that protects against corruption, not forgery. Actually preventing Byzantine symbol injection requires `verify_auth: true` with an auth context AND an authenticated control channel/manifest; without an authenticated channel a MITM can substitute a matching forged manifest + symbols.**
 
 On the decode side, the runtime uses a policy-driven deterministic planner instead of a single fixed elimination strategy:
 
