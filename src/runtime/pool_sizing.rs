@@ -599,12 +599,12 @@ pub fn decide_pool_sizing(
 
 fn beta_bps_for_target(target: PoolSizingTarget) -> u32 {
     match target.wait_probability_ppm().unwrap_or(100_000) {
-        0..=100 => 3_720,
-        101..=1_000 => 3_090,
-        1_001..=10_000 => 2_330,
-        10_001..=50_000 => 1_650,
-        50_001..=100_000 => 1_280,
-        100_001..=250_000 => 670,
+        0..=100 => 37_200,
+        101..=1_000 => 30_900,
+        1_001..=10_000 => 23_300,
+        10_001..=50_000 => 16_500,
+        50_001..=100_000 => 12_800,
+        100_001..=250_000 => 6_700,
         _ => 0,
     }
 }
@@ -781,7 +781,7 @@ mod tests {
 
         assert_eq!(recommendation.reason, PoolSizingReason::TargetMet);
         assert!(recommendation.target_met);
-        assert_eq!(recommendation.recommended_size, 10);
+        assert_eq!(recommendation.recommended_size, 9);
         assert!(recommendation.square_root_staffing_size >= 8);
         assert!(recommendation.selected_metrics.wait_probability_ppm <= 100_000);
     }
@@ -883,7 +883,7 @@ mod tests {
         };
 
         let small_move = decide_pool_sizing(policy, state, estimate(5, 1_000_000), 20);
-        assert_eq!(small_move.recommendation.recommended_size, 10);
+        assert_eq!(small_move.recommendation.recommended_size, 9);
         assert_eq!(small_move.action, PoolSizingAction::HoldHysteresis);
 
         let cadence_hold = decide_pool_sizing(policy, state, estimate(12, 1_000_000), 12);
