@@ -193,11 +193,40 @@ impl DecisionId {
     }
 
     /// Create from millisecond timestamp and random bits.
+    ///
+    /// `ts_ms` is saturated to the 48-bit field (matching
+    /// [`TraceId::from_parts`]) so an out-of-range value — e.g. microseconds
+    /// or nanoseconds passed by a unit-error — never silently corrupts the
+    /// "high 48 = ts, low 80 = random" layout. Without saturation,
+    /// `(ts_ms as u128) << 80` shifts the top bits of an out-of-range `ts_ms`
+    /// off the 128-bit word, so `timestamp_ms` would return a truncated value.
+    /// Use [`Self::try_from_parts`] for a strict, error-returning surface.
+    /// (br-asupersync-rxe2sg)
     #[must_use]
     pub const fn from_parts(ts_ms: u64, random: u128) -> Self {
-        let ts_bits = (ts_ms as u128) << 80;
+        const MAX_TS_MS: u64 = (1u64 << 48) - 1;
+        let saturated_ts = if ts_ms > MAX_TS_MS { MAX_TS_MS } else { ts_ms };
+        let ts_bits = (saturated_ts as u128) << 80;
         let rand_bits = random & 0xFFFF_FFFF_FFFF_FFFF_FFFF;
         Self(ts_bits | rand_bits)
+    }
+
+    /// Strict variant of [`Self::from_parts`] (br-asupersync-rxe2sg).
+    ///
+    /// Returns `Err(ts_ms)` when the millisecond timestamp does not fit in the
+    /// 48-bit field, mirroring [`TraceId::try_from_parts`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(ts_ms)` if `ts_ms >= 2^48`.
+    pub const fn try_from_parts(ts_ms: u64, random: u128) -> Result<Self, u64> {
+        const MAX_TS_MS: u64 = (1u64 << 48) - 1;
+        if ts_ms > MAX_TS_MS {
+            return Err(ts_ms);
+        }
+        let ts_bits = (ts_ms as u128) << 80;
+        let rand_bits = random & 0xFFFF_FFFF_FFFF_FFFF_FFFF;
+        Ok(Self(ts_bits | rand_bits))
     }
 
     /// Extract the millisecond timestamp.
@@ -668,6 +697,33 @@ mod tests {
     }
 
     #[test]
+    fn decision_id_from_parts_saturates_out_of_range_ts() {
+        // br-asupersync-rxe2sg: DecisionId::from_parts must saturate ts_ms to
+        // the 48-bit field like TraceId, not silently truncate via `<< 80`.
+        const MAX_TS_MS: u64 = (1u64 << 48) - 1;
+        let random = 0x00AB_CDEF_0123_4567_89AB_u128;
+
+        // In-range round-trips exactly.
+        let in_range = DecisionId::from_parts(1_700_000_000_000_u64, random);
+        assert_eq!(in_range.timestamp_ms(), 1_700_000_000_000_u64);
+        assert_eq!(in_range.as_u128() & 0xFFFF_FFFF_FFFF_FFFF_FFFF, random);
+
+        // Out-of-range (e.g. microseconds passed as ms) saturates instead of
+        // truncating to its low 48 bits (which would be 12_345 here).
+        let out_of_range_ts = (1u64 << 48) + 12_345;
+        let saturated = DecisionId::from_parts(out_of_range_ts, random);
+        assert_eq!(saturated.timestamp_ms(), MAX_TS_MS);
+        assert_eq!(saturated.as_u128() & 0xFFFF_FFFF_FFFF_FFFF_FFFF, random);
+
+        // try_from_parts rejects the out-of-range value strictly.
+        assert!(matches!(
+            DecisionId::try_from_parts(out_of_range_ts, random),
+            Err(t) if t == out_of_range_ts
+        ));
+        assert!(DecisionId::try_from_parts(MAX_TS_MS, random).is_ok());
+    }
+
+    #[test]
     fn trace_id_display_parse_roundtrip() {
         let id = TraceId::from_raw(0x0123_4567_89AB_CDEF_0123_4567_89AB_CDEF);
         let hex = id.to_string();
@@ -786,6 +842,37 @@ mod tests {
         let id = DecisionId::from_parts(ts, random);
         assert_eq!(id.timestamp_ms(), ts);
         assert_eq!(id.as_u128() & 0xFFFF_FFFF_FFFF_FFFF_FFFF, random);
+    }
+
+    #[test]
+    fn decision_id_from_parts_saturates_above_48_bits() {
+        let oversize = (1u64 << 48) + 12345;
+        let id = DecisionId::from_parts(oversize, 0);
+
+        assert_eq!(id.timestamp_ms(), (1u64 << 48) - 1);
+    }
+
+    #[test]
+    fn decision_id_from_parts_max_u64_saturates() {
+        let id = DecisionId::from_parts(u64::MAX, 0);
+
+        assert_eq!(id.timestamp_ms(), (1u64 << 48) - 1);
+    }
+
+    #[test]
+    fn decision_id_try_from_parts_boundary_contract() {
+        let boundary = (1u64 << 48) - 1;
+        let in_range = DecisionId::try_from_parts(boundary, 0xCAFE).expect("boundary fits");
+
+        assert_eq!(in_range.timestamp_ms(), boundary);
+        assert_eq!(
+            DecisionId::try_from_parts(1u64 << 48, 0).expect_err("out of range"),
+            1u64 << 48
+        );
+        assert_eq!(
+            DecisionId::try_from_parts(u64::MAX, 0).expect_err("out of range"),
+            u64::MAX
+        );
     }
 
     #[test]
