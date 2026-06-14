@@ -28,9 +28,9 @@ use std::task::{Wake, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use asupersync::runtime::reactor::Interest;
 #[cfg(all(target_os = "linux", feature = "io-uring", feature = "test-internals"))]
 use asupersync::runtime::reactor::IoUringReactor;
+use asupersync::runtime::reactor::{Interest, TokenSlab};
 use asupersync::runtime::{Events, LabReactor, Reactor, Token};
 
 // =============================================================================
@@ -478,6 +478,62 @@ fn bench_token_operations(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_token_slab(c: &mut Criterion) {
+    let mut group = c.benchmark_group("reactor/token_slab");
+
+    group.bench_function("remove_reinsert_cycle", |b: &mut criterion::Bencher| {
+        let mut slab = TokenSlab::with_capacity(1);
+        let mut token = slab.insert(noop_waker());
+
+        b.iter(|| {
+            let waker = slab.remove(token).expect("token is present");
+            token = slab.insert(waker);
+            std::hint::black_box(token);
+        });
+    });
+
+    for &count in &[1024_usize, 4096] {
+        let count_u64 = u64::try_from(count).expect("count fits u64");
+        group.throughput(Throughput::Elements(count_u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("clear_already_empty_after_churn", count),
+            &count,
+            |b: &mut criterion::Bencher, &count| {
+                let mut slab = TokenSlab::with_capacity(count);
+                let tokens: Vec<_> = (0..count).map(|_| slab.insert(noop_waker())).collect();
+                for token in tokens {
+                    slab.remove(token).expect("token removed during setup");
+                }
+
+                b.iter(|| {
+                    slab.clear();
+                    std::hint::black_box(slab.len());
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("retain_already_empty_after_churn", count),
+            &count,
+            |b: &mut criterion::Bencher, &count| {
+                let mut slab = TokenSlab::with_capacity(count);
+                let tokens: Vec<_> = (0..count).map(|_| slab.insert(noop_waker())).collect();
+                for token in tokens {
+                    slab.remove(token).expect("token removed during setup");
+                }
+
+                b.iter(|| {
+                    slab.retain(|_, _| true);
+                    std::hint::black_box(slab.len());
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // =============================================================================
 // LAB REACTOR SPECIFIC BENCHMARKS
 // =============================================================================
@@ -582,6 +638,7 @@ criterion_group!(
     bench_echo_latency,
     bench_scalability,
     bench_token_operations,
+    bench_token_slab,
     bench_lab_reactor,
     bench_io_uring_cqe_bookkeeping,
 );

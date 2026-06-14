@@ -319,57 +319,39 @@ impl TokenSlab {
     /// is incremented to invalidate any remaining references to this slot.
     pub fn remove(&mut self, token: SlabToken) -> Option<Waker> {
         let index = token.index as usize;
-        if index >= self.entries.len() {
+        let Some(entry) = self.entries.get_mut(index) else {
             return None;
-        }
+        };
 
-        let current_generation = self.entries[index].generation();
+        let current_generation = match entry {
+            Entry::Occupied { generation, .. } if *generation == token.generation => *generation,
+            _ => return None,
+        };
 
-        if current_generation != token.generation {
-            return None;
-        }
-
-        if matches!(self.entries[index], Entry::Occupied { .. }) {
-            // Increment generation to invalidate stale tokens.
-            let new_generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
-
-            if current_generation == SlabToken::MAX_GENERATION {
-                // Generation overflow: mark the slot permanently unusable
-                // by not adding it back to the free list.
-                let old_entry = std::mem::replace(
-                    &mut self.entries[index],
-                    Entry::Vacant {
-                        next_free: FREE_LIST_END,
-                        generation: new_generation,
-                    },
-                );
-
-                self.len -= 1;
-
-                match old_entry {
-                    Entry::Occupied { waker, .. } => Some(waker),
-                    Entry::Vacant { .. } => unreachable!(),
-                }
-            } else {
-                // Take the waker and convert to vacant.
-                let old_entry = std::mem::replace(
-                    &mut self.entries[index],
-                    Entry::Vacant {
-                        next_free: self.free_head,
-                        generation: new_generation,
-                    },
-                );
-
-                self.free_head = index as u32;
-                self.len -= 1;
-
-                match old_entry {
-                    Entry::Occupied { waker, .. } => Some(waker),
-                    Entry::Vacant { .. } => unreachable!(),
-                }
-            }
+        // Increment generation to invalidate stale tokens.
+        let new_generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
+        let recycle_slot = current_generation != SlabToken::MAX_GENERATION;
+        let next_free = if recycle_slot {
+            self.free_head
         } else {
-            None
+            FREE_LIST_END
+        };
+        let old_entry = std::mem::replace(
+            entry,
+            Entry::Vacant {
+                next_free,
+                generation: new_generation,
+            },
+        );
+
+        if recycle_slot {
+            self.free_head = index as u32;
+        }
+        self.len -= 1;
+
+        match old_entry {
+            Entry::Occupied { waker, .. } => Some(waker),
+            Entry::Vacant { .. } => unreachable!(),
         }
     }
 
@@ -399,6 +381,10 @@ impl TokenSlab {
 
     /// Clears all entries from the slab.
     pub fn clear(&mut self) {
+        if self.len == 0 {
+            return;
+        }
+
         self.free_head = FREE_LIST_END;
         for index in (0..self.entries.len()).rev() {
             let current_generation = self.entries[index].generation();
@@ -426,6 +412,10 @@ impl TokenSlab {
     where
         F: FnMut(SlabToken, &Waker) -> bool,
     {
+        if self.len == 0 {
+            return;
+        }
+
         for index in 0..self.entries.len() {
             let mut remove = false;
             let current_generation = self.entries[index].generation();
@@ -916,6 +906,38 @@ mod tests {
             slab.get(stale).is_none()
         );
         crate::test_complete!("slab_clear_invalidates_stale_tokens");
+    }
+
+    #[test]
+    fn slab_clear_already_empty_keeps_stale_tokens_invalid() {
+        init_test("slab_clear_already_empty_keeps_stale_tokens_invalid");
+        let mut slab = TokenSlab::new();
+
+        let stale = slab.insert(test_waker());
+        slab.remove(stale);
+        slab.clear();
+
+        crate::assert_with_log!(
+            slab.get(stale).is_none(),
+            "removed token remains stale after empty clear",
+            true,
+            slab.get(stale).is_none()
+        );
+
+        let fresh = slab.insert(test_waker());
+        crate::assert_with_log!(
+            slab.contains(fresh),
+            "fresh token after empty clear is live",
+            true,
+            slab.contains(fresh)
+        );
+        crate::assert_with_log!(
+            fresh != stale,
+            "empty clear does not reuse stale token generation",
+            true,
+            fresh != stale
+        );
+        crate::test_complete!("slab_clear_already_empty_keeps_stale_tokens_invalid");
     }
 
     #[test]
