@@ -808,38 +808,42 @@ fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
     // fetched from a trusted source. For now, we verify the signature if
     // the issuer claim is present and non-empty - the caller must ensure
     // proper issuer key validation.
-    if let Some(issuer_str) = issuer.as_deref() {
-        if !issuer_str.is_empty() {
-            let signature = decode_base64_url(signature_b64, "JWT signature")?;
-            let signed_data = format!("{}.{}", header_b64, payload_b64);
+    if let Some(issuer_str) = issuer.as_deref().filter(|iss| !iss.is_empty()) {
+        let signature = decode_base64_url(signature_b64, "JWT signature")?;
+        let signed_data = format!("{}.{}", header_b64, payload_b64);
 
-            // For NATS, the issuer field typically contains the issuer's public key
-            // Attempt to verify signature using issuer as the public key
-            match KeyPair::from_public_key(issuer_str) {
-                Ok(issuer_keypair) => {
-                    issuer_keypair
-                        .verify(signed_data.as_bytes(), &signature)
-                        .map_err(|err| {
-                            NatsError::InvalidAuth(format!(
-                                "JWT signature verification failed: {}",
-                                err
-                            ))
-                        })?;
-                }
-                Err(_) => {
-                    // If issuer is not a valid public key, we cannot verify the signature.
-                    // In a production system, this should be a hard error or the issuer
-                    // keys should be resolved from a different source.
-                    return Err(NatsError::InvalidAuth(
-                        "JWT issuer claim is not a valid NATS public key for signature verification".to_string(),
-                    ));
-                }
+        // For NATS, the issuer field typically contains the issuer's public key
+        // Attempt to verify signature using issuer as the public key
+        match KeyPair::from_public_key(issuer_str) {
+            Ok(issuer_keypair) => {
+                issuer_keypair
+                    .verify(signed_data.as_bytes(), &signature)
+                    .map_err(|err| {
+                        NatsError::InvalidAuth(format!(
+                            "JWT signature verification failed: {}",
+                            err
+                        ))
+                    })?;
+            }
+            Err(_) => {
+                // If issuer is not a valid public key, we cannot verify the signature.
+                // In a production system, this should be a hard error or the issuer
+                // keys should be resolved from a different source.
+                return Err(NatsError::InvalidAuth(
+                    "JWT issuer claim is not a valid NATS public key for signature verification"
+                        .to_string(),
+                ));
             }
         }
     } else {
-        // No issuer claim means we cannot verify the JWT signature
+        // A missing OR empty issuer claim means the JWT signature cannot be
+        // verified. The empty case (`iss: ""`) must be rejected here rather
+        // than silently skipped: the previous `if !is_empty()` guard left an
+        // empty issuer to fall through with NO signature check, so a forged
+        // JWT carrying `iss: ""` (and any signature) was accepted — an auth
+        // bypass. Both cases now fail closed.
         return Err(NatsError::InvalidAuth(
-            "JWT missing issuer claim required for signature verification".to_string(),
+            "JWT missing or empty issuer claim required for signature verification".to_string(),
         ));
     }
 
