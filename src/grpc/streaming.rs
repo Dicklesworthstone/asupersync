@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use crate::bytes::Bytes;
@@ -487,6 +487,95 @@ fn wake_waiter(waiter: &mut Option<Waker>) {
     }
 }
 
+/// Shared, cheap-clone cancellation handle that couples both halves of a
+/// streaming gRPC call to ONE cancellation.
+///
+/// Without it, the request and response streams cancel independently — a caller
+/// has to remember to `cancel_with_error` both. With both halves opened against
+/// the same `CallCancellation`, a single [`cancel`](CallCancellation::cancel)
+/// (driven by a client RST_STREAM, deadline expiry, or a server `Cx` cancel)
+/// makes both halves drain their buffered messages and then surface the same
+/// terminal [`Status`] — one coherent cancellation protocol over the whole
+/// call. This is the call-scoped coupling primitive for
+/// `br-asupersync-server-stack-hardening-eeexl1.10` (AC1); wiring it into the
+/// h2/gRPC dispatch (RST / deadline / server-cancel sources) is layered on top.
+///
+/// The first status wins (idempotent); buffered items already queued before the
+/// cancel are still drained before the terminal status, matching
+/// [`StreamingRequest::cancel_with_error`].
+#[derive(Clone, Debug, Default)]
+pub struct CallCancellation {
+    inner: Arc<Mutex<CallCancellationState>>,
+}
+
+#[derive(Debug, Default)]
+struct CallCancellationState {
+    status: Option<Status>,
+    wakers: Vec<Waker>,
+}
+
+impl CallCancellation {
+    /// Create an un-cancelled call cancellation handle.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancel the whole call with one coherent status.
+    ///
+    /// Idempotent: the first status wins. Wakes every stream half currently
+    /// parked on this call so they re-poll and observe the cancellation.
+    pub fn cancel(&self, status: Status) {
+        let wakers = {
+            let mut state = self.lock();
+            if state.status.is_none() {
+                state.status = Some(status);
+            }
+            std::mem::take(&mut state.wakers)
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// The terminal status, if the call has been cancelled.
+    #[must_use]
+    pub fn status(&self) -> Option<Status> {
+        self.lock().status.clone()
+    }
+
+    /// Whether the call has been cancelled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.lock().status.is_some()
+    }
+
+    /// Register a waker to be notified on cancellation. If already cancelled,
+    /// wakes immediately so the caller re-polls and observes the terminal
+    /// status (drain-then-cancel) instead of parking.
+    fn register(&self, waker: &Waker) {
+        let mut state = self.lock();
+        if state.status.is_some() {
+            drop(state);
+            waker.wake_by_ref();
+            return;
+        }
+        if !state
+            .wakers
+            .iter()
+            .any(|existing| existing.will_wake(waker))
+        {
+            state.wakers.push(waker.clone());
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CallCancellationState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// A streaming request body.
 #[derive(Debug)]
 pub struct StreamingRequest<T> {
@@ -500,6 +589,8 @@ pub struct StreamingRequest<T> {
     terminal_status: Option<Status>,
     /// Last waker waiting for a new item.
     waiter: Option<Waker>,
+    /// Call-scoped cancellation shared with the response half, if any.
+    call_cancellation: Option<CallCancellation>,
 }
 
 impl<T> StreamingRequest<T> {
@@ -512,6 +603,7 @@ impl<T> StreamingRequest<T> {
             graceful_terminal: false,
             terminal_status: None,
             waiter: None,
+            call_cancellation: None,
         }
     }
 
@@ -524,6 +616,22 @@ impl<T> StreamingRequest<T> {
             graceful_terminal: false,
             terminal_status: None,
             waiter: None,
+            call_cancellation: None,
+        }
+    }
+
+    /// Creates an open request stream coupled to a call-scoped
+    /// [`CallCancellation`], so cancelling the call drives this half and the
+    /// response half from one coherent cancellation.
+    #[must_use]
+    pub fn open_in_call(call_cancellation: CallCancellation) -> Self {
+        Self {
+            items: VecDeque::new(),
+            closed: false,
+            graceful_terminal: false,
+            terminal_status: None,
+            waiter: None,
+            call_cancellation: Some(call_cancellation),
         }
     }
 
@@ -594,6 +702,19 @@ impl<T: Send + std::marker::Unpin> Streaming for StreamingRequest<T> {
         if let Some(next) = this.items.pop_front() {
             return Poll::Ready(Some(next));
         }
+        // Apply a call-scoped cancellation: buffered items above are drained
+        // first, then both halves of the call surface the same terminal status.
+        // A graceful half-close already observed wins over a late call cancel.
+        if this.terminal_status.is_none() && !this.graceful_terminal {
+            if let Some(status) = this
+                .call_cancellation
+                .as_ref()
+                .and_then(CallCancellation::status)
+            {
+                this.closed = true;
+                this.terminal_status = Some(status);
+            }
+        }
         if this.closed {
             // SECURITY: Fail-closed stream cancellation - distinguish error vs graceful completion
             if let Some(terminal_status) = &this.terminal_status {
@@ -602,6 +723,9 @@ impl<T: Send + std::marker::Unpin> Streaming for StreamingRequest<T> {
             return Poll::Ready(None);
         }
         this.waiter = Some(cx.waker().clone());
+        if let Some(call_cancellation) = &this.call_cancellation {
+            call_cancellation.register(cx.waker());
+        }
         Poll::Pending
     }
 }
@@ -726,6 +850,8 @@ pub struct ResponseStream<T> {
     terminal_status: Option<Status>,
     /// Last pending poll waker.
     waiter: Option<Waker>,
+    /// Call-scoped cancellation shared with the request half, if any.
+    call_cancellation: Option<CallCancellation>,
 }
 
 #[cfg(test)]
@@ -739,6 +865,7 @@ impl<T> ResponseStream<T> {
             graceful_terminal: false,
             waiter: None,
             terminal_status: None,
+            call_cancellation: None,
         }
     }
 
@@ -751,6 +878,22 @@ impl<T> ResponseStream<T> {
             graceful_terminal: false,
             waiter: None,
             terminal_status: None,
+            call_cancellation: None,
+        }
+    }
+
+    /// Creates an open response stream coupled to a call-scoped
+    /// [`CallCancellation`], so cancelling the call drives this half and the
+    /// request half from one coherent cancellation.
+    #[must_use]
+    pub fn open_in_call(call_cancellation: CallCancellation) -> Self {
+        Self {
+            items: VecDeque::new(),
+            closed: false,
+            graceful_terminal: false,
+            waiter: None,
+            terminal_status: None,
+            call_cancellation: Some(call_cancellation),
         }
     }
 
@@ -816,6 +959,19 @@ impl<T: Send + std::marker::Unpin> Streaming for ResponseStream<T> {
         if let Some(next) = this.items.pop_front() {
             return Poll::Ready(Some(next));
         }
+        // Apply a call-scoped cancellation: buffered items above are drained
+        // first, then both halves of the call surface the same terminal status.
+        // A graceful half-close already observed wins over a late call cancel.
+        if this.terminal_status.is_none() && !this.graceful_terminal {
+            if let Some(status) = this
+                .call_cancellation
+                .as_ref()
+                .and_then(CallCancellation::status)
+            {
+                this.closed = true;
+                this.terminal_status = Some(status);
+            }
+        }
         if this.closed {
             // SECURITY: Fail-closed stream cancellation - distinguish error vs graceful completion
             if let Some(terminal_status) = &this.terminal_status {
@@ -824,6 +980,9 @@ impl<T: Send + std::marker::Unpin> Streaming for ResponseStream<T> {
             return Poll::Ready(None);
         }
         this.waiter = Some(cx.waker().clone());
+        if let Some(call_cancellation) = &this.call_cancellation {
+            call_cancellation.register(cx.waker());
+        }
         Poll::Pending
     }
 }
@@ -3830,6 +3989,71 @@ mod tests {
 
         crate::test_complete!(
             "conformance_bidirectional_cancellation_client_initiated_after_buffered_messages"
+        );
+    }
+
+    #[test]
+    fn conformance_bidirectional_cancellation_call_scoped_drives_both_halves() {
+        init_test("conformance_bidirectional_cancellation_call_scoped_drives_both_halves");
+
+        // Both halves opened against ONE call-scoped CallCancellation: a single
+        // cancel must drive BOTH (draining buffered messages first), instead of
+        // the manual double-cancel the sibling tests use. This is the coupling
+        // primitive for eeexl1.10 AC1.
+        let cancellation = CallCancellation::new();
+        let mut client_request_stream =
+            StreamingRequest::<&'static str>::open_in_call(cancellation.clone());
+        let mut server_response_stream =
+            ResponseStream::<&'static str>::open_in_call(cancellation.clone());
+        client_request_stream
+            .push("client-1")
+            .expect("first client request should buffer");
+        client_request_stream
+            .push("client-2")
+            .expect("second client request should buffer");
+        server_response_stream
+            .push(Ok("server-1"))
+            .expect("first server response should buffer");
+        server_response_stream
+            .push(Ok("server-2"))
+            .expect("second server response should buffer");
+
+        assert!(!cancellation.is_cancelled());
+        // ONE cancel drives BOTH halves coherently.
+        cancellation.cancel(Status::cancelled("call cancelled"));
+        assert!(cancellation.is_cancelled());
+
+        let client_events = collect_streaming_request_events(&mut client_request_stream);
+        let server_events = collect_response_stream_events(&mut server_response_stream);
+        assert_eq!(
+            client_events,
+            vec![
+                "ok:client-1".to_string(),
+                "ok:client-2".to_string(),
+                "err:Cancelled:call cancelled".to_string(),
+            ],
+            "request half drains buffered messages then surfaces the call cancel"
+        );
+        assert_eq!(
+            server_events,
+            vec![
+                "ok:server-1".to_string(),
+                "ok:server-2".to_string(),
+                "err:Cancelled:call cancelled".to_string(),
+            ],
+            "response half drains buffered messages then surfaces the same call cancel"
+        );
+        assert!(
+            client_request_stream.push("post-cancel").is_err(),
+            "request half rejects sends after the call cancel"
+        );
+        assert!(
+            server_response_stream.push(Ok("post-cancel")).is_err(),
+            "response half rejects sends after the call cancel"
+        );
+
+        crate::test_complete!(
+            "conformance_bidirectional_cancellation_call_scoped_drives_both_halves"
         );
     }
 

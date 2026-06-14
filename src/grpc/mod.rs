@@ -111,8 +111,8 @@ pub use status::{Code, GrpcError, Status};
 // `(client::RequestSink, client::ResponseStream)`. Do not re-add a
 // `Bidirectional` re-export here without first wiring a real stateful type.
 pub use streaming::{
-    ClientStreaming, Metadata, MetadataValue, Request, Response, ServerStreaming, Streaming,
-    StreamingRequest,
+    CallCancellation, ClientStreaming, Metadata, MetadataValue, Request, Response, ServerStreaming,
+    Streaming, StreamingRequest,
 };
 pub use web::{
     Base64StreamDecoder, ContentType as WebContentType, TrailerFrame, WebFrame, WebFrameCodec,
