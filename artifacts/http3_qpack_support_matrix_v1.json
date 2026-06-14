@@ -13,8 +13,8 @@
       "severity": "high",
       "surface": "src/net/quic_native/",
       "claim": "quic_native is exposed via the quic/http3 features as an Active QUIC + HTTP/3 surface.",
-      "disclosure": "The native quic_native TLS 1.3 layer does NOT verify server certificates: it implements no Certificate/CertificateVerify/cert-chain/hostname/trust-anchor handling (verified: zero such references under src/net/quic_native/). It therefore provides no MITM protection and must not be used against untrusted peers.",
-      "remediation": "Implement X.509 chain + hostname + CertificateVerify-signature validation in the quic_native handshake (or delegate the handshake to rustls/webpki and keep only QUIC packet protection native); until then use quic_native only over already-trusted transports."
+      "disclosure": "The native quic_native TLS 1.3 layer performs NO in-handshake X.509 verification: it implements no Certificate/CertificateVerify/cert-chain/hostname/trust-anchor parsing (verified: zero such references under src/net/quic_native/). Per asupersync-7pwwwe (CLOSED) the client path now FAILS CLOSED: NativeQuicConnection::on_handshake_confirmed returns QuicTlsError::ServerCertificateUnverified unless the application verified the server identity and called record_verified_server_identity() (no insecure skip-verify default), so the prior silent-accept MITM exposure is removed. It still must not be used against untrusted peers WITHOUT application-supplied certificate verification, because the handshake itself authenticates no server identity.",
+      "remediation": "Resolved to fail-closed in asupersync-7pwwwe. Full fix (follow-up): implement X.509 chain + hostname + CertificateVerify-signature validation in the quic_native handshake (or delegate the handshake to rustls/webpki and keep only QUIC packet protection native) and drive record_verified_server_identity() from that verified handshake. Until then, callers must verify the server identity out-of-band before calling record_verified_server_identity(), or use quic_native only over already-trusted transports."
     }
   ],
   "source_files": [
