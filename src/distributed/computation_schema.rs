@@ -215,6 +215,12 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+// clippy::explicit_auto_deref is a false positive here: matching the
+// `(&SchemaDescriptor, &SchemaDescriptor)` tuple binds the `&'static str`
+// primitive names in `ref` mode (e.g. `e: &&'static str`), so the `*e`/`*a`
+// derefs are required to place `&'static str` values into the mismatch fields —
+// removing them does not type-check.
+#[allow(clippy::explicit_auto_deref)]
 fn diff_at(
     expected: &SchemaDescriptor,
     actual: &SchemaDescriptor,
