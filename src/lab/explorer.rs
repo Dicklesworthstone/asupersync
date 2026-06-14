@@ -39,6 +39,9 @@
 //! ```
 
 use crate::lab::config::LabConfig;
+use crate::lab::exploration_budget::{
+    ExplorationBudget, ExplorationBudgetConfig, ExplorationBudgetEstimate,
+};
 use crate::lab::runtime::{InvariantViolation, LabRuntime};
 use crate::trace::boundary::SquareComplex;
 use crate::trace::canonicalize::{TraceMonoid, trace_fingerprint};
@@ -187,6 +190,12 @@ impl CoverageMetrics {
             return false;
         }
         self.total_runs - self.new_class_discoveries >= window
+    }
+
+    /// Estimate the residual exploration budget from aggregate coverage counts.
+    #[must_use]
+    pub fn exploration_budget(&self, config: ExplorationBudgetConfig) -> ExplorationBudgetEstimate {
+        ExplorationBudget::estimate_from_counts(self.total_runs, self.new_class_discoveries, config)
     }
 }
 

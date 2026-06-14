@@ -59,6 +59,7 @@ pub mod conformal;
 pub mod crashpack;
 pub mod deadlock_radar;
 pub mod dual_run;
+pub mod exploration_budget;
 pub mod explorer;
 pub mod fixtures;
 #[cfg(feature = "benchmark-adapters")]
@@ -127,6 +128,10 @@ pub use dual_run::{
     check_core_invariants, compare_observables, normalize_lab_observable, normalize_lab_report,
     normalize_live_observable, promote_exploration_report, promote_fuzz_finding,
     promote_regression_case, promote_regression_corpus, run_live_adapter,
+};
+pub use exploration_budget::{
+    ExplorationBudget, ExplorationBudgetAssumptions, ExplorationBudgetConfig,
+    ExplorationBudgetEstimate,
 };
 pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
