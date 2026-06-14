@@ -48,6 +48,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Adaptive block-size / overhead / fan-out optimizer (opt-in; see
 /// `docs/atp_rq_adaptive_design.md`). The default transport path does not
@@ -107,6 +108,12 @@ pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Default bound on fountain feedback rounds before failing closed.
 pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 
+/// Default receiver-side quiet drain after each round-complete marker.
+pub const DEFAULT_ROUND_TAIL_DRAIN_MS: u64 = 2;
+
+/// Default receiver-side quiet drain after each round-complete marker.
+pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROUND_TAIL_DRAIN_MS);
+
 /// UDP datagram header size (magic + transfer tag + entry + sbn + esi + kind +
 /// len), big-endian.
 const DGRAM_HEADER: usize = 4 + 8 + 4 + 1 + 4 + 1 + 2;
@@ -136,6 +143,12 @@ pub struct RqConfig {
     pub max_transfer_bytes: u64,
     /// Maximum fountain feedback rounds before failing closed.
     pub max_feedback_rounds: u32,
+    /// Receiver-side quiet window after each `ObjectComplete` frame.
+    ///
+    /// TCP can deliver the control-plane round marker before the receiver has
+    /// drained all UDP symbols already queued in the kernel. This window lets
+    /// the receiver consume that tail before it asks for repair symbols.
+    pub round_tail_drain: Duration,
     /// Test-only: deterministically drop 1-in-N sprayed source symbols on the
     /// sender to exercise the repair/feedback path. 0 disables.
     pub debug_drop_one_in: u32,
@@ -150,6 +163,7 @@ impl Default for RqConfig {
             udp_fanout: DEFAULT_UDP_FANOUT,
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
+            round_tail_drain: DEFAULT_ROUND_TAIL_DRAIN,
             debug_drop_one_in: 0,
         }
     }
@@ -1177,6 +1191,25 @@ pub async fn receive_connection(
 
         match frame.frame_type() {
             FrameType::ObjectComplete => {
+                let drained = drain_round_tail(
+                    cx,
+                    &mut udp,
+                    tag,
+                    &mut rbuf,
+                    config.round_tail_drain,
+                    |parsed, payload| {
+                        if let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) {
+                            if feed_symbol(&mut decoders[pos], parsed, payload, symbol_size) {
+                                symbols_accepted += 1;
+                            }
+                        }
+                    },
+                )
+                .await?;
+                if drained > 0 {
+                    rqtrace!("receiver: tail-drained {drained} datagrams after ObjectComplete");
+                }
+
                 // Assemble any entries that just completed.
                 for d in &mut decoders {
                     if !d.complete
@@ -1451,6 +1484,22 @@ async fn verify_and_commit(
     })
 }
 
+fn parse_and_deliver_datagram<F>(buf: &[u8], n: usize, tag: u64, on_symbol: &mut F) -> bool
+where
+    F: FnMut(&ParsedDatagram, &[u8]),
+{
+    let Some(parsed) = parse_symbol_header(&buf[..n], tag) else {
+        return false;
+    };
+    let start = parsed.header_len;
+    let end = start + parsed.payload_len;
+    if end > n {
+        return false;
+    }
+    on_symbol(&parsed, &buf[start..end]);
+    true
+}
+
 /// Pump UDP symbol datagrams into the decoders until a control frame arrives.
 ///
 /// The sender finishes a spray round and *then* sends `ObjectComplete` on TCP,
@@ -1479,7 +1528,7 @@ where
     }
 
     let mut cbuf = vec![0u8; 65536];
-    let pumped: u64 = 0;
+    let mut pumped: u64 = 0;
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
 
@@ -1521,12 +1570,8 @@ where
 
         match ready {
             Ready::Udp(n) => {
-                if let Some(parsed) = parse_symbol_header(&rbuf[..n], tag) {
-                    let start = parsed.header_len;
-                    let end = start + parsed.payload_len;
-                    if end <= n {
-                        on_symbol(&parsed, &rbuf[start..end]);
-                    }
+                if parse_and_deliver_datagram(rbuf, n, tag, &mut on_symbol) {
+                    pumped += 1;
                 }
             }
             Ready::Control(n) => {
@@ -1545,6 +1590,73 @@ where
                     return Ok(frame);
                 }
             }
+        }
+    }
+}
+
+/// Drain UDP symbols that raced behind the TCP round marker.
+///
+/// `ObjectComplete` only proves the sender has finished a spray round; it does
+/// not prove the receiver has drained every datagram already queued locally. The
+/// drain stops after a quiet window with no matching ATP-RQ symbol, with a hard
+/// cap of 8x that window so stale or hostile UDP traffic cannot pin the task.
+async fn drain_round_tail<F>(
+    cx: &Cx,
+    udp: &mut UdpSocket,
+    tag: u64,
+    rbuf: &mut [u8],
+    quiet_window: Duration,
+    mut on_symbol: F,
+) -> Result<u64, RqError>
+where
+    F: FnMut(&ParsedDatagram, &[u8]),
+{
+    if quiet_window.is_zero() {
+        return Ok(0);
+    }
+
+    use std::future::poll_fn;
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    let mut quiet_sleep = crate::time::Sleep::after(cx.now_for_observability(), quiet_window);
+    let hard_cap = quiet_window.saturating_mul(8).max(Duration::from_millis(1));
+    let mut hard_sleep = crate::time::Sleep::after(cx.now_for_observability(), hard_cap);
+    let mut drained = 0u64;
+
+    loop {
+        cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+
+        let ready = poll_fn(|task_cx| {
+            if Pin::new(&mut hard_sleep).poll(task_cx).is_ready() {
+                return Poll::Ready(Ok::<Option<usize>, std::io::Error>(None));
+            }
+
+            match udp.poll_recv(task_cx, rbuf) {
+                Poll::Ready(Ok(n)) => return Poll::Ready(Ok(Some(n))),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => {}
+            }
+
+            if Pin::new(&mut quiet_sleep).poll(task_cx).is_ready() {
+                return Poll::Ready(Ok(None));
+            }
+
+            Poll::Pending
+        })
+        .await?;
+
+        let Some(n) = ready else {
+            return Ok(drained);
+        };
+
+        if parse_and_deliver_datagram(rbuf, n, tag, &mut on_symbol) {
+            drained += 1;
+            quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
+        }
+
+        if drained > 0 && drained % 512 == 0 {
+            crate::runtime::yield_now().await;
         }
     }
 }
@@ -1656,12 +1768,37 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "br-asupersync-mixdaw: multi-block object_params_for/set_object_params \
-                mismatch fails at set_object_params for >1 block; single-block coding is \
-                correct (the two tests above pass). Open multi-block param bug."]
-    fn coding_roundtrip_multi_block_default() {
-        // ~3 MiB across multiple 1 MiB blocks (default-ish). KNOWN-FAILING guard.
-        assert!(coding_roundtrip(3 * 1024 * 1024, 1024 * 1024, 1024));
+    fn coding_roundtrip_multi_block_small_k() {
+        // Three 64 KiB blocks at K=64 exercises SBN routing, per-block decode,
+        // and final cross-block assembly without making the normal unit lane
+        // pay the K=1024 matrix cost of the historical fleet repro.
+        assert!(coding_roundtrip(3 * 64 * 1024, 64 * 1024, 1024));
+    }
+
+    #[test]
+    fn default_k_multiblock_metadata_is_accepted_by_decoder() {
+        // Regression guard for br-asupersync-c8m8ha: the default-ish multi-block
+        // shape used to fail at set_object_params before any network I/O. Keep
+        // this as metadata-only coverage so the guard stays cheap and stable.
+        let len = 3 * 1024 * 1024;
+        let max_block = 1024 * 1024;
+        let symbol_size = 1024;
+        let object_id = entry_object_id("test-transfer", 0);
+        let dconfig = DecodingConfig {
+            symbol_size,
+            max_block_size: max_block,
+            repair_overhead: 1.5,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: std::time::Duration::from_secs(0),
+            verify_auth: false,
+        };
+        let mut dec = DecodingPipeline::new(dconfig);
+        let params = object_params_for(object_id, len as u64, symbol_size, max_block as u64);
+        assert_eq!(params.source_blocks, 3);
+        assert_eq!(params.symbols_per_block, 1024);
+        dec.set_object_params(params)
+            .expect("default-ish multi-block params must match decoder plan");
     }
 
     #[test]
@@ -1745,5 +1882,6 @@ mod tests {
         // 20 MiB with 8 MiB blocks => 3 blocks (8+8+4).
         let p2 = object_params_for(ObjectId::new(0, 0), 20 * 1024 * 1024, 1024, 8 * 1024 * 1024);
         assert_eq!(p2.source_blocks, 3);
+        assert_eq!(p2.symbols_per_block, 8192);
     }
 }

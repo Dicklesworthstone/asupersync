@@ -577,6 +577,14 @@ run_validation_stage() {
     [[ "$rc" -eq 0 ]]
 }
 
+run_b4_legacy_tuple_quarantine_stage() {
+    run_validation_stage \
+        "b4-legacy-tuple-quarantine" \
+        "static guard (legacy tuple sentinel quarantine)" \
+        "${RUN_DIR}/b4_legacy_tuple_quarantine.log" \
+        cargo test --lib legacy_tuple_sentinel_is_quarantined_from_production_and_generator_sources -- --nocapture
+}
+
 print_suite_contract_help() {
     cat >&2 <<'EOF'
 Suite forensic contract violation (D3 gate).
@@ -717,11 +725,14 @@ if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
     failed_stage_id=""
     case "$PROFILE" in
         fast)
-            run_validation_stage \
-                "unit-fast" \
-                "unit sentinel (repair_zero_only_source)" \
-                "${RUN_DIR}/unit_fast.log" \
-                cargo test --lib raptorq::tests::repair_zero_only_source -- --nocapture || failed_stage_id="unit-fast"
+            run_b4_legacy_tuple_quarantine_stage || failed_stage_id="b4-legacy-tuple-quarantine"
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "unit-fast" \
+                    "unit sentinel (repair_zero_only_source)" \
+                    "${RUN_DIR}/unit_fast.log" \
+                    cargo test --lib raptorq::tests::repair_zero_only_source -- --nocapture || failed_stage_id="unit-fast"
+            fi
             if [[ -z "$failed_stage_id" ]]; then
                 run_validation_stage \
                     "bench-smoke-gf256-primitives" \
@@ -731,11 +742,14 @@ if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
             fi
             ;;
         full)
-            run_validation_stage \
-                "unit-full-raptorq" \
-                "unit suite (raptorq module)" \
-                "${RUN_DIR}/unit_full_raptorq.log" \
-                cargo test --lib raptorq:: -- --nocapture || failed_stage_id="unit-full-raptorq"
+            run_b4_legacy_tuple_quarantine_stage || failed_stage_id="b4-legacy-tuple-quarantine"
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "unit-full-raptorq" \
+                    "unit suite (raptorq module)" \
+                    "${RUN_DIR}/unit_full_raptorq.log" \
+                    cargo test --lib raptorq:: -- --nocapture || failed_stage_id="unit-full-raptorq"
+            fi
             if [[ -z "$failed_stage_id" ]]; then
                 run_validation_stage \
                     "bench-smoke-gf256-primitives" \
@@ -757,11 +771,14 @@ if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
             fi
             ;;
         forensics)
-            run_validation_stage \
-                "unit-full-raptorq" \
-                "unit suite (raptorq module)" \
-                "${RUN_DIR}/unit_full_raptorq.log" \
-                cargo test --lib raptorq:: -- --nocapture || failed_stage_id="unit-full-raptorq"
+            run_b4_legacy_tuple_quarantine_stage || failed_stage_id="b4-legacy-tuple-quarantine"
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "unit-full-raptorq" \
+                    "unit suite (raptorq module)" \
+                    "${RUN_DIR}/unit_full_raptorq.log" \
+                    cargo test --lib raptorq:: -- --nocapture || failed_stage_id="unit-full-raptorq"
+            fi
             if [[ -z "$failed_stage_id" ]]; then
                 run_validation_stage \
                     "bench-smoke-gf256-primitives" \

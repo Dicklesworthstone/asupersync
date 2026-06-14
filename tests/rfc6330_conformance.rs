@@ -24,7 +24,7 @@
 #![allow(missing_docs)]
 
 use asupersync::raptorq::{
-    rfc6330::{LtTuple, deg, next_prime_ge, rand, repair_indices_for_esi, tuple},
+    rfc6330::{LtTuple, deg, next_prime_ge, rand, repair_indices_for_esi, try_tuple},
     systematic::{SystematicEncoder, SystematicParams},
 };
 use serde::{Deserialize, Serialize};
@@ -183,7 +183,7 @@ const DEG_VECTORS: &[GoldenVector<u32, usize>] = &[
 // RFC 6330 Section 5.3.5.3: tuple(k, x) function vectors
 // ============================================================================
 
-/// Test the RFC 6330 tuple() function for LT code parameter generation.
+/// Test the RFC 6330 fallible tuple path for LT code parameter generation.
 ///
 /// RFC 6330 Section 5.3.5.3 specifies the full `(d, a, b, d1, a1, b1)` tuple
 /// and the derived intermediate-symbol schedule for a given `(J, W, P, X)`.
@@ -277,7 +277,7 @@ pub fn run_rfc6330_conformance() -> Vec<ConformanceResult> {
         results.push(result);
     }
 
-    // Test tuple() function vectors
+    // Test fallible tuple vectors
     for vector in TUPLE_VECTORS {
         let result = test_tuple_function(vector);
         results.push(result);
@@ -345,13 +345,14 @@ fn test_deg_function(vector: &GoldenVector<u32, usize>) -> ConformanceResult {
 
 fn test_tuple_function(vector: &TupleGoldenVector) -> ConformanceResult {
     let p1 = next_prime_ge(vector.pi_count).expect("RFC tuple golden vector P1 must fit");
-    let actual_tuple = tuple(
+    let actual_tuple = try_tuple(
         vector.systematic_index,
         vector.lt_width,
         vector.pi_count,
         p1,
         vector.encoding_symbol_id,
-    );
+    )
+    .expect("RFC tuple golden vector must satisfy the fallible tuple gate");
     let actual_indices = repair_indices_for_esi(
         vector.systematic_index,
         vector.lt_width,
@@ -372,7 +373,7 @@ fn test_tuple_function(vector: &TupleGoldenVector) -> ConformanceResult {
         requirement_level: RequirementLevel::Must,
         verdict: verdict.clone(),
         description: format!(
-            "{}: tuple(J={}, W={}, P={}, X={})",
+            "{}: try_tuple(J={}, W={}, P={}, X={})",
             vector.description,
             vector.systematic_index,
             vector.lt_width,

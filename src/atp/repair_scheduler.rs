@@ -358,9 +358,17 @@ impl MultiSourceRepairScheduler {
         // Get most useful symbols to request
         let useful_symbols = self.get_most_useful_symbols(symbols_needed);
 
-        // Schedule requests using peer scores and symbol usefulness
+        // Schedule requests using peer scores and symbol usefulness, enforcing
+        // per-peer batch fairness so no single peer monopolizes the batch.
+        let mut per_peer_assigned: HashMap<PeerId, usize> = HashMap::new();
         for symbol_index in useful_symbols {
-            if let Some(best_peer) = self.select_best_peer_for_symbol(symbol_index, &peer_scores) {
+            let can_add_new_peer = per_peer_assigned.len() < self.config.max_concurrent_peers;
+            if let Some(best_peer) = self.select_best_peer_for_symbol(
+                symbol_index,
+                &peer_scores,
+                &per_peer_assigned,
+                can_add_new_peer,
+            ) {
                 let decode_usefulness = self.calculate_symbol_decode_usefulness(symbol_index);
 
                 let request = RepairSymbolRequest {
@@ -374,6 +382,7 @@ impl MultiSourceRepairScheduler {
 
                 requests.push(request.clone());
                 self.pending_requests.insert(symbol_index, request);
+                *per_peer_assigned.entry(best_peer).or_insert(0) += 1;
 
                 if requests.len()
                     >= self.config.max_concurrent_peers * self.config.max_symbols_per_peer_batch
@@ -550,12 +559,27 @@ impl MultiSourceRepairScheduler {
         &self,
         symbol_index: u32,
         peer_scores: &HashMap<PeerId, f64>,
+        per_peer_assigned: &HashMap<PeerId, usize>,
+        can_add_new_peer: bool,
     ) -> Option<PeerId> {
         let mut best_peer = None;
         let mut best_score = f64::NEG_INFINITY;
 
         for (peer_id, peer_info) in &self.peers {
             if !peer_info.available_symbols.contains(&symbol_index) {
+                continue;
+            }
+
+            // Per-peer batch fairness: never let one peer exceed its share of
+            // the batch, and don't introduce a brand-new peer once the
+            // concurrency cap is reached. Without these guards a single argmax
+            // peer could be assigned every symbol in the batch (up to the
+            // global product cap), starving healthier peers.
+            let already_assigned = per_peer_assigned.get(peer_id).copied().unwrap_or(0);
+            if already_assigned >= self.config.max_symbols_per_peer_batch {
+                continue;
+            }
+            if already_assigned == 0 && !can_add_new_peer {
                 continue;
             }
 
@@ -1071,7 +1095,7 @@ mod tests {
         peer_scores.insert(peer_id.clone(), -0.5);
 
         assert_eq!(
-            scheduler.select_best_peer_for_symbol(7, &peer_scores),
+            scheduler.select_best_peer_for_symbol(7, &peer_scores, &HashMap::new(), true),
             Some(peer_id),
             "an available peer remains selectable even when policy scoring is non-positive"
         );
@@ -1395,6 +1419,48 @@ mod tests {
             scheduler.get_decode_progress().rejected_symbols,
             total,
             "lifetime rejected count must remain exact despite bounded retention"
+        );
+    }
+
+    #[test]
+    fn schedule_next_batch_enforces_per_peer_fairness() {
+        let config = RepairSchedulerConfig {
+            max_symbols_per_peer_batch: 2,
+            max_concurrent_peers: 3,
+            ..RepairSchedulerConfig::default()
+        };
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            config,
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            20,
+        );
+
+        // Five peers all advertise the same broad symbol inventory, so a naive
+        // argmax selection could route every request to a single peer.
+        let symbols: Vec<u32> = (0..20).collect();
+        for port in 0..5u16 {
+            let peer = create_test_peer_id(9000 + port);
+            let info = create_test_peer_info(&scheduler, peer, symbols.clone());
+            scheduler.register_peer(info).unwrap();
+        }
+
+        let requests = scheduler.schedule_next_batch().unwrap();
+        assert!(!requests.is_empty(), "expected scheduled requests");
+
+        let mut per_peer: HashMap<PeerId, usize> = HashMap::new();
+        for req in &requests {
+            *per_peer.entry(req.peer_id.clone()).or_insert(0) += 1;
+        }
+        assert!(
+            per_peer.values().all(|&n| n <= 2),
+            "no peer may exceed max_symbols_per_peer_batch=2: {:?}",
+            per_peer.values().collect::<Vec<_>>()
+        );
+        assert!(
+            per_peer.len() <= 3,
+            "no more than max_concurrent_peers=3 distinct peers may be used, got {}",
+            per_peer.len()
         );
     }
 

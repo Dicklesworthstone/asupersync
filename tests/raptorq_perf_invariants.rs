@@ -6057,6 +6057,35 @@ fn d7_e2e_runner_script_schema_contract_surface() {
     );
 }
 
+/// bd-10hic guardrail: the deterministic E2E bundle must run the static
+/// legacy tuple quarantine test before broader unit/perf stages.
+#[test]
+fn b4_e2e_bundle_runs_legacy_tuple_quarantine_guard() {
+    let script = include_str!("../scripts/run_raptorq_e2e.sh");
+
+    for required in [
+        "run_b4_legacy_tuple_quarantine_stage",
+        "\"b4-legacy-tuple-quarantine\"",
+        "\"static guard (legacy tuple sentinel quarantine)\"",
+        "b4_legacy_tuple_quarantine.log",
+        "cargo test --lib legacy_tuple_sentinel_is_quarantined_from_production_and_generator_sources -- --nocapture",
+        "failed_stage_id=\"b4-legacy-tuple-quarantine\"",
+    ] {
+        assert!(
+            script.contains(required),
+            "missing bd-10hic quarantine bundle token in run_raptorq_e2e.sh: {required}"
+        );
+    }
+
+    assert!(
+        script
+            .matches("run_b4_legacy_tuple_quarantine_stage ||")
+            .count()
+            == 3,
+        "every bundle profile must run the bd-10hic quarantine guard before broader stages"
+    );
+}
+
 /// Track-E dual-policy guardrail: validation bundle must enforce the
 /// deterministic probe-log contract for lane-floor/ratio/window decisions.
 #[test]

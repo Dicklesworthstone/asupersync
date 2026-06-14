@@ -1828,8 +1828,9 @@ mod tests {
     }
 
     /// bd-10hic: keep the legacy sentinel tuple helper quarantined to this
-    /// module's compatibility/conformance tests. Live production code and the
-    /// vector generator must use the fallible tuple path instead.
+    /// module's compatibility/conformance tests. Live production code, the
+    /// compact integration conformance harness, and the vector generator must
+    /// use the fallible tuple path instead.
     #[test]
     fn legacy_tuple_sentinel_is_quarantined_from_production_and_generator_sources() {
         let checked_sources = [
@@ -1838,6 +1839,10 @@ mod tests {
             (
                 "scripts/generate_rfc6330_vectors.rs",
                 include_str!("../../scripts/generate_rfc6330_vectors.rs"),
+            ),
+            (
+                "tests/rfc6330_conformance.rs",
+                include_str!("../../tests/rfc6330_conformance.rs"),
             ),
         ];
 

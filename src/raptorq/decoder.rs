@@ -1573,13 +1573,9 @@ impl InactivationDecoder {
                 let (expected_cols, expected_coefs) = self.source_equation(sym.esi);
                 let derive_canonical_from_esi =
                     sym.columns.is_empty() && sym.coefficients.is_empty();
-                let legacy_identity = sym.columns.len() == 1
-                    && sym.coefficients.len() == 1
-                    && sym.columns[0] == esi
-                    && sym.coefficients[0] == Gf256::ONE;
                 let canonical_equation =
                     sym.columns == expected_cols && sym.coefficients == expected_coefs;
-                if !derive_canonical_from_esi && !legacy_identity && !canonical_equation {
+                if !derive_canonical_from_esi && !canonical_equation {
                     return Err(DecodeError::InvalidSourceSymbolEquation {
                         esi: sym.esi,
                         expected_column: esi,
@@ -4757,6 +4753,55 @@ mod tests {
             DecodeError::SourceEsiOutOfRange {
                 esi: k as u32,
                 max_valid: k,
+            }
+        );
+        assert!(err.is_unrecoverable());
+    }
+
+    #[test]
+    fn decode_rejects_legacy_identity_source_equation() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 0x6330_1D00_u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        received.push(ReceivedSymbol {
+            esi: 0,
+            is_source: true,
+            columns: vec![0],
+            coefficients: vec![Gf256::ONE],
+            data: source[0].clone(),
+        });
+        for (esi, data) in source.iter().enumerate().skip(1) {
+            received.push(ReceivedSymbol::source(esi as u32, data.clone()));
+        }
+        for esi in (k as u32)..(l as u32) {
+            let (columns, coefficients) = decoder.repair_equation(esi).unwrap();
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(
+                esi,
+                columns,
+                coefficients,
+                repair_data,
+            ));
+        }
+
+        assert!(
+            received.len() >= decoder.minimum_received_symbols(),
+            "legacy-path regression must not be masked by InsufficientSymbols"
+        );
+
+        let err = decoder.decode(&received).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::InvalidSourceSymbolEquation {
+                esi: 0,
+                expected_column: 0,
             }
         );
         assert!(err.is_unrecoverable());
