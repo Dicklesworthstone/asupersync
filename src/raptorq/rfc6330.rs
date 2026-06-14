@@ -323,7 +323,7 @@ fn is_prime(n: usize) -> bool {
 /// Reference: RFC 6330 Section 5.3.5.4.
 ///
 /// br-asupersync-pphjvo: this function previously panicked via
-/// `assert!` and `require_rfc_u32` on malformed inputs (W <= 1,
+/// `assert!` and `require_rfc_u32` on malformed inputs (W <= 2,
 /// P == 0, P1 wrong, J/W/P1 exceeding u32::MAX, etc.). For a public
 /// FEC primitive that may be reached from network-receivable
 /// metadata that is the wrong shape — a hostile peer crafting an
@@ -364,7 +364,7 @@ pub fn tuple(
 /// Fallible variant of [`tuple`] for malformed RFC 6330 inputs.
 ///
 /// br-asupersync-pphjvo: returns `None` when the RFC 6330 validity
-/// gate fails (W <= 1, P == 0, P1 != smallest_prime_ge(P), or
+/// gate fails (W <= 2, P == 0, P1 != smallest_prime_ge(P), or
 /// J/W/P1 exceeding u32::MAX). The fail-closed contract applies in
 /// all build modes, including debug/test builds.
 #[must_use]
@@ -376,7 +376,7 @@ pub fn try_tuple(
     encoding_symbol_id: u32,
 ) -> Option<LtTuple> {
     let expected_pi_modulus = next_prime_ge(pi_count)?;
-    let valid = lt_width > 1
+    let valid = lt_width > 2
         && pi_count > 0
         && pi_modulus > 1
         && pi_modulus >= pi_count
@@ -1735,9 +1735,10 @@ mod tests {
     /// FEC-OTI input that the legacy panicking tuple() asserted on.
     #[test]
     fn try_tuple_rejects_malformed_inputs() {
-        // W must be > 1.
+        // W must be > 2; W=2 would clamp the LT degree to zero.
         assert!(try_tuple(0, 0, 1, 2, 0).is_none());
         assert!(try_tuple(0, 1, 1, 2, 0).is_none());
+        assert!(try_tuple(0, 2, 1, 2, 0).is_none());
         // P must be > 0.
         assert!(try_tuple(0, 4, 0, 2, 0).is_none());
         // P1 must be > 1.
@@ -1766,6 +1767,10 @@ mod tests {
             "tuple_with_prime_p1 must reject W=1 through try_tuple"
         );
         assert!(
+            tuple_with_prime_p1(0, 2, 1, 0).is_none(),
+            "tuple_with_prime_p1 must reject W=2 before it can create a zero-degree LT tuple"
+        );
+        assert!(
             tuple_with_prime_p1(0, 4, 0, 0).is_none(),
             "tuple_with_prime_p1 must reject P=0 through try_tuple"
         );
@@ -1779,6 +1784,10 @@ mod tests {
         assert!(
             repair_indices_for_esi(0, 0, 1, 0).is_empty(),
             "malformed W must fail closed before tuple_indices sees a sentinel"
+        );
+        assert!(
+            repair_indices_for_esi(0, 2, 1, 0).is_empty(),
+            "W=2 must fail closed before producing a zero-degree LT schedule"
         );
 
         let valid = repair_indices_for_esi(5, 32, 7, 42);
@@ -1849,6 +1858,11 @@ mod tests {
         assert_eq!(sentinel, LtTuple::default());
         assert_eq!(sentinel.d, 0);
         assert_eq!(sentinel.d1, 0);
+        assert_eq!(
+            tuple(0, 2, 1, 2, 0),
+            LtTuple::default(),
+            "W=2 would produce a zero LT degree and must stay quarantined as the legacy sentinel"
+        );
         // Downstream tuple_indices must reject the zero-degree
         // sentinel via its existing validity gate (zero degrees fail
         // the matches!(d1, 2 | 3) check).
