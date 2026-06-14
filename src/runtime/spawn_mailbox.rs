@@ -837,18 +837,28 @@ impl SpawnGateway {
     /// Returns true while the runtime that owns this gateway is still alive.
     #[must_use]
     pub fn is_runtime_available(&self) -> bool {
-        self.runtime_liveness.upgrade().is_some()
+        self.liveness_guard().is_some()
+    }
+
+    /// Holds the runtime liveness token across producer-side publication.
+    ///
+    /// A successful upgrade means runtime drop must either let a worker admit
+    /// the request or wait for this guard to leave scope before doing the
+    /// final mailbox drain.
+    #[must_use]
+    pub fn liveness_guard(&self) -> Option<Arc<()>> {
+        self.runtime_liveness.upgrade()
     }
 
     /// Enqueues a request stamped with the gateway clock and wakes the
     /// consumer.
     pub fn enqueue_and_notify(&self, request: SpawnRequest) -> Result<(), SpawnError> {
-        if !self.is_runtime_available() {
+        let Some(_liveness_guard) = self.liveness_guard() else {
             request
                 .into_parts()
                 .resolve_failed(SpawnError::RuntimeUnavailable);
             return Err(SpawnError::RuntimeUnavailable);
-        }
+        };
         let now = self
             .clock
             .as_ref()
@@ -886,7 +896,7 @@ mod tests {
     use crate::types::Outcome;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::thread;
 
     fn test_region() -> RegionId {
@@ -2025,6 +2035,138 @@ mod tests {
             gateway.mailbox().total_enqueued(),
             total_enqueued,
             "post-drop Cx::spawn must not publish orphaned mailbox work"
+        );
+    }
+
+    #[test]
+    fn spawn_drop_race_liveness_guard_extends_publication_window() {
+        use crate::runtime::task_handle::JoinError;
+
+        let mailbox = Arc::new(SpawnMailbox::new());
+        let liveness = Arc::new(());
+        let gateway = SpawnGateway::new(
+            Arc::clone(&mailbox),
+            Arc::new(|| {}),
+            None,
+            Arc::downgrade(&liveness),
+        );
+        let guard = gateway
+            .liveness_guard()
+            .expect("runtime liveness should upgrade before drop starts");
+        drop(liveness);
+
+        assert!(
+            gateway.is_runtime_available(),
+            "a held producer guard keeps the runtime publication window visible"
+        );
+
+        let (tx, mut rx) = crate::channel::oneshot::channel::<Result<(), JoinError>>();
+        let request = request(&mailbox).with_admission_error_slot(Box::new(move |error| {
+            let mut reason = CancelReason::user("spawn admission failed");
+            reason.message = Some(error.to_string());
+            let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+        }));
+        gateway
+            .enqueue_and_notify(request)
+            .expect("held liveness guard should permit publication");
+        drop(guard);
+
+        assert!(
+            !gateway.is_runtime_available(),
+            "dropping the last producer guard expires the gateway"
+        );
+        let queued = mailbox.dequeue().expect("request was published");
+        queued
+            .into_parts()
+            .resolve_failed(SpawnError::RuntimeUnavailable);
+        assert!(
+            matches!(rx.try_recv(), Ok(Err(JoinError::Cancelled(_)))),
+            "final mailbox drain must resolve the caller-visible handle"
+        );
+    }
+
+    #[test]
+    fn spawn_drop_race_cx_spawn_resolves_returned_handles() {
+        use crate::runtime::task_handle::JoinError;
+
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(1)
+            .build()
+            .expect("runtime build");
+        let parent_cx = runtime.block_on(
+            runtime
+                .handle()
+                .spawn(async { crate::cx::Cx::current().expect("runtime task Cx") }),
+        );
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let producer_stop = Arc::clone(&stop);
+        let producer_cx = parent_cx.clone();
+
+        let producer = thread::spawn(move || {
+            let mut handles = Vec::new();
+            let mut unavailable_count = 0usize;
+            for _ in 0..64 {
+                match producer_cx.spawn(|_child| async move { 1usize }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(SpawnError::RuntimeUnavailable) => {
+                        unavailable_count += 1;
+                        break;
+                    }
+                    Err(error) => panic!("unexpected spawn error before runtime drop: {error:?}"),
+                }
+            }
+            ready_tx
+                .send(())
+                .expect("test coordinator should receive producer ready");
+            while !producer_stop.load(Ordering::Acquire) {
+                match producer_cx.spawn(|_child| async move { 1usize }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(SpawnError::RuntimeUnavailable) => {
+                        unavailable_count += 1;
+                        break;
+                    }
+                    Err(error) => panic!("unexpected spawn error during runtime drop: {error:?}"),
+                }
+                thread::yield_now();
+            }
+            (handles, unavailable_count)
+        });
+
+        ready_rx
+            .recv()
+            .expect("producer should enter the spawn loop");
+        drop(runtime);
+        stop.store(true, Ordering::Release);
+        let (mut handles, unavailable_count) =
+            producer.join().expect("producer thread should not panic");
+        assert!(
+            !handles.is_empty(),
+            "test must exercise at least one returned Cx::spawn handle"
+        );
+
+        let mut pending = Vec::new();
+        for handle in &mut handles {
+            match handle.try_join() {
+                Ok(Some(_)) | Err(JoinError::Cancelled(_)) => {}
+                Ok(None) => pending.push(handle.task_id()),
+                Err(other) => panic!("unexpected join result after runtime drop: {other:?}"),
+            }
+        }
+        assert!(
+            pending.is_empty(),
+            "spawn handles returned around runtime drop must not hang pending: {pending:?}"
+        );
+        assert!(
+            matches!(
+                parent_cx.spawn(|_child| async move { 2usize }),
+                Err(SpawnError::RuntimeUnavailable)
+            ),
+            "retained Cx fails closed after runtime drop"
+        );
+        assert!(
+            unavailable_count <= 1,
+            "producer stops at the first observed RuntimeUnavailable"
         );
     }
 

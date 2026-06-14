@@ -3822,7 +3822,7 @@ struct RuntimeInner {
     spawn_clock: Option<TimerDriverHandle>,
     /// Keeps the producer-side spawn gateway live exactly as long as the
     /// runtime inner remains live. Retained `Cx` values hold only weak tokens.
-    _spawn_liveness: Arc<()>,
+    _spawn_liveness: Option<Arc<()>>,
     /// Blocking pool for synchronous operations.
     blocking_pool: Option<crate::runtime::blocking_pool::BlockingPool>,
     /// Shutdown signal for the deadline monitor thread.
@@ -4033,7 +4033,7 @@ impl RuntimeInner {
                 spawn_mailbox,
                 root_pending_spawns,
                 spawn_clock,
-                _spawn_liveness: spawn_liveness,
+                _spawn_liveness: Some(spawn_liveness),
                 blocking_pool,
                 deadline_monitor_shutdown: deadline_monitor.shutdown,
                 deadline_monitor_thread: deadline_monitor.thread,
@@ -4216,6 +4216,21 @@ impl RuntimeInner {
 
 impl Drop for RuntimeInner {
     fn drop(&mut self) {
+        let spawn_liveness = self._spawn_liveness.take().map(|token| {
+            let weak = Arc::downgrade(&token);
+            drop(token);
+            weak
+        });
+        let gateway_mailbox = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state
+                .spawn_gateway()
+                .map(|gateway| Arc::clone(gateway.mailbox()))
+        };
+
         // Signal deadline monitor to stop, then join its thread.
         if let Some(shutdown) = self.deadline_monitor_shutdown.take() {
             shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4231,6 +4246,18 @@ impl Drop for RuntimeInner {
         let mut handles = lock_state(&self.worker_threads);
         for handle in handles.drain(..) {
             let _ = handle.join();
+        }
+        drop(handles);
+
+        if let (Some(liveness), Some(mailbox)) = (spawn_liveness, gateway_mailbox) {
+            while liveness.strong_count() > 0 {
+                std::thread::yield_now();
+            }
+            while let Some(request) = mailbox.dequeue() {
+                request
+                    .into_parts()
+                    .resolve_failed(SpawnError::RuntimeUnavailable);
+            }
         }
     }
 }

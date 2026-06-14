@@ -3973,6 +3973,9 @@ where
         use crate::runtime::spawn_mailbox::{AdmittedTask, LocalSpawnFactoryFn, LocalSpawnRequest};
         use crate::runtime::task_handle::JoinError;
 
+        let Some(_liveness_guard) = gateway.liveness_guard() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
         if crate::runtime::scheduler::three_lane::current_worker_id().is_none() {
             return Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable);
         }
@@ -4095,9 +4098,9 @@ where
         use crate::runtime::spawn_mailbox::{AdmittedTask, SpawnFactoryFn, SpawnRequest};
         use crate::runtime::task_handle::JoinError;
 
-        if !gateway.is_runtime_available() {
+        let Some(_liveness_guard) = gateway.liveness_guard() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
-        }
+        };
 
         let (result_tx, result_rx) =
             crate::channel::oneshot::channel::<Result<Fut::Output, JoinError>>();
