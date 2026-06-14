@@ -215,7 +215,7 @@ enum AtpCommand {
     Replay(AtpReplayArgs),
     /// Display ATP proof bundle information
     Proof(AtpProofArgs),
-    /// Run ATP benchmark profiles and generate reports
+    /// Refuse synthetic ATP benchmarks until transport-measured runs exist
     Bench(AtpBenchArgs),
     /// Inspect and analyze ATP trace files
     Trace(AtpTraceArgs),
@@ -630,27 +630,27 @@ struct AtpTransferStatusArgs {
 
 #[derive(Args, Debug)]
 struct AtpBenchArgs {
-    /// Benchmark profile to run: throughput, latency, repair, stress, mixed
+    /// Requested benchmark profile: throughput, latency, repair, stress, mixed
     #[arg(value_name = "PROFILE", default_value = "throughput")]
     profile: String,
 
-    /// Duration of benchmark in seconds
+    /// Requested benchmark duration in seconds
     #[arg(long = "duration", short = 'd', default_value_t = 30)]
     duration_seconds: u64,
 
-    /// Output directory for benchmark reports
+    /// Future output directory for benchmark reports
     #[arg(long = "output-dir", default_value = "target/atp-bench-results")]
     output_dir: PathBuf,
 
-    /// Number of concurrent transfers for stress testing
+    /// Requested number of concurrent transfers for stress testing
     #[arg(long = "concurrency", short = 'c', default_value_t = 4)]
     concurrency: u16,
 
-    /// Transfer size for throughput/latency tests (bytes)
+    /// Requested transfer size for throughput/latency tests (bytes)
     #[arg(long = "transfer-size", default_value_t = 1_048_576)]
     transfer_size: u64,
 
-    /// Include detailed metrics in JSON report
+    /// Request detailed metrics in the future JSON report
     #[arg(long = "detailed", action = ArgAction::SetTrue)]
     detailed: bool,
 }
@@ -4839,53 +4839,12 @@ fn atp_transfer_status(
 }
 
 fn atp_bench(args: &AtpBenchArgs, output: &mut Output) -> Result<(), CliError> {
-    // NOTE (br-asupersync-qk02uw follow-up): these results are model-derived,
-    // not measured from a real ATP transfer. Tracked for replacement with a
-    // transport-driven benchmark; left intact in this de-facade increment to
-    // avoid orphaning the results machinery.
-    if !args.output_dir.exists() {
-        std::fs::create_dir_all(&args.output_dir).map_err(|err| {
-            CliError::new("io_error", "Failed to create benchmark output directory")
-                .detail(format!(
-                    "Path: {}, Error: {}",
-                    args.output_dir.display(),
-                    err
-                ))
-                .exit_code(ExitCode::RUNTIME_ERROR)
-        })?;
-    }
-
-    let final_results = AtpBenchResults::for_profile(
-        &args.profile,
-        args.duration_seconds,
-        args.concurrency,
-        args.transfer_size,
-        args.detailed,
-    );
-
-    let result_file = args
-        .output_dir
-        .join(format!("atp_bench_{}.json", args.profile));
-    let json_content = serde_json::to_string_pretty(&final_results).map_err(|err| {
-        CliError::new(
-            "serialization_error",
-            "Failed to serialize benchmark results",
-        )
-        .detail(format!("Error: {}", err))
-        .exit_code(ExitCode::RUNTIME_ERROR)
-    })?;
-
-    std::fs::write(&result_file, json_content).map_err(|err| {
-        CliError::new("io_error", "Failed to write benchmark results")
-            .detail(format!("Path: {}, Error: {}", result_file.display(), err))
-            .exit_code(ExitCode::RUNTIME_ERROR)
-    })?;
-
-    output
-        .write(&final_results)
-        .map_err(output_write_error("ATP benchmark results"))?;
-
-    Ok(())
+    let _ = (args, output);
+    // Keep the model-only builder compiled for existing fixture tests, but do
+    // not expose it as command output.
+    let _retained_model_fixture_builder: fn(&str, u64, u16, u64, bool) -> AtpBenchResults =
+        AtpBenchResults::for_profile;
+    atp_not_implemented("bench")
 }
 
 fn parse_timeline_second_bound(value: f64, label: &str) -> Result<u64, CliError> {
@@ -16407,6 +16366,29 @@ lab:
                 .revocation_url
                 .as_deref()
                 .is_some_and(|url| url.starts_with("atp://revoke/"))
+        );
+    }
+
+    #[test]
+    fn atp_bench_fails_closed_without_writing_model_results() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output_dir = temp.path().join("atp-bench-results");
+        let mut output = Output::new(OutputFormat::JsonPretty);
+        let args = AtpBenchArgs {
+            profile: "throughput".to_string(),
+            duration_seconds: 1,
+            output_dir: output_dir.clone(),
+            concurrency: 2,
+            transfer_size: 1024,
+            detailed: true,
+        };
+
+        let err = atp_bench(&args, &mut output).expect_err("atp bench must fail closed");
+
+        assert_eq!(err.error_type, "atp_not_implemented");
+        assert!(
+            !output_dir.exists(),
+            "model-derived benchmark reports must not be written"
         );
     }
 
