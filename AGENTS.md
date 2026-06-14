@@ -104,7 +104,14 @@ Do all of this *before* starting any other task. There is no task in this projec
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
+- **Edition:** Rust 2024. Default contributor and release lanes use the pinned
+  nightly toolchain from `rust-toolchain.toml` because default features include
+  `nightly-outcome-try` for `Outcome` `Try`/`?` ergonomics.
+- **Stable Rust subset:** the audited stable lane disables default features and
+  enables only `proc-macros`; use `scripts/run_stable_lane_e2e.sh`, which runs
+  the stable `check`, `clippy`, and focused `Outcome` unit-test stages through
+  RCH with the shared `${TMPDIR:-/tmp}/rch_target_asupersync_stable_lane` target
+  directory.
 - **Dependency versions:** Explicit versions for stability; keep the set minimal
 - **Configuration:** Cargo.toml workspace with members pattern
 - **Unsafe code:** Denied by default (`#![deny(unsafe_code)]`) — specific modules **or functions** that require unsafe (e.g., epoll reactor FFI, the env-var setter calls in `runtime/builder.rs`, GF(256) SIMD kernels in `raptorq/gf256.rs`) can use `#[allow(unsafe_code)]` at file scope (`#![...]`) or at item scope (`#[...]` on the enclosing fn / impl). Per-function allow is preferred when the unsafe surface is narrow — it keeps the override visible at the actual unsafe block instead of hiding it behind a top-of-file pragma. (br-asupersync-f9i00q)

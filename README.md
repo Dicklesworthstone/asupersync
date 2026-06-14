@@ -587,7 +587,21 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_readme_docs cargo bu
 
 ### Minimum Supported Rust Version
 
-Asupersync uses **Rust Edition 2024** and tracks the pinned **nightly** toolchain in `rust-toolchain.toml`.
+Asupersync uses **Rust Edition 2024**. Contributor and release lanes track the
+pinned **nightly** toolchain in `rust-toolchain.toml` because the default feature
+set includes `nightly-outcome-try` for `Outcome` `Try`/`?` ergonomics.
+
+The audited stable subset is checked with default features disabled and
+`proc-macros` enabled:
+
+```bash
+bash scripts/run_stable_lane_e2e.sh
+```
+
+That runner drives `cargo +stable check`, `clippy`, and the focused `Outcome`
+unit tests through RCH with the shared stable-lane target directory. Stable
+consumers must use `--no-default-features --features proc-macros` until the
+nightly `Outcome` `Try` surface is migrated or disabled by default.
 
 ---
 
@@ -1335,6 +1349,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `metrics` | OpenTelemetry metrics provider (Tokio-free normal graph; OTLP protobuf helpers are fuzz/test-only) | No |
 | `tracing-integration` | Tracing spans/logging integration | No |
 | `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!` proc macros | Yes |
+| `nightly-outcome-try` | Nightly-only `Outcome` `Try`/residual impls that enable `?` ergonomics | Yes |
 | `tower` | Tower `Service` adapter support | No |
 | `trace-compression` | LZ4 compression for trace files | No |
 | `debug-server` | Debug HTTP server for runtime inspection | No |
@@ -1358,7 +1373,14 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 
 ### Minimum Supported Rust Version
 
-Rust **nightly** (Edition 2024, pinned by `rust-toolchain.toml`).
+Rust **nightly** remains the default contributor/release toolchain (Edition
+2024, pinned by `rust-toolchain.toml`) because default features include
+`nightly-outcome-try`.
+
+The checked stable subset is `cargo +stable` with default features disabled and
+`proc-macros` enabled. Use `scripts/run_stable_lane_e2e.sh` for the canonical
+local/RCH runner; it emits structured per-stage logs and a `summary.json` for
+the stable-lane artifact.
 
 ### Semver Policy
 
