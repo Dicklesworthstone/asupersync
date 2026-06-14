@@ -10,7 +10,7 @@
 use asupersync::trace::raptorq_journal::{
     BlockKey, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, JOURNAL_FRAME_HEADER_LEN, JOURNAL_FRAME_MAGIC,
     JOURNAL_FRAME_VERSION, JournalFrame, JournalFrameError, StripePlan, crc32, decodable_blocks,
-    latest_recoverable_epoch, scan_frames, summarize_blocks,
+    latest_recoverable_epoch, scan_frames, serialize_striped, summarize_blocks,
 };
 
 fn sample_frame() -> JournalFrame {
@@ -275,4 +275,49 @@ fn stripe_plan_handles_fewer_symbols_than_stripes() {
     assert_eq!(plan.symbols_surviving_loss(1), 1);
     assert_eq!(plan.symbols_surviving_loss(2), 0);
     assert!(plan.survives_stripe_loss(1, 1));
+}
+
+#[test]
+fn serialize_striped_round_trips_and_survives_stripe_loss() {
+    // 5 encoding symbols for one block, K'=3, striped across 3 files.
+    let symbols: Vec<(u32, Vec<u8>)> = (0..5u32).map(|esi| (esi, vec![esi as u8; 8])).collect();
+    let plan = StripePlan::new(symbols.len(), 3).expect("nonzero stripes");
+    let stripes = serialize_striped(
+        11,
+        0,
+        3,
+        8,
+        JOURNAL_FLAG_CHECKPOINT_BOUNDARY,
+        &symbols,
+        &plan,
+    );
+    assert_eq!(stripes.len(), 3);
+
+    // Full round-trip: concatenate all stripes, scan, recover the block.
+    let mut all = Vec::new();
+    for stripe in &stripes {
+        all.extend_from_slice(stripe);
+    }
+    let (frames, consumed) = scan_frames(&all);
+    assert_eq!(consumed, all.len());
+    assert_eq!(frames.len(), 5);
+    assert_eq!(
+        decodable_blocks(&frames),
+        vec![BlockKey {
+            epoch: 11,
+            source_block_number: 0,
+        }]
+    );
+
+    // Lose stripe 0 (a fullest stripe): the remaining stripes must still carry
+    // exactly the worst-case survivor count the plan predicts, and >= K'.
+    let mut survivors = Vec::new();
+    for stripe in &stripes[1..] {
+        survivors.extend_from_slice(stripe);
+    }
+    let (survivor_frames, _) = scan_frames(&survivors);
+    assert_eq!(survivor_frames.len(), plan.symbols_surviving_loss(1));
+    assert!(plan.survives_stripe_loss(3, 1));
+    let surviving_block = &summarize_blocks(&survivor_frames)[0];
+    assert!(surviving_block.is_decodable());
 }

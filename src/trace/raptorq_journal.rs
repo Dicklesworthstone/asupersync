@@ -443,6 +443,45 @@ impl StripePlan {
     }
 }
 
+/// Serialize one checkpoint epoch's encoding symbols into per-stripe byte
+/// streams following `plan`.
+///
+/// Returns `plan.stripe_count()` byte vectors; vector `i` is the concatenation
+/// of the [`JournalFrame`]s for the symbols round-robined onto stripe `i`
+/// (symbol position → [`StripePlan::stripe_of`]). A writer flushes vector `i` to
+/// stripe file `i`, ideally on a distinct failure domain.
+///
+/// Recovery is the inverse: concatenate whatever stripe files survived and feed
+/// the bytes to [`scan_frames`] then [`summarize_blocks`]. Losing whole stripes
+/// is tolerated exactly as [`StripePlan::survives_stripe_loss`] predicts — as
+/// long as at least `source_symbol_count` (K') symbols survive, the block still
+/// RaptorQ-decodes.
+#[must_use]
+pub fn serialize_striped(
+    epoch: u64,
+    source_block_number: u32,
+    source_symbol_count: u32,
+    symbol_size: u32,
+    flags: u16,
+    symbols: &[(u32, Vec<u8>)],
+    plan: &StripePlan,
+) -> Vec<Vec<u8>> {
+    let mut stripes = vec![Vec::new(); plan.stripe_count()];
+    for (index, (encoding_symbol_id, payload)) in symbols.iter().enumerate() {
+        let frame = JournalFrame::new(
+            epoch,
+            source_block_number,
+            *encoding_symbol_id,
+            source_symbol_count,
+            symbol_size,
+            flags,
+            payload.clone(),
+        );
+        frame.encode_into(&mut stripes[plan.stripe_of(index)]);
+    }
+    stripes
+}
+
 #[inline]
 fn read4(bytes: &[u8], at: usize) -> [u8; 4] {
     [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
