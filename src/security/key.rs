@@ -170,16 +170,21 @@ impl AuthKey {
         // This prevents signature forgery attacks via compromised RNG state
         match Self::from_bytes(bytes) {
             Ok(key) => key,
-            Err(err) => {
-                // If RNG output fails validation, re-derive using HKDF for strengthening
-                // Use the weak bytes as IKM but add entropy via salt and context
-                Self::from_hkdf(&bytes, Some(b"rng-strengthen-salt"), b"asupersync::AuthKey::rng-strengthened")
-                    .try_validate()
-                    .unwrap_or_else(|_| {
-                        // Ultimate fallback: use cryptographically strong default
-                        // This should never happen with proper HKDF, but provides safety
-                        panic!("Critical security failure: Unable to generate strong key even with HKDF strengthening. Original error: {:?}", err)
-                    })
+            Err(_) => {
+                // RNG output failed the entropy heuristic; strengthen it with
+                // HKDF, whose output is uniformly distributed by construction.
+                // Accept that output directly (matching `from_seed`): the
+                // heuristic entropy gate (`from_bytes`) must NOT be re-applied
+                // to HKDF output. A small fraction of genuinely uniform 32-byte
+                // buffers exceed `MAX_BYTE_FREQUENCY` purely by chance, so
+                // re-validating here let a valid, strong key abort `from_rng`
+                // — a `#[must_use]`, non-`Result` API whose contract is to
+                // always yield a key — with a panic.
+                Self::from_hkdf(
+                    &bytes,
+                    Some(b"rng-strengthen-salt"),
+                    b"asupersync::AuthKey::rng-strengthened",
+                )
             }
         }
     }
@@ -363,14 +368,6 @@ impl AuthKey {
 
         // HKDF output is uniformly distributed by construction, so skip validation
         Self { bytes: okm }
-    }
-
-    /// Validates an already-constructed key's entropy properties.
-    ///
-    /// This is used internally to re-validate keys that were created through
-    /// trusted methods but may need verification for defense-in-depth.
-    fn try_validate(&self) -> Result<Self, AuthKeyError> {
-        Self::from_bytes(self.bytes)
     }
 }
 
