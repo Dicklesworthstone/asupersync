@@ -8,9 +8,10 @@
 #![allow(missing_docs)]
 
 use asupersync::trace::raptorq_journal::{
-    BlockKey, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, JOURNAL_FRAME_HEADER_LEN, JOURNAL_FRAME_MAGIC,
-    JOURNAL_FRAME_VERSION, JournalFrame, JournalFrameError, StripePlan, crc32, decodable_blocks,
-    latest_recoverable_epoch, scan_frames, serialize_striped, summarize_blocks,
+    BlockKey, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, JOURNAL_FRAME_HEADER_LEN,
+    JOURNAL_FRAME_MAGIC, JOURNAL_FRAME_VERSION, JournalFrame, JournalFrameError, StripePlan, crc32,
+    decodable_blocks, epoch_is_complete, latest_complete_epoch, latest_recoverable_epoch,
+    scan_frames, serialize_striped, summarize_blocks,
 };
 
 fn sample_frame() -> JournalFrame {
@@ -275,6 +276,68 @@ fn stripe_plan_handles_fewer_symbols_than_stripes() {
     assert_eq!(plan.symbols_surviving_loss(1), 1);
     assert_eq!(plan.symbols_surviving_loss(2), 0);
     assert!(plan.survives_stripe_loss(1, 1));
+}
+
+#[test]
+fn epoch_manifest_detects_missing_and_undersymboled_blocks() {
+    // Epoch 5 declared 3 blocks. Block 0 decodable (K'=1), block 1 decodable
+    // (K'=2 with 2 symbols), block 2 wholly missing -> NOT complete.
+    let frames = vec![
+        symbol_frame(5, 0, 0, 1),
+        symbol_frame(5, 1, 0, 2),
+        symbol_frame(5, 1, 7, 2),
+    ];
+    let manifest = EpochManifest {
+        epoch: 5,
+        source_block_count: 3,
+    };
+    // latest_recoverable_epoch is satisfied (every *present* block decodes)...
+    assert_eq!(latest_recoverable_epoch(&frames), Some(5));
+    // ...but the manifest catches the wholly-missing block 2.
+    assert!(!epoch_is_complete(&frames, manifest));
+
+    // Drop the manifest's block count to 2 -> now complete.
+    assert!(epoch_is_complete(
+        &frames,
+        EpochManifest {
+            epoch: 5,
+            source_block_count: 2,
+        }
+    ));
+
+    // An under-symboled present block also fails completeness.
+    let undersymboled = vec![symbol_frame(5, 0, 0, 1), symbol_frame(5, 1, 0, 2)];
+    assert!(!epoch_is_complete(
+        &undersymboled,
+        EpochManifest {
+            epoch: 5,
+            source_block_count: 2,
+        }
+    ));
+}
+
+#[test]
+fn latest_complete_epoch_uses_manifests() {
+    let frames = vec![
+        // epoch 7: both declared blocks decodable.
+        symbol_frame(7, 0, 0, 1),
+        symbol_frame(7, 1, 0, 1),
+        // epoch 9: only block 0 present; block 1 missing.
+        symbol_frame(9, 0, 0, 1),
+    ];
+    let manifests = [
+        EpochManifest {
+            epoch: 7,
+            source_block_count: 2,
+        },
+        EpochManifest {
+            epoch: 9,
+            source_block_count: 2,
+        },
+    ];
+    // 9 is higher but incomplete (missing block 1); 7 is the latest complete.
+    assert_eq!(latest_complete_epoch(&frames, &manifests), Some(7));
+    assert_eq!(latest_complete_epoch(&frames, &[]), None);
 }
 
 #[test]

@@ -358,6 +358,49 @@ pub fn latest_recoverable_epoch(frames: &[JournalFrame]) -> Option<u64> {
         .next_back()
 }
 
+/// Declares how many source blocks a checkpoint epoch was split into.
+///
+/// [`latest_recoverable_epoch`] can only judge the blocks that actually appear
+/// in the surviving frames, so it cannot tell a *wholly missing* block from a
+/// block that was never written. A writer emits one manifest per epoch (a
+/// sidecar record, or a dedicated manifest frame in a future slice); recovery
+/// consults it via [`epoch_is_complete`] / [`latest_complete_epoch`] to require
+/// that every declared block survived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EpochManifest {
+    /// Trace checkpoint epoch the manifest describes.
+    pub epoch: u64,
+    /// Number of RaptorQ source blocks the epoch was split into.
+    pub source_block_count: u32,
+}
+
+/// Whether every source block `0..manifest.source_block_count` in the epoch is
+/// present *and* decodable among `frames`.
+///
+/// Unlike [`latest_recoverable_epoch`], this catches a wholly-missing block: a
+/// block whose frames never made it to any surviving stripe fails the check.
+#[must_use]
+pub fn epoch_is_complete(frames: &[JournalFrame], manifest: EpochManifest) -> bool {
+    let decodable: BTreeSet<u32> = summarize_blocks(frames)
+        .into_iter()
+        .filter(|block| block.key.epoch == manifest.epoch && block.is_decodable())
+        .map(|block| block.key.source_block_number)
+        .collect();
+    (0..manifest.source_block_count).all(|sbn| decodable.contains(&sbn))
+}
+
+/// The highest epoch that is fully complete per its manifest — every declared
+/// block present and decodable. This is the strongest "latest fully recoverable
+/// checkpoint" answer, given per-epoch manifests.
+#[must_use]
+pub fn latest_complete_epoch(frames: &[JournalFrame], manifests: &[EpochManifest]) -> Option<u64> {
+    manifests
+        .iter()
+        .filter(|manifest| epoch_is_complete(frames, **manifest))
+        .map(|manifest| manifest.epoch)
+        .max()
+}
+
 /// Plan that assigns each of `symbol_count` encoding symbols to one of
 /// `stripe_count` striped journal files.
 ///
