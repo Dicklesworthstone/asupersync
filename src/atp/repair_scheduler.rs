@@ -542,7 +542,7 @@ impl MultiSourceRepairScheduler {
         peer_scores: &HashMap<PeerId, f64>,
     ) -> Option<PeerId> {
         let mut best_peer = None;
-        let mut best_score = 0.0;
+        let mut best_score = f64::NEG_INFINITY;
 
         for (peer_id, peer_info) in &self.peers {
             if !peer_info.available_symbols.contains(&symbol_index) {
@@ -1016,6 +1016,29 @@ mod tests {
         assert!(
             cheap_score > expensive_score,
             "cheap/stable peer ({cheap_score}) must outscore expensive/churny ({expensive_score})"
+        );
+    }
+
+    #[test]
+    fn select_best_peer_accepts_available_peer_with_negative_score() {
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            10,
+        );
+
+        let peer_id = create_test_peer_id(8103);
+        let peer_info = create_test_peer_info(&scheduler, peer_id.clone(), vec![7]);
+        scheduler.register_peer(peer_info).unwrap();
+
+        let mut peer_scores = HashMap::new();
+        peer_scores.insert(peer_id.clone(), -0.5);
+
+        assert_eq!(
+            scheduler.select_best_peer_for_symbol(7, &peer_scores),
+            Some(peer_id),
+            "an available peer remains selectable even when policy scoring is non-positive"
         );
     }
 
