@@ -4,7 +4,7 @@
 
 ### (single-thread → multi-core → distributed) with deterministic testing, trace replay, and formalizable semantics
 
-> **North Star:** inside Asupersync’s capability boundary, every concurrent program has (1) a well‑founded ownership tree, (2) explicit cancellation driven to quiescence, (3) deterministic resource cleanup, and (4) compositional building blocks whose semantics are *lawful* and testable under a deterministic lab runtime.
+> **North Star:** inside Asupersync’s runtime-managed capability boundary, concurrent programs built from covered primitives have (1) a well‑founded ownership tree, (2) explicit cancellation driven to quiescence under cited responsiveness bounds, (3) deterministic resource cleanup for scoped effects, and (4) compositional building blocks whose semantics are *lawful* and testable under a deterministic lab runtime.
 
 This is a **blank‑slate** design: Asupersync owns the scheduler, cancellation protocol, region model, and (optionally) the I/O reactor. It is built on Rust’s `async/await` plus `core::future::Future` and `std::task::{Waker, RawWaker}`; the current repository pins a nightly Edition 2024 toolchain even though the semantic model itself does not require language changes.
 
@@ -23,7 +23,7 @@ Asupersync is not “an executor plus helpers.” It is a **semantic platform**:
 * A **lab runtime** with virtual time and deterministic scheduling (plus DPOR‑class exploration hooks) so concurrency bugs become testable.
 * A **distributed story that is honest**: named computations + leases + idempotency + sagas, not “serialize closures across machines.”
 
-If you use Asupersync primitives, you get **cancel correctness**, **no orphan tasks**, **bounded cleanup**, **predictable shutdown**, and **replayable traces**.
+When code stays inside runtime-managed primitives and their documented support boundaries, Asupersync provides **cancel correctness**, **no orphan tasks**, **bounded cleanup where concrete responsiveness bounds exist**, **predictable shutdown**, and **replayable traces**. Adapter, host-boundary, and inherently partial I/O paths keep the narrower guarantees they explicitly publish.
 
 ---
 
