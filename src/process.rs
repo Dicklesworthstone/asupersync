@@ -51,6 +51,8 @@ use std::task::{Context, Poll};
 use std::cmp::Ordering;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::{
     ffi::OsStrExt,
@@ -152,6 +154,18 @@ fn cleanup_child_after_spawn_setup_failure(child: &mut std_process::Child) {
     let _ = child.wait();
 }
 
+#[cfg(unix)]
+fn cleanup_child_after_spawn_setup_failure_with_target(
+    child: &mut std_process::Child,
+    target: ChildSignalTarget,
+) {
+    if target.send(libc::SIGKILL).is_ok() {
+        let _ = child.wait();
+    } else {
+        cleanup_child_after_spawn_setup_failure(child);
+    }
+}
+
 /// Error type for process operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -170,6 +184,14 @@ pub enum ProcessError {
     /// The process was terminated by a signal.
     #[error("process terminated by signal {0}")]
     Signaled(i32),
+
+    /// The requested process configuration is not supported on this platform.
+    #[error("unsupported process configuration: {0}")]
+    Unsupported(String),
+
+    /// The requested process configuration is internally inconsistent.
+    #[error("invalid process configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 impl From<ProcessError> for io::Error {
@@ -203,6 +225,127 @@ pub enum Stdio {
     /// For stdin, the child will read EOF immediately.
     /// For stdout/stderr, the output is discarded.
     Null,
+}
+
+/// Unix process-group/session mode for a spawned child.
+///
+/// The default is [`Inherit`](Self::Inherit), preserving the parent process
+/// group and session exactly as `std::process::Command` would. The other modes
+/// are Unix-only; on non-Unix targets, [`Command::spawn`] returns
+/// [`ProcessError::Unsupported`] if either is requested.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum ProcessGroupMode {
+    /// Inherit the parent's process group and session.
+    #[default]
+    Inherit,
+    /// Create a new process group with the child as the group leader.
+    NewProcessGroup,
+    /// Create a new session, making the child both session leader and process
+    /// group leader.
+    NewSession,
+}
+
+impl ProcessGroupMode {
+    #[cfg(unix)]
+    fn creates_managed_group(self) -> bool {
+        matches!(self, Self::NewProcessGroup | Self::NewSession)
+    }
+}
+
+/// Target used by process termination helpers.
+///
+/// The default [`Process`](Self::Process) target sends signals only to the
+/// direct child pid. [`ProcessGroup`](Self::ProcessGroup) requires a managed
+/// process group from [`ProcessGroupMode::NewProcessGroup`] or
+/// [`ProcessGroupMode::NewSession`]; `spawn()` rejects it with
+/// [`ProcessError::InvalidConfiguration`] if the command would otherwise
+/// target the parent's inherited group.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum ProcessSignalTarget {
+    /// Send termination signals to the direct child process only.
+    #[default]
+    Process,
+    /// Send termination signals to the managed child process group.
+    ProcessGroup,
+}
+
+#[cfg(unix)]
+fn configure_unix_process_group(mode: ProcessGroupMode) -> io::Result<()> {
+    match mode {
+        ProcessGroupMode::Inherit => Ok(()),
+        ProcessGroupMode::NewProcessGroup => {
+            if unsafe { libc::setpgid(0, 0) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        ProcessGroupMode::NewSession => {
+            if unsafe { libc::setsid() } >= 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn child_pid_t(child: &std_process::Child) -> Result<libc::pid_t, ProcessError> {
+    libc::pid_t::try_from(child.id()).map_err(|_| {
+        ProcessError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("child pid {} does not fit pid_t", child.id()),
+        ))
+    })
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ChildSignalTarget {
+    Process(libc::pid_t),
+    ProcessGroup(libc::pid_t),
+}
+
+#[cfg(unix)]
+impl ChildSignalTarget {
+    fn new(
+        child: &std_process::Child,
+        requested: ProcessSignalTarget,
+        managed_process_group_id: Option<libc::pid_t>,
+    ) -> Result<Self, ProcessError> {
+        let child_pid = child_pid_t(child)?;
+        match requested {
+            ProcessSignalTarget::Process => Ok(Self::Process(child_pid)),
+            ProcessSignalTarget::ProcessGroup => {
+                let group_id = managed_process_group_id.ok_or_else(|| {
+                    ProcessError::InvalidConfiguration(
+                        "process-group signal target requires a managed child group".to_owned(),
+                    )
+                })?;
+                Ok(Self::ProcessGroup(group_id))
+            }
+        }
+    }
+
+    fn configured_target(self) -> ProcessSignalTarget {
+        match self {
+            Self::Process(_) => ProcessSignalTarget::Process,
+            Self::ProcessGroup(_) => ProcessSignalTarget::ProcessGroup,
+        }
+    }
+
+    fn send(self, sig: i32) -> Result<(), ProcessError> {
+        let target = match self {
+            Self::Process(pid) => pid,
+            Self::ProcessGroup(group_id) => -group_id,
+        };
+        let ret = unsafe { libc::kill(target, sig) };
+        if ret != 0 {
+            return Err(ProcessError::Io(io::Error::last_os_error()));
+        }
+        Ok(())
+    }
 }
 
 impl Stdio {
@@ -406,9 +549,37 @@ pub struct Command {
     stdout: Stdio,
     stderr: Stdio,
     kill_on_drop: bool,
+    process_group_mode: ProcessGroupMode,
+    signal_target: ProcessSignalTarget,
 }
 
 impl Command {
+    fn validate_process_group_configuration(&self) -> Result<(), ProcessError> {
+        #[cfg(not(unix))]
+        {
+            if self.process_group_mode != ProcessGroupMode::Inherit
+                || self.signal_target != ProcessSignalTarget::Process
+            {
+                return Err(ProcessError::Unsupported(
+                    "process group and session controls are only supported on Unix".to_owned(),
+                ));
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            if self.signal_target == ProcessSignalTarget::ProcessGroup
+                && !self.process_group_mode.creates_managed_group()
+            {
+                return Err(ProcessError::InvalidConfiguration(
+                    "process-group signal target requires ProcessGroupMode::NewProcessGroup or ProcessGroupMode::NewSession".to_owned(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     fn set_env_change(&mut self, key: EnvKey, value: Option<OsString>) {
         self.env.remove(&key);
         self.env.insert(key, value);
@@ -440,6 +611,8 @@ impl Command {
             stdout: Stdio::default(),
             stderr: Stdio::default(),
             kill_on_drop: false,
+            process_group_mode: ProcessGroupMode::default(),
+            signal_target: ProcessSignalTarget::default(),
         }
     }
 
@@ -624,6 +797,47 @@ impl Command {
         self
     }
 
+    /// Configures the child's Unix process-group or session setup.
+    ///
+    /// This does not by itself change termination targeting: by default
+    /// [`kill`](Child::kill), [`signal`](Child::signal), cancel drain, and
+    /// `kill_on_drop(true)` still target only the direct child pid. Pair this
+    /// with [`signal_target`](Self::signal_target) when the desired cancellation
+    /// domain is the managed process group.
+    ///
+    /// On non-Unix targets, requesting anything other than
+    /// [`ProcessGroupMode::Inherit`] causes [`spawn`](Self::spawn) to return
+    /// [`ProcessError::Unsupported`].
+    pub fn process_group_mode(&mut self, mode: ProcessGroupMode) -> &mut Self {
+        self.process_group_mode = mode;
+        self
+    }
+
+    /// Convenience helper for [`ProcessGroupMode::NewSession`].
+    ///
+    /// Passing `false` restores [`ProcessGroupMode::Inherit`].
+    pub fn create_new_session(&mut self, enabled: bool) -> &mut Self {
+        self.process_group_mode = if enabled {
+            ProcessGroupMode::NewSession
+        } else {
+            ProcessGroupMode::Inherit
+        };
+        self
+    }
+
+    /// Configures whether termination signals target the child pid or a
+    /// managed child process group.
+    ///
+    /// [`ProcessSignalTarget::ProcessGroup`] is accepted only together with
+    /// [`ProcessGroupMode::NewProcessGroup`] or
+    /// [`ProcessGroupMode::NewSession`]. `spawn()` rejects inherited-group
+    /// targeting so a command cannot accidentally signal the caller's own
+    /// process group.
+    pub fn signal_target(&mut self, target: ProcessSignalTarget) -> &mut Self {
+        self.signal_target = target;
+        self
+    }
+
     /// Spawns the command as a child process.
     ///
     /// Returns a `Child` handle that can be used to interact with the process.
@@ -645,6 +859,8 @@ impl Command {
     /// let status = child.wait()?;
     /// ```
     pub fn spawn(&mut self) -> Result<Child, ProcessError> {
+        self.validate_process_group_configuration()?;
+
         let mut cmd = std_process::Command::new(&self.program);
 
         cmd.args(&self.args);
@@ -669,6 +885,16 @@ impl Command {
         cmd.stdout(self.stdout.to_std());
         cmd.stderr(self.stderr.to_std());
 
+        #[cfg(unix)]
+        {
+            let mode = self.process_group_mode;
+            if mode != ProcessGroupMode::Inherit {
+                unsafe {
+                    cmd.pre_exec(move || configure_unix_process_group(mode));
+                }
+            }
+        }
+
         let mut child = cmd.spawn().map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => {
                 ProcessError::NotFound(self.program.to_string_lossy().into_owned())
@@ -679,6 +905,16 @@ impl Command {
             _ => ProcessError::Io(e),
         })?;
 
+        #[cfg(unix)]
+        let managed_process_group_id = if self.process_group_mode.creates_managed_group() {
+            Some(child_pid_t(&child)?)
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        let child_signal_target =
+            ChildSignalTarget::new(&child, self.signal_target, managed_process_group_id)?;
+
         // Extract the I/O handles before wrapping (use take() to avoid partial move).
         // If set_nonblocking fails for any handle, kill the child to prevent zombies.
         let stdin = child
@@ -687,6 +923,12 @@ impl Command {
             .map(ChildStdin::from_std)
             .transpose()
             .inspect_err(|_| {
+                #[cfg(unix)]
+                cleanup_child_after_spawn_setup_failure_with_target(
+                    &mut child,
+                    child_signal_target,
+                );
+                #[cfg(not(unix))]
                 cleanup_child_after_spawn_setup_failure(&mut child);
             })?;
         let stdout = child
@@ -695,6 +937,12 @@ impl Command {
             .map(ChildStdout::from_std)
             .transpose()
             .inspect_err(|_| {
+                #[cfg(unix)]
+                cleanup_child_after_spawn_setup_failure_with_target(
+                    &mut child,
+                    child_signal_target,
+                );
+                #[cfg(not(unix))]
                 cleanup_child_after_spawn_setup_failure(&mut child);
             })?;
         let stderr = child
@@ -703,6 +951,12 @@ impl Command {
             .map(ChildStderr::from_std)
             .transpose()
             .inspect_err(|_| {
+                #[cfg(unix)]
+                cleanup_child_after_spawn_setup_failure_with_target(
+                    &mut child,
+                    child_signal_target,
+                );
+                #[cfg(not(unix))]
                 cleanup_child_after_spawn_setup_failure(&mut child);
             })?;
 
@@ -712,6 +966,10 @@ impl Command {
             stdout,
             stderr,
             kill_on_drop: self.kill_on_drop,
+            #[cfg(unix)]
+            managed_process_group_id,
+            #[cfg(unix)]
+            signal_target: child_signal_target,
         })
     }
 
@@ -818,6 +1076,10 @@ pub struct Child {
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
     kill_on_drop: bool,
+    #[cfg(unix)]
+    managed_process_group_id: Option<libc::pid_t>,
+    #[cfg(unix)]
+    signal_target: ChildSignalTarget,
 }
 
 impl Child {
@@ -827,6 +1089,21 @@ impl Child {
     #[must_use]
     pub fn id(&self) -> Option<u32> {
         self.inner.as_ref().map(std::process::Child::id)
+    }
+
+    /// Returns the configured termination target for this child.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn configured_signal_target(&self) -> ProcessSignalTarget {
+        self.signal_target.configured_target()
+    }
+
+    /// Returns the managed process group id, when the child was spawned with a
+    /// process-group or session mode.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn process_group_id(&self) -> Option<i32> {
+        self.managed_process_group_id
     }
 
     /// Takes ownership of the child's stdin handle.
@@ -1192,15 +1469,23 @@ impl Child {
     ///
     /// Returns an error if the signal cannot be sent (e.g., process already exited).
     pub fn kill(&mut self) -> Result<(), ProcessError> {
-        let child = self.inner.as_mut().ok_or_else(|| {
-            ProcessError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "child already waited",
-            ))
-        })?;
+        #[cfg(unix)]
+        {
+            self.send_configured_signal(libc::SIGKILL)
+        }
 
-        child.kill()?;
-        Ok(())
+        #[cfg(not(unix))]
+        {
+            let child = self.inner.as_mut().ok_or_else(|| {
+                ProcessError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "child already waited",
+                ))
+            })?;
+
+            child.kill()?;
+            Ok(())
+        }
     }
 
     /// Sends an arbitrary signal to the child process (Unix only).
@@ -1214,20 +1499,19 @@ impl Child {
     /// the `kill(2)` syscall fails (e.g., process already exited).
     #[cfg(unix)]
     pub fn signal(&mut self, sig: i32) -> Result<(), ProcessError> {
-        let child = self.inner.as_ref().ok_or_else(|| {
+        self.send_configured_signal(sig)
+    }
+
+    #[cfg(unix)]
+    fn send_configured_signal(&self, sig: i32) -> Result<(), ProcessError> {
+        self.inner.as_ref().ok_or_else(|| {
             ProcessError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "child already waited",
             ))
         })?;
 
-        #[allow(clippy::cast_possible_wrap)]
-        let pid = child.id() as i32; // POSIX pid_t is i32; u32->i32 wrapping is safe for valid PIDs
-        let ret = unsafe { libc::kill(pid, sig) };
-        if ret != 0 {
-            return Err(ProcessError::Io(io::Error::last_os_error()));
-        }
-        Ok(())
+        self.signal_target.send(sig)
     }
 
     /// Attempts to check exit status without blocking.
@@ -1626,7 +1910,14 @@ impl Drop for Child {
         drop(self.stdin.take());
 
         if self.kill_on_drop {
-            if let Some(mut child) = self.inner.take() {
+            #[cfg(unix)]
+            if self.inner.is_some() {
+                let _ = self.send_configured_signal(libc::SIGKILL);
+            }
+            if let Some(child) = self.inner.take() {
+                #[cfg(not(unix))]
+                let mut child = child;
+                #[cfg(not(unix))]
                 let _ = child.kill();
                 // Preserve the no-zombie guarantee from kill_on_drop, but
                 // do not surprise a runtime worker thread with a blocking
@@ -2132,6 +2423,12 @@ mod tests {
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[cfg(unix)]
+    fn child_pid_t_for_test(child: &Child) -> libc::pid_t {
+        libc::pid_t::try_from(child.id().expect("missing child pid"))
+            .expect("child pid should fit pid_t in test")
     }
 
     #[test]
@@ -2662,6 +2959,25 @@ mod tests {
         // Process should no longer exist (we can't easily check this portably,
         // but we can verify the test runs to completion)
         crate::test_complete!("test_command_kill_on_drop");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_group_signal_target_requires_managed_group() {
+        init_test("test_process_group_signal_target_requires_managed_group");
+
+        let result = Command::new("true")
+            .signal_target(ProcessSignalTarget::ProcessGroup)
+            .spawn();
+        let rejected = matches!(result, Err(ProcessError::InvalidConfiguration(_)));
+
+        crate::assert_with_log!(
+            rejected,
+            "process-group target rejects inherited group",
+            true,
+            rejected
+        );
+        crate::test_complete!("test_process_group_signal_target_requires_managed_group");
     }
 
     #[cfg(unix)]
@@ -3300,38 +3616,33 @@ mod tests {
         crate::test_complete!("test_stdio_pipe_close_after_exit");
     }
 
-    /// Test setsid isolation preventing signal propagation.
+    /// Test new-session isolation preventing signal propagation.
     ///
     /// Verifies that child processes in new session don't receive signals
     /// intended for parent process group.
     #[cfg(unix)]
     #[test]
-    fn test_setsid_isolation() {
-        init_test("test_setsid_isolation");
+    fn test_new_session_isolation() {
+        init_test("test_new_session_isolation");
 
         use std::time::Duration;
 
-        // Create a child process that creates its own session. Spawn `setsid`
-        // directly so `child.id()` refers to the session-isolated process we
-        // later probe and kill, rather than an intermediate shell in our group.
-        let mut isolated_child = Command::new("setsid")
-            .arg("sleep")
+        let mut isolated_command = Command::new("sleep");
+        let mut isolated_child = isolated_command
             .arg("30")
+            .create_new_session(true)
             .spawn()
             .expect("spawn failed");
 
-        let isolated_pid = isolated_child.id().expect("no pid");
+        let isolated_pid = child_pid_t_for_test(&isolated_child);
 
         // Get our own process group
         let our_pgid = unsafe { libc::getpgid(0) };
 
-        // `setsid(1)` execs and then calls `setsid(2)` asynchronously; `spawn()`
-        // returns as soon as fork/exec begins, so there is a window where
-        // `getpgid(child)` still reads the inherited parent group before the
-        // child has detached. Poll briefly so the session change has a chance to
-        // land before we decide whether isolation is observable here.
-        let read_isolated_pgid =
-            || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid.cast_signed()) } };
+        // The pre-exec hook runs in the child before exec, but the parent can
+        // observe the fork before that hook has completed. Poll briefly for the
+        // managed group to become visible.
+        let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };
         let mut isolated_pgid = read_isolated_pgid();
         for _ in 0..50 {
             if isolated_pgid > 0 && isolated_pgid != our_pgid {
@@ -3342,37 +3653,50 @@ mod tests {
         }
 
         // Some constrained environments (sandboxed CI / container runners with a
-        // restricted PID namespace, or hosts where `setsid` cannot acquire a new
-        // session) never let the spawned child leave the launcher's process
-        // group. There the isolation-dependent assertions below cannot be
-        // observed through `getpgid`, so we skip them rather than assert a
-        // property the platform refuses to provide. Where setsid DOES isolate
-        // (the common case) the assertions run in full and remain meaningful.
-        let setsid_isolates = isolated_pgid > 0 && isolated_pgid != our_pgid;
-        if !setsid_isolates {
+        // restricted PID namespace) never let the spawned child leave the
+        // launcher's process group. There the isolation-dependent assertions
+        // below cannot be observed through `getpgid`, so we skip them rather
+        // than assert a property the platform refuses to provide. Where the
+        // pre-exec session creation succeeds, the assertions run in full and
+        // remain meaningful.
+        let new_session_isolates = isolated_pgid > 0 && isolated_pgid != our_pgid;
+        if !new_session_isolates {
             let _ = isolated_child.kill();
             let _ = isolated_child.wait();
-            crate::test_complete!("test_setsid_isolation");
+            crate::test_complete!("test_new_session_isolation");
             return;
         }
 
         crate::assert_with_log!(
-            setsid_isolates,
+            new_session_isolates,
             "Child in different process group",
             true,
-            setsid_isolates
+            new_session_isolates
+        );
+        crate::assert_with_log!(
+            isolated_child.process_group_id() == Some(isolated_pid),
+            "child records managed process group",
+            Some(isolated_pid),
+            isolated_child.process_group_id()
+        );
+        crate::assert_with_log!(
+            isolated_child.configured_signal_target() == ProcessSignalTarget::Process,
+            "session creation preserves pid target by default",
+            ProcessSignalTarget::Process,
+            isolated_child.configured_signal_target()
         );
 
         // Exercise process-group signalling against a dedicated target group
         // instead of the test runner's own process group.
-        let mut signal_target = Command::new("setsid")
-            .arg("sleep")
+        let mut target_command = Command::new("sleep");
+        let mut signal_target = target_command
             .arg("30")
+            .process_group_mode(ProcessGroupMode::NewSession)
+            .signal_target(ProcessSignalTarget::ProcessGroup)
             .spawn()
             .expect("spawn signal target failed");
-        let target_pid = signal_target.id().expect("target pid");
-        let read_target_pgid =
-            || -> libc::pid_t { unsafe { libc::getpgid(target_pid.cast_signed()) } };
+        let target_pid = child_pid_t_for_test(&signal_target);
+        let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };
         let mut target_pgid = read_target_pgid();
         for _ in 0..50 {
             if target_pgid > 0 && target_pgid != isolated_pgid && target_pgid != our_pgid {
@@ -3391,7 +3715,7 @@ mod tests {
             let _ = signal_target.wait();
             let _ = isolated_child.kill();
             let _ = isolated_child.wait();
-            crate::test_complete!("test_setsid_isolation");
+            crate::test_complete!("test_new_session_isolation");
             return;
         }
         crate::assert_with_log!(
@@ -3400,13 +3724,25 @@ mod tests {
             true,
             target_group_valid
         );
-
-        let signal_result = unsafe { libc::kill(-target_pgid, libc::SIGUSR1) };
         crate::assert_with_log!(
-            signal_result == 0,
+            signal_target.configured_signal_target() == ProcessSignalTarget::ProcessGroup,
+            "configured process-group signal target",
+            ProcessSignalTarget::ProcessGroup,
+            signal_target.configured_signal_target()
+        );
+        crate::assert_with_log!(
+            signal_target.process_group_id() == Some(target_pgid),
+            "target records managed process group",
+            Some(target_pgid),
+            signal_target.process_group_id()
+        );
+
+        let signal_result = signal_target.signal(libc::SIGUSR1);
+        crate::assert_with_log!(
+            signal_result.is_ok(),
             "Signal sent to dedicated process group",
-            0,
-            signal_result
+            true,
+            signal_result.is_ok()
         );
 
         let mut target_signal = None;
@@ -3424,7 +3760,7 @@ mod tests {
 
         // The isolated child should still be alive because the group signal was
         // sent to a different session.
-        let child_alive = unsafe { libc::kill(isolated_pid.cast_signed(), 0) == 0 };
+        let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };
 
         // Clean up the isolated child before asserting so failures don't leave
         // the long-lived sleep process behind.
@@ -3444,7 +3780,7 @@ mod tests {
             child_alive
         );
 
-        crate::test_complete!("test_setsid_isolation");
+        crate::test_complete!("test_new_session_isolation");
     }
 
     /// Test exit code preservation across 256-bit exit status.
