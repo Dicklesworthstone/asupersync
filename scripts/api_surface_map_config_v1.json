@@ -42,7 +42,7 @@
     "service": "Service and layer traits for middleware-style composition.",
     "raptorq": "RaptorQ encoding, decoding, repair, and proof surfaces.",
     "atp": "Native ATP object-transfer and dogfood workflow surfaces.",
-    "spork": "Supervised application topology and deterministic app harness surfaces.",
+    "spork": "Supervised application topology, deterministic process-group models, and app harness surfaces.",
     "database": "Optional SQLite, Postgres, and MySQL client and pool surfaces.",
     "grpc": "Native gRPC client/server surfaces.",
     "fs": "Native filesystem surfaces.",
@@ -103,6 +103,12 @@
       "symbol": "spork",
       "summary": "Build a minimal supervised application topology.",
       "example_path": "examples/spork_minimal_supervised_app.rs"
+    },
+    {
+      "use_case": "process_group_model",
+      "symbol": "spork::process_group",
+      "summary": "Use deterministic node-local process-group names, member snapshots, event cursors, and broadcast accounting.",
+      "example_path": "src/spork.rs"
     },
     {
       "use_case": "raptorq_transfer",

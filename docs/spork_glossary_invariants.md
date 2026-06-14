@@ -347,9 +347,9 @@ Erlang's ability to upgrade running code (hot code swap) is not supported. Actor
 
 Spork does not pretend that remote actors behave identically to local ones. Remote communication uses the explicit `remote::invoke` API with leases and idempotency keys (Asupersync tier 4). Message passing to remote actors is not transparently proxied through local mailboxes.
 
-### NG-4: Process Groups / pg Module
+### NG-4: Distributed Process Groups / Cluster pg Module
 
-Erlang's `pg` (process groups) for pub/sub style communication is not in v1. Spork actors communicate through explicit `ActorRef` handles obtained via the registry or direct spawning. Group-based broadcast can be built on top using a supervisor that manages a set of actors.
+Spork now includes a node-local `spork::process_group` value layer for validated group names, deterministic member snapshots, membership-event cursors, and broadcast accounting. Cluster-wide `pg` behavior and runtime delivery across nodes remain out of scope for v1.
 
 ### NG-5: Dynamic Supervision (add_child at runtime)
 
@@ -431,6 +431,7 @@ Submodules and responsibilities:
 | `spork::genserver` | `GenServer` trait, `call/cast`, reply-obligation linearity, budget-driven timeouts | `actor`, `channel`, `obligation`, `types::{Budget, Outcome}` |
 | `spork::supervisor` | `Supervisor` builder + `ChildSpec`, compiled topology over regions, deterministic restart semantics | `supervision`, `cx::{Scope, Cx}`, `runtime::RuntimeState` |
 | `spork::registry` | capability-scoped naming, name ownership as lease obligations, deterministic collision semantics | `obligation`, `types::{Time, Budget}`, planned in bd-3rpp8 |
+| `spork::process_group` | node-local group names, deterministic member snapshots, event cursors, and broadcast accounting | `remote::NodeId`, `types::{TaskId, Time}`, `monitor::DownReason` |
 | `spork::link` | linking/monitoring, down events, deterministic ordering contracts | `supervision` + planned monitor/Down delivery |
 | `spork::crash` | deterministic crash packs, canonical traces, replay hooks | `trace`, `lab`, `record` (internal) |
 | `spork::lab` | app harness + conformance suites (seed-sweep, DPOR, oracles) | `lab::{LabRuntime, LabConfig}`, `trace` |

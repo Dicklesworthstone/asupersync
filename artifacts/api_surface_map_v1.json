@@ -1,6 +1,6 @@
 {
   "counts": {
-    "entry_points": 18,
+    "entry_points": 19,
     "modules": 120,
     "root_exports": 297
   },
@@ -58,6 +58,15 @@
       "summary": "Use two-phase MPSC send/receive paths in an end-to-end example.",
       "symbol": "channel::mpsc",
       "use_case": "mpsc_select"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "src/spork.rs"
+      },
+      "summary": "Use deterministic node-local process-group names, member snapshots, event cursors, and broadcast accounting.",
+      "symbol": "spork::process_group",
+      "use_case": "process_group_model"
     },
     {
       "example": {
@@ -1259,7 +1268,7 @@
     },
     {
       "cfg": null,
-      "doc": "Supervised application topology and deterministic app harness surfaces.",
+      "doc": "Supervised application topology, deterministic process-group models, and app harness surfaces.",
       "feature_flags": [],
       "kind": "module",
       "line": 206,
@@ -2588,7 +2597,7 @@
     },
     {
       "cfg": null,
-      "doc": "Supervised application topology and deterministic app harness surfaces.",
+      "doc": "Supervised application topology, deterministic process-group models, and app harness surfaces.",
       "feature_flags": [],
       "kind": "module",
       "line": 206,

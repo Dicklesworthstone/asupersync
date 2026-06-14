@@ -1212,6 +1212,7 @@ deterministic lab runtime.
 
 - Supervisor compilation/runtime: `src/supervision.rs`
 - Name leases + registry plumbing: `src/cx/registry.rs`
+- Node-local process-group value layer: `src/spork.rs` (`spork::process_group`)
 - Minimal supervised Spork app walkthrough: `examples/spork_minimal_supervised_app.rs`
 - Deterministic ordering contracts (Spork): `docs/spork_deterministic_ordering.md`
 - Spork glossary + invariants: `docs/spork_glossary_invariants.md`
