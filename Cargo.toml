@@ -564,6 +564,11 @@ harness = false
 required-features = ["test-internals", "criterion-benches"]
 
 [[bench]]
+name = "cancel_storm"
+harness = false
+required-features = ["test-internals", "criterion-benches"]
+
+[[bench]]
 name = "cancel_trace_bench"
 harness = false
 required-features = ["test-internals", "criterion-benches"]
