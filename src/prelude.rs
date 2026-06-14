@@ -23,6 +23,7 @@
 //! Runtime entry points + task handles:
 //! - [`Runtime`] / [`RuntimeBuilder`] / [`RuntimeHandle`] — build and drive a runtime.
 //! - [`TaskHandle`] — await or cancel a spawned task.
+//! - [`JoinSet`] — dynamic fan-out collection with explicit drain/cancel.
 //!
 //! Channels (re-exported as *modules*, so you call `mpsc::channel(..)` — never a
 //! glob, to keep `channel`/`Sender`/`Receiver` names unambiguous):
@@ -46,8 +47,8 @@
 //!
 //! - **`Result`** — would shadow `std::prelude::Result` ambiguously. Import the
 //!   crate alias explicitly as `asupersync::Result` when you want it.
-//! - **`JoinSet` / `TaskGroup`** — not landed yet; they join the prelude when
-//!   `asupersync-dx-core-api-v2-u1z5hn.5` ships.
+//! - **`TaskGroup`** — not landed yet; it joins the prelude when its owning
+//!   API-v2 slice ships.
 //! - **`#[asupersync::main]` / `#[asupersync::test]` attribute macros** — arrive
 //!   with `asupersync-dx-core-api-v2-u1z5hn.3`; until then start from
 //!   [`RuntimeBuilder`].
@@ -106,6 +107,7 @@ pub use crate::{Cx, Scope};
 pub use crate::{Budget, CancelKind, CancelReason, Error, Outcome, Time};
 
 // ── Runtime entry points + task handles ───────────────────────────────────
+pub use crate::combinator::JoinSet;
 pub use crate::runtime::{Runtime, RuntimeBuilder, RuntimeHandle, TaskHandle};
 
 // ── Channel constructors (module re-exports, never a glob) ─────────────────

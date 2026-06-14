@@ -21,11 +21,11 @@
 //!
 //! This first slice lands the most common server pattern — fan-out N members
 //! and collect them — via [`JoinSet::new`], [`JoinSet::spawn`],
-//! [`JoinSet::join_all`], [`JoinSet::len`]/[`JoinSet::is_empty`], and
-//! abort-on-drop. The streaming [`join_next`]-as-they-complete API, explicit
-//! `cancel_all` draining, `in_cx`/`in_child_region` constructors, and the
-//! `JoinSummary` severity aggregation are tracked follow-up slices on the same
-//! bead (asupersync-dx-core-api-v2-u1z5hn.5).
+//! [`JoinSet::join_all`], [`JoinSet::cancel_all`],
+//! [`JoinSet::len`]/[`JoinSet::is_empty`], and abort-on-drop. The streaming
+//! [`join_next`]-as-they-complete API, `in_cx`/`in_child_region`
+//! constructors, and the `JoinSummary` severity aggregation are tracked
+//! follow-up slices on the same bead (asupersync-dx-core-api-v2-u1z5hn.5).
 //!
 //! [`join_next`]: JoinSet
 
@@ -111,8 +111,27 @@ where
     /// [`Outcome::Panicked`]. Consuming the set means the awaited members are no
     /// longer abort-on-drop targets.
     pub async fn join_all(mut self, cx: &Cx) -> Vec<Outcome<T, E>> {
-        let mut outcomes = Vec::with_capacity(self.handles.len());
-        for handle in &mut self.handles {
+        self.drain_all(cx).await
+    }
+
+    /// Requests cancellation for every member and drains all terminal outcomes
+    /// in spawn order.
+    ///
+    /// Cancellation is requested through each task handle, then every member is
+    /// joined so the caller observes the final [`Outcome`] for each child. This
+    /// is the explicit counterpart to drop's best-effort cancellation request:
+    /// `cancel_all` waits for the handles it owns before returning.
+    pub async fn cancel_all(mut self, cx: &Cx) -> Vec<Outcome<T, E>> {
+        for handle in &self.handles {
+            handle.abort();
+        }
+        self.drain_all(cx).await
+    }
+
+    async fn drain_all(&mut self, cx: &Cx) -> Vec<Outcome<T, E>> {
+        let mut handles = std::mem::take(&mut self.handles);
+        let mut outcomes = Vec::with_capacity(handles.len());
+        for handle in &mut handles {
             outcomes.push(join_to_outcome(handle.join(cx).await));
         }
         outcomes
