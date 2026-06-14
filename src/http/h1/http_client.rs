@@ -657,6 +657,32 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Adds a default header to every request unless that request supplies
+    /// the same header name.
+    #[must_use]
+    pub fn default_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config
+            .default_headers
+            .push((name.into(), value.into()));
+        self
+    }
+
+    /// Adds multiple default headers.
+    #[must_use]
+    pub fn default_headers<I, N, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (N, V)>,
+        N: Into<String>,
+        V: Into<String>,
+    {
+        self.config.default_headers.extend(
+            headers
+                .into_iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
+        self
+    }
+
     /// Enables/disables automatic cookie persistence and attachment.
     #[must_use]
     pub fn cookie_store(mut self, enabled: bool) -> Self {
@@ -730,6 +756,8 @@ pub struct HttpClientConfig {
     pub retry_policy: RetryPolicy,
     /// Default User-Agent header value.
     pub user_agent: Option<String>,
+    /// Default headers attached to each request.
+    pub default_headers: Vec<(String, String)>,
     /// Whether the client should automatically persist and attach cookies.
     pub cookie_store: bool,
     /// Optional proxy URL used for outbound requests.
@@ -758,6 +786,7 @@ impl Default for HttpClientConfig {
             redirect_policy: RedirectPolicy::default(),
             retry_policy: RetryPolicy::default(),
             user_agent: Some("asupersync/0.1".into()),
+            default_headers: Vec::new(),
             cookie_store: false,
             proxy_url: None,
             max_body_size: None,
@@ -1710,17 +1739,18 @@ impl HttpClient {
         request_target: Option<String>,
         proxy_authorization: Option<&str>,
     ) -> Request {
-        let has_cookie_header = extra_headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("cookie"));
-        let has_proxy_authorization = extra_headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"));
+        let default_headers = &self.config.default_headers;
+        let has_cookie_header =
+            has_header(extra_headers, "cookie") || has_header(default_headers, "cookie");
+        let has_proxy_authorization = has_header(extra_headers, "proxy-authorization")
+            || has_header(default_headers, "proxy-authorization");
+        let has_user_agent_header =
+            has_header(extra_headers, "user-agent") || has_header(default_headers, "user-agent");
         let request_target = request_target.unwrap_or_else(|| parsed.path.clone());
         let mut builder =
             Request::builder(method.clone(), request_target).header("Host", parsed.authority());
 
-        if let Some(user_agent) = self.config.user_agent.as_deref() {
+        if !has_user_agent_header && let Some(user_agent) = self.config.user_agent.as_deref() {
             builder = builder.header("User-Agent", user_agent);
         }
 
@@ -1735,6 +1765,14 @@ impl HttpClient {
         }
 
         builder
+            .headers(
+                default_headers
+                    .iter()
+                    .filter(|(name, _)| {
+                        !name.eq_ignore_ascii_case("host") && !has_header(extra_headers, name)
+                    })
+                    .cloned(),
+            )
             .headers(
                 extra_headers
                     .iter()
@@ -2146,6 +2184,10 @@ fn get_header(headers: &[(String, String)], name: &str) -> Option<String> {
         .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.clone())
+}
+
+fn has_header(headers: &[(String, String)], name: &str) -> bool {
+    headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
 
 fn ensure_multipart_content_type(headers: &mut Vec<(String, String)>, form: &MultipartForm) {
@@ -3291,6 +3333,8 @@ mod tests {
             .max_redirects(2)
             .retry_policy(RetryPolicy::SafeMethodsOnStaleReuse)
             .user_agent("asupersync-test/2.0")
+            .default_header("Accept", "application/json")
+            .default_headers([("X-Trace-Id", "client-default")])
             .cookie_store(true)
             .proxy("socks5://proxy.internal:1080")
             .build();
@@ -3316,6 +3360,13 @@ mod tests {
         assert_eq!(
             client.config.user_agent.as_deref(),
             Some("asupersync-test/2.0")
+        );
+        assert_eq!(
+            client.config.default_headers,
+            vec![
+                ("Accept".to_owned(), "application/json".to_owned()),
+                ("X-Trace-Id".to_owned(), "client-default".to_owned())
+            ]
         );
         assert!(client.config.cookie_store);
         assert_eq!(
@@ -3889,6 +3940,88 @@ mod tests {
             .collect();
         assert_eq!(host_headers.len(), 1);
         assert_eq!(host_headers[0].1, "example.com");
+    }
+
+    #[test]
+    fn build_request_applies_default_headers_as_request_fallbacks() {
+        let client = HttpClient::builder()
+            .default_header("Accept", "application/json")
+            .default_header("Host", "wrong.example")
+            .default_header("User-Agent", "asupersync-test/default")
+            .default_header("X-Trace-Id", "client-default")
+            .build();
+        let parsed = ParsedUrl::parse("http://example.com/path").expect("valid URL");
+        let req = client.build_request(
+            &Method::Get,
+            &parsed,
+            &[
+                ("Host".to_string(), "attacker.test".to_string()),
+                ("X-Trace-Id".to_string(), "request-override".to_string()),
+            ],
+            &[],
+            None,
+            None,
+        );
+
+        assert_eq!(
+            get_header(&req.headers, "accept"),
+            Some("application/json".to_string())
+        );
+        assert_eq!(
+            get_header(&req.headers, "user-agent"),
+            Some("asupersync-test/default".to_string())
+        );
+        assert_eq!(
+            get_header(&req.headers, "x-trace-id"),
+            Some("request-override".to_string())
+        );
+
+        let host_headers: Vec<_> = req
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .collect();
+        assert_eq!(host_headers.len(), 1);
+        assert_eq!(host_headers[0].1, "example.com");
+
+        let trace_headers = req
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("x-trace-id"))
+            .count();
+        assert_eq!(trace_headers, 1);
+    }
+
+    #[test]
+    fn build_request_treats_default_cookie_and_proxy_authorization_as_explicit() {
+        let client = HttpClient::builder()
+            .cookie_store(true)
+            .default_header("Cookie", "client-default=1")
+            .default_header("Proxy-Authorization", "Basic Y2xpZW50")
+            .build();
+        client.store_response_cookies(
+            "example.com",
+            &[("Set-Cookie".to_string(), "stored=ignored".to_string())],
+        );
+
+        let parsed = ParsedUrl::parse("http://example.com/path").expect("valid URL");
+        let req = client.build_request(
+            &Method::Get,
+            &parsed,
+            &[],
+            &[],
+            Some(absolute_request_target(&parsed)),
+            Some("Basic cHJveHk="),
+        );
+
+        assert_eq!(
+            get_header(&req.headers, "cookie"),
+            Some("client-default=1".to_string())
+        );
+        assert_eq!(
+            get_header(&req.headers, "proxy-authorization"),
+            Some("Basic Y2xpZW50".to_string())
+        );
     }
 
     #[test]
