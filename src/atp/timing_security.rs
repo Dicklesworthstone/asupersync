@@ -640,15 +640,28 @@ mod tests {
 
     #[test]
     fn test_side_channel_detector_calibration() {
-        let mut detector = TimingSideChannelDetector::default();
-
-        // Calibrate with a simple operation
-        let result = detector.calibrate_baseline(|| {
-            // Simple operation that should have consistent timing
-            let _sum: u64 = (0..100).sum();
+        // Verify the calibration MECHANISM (collect samples -> compute stats ->
+        // return a result), NOT host timing stability. The default 10% CV bound
+        // is unattainable on a loaded/shared CI host (br-asupersync-c2mvrh: a
+        // trivial op measured CV ~0.23 and retries never converged under
+        // sustained load), so use a CI-appropriate lenient CV tolerance and a
+        // small sample count for speed. The strict-CV rejection path is covered
+        // deterministically with synthetic stats in
+        // significant_sub_threshold_constant_time_difference_requires_review.
+        let mut detector = TimingSideChannelDetector::new(TimingDetectorConfig {
+            baseline_samples: 512,
+            warmup_iterations: 64,
+            max_baseline_cv: 5.0,
+            ..TimingDetectorConfig::default()
         });
-
-        assert!(result.is_ok(), "Baseline calibration failed: {:?}", result);
+        let result = detector.calibrate_baseline(|| {
+            let sum: u64 = (0..256u64).map(|x| x.wrapping_mul(2_654_435_761)).sum();
+            std::hint::black_box(sum);
+        });
+        assert!(
+            result.is_ok(),
+            "baseline calibration mechanism should complete under a CI-lenient CV bound: {result:?}"
+        );
     }
 
     #[test]
