@@ -243,8 +243,55 @@ async fn race_force_close<F: Future>(signal: &ShutdownSignal, fut: F) -> Option<
 
 /// A handler response travelling back to the connection driver, carrying
 /// the in-flight guard so accounting is released only after the response
-/// frames are queued.
-type FunnelItem = (u32, Response, InFlightRequestGuard);
+/// frames are queued. The trailing flag records whether the originating
+/// request was HEAD and therefore must not receive DATA frames.
+type FunnelItem = (u32, Response, InFlightRequestGuard, bool);
+
+fn replace_or_insert_header(resp: &mut Response, header_name: &str, header_value: String) {
+    let mut replaced = false;
+    resp.headers.retain_mut(|(name, value)| {
+        if name.eq_ignore_ascii_case(header_name) {
+            if replaced {
+                false
+            } else {
+                header_value.clone_into(value);
+                replaced = true;
+                true
+            }
+        } else {
+            true
+        }
+    });
+    if !replaced {
+        resp.headers.push((header_name.to_owned(), header_value));
+    }
+}
+
+fn remove_header(resp: &mut Response, header_name: &str) -> bool {
+    let before = resp.headers.len();
+    resp.headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case(header_name));
+    resp.headers.len() != before
+}
+
+fn suppress_response_body_for_head(resp: &mut Response) {
+    let body_len = resp.body.len();
+    let has_content_length = resp
+        .headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+    let had_transfer_encoding = remove_header(resp, "transfer-encoding");
+    let _ = remove_header(resp, "trailer");
+
+    // RFC 9110 section 9.3.2: HEAD responses carry the same Content-Length
+    // as an equivalent GET response but never send a message body.
+    if !has_content_length && (body_len != 0 || had_transfer_encoding) {
+        replace_or_insert_header(resp, "Content-Length", body_len.to_string());
+    }
+
+    resp.trailers.clear();
+    resp.body.clear();
+}
 
 /// One wake-up of the connection driver's event select.
 enum DriverEvent {
@@ -357,6 +404,7 @@ fn dispatch_h2_request<F, Fut>(
             return;
         }
     };
+    let suppress_response_body = request.method == Method::Head;
     let guard = InFlightRequestGuard::acquire(Some(in_flight_requests));
     let handler = Arc::clone(handler);
     let resp_tx = resp_tx.clone();
@@ -371,7 +419,7 @@ fn dispatch_h2_request<F, Fut>(
             return;
         };
         if let Ok(permit) = resp_tx.reserve(&cx).await {
-            permit.send((stream_id, response, guard));
+            permit.send((stream_id, response, guard, suppress_response_body));
         }
     });
     if spawned.is_err() {
@@ -592,7 +640,10 @@ where
                 }
                 Ok(_) => {}
             },
-            DriverEvent::Response((stream_id, response, guard)) => {
+            DriverEvent::Response((stream_id, mut response, guard, suppress_response_body)) => {
+                if suppress_response_body {
+                    suppress_response_body_for_head(&mut response);
+                }
                 let header_block = h2_headers_from_response(&response);
                 let end_stream = response.body.is_empty();
                 if conn
@@ -1156,5 +1207,44 @@ mod tests {
         let block = h2_headers_from_response(&response);
         assert_eq!(block.len(), 2);
         assert_eq!(block[1], Header::new("te", "trailers"));
+    }
+
+    #[test]
+    fn head_response_suppression_drops_body_and_synthesizes_length() {
+        let mut response = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Trailer", "X-Trace")
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("X-Trace", "abc123");
+
+        suppress_response_body_for_head(&mut response);
+
+        assert!(response.body.is_empty());
+        assert!(response.trailers.is_empty());
+        assert_eq!(response.header_value("content-length"), Some("5"));
+        assert_eq!(response.header_value("trailer"), None);
+        assert_eq!(response.header_value("transfer-encoding"), None);
+
+        let block = h2_headers_from_response(&response);
+        assert!(
+            block
+                .iter()
+                .any(|header| header.name == "content-length" && header.value == "5")
+        );
+        assert!(
+            !block
+                .iter()
+                .any(|header| header.name == "trailer" || header.name == "transfer-encoding")
+        );
+    }
+
+    #[test]
+    fn head_response_suppression_preserves_explicit_length() {
+        let mut response =
+            Response::new(200, "OK", b"sentinel".to_vec()).with_header("Content-Length", "999");
+
+        suppress_response_body_for_head(&mut response);
+
+        assert!(response.body.is_empty());
+        assert_eq!(response.header_value("content-length"), Some("999"));
     }
 }
