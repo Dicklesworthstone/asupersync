@@ -1021,7 +1021,7 @@ Beyond `join`, `race`, and `timeout`, the combinator library includes patterns f
 | **bracket** | `src/combinator/bracket.rs` | Acquire/use/release with guaranteed cleanup |
 | **retry** | `src/combinator/retry.rs` | Exponential backoff, budget-aware |
 
-Every combinator is cancel-safe. Losers drain after races. Outcomes aggregate via the severity lattice. An explicit law sheet (`src/combinator/laws.rs`) documents algebraic properties (associativity, commutativity, distributivity) and a rewrite engine (`src/plan/rewrite.rs`) can optimize combinator DAGs while preserving cancel/drain/quiescence invariants.
+The core combinators publish cancel-safety contracts, and race/select-style winners drain losers through dedicated drain paths. Outcomes aggregate via the severity lattice. An explicit law sheet (`src/combinator/laws.rs`) documents algebraic properties (associativity, commutativity, distributivity), while the rewrite engine (`src/plan/rewrite.rs`) optimizes only through explicit `RewritePolicy` gates and conservative `src/plan/analysis.rs` side-condition checks. `Unknown`, `MayLeak`, or `MayOrphan` analysis results are not proof that a rewrite preserves cancel/drain/quiescence invariants.
 
 ---
 
