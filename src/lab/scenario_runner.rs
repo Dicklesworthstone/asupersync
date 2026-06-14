@@ -447,29 +447,101 @@ pub struct FilteredOracleReport {
 }
 
 impl FilteredOracleReport {
-    fn from_full(full_report: OracleReport, oracle_names: &[String]) -> Self {
-        let check_all = OracleRegistry::is_all_selection(oracle_names);
-        let oracle_filter = (!check_all).then(|| {
-            OracleRegistry::select_reported(oracle_names)
-                .expect("scenario oracle names are validated before filtering")
-                .into_iter()
-                .collect::<HashSet<_>>()
-        });
-
-        let entries: Vec<_> = if check_all {
-            full_report.entries.clone()
+    /// Build the filtered report honoring BOTH the scenario's declared oracle
+    /// list AND (br-asupersync-7tcipb item 2) the operator's
+    /// `LabConfig::with_oracles` selection.
+    ///
+    /// The two selections INTERSECT: a config selection can only *narrow* the
+    /// scenario's set — a config must never make the lab report an oracle the
+    /// scenario never declared. An empty `config_selection` (the default,
+    /// produced for every scenario run since `Scenario::to_lab_config` does not
+    /// populate it) applies no narrowing, so scenario-only behavior is
+    /// unchanged. This is what wires the previously-inert `with_oracles` /
+    /// `LabConfig::selected_oracles` knob into the live filtering path.
+    fn from_full(
+        full_report: OracleReport,
+        scenario_oracles: &[String],
+        config_selection: &[String],
+    ) -> Self {
+        let scenario_filter = Self::resolve_filter(scenario_oracles);
+        // br-asupersync-7tcipb item 2: an empty selection means "no operator
+        // narrowing" (a no-op), which is distinct from an empty *scenario* list
+        // meaning "the scenario declares no oracles".
+        let config_filter = if config_selection.is_empty() {
+            None
         } else {
-            full_report
-                .entries
-                .iter()
-                .filter(|e| {
-                    oracle_filter
-                        .as_ref()
-                        .is_some_and(|filter| filter.contains(e.invariant.as_str()))
-                })
-                .cloned()
-                .collect()
+            Self::resolve_filter(config_selection)
         };
+        Self::build(full_report, scenario_filter, config_filter)
+    }
+
+    /// br-asupersync-7tcipb item 2: build the report narrowed ONLY by the
+    /// operator's `LabConfig::with_oracles` selection (no scenario context).
+    ///
+    /// This is what makes `with_oracles` / `LabConfig::selected_oracles` a real
+    /// control instead of a parsed-and-ignored phantom: a `LabRuntime` built
+    /// from a config that selected a subset of oracles can produce a report
+    /// containing only those oracles, e.g.
+    ///
+    /// ```ignore
+    /// let report = runtime.report();
+    /// let selected = FilteredOracleReport::for_lab_config(report.oracle_report, runtime.config());
+    /// ```
+    ///
+    /// An empty selection (or `"all"`) applies no narrowing and returns the full
+    /// report. The selection was already validated by `with_oracles`, so
+    /// `LabConfig::selected_oracles` cannot fail here.
+    #[must_use]
+    pub fn for_lab_config(full_report: OracleReport, config: &LabConfig) -> Self {
+        let config_filter = if config.oracle_selection.is_empty()
+            || OracleRegistry::is_all_selection(&config.oracle_selection)
+        {
+            None
+        } else {
+            Some(
+                config
+                    .selected_oracles()
+                    .expect("LabConfig::with_oracles validated the oracle selection")
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+            )
+        };
+        Self::build(full_report, None, config_filter)
+    }
+
+    /// Resolve a name list into a concrete reported-oracle set, or `None` when
+    /// the list selects all reported oracles (so no filtering is applied).
+    fn resolve_filter(names: &[String]) -> Option<HashSet<&'static str>> {
+        if OracleRegistry::is_all_selection(names) {
+            None
+        } else {
+            Some(
+                OracleRegistry::select_reported(names)
+                    .expect("oracle names are validated before filtering")
+                    .into_iter()
+                    .collect(),
+            )
+        }
+    }
+
+    /// Filter `full_report` to the entries permitted by both dimensions, where
+    /// `None` means "no restriction from this dimension". Entry order from the
+    /// full report is preserved.
+    fn build(
+        full_report: OracleReport,
+        scenario_filter: Option<HashSet<&'static str>>,
+        config_filter: Option<HashSet<&'static str>>,
+    ) -> Self {
+        let entries: Vec<_> = full_report
+            .entries
+            .iter()
+            .filter(|e| {
+                let name = e.invariant.as_str();
+                scenario_filter.as_ref().is_none_or(|f| f.contains(name))
+                    && config_filter.as_ref().is_none_or(|f| f.contains(name))
+            })
+            .cloned()
+            .collect();
 
         let checked: Vec<String> = entries.iter().map(|e| e.invariant.clone()).collect();
         let passed_count = entries.iter().filter(|e| e.passed).count();
@@ -893,8 +965,11 @@ impl ScenarioRunner {
         let certificate = Self::certificate_snapshot(&lab_report);
         let replay_metadata = Self::replay_metadata_for_run(identity, &lab_report);
         let seed_lineage = identity.seed_lineage();
-        let oracle_report =
-            FilteredOracleReport::from_full(lab_report.oracle_report.clone(), &scenario.oracles);
+        let oracle_report = FilteredOracleReport::from_full(
+            lab_report.oracle_report.clone(),
+            &scenario.oracles,
+            &runtime.config().oracle_selection,
+        );
         let replay_trace = runtime.finish_replay_trace();
 
         Ok(ScenarioRunResult {
@@ -952,8 +1027,11 @@ impl ScenarioRunner {
         let seed_lineage = identity.seed_lineage();
 
         // 6. Filter oracle results
-        let oracle_report =
-            FilteredOracleReport::from_full(lab_report.oracle_report.clone(), &scenario.oracles);
+        let oracle_report = FilteredOracleReport::from_full(
+            lab_report.oracle_report.clone(),
+            &scenario.oracles,
+            &runtime.config().oracle_selection,
+        );
 
         // 7. Extract replay trace
         let replay_trace = runtime.finish_replay_trace();
