@@ -9,6 +9,7 @@
 //! | Supervisor      | [`supervisor`]         | `SupervisorBuilder`, `ChildSpec`       |
 //! | GenServer       | [`gen_server`]         | `GenServer`, `GenServerHandle`, `Reply`, `SystemMsg` |
 //! | Registry        | [`registry`]           | `NameRegistry`, `RegistryHandle`, `NameLease` |
+//! | Process Groups  | [`process_group`]      | `GroupName`, `GroupMemberId`, `GroupSnapshot` |
 //! | Monitor         | [`monitor`]            | `MonitorRef`, `DownReason`             |
 //! | Link            | [`link`]               | `LinkRef`, `ExitPolicy`, `ExitSignal`  |
 //!
@@ -54,6 +55,7 @@
 //! | `spork::supervisor` | Failed children are drained before restart/escalation | `SUP-START` / `SUP-STOP` ordering in deterministic docs | Child lifecycle transitions remain monotone |
 //! | `spork::gen_server` | Request -> drain -> `on_stop` under terminate budget | Mailbox FIFO + `SYS-ORDER` for shutdown messages | Calls create reply obligations that must resolve |
 //! | `spork::registry` | Name ownership ends on task/region close | `REG-FIRST` and deterministic collision tie-breaks | Name leases are obligations |
+//! | `spork::process_group` | Membership will be lease-backed by the runtime join surface | Snapshots sort by `(join_sequence, node, task)` | Join handles will own name/permit obligations |
 //! | `spork::monitor` | Monitor scope ends with owner region | `DOWN-ORDER`: `(vt, tid)` for batched down notifications | N/A |
 //! | `spork::link` | Exit propagation participates in cancel protocol | `SYS-LINK-MONITOR` for `Down`/`Exit` ordering | N/A |
 //! | `spork::crash` | Crash artifacts emitted on terminal failure paths | Replay certificates detect ordering divergence | Artifact manifest must remain internally consistent |
@@ -155,6 +157,302 @@ pub mod registry {
     };
 }
 
+/// Node-local process-group model.
+///
+/// This module is the stable value layer for Spork process groups. The runtime
+/// join/broadcast surface is built on top of these identifiers, deterministic
+/// snapshots, and membership events.
+pub mod process_group {
+    use crate::monitor::DownReason;
+    use crate::remote::NodeId;
+    use crate::types::{TaskId, Time};
+    use std::fmt;
+
+    /// Validation failure for process-group names.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum GroupNameError {
+        /// Group names must contain at least one non-whitespace byte.
+        Empty,
+        /// Group names are registry keys and cannot contain interior NUL bytes.
+        ContainsNul,
+    }
+
+    impl fmt::Display for GroupNameError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Empty => write!(f, "process group name is empty"),
+                Self::ContainsNul => write!(f, "process group name contains NUL"),
+            }
+        }
+    }
+
+    impl std::error::Error for GroupNameError {}
+
+    /// A validated Spork process-group name.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct GroupName(String);
+
+    impl GroupName {
+        /// Validates and stores a process-group name.
+        ///
+        /// Names are intentionally opaque. The only constraints here are the
+        /// cross-surface invariants required by registry-backed memberships.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`GroupNameError::Empty`] when the name contains only
+        /// whitespace, and [`GroupNameError::ContainsNul`] when it contains an
+        /// interior NUL byte.
+        pub fn new(name: impl Into<String>) -> Result<Self, GroupNameError> {
+            let name = name.into();
+            if name.trim().is_empty() {
+                return Err(GroupNameError::Empty);
+            }
+            if name.contains('\0') {
+                return Err(GroupNameError::ContainsNul);
+            }
+            Ok(Self(name))
+        }
+
+        /// Returns the name as a string slice.
+        #[must_use]
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl fmt::Display for GroupName {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl TryFrom<String> for GroupName {
+        type Error = GroupNameError;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    impl TryFrom<&str> for GroupName {
+        type Error = GroupNameError;
+
+        fn try_from(value: &str) -> Result<Self, Self::Error> {
+            Self::new(value)
+        }
+    }
+
+    /// Process-group member identity.
+    ///
+    /// The node component is present even for this node-local first slice so
+    /// later cluster-wide process groups do not need a different member ID.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct GroupMemberId {
+        node: NodeId,
+        task: TaskId,
+    }
+
+    impl GroupMemberId {
+        /// Creates a member identity from its node and task components.
+        #[must_use]
+        pub fn new(node: NodeId, task: TaskId) -> Self {
+            Self { node, task }
+        }
+
+        /// Returns the node component.
+        #[must_use]
+        pub fn node(&self) -> &NodeId {
+            &self.node
+        }
+
+        /// Returns the task component.
+        #[must_use]
+        pub fn task(&self) -> TaskId {
+            self.task
+        }
+    }
+
+    impl fmt::Display for GroupMemberId {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}:{}", self.node, self.task)
+        }
+    }
+
+    /// A single active process-group member.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GroupMember {
+        id: GroupMemberId,
+        joined_at: Time,
+        join_sequence: u64,
+    }
+
+    impl GroupMember {
+        /// Creates a member record.
+        ///
+        /// `join_sequence` is the deterministic registration-order key minted
+        /// by the runtime join surface.
+        #[must_use]
+        pub fn new(id: GroupMemberId, joined_at: Time, join_sequence: u64) -> Self {
+            Self {
+                id,
+                joined_at,
+                join_sequence,
+            }
+        }
+
+        /// Returns this member's identity.
+        #[must_use]
+        pub fn id(&self) -> &GroupMemberId {
+            &self.id
+        }
+
+        /// Returns the virtual or wall-clock time when this member joined.
+        #[must_use]
+        pub fn joined_at(&self) -> Time {
+            self.joined_at
+        }
+
+        /// Returns the deterministic join-order sequence.
+        #[must_use]
+        pub fn join_sequence(&self) -> u64 {
+            self.join_sequence
+        }
+    }
+
+    /// Deterministically ordered snapshot of a process group.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GroupSnapshot {
+        group: GroupName,
+        members: Vec<GroupMember>,
+    }
+
+    impl GroupSnapshot {
+        /// Creates a snapshot and normalizes member ordering.
+        ///
+        /// Members are sorted by `(join_sequence, node, task)`, which preserves
+        /// registration order and gives deterministic tie-breaking for lab
+        /// schedules that observe equal sequence values.
+        #[must_use]
+        pub fn new(group: GroupName, mut members: Vec<GroupMember>) -> Self {
+            members.sort_by(|left, right| {
+                left.join_sequence()
+                    .cmp(&right.join_sequence())
+                    .then_with(|| left.id().cmp(right.id()))
+            });
+            Self { group, members }
+        }
+
+        /// Returns the process-group name.
+        #[must_use]
+        pub fn group(&self) -> &GroupName {
+            &self.group
+        }
+
+        /// Returns the ordered member records.
+        #[must_use]
+        pub fn members(&self) -> &[GroupMember] {
+            &self.members
+        }
+
+        /// Returns the ordered member identities.
+        pub fn member_ids(&self) -> impl Iterator<Item = &GroupMemberId> {
+            self.members.iter().map(GroupMember::id)
+        }
+
+        /// Returns the number of members.
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.members.len()
+        }
+
+        /// Returns whether the snapshot contains no members.
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.members.is_empty()
+        }
+    }
+
+    /// Membership-change event kind.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum GroupEventKind {
+        /// A member joined the group.
+        Joined,
+        /// A member left the group through an explicit leave/release path.
+        Left,
+        /// A member went down and was removed by monitor/region cleanup.
+        Down(DownReason),
+    }
+
+    /// A deterministic membership-change event.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct GroupEvent {
+        group: GroupName,
+        member: GroupMemberId,
+        kind: GroupEventKind,
+        at: Time,
+    }
+
+    impl GroupEvent {
+        /// Creates a membership-change event.
+        #[must_use]
+        pub fn new(
+            group: GroupName,
+            member: GroupMemberId,
+            kind: GroupEventKind,
+            at: Time,
+        ) -> Self {
+            Self {
+                group,
+                member,
+                kind,
+                at,
+            }
+        }
+
+        /// Returns the group name.
+        #[must_use]
+        pub fn group(&self) -> &GroupName {
+            &self.group
+        }
+
+        /// Returns the affected member.
+        #[must_use]
+        pub fn member(&self) -> &GroupMemberId {
+            &self.member
+        }
+
+        /// Returns the event kind.
+        #[must_use]
+        pub fn kind(&self) -> &GroupEventKind {
+            &self.kind
+        }
+
+        /// Returns the event timestamp.
+        #[must_use]
+        pub fn at(&self) -> Time {
+            self.at
+        }
+    }
+
+    /// Broadcast behavior when one member cannot accept a message immediately.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum BroadcastBackpressurePolicy {
+        /// Wait for the slow member within the caller's budget.
+        Wait,
+        /// Skip the slow member and report the skip count.
+        Skip,
+        /// Fail the broadcast immediately.
+        Error,
+    }
+
+    impl Default for BroadcastBackpressurePolicy {
+        fn default() -> Self {
+            Self::Wait
+        }
+    }
+}
+
 /// Unidirectional down notifications.
 ///
 /// Re-exports from [`crate::monitor`].
@@ -203,6 +501,7 @@ pub mod crash {
 /// - **GenServer**: `GenServer`, `GenServerHandle`, `Reply`,
 ///   `SystemMsg`, `DownMsg`, `ExitMsg`, `TimeoutMsg`
 /// - **Registry**: `NameRegistry`, `RegistryHandle`, `NameLease`
+/// - **Process groups**: `GroupName`, `GroupMemberId`, `GroupSnapshot`
 /// - **Monitoring**: `MonitorRef`, `DownReason`, `DownNotification`
 /// - **Linking**: `ExitPolicy`, `ExitSignal`, `LinkRef`
 /// - **Errors**: `AppStartError`, `CallError`, `CastError`
@@ -224,6 +523,12 @@ pub mod prelude {
 
     // -- Registry --
     pub use crate::cx::{NameLease, NameRegistry, RegistryHandle};
+
+    // -- Process groups --
+    pub use super::process_group::{
+        BroadcastBackpressurePolicy, GroupEvent, GroupEventKind, GroupMember, GroupMemberId,
+        GroupName, GroupNameError, GroupSnapshot,
+    };
 
     // -- Monitor --
     pub use crate::monitor::{DownNotification, DownReason, MonitorRef};
@@ -528,6 +833,11 @@ mod tests {
         let _ = std::any::type_name::<prelude::NameRegistry>();
         let _ = std::any::type_name::<prelude::RegistryHandle>();
         let _ = std::any::type_name::<prelude::NameLease>();
+        let _ = std::any::type_name::<prelude::GroupName>();
+        let _ = std::any::type_name::<prelude::GroupMemberId>();
+        let _ = std::any::type_name::<prelude::GroupSnapshot>();
+        let _ = std::any::type_name::<prelude::GroupEvent>();
+        let _ = std::any::type_name::<prelude::BroadcastBackpressurePolicy>();
         let _ = std::any::type_name::<prelude::MonitorRef>();
         let _ = std::any::type_name::<prelude::DownReason>();
         let _ = std::any::type_name::<prelude::DownNotification>();
@@ -575,6 +885,15 @@ mod tests {
         let _ = std::any::type_name::<registry::RegistryHandle>();
         let _ = std::any::type_name::<registry::NameLease>();
         let _ = std::any::type_name::<registry::NameCollisionPolicy>();
+
+        // Process group sub-module
+        let _ = std::any::type_name::<process_group::GroupName>();
+        let _ = std::any::type_name::<process_group::GroupMemberId>();
+        let _ = std::any::type_name::<process_group::GroupMember>();
+        let _ = std::any::type_name::<process_group::GroupSnapshot>();
+        let _ = std::any::type_name::<process_group::GroupEvent>();
+        let _ = std::any::type_name::<process_group::GroupEventKind>();
+        let _ = std::any::type_name::<process_group::BroadcastBackpressurePolicy>();
 
         // Monitor sub-module
         let _ = std::any::type_name::<monitor::MonitorRef>();
@@ -627,6 +946,108 @@ mod tests {
         let _ignore = prelude::ExitPolicy::Ignore;
 
         crate::test_complete!("exit_policy_constructible");
+    }
+
+    fn test_task_id(index: u32) -> crate::types::TaskId {
+        crate::types::TaskId::from_arena(crate::util::ArenaIndex::new(index, 0))
+    }
+
+    fn test_member(node: &str, task_index: u32, sequence: u64) -> process_group::GroupMember {
+        process_group::GroupMember::new(
+            process_group::GroupMemberId::new(
+                crate::remote::NodeId::new(node),
+                test_task_id(task_index),
+            ),
+            crate::types::Time::from_nanos(sequence),
+            sequence,
+        )
+    }
+
+    #[test]
+    fn process_group_name_validation_rejects_empty_and_nul() {
+        init_test("process_group_name_validation_rejects_empty_and_nul");
+
+        assert_eq!(
+            process_group::GroupName::new("   ").unwrap_err(),
+            process_group::GroupNameError::Empty
+        );
+        assert_eq!(
+            process_group::GroupName::new("workers\0blue").unwrap_err(),
+            process_group::GroupNameError::ContainsNul
+        );
+        assert_eq!(
+            process_group::GroupName::new("workers").unwrap().as_str(),
+            "workers"
+        );
+
+        crate::test_complete!("process_group_name_validation_rejects_empty_and_nul");
+    }
+
+    #[test]
+    fn process_group_snapshot_orders_by_join_sequence_then_member_id() {
+        init_test("process_group_snapshot_orders_by_join_sequence_then_member_id");
+
+        let group = process_group::GroupName::new("workers").unwrap();
+        let snapshot = process_group::GroupSnapshot::new(
+            group,
+            vec![
+                test_member("node-b", 2, 20),
+                test_member("node-c", 3, 10),
+                test_member("node-a", 1, 10),
+            ],
+        );
+
+        let ordered: Vec<String> = snapshot
+            .member_ids()
+            .map(std::string::ToString::to_string)
+            .collect();
+        assert_eq!(
+            ordered,
+            vec!["Node(node-a):T1", "Node(node-c):T3", "Node(node-b):T2"]
+        );
+        assert_eq!(snapshot.len(), 3);
+        assert!(!snapshot.is_empty());
+
+        crate::test_complete!("process_group_snapshot_orders_by_join_sequence_then_member_id");
+    }
+
+    #[test]
+    fn process_group_event_preserves_down_reason() {
+        init_test("process_group_event_preserves_down_reason");
+
+        let group = process_group::GroupName::new("workers").unwrap();
+        let member = process_group::GroupMemberId::new(
+            crate::remote::NodeId::new("node-a"),
+            test_task_id(7),
+        );
+        let event = process_group::GroupEvent::new(
+            group,
+            member,
+            process_group::GroupEventKind::Down(monitor::DownReason::Error("boom".into())),
+            crate::types::Time::from_millis(5),
+        );
+
+        assert_eq!(event.group().as_str(), "workers");
+        assert_eq!(event.at(), crate::types::Time::from_millis(5));
+        assert!(matches!(
+            event.kind(),
+            process_group::GroupEventKind::Down(monitor::DownReason::Error(message))
+                if message == "boom"
+        ));
+
+        crate::test_complete!("process_group_event_preserves_down_reason");
+    }
+
+    #[test]
+    fn process_group_backpressure_default_waits() {
+        init_test("process_group_backpressure_default_waits");
+
+        assert_eq!(
+            process_group::BroadcastBackpressurePolicy::default(),
+            process_group::BroadcastBackpressurePolicy::Wait
+        );
+
+        crate::test_complete!("process_group_backpressure_default_waits");
     }
 
     // =====================================================================
