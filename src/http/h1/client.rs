@@ -122,12 +122,17 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
     memmem::find(buf, b"\r\n\r\n").map(|idx| idx + 4)
 }
 
+#[inline]
+fn is_valid_reason_phrase_byte(byte: u8) -> bool {
+    matches!(byte, b'\t' | b' '..=b'~' | 0x80..=0xff)
+}
+
 /// Parse status line: `HTTP/1.1 200 OK`.
 fn parse_status_line(line: &str) -> Result<(Version, u16, String), HttpError> {
     let mut parts = line.splitn(3, ' ');
     let ver = parts.next().ok_or(HttpError::BadRequestLine)?;
     let code = parts.next().ok_or(HttpError::BadRequestLine)?;
-    let reason = parts.next().unwrap_or("").to_owned();
+    let reason = parts.next().unwrap_or("");
 
     let version = Version::from_bytes(ver.as_bytes()).ok_or(HttpError::UnsupportedVersion)?;
     // RFC 9110 §15: status codes are three-digit integers (100–999).
@@ -138,8 +143,11 @@ fn parse_status_line(line: &str) -> Result<(Version, u16, String), HttpError> {
     if !(100..=999).contains(&status) {
         return Err(HttpError::BadRequestLine);
     }
+    if !reason.as_bytes().iter().copied().all(is_valid_reason_phrase_byte) {
+        return Err(HttpError::BadRequestLine);
+    }
 
-    Ok((version, status, reason))
+    Ok((version, status, reason.to_owned()))
 }
 
 fn response_body_kind(
@@ -1224,6 +1232,47 @@ mod tests {
             assert!(
                 matches!(result, Err(HttpError::BadRequestLine)),
                 "wire status line {line:?} should poison the response decoder, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_status_line_rejects_forbidden_reason_phrase_controls() {
+        for line in [
+            "HTTP/1.1 200 OK\0tail",
+            "HTTP/1.1 200 OK\u{000b}tail",
+            "HTTP/1.1 200 OK\u{000c}tail",
+            "HTTP/1.1 200 OK\u{007f}tail",
+        ] {
+            let result = parse_status_line(line);
+            assert!(
+                matches!(result, Err(HttpError::BadRequestLine)),
+                "reason phrase controls in {line:?} must be rejected, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_status_line_allows_reason_phrase_htab_visible_and_obs_text() {
+        let (version, status, reason) =
+            parse_status_line("HTTP/1.1 200 OK\tReady \u{00e9}").expect("valid reason phrase");
+
+        assert_eq!(version, Version::Http11);
+        assert_eq!(status, 200);
+        assert_eq!(reason, "OK\tReady \u{00e9}");
+    }
+
+    #[test]
+    fn decode_rejects_wire_reason_phrase_controls() {
+        for line in ["HTTP/1.1 200 OK\0tail", "HTTP/1.1 200 OK\u{007f}tail"] {
+            let raw = format!("{line}\r\nContent-Length: 0\r\n\r\n");
+            let mut codec = Http1ClientCodec::new();
+            let mut buf = BytesMut::from(raw.as_bytes());
+            let result = codec.decode(&mut buf);
+
+            assert!(
+                matches!(result, Err(HttpError::BadRequestLine)),
+                "wire reason phrase controls in {line:?} should poison the response decoder, got {result:?}"
             );
         }
     }
