@@ -43,15 +43,12 @@ impl AuthenticatedSymbol {
     ///
     /// asupersync-8kumb7: Callers should use `new_unauthenticated()` instead of
     /// passing zero tags to this method, as it makes the lack of authentication explicit.
+    ///
+    /// Core library code must stay silent, so this constructor does not log or
+    /// print when it sees the sentinel. The returned verification state is the
+    /// diagnostic contract.
     #[must_use]
     pub(crate) fn new_verified(symbol: Symbol, tag: AuthenticationTag) -> Self {
-        // asupersync-8kumb7: Log warning for zero tag usage to discourage this pattern
-        if tag.is_zero() {
-            eprintln!(
-                "WARNING: AuthenticatedSymbol::new_verified called with zero tag - consider using new_unauthenticated() instead"
-            );
-        }
-
         let verified = !tag.is_zero();
         Self {
             symbol,
