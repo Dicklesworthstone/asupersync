@@ -2285,11 +2285,16 @@ fn parse_proxy_endpoint(proxy_url: &str) -> Result<ProxyEndpoint, ClientError> {
 
     // RFC 3986: authority ends at the first '/', '?', or '#'.
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = rest[..authority_end].trim();
+    let authority = &rest[..authority_end];
     if authority.is_empty() {
         return Err(ClientError::InvalidUrl(format!(
             "proxy URL missing authority: {proxy_url}"
         )));
+    }
+    if contains_ctl_or_whitespace(authority) {
+        return Err(ClientError::InvalidUrl(
+            "proxy URL authority cannot contain control characters or whitespace".into(),
+        ));
     }
 
     let (userinfo, host_port) = authority
@@ -3059,6 +3064,24 @@ mod tests {
         assert_eq!(proxy.host, "127.0.0.1");
         assert_eq!(proxy.port, 1080);
         assert_eq!(proxy.socks5_credentials(), Some(("agent", "pw")));
+    }
+
+    #[test]
+    fn parse_proxy_endpoint_rejects_control_or_whitespace_in_authority() {
+        for proxy_url in [
+            "http:// proxy.local:8080",
+            "http://proxy.local:8080 /path",
+            "http://proxy.\tlocal:8080",
+            "socks5://agent:pw@127.0.0.1\n:1080",
+        ] {
+            let error = parse_proxy_endpoint(proxy_url)
+                .expect_err("proxy authority whitespace must fail closed");
+            assert!(
+                matches!(error, ClientError::InvalidUrl(ref message)
+                    if message.contains("authority cannot contain control characters or whitespace")),
+                "unexpected error for {proxy_url:?}: {error}"
+            );
+        }
     }
 
     #[test]
