@@ -21,11 +21,14 @@
 mod common;
 
 use asupersync::Cx;
+use asupersync::bytes::Buf;
 use asupersync::http::h1::HttpClient;
+use asupersync::http::{Body, Frame};
 use asupersync::types::Budget;
 use common::*;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::pin::Pin;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -198,6 +201,26 @@ fn read_optional_next_request(stream: &mut TcpStream) -> std::io::Result<Option<
     }
 }
 
+fn read_reuse_or_close_after_stream_drop(
+    stream: &mut TcpStream,
+) -> std::io::Result<(bool, Option<Vec<u8>>)> {
+    stream.set_read_timeout(Some(Duration::from_millis(750)))?;
+    match read_until_headers_end(stream) {
+        Ok(raw) if raw.is_empty() => Ok((true, None)),
+        Ok(raw) => Ok((false, Some(raw))),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Ok((false, None))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => Ok((true, None)),
+        Err(err) => Err(err),
+    }
+}
+
 fn write_fixed_response(
     conn: &mut TcpStream,
     body: &'static [u8],
@@ -245,6 +268,50 @@ fn spawn_connection_reuse_probe_server() -> (SocketAddr, thread::JoinHandle<std:
         assert_eq!(request_method(&second_raw), "GET");
         write_fixed_response(&mut second, b"SECOND", true)?;
         Ok(2)
+    });
+
+    (addr, handle)
+}
+
+fn spawn_streaming_drop_probe_server() -> (
+    SocketAddr,
+    thread::JoinHandle<std::io::Result<(bool, Vec<String>)>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking listener");
+    let addr = listener.local_addr().expect("listener local_addr");
+
+    let handle = thread::spawn(move || -> std::io::Result<(bool, Vec<String>)> {
+        let mut methods = Vec::with_capacity(2);
+
+        let mut first = accept_with_timeout(&listener, IO_TIMEOUT)?;
+        first.set_read_timeout(Some(IO_TIMEOUT))?;
+        first.set_write_timeout(Some(IO_TIMEOUT))?;
+        let first_raw = read_until_headers_end(&mut first)?;
+        methods.push(request_method(&first_raw));
+        first.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: keep-alive\r\n\r\nHELLO",
+        )?;
+        first.flush()?;
+
+        let (first_closed, maybe_reused_request) =
+            read_reuse_or_close_after_stream_drop(&mut first)?;
+        if let Some(raw) = maybe_reused_request {
+            methods.push(request_method(&raw));
+            write_fixed_response(&mut first, b"FRESH", true)?;
+            return Ok((first_closed, methods));
+        }
+
+        let mut second = accept_with_timeout(&listener, IO_TIMEOUT)?;
+        second.set_read_timeout(Some(IO_TIMEOUT))?;
+        second.set_write_timeout(Some(IO_TIMEOUT))?;
+        let second_raw = read_until_headers_end(&mut second)?;
+        methods.push(request_method(&second_raw));
+        write_fixed_response(&mut second, b"FRESH", true)?;
+
+        Ok((first_closed, methods))
     });
 
     (addr, handle)
@@ -533,4 +600,77 @@ fn cloned_client_handles_share_connection_pool() {
     );
 
     test_complete!("cloned_client_handles_share_connection_pool");
+}
+
+#[test]
+fn dropping_streaming_response_mid_body_closes_connection_before_next_request() {
+    init_test_logging();
+    test_phase!("dropping_streaming_response_mid_body_closes_connection_before_next_request");
+
+    let (addr, server) = spawn_streaming_drop_probe_server();
+
+    run_test(|| async move {
+        let cx = Cx::for_testing();
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        let url = format!("http://{addr}/stream");
+
+        let mut streaming = client
+            .request_streaming(
+                &cx,
+                asupersync::http::h1::Method::Get,
+                url.as_str(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .await
+            .expect("streaming request should produce response head");
+        assert_eq!(streaming.head.status, 200);
+
+        let first_frame =
+            std::future::poll_fn(|task_cx| Pin::new(&mut streaming.body).poll_frame(task_cx))
+                .await
+                .expect("streaming body should yield first frame")
+                .expect("first body frame should parse");
+        let mut chunk = match first_frame {
+            Frame::Data(chunk) => chunk,
+            Frame::Trailers(_) => panic!("first streaming frame should be data"),
+        };
+        let mut first_chunk = Vec::new();
+        while chunk.has_remaining() {
+            let bytes = chunk.chunk();
+            first_chunk.extend_from_slice(bytes);
+            chunk.advance(bytes.len());
+        }
+        assert_eq!(first_chunk, b"HELLO");
+
+        drop(streaming);
+        assert_eq!(
+            client.pool_stats().idle_connections,
+            0,
+            "undrained streaming responses must not be returned to the idle pool"
+        );
+
+        let follow_up = client
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect("follow-up request should use a fresh connection");
+        assert_eq!(follow_up.status, 200);
+        assert_eq!(follow_up.body, b"FRESH");
+    });
+
+    let (first_closed, methods) = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert!(
+        first_closed,
+        "dropping the undrained streaming body must close the first connection before reuse"
+    );
+    assert_eq!(methods, vec!["GET".to_owned(), "GET".to_owned()]);
+
+    test_complete!("dropping_streaming_response_mid_body_closes_connection_before_next_request");
 }
