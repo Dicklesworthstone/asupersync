@@ -1,7 +1,12 @@
 //! Native QUIC stream table + flow-control model.
 
-use std::collections::BTreeMap;
+use crate::bytes::Bytes;
+use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
 
 /// Stream role relative to this endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +231,11 @@ pub enum QuicStreamError {
         /// Segment length.
         len: u64,
     },
+    /// Send side already emitted a FIN and cannot accept more bytes.
+    SendFinished {
+        /// Final stream size already committed by FIN.
+        final_size: u64,
+    },
 }
 
 impl fmt::Display for QuicStreamError {
@@ -251,6 +261,9 @@ impl fmt::Display for QuicStreamError {
             Self::OffsetOverflow { offset, len } => {
                 write!(f, "stream offset overflow: offset={offset}, len={len}")
             }
+            Self::SendFinished { final_size } => {
+                write!(f, "stream send side finished: final_size={final_size}")
+            }
         }
     }
 }
@@ -263,6 +276,29 @@ impl From<FlowControlError> for QuicStreamError {
     }
 }
 
+/// Application STREAM frame payload ready for packet assembly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamFramePayload {
+    /// Stream carrying the payload.
+    pub stream_id: StreamId,
+    /// Absolute byte offset in the stream.
+    pub offset: u64,
+    /// Payload bytes.
+    pub data: Bytes,
+    /// Whether this frame carries FIN.
+    pub fin: bool,
+    /// Whether this frame was requeued after loss.
+    pub retransmit: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueuedStreamFrame {
+    offset: u64,
+    data: Bytes,
+    fin: bool,
+    retransmit: bool,
+}
+
 /// One stream's flow + offset state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuicStream {
@@ -272,12 +308,16 @@ pub struct QuicStream {
     pub send_offset: u64,
     /// Received bytes accepted by reassembly.
     pub recv_offset: u64,
+    /// Received bytes consumed by the application.
+    pub read_offset: u64,
     /// Send-side flow credit.
     pub send_credit: FlowCredit,
     /// Receive-side flow credit.
     pub recv_credit: FlowCredit,
     /// Optional final size received via FIN/RESET.
     pub final_size: Option<u64>,
+    /// Optional final size committed by a locally sent FIN.
+    pub send_final_size: Option<u64>,
     /// Optional local reset state `(error_code, final_size)`.
     pub send_reset: Option<(u64, u64)>,
     /// Optional peer STOP_SENDING error code.
@@ -286,6 +326,12 @@ pub struct QuicStream {
     pub receive_stopped_error_code: Option<u64>,
     /// Buffered receive ranges keyed by start offset, value = exclusive end.
     recv_ranges: BTreeMap<u64, u64>,
+    /// Buffered receive bytes keyed by absolute stream offset.
+    recv_chunks: BTreeMap<u64, Bytes>,
+    /// STREAM frames queued for packet assembly.
+    pending_send_frames: VecDeque<QueuedStreamFrame>,
+    /// STREAM frames emitted at least once and available for retransmission.
+    sent_stream_frames: BTreeMap<u64, QueuedStreamFrame>,
 }
 
 impl QuicStream {
@@ -294,18 +340,56 @@ impl QuicStream {
             id,
             send_offset: 0,
             recv_offset: 0,
+            read_offset: 0,
             send_credit: FlowCredit::new(send_window),
             recv_credit: FlowCredit::new(recv_window),
             final_size: None,
+            send_final_size: None,
             send_reset: None,
             stop_sending_error_code: None,
             receive_stopped_error_code: None,
             recv_ranges: BTreeMap::new(),
+            recv_chunks: BTreeMap::new(),
+            pending_send_frames: VecDeque::new(),
+            sent_stream_frames: BTreeMap::new(),
         }
     }
 
     /// Account bytes written to this stream.
     pub fn write(&mut self, len: u64) -> Result<(), QuicStreamError> {
+        self.ensure_can_send(len)?;
+        self.send_credit.consume(len)?;
+        self.send_offset = self.send_offset.saturating_add(len);
+        Ok(())
+    }
+
+    /// Queue application bytes for STREAM frame emission.
+    pub fn write_bytes(&mut self, data: Bytes, fin: bool) -> Result<(), QuicStreamError> {
+        let len = data.len() as u64;
+        self.ensure_can_send(len)?;
+        self.send_credit.consume(len)?;
+        let offset = self.send_offset;
+        self.send_offset = self.send_offset.saturating_add(len);
+        if fin {
+            self.send_final_size = Some(self.send_offset);
+        }
+        if len > 0 || fin {
+            self.pending_send_frames.push_back(QueuedStreamFrame {
+                offset,
+                data,
+                fin,
+                retransmit: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// Queue a FIN without additional bytes.
+    pub fn finish_send(&mut self) -> Result<(), QuicStreamError> {
+        self.write_bytes(Bytes::new(), true)
+    }
+
+    fn ensure_can_send(&self, len: u64) -> Result<(), QuicStreamError> {
         if let Some(code) = self.stop_sending_error_code {
             return Err(QuicStreamError::SendStopped { code });
         }
@@ -313,8 +397,10 @@ impl QuicStream {
         if let Some((code, _)) = self.send_reset {
             return Err(QuicStreamError::SendStopped { code });
         }
-        self.send_credit.consume(len)?;
-        self.send_offset = self.send_offset.saturating_add(len);
+        if let Some(final_size) = self.send_final_size {
+            return Err(QuicStreamError::SendFinished { final_size });
+        }
+        self.send_credit.can_consume(len)?;
         Ok(())
     }
 
@@ -359,6 +445,113 @@ impl QuicStream {
             self.advance_contiguous_recv_offset();
         }
         Ok(flow_delta)
+    }
+
+    /// Receive bytes on this stream at an explicit offset.
+    ///
+    /// Returns the receive-window delta newly consumed by this segment.
+    pub fn receive_bytes(
+        &mut self,
+        offset: u64,
+        data: Bytes,
+        is_fin: bool,
+    ) -> Result<u64, QuicStreamError> {
+        let len = data.len() as u64;
+        let flow_delta = self.receive_segment(offset, len, is_fin)?;
+        if len > 0 {
+            self.insert_recv_bytes(offset, data)?;
+        }
+        Ok(flow_delta)
+    }
+
+    /// Read contiguous bytes already reassembled for the application.
+    #[must_use]
+    pub fn read_bytes(&mut self, max_len: usize) -> Bytes {
+        if max_len == 0 {
+            return Bytes::new();
+        }
+        let Some(mut chunk) = self.recv_chunks.remove(&self.read_offset) else {
+            return Bytes::new();
+        };
+        let n = chunk.len().min(max_len);
+        let out = chunk.slice(..n);
+        if n < chunk.len() {
+            let tail = chunk.split_off(n);
+            self.recv_chunks
+                .insert(self.read_offset.saturating_add(n as u64), tail);
+        }
+        self.read_offset = self.read_offset.saturating_add(n as u64);
+        out
+    }
+
+    /// Whether this stream has reached application EOF.
+    #[must_use]
+    pub fn is_read_eof(&self) -> bool {
+        self.final_size == Some(self.read_offset)
+    }
+
+    /// Whether packet assembly has STREAM frames waiting for this stream.
+    #[must_use]
+    pub fn has_pending_stream_frames(&self) -> bool {
+        !self.pending_send_frames.is_empty()
+    }
+
+    /// Pop the next queued STREAM frame, splitting it to `max_data_len`.
+    pub fn pop_pending_stream_frame(&mut self, max_data_len: usize) -> Option<StreamFramePayload> {
+        let mut frame = self.pending_send_frames.pop_front()?;
+        if max_data_len == 0 && !frame.data.is_empty() {
+            self.pending_send_frames.push_front(frame);
+            return None;
+        }
+        if frame.data.len() > max_data_len {
+            let tail = frame.data.slice(max_data_len..);
+            let tail_offset = frame.offset.saturating_add(max_data_len as u64);
+            self.pending_send_frames.push_front(QueuedStreamFrame {
+                offset: tail_offset,
+                data: tail,
+                fin: frame.fin,
+                retransmit: frame.retransmit,
+            });
+            frame.data = frame.data.slice(..max_data_len);
+            frame.fin = false;
+        }
+        self.sent_stream_frames.insert(frame.offset, frame.clone());
+        Some(StreamFramePayload {
+            stream_id: self.id,
+            offset: frame.offset,
+            data: frame.data,
+            fin: frame.fin,
+            retransmit: frame.retransmit,
+        })
+    }
+
+    /// Put a popped STREAM frame back when packet assembly did not emit it.
+    pub fn requeue_unemitted_stream_frame(&mut self, payload: StreamFramePayload) {
+        debug_assert_eq!(payload.stream_id, self.id);
+        if !payload.retransmit {
+            self.sent_stream_frames.remove(&payload.offset);
+        }
+        self.pending_send_frames.push_front(QueuedStreamFrame {
+            offset: payload.offset,
+            data: payload.data,
+            fin: payload.fin,
+            retransmit: payload.retransmit,
+        });
+    }
+
+    /// Requeue a previously emitted STREAM frame after packet loss.
+    pub fn requeue_sent_stream_frame(&mut self, offset: u64) -> Result<(), QuicStreamError> {
+        let Some(frame) = self.sent_stream_frames.get(&offset).cloned() else {
+            return Err(QuicStreamError::InvalidFinalSize {
+                final_size: self.send_offset,
+                received: offset,
+            });
+        };
+        self.pending_send_frames.push_front(QueuedStreamFrame {
+            retransmit: true,
+            ..frame
+        });
+        Ok(())
     }
 
     /// Set final size from FIN/RESET.
@@ -459,6 +652,53 @@ impl QuicStream {
             }
         }
     }
+
+    fn insert_recv_bytes(&mut self, offset: u64, data: Bytes) -> Result<(), QuicStreamError> {
+        let len = data.len() as u64;
+        let end = offset
+            .checked_add(len)
+            .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
+        if end <= self.read_offset {
+            return Ok(());
+        }
+
+        let mut cursor = offset.max(self.read_offset);
+        let mut data_cursor = cursor.saturating_sub(offset) as usize;
+        let overlapping: Vec<(u64, u64)> = self
+            .recv_chunks
+            .range(..end)
+            .filter_map(|(&start, chunk)| {
+                let chunk_end = start.saturating_add(chunk.len() as u64);
+                if chunk_end > cursor && start < end {
+                    Some((start, chunk_end))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (known_start, known_end) in overlapping {
+            if cursor < known_start {
+                let gap_len = (known_start - cursor) as usize;
+                self.recv_chunks
+                    .insert(cursor, data.slice(data_cursor..data_cursor + gap_len));
+                cursor = known_start;
+                data_cursor += gap_len;
+            }
+            if known_end > cursor {
+                let skip = (known_end - cursor) as usize;
+                cursor = known_end;
+                data_cursor = data_cursor.saturating_add(skip);
+            }
+        }
+
+        if cursor < end {
+            let tail_len = (end - cursor) as usize;
+            self.recv_chunks
+                .insert(cursor, data.slice(data_cursor..data_cursor + tail_len));
+        }
+        Ok(())
+    }
 }
 
 /// Stream table errors.
@@ -525,6 +765,8 @@ pub struct StreamTable {
     send_connection_credit: FlowCredit,
     recv_connection_credit: FlowCredit,
     rr_cursor: Option<StreamId>,
+    read_wakers: BTreeMap<StreamId, Waker>,
+    write_wakers: BTreeMap<StreamId, Waker>,
 }
 
 impl StreamTable {
@@ -571,6 +813,8 @@ impl StreamTable {
             send_connection_credit: FlowCredit::new(connection_send_limit),
             recv_connection_credit: FlowCredit::new(connection_recv_limit),
             rr_cursor: None,
+            read_wakers: BTreeMap::new(),
+            write_wakers: BTreeMap::new(),
         }
     }
 
@@ -639,21 +883,9 @@ impl StreamTable {
         }
         {
             let stream = self.stream(id)?;
-            if let Some(code) = stream.stop_sending_error_code {
-                return Err(StreamTableError::Stream(QuicStreamError::SendStopped {
-                    code,
-                }));
-            }
-            // RFC 9000 §3.1: after issuing RESET_STREAM, no further STREAM frames.
-            if let Some((code, _)) = stream.send_reset {
-                return Err(StreamTableError::Stream(QuicStreamError::SendStopped {
-                    code,
-                }));
-            }
             stream
-                .send_credit
-                .can_consume(len)
-                .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+                .ensure_can_send(len)
+                .map_err(StreamTableError::Stream)?;
         }
         self.send_connection_credit
             .can_consume(len)
@@ -662,12 +894,40 @@ impl StreamTable {
             .consume(len)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
         let stream = self.stream_mut(id)?;
-        stream
-            .send_credit
+        stream.write(len)?;
+        Ok(())
+    }
+
+    /// Queue bytes for one writable stream with connection-level flow control.
+    pub fn write_stream_bytes(
+        &mut self,
+        id: StreamId,
+        data: Bytes,
+        fin: bool,
+    ) -> Result<(), StreamTableError> {
+        if id.direction() == StreamDirection::Unidirectional && !id.is_local_for(self.role) {
+            return Err(StreamTableError::StreamNotWritable(id));
+        }
+        let len = data.len() as u64;
+        {
+            let stream = self.stream(id)?;
+            stream
+                .ensure_can_send(len)
+                .map_err(StreamTableError::Stream)?;
+        }
+        self.send_connection_credit
+            .can_consume(len)
+            .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        self.send_connection_credit
             .consume(len)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
-        stream.send_offset = stream.send_offset.saturating_add(len);
+        self.stream_mut(id)?.write_bytes(data, fin)?;
         Ok(())
+    }
+
+    /// Queue a FIN-only STREAM frame for one writable stream.
+    pub fn finish_stream_send(&mut self, id: StreamId) -> Result<(), StreamTableError> {
+        self.write_stream_bytes(id, Bytes::new(), true)
     }
 
     /// Account bytes received on one stream at its current contiguous receive offset.
@@ -702,6 +962,154 @@ impl StreamTable {
         self.recv_connection_credit
             .consume(flow_delta)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        if len > 0 || is_fin {
+            self.wake_reader(id);
+        }
+        Ok(())
+    }
+
+    /// Receive STREAM payload bytes on one stream at an explicit offset.
+    pub fn receive_stream_bytes(
+        &mut self,
+        id: StreamId,
+        offset: u64,
+        data: Bytes,
+        is_fin: bool,
+    ) -> Result<(), StreamTableError> {
+        if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
+            return Err(StreamTableError::StreamNotReadable(id));
+        }
+        let len = data.len() as u64;
+        let end = offset
+            .checked_add(len)
+            .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
+        let prior_used = self.stream(id)?.recv_credit.used();
+        let connection_delta = end.saturating_sub(prior_used);
+        self.recv_connection_credit
+            .can_consume(connection_delta)
+            .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        let flow_delta = self.stream_mut(id)?.receive_bytes(offset, data, is_fin)?;
+        self.recv_connection_credit
+            .consume(flow_delta)
+            .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        if len > 0 || is_fin {
+            self.wake_reader(id);
+        }
+        Ok(())
+    }
+
+    /// Read contiguous application bytes from one readable stream.
+    pub fn read_stream_bytes(
+        &mut self,
+        id: StreamId,
+        max_len: usize,
+    ) -> Result<Bytes, StreamTableError> {
+        if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
+            return Err(StreamTableError::StreamNotReadable(id));
+        }
+        let stream = self.stream_mut(id)?;
+        if let Some(code) = stream.receive_stopped_error_code {
+            return Err(StreamTableError::Stream(QuicStreamError::ReceiveStopped {
+                code,
+            }));
+        }
+        Ok(stream.read_bytes(max_len))
+    }
+
+    /// Whether a stream has reached application EOF.
+    pub fn is_stream_read_eof(&self, id: StreamId) -> Result<bool, StreamTableError> {
+        Ok(self.stream(id)?.is_read_eof())
+    }
+
+    /// Current stream-level send limit.
+    pub fn stream_send_limit(&self, id: StreamId) -> Result<u64, StreamTableError> {
+        Ok(self.stream(id)?.send_credit.limit())
+    }
+
+    /// Requeue one previously emitted STREAM frame after packet loss.
+    pub fn requeue_sent_stream_frame(
+        &mut self,
+        id: StreamId,
+        offset: u64,
+    ) -> Result<(), StreamTableError> {
+        self.stream_mut(id)?.requeue_sent_stream_frame(offset)?;
+        Ok(())
+    }
+
+    /// Put a popped STREAM frame back when packet assembly did not emit it.
+    pub fn requeue_unemitted_stream_frame(
+        &mut self,
+        payload: StreamFramePayload,
+    ) -> Result<(), StreamTableError> {
+        let id = payload.stream_id;
+        self.stream_mut(id)?.requeue_unemitted_stream_frame(payload);
+        Ok(())
+    }
+
+    /// Pop the next queued STREAM frame, splitting payload bytes to `max_data_len`.
+    pub fn pop_next_stream_frame(&mut self, max_data_len: usize) -> Option<StreamFramePayload> {
+        if max_data_len == 0 {
+            return None;
+        }
+        let cursor = self.rr_cursor;
+        let iter1 = self.streams.range((
+            cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
+            std::ops::Bound::Unbounded,
+        ));
+        let iter2 = self.streams.range((
+            std::ops::Bound::Unbounded,
+            cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Included),
+        ));
+        let next_id = iter1
+            .chain(
+                if cursor.is_none() { None } else { Some(iter2) }
+                    .into_iter()
+                    .flatten(),
+            )
+            .find_map(|(id, stream)| stream.has_pending_stream_frames().then_some(*id))?;
+        self.rr_cursor = Some(next_id);
+        self.stream_mut(next_id)
+            .ok()?
+            .pop_pending_stream_frame(max_data_len)
+    }
+
+    /// Borrow a stream as an `AsyncRead + AsyncWrite` adapter.
+    pub fn stream_io(&mut self, id: StreamId) -> Result<QuicStreamIo<'_>, StreamTableError> {
+        let _ = self.stream(id)?;
+        Ok(QuicStreamIo { table: self, id })
+    }
+
+    /// Apply a peer `STOP_SENDING` signal and wake any blocked writer.
+    pub fn on_stop_sending(
+        &mut self,
+        id: StreamId,
+        error_code: u64,
+    ) -> Result<(), StreamTableError> {
+        self.stream_mut(id)?.on_stop_sending(error_code);
+        self.wake_writer(id);
+        Ok(())
+    }
+
+    /// Locally stop receiving a stream and wake any blocked reader.
+    pub fn stop_receiving(
+        &mut self,
+        id: StreamId,
+        error_code: u64,
+    ) -> Result<(), StreamTableError> {
+        self.stream_mut(id)?.stop_receiving(error_code);
+        self.wake_reader(id);
+        Ok(())
+    }
+
+    /// Locally reset one stream's send side and wake any blocked writer.
+    pub fn reset_stream_send(
+        &mut self,
+        id: StreamId,
+        error_code: u64,
+        final_size: u64,
+    ) -> Result<(), StreamTableError> {
+        self.stream_mut(id)?.reset_send(error_code, final_size)?;
+        self.wake_writer(id);
         Ok(())
     }
 
@@ -712,6 +1120,7 @@ impl StreamTable {
         final_size: u64,
     ) -> Result<(), StreamTableError> {
         self.stream_mut(id)?.set_final_size(final_size)?;
+        self.wake_reader(id);
         Ok(())
     }
 
@@ -720,7 +1129,29 @@ impl StreamTable {
         &mut self,
         new_limit: u64,
     ) -> Result<(), FlowControlError> {
-        self.send_connection_credit.increase_limit(new_limit)
+        let before = self.send_connection_credit.remaining();
+        let result = self.send_connection_credit.increase_limit(new_limit);
+        if result.is_ok() && self.send_connection_credit.remaining() > before {
+            self.wake_all_writers();
+        }
+        result
+    }
+
+    /// Increase stream-level send limit monotonically.
+    pub fn increase_stream_send_limit(
+        &mut self,
+        id: StreamId,
+        new_limit: u64,
+    ) -> Result<(), StreamTableError> {
+        let before = self.stream(id)?.send_credit.remaining();
+        self.stream_mut(id)?
+            .send_credit
+            .increase_limit(new_limit)
+            .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        if self.stream(id)?.send_credit.remaining() > before {
+            self.wake_writer(id);
+        }
+        Ok(())
     }
 
     /// Increase connection-level receive limit monotonically.
@@ -799,6 +1230,47 @@ impl StreamTable {
         self.streams.is_empty()
     }
 
+    fn register_read_waker(&mut self, id: StreamId, waker: &Waker) {
+        self.read_wakers
+            .entry(id)
+            .and_modify(|registered| {
+                if !registered.will_wake(waker) {
+                    *registered = waker.clone();
+                }
+            })
+            .or_insert_with(|| waker.clone());
+    }
+
+    fn register_write_waker(&mut self, id: StreamId, waker: &Waker) {
+        self.write_wakers
+            .entry(id)
+            .and_modify(|registered| {
+                if !registered.will_wake(waker) {
+                    *registered = waker.clone();
+                }
+            })
+            .or_insert_with(|| waker.clone());
+    }
+
+    fn wake_reader(&mut self, id: StreamId) {
+        if let Some(waker) = self.read_wakers.remove(&id) {
+            waker.wake();
+        }
+    }
+
+    fn wake_writer(&mut self, id: StreamId) {
+        if let Some(waker) = self.write_wakers.remove(&id) {
+            waker.wake();
+        }
+    }
+
+    fn wake_all_writers(&mut self) {
+        let wakers = std::mem::take(&mut self.write_wakers);
+        for (_, waker) in wakers {
+            waker.wake();
+        }
+    }
+
     fn insert_new_stream(&mut self, id: StreamId) -> Result<(), StreamTableError> {
         if self.streams.contains_key(&id) {
             return Err(StreamTableError::DuplicateStream(id));
@@ -806,6 +1278,82 @@ impl StreamTable {
         self.streams
             .insert(id, QuicStream::new(id, self.send_window, self.recv_window));
         Ok(())
+    }
+}
+
+/// Poll-based application I/O adapter for one QUIC stream.
+pub struct QuicStreamIo<'a> {
+    table: &'a mut StreamTable,
+    id: StreamId,
+}
+
+impl QuicStreamIo<'_> {
+    fn io_error(err: StreamTableError) -> io::Error {
+        io::Error::new(io::ErrorKind::BrokenPipe, err.to_string())
+    }
+}
+
+impl AsyncRead for QuicStreamIo<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        match this.table.read_stream_bytes(this.id, buf.remaining()) {
+            Ok(bytes) if !bytes.is_empty() => {
+                buf.put_slice(&bytes);
+                Poll::Ready(Ok(()))
+            }
+            Ok(_) => match this.table.is_stream_read_eof(this.id) {
+                Ok(true) => Poll::Ready(Ok(())),
+                Ok(false) => {
+                    this.table.register_read_waker(this.id, cx.waker());
+                    Poll::Pending
+                }
+                Err(err) => Poll::Ready(Err(Self::io_error(err))),
+            },
+            Err(err) => Poll::Ready(Err(Self::io_error(err))),
+        }
+    }
+}
+
+impl AsyncWrite for QuicStreamIo<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let this = self.get_mut();
+        match this
+            .table
+            .write_stream_bytes(this.id, Bytes::copy_from_slice(buf), false)
+        {
+            Ok(()) => Poll::Ready(Ok(buf.len())),
+            Err(StreamTableError::Stream(QuicStreamError::Flow(_))) => {
+                this.table.register_write_waker(this.id, cx.waker());
+                Poll::Pending
+            }
+            Err(err) => Poll::Ready(Err(Self::io_error(err))),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match this.table.finish_stream_send(this.id) {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(err) => Poll::Ready(Err(Self::io_error(err))),
+        }
     }
 }
 
@@ -820,6 +1368,33 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    #[derive(Default)]
+    struct CountingWake {
+        count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingWake {
+        fn count(&self) -> usize {
+            self.count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl std::task::Wake for CountingWake {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (std::sync::Arc<CountingWake>, std::task::Waker) {
+        let counter = std::sync::Arc::new(CountingWake::default());
+        let waker = std::task::Waker::from(counter.clone());
+        (counter, waker)
+    }
 
     #[test]
     fn stream_id_encoding_and_role_checks() {
@@ -1040,6 +1615,10 @@ mod tests {
                     new_final_size: 200,
                 },
                 "inconsistent reset",
+            ),
+            (
+                QuicStreamError::SendFinished { final_size: 12 },
+                "send side finished",
             ),
         ];
         for (err, expected_substr) in tests {
@@ -1266,6 +1845,240 @@ mod tests {
         ));
         let after_used = tbl.stream(id).expect("stream").recv_credit.used();
         assert_eq!(before_used, after_used);
+    }
+
+    #[test]
+    fn stream_bytes_round_trip_out_of_order_with_retransmit_and_fin() {
+        let mut sender =
+            StreamTable::new_with_connection_limits(StreamRole::Client, 1, 0, 64, 64, 64, 64);
+        let stream = sender.open_local_bidi().expect("open");
+        let payload = Bytes::from_static(b"hello reliable stream control");
+        sender
+            .write_stream_bytes(stream, payload.clone(), true)
+            .expect("queue payload");
+
+        let first = sender.pop_next_stream_frame(8).expect("first frame");
+        let lost = sender.pop_next_stream_frame(8).expect("lost frame");
+        let last = sender.pop_next_stream_frame(64).expect("last frame");
+        assert_eq!(first.offset, 0);
+        assert_eq!(lost.offset, 8);
+        assert_eq!(last.offset, 16);
+        assert!(last.fin);
+        assert!(!lost.retransmit);
+
+        sender
+            .requeue_sent_stream_frame(stream, lost.offset)
+            .expect("requeue lost frame");
+        let retransmit = sender
+            .pop_next_stream_frame(8)
+            .expect("retransmitted frame");
+        assert_eq!(retransmit.offset, lost.offset);
+        assert_eq!(retransmit.data, lost.data);
+        assert!(retransmit.retransmit);
+
+        let mut receiver =
+            StreamTable::new_with_connection_limits(StreamRole::Server, 0, 0, 64, 64, 64, 64);
+        receiver.accept_remote_stream(stream).expect("accept");
+
+        receiver
+            .receive_stream_bytes(stream, last.offset, last.data.clone(), last.fin)
+            .expect("receive tail first");
+        assert_eq!(receiver.stream(stream).expect("stream").recv_offset, 0);
+        receiver
+            .receive_stream_bytes(stream, first.offset, first.data.clone(), first.fin)
+            .expect("receive head");
+        assert_eq!(receiver.stream(stream).expect("stream").recv_offset, 8);
+        receiver
+            .receive_stream_bytes(
+                stream,
+                retransmit.offset,
+                retransmit.data.clone(),
+                retransmit.fin,
+            )
+            .expect("receive retransmit");
+        receiver
+            .receive_stream_bytes(stream, lost.offset, lost.data.clone(), lost.fin)
+            .expect("duplicate lost frame must dedup");
+
+        let mut out = Vec::new();
+        while !receiver.is_stream_read_eof(stream).expect("eof check") {
+            let chunk = receiver.read_stream_bytes(stream, 5).expect("read chunk");
+            assert!(!chunk.is_empty(), "no read gap after retransmit");
+            out.extend_from_slice(&chunk);
+        }
+        assert_eq!(out, payload.as_ref());
+    }
+
+    #[test]
+    fn stream_io_async_read_observes_fin_as_eof() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Server, 0, 0, 16, 16, 16, 16);
+        let stream = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        table.accept_remote_stream(stream).expect("accept");
+        table
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"abc"), true)
+            .expect("receive fin");
+
+        let waker = std::task::Waker::noop().clone();
+        let mut cx = Context::from_waker(&waker);
+        let mut storage = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut storage);
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncRead::poll_read(Pin::new(&mut io), &mut cx, &mut read_buf);
+            assert!(matches!(poll, Poll::Ready(Ok(()))));
+        }
+        assert_eq!(read_buf.filled(), b"abc");
+
+        let mut eof_storage = [0u8; 8];
+        let mut eof_buf = ReadBuf::new(&mut eof_storage);
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncRead::poll_read(Pin::new(&mut io), &mut cx, &mut eof_buf);
+            assert!(matches!(poll, Poll::Ready(Ok(()))));
+        }
+        assert!(eof_buf.filled().is_empty());
+        assert!(table.is_stream_read_eof(stream).expect("eof"));
+    }
+
+    #[test]
+    fn stream_io_async_write_enforces_flow_control_without_consuming_credit() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Client, 1, 0, 4, 4, 4, 4);
+        let stream = table.open_local_bidi().expect("open");
+        let waker = std::task::Waker::noop().clone();
+        let mut cx = Context::from_waker(&waker);
+
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
+            assert!(matches!(poll, Poll::Pending));
+        }
+        assert_eq!(table.connection_send_remaining(), 4);
+        assert_eq!(table.stream(stream).expect("stream").send_offset, 0);
+
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcd");
+            assert!(matches!(poll, Poll::Ready(Ok(4))));
+        }
+        assert_eq!(table.connection_send_remaining(), 0);
+        let frame = table.pop_next_stream_frame(16).expect("stream frame");
+        assert_eq!(frame.data.as_ref(), b"abcd");
+        assert!(!frame.fin);
+    }
+
+    #[test]
+    fn stream_io_pending_read_wakes_when_bytes_arrive() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Server, 0, 0, 16, 16, 16, 16);
+        let stream = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        table.accept_remote_stream(stream).expect("accept");
+
+        let (counter, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut storage = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut storage);
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncRead::poll_read(Pin::new(&mut io), &mut cx, &mut read_buf);
+            assert!(matches!(poll, Poll::Pending));
+        }
+        assert_eq!(counter.count(), 0, "pending read must not self-wake");
+
+        table
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"abc"), true)
+            .expect("receive bytes");
+        assert_eq!(counter.count(), 1, "received bytes must wake reader");
+
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncRead::poll_read(Pin::new(&mut io), &mut cx, &mut read_buf);
+            assert!(matches!(poll, Poll::Ready(Ok(()))));
+        }
+        assert_eq!(read_buf.filled(), b"abc");
+    }
+
+    #[test]
+    fn stream_io_pending_write_wakes_after_flow_limit_increase() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Client, 1, 0, 4, 16, 16, 16);
+        let stream = table.open_local_bidi().expect("open");
+
+        let (counter, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
+            assert!(matches!(poll, Poll::Pending));
+        }
+        assert_eq!(counter.count(), 0, "pending write must not self-wake");
+        assert_eq!(table.stream(stream).expect("stream").send_offset, 0);
+
+        table
+            .increase_stream_send_limit(stream, 8)
+            .expect("increase stream limit");
+        assert_eq!(counter.count(), 1, "limit increase must wake writer");
+
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncWrite::poll_write(Pin::new(&mut io), &mut cx, b"abcde");
+            assert!(matches!(poll, Poll::Ready(Ok(5))));
+        }
+        let frame = table.pop_next_stream_frame(16).expect("stream frame");
+        assert_eq!(frame.data.as_ref(), b"abcde");
+    }
+
+    #[test]
+    fn stream_io_pending_read_wakes_when_receive_side_stops() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Server, 0, 0, 16, 16, 16, 16);
+        let stream = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        table.accept_remote_stream(stream).expect("accept");
+
+        let (counter, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut storage = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut storage);
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncRead::poll_read(Pin::new(&mut io), &mut cx, &mut read_buf);
+            assert!(matches!(poll, Poll::Pending));
+        }
+        table.stop_receiving(stream, 9).expect("stop receiving");
+        assert_eq!(counter.count(), 1, "stop_receiving must wake reader");
+        {
+            let mut io = table.stream_io(stream).expect("io");
+            let poll = AsyncRead::poll_read(Pin::new(&mut io), &mut cx, &mut read_buf);
+            assert!(matches!(poll, Poll::Ready(Err(_))));
+        }
+    }
+
+    #[test]
+    fn requeue_unemitted_stream_frame_preserves_original_send_state() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Client, 1, 0, 64, 64, 64, 64);
+        let stream = table.open_local_bidi().expect("open");
+        table
+            .write_stream_bytes(stream, Bytes::from_static(b"packet-budget"), true)
+            .expect("queue stream bytes");
+
+        let frame = table.pop_next_stream_frame(6).expect("stream frame");
+        assert!(!frame.retransmit);
+        let offset = frame.offset;
+        let data = frame.data.clone();
+        table
+            .requeue_unemitted_stream_frame(frame)
+            .expect("requeue unemitted");
+        assert!(
+            table.requeue_sent_stream_frame(stream, offset).is_err(),
+            "unemitted frames must not remain marked as sent"
+        );
+
+        let next = table.pop_next_stream_frame(6).expect("requeued frame");
+        assert_eq!(next.offset, offset);
+        assert_eq!(next.data, data);
+        assert!(!next.retransmit);
     }
 
     #[test]

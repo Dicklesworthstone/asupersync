@@ -15,7 +15,10 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::task::{Context as TaskContext, Poll, Waker};
 
-use super::streams::{QuicStreamError, StreamId, StreamRole, StreamTable, StreamTableError};
+use super::streams::{
+    FlowControlError, QuicStreamError, QuicStreamIo, StreamId, StreamRole, StreamTable,
+    StreamTableError,
+};
 use super::tls::{CryptoLevel, KeyUpdateEvent, QuicTlsError, QuicTlsMachine};
 #[cfg(feature = "tls")]
 use super::tls::{QuicServerIdentityVerification, QuicServerIdentityVerifier};
@@ -495,6 +498,27 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Queue application bytes for reliable STREAM frame emission.
+    pub fn write_stream_bytes(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        data: Bytes,
+        fin: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_data_state()?;
+        let result = self.streams.write_stream_bytes(id, data, fin);
+        if let Err(StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted {
+            ..
+        }))) = &result
+        {
+            self.queue_stream_data_blocked(id);
+        }
+        result.map_err(map_stream_table_error)?;
+        Ok(())
+    }
+
     /// Account bytes received on a stream.
     pub fn receive_stream(
         &mut self,
@@ -510,6 +534,52 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Read contiguous STREAM bytes already reassembled for the application.
+    pub fn read_stream_bytes(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        max_len: usize,
+    ) -> Result<Bytes, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_stream_active_state()?;
+        self.streams
+            .read_stream_bytes(id, max_len)
+            .map_err(map_stream_table_error)
+    }
+
+    /// Whether an application STREAM read has consumed through FIN.
+    pub fn is_stream_read_eof(&self, id: StreamId) -> Result<bool, NativeQuicConnectionError> {
+        self.streams
+            .is_stream_read_eof(id)
+            .map_err(map_stream_table_error)
+    }
+
+    /// Borrow a stream as an `AsyncRead + AsyncWrite` adapter.
+    pub fn stream_io(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+    ) -> Result<QuicStreamIo<'_>, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_stream_active_state()?;
+        self.streams.stream_io(id).map_err(map_stream_table_error)
+    }
+
+    /// Requeue a previously emitted STREAM frame after packet loss.
+    pub fn requeue_sent_stream_frame(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        offset: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_data_state()?;
+        self.streams
+            .requeue_sent_stream_frame(id, offset)
+            .map_err(map_stream_table_error)
+    }
+
     /// Account bytes received on a stream at an explicit offset.
     pub fn receive_stream_segment(
         &mut self,
@@ -523,6 +593,23 @@ impl NativeQuicConnection {
         self.ensure_stream_active_state()?;
         self.streams
             .receive_stream_segment(id, offset, len, is_fin)
+            .map_err(map_stream_table_error)?;
+        Ok(())
+    }
+
+    /// Receive STREAM payload bytes at an explicit offset.
+    pub fn receive_stream_bytes(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        offset: u64,
+        data: Bytes,
+        is_fin: bool,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_stream_active_state()?;
+        self.streams
+            .receive_stream_bytes(id, offset, data, is_fin)
             .map_err(map_stream_table_error)?;
         Ok(())
     }
@@ -552,9 +639,8 @@ impl NativeQuicConnection {
         checkpoint(cx)?;
         self.ensure_stream_active_state()?;
         self.streams
-            .stream_mut(id)
-            .map_err(map_stream_table_error)?
-            .on_stop_sending(error_code);
+            .on_stop_sending(id, error_code)
+            .map_err(map_stream_table_error)?;
         Ok(())
     }
 
@@ -568,9 +654,8 @@ impl NativeQuicConnection {
         checkpoint(cx)?;
         self.ensure_stream_active_state()?;
         self.streams
-            .stream_mut(id)
-            .map_err(map_stream_table_error)?
-            .stop_receiving(error_code);
+            .stop_receiving(id, error_code)
+            .map_err(map_stream_table_error)?;
         Ok(())
     }
 
@@ -585,8 +670,8 @@ impl NativeQuicConnection {
         checkpoint(cx)?;
         self.ensure_stream_active_state()?;
         self.streams
-            .stream_mut(id)?
-            .reset_send(error_code, final_size)?;
+            .reset_stream_send(id, error_code, final_size)
+            .map_err(map_stream_table_error)?;
         Ok(())
     }
 
@@ -1038,13 +1123,9 @@ impl NativeQuicConnection {
                 if self.streams.stream(id).is_err() {
                     self.accept_remote_stream(cx, id)?;
                 }
-                self.receive_stream_segment(
-                    cx,
-                    id,
-                    offset.map_or(0, VarInt::value),
-                    data.len() as u64,
-                    *fin,
-                )?;
+                let frame_offset = offset.map_or(0, VarInt::value);
+                self.receive_stream_bytes(cx, id, frame_offset, data.clone(), *fin)?;
+                self.trace_stream_frame(cx, "recv", id, frame_offset, data.len(), *fin, false);
                 Ok(())
             }
             QuicFrame::Crypto { .. } => {
@@ -1083,11 +1164,11 @@ impl NativeQuicConnection {
                 maximum_stream_data,
             } => {
                 self.streams
-                    .stream_mut(StreamId(stream_id.value()))
-                    .map_err(map_stream_table_error)?
-                    .send_credit
-                    .increase_limit(maximum_stream_data.value())
-                    .map_err(QuicStreamError::Flow)?;
+                    .increase_stream_send_limit(
+                        StreamId(stream_id.value()),
+                        maximum_stream_data.value(),
+                    )
+                    .map_err(map_stream_table_error)?;
                 Ok(())
             }
             QuicFrame::PathChallenge { data } => {
@@ -1359,11 +1440,56 @@ impl NativeQuicConnection {
             }
         }
 
-        // DATAGRAM frames are application (1-RTT) data only (RFC 9221); never
+        // STREAM and DATAGRAM frames are application (1-RTT) data only; never
         // emit them in the Initial/Handshake spaces. Drain into the same byte
         // budget, leaving the remainder queued so a small packet does not drop
-        // datagrams on the floor.
+        // application data on the floor.
         if space == PacketNumberSpace::ApplicationData {
+            while used.saturating_add(32) <= max_frame_bytes {
+                let payload_budget = max_frame_bytes.saturating_sub(used).saturating_sub(32);
+                let Some(payload) = self.streams.pop_next_stream_frame(payload_budget) else {
+                    break;
+                };
+                let frame = QuicFrame::Stream {
+                    stream_id: VarInt::from_u64_unchecked(payload.stream_id.0),
+                    offset: (payload.offset != 0)
+                        .then_some(VarInt::from_u64_unchecked(payload.offset)),
+                    data: payload.data.clone(),
+                    fin: payload.fin,
+                };
+                let mut encoded = BytesMut::new();
+                frame.encode(&mut encoded)?;
+                let frame_len = encoded.len();
+                if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
+                    self.streams
+                        .requeue_unemitted_stream_frame(payload)
+                        .map_err(map_stream_table_error)?;
+                    break;
+                }
+                used = used.saturating_add(frame_len);
+                if let QuicFrame::Stream {
+                    stream_id,
+                    offset,
+                    data,
+                    fin,
+                } = &frame
+                {
+                    self.trace_stream_frame(
+                        cx,
+                        "send",
+                        StreamId(stream_id.value()),
+                        offset.map_or(0, VarInt::value),
+                        data.len(),
+                        *fin,
+                        payload.retransmit,
+                    );
+                }
+                frames.push(frame);
+                if used >= max_frame_bytes {
+                    break;
+                }
+            }
+
             while let Some(payload) = self.outbound_datagrams.pop_front() {
                 let frame = QuicFrame::Datagram { data: payload };
                 let mut encoded = BytesMut::new();
@@ -1435,6 +1561,52 @@ impl NativeQuicConnection {
         }
 
         Ok(frames)
+    }
+
+    fn queue_stream_data_blocked(&mut self, id: StreamId) {
+        let limit = self.streams.stream_send_limit(id).unwrap_or(0);
+        self.pending_control_frames
+            .push_back(QuicFrame::StreamDataBlocked {
+                stream_id: VarInt::from_u64_unchecked(id.0),
+                maximum_stream_data: VarInt::from_u64_unchecked(limit),
+            });
+    }
+
+    fn trace_stream_frame(
+        &self,
+        cx: &Cx,
+        direction: &str,
+        id: StreamId,
+        offset: u64,
+        len: usize,
+        fin: bool,
+        retransmit: bool,
+    ) {
+        let id_s = id.0.to_string();
+        let offset_s = offset.to_string();
+        let len_s = len.to_string();
+        let fin_s = fin.to_string();
+        let retransmit_s = retransmit.to_string();
+        cx.trace_with_fields(
+            "ATP_QUIC_TRACE stream_frame",
+            &[
+                ("direction", direction),
+                ("stream_id", id_s.as_str()),
+                ("offset", offset_s.as_str()),
+                ("len", len_s.as_str()),
+                ("fin", fin_s.as_str()),
+                ("retransmit", retransmit_s.as_str()),
+            ],
+        );
+        quictrace!(
+            "event=stream_frame direction={} stream_id={} offset={} len={} fin={} retransmit={}",
+            direction,
+            id.0,
+            offset,
+            len,
+            fin,
+            retransmit
+        );
     }
 
     fn queue_ack_frame(&mut self, packet_number: u64) {
@@ -1514,6 +1686,19 @@ mod tests {
         // helper records it so the fail-closed gate (br-7pwwwe) lets the
         // state-machine tests reach the confirmed state.
         conn.record_verified_server_identity();
+        conn.on_handshake_confirmed(&cx).expect("confirmed");
+        conn
+    }
+
+    fn established_server_conn() -> NativeQuicConnection {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig {
+            role: StreamRole::Server,
+            ..NativeQuicConnectionConfig::default()
+        });
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx).expect("hs keys");
+        conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
         conn.on_handshake_confirmed(&cx).expect("confirmed");
         conn
     }
@@ -1716,6 +1901,150 @@ mod tests {
             conn.streams().stream(stream).expect("stream").recv_offset,
             10
         );
+    }
+
+    #[test]
+    fn stream_payload_frames_round_trip_via_connection_api() {
+        let cx = test_cx();
+        let mut tx = established_conn();
+        let stream = tx.open_local_bidi(&cx).expect("open");
+        let payload = Bytes::from_static(b"manifest-control-stream");
+        tx.write_stream_bytes(&cx, stream, payload.clone(), true)
+            .expect("queue bytes");
+
+        let first = tx
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 42)
+            .expect("first frames")
+            .into_iter()
+            .find_map(|frame| match frame {
+                QuicFrame::Stream { .. } => Some(frame),
+                _ => None,
+            })
+            .expect("first stream frame");
+        let lost = tx
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 42)
+            .expect("lost frames")
+            .into_iter()
+            .find_map(|frame| match frame {
+                QuicFrame::Stream { .. } => Some(frame),
+                _ => None,
+            })
+            .expect("lost stream frame");
+        let lost_offset = match &lost {
+            QuicFrame::Stream { offset, .. } => offset.map_or(0, VarInt::value),
+            _ => unreachable!("lost is a STREAM frame"),
+        };
+        let last = tx
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("last frames")
+            .into_iter()
+            .find_map(|frame| match frame {
+                QuicFrame::Stream { .. } => Some(frame),
+                _ => None,
+            })
+            .expect("last stream frame");
+        tx.requeue_sent_stream_frame(&cx, stream, lost_offset)
+            .expect("requeue lost frame");
+        let retransmit = tx
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 42)
+            .expect("retransmit frames")
+            .into_iter()
+            .find_map(|frame| match frame {
+                QuicFrame::Stream { .. } => Some(frame),
+                _ => None,
+            })
+            .expect("retransmitted stream frame");
+
+        let mut rx = established_server_conn();
+        for frame in [last, retransmit, first] {
+            rx.process_frame(&cx, &frame, PacketNumberSpace::ApplicationData)
+                .expect("process stream frame");
+        }
+        let mut out = Vec::new();
+        while !rx.is_stream_read_eof(stream).expect("eof check") {
+            let chunk = rx.read_stream_bytes(&cx, stream, 8).expect("read bytes");
+            assert!(!chunk.is_empty(), "stream must not stall after retransmit");
+            out.extend_from_slice(&chunk);
+        }
+        assert_eq!(out, payload.as_ref());
+    }
+
+    #[test]
+    fn connection_stream_io_adapter_round_trips_one_payload() {
+        let cx = test_cx();
+        let mut tx = established_conn();
+        let stream = tx.open_local_bidi(&cx).expect("open");
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = std::task::Context::from_waker(&waker);
+
+        {
+            let mut io = tx.stream_io(&cx, stream).expect("stream io");
+            let poll = crate::io::AsyncWrite::poll_write(
+                std::pin::Pin::new(&mut io),
+                &mut task_cx,
+                b"abc",
+            );
+            assert!(matches!(poll, Poll::Ready(Ok(3))));
+        }
+        let frame = tx
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("frames")
+            .into_iter()
+            .find_map(|frame| match frame {
+                QuicFrame::Stream { .. } => Some(frame),
+                _ => None,
+            })
+            .expect("stream frame");
+
+        let mut rx = established_server_conn();
+        rx.process_frame(&cx, &frame, PacketNumberSpace::ApplicationData)
+            .expect("process stream frame");
+        let mut storage = [0u8; 8];
+        let mut read_buf = crate::io::ReadBuf::new(&mut storage);
+        {
+            let mut io = rx.stream_io(&cx, stream).expect("stream io");
+            let poll = crate::io::AsyncRead::poll_read(
+                std::pin::Pin::new(&mut io),
+                &mut task_cx,
+                &mut read_buf,
+            );
+            assert!(matches!(poll, Poll::Ready(Ok(()))));
+        }
+        assert_eq!(read_buf.filled(), b"abc");
+    }
+
+    #[test]
+    fn stream_flow_exhaustion_queues_stream_data_blocked() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig {
+            send_window: 4,
+            connection_send_limit: 4,
+            ..NativeQuicConnectionConfig::default()
+        });
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx).expect("hs keys");
+        conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+        conn.record_verified_server_identity();
+        conn.on_handshake_confirmed(&cx).expect("confirmed");
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        let err = conn
+            .write_stream_bytes(&cx, stream, Bytes::from_static(b"abcde"), false)
+            .expect_err("flow controlled");
+        assert!(matches!(
+            err,
+            NativeQuicConnectionError::Stream(QuicStreamError::Flow(
+                FlowControlError::Exhausted { .. }
+            ))
+        ));
+        let blocked = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("frames")
+            .into_iter()
+            .find_map(|frame| match frame {
+                QuicFrame::StreamDataBlocked { .. } => Some(frame),
+                _ => None,
+            });
+        assert!(blocked.is_some(), "STREAM_DATA_BLOCKED must be emitted");
     }
 
     #[test]
