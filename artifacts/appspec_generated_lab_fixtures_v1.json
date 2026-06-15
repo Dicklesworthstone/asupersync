@@ -24,14 +24,15 @@
   "blocked_by": [
     {
       "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2.2",
-      "status": "in_progress",
-      "reason": "A2 source landed in 739780907 and 5707618c1, but its exact focused RCH unit proof was canceled, stale-progress, or refused before worker assignment, so A3 remains a contract packet until the A2 proof is fresh."
+      "status": "closed",
+      "reason": "A2 proven and CLOSED in 39e1a9b74: AppSpecV1::compiler_plan + compile_with_child_specs single-group lowering proven via tests/appspec_v1_compiler.rs (7/7 remote rch) incl region-close quiescence; multi-group lowering remains fail-closed (UnsupportedRuntimeMapping)."
     }
   ],
   "a2_source_evidence": {
     "commits": [
       "739780907",
-      "5707618c1"
+      "5707618c1",
+      "39e1a9b74"
     ],
     "source_paths": [
       "src/app.rs",
@@ -47,7 +48,8 @@
       "appspec_v1_compile_lowers_to_existing_builder",
       "appspec_v1_validate_rejects_"
     ],
-    "proof_status": "source-check-passed-focused-tests-blocked-by-rch"
+    "proof_status": "proven-remote-rch",
+    "proof_test": "tests/appspec_v1_compiler.rs"
   },
   "generation_policy": {
     "manual_fixture_tables_accepted": false,
@@ -64,7 +66,7 @@
   "accepted_fixtures": [
     {
       "fixture_id": "minimal-http-worker-topology",
-      "fixture_status": "contracted-not-executed",
+      "fixture_status": "contracted-and-executed-single-group",
       "manifest_summary": {
         "app_id": "minimal-http-worker",
         "services": [
@@ -122,7 +124,7 @@
       },
       "lab_replay": {
         "scenario_id": "appspec/minimal-http-worker-topology",
-        "execution_status": "blocked-by-a2-proof",
+        "execution_status": "executed-single-group",
         "deterministic_seeds": [
           1,
           2,
@@ -134,7 +136,10 @@
           "no-obligation-leaks",
           "race-losers-drained"
         ],
-        "expected_outcome": "not-executed-until-a2-proof-is-fresh"
+        "expected_outcome": "region-close-quiescence-no-task-leaks-deterministic-replay",
+        "executed_by": "tests/appspec_v1_lab_replay.rs",
+        "lowering_scope": "single-supervision-group",
+        "multi_group_region_tree": "contracted-pending-a2-multi-group-sub-supervisor-lowering"
       }
     }
   ],
@@ -222,11 +227,13 @@
   },
   "proof_status_projection": {
     "claim_id": "appspec-generated-lab-fixtures",
-    "status": "blocked-by-a2-proof",
-    "fresh_rch_pass": false,
+    "status": "a2-proven-minimal-topology-executed",
+    "fresh_rch_pass": true,
     "first_blocker": "asupersync-idea-wizard-fifth-wave-3gaiun.2.2",
     "latest_remote_required_refusal": "2026-06-13 A2 focused proof refused before worker assignment with critical_pressure=1, health_below_fallback=1, hard_preflight=3, active_project_exclusion=1",
-    "operator_action": "rerun A2 focused proof, then run appspec-generated-lab-fixtures-contract remotely"
+    "operator_action": "run appspec-generated-lab-fixtures-contract and appspec-v1-lab-replay remotely to reconfirm; multi-group lowering still pending",
+    "a2_proof_commit": "39e1a9b74",
+    "minimal_topology_replay_test": "tests/appspec_v1_lab_replay.rs"
   },
   "validation": {
     "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_appspec_generated_lab_fixtures_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test appspec_generated_lab_fixtures_contract --no-default-features -- --nocapture",
@@ -246,5 +253,29 @@
     "closure of asupersync-idea-wizard-fifth-wave-3gaiun.2",
     "closure of asupersync-idea-wizard-fifth-wave-3gaiun.2.3",
     "closure of asupersync-idea-wizard-fifth-wave-3gaiun.16"
-  ]
+  ],
+  "lab_replay_proof_manifest": {
+    "lane_id": "appspec-v1-lab-replay",
+    "kind": "executed_lab_replay",
+    "resource_envelope_class": "focused-integration-test",
+    "package": "asupersync",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_appspec_v1_lab_replay CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test appspec_v1_lab_replay -- --nocapture",
+    "guarantee_ids": [
+      "appspec-v1-minimal-topology-deterministic-replay"
+    ],
+    "source_paths": [
+      "tests/appspec_v1_lab_replay.rs",
+      "src/app.rs",
+      "src/lab/spork_harness.rs"
+    ],
+    "expected_signal": "minimal single-group topology runs to region-close quiescence with no orphan tasks for seeds 1/2/3 and replays a deterministic trace fingerprint",
+    "no_claims": [
+      "broad workspace health",
+      "release readiness",
+      "AppSpec production readiness",
+      "runtime correctness",
+      "local Cargo fallback",
+      "multi-group region tree execution"
+    ]
+  }
 }

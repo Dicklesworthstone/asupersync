@@ -187,7 +187,10 @@ fn accepted_fixture_declares_deterministic_topology_and_lab_replay() {
         string(fixture, "fixture_id"),
         "minimal-http-worker-topology"
     );
-    assert_eq!(string(fixture, "fixture_status"), "contracted-not-executed");
+    assert_eq!(
+        string(fixture, "fixture_status"),
+        "contracted-and-executed-single-group"
+    );
 
     let summary = object(fixture, "manifest_summary");
     for required in ["api", "worker", "/health"] {
@@ -225,11 +228,22 @@ fn accepted_fixture_declares_deterministic_topology_and_lab_replay() {
     let lab_replay = object(fixture, "lab_replay");
     assert_eq!(
         string(lab_replay, "execution_status"),
-        "blocked-by-a2-proof"
+        "executed-single-group"
     );
     assert_eq!(
         string(lab_replay, "expected_outcome"),
-        "not-executed-until-a2-proof-is-fresh"
+        "region-close-quiescence-no-task-leaks-deterministic-replay"
+    );
+    // The executed minimal topology is the single-group lowering A2 implements;
+    // the richer multi-group region tree stays a contracted snapshot.
+    assert_eq!(
+        string(lab_replay, "executed_by"),
+        "tests/appspec_v1_lab_replay.rs"
+    );
+    assert_live_path(string(lab_replay, "executed_by"));
+    assert_eq!(
+        string(lab_replay, "lowering_scope"),
+        "single-supervision-group"
     );
     assert_eq!(array(lab_replay, "deterministic_seeds").len(), 3);
 
@@ -291,12 +305,12 @@ fn negative_fixture_catalog_covers_required_validation_classes() {
 }
 
 #[test]
-fn proof_projection_and_status_remain_fail_closed() {
+fn proof_projection_records_fresh_a2_proof_and_keeps_no_claims_fail_closed() {
     let artifact = artifact();
 
     let a2_evidence = object(&artifact, "a2_source_evidence");
     let commits = string_set(a2_evidence, "commits");
-    for required in ["739780907", "5707618c1"] {
+    for required in ["739780907", "5707618c1", "39e1a9b74"] {
         assert!(commits.contains(required), "missing A2 commit {required}");
     }
     let validation_surfaces = string_set(a2_evidence, "validation_surfaces");
@@ -310,18 +324,15 @@ fn proof_projection_and_status_remain_fail_closed() {
             "missing A2 validation surface {required}"
         );
     }
-    assert_eq!(
-        string(a2_evidence, "proof_status"),
-        "source-check-passed-focused-tests-blocked-by-rch"
-    );
+    assert_eq!(string(a2_evidence, "proof_status"), "proven-remote-rch");
 
+    // The A2 blocker is still recorded for provenance, now resolved (closed).
     let blockers = array(&artifact, "blocked_by");
-    assert!(
-        blockers
-            .iter()
-            .any(|row| string(row, "bead_id") == BLOCKER_BEAD_ID),
-        "A3 must record the A2 proof blocker"
-    );
+    let a2_blocker = blockers
+        .iter()
+        .find(|row| string(row, "bead_id") == BLOCKER_BEAD_ID)
+        .unwrap_or_else(|| panic!("A3 must record the A2 proof blocker"));
+    assert_eq!(string(a2_blocker, "status"), "closed");
 
     let projection = object(&artifact, "proof_manifest_projection");
     assert_eq!(
@@ -350,9 +361,47 @@ fn proof_projection_and_status_remain_fail_closed() {
     }
 
     let status = object(&artifact, "proof_status_projection");
-    assert_eq!(string(status, "status"), "blocked-by-a2-proof");
-    assert!(!bool_field(status, "fresh_rch_pass"));
+    assert_eq!(
+        string(status, "status"),
+        "a2-proven-minimal-topology-executed"
+    );
+    assert!(bool_field(status, "fresh_rch_pass"));
     assert_eq!(string(status, "first_blocker"), BLOCKER_BEAD_ID);
+    assert_eq!(string(status, "a2_proof_commit"), "39e1a9b74");
+    assert_eq!(
+        string(status, "minimal_topology_replay_test"),
+        "tests/appspec_v1_lab_replay.rs"
+    );
+
+    // The executed lab-replay lane is remote-required and points at the real test.
+    let replay = object(&artifact, "lab_replay_proof_manifest");
+    assert_eq!(string(replay, "lane_id"), "appspec-v1-lab-replay");
+    assert_eq!(string(replay, "kind"), "executed_lab_replay");
+    let replay_command = string(replay, "command");
+    assert!(
+        replay_command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env "),
+        "lab-replay proof command must require remote RCH: {replay_command}"
+    );
+    assert!(
+        replay_command.contains("cargo test -p asupersync --test appspec_v1_lab_replay"),
+        "lab-replay command must run the replay test: {replay_command}"
+    );
+    for forbidden in [
+        "RCH_ALLOW_LOCAL=1",
+        "RCH_REQUIRE_REMOTE=0",
+        "local fallback",
+    ] {
+        assert!(
+            !replay_command.contains(forbidden),
+            "lab-replay command contains forbidden fallback marker {forbidden}"
+        );
+    }
+    let replay_sources = string_set(replay, "source_paths");
+    assert!(
+        replay_sources.contains("tests/appspec_v1_lab_replay.rs"),
+        "lab-replay manifest must reference the replay test"
+    );
+    assert_live_path("tests/appspec_v1_lab_replay.rs");
 
     let no_claims = string_set(&artifact, "no_claims");
     for required in [
