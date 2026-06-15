@@ -572,6 +572,23 @@ impl Connection {
         Ok(())
     }
 
+    /// Time remaining before the in-flight CONTINUATION sequence times out, or
+    /// `None` when no header-block continuation is pending.
+    ///
+    /// Unlike [`Connection::check_continuation_timeout`] (which only runs when
+    /// a frame arrives), this lets the connection driver arm a
+    /// frame-arrival-independent deadline so a peer that opens a header block
+    /// and then stalls is reclaimed instead of hanging forever
+    /// (br-asupersync-mfqfst L4). Returns `Some(Duration::ZERO)` once the
+    /// budget is already spent.
+    #[must_use]
+    pub fn continuation_timeout_remaining(&self) -> Option<std::time::Duration> {
+        let started_at = self.continuation_started_at?;
+        let budget = std::time::Duration::from_millis(self.local_settings.continuation_timeout_ms);
+        let elapsed = (self.time_getter)().saturating_duration_since(started_at);
+        Some(budget.saturating_sub(elapsed))
+    }
+
     /// Queue initial settings frame.
     pub fn queue_initial_settings(&mut self) {
         let settings = SettingsFrame::new(

@@ -988,6 +988,10 @@ enum DriverEvent {
     /// The connection was fully quiescent past its idle budget: close it with
     /// a NO_ERROR GOAWAY (br-asupersync-mfqfst L4).
     IdleTimeout,
+    /// An incomplete HEADERS/PUSH_PROMISE CONTINUATION sequence stalled past
+    /// the configured budget with no further frame: close it with a
+    /// PROTOCOL_ERROR GOAWAY (br-asupersync-mfqfst L4).
+    ContinuationTimeout,
 }
 
 /// Flush every frame the connection has queued onto the transport.
@@ -1015,6 +1019,7 @@ async fn next_driver_event(
     watch_drain: bool,
     finalize_deadline: Option<Time>,
     idle_deadline: Option<Time>,
+    continuation_deadline: Option<Time>,
 ) -> DriverEvent {
     if watch_drain && signal.is_shutting_down() {
         return DriverEvent::DrainRequested;
@@ -1043,6 +1048,17 @@ async fn next_driver_event(
             None => std::future::pending::<()>().await,
         }
     });
+    // br-asupersync-mfqfst L4: deadline for a stalled CONTINUATION sequence,
+    // armed by the caller from the connection's remaining continuation budget.
+    // Like the idle deadline it fires without any further frame arriving — the
+    // existing check only ran on frame arrival, so a silent client could pin a
+    // half-read header block open indefinitely (slowloris).
+    let mut continuation_fut = std::pin::pin!(async move {
+        match continuation_deadline {
+            Some(deadline) => crate::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    });
     std::future::poll_fn(move |cx| {
         if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
             || force_fut.as_mut().poll(cx).is_ready()
@@ -1057,6 +1073,9 @@ async fn next_driver_event(
         }
         if idle_deadline.is_some() && idle_fut.as_mut().poll(cx).is_ready() {
             return Poll::Ready(DriverEvent::IdleTimeout);
+        }
+        if continuation_deadline.is_some() && continuation_fut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(DriverEvent::ContinuationTimeout);
         }
         // Cancel-correct channels make dropping a partially-polled recv
         // safe: no item is consumed unless the future completes.
@@ -1362,6 +1381,15 @@ where
         } else {
             idle_at = None;
         }
+        // br-asupersync-mfqfst L4: while a header block is mid-CONTINUATION,
+        // arm an absolute deadline from the connection's remaining budget so a
+        // client that opens the block and goes silent is reclaimed instead of
+        // hanging. Recomputed each iteration: as wall time advances the
+        // remaining budget shrinks by the same amount, so `now + remaining`
+        // stays a stable absolute deadline and collapses to `now` once spent.
+        let continuation_at = conn
+            .continuation_timeout_remaining()
+            .map(|remaining| now + remaining);
         let event = next_driver_event(
             &mut framed,
             &mut resp_rx,
@@ -1370,6 +1398,7 @@ where
             watch_drain,
             finalize_at,
             idle_at,
+            continuation_at,
         )
         .await;
 
@@ -1395,6 +1424,20 @@ where
                 conn.goaway(
                     ErrorCode::NoError,
                     crate::bytes::Bytes::from_static(b"idle timeout"),
+                );
+                pump_writes(&mut conn, &mut framed).await?;
+                let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                return Ok(());
+            }
+            DriverEvent::ContinuationTimeout => {
+                // br-asupersync-mfqfst L4: a header block was left incomplete
+                // past the CONTINUATION budget with no further frame. RFC 9113
+                // §6.10 treats a broken CONTINUATION sequence as a connection
+                // PROTOCOL_ERROR, so GOAWAY + close (matching the on-arrival
+                // check in Connection::check_continuation_timeout).
+                conn.goaway(
+                    ErrorCode::ProtocolError,
+                    crate::bytes::Bytes::from_static(b"CONTINUATION timeout"),
                 );
                 pump_writes(&mut conn, &mut framed).await?;
                 let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
