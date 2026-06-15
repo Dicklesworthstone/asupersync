@@ -27,7 +27,7 @@
 //! doubt. An empty derivation (an outcome that holds with no fault-able support)
 //! is *unbreakable* by event faults within that lineage.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Identifier of a fault-able event (a send, ack, timer fire, or lease) drawn
 /// from a lab trace. The pure generator treats it as an opaque ordered token.
@@ -258,6 +258,167 @@ fn filter_minimal(mut sets: Vec<BTreeSet<FaultEventId>>) -> Vec<BTreeSet<FaultEv
     result
 }
 
+/// A causal happens-before relation over lab events, the input to lineage
+/// extraction (bead `yj2nxx.4`, WHAT step 1).
+///
+/// This is the pure boundary between the trace machinery and the hitting-set
+/// core: a sibling lab-runtime adapter populates it from `trace/causality`
+/// happens-before edges, then [`SupportGraph::from_causal_cones`] turns the
+/// causal cone of each outcome production into a derivation. Keeping the graph
+/// here free of any trace, I/O, or clock types is deliberate — the algorithm
+/// (backward reachability over predecessors) is what is reusable and testable;
+/// the adapter that fills it is not.
+///
+/// Each event carries a *fault-able* flag: a fault can only be injected on the
+/// fault-able events (sends, acks, timer fires, leases). Non-fault-able events
+/// (local computation, the outcome assertion itself) still propagate causality —
+/// their predecessors are followed — but they never appear in a derivation,
+/// because there is no fault to inject on them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CausalLineage {
+    /// Direct happens-before predecessors of each registered event.
+    predecessors: BTreeMap<FaultEventId, BTreeSet<FaultEventId>>,
+    /// Events on which a fault can be injected.
+    faultable: BTreeSet<FaultEventId>,
+}
+
+impl CausalLineage {
+    /// An empty lineage.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers `event`, setting whether a fault can be injected on it.
+    ///
+    /// Idempotent on the causal structure; re-declaring an event only updates its
+    /// fault-able flag (so a later non-fault-able declaration can demote it).
+    pub fn add_event(&mut self, event: FaultEventId, faultable: bool) {
+        self.predecessors.entry(event).or_default();
+        if faultable {
+            self.faultable.insert(event);
+        } else {
+            self.faultable.remove(&event);
+        }
+    }
+
+    /// Marks `event` fault-able, registering it if new. Idempotent.
+    pub fn mark_faultable(&mut self, event: FaultEventId) {
+        self.predecessors.entry(event).or_default();
+        self.faultable.insert(event);
+    }
+
+    /// Records a happens-before edge: `before` causally precedes `after`.
+    ///
+    /// Both endpoints are registered (non-fault-able unless separately marked).
+    /// A self-edge is ignored — an event cannot causally precede itself.
+    pub fn add_happens_before(&mut self, before: FaultEventId, after: FaultEventId) {
+        self.predecessors.entry(before).or_default();
+        let preds = self.predecessors.entry(after).or_default();
+        if before != after {
+            preds.insert(before);
+        }
+    }
+
+    /// Whether `event` is fault-able.
+    #[must_use]
+    pub fn is_faultable(&self, event: FaultEventId) -> bool {
+        self.faultable.contains(&event)
+    }
+
+    /// The full backward causal cone of `target`: `target` itself plus every
+    /// event that happens-before it, transitively. Deterministic (BTree order)
+    /// and cycle-safe (a malformed cyclic input still terminates).
+    #[must_use]
+    pub fn causal_cone(&self, target: FaultEventId) -> BTreeSet<FaultEventId> {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![target];
+        while let Some(event) = stack.pop() {
+            if !seen.insert(event) {
+                continue;
+            }
+            if let Some(preds) = self.predecessors.get(&event) {
+                for &pred in preds {
+                    if !seen.contains(&pred) {
+                        stack.push(pred);
+                    }
+                }
+            }
+        }
+        seen
+    }
+
+    /// The fault-able support of `target`: its causal cone intersected with the
+    /// fault-able events. This is the over-approximating lineage support of one
+    /// production of the outcome — per the soundness note, include-when-in-doubt,
+    /// so the full cone (not a minimal cut) is the safe choice.
+    #[must_use]
+    pub fn support_of(&self, target: FaultEventId) -> BTreeSet<FaultEventId> {
+        self.causal_cone(target)
+            .into_iter()
+            .filter(|event| self.faultable.contains(event))
+            .collect()
+    }
+}
+
+impl SupportGraph {
+    /// Builds a single-derivation support graph from the fault-able causal cone
+    /// of one outcome-producing event.
+    #[must_use]
+    pub fn from_causal_cone(lineage: &CausalLineage, target: FaultEventId) -> Self {
+        Self::from_causal_cones(lineage, std::iter::once(target))
+    }
+
+    /// Builds a support graph from several alternative productions of an outcome:
+    /// each `target` contributes one derivation (its fault-able causal cone).
+    ///
+    /// The outcome survives a fault hypothesis iff at least one target's cone is
+    /// left fully intact, so the minimal hitting sets over these derivations are
+    /// exactly the fault hypotheses worth testing — composing this extractor with
+    /// [`SupportGraph::minimal_hitting_sets`] is the AC1 lineage→hypothesis path.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::lab::ldfi::{CausalLineage, FaultEventId, HittingSetBudget, SupportGraph};
+    ///
+    /// // ack(2) and ack(3) each independently confirm delivery; both depend on
+    /// // the single send(1). Dropping send(1) breaks every path.
+    /// let (send, ack_a, ack_b, ok_a, ok_b) = (
+    ///     FaultEventId::new(1),
+    ///     FaultEventId::new(2),
+    ///     FaultEventId::new(3),
+    ///     FaultEventId::new(10),
+    ///     FaultEventId::new(11),
+    /// );
+    /// let mut lineage = CausalLineage::new();
+    /// for e in [send, ack_a, ack_b] {
+    ///     lineage.mark_faultable(e);
+    /// }
+    /// lineage.add_happens_before(send, ack_a);
+    /// lineage.add_happens_before(send, ack_b);
+    /// lineage.add_happens_before(ack_a, ok_a); // ok_* are non-fault-able outcomes
+    /// lineage.add_happens_before(ack_b, ok_b);
+    ///
+    /// let graph = SupportGraph::from_causal_cones(&lineage, [ok_a, ok_b]);
+    /// let result = graph.minimal_hitting_sets(HittingSetBudget::default());
+    /// // The minimal breaking hypothesis is exactly {send}.
+    /// assert_eq!(result.hypotheses.first().map(|h| h.len()), Some(1));
+    /// assert!(result.hypotheses[0].contains(&send));
+    /// ```
+    #[must_use]
+    pub fn from_causal_cones(
+        lineage: &CausalLineage,
+        targets: impl IntoIterator<Item = FaultEventId>,
+    ) -> Self {
+        let mut graph = Self::new();
+        for target in targets {
+            graph.add_derivation(lineage.support_of(target));
+        }
+        graph
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,7 +443,12 @@ mod tests {
         assert!(result.hypotheses.contains(&set(&[1])));
         // The single-event hypothesis is minimal, so no larger superset of {1}
         // is reported.
-        assert!(result.hypotheses.iter().all(|h| !h.is_superset(&set(&[1])) || *h == set(&[1])));
+        assert!(
+            result
+                .hypotheses
+                .iter()
+                .all(|h| !h.is_superset(&set(&[1])) || *h == set(&[1]))
+        );
         assert!(result.exhausted);
         assert!(result.coverage_certificate().is_none());
     }
@@ -350,5 +516,65 @@ mod tests {
         assert!(result.is_empty());
         assert!(result.exhausted);
         assert!(!result.unbreakable);
+    }
+
+    #[test]
+    fn causal_cone_collects_transitive_faultable_ancestry_only() {
+        // 1 -> 2 -> 3 (-> 4, non-fault-able outcome). The support of 4 is the
+        // fault-able cone {1,2,3}; the non-fault-able 4 propagates causality but
+        // never appears in a derivation.
+        let mut lineage = CausalLineage::new();
+        for id in [1, 2, 3] {
+            lineage.mark_faultable(ev(id));
+        }
+        lineage.add_happens_before(ev(1), ev(2));
+        lineage.add_happens_before(ev(2), ev(3));
+        lineage.add_happens_before(ev(3), ev(4)); // 4 left non-fault-able
+
+        assert_eq!(lineage.causal_cone(ev(4)), set(&[1, 2, 3, 4]));
+        assert_eq!(lineage.support_of(ev(4)), set(&[1, 2, 3]));
+        assert!(!lineage.is_faultable(ev(4)));
+    }
+
+    #[test]
+    fn shared_root_cone_yields_depth_one_hypothesis_end_to_end() {
+        // Two independent ack paths both rooted at the single send: dropping the
+        // send breaks both, so the lineage->hitting-set pipeline returns {send}.
+        let mut lineage = CausalLineage::new();
+        for id in [1, 2, 3] {
+            lineage.mark_faultable(ev(id));
+        }
+        lineage.add_happens_before(ev(1), ev(2));
+        lineage.add_happens_before(ev(1), ev(3));
+        lineage.add_happens_before(ev(2), ev(10));
+        lineage.add_happens_before(ev(3), ev(11));
+
+        let graph = SupportGraph::from_causal_cones(&lineage, [ev(10), ev(11)]);
+        assert_eq!(graph.derivations().len(), 2);
+        let result = graph.minimal_hitting_sets(HittingSetBudget::default());
+        assert!(result.hypotheses.contains(&set(&[1])));
+        assert!(result.coverage_certificate().is_none());
+    }
+
+    #[test]
+    fn outcome_with_no_faultable_support_is_unbreakable() {
+        // The outcome is produced with no fault-able ancestry: its derivation is
+        // empty, so it cannot be hit -> coverage certificate.
+        let mut lineage = CausalLineage::new();
+        lineage.add_event(ev(7), false); // a non-fault-able local outcome
+        let graph = SupportGraph::from_causal_cone(&lineage, ev(7));
+        let result = graph.minimal_hitting_sets(HittingSetBudget::default());
+        assert!(result.unbreakable);
+        assert_eq!(result.coverage_certificate(), Some(3));
+    }
+
+    #[test]
+    fn add_event_can_demote_a_previously_faultable_event() {
+        let mut lineage = CausalLineage::new();
+        lineage.mark_faultable(ev(1));
+        assert!(lineage.is_faultable(ev(1)));
+        lineage.add_event(ev(1), false);
+        assert!(!lineage.is_faultable(ev(1)));
+        assert!(lineage.support_of(ev(1)).is_empty());
     }
 }
