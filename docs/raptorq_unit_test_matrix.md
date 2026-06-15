@@ -211,7 +211,7 @@ Primary keys for triage:
 
 - `summary.json`: `status`, `profile`, `validation_bundle`, `validation_stage_log`, `scenario_log`
 - `scenarios.ndjson`: `scenario_id`, `category`, `status`, `seed`, `parameter_set`, `replay_ref`, `unit_sentinel`, `repro_command`, `artifact_path`
-- `validation_stages.ndjson`: `stage_id`, `status`, `exit_code`, `duration_ms`, `artifact_path`, `repro_command`
+- `validation_stages.ndjson`: `stage_id`, `status`, `exit_code`, `duration_ms`, `bead_id`, `scenario_id`, `seed_or_fixture`, `expected_outcome`, `artifact_path`, `repro_command`
 - unit/e2e schema anchors: `src/raptorq/test_log_schema.rs` (`raptorq-unit-log-v1`, `raptorq-e2e-log-v1`)
 
 Replay lookup workflow:

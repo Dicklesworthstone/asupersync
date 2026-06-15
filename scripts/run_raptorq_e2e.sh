@@ -497,10 +497,22 @@ validate_dual_policy_probe_contract() {
     if [[ "$rc" -ne 0 ]]; then
         validation_failures=$((validation_failures + 1))
     fi
-    printf '{"schema_version":"raptorq-validation-stage-log-v1","stage_id":"%s","stage_desc":"%s","profile":"%s","status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":0,"tests_failed":0,"artifact_path":"%s","repro_command":"%s"}\n' \
+    local bead_id
+    local scenario_id
+    local seed_or_fixture
+    local expected_outcome
+    bead_id="$(validation_stage_bead_id "$stage_id")"
+    scenario_id="$(validation_stage_scenario_id "$stage_id")"
+    seed_or_fixture="$(validation_stage_seed_or_fixture "$stage_id")"
+    expected_outcome="$(validation_stage_expected_outcome "$stage_id")"
+    printf '{"schema_version":"raptorq-validation-stage-log-v1","stage_id":"%s","stage_desc":"%s","profile":"%s","bead_id":"%s","scenario_id":"%s","seed_or_fixture":"%s","expected_outcome":"%s","status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":0,"tests_failed":0,"artifact_path":"%s","repro_command":"%s"}\n' \
         "$(json_escape "$stage_id")" \
         "$(json_escape "$stage_desc")" \
         "$(json_escape "$PROFILE")" \
+        "$(json_escape "$bead_id")" \
+        "$(json_escape "$scenario_id")" \
+        "$(json_escape "$seed_or_fixture")" \
+        "$(json_escape "$expected_outcome")" \
         "$(json_escape "$status")" \
         "$rc" \
         "$duration_ms" \
@@ -509,6 +521,33 @@ validate_dual_policy_probe_contract() {
         >> "$VALIDATION_STAGE_LOG"
 
     [[ "$rc" -eq 0 ]]
+}
+
+validation_stage_bead_id() {
+    case "$1" in
+        b4-legacy-tuple-quarantine) printf '%s\n' "bd-10hic" ;;
+        *) printf '%s\n' "N/A" ;;
+    esac
+}
+
+validation_stage_scenario_id() {
+    case "$1" in
+        b4-legacy-tuple-quarantine) printf '%s\n' "B4-LEGACY-TUPLE-QUARANTINE" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+validation_stage_seed_or_fixture() {
+    case "$1" in
+        b4-legacy-tuple-quarantine) printf '%s\n' "static-source-guard:src/raptorq/rfc6330.rs" ;;
+        *) printf '%s\n' "N/A" ;;
+    esac
+}
+
+validation_stage_expected_outcome() {
+    case "$1" in
+        *) printf '%s\n' "pass" ;;
+    esac
 }
 
 run_validation_stage() {
@@ -561,10 +600,22 @@ run_validation_stage() {
     fi
 
     validation_stage_count=$((validation_stage_count + 1))
-    printf '{"schema_version":"raptorq-validation-stage-log-v1","stage_id":"%s","stage_desc":"%s","profile":"%s","status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","repro_command":"%s"}\n' \
+    local bead_id
+    local scenario_id
+    local seed_or_fixture
+    local expected_outcome
+    bead_id="$(validation_stage_bead_id "$stage_id")"
+    scenario_id="$(validation_stage_scenario_id "$stage_id")"
+    seed_or_fixture="$(validation_stage_seed_or_fixture "$stage_id")"
+    expected_outcome="$(validation_stage_expected_outcome "$stage_id")"
+    printf '{"schema_version":"raptorq-validation-stage-log-v1","stage_id":"%s","stage_desc":"%s","profile":"%s","bead_id":"%s","scenario_id":"%s","seed_or_fixture":"%s","expected_outcome":"%s","status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","repro_command":"%s"}\n' \
         "$(json_escape "$stage_id")" \
         "$(json_escape "$stage_desc")" \
         "$(json_escape "$PROFILE")" \
+        "$(json_escape "$bead_id")" \
+        "$(json_escape "$scenario_id")" \
+        "$(json_escape "$seed_or_fixture")" \
+        "$(json_escape "$expected_outcome")" \
         "$(json_escape "$status")" \
         "$rc" \
         "$duration_ms" \
