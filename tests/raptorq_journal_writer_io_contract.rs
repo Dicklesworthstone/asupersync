@@ -531,3 +531,83 @@ fn k_minus_one_surviving_symbols_fail_closed_with_clear_diagnostic() {
         "the K/K-1 boundary must recover exactly at K and fail closed with a clear diagnostic at K-1"
     );
 }
+
+#[test]
+fn recover_epoch_attaches_integrity_proof_through_stripe_loss() {
+    // AC3: recovery must hand back integrity evidence (a RecoveryProof) describing
+    // HOW the bytes were reconstructed -- the CRC-validated survivor accounting --
+    // not bare bytes with no provenance. The proof stays self-consistent through a
+    // lost failure domain (fewer surviving frames, still byte-exact, still >= K').
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let ok = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 4,
+            stripe_count: 3,
+        });
+
+        let data = varied_payload(900);
+        journal.record_epoch(91, &data).await.expect("record epoch");
+
+        let (full_bytes, full_proof) = journal
+            .recover_epoch_with_proof(91)
+            .await
+            .expect("recover with proof");
+        assert_eq!(full_bytes, data, "proof recovery must be byte-exact");
+        assert_eq!(full_proof.epoch, 91);
+        assert_eq!(full_proof.recovered_len, data.len());
+        assert!(
+            full_proof.source_block_count >= 1,
+            "the object must have >= 1 source block"
+        );
+        assert!(
+            full_proof.surviving_frames > 0,
+            "the proof must account for the CRC-validated frames consumed"
+        );
+
+        // The proof path agrees with the plain recovery path on the bytes.
+        let plain = journal.recover_epoch(91).await.expect("plain recover");
+        assert_eq!(plain, full_bytes);
+
+        // Lose a whole failure domain: still byte-exact, and the proof honestly
+        // records that fewer symbol frames survived (but enough to decode).
+        std::fs::remove_file(dir_path.join(stripe_file_name(91, 0))).expect("drop stripe 0");
+        let (after_bytes, after_proof) = journal
+            .recover_epoch_with_proof(91)
+            .await
+            .expect("recover with proof after loss");
+        assert_eq!(
+            after_bytes, data,
+            "recovery stays byte-exact after stripe loss"
+        );
+        assert_eq!(after_proof.epoch, 91);
+        assert_eq!(after_proof.recovered_len, data.len());
+        assert_eq!(
+            after_proof.source_block_count,
+            full_proof.source_block_count
+        );
+        assert!(
+            after_proof.surviving_frames < full_proof.surviving_frames,
+            "losing a stripe must reduce the surviving-frame count in the proof"
+        );
+        assert!(
+            after_proof.surviving_frames > 0,
+            "enough frames must survive to decode and prove recovery"
+        );
+
+        // An unrecorded epoch produces no proof -- fail closed, not a fake one.
+        matches!(
+            journal.recover_epoch_with_proof(404).await,
+            Err(DurableJournalError::MissingParams)
+        )
+    }));
+
+    assert!(
+        ok,
+        "recovery must attach consistent integrity evidence, including through stripe loss"
+    );
+}

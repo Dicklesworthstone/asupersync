@@ -375,6 +375,28 @@ impl From<std::io::Error> for DurableJournalError {
     }
 }
 
+/// Integrity evidence attached to a recovered checkpoint epoch
+/// (br-asupersync-raptorq-leverage-3bb2pl.2 AC3).
+///
+/// Every frame counted in `surviving_frames` passed its per-frame CRC in
+/// [`scan_frames`] (header CRC + payload CRC), and the decode only succeeded
+/// because at least `K'` symbols survived for each of the `source_block_count`
+/// blocks — so this record is concrete evidence that the `recovered_len` bytes
+/// were reconstructed from intact, CRC-validated symbols rather than guessed or
+/// silently truncated. It travels with the recovered bytes so downstream trace
+/// tooling can record *how* a post-crash trace was restored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryProof {
+    /// Checkpoint epoch that was recovered.
+    pub epoch: u64,
+    /// Number of RaptorQ source blocks the object was split into.
+    pub source_block_count: u16,
+    /// Length, in bytes, of the reconstructed checkpoint.
+    pub recovered_len: usize,
+    /// Count of CRC-validated symbol frames (for this epoch) fed to the decoder.
+    pub surviving_frames: usize,
+}
+
 /// Configuration for a [`DurableTraceJournal`].
 #[derive(Debug, Clone)]
 pub struct DurableTraceJournalConfig {
@@ -476,6 +498,47 @@ impl DurableTraceJournal {
             read_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
         let (frames, _) = scan_frames(&survivors);
         decode_epoch_frames(record, &frames)
+    }
+
+    /// Recover `epoch`'s original bytes *and* the [`RecoveryProof`] integrity
+    /// evidence describing how they were reconstructed
+    /// (br-asupersync-raptorq-leverage-3bb2pl.2 AC3).
+    ///
+    /// Identical decode path to [`Self::recover_epoch`], but it also returns the
+    /// CRC-validated survivor accounting (epoch, block count, decoded length, and
+    /// the number of intact symbol frames consumed) so a trace-recover tool can
+    /// attach integrity evidence to the restored trace rather than handing back
+    /// bare bytes with no provenance.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::recover_epoch`]: [`DurableJournalError::Io`] for a read
+    /// failure, [`DurableJournalError::MissingParams`] if the params record is
+    /// absent, or [`DurableJournalError::Decoding`] /
+    /// [`DurableJournalError::Incomplete`] if the survivors cannot reconstruct
+    /// the object.
+    pub async fn recover_epoch_with_proof(
+        &self,
+        epoch: u64,
+    ) -> Result<(Vec<u8>, RecoveryProof), DurableJournalError> {
+        let record = read_epoch_params(&self.config.directory, epoch)
+            .await?
+            .ok_or(DurableJournalError::MissingParams)?;
+        let (source_block_count, _) = record.block_layout();
+        let survivors =
+            read_epoch_stripes(&self.config.directory, epoch, self.config.stripe_count).await?;
+        let (frames, _) = scan_frames(&survivors);
+        // Count only the CRC-validated frames the decoder actually consumes for
+        // this epoch (decode_epoch_frames skips any frame from another epoch).
+        let surviving_frames = frames.iter().filter(|f| f.header.epoch == epoch).count();
+        let data = decode_epoch_frames(record, &frames)?;
+        let proof = RecoveryProof {
+            epoch,
+            source_block_count,
+            recovered_len: data.len(),
+            surviving_frames,
+        };
+        Ok((data, proof))
     }
 
     /// Restore the newest still-recoverable checkpoint from the journal
