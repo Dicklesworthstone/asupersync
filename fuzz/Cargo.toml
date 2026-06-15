@@ -560,6 +560,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "atp_quic_frame_parse"
+path = "fuzz_targets/atp_quic_frame_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "atp_quic_datagram_frame_parse"
+path = "fuzz_targets/atp_quic_datagram_frame_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_quic_tls_state_machine"
 path = "fuzz_targets/quic_tls_state_machine.rs"
 test = false
@@ -6202,7 +6216,6 @@ path = "fuzz_targets/replay_minimization_invariants.rs"
 test = false
 doc = false
 bench = false
-
 
 
 
