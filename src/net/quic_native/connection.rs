@@ -187,11 +187,25 @@ pub struct NativeQuicConnection {
     /// Total DATAGRAM frames accepted on receive (anti-amplification + metrics),
     /// counted before any drop-oldest eviction so the figure reflects the wire.
     datagrams_received: u64,
+    /// Outbound DATAGRAM payloads queued by `send_datagram`, drained into
+    /// `QuicFrame::Datagram` frames by `generate_frames` in 1-RTT packets.
+    outbound_datagrams: VecDeque<Bytes>,
+    /// Total DATAGRAM frames emitted onto the wire by `generate_frames`.
+    datagrams_sent: u64,
 }
 
 /// Maximum number of decoded inbound DATAGRAM payloads buffered before the
 /// oldest is dropped to bound memory under a fast producer / slow consumer.
 const MAX_INBOUND_DATAGRAMS: usize = 256;
+
+/// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
+/// applies backpressure (rejects the enqueue) instead of growing unbounded.
+const MAX_OUTBOUND_DATAGRAMS: usize = 256;
+
+/// Largest DATAGRAM *frame* (RFC 9221 `max_datagram_frame_size` semantics) this
+/// endpoint will emit; a `send_datagram` whose encoded frame would exceed this
+/// is rejected so a single datagram always fits one 1-RTT packet.
+const MAX_DATAGRAM_FRAME_SIZE: usize = 1200;
 
 impl NativeQuicConnection {
     /// Construct a new connection machine.
@@ -222,6 +236,8 @@ impl NativeQuicConnection {
             pending_control_frames: VecDeque::new(),
             inbound_datagrams: VecDeque::new(),
             datagrams_received: 0,
+            outbound_datagrams: VecDeque::new(),
+            datagrams_sent: 0,
         }
     }
 
@@ -1017,11 +1033,59 @@ impl NativeQuicConnection {
         self.datagrams_received
     }
 
-    /// Drain queued control frames for packet assembly.
+    /// Queue an unreliable application datagram (RFC 9221) for transmission.
+    ///
+    /// The payload is later drained by [`Self::generate_frames`] into a
+    /// `QuicFrame::Datagram` carried in a 1-RTT packet. Unlike the loss-tolerant
+    /// receive queue, the send side never silently drops: an enqueue that would
+    /// exceed the bounded outbound queue applies backpressure by failing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeQuicConnectionError::InvalidState`] if the encoded frame
+    /// would exceed the maximum DATAGRAM frame size, or if the outbound queue is
+    /// full.
+    pub fn send_datagram(&mut self, payload: Bytes) -> Result<(), NativeQuicConnectionError> {
+        // RFC 9221: a sender MUST NOT send a DATAGRAM frame larger than the
+        // peer-advertised max_datagram_frame_size. Bound the encoded frame so a
+        // single datagram always fits one 1-RTT packet.
+        let frame = QuicFrame::Datagram {
+            data: payload.clone(),
+        };
+        let mut probe = BytesMut::new();
+        frame.encode(&mut probe)?;
+        if probe.len() > MAX_DATAGRAM_FRAME_SIZE {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "datagram frame exceeds max_datagram_frame_size",
+            ));
+        }
+        if self.outbound_datagrams.len() >= MAX_OUTBOUND_DATAGRAMS {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "outbound datagram queue is full",
+            ));
+        }
+        self.outbound_datagrams.push_back(payload);
+        Ok(())
+    }
+
+    /// Number of queued outbound DATAGRAM payloads awaiting transmission.
+    #[must_use]
+    pub fn pending_outbound_datagram_count(&self) -> usize {
+        self.outbound_datagrams.len()
+    }
+
+    /// Total DATAGRAM frames emitted onto the wire by [`Self::generate_frames`].
+    #[must_use]
+    pub fn datagrams_sent(&self) -> u64 {
+        self.datagrams_sent
+    }
+
+    /// Drain queued control frames (and, in 1-RTT, queued DATAGRAM payloads)
+    /// for packet assembly.
     pub fn generate_frames(
         &mut self,
         cx: &Cx,
-        _space: PacketNumberSpace,
+        space: PacketNumberSpace,
         max_frame_bytes: usize,
     ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
         checkpoint(cx)?;
@@ -1040,6 +1104,32 @@ impl NativeQuicConnection {
             frames.push(frame);
             if used >= max_frame_bytes {
                 break;
+            }
+        }
+
+        // DATAGRAM frames are application (1-RTT) data only (RFC 9221); never
+        // emit them in the Initial/Handshake spaces. Drain into the same byte
+        // budget, leaving the remainder queued so a small packet does not drop
+        // datagrams on the floor.
+        if space == PacketNumberSpace::ApplicationData {
+            while let Some(payload) = self.outbound_datagrams.pop_front() {
+                let frame = QuicFrame::Datagram { data: payload };
+                let mut encoded = BytesMut::new();
+                frame.encode(&mut encoded)?;
+                let frame_len = encoded.len();
+                if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
+                    let QuicFrame::Datagram { data } = frame else {
+                        unreachable!("frame was just constructed as a DATAGRAM");
+                    };
+                    self.outbound_datagrams.push_front(data);
+                    break;
+                }
+                used = used.saturating_add(frame_len);
+                self.datagrams_sent = self.datagrams_sent.saturating_add(1);
+                frames.push(frame);
+                if used >= max_frame_bytes {
+                    break;
+                }
             }
         }
 
