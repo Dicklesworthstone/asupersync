@@ -671,13 +671,20 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
         .split(['/', '?', '#'])
         .next()
         .ok_or_else(|| GrpcError::transport("channel URI is missing an authority"))?;
+    if authority
+        .chars()
+        .any(|ch| ch.is_ascii_whitespace() || ch.is_control())
+    {
+        return Err(GrpcError::transport(
+            "channel URI authority cannot contain whitespace or control characters",
+        ));
+    }
     // Strip userinfo (RFC 3986 §3.2: authority = [userinfo "@"] host [":" port])
     // before extracting the host, so "loopback:pw@evil.com" doesn't pass.
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
     let host = host_port
         .split_once(':')
-        .map_or(host_port, |(host, _)| host)
-        .trim();
+        .map_or(host_port, |(host, _)| host);
     if host.is_empty() {
         return Err(GrpcError::transport("channel URI is missing a host"));
     }
@@ -2516,6 +2523,31 @@ mod tests {
                     );
                 }
                 other => panic!("expected transport error for {uri}, got: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn channel_connect_rejects_authority_whitespace() {
+        for uri in [
+            "http:// localhost:50051",
+            "http://localhost :50051",
+            "http://localhost:50051 ",
+            "http://local\thost:50051",
+            "http://localhost\n:50051",
+        ] {
+            let error = match futures_lite::future::block_on(Channel::connect(uri)) {
+                Ok(_) => panic!("authority whitespace must fail closed: {uri:?}"),
+                Err(error) => error,
+            };
+            match error {
+                GrpcError::Transport(_kind, message) => {
+                    assert!(
+                        message.contains("authority cannot contain whitespace"),
+                        "expected authority whitespace error for {uri:?}, got: {message}"
+                    );
+                }
+                other => panic!("expected transport error for {uri:?}, got: {other:?}"),
             }
         }
     }
