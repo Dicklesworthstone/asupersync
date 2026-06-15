@@ -18,6 +18,12 @@
 //! - [`MessageHeader`]: the small, fixed-size header that precedes a message's
 //!   symbols on the wire so a receiver can plan its decode before any symbol
 //!   arrives.
+//! - [`SymbolFrame`]: the lightweight per-symbol wire frame (`message_id` +
+//!   `esi` + payload) that a lossy transport drops, reorders, or duplicates one
+//!   at a time.
+//! - [`MessageReassembler`]: the receive-side intake state machine that
+//!   deduplicates and reorders incoming symbols and reports decode readiness
+//!   against the [`BlockLayout`] — the pure core of the symbol aggregator.
 //!
 //! The async `EcSender`/`EcReceiver` composition over the RaptorQ pipeline
 //! ([`crate::raptorq::pipeline`]), the symbol transport, authenticated symbols,
@@ -276,6 +282,226 @@ impl MessageHeader {
     }
 }
 
+/// A single erasure symbol as it travels over the wire.
+///
+/// Each encoded symbol of a message is carried in its own frame so a lossy,
+/// reordering, duplicating transport can drop, shuffle, or repeat individual
+/// symbols without corrupting the others. A frame carries only what is needed
+/// to route and deduplicate the symbol: the per-sender `message_id` (which
+/// selects the receive-side [`MessageReassembler`] and drives per-sender FIFO
+/// ordering) and the RaptorQ encoding-symbol id (`esi`, which identifies the
+/// symbol within its message and is the deduplication key). The message
+/// geometry (`K`/`N`/size) travels once in the [`MessageHeader`]; symbol frames
+/// stay small.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolFrame {
+    /// Per-sender message identifier this symbol belongs to.
+    pub message_id: u64,
+    /// RaptorQ encoding-symbol id within the message (the dedup key).
+    pub esi: u16,
+    /// The symbol bytes (`symbol_size` bytes for a well-formed symbol).
+    pub payload: Vec<u8>,
+}
+
+impl SymbolFrame {
+    /// Fixed bytes preceding the payload: `message_id` (8) + `esi` (2).
+    pub const HEADER_LEN: usize = 8 + 2;
+
+    /// Builds a frame for symbol `esi` of message `message_id`.
+    #[must_use]
+    pub const fn new(message_id: u64, esi: u16, payload: Vec<u8>) -> Self {
+        Self {
+            message_id,
+            esi,
+            payload,
+        }
+    }
+
+    /// The total encoded length of this frame (fixed header + payload).
+    #[must_use]
+    pub const fn encoded_len(&self) -> usize {
+        Self::HEADER_LEN + self.payload.len()
+    }
+
+    /// Encodes the frame to `[message_id LE][esi LE][payload..]`.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.encoded_len());
+        out.extend_from_slice(&self.message_id.to_le_bytes());
+        out.extend_from_slice(&self.esi.to_le_bytes());
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    /// Decodes a frame from `bytes`; the payload is everything after the fixed
+    /// [`HEADER_LEN`](Self::HEADER_LEN) header.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EcError> {
+        if bytes.len() < Self::HEADER_LEN {
+            return Err(EcError::ShortFrame {
+                got: bytes.len(),
+                need: Self::HEADER_LEN,
+            });
+        }
+        let message_id = u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes"));
+        let esi = u16::from_le_bytes(bytes[8..10].try_into().expect("2 bytes"));
+        Ok(Self {
+            message_id,
+            esi,
+            payload: bytes[Self::HEADER_LEN..].to_vec(),
+        })
+    }
+}
+
+/// The outcome of offering a symbol to a [`MessageReassembler`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolAccept {
+    /// A new, in-range, correctly sized symbol was stored.
+    Accepted,
+    /// The symbol's `esi` was already held; the reassembler keeps the first
+    /// copy (later copies — including a Byzantine re-send under a different
+    /// payload — are dropped; per-symbol authentication is enforced by the
+    /// layer above).
+    Duplicate,
+    /// `esi` was not below the message's `total_symbols`, so it cannot be a
+    /// symbol of this block.
+    OutOfRange {
+        /// The rejected encoding-symbol id.
+        esi: u16,
+        /// The message's symbol count (`N`); valid ids are `0..total`.
+        total: u16,
+    },
+    /// The payload length did not equal the message's `symbol_size`.
+    WrongSize {
+        /// The encoding-symbol id whose payload was malformed.
+        esi: u16,
+        /// The payload length actually offered.
+        got: usize,
+        /// The required per-symbol length (`symbol_size`).
+        expected: usize,
+    },
+    /// The frame's `message_id` did not match this reassembler's message.
+    WrongMessage {
+        /// The reassembler's message id.
+        expected: u64,
+        /// The frame's message id.
+        got: u64,
+    },
+}
+
+/// Receive-side intake for one message: deduplicates and reorders symbols and
+/// tracks decode readiness against the message's [`BlockLayout`].
+///
+/// Constructed from the message's [`MessageHeader`], it accepts symbols in any
+/// order, drops duplicates and malformed/out-of-range symbols, and reports when
+/// enough distinct symbols have arrived to attempt a RaptorQ decode
+/// ([`is_ready`](Self::is_ready)). Held symbols are retained in ascending `esi`
+/// order so a later decode pass observes a deterministic, replayable symbol
+/// sequence regardless of arrival order — the determinism the loss-injection
+/// suite relies on. The actual RaptorQ decode is performed by the async
+/// receiver layered on top; this type owns only the transport-free, pure intake
+/// state machine.
+#[derive(Debug, Clone)]
+pub struct MessageReassembler {
+    message_id: u64,
+    layout: BlockLayout,
+    symbols: std::collections::BTreeMap<u16, Vec<u8>>,
+}
+
+impl MessageReassembler {
+    /// Creates a reassembler for the message described by `header`.
+    #[must_use]
+    pub fn new(header: &MessageHeader) -> Self {
+        Self {
+            message_id: header.message_id,
+            layout: header.block_layout(),
+            symbols: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// The message id this reassembler collects symbols for.
+    #[must_use]
+    pub const fn message_id(&self) -> u64 {
+        self.message_id
+    }
+
+    /// The decode plan ([`BlockLayout`]) this reassembler tracks progress
+    /// against.
+    #[must_use]
+    pub const fn layout(&self) -> &BlockLayout {
+        &self.layout
+    }
+
+    /// The number of distinct, accepted symbols currently held (never exceeds
+    /// the message's `total_symbols`).
+    #[must_use]
+    pub fn distinct_received(&self) -> u16 {
+        u16::try_from(self.symbols.len()).unwrap_or(u16::MAX)
+    }
+
+    /// Whether enough distinct symbols have arrived to attempt a decode (the
+    /// theoretical `K` bound; a real decode may need the small overhead epsilon
+    /// the repair budget absorbs).
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.layout.is_decodable(self.distinct_received())
+    }
+
+    /// How many more distinct symbols are needed before a decode can be
+    /// attempted — `0` once [`is_ready`](Self::is_ready) holds.
+    #[must_use]
+    pub fn symbols_until_ready(&self) -> u16 {
+        self.layout
+            .symbols_until_decodable(self.distinct_received())
+    }
+
+    /// Offers a raw `(esi, payload)` symbol, deduplicating by `esi`, rejecting
+    /// out-of-range ids and wrong-sized payloads, and keeping the first copy of
+    /// any repeated symbol.
+    #[must_use]
+    pub fn accept(&mut self, esi: u16, payload: &[u8]) -> SymbolAccept {
+        if esi >= self.layout.total_symbols {
+            return SymbolAccept::OutOfRange {
+                esi,
+                total: self.layout.total_symbols,
+            };
+        }
+        let expected = self.layout.symbol_size as usize;
+        if payload.len() != expected {
+            return SymbolAccept::WrongSize {
+                esi,
+                got: payload.len(),
+                expected,
+            };
+        }
+        if self.symbols.contains_key(&esi) {
+            return SymbolAccept::Duplicate;
+        }
+        self.symbols.insert(esi, payload.to_vec());
+        SymbolAccept::Accepted
+    }
+
+    /// Offers a decoded [`SymbolFrame`], routing it by `message_id` (a frame for
+    /// a different message is rejected with [`SymbolAccept::WrongMessage`]).
+    #[must_use]
+    pub fn accept_frame(&mut self, frame: &SymbolFrame) -> SymbolAccept {
+        if frame.message_id != self.message_id {
+            return SymbolAccept::WrongMessage {
+                expected: self.message_id,
+                got: frame.message_id,
+            };
+        }
+        self.accept(frame.esi, &frame.payload)
+    }
+
+    /// Iterates the held symbols in ascending `esi` order — a deterministic,
+    /// arrival-order-independent sequence suitable for feeding a decode.
+    pub fn symbols(&self) -> impl Iterator<Item = (u16, &[u8])> {
+        self.symbols
+            .iter()
+            .map(|(&esi, bytes)| (esi, bytes.as_slice()))
+    }
+}
+
 /// Errors from erasure-channel configuration, planning, and framing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EcError {
@@ -299,6 +525,13 @@ pub enum EcError {
         /// Bytes required.
         need: usize,
     },
+    /// A buffer was too short to contain a [`SymbolFrame`] header.
+    ShortFrame {
+        /// Bytes available.
+        got: usize,
+        /// Bytes required for the fixed frame header.
+        need: usize,
+    },
 }
 
 impl fmt::Display for EcError {
@@ -307,13 +540,22 @@ impl fmt::Display for EcError {
             Self::ZeroSymbolSize => write!(f, "symbol_size must be >= 1"),
             Self::ZeroMaxMessage => write!(f, "max_message_size must be >= 1"),
             Self::MessageTooLarge { size, max } => {
-                write!(f, "message of {size} bytes exceeds the {max}-byte block maximum")
+                write!(
+                    f,
+                    "message of {size} bytes exceeds the {max}-byte block maximum"
+                )
             }
             Self::SymbolCountOverflow => {
-                write!(f, "erasure block layout exceeds the on-wire symbol-count space")
+                write!(
+                    f,
+                    "erasure block layout exceeds the on-wire symbol-count space"
+                )
             }
             Self::ShortHeader { got, need } => {
                 write!(f, "message header needs {need} bytes, got {got}")
+            }
+            Self::ShortFrame { got, need } => {
+                write!(f, "symbol frame header needs {need} bytes, got {got}")
             }
         }
     }
@@ -530,5 +772,171 @@ mod tests {
         assert_eq!(layout.padding, 50); // 3*100 - 250
         assert_eq!(layout.message_size, 250);
         assert_eq!(layout.min_symbols_to_decode(), 3);
+    }
+
+    fn k3_n5_header(message_id: u64) -> MessageHeader {
+        // symbol_size=4, K=ceil(9/4)=3, repair=2, N=5.
+        let cfg = EcConfig {
+            symbol_size: 4,
+            repair_overhead: 2,
+            max_message_size: 1 << 20,
+        };
+        let layout = cfg.plan(9).expect("plan");
+        assert_eq!(layout.source_symbols, 3);
+        assert_eq!(layout.total_symbols, 5);
+        MessageHeader::from_layout(message_id, &layout).expect("header")
+    }
+
+    #[test]
+    fn symbol_frame_roundtrips() {
+        let frame = SymbolFrame::new(0x00A1_B2C3_D4E5_F601, 9, vec![1, 2, 3, 4, 5]);
+        assert_eq!(frame.encoded_len(), SymbolFrame::HEADER_LEN + 5);
+        let bytes = frame.encode();
+        assert_eq!(bytes.len(), frame.encoded_len());
+        let decoded = SymbolFrame::decode(&bytes).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(decoded.message_id, 0x00A1_B2C3_D4E5_F601);
+        assert_eq!(decoded.esi, 9);
+        assert_eq!(decoded.payload, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn symbol_frame_empty_payload_roundtrips() {
+        let frame = SymbolFrame::new(5, 0, Vec::new());
+        let bytes = frame.encode();
+        assert_eq!(bytes.len(), SymbolFrame::HEADER_LEN);
+        let decoded = SymbolFrame::decode(&bytes).expect("decode");
+        assert_eq!(decoded, frame);
+        assert!(decoded.payload.is_empty());
+    }
+
+    #[test]
+    fn symbol_frame_decode_rejects_short_buffer() {
+        let result = SymbolFrame::decode(&[0u8; 9]);
+        assert_eq!(
+            result,
+            Err(EcError::ShortFrame {
+                got: 9,
+                need: SymbolFrame::HEADER_LEN
+            })
+        );
+    }
+
+    #[test]
+    fn reassembler_dedups_reorders_and_tracks_readiness() {
+        let header = k3_n5_header(11);
+        let mut ra = MessageReassembler::new(&header);
+        assert_eq!(ra.message_id(), 11);
+        assert_eq!(ra.layout().source_symbols, 3);
+        assert_eq!(ra.distinct_received(), 0);
+        assert!(!ra.is_ready());
+        assert_eq!(ra.symbols_until_ready(), 3);
+
+        // Out-of-order arrivals are accepted.
+        assert_eq!(ra.accept(3, &[3, 3, 3, 3]), SymbolAccept::Accepted);
+        assert_eq!(ra.accept(0, &[0, 0, 0, 0]), SymbolAccept::Accepted);
+        assert_eq!(ra.distinct_received(), 2);
+        assert!(!ra.is_ready());
+        assert_eq!(ra.symbols_until_ready(), 1);
+
+        // A repeated esi (even with different bytes) is a duplicate; the first
+        // copy is kept and the count does not advance.
+        assert_eq!(ra.accept(3, &[9, 9, 9, 9]), SymbolAccept::Duplicate);
+        assert_eq!(ra.distinct_received(), 2);
+
+        // The third distinct symbol reaches K and flips readiness.
+        assert_eq!(ra.accept(4, &[4, 4, 4, 4]), SymbolAccept::Accepted);
+        assert_eq!(ra.distinct_received(), 3);
+        assert!(ra.is_ready());
+        assert_eq!(ra.symbols_until_ready(), 0);
+
+        // Extra symbols beyond K are still accepted (decode-overhead headroom).
+        assert_eq!(ra.accept(1, &[1, 1, 1, 1]), SymbolAccept::Accepted);
+        assert_eq!(ra.distinct_received(), 4);
+        assert!(ra.is_ready());
+
+        // Held symbols come back in ascending esi order regardless of arrival
+        // order, and esi 3 retained its FIRST payload (not the duplicate).
+        let held: Vec<(u16, Vec<u8>)> = ra.symbols().map(|(e, b)| (e, b.to_vec())).collect();
+        assert_eq!(
+            held,
+            vec![
+                (0, vec![0, 0, 0, 0]),
+                (1, vec![1, 1, 1, 1]),
+                (3, vec![3, 3, 3, 3]),
+                (4, vec![4, 4, 4, 4]),
+            ]
+        );
+    }
+
+    #[test]
+    fn reassembler_rejects_out_of_range_and_wrong_size() {
+        let header = k3_n5_header(1);
+        let mut ra = MessageReassembler::new(&header);
+
+        // esi == total_symbols (5) is out of range; valid ids are 0..5.
+        assert_eq!(
+            ra.accept(5, &[0, 0, 0, 0]),
+            SymbolAccept::OutOfRange { esi: 5, total: 5 }
+        );
+        // Payload length must equal symbol_size (4).
+        assert_eq!(
+            ra.accept(0, &[0, 0, 0]),
+            SymbolAccept::WrongSize {
+                esi: 0,
+                got: 3,
+                expected: 4
+            }
+        );
+        // Rejected offers store nothing.
+        assert_eq!(ra.distinct_received(), 0);
+    }
+
+    #[test]
+    fn reassembler_routes_frames_by_message_id() {
+        let header = k3_n5_header(100);
+        let mut ra = MessageReassembler::new(&header);
+
+        let foreign = SymbolFrame::new(200, 0, vec![0, 0, 0, 0]);
+        assert_eq!(
+            ra.accept_frame(&foreign),
+            SymbolAccept::WrongMessage {
+                expected: 100,
+                got: 200
+            }
+        );
+        assert_eq!(ra.distinct_received(), 0);
+
+        let ours = SymbolFrame::new(100, 0, vec![7, 7, 7, 7]);
+        assert_eq!(ra.accept_frame(&ours), SymbolAccept::Accepted);
+        assert_eq!(ra.distinct_received(), 1);
+        // Re-offering the same frame deduplicates.
+        assert_eq!(ra.accept_frame(&ours), SymbolAccept::Duplicate);
+        assert_eq!(ra.distinct_received(), 1);
+    }
+
+    #[test]
+    fn reassembler_intake_is_arrival_order_independent() {
+        // The same symbol set delivered in two different orders yields an
+        // identical held sequence and identical readiness — the determinism the
+        // seeded loss-injection suite relies on (AC7).
+        let header = k3_n5_header(7);
+        let payloads: [(u16, [u8; 4]); 3] = [(0, [10; 4]), (1, [11; 4]), (2, [12; 4])];
+
+        let mut forward = MessageReassembler::new(&header);
+        for (esi, bytes) in payloads {
+            assert_eq!(forward.accept(esi, &bytes), SymbolAccept::Accepted);
+        }
+
+        let mut reversed = MessageReassembler::new(&header);
+        for (esi, bytes) in payloads.iter().rev() {
+            assert_eq!(reversed.accept(*esi, bytes), SymbolAccept::Accepted);
+        }
+
+        let fwd: Vec<(u16, Vec<u8>)> = forward.symbols().map(|(e, b)| (e, b.to_vec())).collect();
+        let rev: Vec<(u16, Vec<u8>)> = reversed.symbols().map(|(e, b)| (e, b.to_vec())).collect();
+        assert_eq!(fwd, rev);
+        assert_eq!(forward.is_ready(), reversed.is_ready());
+        assert!(forward.is_ready());
     }
 }
