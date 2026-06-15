@@ -632,11 +632,20 @@ impl<C: Codec> GrpcClient<C> {
 
         let request = Request::new(Bytes::new());
         let _metadata = self.build_outbound_metadata(&request, path)?;
-        let stream = ResponseStream::open();
+        let request_state = Arc::new(Mutex::new(RequestSinkState::new()));
+        let cancel_request_state = Arc::clone(&request_state);
+        let stream = ResponseStream::open_with_cancel_hook(Box::new(move || {
+            cancel_request_sink_state(
+                &cancel_request_state,
+                Status::cancelled("response stream cancelled by client"),
+            );
+            Ok(())
+        }));
         let mut send_stream = stream.clone();
         let close_stream = stream.clone();
         let cancel_stream = stream.clone();
-        let sink = RequestSink::with_hooks(
+        let sink = RequestSink::with_state_and_hooks(
+            request_state,
             Some(Box::new(move |message: Req| {
                 let response =
                     convert_message::<Req, Resp>(message, "bidirectional streaming conversion")?;
@@ -830,13 +839,24 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[derive(Debug)]
 struct ResponseStreamState<T> {
     items: VecDeque<Result<T, Status>>,
     closed: bool,
     terminal_status: Option<Status>,
     terminal_metadata: Metadata,
     waiters: Vec<Waker>,
+}
+
+impl<T> fmt::Debug for ResponseStreamState<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResponseStreamState")
+            .field("items_len", &self.items.len())
+            .field("closed", &self.closed)
+            .field("terminal_status", &self.terminal_status)
+            .field("terminal_metadata", &self.terminal_metadata)
+            .field("waiters_len", &self.waiters.len())
+            .finish()
+    }
 }
 
 impl<T> ResponseStreamState<T> {
@@ -880,16 +900,26 @@ impl<T> ResponseStreamState<T> {
 }
 
 /// A stream of responses from the server.
-#[derive(Debug)]
 pub struct ResponseStream<T> {
     state: Arc<Mutex<ResponseStreamState<T>>>,
+    on_cancel: Option<Arc<Mutex<CloseHook>>>,
 }
 
 impl<T> Clone for ResponseStream<T> {
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
+            on_cancel: self.on_cancel.as_ref().map(Arc::clone),
         }
+    }
+}
+
+impl<T> fmt::Debug for ResponseStream<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResponseStream")
+            .field("state", &self.state)
+            .field("has_cancel_hook", &self.on_cancel.is_some())
+            .finish()
     }
 }
 
@@ -899,6 +929,7 @@ impl<T> ResponseStream<T> {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(ResponseStreamState::closed())),
+            on_cancel: None,
         }
     }
 
@@ -907,6 +938,14 @@ impl<T> ResponseStream<T> {
     pub fn open() -> Self {
         Self {
             state: Arc::new(Mutex::new(ResponseStreamState::open())),
+            on_cancel: None,
+        }
+    }
+
+    fn open_with_cancel_hook(on_cancel: CloseHook) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ResponseStreamState::open())),
+            on_cancel: Some(Arc::new(Mutex::new(on_cancel))),
         }
     }
 
@@ -952,10 +991,16 @@ impl<T> ResponseStream<T> {
         self.cancel_with_metadata(status, Metadata::new());
     }
 
-    fn set_terminal_status(&self, status: Status, metadata: Metadata, discard_buffered: bool) {
-        let waiters = {
+    fn set_terminal_status(
+        &self,
+        status: Status,
+        metadata: Metadata,
+        discard_buffered: bool,
+    ) -> bool {
+        let (waiters, inserted) = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
+            let inserted = state.terminal_status.is_none();
             if state.terminal_status.is_none() {
                 if discard_buffered {
                     state.items.clear();
@@ -963,11 +1008,12 @@ impl<T> ResponseStream<T> {
                 state.terminal_status = Some(status);
                 state.terminal_metadata = metadata;
             }
-            state.take_waiters()
+            (state.take_waiters(), inserted)
         };
         for waker in waiters {
             waker.wake();
         }
+        inserted
     }
 
     /// Cancel the stream immediately with a terminal status and trailing metadata.
@@ -975,7 +1021,12 @@ impl<T> ResponseStream<T> {
     /// Cancellation is abrupt: queued response items are discarded so the
     /// caller observes the terminal status before any stale buffered payloads.
     pub fn cancel_with_metadata(&self, status: Status, metadata: Metadata) {
-        self.set_terminal_status(status, metadata, true);
+        if self.set_terminal_status(status, metadata, true)
+            && let Some(on_cancel) = &self.on_cancel
+        {
+            let mut hook = lock_unpoisoned(on_cancel);
+            let _ = hook();
+        }
     }
 
     /// Finish the stream with a terminal status after draining queued items.
@@ -1061,6 +1112,33 @@ pub struct RequestSink<T> {
     on_cancel: Option<CloseHook>,
 }
 
+fn send_closed_error(close_state: &RequestSinkCloseState) -> Option<Status> {
+    match close_state {
+        RequestSinkCloseState::Open => None,
+        RequestSinkCloseState::Graceful => Some(Status::failed_precondition(
+            "cannot send after request sink is closed",
+        )),
+        RequestSinkCloseState::Cancelled(status) | RequestSinkCloseState::Failed(status) => {
+            Some(status.clone())
+        }
+    }
+}
+
+fn cancel_request_sink_state(state: &Arc<Mutex<RequestSinkState>>, status: Status) {
+    let waiter = {
+        let mut state = lock_unpoisoned(state);
+        if !state.close_state.is_open() {
+            None
+        } else {
+            state.close_state = RequestSinkCloseState::Cancelled(status);
+            state.waiter.take()
+        }
+    };
+    if let Some(waiter) = waiter {
+        waiter.wake();
+    }
+}
+
 impl<T> RequestSink<T> {
     /// Create a new request sink.
     #[must_use]
@@ -1088,13 +1166,28 @@ impl<T> RequestSink<T> {
         }
     }
 
+    #[cfg(test)]
     fn with_hooks(
         on_send: Option<SendHook<T>>,
         on_close: Option<CloseHook>,
         on_cancel: Option<CloseHook>,
     ) -> Self {
+        Self::with_state_and_hooks(
+            Arc::new(Mutex::new(RequestSinkState::new())),
+            on_send,
+            on_close,
+            on_cancel,
+        )
+    }
+
+    fn with_state_and_hooks(
+        state: Arc<Mutex<RequestSinkState>>,
+        on_send: Option<SendHook<T>>,
+        on_close: Option<CloseHook>,
+        on_cancel: Option<CloseHook>,
+    ) -> Self {
         Self {
-            state: Arc::new(Mutex::new(RequestSinkState::new())),
+            state,
             on_send,
             on_close,
             on_cancel,
@@ -1108,13 +1201,13 @@ impl<T> RequestSink<T> {
         T: Send + 'static,
     {
         if self.on_send.is_none() {
-            let closed = {
+            let closed_error = {
                 let mut state = self
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let closed = !state.close_state.is_open();
-                if !closed {
+                let closed_error = send_closed_error(&state.close_state);
+                if closed_error.is_none() {
                     if state.sent_count > 0 {
                         return Err(Status::failed_precondition(
                             "loopback client streaming does not support multiple request messages yet",
@@ -1124,27 +1217,23 @@ impl<T> RequestSink<T> {
                     state.sent_count = state.sent_count.saturating_add(1);
                 }
                 drop(state);
-                closed
+                closed_error
             };
-            if closed {
-                return Err(Status::failed_precondition(
-                    "cannot send after request sink is closed",
-                ));
+            if let Some(status) = closed_error {
+                return Err(status);
             }
             return Ok(());
         }
 
-        let closed = {
+        let closed_error = {
             let state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            !state.close_state.is_open()
+            send_closed_error(&state.close_state)
         };
-        if closed {
-            return Err(Status::failed_precondition(
-                "cannot send after request sink is closed",
-            ));
+        if let Some(status) = closed_error {
+            return Err(status);
         }
         if let Some(hook) = self.on_send.as_mut() {
             hook(message)?;
@@ -2333,6 +2422,29 @@ mod tests {
             Streaming::poll_next(Pin::new(&mut stream), cx)
         }));
         assert!(second.is_none(), "cancelled bidi stream should then close");
+    }
+
+    #[test]
+    fn conformance_bidi_response_cancel_closes_request_sink() {
+        let channel = make_channel("http://loopback:50051");
+        let mut client = GrpcClient::new(channel);
+
+        let (mut sink, stream) = futures_lite::future::block_on(
+            client.bidi_streaming::<u32, u32>("/pkg.Service/Method"),
+        )
+        .expect("bidi streaming setup");
+
+        stream.cancel(Status::cancelled("response stream cancelled by client"));
+
+        let send_error = futures_lite::future::block_on(sink.send(7))
+            .expect_err("response cancellation should cancel the request sink");
+        assert_eq!(send_error.code(), crate::grpc::Code::Cancelled);
+        assert_eq!(send_error.message(), "response stream cancelled by client");
+
+        let close_error = futures_lite::future::block_on(sink.close())
+            .expect_err("closing a cancelled request sink should report cancellation");
+        assert_eq!(close_error.code(), crate::grpc::Code::Cancelled);
+        assert_eq!(close_error.message(), "response stream cancelled by client");
     }
 
     #[test]
