@@ -3655,7 +3655,7 @@ impl Cx<cap::All> {
         let scope = self.scope();
         let mut handles = Vec::with_capacity(futures.len());
         for future in futures {
-            match self.spawn_in(&scope, move |_child| async move { future.await }) {
+            match self.spawn_in(&scope, move |_child| future) {
                 Ok(handle) => handles.push(handle),
                 Err(_spawn_err) => {
                     // Fail closed: dropping the already-spawned handles requests

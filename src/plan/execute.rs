@@ -917,9 +917,11 @@ pub struct OptimizedExecution<T> {
 }
 
 /// Captures a plan, applies the conservative *certified* rewrite pass, and
-/// executes the result — falling closed to the original plan (never erroring on
-/// the optimization itself) whenever the rewrite is absent, unverifiable, or not
-/// execution-safe. The certificate is always surfaced.
+/// executes the result.
+///
+/// Falls closed to the original plan (never erroring on the optimization itself)
+/// whenever the rewrite is absent, unverifiable, or not execution-safe. The
+/// certificate is always surfaced.
 ///
 /// Fail-closed conditions (each runs the original plan with a logged reason):
 /// * the plan contains `first_ok`/`quorum` (no structural rewrite IR);
