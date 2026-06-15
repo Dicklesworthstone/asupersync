@@ -160,7 +160,7 @@ pub trait SessionStateMarker {
 }
 
 /// Linear authority to publish onto a specific subject family.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct PublishPermit<S: SubjectFamilyTag> {
     schema_name: String,
     delivery_class: DeliveryClass,
@@ -201,6 +201,12 @@ impl<S: SubjectFamilyTag> PublishPermit<S> {
     }
 }
 
+impl<S: SubjectFamilyTag> fmt::Debug for PublishPermit<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PublishPermit(<redacted>)")
+    }
+}
+
 impl<S: SubjectFamilyTag> fmt::Display for PublishPermit<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -214,7 +220,7 @@ impl<S: SubjectFamilyTag> fmt::Display for PublishPermit<S> {
 }
 
 /// Linear authority to register interest in a specific subject family.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct SubscribeToken<S: SubjectFamilyTag> {
     schema_name: String,
     delivery_class: DeliveryClass,
@@ -259,6 +265,12 @@ impl<S: SubjectFamilyTag> SubscribeToken<S> {
     }
 }
 
+impl<S: SubjectFamilyTag> fmt::Debug for SubscribeToken<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SubscribeToken(<redacted>)")
+    }
+}
+
 impl<S: SubjectFamilyTag> fmt::Display for SubscribeToken<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -272,7 +284,7 @@ impl<S: SubjectFamilyTag> fmt::Display for SubscribeToken<S> {
 }
 
 /// Linear protocol-state token for session-typed conversations.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct SessionToken<P: ProtocolMarker, State: SessionStateMarker> {
     session_id: u64,
     _protocol: PhantomData<fn() -> P>,
@@ -304,6 +316,12 @@ impl<P: ProtocolMarker, State: SessionStateMarker> SessionToken<P, State> {
     }
 }
 
+impl<P: ProtocolMarker, State: SessionStateMarker> fmt::Debug for SessionToken<P, State> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SessionToken(<redacted>)")
+    }
+}
+
 impl<P: ProtocolMarker, State: SessionStateMarker> fmt::Display for SessionToken<P, State> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -317,7 +335,7 @@ impl<P: ProtocolMarker, State: SessionStateMarker> fmt::Display for SessionToken
 }
 
 /// Authority artifact for cursor operations scoped to a subject cell and epoch.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct CursorAuthorityLease {
     cell_id: CellId,
     epoch: CellEpoch,
@@ -360,6 +378,12 @@ impl CursorAuthorityLease {
     }
 }
 
+impl fmt::Debug for CursorAuthorityLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CursorAuthorityLease(<redacted>)")
+    }
+}
+
 impl fmt::Display for CursorAuthorityLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -374,7 +398,7 @@ impl fmt::Display for CursorAuthorityLease {
 }
 
 /// Authority certificate for appending to a stream-backed subject cell.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct AppendCertificate {
     cell_id: CellId,
     epoch: CellEpoch,
@@ -417,6 +441,12 @@ impl AppendCertificate {
     }
 }
 
+impl fmt::Debug for AppendCertificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AppendCertificate(<redacted>)")
+    }
+}
+
 impl fmt::Display for AppendCertificate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -428,7 +458,7 @@ impl fmt::Display for AppendCertificate {
 }
 
 /// Authority token for fencing operations on a specific subject cell epoch.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct FenceToken {
     cell_id: CellId,
     epoch: CellEpoch,
@@ -451,6 +481,12 @@ impl FenceToken {
     #[must_use]
     pub const fn epoch(&self) -> CellEpoch {
         self.epoch
+    }
+}
+
+impl fmt::Debug for FenceToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FenceToken(<redacted>)")
     }
 }
 
@@ -719,5 +755,71 @@ mod tests {
             fence.to_string(),
             format!("fence-token[cell={cell_id}, epoch=5:3]")
         );
+    }
+
+    #[test]
+    fn debug_redacts_linear_authority_metadata() {
+        let schema = schema_with(
+            vec![SubjectFamily::Event],
+            vec![DeliveryClass::DurableOrdered],
+            vec![
+                CapabilityPermission::Publish,
+                CapabilityPermission::Subscribe,
+            ],
+        );
+        let epoch = CellEpoch::new(5, 3);
+        let cell_id = demo_cell_id(epoch);
+
+        let publish =
+            PublishPermit::<EventFamily>::authorize(&schema, DeliveryClass::DurableOrdered)
+                .expect("publish token");
+        let subscribe =
+            SubscribeToken::<EventFamily>::authorize(&schema, DeliveryClass::DurableOrdered)
+                .expect("subscribe token");
+        let session = SessionToken::<DemoProtocol, Init>::new(21).expect("session token");
+        let lease =
+            CursorAuthorityLease::new(cell_id, epoch, Time::from_secs(30)).expect("cursor lease");
+        let append = AppendCertificate::new(cell_id, epoch, 17).expect("append cert");
+        let fence = FenceToken::new(cell_id, epoch);
+
+        let debug_values = [
+            format!("{publish:?}"),
+            format!("{subscribe:?}"),
+            format!("{session:?}"),
+            format!("{lease:?}"),
+            format!("{append:?}"),
+            format!("{fence:?}"),
+        ];
+
+        for debug in debug_values {
+            assert!(
+                debug.contains("<redacted>"),
+                "linear authority Debug must make redaction explicit: {debug}"
+            );
+            assert!(
+                !debug.contains("fabric.token.demo"),
+                "schema names authorize capability use and must not leak through Debug: {debug}"
+            );
+            assert!(
+                !debug.contains("fabric.demo"),
+                "protocol names must not leak through Debug: {debug}"
+            );
+            assert!(
+                !debug.contains("session_id"),
+                "session authority metadata must not leak through Debug: {debug}"
+            );
+            assert!(
+                !debug.contains(&cell_id.to_string()),
+                "cell authority metadata must not leak through Debug: {debug}"
+            );
+            assert!(
+                !debug.contains("epoch"),
+                "epoch fences must not leak through Debug: {debug}"
+            );
+            assert!(
+                !debug.contains("sequence"),
+                "append certificate sequences must not leak through Debug: {debug}"
+            );
+        }
     }
 }
