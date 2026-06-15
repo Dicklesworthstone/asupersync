@@ -80,6 +80,43 @@ fn build_received(
     (received, constraint_count)
 }
 
+/// Build received symbols using a repair window that starts at an arbitrary
+/// ESI offset above `K` instead of being anchored at `K`. Used to prove the
+/// decoder does not secretly depend on low / K-anchored repair ESIs.
+fn build_received_with_repair_window(
+    encoder: &SystematicEncoder,
+    decoder: &InactivationDecoder,
+    source: &[Vec<u8>],
+    dropped: &[usize],
+    repair_start_offset: u32,
+    repair_count: usize,
+) -> Vec<ReceivedSymbol> {
+    let k = source.len();
+    let mut received = decoder.constraint_symbols();
+
+    for (esi, data) in source.iter().enumerate() {
+        if !dropped.contains(&esi) {
+            received.push(ReceivedSymbol::source(esi as u32, data.clone()));
+        }
+    }
+
+    for offset in 0..repair_count {
+        let esi = k as u32 + repair_start_offset + offset as u32;
+        let (columns, coefficients) = decoder
+            .repair_equation(esi)
+            .unwrap_or_else(|err| panic!("repair_equation esi={esi} failed: {err:?}"));
+        let repair_data = encoder.repair_symbol(esi);
+        received.push(ReceivedSymbol::repair(
+            esi,
+            columns,
+            coefficients,
+            repair_data,
+        ));
+    }
+
+    received
+}
+
 /// Decode and return the recovered source, panicking on failure.
 fn decode(decoder: &InactivationDecoder, received: &[ReceivedSymbol], sbn: u8) -> Vec<Vec<u8>> {
     let object_id = ObjectId::new(OBJECT_ID_HIGH, OBJECT_ID_LOW);
@@ -157,5 +194,41 @@ fn decode_is_invariant_to_redundant_repair_symbols() {
         decode(&decoder_rich, &rich, SBN),
         lean_recovered,
         "redundant repair symbols must not change the recovered source"
+    );
+}
+
+/// Relation 3 — recovered source is invariant to *which* repair symbols carry
+/// the recovery, not merely how many. Every other decode test in the tree feeds
+/// a contiguous repair run anchored at ESI `K`; a decoder that secretly depended
+/// on low or `K`-anchored repair ESIs (e.g. a broken `ESI -> ISI` K' padding
+/// translation in `repair_isi_for_esi`) would pass all of them yet corrupt
+/// higher-ESI repair recovery. Here the same dropped source set is recovered
+/// from a repair window anchored at `K` versus one shifted well above `K`; both
+/// must reconstruct byte-identical source.
+#[test]
+fn decode_is_invariant_to_repair_symbol_selection() {
+    let source = make_source(K, SYMBOL_SIZE, SEED);
+    let encoder = SystematicEncoder::new(&source, SYMBOL_SIZE, SEED).expect("encoder");
+    let l = InactivationDecoder::new(K, SYMBOL_SIZE, SEED).params().l;
+
+    // Window A: repair ESIs [K, K + L).
+    let decoder_a = InactivationDecoder::new(K, SYMBOL_SIZE, SEED);
+    let window_a =
+        build_received_with_repair_window(&encoder, &decoder_a, &source, DROPPED, 0, l);
+    let recovered_a = decode(&decoder_a, &window_a, SBN);
+    assert_eq!(
+        recovered_a, source,
+        "K-anchored repair window must recover the source"
+    );
+
+    // Window B: repair ESIs [K + 37, K + 37 + L) — a disjoint, higher-ESI set.
+    let shift: u32 = 37;
+    let decoder_b = InactivationDecoder::new(K, SYMBOL_SIZE, SEED);
+    let window_b =
+        build_received_with_repair_window(&encoder, &decoder_b, &source, DROPPED, shift, l);
+    let recovered_b = decode(&decoder_b, &window_b, SBN);
+    assert_eq!(
+        recovered_b, recovered_a,
+        "a shifted, disjoint repair window must recover identical source"
     );
 }
