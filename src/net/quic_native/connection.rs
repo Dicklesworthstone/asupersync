@@ -13,6 +13,7 @@ use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
 use crate::net::atp::protocol::varint::VarInt;
 use std::collections::VecDeque;
 use std::fmt;
+use std::task::{Context as TaskContext, Poll, Waker};
 
 use super::streams::{QuicStreamError, StreamId, StreamRole, StreamTable, StreamTableError};
 use super::tls::{CryptoLevel, KeyUpdateEvent, QuicTlsError, QuicTlsMachine};
@@ -187,6 +188,10 @@ pub struct NativeQuicConnection {
     /// Total DATAGRAM frames accepted on receive (anti-amplification + metrics),
     /// counted before any drop-oldest eviction so the figure reflects the wire.
     datagrams_received: u64,
+    /// Total inbound DATAGRAM payloads evicted by the bounded drop-oldest queue.
+    datagrams_dropped_on_receive: u64,
+    /// Task waiting for the next inbound DATAGRAM payload.
+    inbound_datagram_waker: Option<Waker>,
     /// Outbound DATAGRAM payloads queued by `send_datagram`, drained into
     /// `QuicFrame::Datagram` frames by `generate_frames` in 1-RTT packets.
     outbound_datagrams: VecDeque<Bytes>,
@@ -206,6 +211,16 @@ const MAX_OUTBOUND_DATAGRAMS: usize = 256;
 /// endpoint will emit; a `send_datagram` whose encoded frame would exceed this
 /// is rejected so a single datagram always fits one 1-RTT packet.
 const MAX_DATAGRAM_FRAME_SIZE: usize = 1200;
+
+/// Opt-in stderr tracing for QUIC transport bring-up/diagnosis. Off unless the
+/// `ATP_QUIC_TRACE` env var is set, so the production path stays silent.
+macro_rules! quictrace {
+    ($($arg:tt)*) => {
+        if std::env::var_os("ATP_QUIC_TRACE").is_some() {
+            eprintln!("[atp-quic] {}", format!($($arg)*));
+        }
+    };
+}
 
 impl NativeQuicConnection {
     /// Construct a new connection machine.
@@ -236,6 +251,8 @@ impl NativeQuicConnection {
             pending_control_frames: VecDeque::new(),
             inbound_datagrams: VecDeque::new(),
             datagrams_received: 0,
+            datagrams_dropped_on_receive: 0,
+            inbound_datagram_waker: None,
             outbound_datagrams: VecDeque::new(),
             datagrams_sent: 0,
         }
@@ -995,10 +1012,27 @@ impl NativeQuicConnection {
                 // then drop the oldest payload if the queue is full so a slow
                 // consumer can never make the connection unbounded (RFC 9221).
                 self.datagrams_received = self.datagrams_received.saturating_add(1);
+                let mut dropped_oldest = false;
                 if self.inbound_datagrams.len() >= MAX_INBOUND_DATAGRAMS {
                     self.inbound_datagrams.pop_front();
+                    self.datagrams_dropped_on_receive =
+                        self.datagrams_dropped_on_receive.saturating_add(1);
+                    dropped_oldest = true;
                 }
                 self.inbound_datagrams.push_back(data.clone());
+                quictrace!(
+                    "event=datagram_recv size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} dropped_oldest={} total_received={} total_dropped={}",
+                    data.len(),
+                    self.active_path_id,
+                    space,
+                    self.inbound_datagrams.len(),
+                    dropped_oldest,
+                    self.datagrams_received,
+                    self.datagrams_dropped_on_receive
+                );
+                if let Some(waker) = self.inbound_datagram_waker.take() {
+                    waker.wake();
+                }
                 Ok(())
             }
             QuicFrame::MaxStreams { .. }
@@ -1019,6 +1053,35 @@ impl NativeQuicConnection {
         self.inbound_datagrams.pop_front()
     }
 
+    /// Poll for the next decoded DATAGRAM payload without busy-polling.
+    ///
+    /// This is the Cx-aware receive surface used by higher-level event-loop
+    /// adapters: cancellation is observed through [`Cx::checkpoint`], an
+    /// available payload returns immediately, and an empty queue registers the
+    /// task waker for the next DATAGRAM arrival.
+    pub fn poll_recv_datagram(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<Bytes, NativeQuicConnectionError>> {
+        if let Err(err) = checkpoint(cx) {
+            return Poll::Ready(Err(err));
+        }
+
+        if let Some(datagram) = self.inbound_datagrams.pop_front() {
+            return Poll::Ready(Ok(datagram));
+        }
+
+        let should_replace = self
+            .inbound_datagram_waker
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(task_cx.waker()));
+        if should_replace {
+            self.inbound_datagram_waker = Some(task_cx.waker().clone());
+        }
+        Poll::Pending
+    }
+
     /// Number of inbound DATAGRAM payloads currently buffered for the
     /// application.
     #[must_use]
@@ -1031,6 +1094,12 @@ impl NativeQuicConnection {
     #[must_use]
     pub fn datagrams_received(&self) -> u64 {
         self.datagrams_received
+    }
+
+    /// Total inbound DATAGRAM payloads dropped by the bounded receive queue.
+    #[must_use]
+    pub fn datagrams_dropped_on_receive(&self) -> u64 {
+        self.datagrams_dropped_on_receive
     }
 
     /// Queue an unreliable application datagram (RFC 9221) for transmission.

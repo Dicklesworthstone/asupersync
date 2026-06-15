@@ -15,8 +15,8 @@
 //!   the retained set is exactly the most-recent contiguous suffix.
 //!
 //! Scope: node-local receive path on committed `HEAD` plus this slice's new
-//! codec + handler. The Cx-aware async `poll_recv_datagram` waker layer and the
-//! A1 send path remain open on the epic.
+//! codec + handler + Cx-aware `poll_recv_datagram` waker layer. The A1 send
+//! path remains separately tracked on the epic.
 
 #![allow(missing_docs)]
 
@@ -24,8 +24,14 @@ use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::cx::Cx;
 use asupersync::net::atp::protocol::quic_frames::QuicFrame;
 use asupersync::net::quic_native::{
-    NativeQuicConnection, NativeQuicConnectionConfig, PacketNumberSpace,
+    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
+    PacketNumberSpace,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::task::{Context as TaskContext, Poll, Wake, Waker};
 
 /// Encode a sequence of frames into a single packet payload, as the wire would
 /// carry them.
@@ -39,6 +45,33 @@ fn encode_packet(frames: &[QuicFrame]) -> Vec<u8> {
 
 fn fresh_connection() -> NativeQuicConnection {
     NativeQuicConnection::new(NativeQuicConnectionConfig::default())
+}
+
+#[derive(Debug, Default)]
+struct CountingWaker {
+    wakes: AtomicUsize,
+}
+
+impl CountingWaker {
+    fn wake_count(&self) -> usize {
+        self.wakes.load(Ordering::SeqCst)
+    }
+}
+
+impl Wake for CountingWaker {
+    fn wake(self: Arc<Self>) {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn counting_waker() -> (Arc<CountingWaker>, Waker) {
+    let state = Arc::new(CountingWaker::default());
+    let waker = Waker::from(Arc::clone(&state));
+    (state, waker)
 }
 
 #[test]
@@ -72,6 +105,48 @@ fn packet_with_datagram_frame_surfaces_exact_payload_via_recv() {
     assert!(conn.recv_datagram().is_none());
     assert_eq!(conn.pending_datagram_count(), 0);
     assert_eq!(conn.datagrams_received(), 1);
+}
+
+#[test]
+fn poll_recv_datagram_registers_waker_and_wakes_on_arrival() {
+    let cx = Cx::for_testing();
+    let mut conn = fresh_connection();
+    let (wake_state, waker) = counting_waker();
+    let mut task_cx = TaskContext::from_waker(&waker);
+
+    assert!(matches!(
+        conn.poll_recv_datagram(&cx, &mut task_cx),
+        Poll::Pending
+    ));
+    assert_eq!(wake_state.wake_count(), 0);
+
+    let payload = Bytes::from_static(b"wake-me-when-symbol-arrives");
+    let packet = encode_packet(&[QuicFrame::Datagram {
+        data: payload.clone(),
+    }]);
+    conn.process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 10, &packet, 0)
+        .expect("processing DATAGRAM wakes the registered receiver");
+
+    assert_eq!(wake_state.wake_count(), 1);
+    match conn.poll_recv_datagram(&cx, &mut task_cx) {
+        Poll::Ready(Ok(received)) => assert_eq!(received, payload),
+        other => panic!("expected ready datagram after wake, got {other:?}"),
+    }
+    assert_eq!(conn.pending_datagram_count(), 0);
+}
+
+#[test]
+fn poll_recv_datagram_observes_cx_cancellation() {
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+    let mut conn = fresh_connection();
+    let (_, waker) = counting_waker();
+    let mut task_cx = TaskContext::from_waker(&waker);
+
+    match conn.poll_recv_datagram(&cx, &mut task_cx) {
+        Poll::Ready(Err(NativeQuicConnectionError::Cancelled)) => {}
+        other => panic!("cancelled Cx must fail closed, got {other:?}"),
+    }
 }
 
 #[test]
@@ -144,6 +219,10 @@ fn inbound_queue_drops_oldest_on_overflow_but_counts_every_frame() {
     assert!(
         u32::try_from(pending).expect("pending fits u32") < total,
         "overflow must have dropped some datagrams"
+    );
+    assert_eq!(
+        conn.datagrams_dropped_on_receive(),
+        u64::from(total) - u64::try_from(pending).expect("pending fits u64")
     );
 
     // Drain and decode the retained indices in delivery order.
