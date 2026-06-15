@@ -286,29 +286,32 @@ fn derive_key(mut key: AuthKey, purposes: &[Vec<u8>]) -> AuthKey {
     key
 }
 
-fn reference_derive_subkey(key: &AuthKey, purpose: &[u8]) -> AuthKey {
-    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+fn reference_derive_subkey_bytes(
+    key_bytes: &[u8; AUTH_KEY_SIZE],
+    purpose: &[u8],
+) -> [u8; AUTH_KEY_SIZE] {
+    let mut mac = HmacSha256::new_from_slice(key_bytes).expect("HMAC accepts any key length");
     mac.update(purpose);
-    AuthKey::from_hmac_derived(mac.finalize().into_bytes().into())
-        .expect("HMAC-derived bytes should satisfy AuthKey validators")
+    mac.finalize().into_bytes().into()
 }
 
 fn assert_chain_matches_reference(base_key: &AuthKey, purposes: &[Vec<u8>]) {
     let mut derived = base_key.clone();
-    let mut reference = base_key.clone();
+    let mut reference_bytes = *base_key.as_bytes();
 
     for purpose in purposes {
         derived = derived.derive_subkey(purpose);
-        reference = reference_derive_subkey(&reference, purpose);
+        reference_bytes = reference_derive_subkey_bytes(&reference_bytes, purpose);
         assert_eq!(
-            derived, reference,
+            derived.as_bytes(),
+            &reference_bytes,
             "derive_subkey step must match direct HMAC-SHA256 reference for encoded KDF info"
         );
     }
 
     assert_eq!(
-        derive_key(base_key.clone(), purposes),
-        reference,
+        derive_key(base_key.clone(), purposes).as_bytes(),
+        &reference_bytes,
         "whole-chain derivation must match the stepwise reference"
     );
 }

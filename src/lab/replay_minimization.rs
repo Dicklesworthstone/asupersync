@@ -474,6 +474,10 @@ impl TraceMinimizer {
             | MonitorDropped
             | LinkCreated
             | LinkDropped
+            | TaskSpawnEnqueued
+            | TaskAdmitted
+            | BudgetInstalled
+            | BudgetConsumed
             | WorkerCancelAcknowledged
             | WorkerDrainStarted => false,
         }

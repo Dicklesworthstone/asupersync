@@ -147,3 +147,30 @@ fn debug_does_not_leak_full_key_material() {
     );
     test_complete!("debug_does_not_leak_full_key_material");
 }
+
+#[test]
+fn hmac_derived_constructor_is_not_public_api() {
+    init_test_logging();
+    test_phase!("hmac_derived_constructor_is_not_public_api");
+    let source =
+        std::fs::read_to_string("src/security/key.rs").expect("security key source is readable");
+    let signature = source
+        .lines()
+        .find(|line| line.contains("fn from_hmac_derived"))
+        .expect("AuthKey HMAC-derived constructor signature is present")
+        .trim_start();
+
+    assert_with_log!(
+        signature.starts_with("pub(crate) fn from_hmac_derived"),
+        "HMAC-derived entropy bypass should stay crate-private",
+        "pub(crate) fn from_hmac_derived",
+        signature
+    );
+    assert_with_log!(
+        !signature.starts_with("pub fn from_hmac_derived"),
+        "HMAC-derived entropy bypass should not be public API",
+        "not pub fn from_hmac_derived",
+        signature
+    );
+    test_complete!("hmac_derived_constructor_is_not_public_api");
+}

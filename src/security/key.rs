@@ -314,17 +314,16 @@ impl AuthKey {
         }
     }
 
-    /// Creates a key from HMAC-derived bytes with validation.
+    /// Creates a key from HMAC-derived bytes.
     ///
     /// This method is specifically designed for use with HMAC outputs,
-    /// which are cryptographically strong by construction, but still
-    /// validates the bytes to prevent attacks from weak or manipulated
-    /// HMAC chains.
+    /// which are cryptographically strong by construction. It deliberately
+    /// skips heuristic entropy validation to avoid rejecting uniform HMAC
+    /// output by accident.
     ///
-    /// Use this instead of `from_bytes_unchecked` for HMAC-derived
-    /// keys to maintain security while avoiding false positive
-    /// entropy rejection.
-    pub fn from_hmac_derived(bytes: [u8; AUTH_KEY_SIZE]) -> Result<Self, AuthKeyError> {
+    /// Keep this crate-private so external callers cannot use it as a public
+    /// bypass around [`Self::from_bytes`] entropy validation.
+    pub(crate) fn from_hmac_derived(bytes: [u8; AUTH_KEY_SIZE]) -> Result<Self, AuthKeyError> {
         // HMAC-SHA256 outputs are cryptographically secure by construction.
         // Skip entropy validation to avoid false positives while maintaining
         // the Result type for consistency with other constructors.
