@@ -161,6 +161,40 @@ no-claim boundaries. Agent Mail and `br` bodies are structured-field-first.
 No handshake path uses local Cargo fallback, branch creation, worktree creation,
 scratch clones, file deletion, `git clean`, or `git reset`.
 
+## Proof-Traffic A4 Parking Lot
+
+`asupersync-proof-traffic-control-kuyx64.4` defines the parked proof manifest in
+`src/audit/proof_traffic_parking_lot.rs`, checked by
+`tests/proof_traffic_parking_lot_contract.rs` and
+`artifacts/proof_traffic_parking_lot_v1.json`.
+
+The parking lot is not a second issue tracker and is not proof evidence. It is a
+resume packet for proof attempts that were parked, refused, or blocked. Each
+attempt records:
+
+- `head_commit`
+- `command_intent`
+- exact RCH command or blocker marker
+- `target_dir`
+- owned paths
+- reservation evidence
+- blocker class
+- blocker owner or handoff thread when known
+- retry predicate
+- no-claim boundaries
+
+Duplicate parked attempts are grouped by `blocker_key` so agents can see that
+several proof attempts are waiting on the same blocker without losing per-agent
+command details, owned paths, or reservation evidence.
+
+The resume renderer has one hard rule: it emits the exact RCH command only when
+the retry predicate is satisfied and the attempt recorded an exact command. If
+the predicate is not satisfied, or the attempt only recorded a blocker marker,
+the renderer emits a fresh parked blocker marker instead.
+
+Parked, refused, and stale attempts are not green proof evidence. They can be
+cited only as handoff context for a future retry.
+
 ## No-Claim Boundaries
 
 This gate does not prove release readiness, broad workspace health, runtime
