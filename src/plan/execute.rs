@@ -61,8 +61,9 @@ use std::time::Duration;
 
 use crate::combinator::SelectAll;
 use crate::cx::{Cx, cap};
+use crate::util::{DetHashMap, DetHashSet};
 
-use super::{PlanDag, PlanId};
+use super::{PlanDag, PlanId, PlanNode, RewriteCertificate, RewritePolicy, RewriteRule};
 
 /// Type-erased, single-poll leaf future slot keyed (positionally) by node id.
 ///
@@ -602,6 +603,35 @@ impl<'a, T> ExecPlan<'a, T> {
         take_owned(&mut slots, self.root)
     }
 
+    /// Consumes the plan into (structural [`PlanDag`], leaf futures indexed
+    /// densely, map from each leaf's `PlanId` to its leaf-store index).
+    ///
+    /// Only called after [`Self::try_structure`] confirms representability, so
+    /// no `first_ok`/`quorum` node is ever encountered. The leaf-store index is
+    /// stable across rewrites (rewrites preserve leaf `PlanId`s), which is what
+    /// lets [`owned_from_dag`] re-associate the real futures afterward.
+    fn dismantle(
+        self,
+    ) -> (
+        PlanDag,
+        Vec<Option<BoxFut<'a, T>>>,
+        DetHashMap<PlanId, usize>,
+    ) {
+        let mut slots: Vec<Option<CaptureNode<'a, T>>> = self.nodes.into_iter().map(Some).collect();
+        let mut dag = PlanDag::new();
+        let mut leaf_store: Vec<Option<BoxFut<'a, T>>> = Vec::new();
+        let mut leaf_pid_to_idx = DetHashMap::default();
+        let root = dismantle_node(
+            &mut slots,
+            self.root,
+            &mut dag,
+            &mut leaf_store,
+            &mut leaf_pid_to_idx,
+        );
+        dag.set_root(root);
+        (dag, leaf_store, leaf_pid_to_idx)
+    }
+
     /// Executes the captured plan, reusing the real combinator internals.
     ///
     /// The result is the typed [`PlanValue<T>`] of the root node. See the
@@ -677,6 +707,48 @@ fn take_owned<'a, T>(slots: &mut [Option<CaptureNode<'a, T>>], id: NodeId) -> Ow
             is_success,
             node: id,
         },
+    }
+}
+
+fn dismantle_node<'a, T>(
+    slots: &mut [Option<CaptureNode<'a, T>>],
+    id: NodeId,
+    dag: &mut PlanDag,
+    leaf_store: &mut Vec<Option<BoxFut<'a, T>>>,
+    leaf_pid_to_idx: &mut DetHashMap<PlanId, usize>,
+) -> PlanId {
+    let node = slots[id.index()]
+        .take()
+        .expect("validated representable tree: each node is taken exactly once");
+    match node {
+        CaptureNode::Leaf { label, fut } => {
+            let pid = dag.leaf(label);
+            let idx = leaf_store.len();
+            leaf_store.push(Some(fut));
+            leaf_pid_to_idx.insert(pid, idx);
+            pid
+        }
+        CaptureNode::Join(children) => {
+            let mut kids = Vec::with_capacity(children.len());
+            for c in children {
+                kids.push(dismantle_node(slots, c, dag, leaf_store, leaf_pid_to_idx));
+            }
+            dag.join(kids)
+        }
+        CaptureNode::Race(children) => {
+            let mut kids = Vec::with_capacity(children.len());
+            for c in children {
+                kids.push(dismantle_node(slots, c, dag, leaf_store, leaf_pid_to_idx));
+            }
+            dag.race(kids)
+        }
+        CaptureNode::Timeout { child, duration } => {
+            let c = dismantle_node(slots, child, dag, leaf_store, leaf_pid_to_idx);
+            dag.timeout(c, duration)
+        }
+        CaptureNode::FirstOk { .. } | CaptureNode::Quorum { .. } => {
+            unreachable!("dismantle runs only after try_structure confirms representability")
+        }
     }
 }
 
@@ -801,4 +873,231 @@ async fn drive_all<'f, R>(mut futs: Vec<Pin<Box<dyn Future<Output = R> + 'f>>>) 
     outs.into_iter()
         .map(|o| o.expect("drive_all resolved only after every branch was Ready"))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Certified rewrite application (tjrmwz.2)
+//
+// The fail-closed ladder: capture (I1) -> structural PlanDag -> conservative
+// certified rewrite (the e-graph engine, which already verifies side-conditions
+// per rule) -> leaf-conservation guard -> execute the rewritten DAG, OR run the
+// original plan unchanged. Optimization is *always* optional: the rewrite never
+// turns into a hard error, only a logged fallback. The certificate is always
+// surfaced.
+// ---------------------------------------------------------------------------
+
+/// The conservative rule set offered to the rewrite engine. [`RewritePolicy`]
+/// itself gates which actually fire (conservative disables commutativity), so a
+/// rule appearing here is necessary-but-not-sufficient for it to run.
+const CONSERVATIVE_RULES: [RewriteRule; 6] = [
+    RewriteRule::JoinAssoc,
+    RewriteRule::RaceAssoc,
+    RewriteRule::JoinCommute,
+    RewriteRule::RaceCommute,
+    RewriteRule::TimeoutMin,
+    RewriteRule::DedupRaceJoin,
+];
+
+/// Outcome of [`capture_optimized`]: the executed value plus the machine-checkable
+/// certificate describing the rewrite that was attempted.
+#[derive(Debug)]
+pub struct OptimizedExecution<T> {
+    /// The root value — from the rewritten plan when `rewritten`, else the original.
+    pub value: PlanValue<T>,
+    /// The versioned rewrite certificate. `None` only when the plan has no
+    /// structural IR (it contains `first_ok`/`quorum`); otherwise present and
+    /// `is_identity()` when no rule fired.
+    pub certificate: Option<RewriteCertificate>,
+    /// Whether the *rewritten* DAG was executed (vs. the fail-closed fallback).
+    pub rewritten: bool,
+    /// Rules that fired during rewriting, in order.
+    pub fired_rules: Vec<RewriteRule>,
+    /// Why the original (unrewritten) plan ran, when it did.
+    pub fallback_reason: Option<String>,
+}
+
+/// Captures a plan, applies the conservative *certified* rewrite pass, and
+/// executes the result — falling closed to the original plan (never erroring on
+/// the optimization itself) whenever the rewrite is absent, unverifiable, or not
+/// execution-safe. The certificate is always surfaced.
+///
+/// Fail-closed conditions (each runs the original plan with a logged reason):
+/// * the plan contains `first_ok`/`quorum` (no structural rewrite IR);
+/// * no conservative rule fired (identity certificate);
+/// * the rewritten DAG fails structural validation; or
+/// * the rewrite is not leaf-conserving — a one-shot leaf future would be
+///   duplicated or dropped (the execution-safety contract).
+#[allow(clippy::future_not_send)] // inline single-task driver; see `ExecPlan::execute`
+pub async fn capture_optimized<'a, T, Caps, F>(
+    cx: &Cx<Caps>,
+    build: F,
+) -> Result<OptimizedExecution<T>, PlanExecError>
+where
+    F: FnOnce(&mut PlanCapture<'a, T>) -> NodeId,
+    Caps: cap::HasTime,
+    T: 'a,
+{
+    let plan = capture(build)?;
+
+    // Plans with first_ok/quorum have no structural IR: execute directly.
+    match plan.try_structure() {
+        Ok(_) => {}
+        Err(PlanExecError::NotRepresentable { .. }) => {
+            let value = plan.execute(cx).await?;
+            return Ok(OptimizedExecution {
+                value,
+                certificate: None,
+                rewritten: false,
+                fired_rules: Vec::new(),
+                fallback_reason: Some(
+                    "plan contains first_ok/quorum; no structural rewrite IR".to_string(),
+                ),
+            });
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Dismantle into (original structure, leaf futures by index, leaf-PlanId map).
+    let (original_dag, mut leaf_store, leaf_pid_to_idx) = plan.dismantle();
+
+    let mut rewritten_dag = original_dag.clone();
+    let (report, certificate) =
+        rewritten_dag.apply_rewrites_certified(RewritePolicy::conservative(), &CONSERVATIVE_RULES);
+    let fired_rules: Vec<RewriteRule> = report.steps().iter().map(|step| step.rule).collect();
+
+    // Decide the execution path, fail-closed.
+    let (exec_dag, rewritten, fallback_reason) = if report.is_empty() {
+        (
+            &original_dag,
+            false,
+            Some("no conservative rewrite applied".to_string()),
+        )
+    } else if rewritten_dag.validate().is_err() {
+        (
+            &original_dag,
+            false,
+            Some("rewritten plan failed structural validation; ran original".to_string()),
+        )
+    } else if leaves_conserved(&rewritten_dag, &leaf_pid_to_idx) {
+        (&rewritten_dag, true, None)
+    } else {
+        (
+            &original_dag,
+            false,
+            Some(
+                "rewrite not leaf-conserving (a one-shot leaf would be duplicated or dropped); ran original"
+                    .to_string(),
+            ),
+        )
+    };
+
+    let root = exec_dag.root().ok_or(PlanExecError::MissingRoot)?;
+    let owned = owned_from_dag(exec_dag, root, &mut leaf_store, &leaf_pid_to_idx)?;
+    let value = eval(owned, cx).await?;
+
+    Ok(OptimizedExecution {
+        value,
+        certificate: Some(certificate),
+        rewritten,
+        fired_rules,
+        fallback_reason,
+    })
+}
+
+/// Returns true iff the tree reachable from `dag`'s root references exactly the
+/// original leaf set, each leaf exactly once, with no shared (re-executed)
+/// subtree — the precondition for moving one-shot leaf futures into the
+/// rewritten structure.
+fn leaves_conserved(dag: &PlanDag, leaf_pid_to_idx: &DetHashMap<PlanId, usize>) -> bool {
+    let Some(root) = dag.root() else {
+        return false;
+    };
+    let mut seen = DetHashSet::default();
+    let mut leaf_indices = Vec::new();
+    if !collect_tree_leaves(dag, root, &mut seen, &mut leaf_indices, leaf_pid_to_idx) {
+        return false;
+    }
+    // Every original leaf used exactly once (bijection).
+    if leaf_indices.len() != leaf_pid_to_idx.len() {
+        return false;
+    }
+    leaf_indices.sort_unstable();
+    leaf_indices.dedup();
+    leaf_indices.len() == leaf_pid_to_idx.len()
+}
+
+fn collect_tree_leaves(
+    dag: &PlanDag,
+    id: PlanId,
+    seen: &mut DetHashSet<PlanId>,
+    leaf_indices: &mut Vec<usize>,
+    leaf_pid_to_idx: &DetHashMap<PlanId, usize>,
+) -> bool {
+    if !seen.insert(id) {
+        return false; // shared node — execution would re-run a subtree
+    }
+    match dag.node(id) {
+        None => false,
+        Some(PlanNode::Leaf { .. }) => match leaf_pid_to_idx.get(&id) {
+            Some(idx) => {
+                leaf_indices.push(*idx);
+                true
+            }
+            None => false,
+        },
+        Some(PlanNode::Join { children } | PlanNode::Race { children }) => children
+            .iter()
+            .all(|&c| collect_tree_leaves(dag, c, seen, leaf_indices, leaf_pid_to_idx)),
+        Some(PlanNode::Timeout { child, .. }) => {
+            collect_tree_leaves(dag, *child, seen, leaf_indices, leaf_pid_to_idx)
+        }
+    }
+}
+
+/// Rebuilds an owned execution tree from a (possibly rewritten) [`PlanDag`],
+/// moving each leaf's real future out of `leaf_store` by its `PlanId`. Reuses
+/// the single [`eval`] engine — no second interpreter.
+fn owned_from_dag<'a, T>(
+    dag: &PlanDag,
+    id: PlanId,
+    leaf_store: &mut [Option<BoxFut<'a, T>>],
+    leaf_pid_to_idx: &DetHashMap<PlanId, usize>,
+) -> Result<OwnedNode<'a, T>, PlanExecError> {
+    let node = NodeId(id.index());
+    match dag.node(id).ok_or(PlanExecError::MissingChild {
+        parent: node,
+        child: node,
+    })? {
+        PlanNode::Leaf { .. } => {
+            let idx = *leaf_pid_to_idx
+                .get(&id)
+                .ok_or(PlanExecError::MissingChild {
+                    parent: node,
+                    child: node,
+                })?;
+            let fut = leaf_store[idx]
+                .take()
+                .ok_or(PlanExecError::SharedNode { node })?;
+            Ok(OwnedNode::Leaf(fut))
+        }
+        PlanNode::Join { children } => {
+            let mut kids = Vec::with_capacity(children.len());
+            for &c in children {
+                kids.push(owned_from_dag(dag, c, leaf_store, leaf_pid_to_idx)?);
+            }
+            Ok(OwnedNode::Join(kids))
+        }
+        PlanNode::Race { children } => {
+            let mut kids = Vec::with_capacity(children.len());
+            for &c in children {
+                kids.push(owned_from_dag(dag, c, leaf_store, leaf_pid_to_idx)?);
+            }
+            Ok(OwnedNode::Race(kids))
+        }
+        PlanNode::Timeout { child, duration } => Ok(OwnedNode::Timeout {
+            child: Box::new(owned_from_dag(dag, *child, leaf_store, leaf_pid_to_idx)?),
+            duration: *duration,
+            node,
+        }),
+    }
 }

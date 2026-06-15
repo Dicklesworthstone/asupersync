@@ -14,8 +14,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use asupersync::Cx;
-use asupersync::plan::PlanNode;
-use asupersync::plan::execute::{NodeId, PlanCapture, PlanExecError, PlanValue, capture};
+use asupersync::plan::execute::{
+    NodeId, PlanCapture, PlanExecError, PlanValue, capture, capture_optimized,
+};
+use asupersync::plan::{PlanNode, RewriteRule};
 use futures_lite::future::block_on;
 
 // ---------------------------------------------------------------------------
@@ -313,4 +315,94 @@ fn invalid_quorum_threshold_is_rejected() {
         p.quorum([a, b], 3, |_: &u32| true) // 3 > 2 children
     });
     assert!(matches!(result, Err(PlanExecError::InvalidQuorum { .. })));
+}
+
+// ---------------------------------------------------------------------------
+// Certified rewrite application (tjrmwz.2): capture_optimized fail-closed ladder
+// ---------------------------------------------------------------------------
+
+#[test]
+fn capture_optimized_flattens_nested_join_with_certificate() {
+    let cx = Cx::for_testing();
+    // join(join(a, b), c) flattens to join(a, b, c) under conservative policy.
+    let exec = block_on(capture_optimized(&cx, |p| {
+        let a = p.leaf(async { 1u32 });
+        let b = p.leaf(async { 2u32 });
+        let inner = p.join([a, b]);
+        let c = p.leaf(async { 3u32 });
+        p.join([inner, c])
+    }))
+    .expect("ok");
+
+    assert!(exec.rewritten, "nested join must flatten");
+    assert!(exec.fired_rules.contains(&RewriteRule::JoinAssoc));
+    let cert = exec.certificate.expect("representable plan -> certificate");
+    assert!(!cert.is_identity(), "a rule fired, so not identity");
+    assert!(exec.fallback_reason.is_none());
+    // Outcome is identical to the unrewritten plan (the equivalence guarantee).
+    assert_eq!(exec.value, PlanValue::Vector(vec![1, 2, 3]));
+}
+
+#[test]
+fn capture_optimized_identity_runs_original_with_reason() {
+    let cx = Cx::for_testing();
+    // A flat join has nothing to rewrite: identity certificate, original runs.
+    let exec = block_on(capture_optimized(&cx, |p| {
+        let a = p.leaf(async { 1u32 });
+        let b = p.leaf(async { 2u32 });
+        p.join([a, b])
+    }))
+    .expect("ok");
+
+    assert!(!exec.rewritten);
+    assert!(exec.fired_rules.is_empty());
+    assert!(exec.certificate.expect("representable").is_identity());
+    assert!(exec.fallback_reason.is_some());
+    assert_eq!(exec.value, PlanValue::Vector(vec![1, 2]));
+}
+
+#[test]
+fn capture_optimized_first_ok_runs_directly_no_ir() {
+    let cx = Cx::for_testing();
+    let exec = block_on(capture_optimized(&cx, |p| {
+        let a = p.leaf(async { 0u32 });
+        let b = p.leaf(async { 7u32 });
+        p.first_ok([a, b], |v: &u32| *v > 0)
+    }))
+    .expect("ok");
+
+    assert!(!exec.rewritten);
+    assert!(exec.certificate.is_none(), "first_ok has no structural IR");
+    assert_eq!(exec.value, PlanValue::Scalar(7));
+    assert!(exec.fallback_reason.unwrap().contains("first_ok"));
+}
+
+#[test]
+fn capture_optimized_outcome_matches_unoptimized() {
+    let cx = Cx::for_testing();
+    // race(race(a, b), c) flattens to race(a, b, c); index-0 winner is identical.
+    let optimized = block_on(capture_optimized(&cx, |p| {
+        let a = p.leaf(async { 1u32 });
+        let b = p.leaf(async { 2u32 });
+        let inner = p.race([a, b]);
+        let c = p.leaf(async { 3u32 });
+        p.race([inner, c])
+    }))
+    .expect("ok");
+
+    let direct = block_on(
+        capture(|p| {
+            let a = p.leaf(async { 1u32 });
+            let b = p.leaf(async { 2u32 });
+            let inner = p.race([a, b]);
+            let c = p.leaf(async { 3u32 });
+            p.race([inner, c])
+        })
+        .expect("valid")
+        .execute(&cx),
+    )
+    .expect("ok");
+
+    assert_eq!(optimized.value, direct);
+    assert_eq!(optimized.value, PlanValue::Scalar(1));
 }
