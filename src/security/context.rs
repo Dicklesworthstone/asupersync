@@ -12,6 +12,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use parking_lot::RwLock;
 use sha2::Sha256;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -96,7 +97,7 @@ pub struct SecurityContext {
 /// The signature is `HMAC-SHA256(SecurityContext.key, domain || replica_id ||
 /// region_scope)`. A record with `region_id == None` grants membership in any
 /// region; a region-scoped record only authorizes that exact region.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReplicaAuthorization {
     /// Authorized replica identifier.
     pub replica_id: String,
@@ -104,6 +105,16 @@ pub struct ReplicaAuthorization {
     pub region_id: Option<String>,
     /// Domain-separated HMAC over the authorization tuple.
     pub signature: [u8; 32],
+}
+
+impl fmt::Debug for ReplicaAuthorization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplicaAuthorization")
+            .field("replica_id", &self.replica_id)
+            .field("region_id", &self.region_id)
+            .field("signature", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SecurityContext {
@@ -533,6 +544,31 @@ mod tests {
         assert!(ctx.revoke_replica_authorization("replica-3"));
         assert!(!ctx.is_replica_authorized("replica-3", None));
         assert!(!ctx.revoke_replica_authorization("replica-3"));
+    }
+
+    #[test]
+    fn replica_authorization_debug_redacts_signature() {
+        let ctx = SecurityContext::for_testing(42);
+        let record = ctx
+            .authorize_replica("replica-debug", Some("region-debug"))
+            .expect("authorization should mint");
+        let raw_signature_debug = format!("{:?}", record.signature);
+
+        let record_debug = format!("{record:?}");
+        assert!(record_debug.contains("ReplicaAuthorization"));
+        assert!(record_debug.contains("replica-debug"));
+        assert!(record_debug.contains("region-debug"));
+        assert!(record_debug.contains("<redacted>"));
+        assert!(
+            !record_debug.contains(&raw_signature_debug),
+            "ReplicaAuthorization Debug must not expose the bearer signature: {record_debug}"
+        );
+
+        let context_debug = format!("{ctx:?}");
+        assert!(
+            !context_debug.contains(&raw_signature_debug),
+            "SecurityContext Debug must not expose stored replica authorization signatures: {context_debug}"
+        );
     }
 
     #[test]
