@@ -850,6 +850,8 @@ enum QuerySelection {
     NoRecords,
 }
 
+const DNS_MAX_EXPANDED_NAME_LEN: usize = 253;
+
 fn validate_dns_record_name(name: &str) -> Result<(), DnsError> {
     let validated_name = name.strip_suffix('.').unwrap_or(name);
     if validated_name.is_empty() || validated_name.len() > 253 {
@@ -1030,6 +1032,27 @@ fn read_u32(packet: &[u8], offset: &mut usize) -> Result<u32, DnsError> {
     Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
+fn push_decoded_dns_label(
+    labels: &mut Vec<String>,
+    expanded_len: &mut usize,
+    label: &str,
+) -> Result<(), DnsError> {
+    let separator_len = usize::from(!labels.is_empty());
+    let next_len = expanded_len
+        .checked_add(separator_len)
+        .and_then(|len| len.checked_add(label.len()))
+        .ok_or_else(|| DnsError::Protocol("expanded DNS name exceeds 253 bytes".to_string()))?;
+    if next_len > DNS_MAX_EXPANDED_NAME_LEN {
+        return Err(DnsError::Protocol(
+            "expanded DNS name exceeds 253 bytes".to_string(),
+        ));
+    }
+
+    *expanded_len = next_len;
+    labels.push(label.to_string());
+    Ok(())
+}
+
 fn decode_dns_name(packet: &[u8], offset: &mut usize) -> Result<String, DnsError> {
     let (name, consumed) = decode_dns_name_inner(packet, *offset, 0)?;
     *offset = consumed;
@@ -1048,6 +1071,7 @@ fn decode_dns_name_inner(
     }
 
     let mut labels = Vec::new();
+    let mut expanded_len = 0usize;
     let mut offset = start;
 
     loop {
@@ -1066,7 +1090,7 @@ fn decode_dns_name_inner(
             }
             let (suffix, _) = decode_dns_name_inner(packet, pointer, depth.saturating_add(1))?;
             if !suffix.is_empty() {
-                labels.push(suffix);
+                push_decoded_dns_label(&mut labels, &mut expanded_len, &suffix)?;
             }
             return Ok((labels.join("."), offset.saturating_add(2)));
         }
@@ -1085,7 +1109,7 @@ fn decode_dns_name_inner(
             .ok_or_else(|| DnsError::Protocol("truncated DNS label".to_string()))?;
         let label = std::str::from_utf8(label_bytes)
             .map_err(|_| DnsError::Protocol("DNS label is not UTF-8".to_string()))?;
-        labels.push(label.to_string());
+        push_decoded_dns_label(&mut labels, &mut expanded_len, label)?;
         offset = end;
     }
 }
@@ -2143,6 +2167,65 @@ mod tests {
         );
 
         crate::test_complete!("decode_dns_name_rejects_forward_compression_pointer");
+    }
+
+    #[test]
+    fn decode_dns_name_rejects_oversized_uncompressed_expansion() {
+        init_test("decode_dns_name_rejects_oversized_uncompressed_expansion");
+
+        let mut packet = Vec::new();
+        for byte in [b'a', b'b', b'c', b'd'] {
+            packet.push(63);
+            packet.extend_from_slice(&[byte; 63]);
+        }
+        packet.push(0);
+
+        let mut offset = 0usize;
+        let error =
+            decode_dns_name(&packet, &mut offset).expect_err("oversized name must be rejected");
+
+        crate::assert_with_log!(
+            matches!(error, DnsError::Protocol(ref message)
+                if message.contains("expanded DNS name exceeds 253 bytes")),
+            "oversized uncompressed DNS name must fail closed",
+            true,
+            format!("{error:?}")
+        );
+
+        crate::test_complete!("decode_dns_name_rejects_oversized_uncompressed_expansion");
+    }
+
+    #[test]
+    fn decode_dns_name_rejects_oversized_compressed_expansion() {
+        init_test("decode_dns_name_rejects_oversized_compressed_expansion");
+
+        let max_suffix = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let mut packet = Vec::new();
+        encode_dns_name(&max_suffix, &mut packet).expect("max suffix encodes");
+        let alias_offset = packet.len();
+        packet.push(3);
+        packet.extend_from_slice(b"www");
+        packet.extend_from_slice(&[0xC0, 0x00]);
+
+        let mut offset = alias_offset;
+        let error = decode_dns_name(&packet, &mut offset)
+            .expect_err("oversized compressed name must be rejected");
+
+        crate::assert_with_log!(
+            matches!(error, DnsError::Protocol(ref message)
+                if message.contains("expanded DNS name exceeds 253 bytes")),
+            "oversized compressed DNS name must fail closed",
+            true,
+            format!("{error:?}")
+        );
+
+        crate::test_complete!("decode_dns_name_rejects_oversized_compressed_expansion");
     }
 
     #[test]
