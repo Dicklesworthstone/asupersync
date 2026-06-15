@@ -556,6 +556,11 @@ impl AdaptiveCancelStreakPolicy {
         self.epoch_start = None;
     }
 
+    fn reset_to_priors(&mut self) {
+        let epoch_steps = self.epoch_steps;
+        *self = Self::new(epoch_steps);
+    }
+
     fn current_limit(&self) -> usize {
         self.arms[self.selected_arm]
     }
@@ -4120,6 +4125,48 @@ impl ThreeLaneWorker {
     #[must_use]
     pub fn steal_locality_counters(&self) -> StealLocalityCounters {
         self.steal_locality_counters
+    }
+
+    /// Applies a runtime regime-shift receipt to the adaptive cancel-streak policy.
+    ///
+    /// The conservative response to a scheduler metric change-point is to
+    /// forget stale EXP3/UCB learning and restart from priors. This method does
+    /// not alter queue contents or take an aggressive scheduling action; it only
+    /// resets the adaptive controller when it is enabled for a known runtime
+    /// series.
+    #[must_use]
+    pub fn apply_changepoint_detection_to_adaptive_cancel_streak(
+        &mut self,
+        detection: crate::runtime::changepoint::ChangePointDetection,
+    ) -> bool {
+        if matches!(
+            detection.series,
+            crate::runtime::changepoint::RuntimeMetricSeries::Custom(_)
+        ) {
+            return false;
+        }
+
+        let Some(policy) = self.adaptive_cancel_policy.as_mut() else {
+            return false;
+        };
+
+        policy.reset_to_priors();
+        self.preemption_metrics.adaptive_epochs = policy.epoch_count;
+        self.preemption_metrics.adaptive_current_limit = policy.current_limit();
+        self.preemption_metrics.adaptive_reward_ema = policy.reward_ema;
+        self.preemption_metrics.adaptive_e_value = policy.e_value();
+
+        trace!(
+            worker_id = self.id,
+            series = detection.series.as_str(),
+            detector = ?detection.detector,
+            direction = ?detection.direction,
+            sample_index = detection.sample_index,
+            adaptive_limit = self.preemption_metrics.adaptive_current_limit,
+            "changepoint reset adaptive cancel-streak policy to priors"
+        );
+
+        true
     }
 
     /// Builds a deterministic fairness certificate from current metrics.

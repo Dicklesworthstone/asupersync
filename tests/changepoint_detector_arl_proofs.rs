@@ -25,11 +25,16 @@
 //! * AC6 — the conservative scheduler profile is structurally off-by-default and
 //!   freezes detector state while disabled.
 
+use asupersync::runtime::RuntimeState;
 use asupersync::runtime::changepoint::{
     ChangeDirection, ChangePointDetection, ChangePointDetectorKind, ChangePointMonitor,
     ChangePointMonitorConfig, ChangePointSeriesConfig, CusumConfig, CusumDetector, MetricSample,
     PageHinkleyConfig, PageHinkleyDetector, RuntimeMetricSeries,
 };
+use asupersync::runtime::scheduler::ThreeLaneScheduler;
+use asupersync::sync::ContendedMutex;
+use asupersync::types::Budget;
+use std::sync::Arc;
 
 /// Tiny deterministic LCG (PCG-style multiplier + odd increment) with an output
 /// xorshift mix. No `rand`, no clock, no float — replay-exact across machines.
@@ -170,6 +175,84 @@ fn page_hinkley_step_detection_delay_is_monotone_in_magnitude() {
             "larger step must not detect later: delays={delays:?}"
         );
     }
+}
+
+/// AC3 slice — a scheduler-facing change-point receipt resets stale adaptive
+/// cancel-streak learning to priors without perturbing non-adaptive metrics.
+#[test]
+fn changepoint_receipt_resets_adaptive_cancel_streak_controller() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let root = {
+        let mut runtime_state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        runtime_state.create_root_region(Budget::INFINITE)
+    };
+    let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+    scheduler.set_adaptive_cancel_streak(true, 1);
+
+    for index in 0..8u32 {
+        let task_id = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            runtime_state
+                .create_task(root, Budget::INFINITE, async move {
+                    let _ = index;
+                })
+                .expect("task create")
+                .0
+        };
+        scheduler.inject_ready(task_id, 50);
+        assert!(scheduler.run_once(), "ready task {index} should execute");
+    }
+
+    let mut worker = scheduler.take_workers().into_iter().next().expect("worker");
+    let trained = worker.preemption_metrics().clone();
+    assert!(
+        trained.adaptive_epochs > 0,
+        "fixture should train at least one adaptive epoch before reset"
+    );
+    assert!(
+        trained.ready_dispatches > 0,
+        "fixture should exercise the normal ready dispatch path"
+    );
+
+    let mut monitor = ChangePointMonitorConfig::conservative_scheduler_defaults()
+        .enable()
+        .build_monitor();
+    let detection = [10, 10, 10, 10, 10, 34, 34, 34, 34, 34]
+        .into_iter()
+        .find_map(|value| {
+            monitor.observe(
+                RuntimeMetricSeries::ReadyQueueDepth,
+                MetricSample::from_units(value),
+            )
+        })
+        .expect("workload flip should produce a deterministic changepoint receipt");
+
+    assert!(
+        worker.apply_changepoint_detection_to_adaptive_cancel_streak(detection),
+        "known runtime series should reset an enabled adaptive policy"
+    );
+    let reset = worker.preemption_metrics();
+    assert_eq!(reset.adaptive_epochs, 0);
+    assert_eq!(reset.adaptive_current_limit, 16);
+    assert_eq!(reset.adaptive_reward_ema, 0.5);
+    assert_eq!(reset.adaptive_e_value, 1.0);
+    assert_eq!(
+        reset.ready_dispatches, trained.ready_dispatches,
+        "reset must not rewrite non-adaptive dispatch counters"
+    );
+
+    let custom_detection = ChangePointDetection {
+        series: RuntimeMetricSeries::Custom(7),
+        ..detection
+    };
+    assert!(
+        !worker.apply_changepoint_detection_to_adaptive_cancel_streak(custom_detection),
+        "caller-defined custom series should not reset scheduler policy implicitly"
+    );
 }
 
 /// AC1 (metamorphic) — CUSUM detection delay is monotone non-decreasing in the
