@@ -886,10 +886,12 @@ async fn drive_all<'f, R>(mut futs: Vec<Pin<Box<dyn Future<Output = R> + 'f>>>) 
 // surfaced.
 // ---------------------------------------------------------------------------
 
-/// The conservative rule set offered to the rewrite engine. [`RewritePolicy`]
-/// itself gates which actually fire (conservative disables commutativity), so a
-/// rule appearing here is necessary-but-not-sufficient for it to run.
-const CONSERVATIVE_RULES: [RewriteRule; 6] = [
+/// The full rule menu offered to the rewrite engine. The [`RewritePolicy`]
+/// itself gates which actually fire (e.g. the conservative policy disables
+/// commutativity), so a rule appearing here is necessary-but-not-sufficient for
+/// it to run. Both the conservative and aggressive certified paths share this
+/// menu — only the policy differs.
+const REWRITE_RULE_MENU: [RewriteRule; 6] = [
     RewriteRule::JoinAssoc,
     RewriteRule::RaceAssoc,
     RewriteRule::JoinCommute,
@@ -929,6 +931,9 @@ pub struct OptimizedExecution<T> {
 /// * the rewritten DAG fails structural validation; or
 /// * the rewrite is not leaf-conserving — a one-shot leaf future would be
 ///   duplicated or dropped (the execution-safety contract).
+///
+/// This is the conservative front door; [`capture_optimized_with_policy`] runs
+/// the same certified ladder under a caller-chosen [`RewritePolicy`].
 #[allow(clippy::future_not_send)] // inline single-task driver; see `ExecPlan::execute`
 pub async fn capture_optimized<'a, T, Caps, F>(
     cx: &Cx<Caps>,
@@ -939,6 +944,61 @@ where
     Caps: cap::HasTime,
     T: 'a,
 {
+    capture_optimized_with_policy(cx, build, RewritePolicy::conservative()).await
+}
+
+/// Runs the certified-rewrite ladder under an explicit [`RewritePolicy`].
+///
+/// Captures a plan, executes the rewritten DAG when (and only when) it is
+/// verified and execution-safe, and otherwise fails closed to the original plan.
+/// The fail-closed ladder is identical to [`capture_optimized`]; only the policy
+/// offered to the engine changes. Use [`RewritePolicy::conservative`] for the
+/// outcome-preserving default and [`RewritePolicy::assume_all`] for the
+/// aggressive policy.
+///
+/// ## Why the aggressive policy stays gated: it can reorder outcomes
+///
+/// `assume_all()` is **not** outcome-preserving, even through [`capture`]. It
+/// agrees with `conservative()` only while no rewrite perturbs a node's child
+/// order: capture's structuring DFS hands every node strictly ascending child
+/// `PlanId`s, so the commutativity rules (which fire only on a non-canonical
+/// child order) have nothing to do on the captured shape itself, and
+/// `DedupRaceJoin` needs a shared subtree a captured *tree* never contains.
+///
+/// But any node-replacing rewrite — `TimeoutMin` collapsing a nested timeout,
+/// `JoinAssoc`/`RaceAssoc` flattening a subtree — pushes a *fresh, higher-id*
+/// node in place of a child. If that child has a `Join`/`Race` parent, the
+/// parent's children are now out of order, and under `assume_all()` the
+/// commutativity rule then canonicalizes them. Re-ordering a `Join`'s children
+/// permutes its aggregated value; re-ordering a `Race`'s children can change the
+/// index-0 winner outright. So the aggressive policy can change observable
+/// outcomes on ordinary captured plans, which is exactly why it is feature-/
+/// gate-guarded behind the I3 differential equivalence gate (tjrmwz.3) and never
+/// defaults on. The `conservative()` path forbids commutativity entirely and so
+/// is order-stable. See the
+/// `plan_capture_optimized_policy_invariance_contract` integration test for the
+/// reproducing fixtures (a `Join` permutation and a `Race` winner change).
+#[allow(clippy::future_not_send)] // inline single-task driver; see `ExecPlan::execute`
+pub async fn capture_optimized_with_policy<'a, T, Caps, F>(
+    cx: &Cx<Caps>,
+    build: F,
+    policy: RewritePolicy,
+) -> Result<OptimizedExecution<T>, PlanExecError>
+where
+    F: FnOnce(&mut PlanCapture<'a, T>) -> NodeId,
+    Caps: cap::HasTime,
+    T: 'a,
+{
+    // Label the fail-closed reason after the active policy so the logged reason
+    // names the pass that declined to rewrite (preserves the conservative text).
+    let policy_label = if policy == RewritePolicy::conservative() {
+        "conservative"
+    } else if policy == RewritePolicy::assume_all() {
+        "aggressive"
+    } else {
+        "requested-policy"
+    };
+
     let plan = capture(build)?;
 
     // Plans with first_ok/quorum have no structural IR: execute directly.
@@ -963,8 +1023,7 @@ where
     let (original_dag, mut leaf_store, leaf_pid_to_idx) = plan.dismantle();
 
     let mut rewritten_dag = original_dag.clone();
-    let (report, certificate) =
-        rewritten_dag.apply_rewrites_certified(RewritePolicy::conservative(), &CONSERVATIVE_RULES);
+    let (report, certificate) = rewritten_dag.apply_rewrites_certified(policy, &REWRITE_RULE_MENU);
     let fired_rules: Vec<RewriteRule> = report.steps().iter().map(|step| step.rule).collect();
 
     // Decide the execution path, fail-closed.
@@ -972,7 +1031,7 @@ where
         (
             &original_dag,
             false,
-            Some("no conservative rewrite applied".to_string()),
+            Some(format!("no {policy_label} rewrite applied")),
         )
     } else if rewritten_dag.validate().is_err() {
         (
