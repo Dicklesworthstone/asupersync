@@ -225,12 +225,47 @@ fallback, branch/worktree/scratch-clone setup, peer build cancellation, file
 deletion, `git clean`, `git reset`, or the peer poison path. Live RCH fleet state
 may be attached only as operator evidence. In A5, deterministic fixtures are the correctness source.
 
+## Proof-Traffic A6 Final Signoff
+
+`asupersync-proof-traffic-control-kuyx64.6` aggregates the A1-A5 proof-traffic
+controller artifacts into the final signoff packet
+`artifacts/proof_traffic_final_signoff_v1.json`, checked by
+`tests/proof_traffic_final_signoff_contract.rs`. The focused proof manifest lane
+is `proof-traffic-final-signoff`.
+
+The A6 packet records these child evidence rows:
+
+- A1 capability-drift gate:
+  `artifacts/proof_traffic_rch_capabilities_v1.json`,
+  `tests/proof_traffic_rch_capability_contract.rs`
+- A2 admission receipts:
+  `artifacts/proof_traffic_admission_receipts_v1.json`,
+  `tests/proof_traffic_admission_receipt_contract.rs`
+- A3 clean-overlay handshake:
+  `artifacts/proof_traffic_clean_overlay_runner_handshake_v1.json`,
+  `tests/proof_traffic_clean_overlay_runner_handshake_contract.rs`
+- A4 proof parking lot:
+  `artifacts/proof_traffic_parking_lot_v1.json`,
+  `tests/proof_traffic_parking_lot_contract.rs`
+- A5 blocked-loop e2e:
+  `artifacts/proof_traffic_blocked_loop_e2e_v1.json`,
+  `tests/proof_traffic_blocked_loop_e2e_contract.rs`
+
+The final signoff preserves the proof-traffic controller's fail-closed policy:
+capability drift blocks clean-overlay command emission, parked or refused proof
+attempts remain `rerun-required`, and blocked/stale RCH rows are handoff
+evidence only. No proof-traffic path authorizes local Cargo fallback or peer build cancellation.
+
+The closeout checklist requires a live dependency-cycle check with
+`br dep cycles` before the parent can be closed. The expected signal is no
+dependency cycles.
+
 ## No-Claim Boundaries
 
 This gate does not prove release readiness, broad workspace health, runtime
 correctness, performance improvement, live RCH fleet availability, local Cargo
 fallback approval, or permission to delete files, clean worktrees, create
-branches, or create worktrees.
+branches, create worktrees, or cancel peer builds.
 
 It also does not prove that documented clean-overlay flags are available unless
 the installed capability artifact says they are supported.

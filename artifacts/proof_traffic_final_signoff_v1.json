@@ -1,0 +1,134 @@
+{
+  "schema_version": "proof-traffic-final-signoff-v1",
+  "bead_id": "asupersync-proof-traffic-control-kuyx64.6",
+  "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
+  "status": "contract_guarded",
+  "generated_at": "2026-06-15T07:11:28Z",
+  "source_of_truth": {
+    "signoff_artifact": "artifacts/proof_traffic_final_signoff_v1.json",
+    "operator_doc": "docs/proof_traffic_control.md",
+    "contract_test": "tests/proof_traffic_final_signoff_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "manifest_projection": "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md"
+  },
+  "proof_lane": {
+    "lane_id": "proof-traffic-final-signoff",
+    "guarantee_id": "proof-traffic-final-signoff",
+    "status_claim_id": "proof-traffic-final-signoff",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_traffic_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_traffic_final_signoff_contract -- --nocapture"
+  },
+  "child_evidence_rows": [
+    {
+      "row_id": "A1-capability-drift-gate",
+      "bead_id": "asupersync-proof-traffic-control-kuyx64.1",
+      "primary_artifact": "artifacts/proof_traffic_rch_capabilities_v1.json",
+      "contract_test": "tests/proof_traffic_rch_capability_contract.rs",
+      "evidence_status": "landed",
+      "current_interpretation": "Installed RCH capability evidence gates clean-overlay command emission; unsupported flags are capability drift, not proof success.",
+      "no_claim_boundaries": [
+        "does_not_prove_release_readiness",
+        "does_not_prove_broad_workspace_health",
+        "does_not_prove_live_rch_fleet_availability",
+        "does_not_approve_local_cargo_fallback"
+      ]
+    },
+    {
+      "row_id": "A2-admission-receipts",
+      "bead_id": "asupersync-proof-traffic-control-kuyx64.2",
+      "primary_artifact": "artifacts/proof_traffic_admission_receipts_v1.json",
+      "contract_test": "tests/proof_traffic_admission_receipt_contract.rs",
+      "evidence_status": "landed",
+      "current_interpretation": "Admission receipts classify run, queue, park, refusal, peer, and capability-drift outcomes without executing proof commands.",
+      "no_claim_boundaries": [
+        "does_not_prove_runtime_correctness",
+        "does_not_prove_live_rch_fleet_availability",
+        "does_not_grant_peer_build_cancellation_authority",
+        "does_not_approve_local_cargo_fallback"
+      ]
+    },
+    {
+      "row_id": "A3-clean-overlay-handshake",
+      "bead_id": "asupersync-proof-traffic-control-kuyx64.3",
+      "primary_artifact": "artifacts/proof_traffic_clean_overlay_runner_handshake_v1.json",
+      "contract_test": "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
+      "evidence_status": "landed",
+      "current_interpretation": "The handshake admits clean-overlay proof commands only when owned reservations, peer exclusion, and installed RCH capability evidence all satisfy the gate.",
+      "no_claim_boundaries": [
+        "does_not_prove_broad_workspace_health",
+        "does_not_prove_runtime_correctness",
+        "does_not_prove_live_rch_fleet_availability",
+        "does_not_grant_peer_build_cancellation_authority",
+        "does_not_approve_local_cargo_fallback"
+      ]
+    },
+    {
+      "row_id": "A4-proof-parking-lot",
+      "bead_id": "asupersync-proof-traffic-control-kuyx64.4",
+      "primary_artifact": "artifacts/proof_traffic_parking_lot_v1.json",
+      "contract_test": "tests/proof_traffic_parking_lot_contract.rs",
+      "evidence_status": "landed",
+      "current_interpretation": "The parking lot is resumable handoff context for parked, blocked, or refused proof attempts; it is not green proof evidence.",
+      "no_claim_boundaries": [
+        "does_not_prove_release_readiness",
+        "does_not_prove_broad_workspace_health",
+        "does_not_prove_live_rch_fleet_availability",
+        "does_not_approve_local_cargo_fallback"
+      ]
+    },
+    {
+      "row_id": "A5-blocked-loop-e2e",
+      "bead_id": "asupersync-proof-traffic-control-kuyx64.5",
+      "primary_artifact": "artifacts/proof_traffic_blocked_loop_e2e_v1.json",
+      "contract_test": "tests/proof_traffic_blocked_loop_e2e_contract.rs",
+      "evidence_status": "landed",
+      "current_interpretation": "The deterministic blocked-loop e2e proves the receipt, clean-overlay handshake, and parking-lot surfaces fail closed under peer dirt and missing capability fixtures.",
+      "no_claim_boundaries": [
+        "does_not_prove_release_readiness",
+        "does_not_prove_broad_workspace_health",
+        "does_not_prove_runtime_correctness",
+        "does_not_prove_live_rch_fleet_availability",
+        "does_not_approve_local_cargo_fallback",
+        "does_not_grant_peer_build_cancellation_authority"
+      ]
+    }
+  ],
+  "freshness_policy": {
+    "required_evidence_status_for_fresh_claim": "fresh-rch-pass",
+    "current_signoff_evidence_status": "rerun-required",
+    "fresh_claim_requires_exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_traffic_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_traffic_final_signoff_contract -- --nocapture",
+    "local_fallback_allowed": false,
+    "live_fleet_state_is_operator_evidence_only": true
+  },
+  "operator_closeout_checklist": [
+    "Confirm all A1-A5 child artifacts and contract tests exist.",
+    "Run the proof-traffic-final-signoff manifest lane through remote-required RCH before citing fresh proof.",
+    "Run br dep cycles and require no dependency cycles before closing the parent.",
+    "Push main and mirror main:master after commit.",
+    "Do not cancel peer RCH jobs, run local Cargo fallback, delete files, create branches, create worktrees, or use scratch clones."
+  ],
+  "blocked_stale_interpretation_rules": [
+    "Blocked or stale RCH attempts are handoff evidence, not green proof.",
+    "Capability-drift rows block clean-overlay command emission.",
+    "Remote-required refusal means rerun-required, not pass.",
+    "Parking-lot entries are resumable context, not proof evidence.",
+    "Dependency-cycle failure blocks parent closeout."
+  ],
+  "dependency_cycle_check": {
+    "command": "br dep cycles",
+    "expected_signal": "no dependency cycles",
+    "result_status": "rerun-required-before-parent-close"
+  },
+  "no_claim_boundaries": [
+    "does_not_prove_release_readiness",
+    "does_not_prove_broad_workspace_health",
+    "does_not_prove_runtime_correctness",
+    "does_not_prove_performance_improvement",
+    "does_not_prove_live_rch_fleet_availability",
+    "does_not_approve_local_cargo_fallback",
+    "does_not_grant_peer_build_cancellation_authority",
+    "does_not_grant_file_deletion_or_branch_worktree_permission"
+  ]
+}

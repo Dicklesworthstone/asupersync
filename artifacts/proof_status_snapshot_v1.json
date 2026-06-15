@@ -91,7 +91,8 @@
     "doctor e2e proof lane",
     "Rust crate release provenance contract",
     "artifact governance final signoff",
-    "clean-overlay proof orchestration contract"
+    "clean-overlay proof orchestration contract",
+    "proof traffic final signoff"
   ],
   "claim_categories": [
     {
@@ -991,6 +992,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped clean-overlay proof-orchestration operator packet evidence only; does not prove broad workspace health, release readiness, runtime correctness outside the cited clean-overlay planner/blocker/overlay-command surfaces, performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval."
+    },
+    {
+      "claim_id": "proof-traffic-final-signoff",
+      "category": "proof traffic final signoff",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_traffic_final_signoff_v1.json",
+          "proof-traffic-final-signoff"
+        ],
+        "AGENTS.md": [
+          "artifacts/proof_traffic_final_signoff_v1.json",
+          "proof-traffic-final-signoff"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "proof-traffic-final-signoff"
+      ],
+      "manifest_lane_ids": [
+        "proof-traffic-final-signoff"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_traffic_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_traffic_final_signoff_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped proof-traffic A6 operator packet: cite it only for A1-A5 evidence aggregation, capability-drift gate, admission receipts, clean-overlay handshake, proof parking lot, blocked-loop e2e, proof manifest/status rows, README/AGENTS markers, no-local-fallback/no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries. It does not prove release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds."
     }
   ],
   "proof_reuse_status_rows": [

@@ -437,7 +437,8 @@
     "rust-crate-release-provenance-contract",
     "artifact-governance-validation-harness",
     "artifact-governance-final-signoff",
-    "clean-overlay-proof-orchestration-contract"
+    "clean-overlay-proof-orchestration-contract",
+    "proof-traffic-final-signoff"
   ],
   "lanes": [
     {
@@ -1481,6 +1482,38 @@
         "artifacts/proof_lane_manifest_v1.json",
         "artifacts/proof_status_snapshot_v1.json"
       ]
+    },
+    {
+      "lane_id": "proof-traffic-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_traffic_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_traffic_final_signoff_contract -- --nocapture",
+      "guarantee_ids": [
+        "proof-traffic-final-signoff"
+      ],
+      "feature_flags": [],
+      "expected_signal": "proof_traffic_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/proof_traffic_final_signoff_v1.json",
+        "tests/proof_traffic_final_signoff_contract.rs",
+        "docs/proof_traffic_control.md",
+        "artifacts/proof_traffic_rch_capabilities_v1.json",
+        "tests/proof_traffic_rch_capability_contract.rs",
+        "artifacts/proof_traffic_admission_receipts_v1.json",
+        "tests/proof_traffic_admission_receipt_contract.rs",
+        "artifacts/proof_traffic_clean_overlay_runner_handshake_v1.json",
+        "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
+        "artifacts/proof_traffic_parking_lot_v1.json",
+        "tests/proof_traffic_parking_lot_contract.rs",
+        "artifacts/proof_traffic_blocked_loop_e2e_v1.json",
+        "tests/proof_traffic_blocked_loop_e2e_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ]
     }
   ],
   "guarantees": [
@@ -1782,6 +1815,12 @@
       "guarantee_id": "clean-overlay-proof-orchestration-contract",
       "lane_ids": [
         "clean-overlay-proof-orchestration-contract"
+      ]
+    },
+    {
+      "guarantee_id": "proof-traffic-final-signoff",
+      "lane_ids": [
+        "proof-traffic-final-signoff"
       ]
     }
   ]
