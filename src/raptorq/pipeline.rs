@@ -13,7 +13,7 @@ use crate::encoding::{EncodingPipeline, max_object_size};
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
 use crate::raptorq::systematic::SystematicParams;
-use crate::security::{AuthenticatedSymbol, SecurityContext};
+use crate::security::{AuthenticatedSymbol, AuthenticatedSymbolState, SecurityContext};
 use crate::transport::error::StreamError;
 use crate::transport::sink::SymbolSink;
 use crate::transport::stream::SymbolStream;
@@ -51,6 +51,61 @@ pub struct ReceiveOutcome {
     pub symbols_received: usize,
     /// Whether every symbol consumed for decode was cryptographically verified.
     pub authenticated: bool,
+    /// Authentication posture of the symbols accepted into the decode set.
+    pub authentication: ReceiveAuthenticationSummary,
+}
+
+/// Authentication posture counts for symbols accepted into a receive decode set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReceiveAuthenticationSummary {
+    /// Symbols cryptographically verified by the receive path.
+    pub verified: usize,
+    /// Symbols carrying a non-zero tag that the receive path did not verify.
+    pub unverified_tagged: usize,
+    /// Symbols carrying the all-zero unauthenticated sentinel tag.
+    pub unauthenticated_sentinel: usize,
+}
+
+impl ReceiveAuthenticationSummary {
+    fn record(&mut self, state: AuthenticatedSymbolState) {
+        match state {
+            AuthenticatedSymbolState::Verified => {
+                self.verified = self.verified.saturating_add(1);
+            }
+            AuthenticatedSymbolState::UnverifiedTagged => {
+                self.unverified_tagged = self.unverified_tagged.saturating_add(1);
+            }
+            AuthenticatedSymbolState::UnauthenticatedSentinel => {
+                self.unauthenticated_sentinel = self.unauthenticated_sentinel.saturating_add(1);
+            }
+        }
+    }
+
+    /// Total symbols represented by this summary.
+    #[must_use]
+    pub const fn total(self) -> usize {
+        self.verified
+            .saturating_add(self.unverified_tagged)
+            .saturating_add(self.unauthenticated_sentinel)
+    }
+
+    /// Returns true when every represented symbol was verified.
+    #[must_use]
+    pub const fn all_verified(self) -> bool {
+        self.total() == self.verified
+    }
+
+    /// Returns true when any accepted symbol carried the zero-tag sentinel.
+    #[must_use]
+    pub const fn has_unauthenticated_sentinel(self) -> bool {
+        self.unauthenticated_sentinel > 0
+    }
+
+    /// Returns true when any accepted symbol carried a non-zero unverified tag.
+    #[must_use]
+    pub const fn has_unverified_tagged(self) -> bool {
+        self.unverified_tagged > 0
+    }
 }
 
 /// Sender pipeline: encode → sign → transport.
@@ -275,6 +330,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
 
         let mut symbols_received = 0usize;
         let mut authenticated = has_auth_material;
+        let mut authentication = ReceiveAuthenticationSummary::default();
 
         // Read symbols until decoding completes.
         while !decoder.is_complete() {
@@ -301,6 +357,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                     } else {
                         false
                     };
+                let symbol_authentication_state = auth_symbol.authentication_state();
 
                 // br-asupersync-x7ad3b: reject_unauthenticated enforcement. With
                 // auth material available (explicit or config-derived) the
@@ -319,6 +376,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                     | SymbolAcceptResult::DecodingStarted { .. }
                     | SymbolAcceptResult::BlockComplete { .. } => {
                         authenticated &= symbol_verified;
+                        authentication.record(symbol_authentication_state);
                         symbols_received += 1;
                         if let Some(ref mut m) = self.metrics {
                             m.counter("raptorq.symbols_received").increment();
@@ -351,6 +409,7 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
             data,
             symbols_received,
             authenticated,
+            authentication,
         })
     }
 
@@ -1389,6 +1448,9 @@ mod tests {
 
         let recv = receiver.receive_object(&cx, &params).unwrap();
         assert!(recv.authenticated);
+        assert_eq!(recv.authentication.verified, recv.symbols_received);
+        assert!(recv.authentication.all_verified());
+        assert!(!recv.authentication.has_unauthenticated_sentinel());
     }
 
     #[test]
@@ -1425,6 +1487,8 @@ mod tests {
             recv.authenticated,
             "config auth_key_seed must drive symbol verification"
         );
+        assert_eq!(recv.authentication.verified, recv.symbols_received);
+        assert!(recv.authentication.all_verified());
     }
 
     #[test]
@@ -1493,6 +1557,14 @@ mod tests {
         let recv = receiver.receive_object(&cx, &params).unwrap();
         assert_eq!(&recv.data[..data.len()], &data);
         assert!(!recv.authenticated);
+        assert_eq!(recv.authentication.total(), recv.symbols_received);
+        assert_eq!(recv.authentication.verified, 0);
+        assert_eq!(recv.authentication.unverified_tagged, 0);
+        assert_eq!(
+            recv.authentication.unauthenticated_sentinel,
+            recv.symbols_received
+        );
+        assert!(recv.authentication.has_unauthenticated_sentinel());
     }
 
     #[test]
@@ -1580,6 +1652,14 @@ mod tests {
             !recv.authenticated,
             "permissive-mode decode with an unverified symbol must not report authenticated"
         );
+        assert_eq!(recv.authentication.total(), recv.symbols_received);
+        assert_eq!(recv.authentication.unauthenticated_sentinel, 1);
+        assert_eq!(
+            recv.authentication.verified,
+            recv.symbols_received.saturating_sub(1)
+        );
+        assert!(recv.authentication.has_unauthenticated_sentinel());
+        assert!(!recv.authentication.has_unverified_tagged());
     }
 
     #[test]
@@ -1613,6 +1693,11 @@ mod tests {
         assert_eq!(
             recv.symbols_received, outcome.source_symbols,
             "duplicate symbols must not count as used-for-decoding"
+        );
+        assert_eq!(recv.authentication.total(), recv.symbols_received);
+        assert_eq!(
+            recv.authentication.unauthenticated_sentinel,
+            recv.symbols_received
         );
     }
 
@@ -1666,6 +1751,12 @@ mod tests {
             recv.authenticated,
             "a rejected duplicate must not mark the decoded object unauthenticated"
         );
+        assert_eq!(recv.authentication.total(), recv.symbols_received);
+        assert_eq!(
+            recv.authentication.verified, recv.symbols_received,
+            "a rejected duplicate must not count in the receive auth summary"
+        );
+        assert!(!recv.authentication.has_unauthenticated_sentinel());
     }
 
     #[test]
@@ -1697,8 +1788,27 @@ mod tests {
             data: vec![0u8; 16],
             symbols_received: 20,
             authenticated: true,
+            authentication: ReceiveAuthenticationSummary {
+                verified: 20,
+                unverified_tagged: 0,
+                unauthenticated_sentinel: 0,
+            },
         };
         let dbg = format!("{r:?}");
         assert!(dbg.contains("ReceiveOutcome"), "{dbg}");
+    }
+
+    #[test]
+    fn receive_authentication_summary_reports_totals_and_flags() {
+        let summary = ReceiveAuthenticationSummary {
+            verified: 2,
+            unverified_tagged: 1,
+            unauthenticated_sentinel: 3,
+        };
+
+        assert_eq!(summary.total(), 6);
+        assert!(!summary.all_verified());
+        assert!(summary.has_unverified_tagged());
+        assert!(summary.has_unauthenticated_sentinel());
     }
 }
