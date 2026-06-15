@@ -974,6 +974,32 @@ impl<T> ResponseStream<T> {
         Ok(())
     }
 
+    /// Number of queued response items currently waiting to be consumed.
+    #[must_use]
+    pub fn buffer_len(&self) -> usize {
+        lock_unpoisoned(&self.state).items.len()
+    }
+
+    /// Maximum number of response items this stream will buffer before applying
+    /// sender backpressure.
+    #[must_use]
+    pub fn buffer_capacity(&self) -> usize {
+        MAX_STREAM_BUFFERED
+    }
+
+    /// Remaining enqueue slots before the stream applies sender backpressure.
+    #[must_use]
+    pub fn remaining_capacity(&self) -> usize {
+        let len = lock_unpoisoned(&self.state).items.len();
+        MAX_STREAM_BUFFERED.saturating_sub(len)
+    }
+
+    /// Whether the stream has reached its bounded buffer cap.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        lock_unpoisoned(&self.state).items.len() >= MAX_STREAM_BUFFERED
+    }
+
     /// Close the stream.
     pub fn close(&self) {
         let waiters = {

@@ -479,7 +479,7 @@ pub trait Streaming: Send {
 
 /// Maximum items buffered in a streaming request or response before
 /// backpressure is applied to the sender.
-pub(crate) const MAX_STREAM_BUFFERED: usize = 1024;
+pub const MAX_STREAM_BUFFERED: usize = 1024;
 
 fn wake_waiter(waiter: &mut Option<Waker>) {
     if let Some(waiter) = waiter.take() {
@@ -633,6 +633,31 @@ impl<T> StreamingRequest<T> {
             waiter: None,
             call_cancellation: Some(call_cancellation),
         }
+    }
+
+    /// Number of queued request items currently waiting to be consumed.
+    #[must_use]
+    pub fn buffer_len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Maximum number of request items this stream will buffer before applying
+    /// sender backpressure.
+    #[must_use]
+    pub fn buffer_capacity(&self) -> usize {
+        MAX_STREAM_BUFFERED
+    }
+
+    /// Remaining enqueue slots before the stream applies sender backpressure.
+    #[must_use]
+    pub fn remaining_capacity(&self) -> usize {
+        MAX_STREAM_BUFFERED.saturating_sub(self.items.len())
+    }
+
+    /// Whether the stream has reached its bounded buffer cap.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.items.len() >= MAX_STREAM_BUFFERED
     }
 
     /// Pushes a message into the stream queue.
@@ -895,6 +920,31 @@ impl<T> ResponseStream<T> {
             terminal_status: None,
             call_cancellation: Some(call_cancellation),
         }
+    }
+
+    /// Number of queued response items currently waiting to be consumed.
+    #[must_use]
+    pub fn buffer_len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Maximum number of response items this stream will buffer before applying
+    /// sender backpressure.
+    #[must_use]
+    pub fn buffer_capacity(&self) -> usize {
+        MAX_STREAM_BUFFERED
+    }
+
+    /// Remaining enqueue slots before the stream applies sender backpressure.
+    #[must_use]
+    pub fn remaining_capacity(&self) -> usize {
+        MAX_STREAM_BUFFERED.saturating_sub(self.items.len())
+    }
+
+    /// Whether the stream has reached its bounded buffer cap.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.items.len() >= MAX_STREAM_BUFFERED
     }
 
     /// Enqueue a streamed response item.

@@ -18,21 +18,15 @@
 //!       message `"... buffer full — apply backpressure"` so a
 //!       sender can pattern-match the back-pressure signal.
 //!
-//!   (c) **Documented gap (P3): no buffer-fullness query API.**
-//!       Producers cannot proactively self-pace; they must try
-//!       `push` and react to `Err`. There is no
-//!       `buffer_len()` / `is_full()` / `poll_ready()` accessor
-//!       (`grep -n 'pub fn buffer_len\\|pub fn is_full\\|pub fn poll_ready'`
-//!       returns zero hits in streaming.rs / client.rs). This is
-//!       a doc-truthfulness item; the back-pressure path itself
-//!       works.
+//!   (c) **Producer pacing telemetry — VERIFIED.**
+//!       `buffer_len()`, `buffer_capacity()`, `remaining_capacity()`,
+//!       and `is_full()` expose non-mutating buffer state so producers
+//!       can self-pace before attempting another `push`.
 //!
-//!   (d) **Documented gap (P3): cap is `pub(crate)` only.**
-//!       `MAX_STREAM_BUFFERED` is not re-exported from
-//!       `asupersync::grpc`, so operators cannot read or override
-//!       the value without forking. Future enhancement could
-//!       expose it as a public const or make it per-stream
-//!       configurable.
+//!   (d) **Public cap discovery — VERIFIED.**
+//!       `MAX_STREAM_BUFFERED` is re-exported from `asupersync::grpc`,
+//!       so operators and tests can discover the default bounded-buffer
+//!       cap without forking internal modules.
 //!
 //! Regression tests below pin (a) and (b) via the public push API
 //! without depending on the exact constant value (they discover
@@ -40,16 +34,13 @@
 //! still passes).
 
 use asupersync::bytes::Bytes;
-use asupersync::grpc::ResponseStream;
 use asupersync::grpc::status::Code;
 use asupersync::grpc::streaming::{Streaming, StreamingRequest};
+use asupersync::grpc::{MAX_STREAM_BUFFERED, ResponseStream};
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 
-/// Documented cap as of 2026-04-29. Tests below probe the cap
-/// by behavior — if a future tuning changes this constant, the
-/// behavior tests still pass; only the comment needs updating.
-const DOCUMENTED_CAP: usize = 1024;
+const DOCUMENTED_CAP: usize = MAX_STREAM_BUFFERED;
 
 fn make_waker() -> Waker {
     Waker::noop().clone()
@@ -117,6 +108,30 @@ fn streaming_request_recovers_after_consumer_drains() {
 }
 
 #[test]
+fn streaming_request_exposes_buffer_telemetry_for_proactive_pacing() {
+    let mut stream = StreamingRequest::<u32>::open();
+    assert_eq!(stream.buffer_capacity(), DOCUMENTED_CAP);
+    assert_eq!(stream.buffer_len(), 0);
+    assert_eq!(stream.remaining_capacity(), DOCUMENTED_CAP);
+    assert!(!stream.is_full());
+
+    for i in 0..(DOCUMENTED_CAP as u32) {
+        stream.push(i).expect("fill to cap");
+    }
+    assert_eq!(stream.buffer_len(), DOCUMENTED_CAP);
+    assert_eq!(stream.remaining_capacity(), 0);
+    assert!(stream.is_full());
+
+    let waker = make_waker();
+    let mut cx = Context::from_waker(&waker);
+    let drained = Pin::new(&mut stream).poll_next(&mut cx);
+    assert!(matches!(drained, Poll::Ready(Some(Ok(0)))));
+    assert_eq!(stream.buffer_len(), DOCUMENTED_CAP - 1);
+    assert_eq!(stream.remaining_capacity(), 1);
+    assert!(!stream.is_full());
+}
+
+#[test]
 fn response_stream_push_rejects_at_cap_with_back_pressure_signal() {
     // Symmetric property on the production client::ResponseStream
     // (the server→client direction). Same cap, same Err shape.
@@ -132,6 +147,30 @@ fn response_stream_push_rejects_at_cap_with_back_pressure_signal() {
         .expect_err("push at cap must return Err");
     assert_eq!(err.code(), Code::ResourceExhausted);
     assert!(err.message().contains("buffer full") || err.message().contains("backpressure"));
+}
+
+#[test]
+fn response_stream_exposes_buffer_telemetry_for_proactive_pacing() {
+    let mut stream = ResponseStream::<u32>::open();
+    assert_eq!(stream.buffer_capacity(), DOCUMENTED_CAP);
+    assert_eq!(stream.buffer_len(), 0);
+    assert_eq!(stream.remaining_capacity(), DOCUMENTED_CAP);
+    assert!(!stream.is_full());
+
+    for i in 0..(DOCUMENTED_CAP as u32) {
+        stream.push(Ok(i)).expect("fill to cap");
+    }
+    assert_eq!(stream.buffer_len(), DOCUMENTED_CAP);
+    assert_eq!(stream.remaining_capacity(), 0);
+    assert!(stream.is_full());
+
+    let waker = make_waker();
+    let mut cx = Context::from_waker(&waker);
+    let drained = Pin::new(&mut stream).poll_next(&mut cx);
+    assert!(matches!(drained, Poll::Ready(Some(Ok(0)))));
+    assert_eq!(stream.buffer_len(), DOCUMENTED_CAP - 1);
+    assert_eq!(stream.remaining_capacity(), 1);
+    assert!(!stream.is_full());
 }
 
 #[test]
