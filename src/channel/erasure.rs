@@ -54,7 +54,7 @@ use crate::config::EncodingConfig;
 use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline};
 use crate::encoding::EncodingPipeline;
-use crate::security::AuthenticatedSymbol;
+use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use crate::util::DetRng;
@@ -196,6 +196,67 @@ impl EcConfig {
         };
         Ok(EncodedMessage { header, frames })
     }
+
+    /// Like [`encode_message`](Self::encode_message) but signs every symbol with
+    /// `auth`, returning the header and the signed [`AuthenticatedSymbol`]s for
+    /// the per-symbol-authenticated channel path (Byzantine-injection
+    /// resistance).
+    ///
+    /// A receiver holding the same [`SecurityContext`] key
+    /// ([`decode_message_authenticated`]) verifies each symbol before decoding;
+    /// forged, tampered, or wrong-key symbols fail verification and are rejected,
+    /// while the authentic survivors still decode within the repair budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`encode_message`](Self::encode_message).
+    pub fn encode_message_authenticated(
+        &self,
+        message_id: u64,
+        message: &[u8],
+        auth: &SecurityContext,
+    ) -> Result<(MessageHeader, Vec<AuthenticatedSymbol>), EcError> {
+        self.plan(message.len())?;
+        let enc_config = EncodingConfig {
+            symbol_size: self.symbol_size,
+            max_block_size: self.max_message_size,
+            ..EncodingConfig::default()
+        };
+        let mut pipeline =
+            EncodingPipeline::new(enc_config, SymbolPool::new(PoolConfig::default()));
+        let object_id = ObjectId::new(message_id, 0);
+        let repair_count = self.repair_overhead as usize;
+
+        let mut symbols = Vec::new();
+        let mut source_symbols: u16 = 0;
+        for result in pipeline.encode_with_repair(object_id, message, repair_count) {
+            let symbol = result.map_err(|e| EcError::Coding(e.to_string()))?;
+            if symbol.id().sbn() != 0 {
+                return Err(EcError::Coding(
+                    "message spans more than one source block".to_string(),
+                ));
+            }
+            if symbol.kind().is_source() {
+                source_symbols = source_symbols
+                    .checked_add(1)
+                    .ok_or(EcError::SymbolCountOverflow)?;
+            }
+            symbols.push(auth.sign_symbol(symbol.symbol()));
+        }
+
+        let total_symbols =
+            u16::try_from(symbols.len()).map_err(|_| EcError::SymbolCountOverflow)?;
+        let message_size =
+            u32::try_from(message.len()).map_err(|_| EcError::SymbolCountOverflow)?;
+        let header = MessageHeader {
+            message_id,
+            message_size,
+            symbol_size: self.symbol_size,
+            source_symbols,
+            total_symbols,
+        };
+        Ok((header, symbols))
+    }
 }
 
 /// A message encoded into its erasure symbol frames plus the [`MessageHeader`]
@@ -262,6 +323,64 @@ pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<
         );
         decoder
             .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
+            .map_err(|e| EcError::Coding(e.to_string()))?;
+    }
+
+    if !decoder.is_complete() {
+        return Err(EcError::IncompleteDecode {
+            needed: source_symbols,
+        });
+    }
+    decoder
+        .into_data()
+        .map_err(|e| EcError::Coding(e.to_string()))
+}
+
+/// Reconstructs a message from per-symbol-authenticated symbols, verifying every
+/// symbol against `auth` before it contributes to the decode (the AC3
+/// Byzantine-injection-resistant path).
+///
+/// Built with a fail-closed [`DecodingPipeline::with_auth`]: a symbol whose tag
+/// does not verify under `auth`'s key is rejected and never poisons the decode,
+/// so a wrong-key or forged symbol cannot inject data, and an authentic transfer
+/// still reconstructs from the symbols that pass.
+///
+/// # Errors
+///
+/// [`EcError::IncompleteDecode`] if too few symbols authenticated to reconstruct
+/// the block (e.g. the wrong key, so none pass), or [`EcError::Coding`] if the
+/// decoder rejects a symbol or fails to finalize.
+pub fn decode_message_authenticated(
+    header: &MessageHeader,
+    symbols: &[AuthenticatedSymbol],
+    auth: &SecurityContext,
+) -> Result<Vec<u8>, EcError> {
+    if header.message_size == 0 {
+        return Ok(Vec::new());
+    }
+    let object_id = ObjectId::new(header.message_id, 0);
+    let source_symbols = header.source_symbols;
+
+    let config = DecodingConfig {
+        symbol_size: header.symbol_size,
+        max_block_size: usize::from(source_symbols) * usize::from(header.symbol_size),
+        ..DecodingConfig::default()
+    };
+
+    let mut decoder = DecodingPipeline::with_auth(config, auth.clone());
+    decoder
+        .set_object_params(ObjectParams {
+            object_id,
+            object_size: u64::from(header.message_size),
+            symbol_size: header.symbol_size,
+            source_blocks: 1,
+            symbols_per_block: source_symbols,
+        })
+        .map_err(|e| EcError::Coding(e.to_string()))?;
+
+    for symbol in symbols {
+        decoder
+            .feed(symbol.clone())
             .map_err(|e| EcError::Coding(e.to_string()))?;
     }
 
