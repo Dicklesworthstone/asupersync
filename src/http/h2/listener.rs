@@ -985,6 +985,9 @@ enum DriverEvent {
     FinalizeTick,
     /// The shutdown signal entered `ForceClosing`: drop the transport.
     ForceClose,
+    /// The connection was fully quiescent past its idle budget: close it with
+    /// a NO_ERROR GOAWAY (br-asupersync-mfqfst L4).
+    IdleTimeout,
 }
 
 /// Flush every frame the connection has queued onto the transport.
@@ -1011,6 +1014,7 @@ async fn next_driver_event(
     signal: &ShutdownSignal,
     watch_drain: bool,
     finalize_deadline: Option<Time>,
+    idle_deadline: Option<Time>,
 ) -> DriverEvent {
     if watch_drain && signal.is_shutting_down() {
         return DriverEvent::DrainRequested;
@@ -1029,6 +1033,16 @@ async fn next_driver_event(
             None => std::future::pending::<()>().await,
         }
     });
+    // br-asupersync-mfqfst L4: absolute idle deadline armed by the caller once
+    // the connection went quiescent; like the finalize tick it is fixed (not
+    // relative) so it cannot be postponed by spurious wake-ups, and it fires
+    // even when no frame ever arrives (the frame-arrival-independent backstop).
+    let mut idle_fut = std::pin::pin!(async move {
+        match idle_deadline {
+            Some(deadline) => crate::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    });
     std::future::poll_fn(move |cx| {
         if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
             || force_fut.as_mut().poll(cx).is_ready()
@@ -1040,6 +1054,9 @@ async fn next_driver_event(
         }
         if finalize_deadline.is_some() && tick_fut.as_mut().poll(cx).is_ready() {
             return Poll::Ready(DriverEvent::FinalizeTick);
+        }
+        if idle_deadline.is_some() && idle_fut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(DriverEvent::IdleTimeout);
         }
         // Cancel-correct channels make dropping a partially-polled recv
         // safe: no item is consumed unless the future completes.
@@ -1254,6 +1271,7 @@ async fn serve_h2_connection<F, Fut, R>(
     request_timeout_header_cap: Option<Duration>,
     request_drain_grace: Duration,
     max_requests_per_connection: Option<u64>,
+    idle_timeout: Option<Duration>,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -1285,6 +1303,10 @@ where
     // this connection so it can be recycled once the configured budget is
     // reached (see the recycle check at the end of the loop body).
     let mut requests_dispatched: u64 = 0;
+    // br-asupersync-mfqfst L4: absolute idle deadline, armed once when the
+    // connection becomes fully quiescent and cleared as soon as activity
+    // resumes (kept fixed in between so it is not pushed forward by wake-ups).
+    let mut idle_at: Option<Time> = None;
 
     loop {
         pump_writes(&mut conn, &mut framed).await?;
@@ -1309,18 +1331,36 @@ where
         }
 
         let watch_drain = !conn.goaway_sent();
+        let now = Cx::current()
+            .and_then(|cx| cx.timer_driver())
+            .map_or_else(crate::time::wall_now, |timer| timer.now());
         // Arm the stage-2 finalize deadline once, when the stage-1 GOAWAY is
         // outstanding; keep it fixed across loop iterations so active traffic
         // cannot reset the window.
         if conn.graceful_shutdown_pending() {
             if finalize_at.is_none() {
-                let now = Cx::current()
-                    .and_then(|cx| cx.timer_driver())
-                    .map_or_else(crate::time::wall_now, |timer| timer.now());
                 finalize_at = Some(now + DRAIN_SUPERVISION_TICK);
             }
         } else {
             finalize_at = None;
+        }
+        // br-asupersync-mfqfst L4: arm the idle timeout while the connection is
+        // fully quiescent — no active streams, nothing being assembled, no
+        // queued frames, not mid-CONTINUATION, and no GOAWAY in flight (the
+        // shutdown paths own closing once a GOAWAY is sent). A busy connection
+        // never trips it; an idle keep-alive or a client that connects and
+        // makes no progress is reclaimed after the configured budget.
+        let connection_idle = !conn.goaway_sent()
+            && conn.active_stream_count() == 0
+            && pending_requests.is_empty()
+            && !conn.is_awaiting_continuation()
+            && !conn.has_pending_frames();
+        if let Some(timeout) = idle_timeout.filter(|_| connection_idle) {
+            if idle_at.is_none() {
+                idle_at = Some(now + timeout);
+            }
+        } else {
+            idle_at = None;
         }
         let event = next_driver_event(
             &mut framed,
@@ -1329,6 +1369,7 @@ where
             &shutdown_signal,
             watch_drain,
             finalize_at,
+            idle_at,
         )
         .await;
 
@@ -1344,6 +1385,20 @@ where
             }
             DriverEvent::FinalizeTick => {
                 conn.finalize_graceful_shutdown(crate::bytes::Bytes::new());
+            }
+            DriverEvent::IdleTimeout => {
+                // br-asupersync-mfqfst L4: the connection has been fully
+                // quiescent past the idle budget (it is only armed when no
+                // stream is active and nothing is queued), so a NO_ERROR
+                // GOAWAY + close strands no in-flight work. h1 parity with
+                // the keep-alive idle timeout.
+                conn.goaway(
+                    ErrorCode::NoError,
+                    crate::bytes::Bytes::from_static(b"idle timeout"),
+                );
+                pump_writes(&mut conn, &mut framed).await?;
+                let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                return Ok(());
             }
             DriverEvent::Frame(None) => {
                 // Peer closed the transport.
@@ -1552,6 +1607,14 @@ pub struct Http2ListenerConfig {
     /// refused (after the two-stage GOAWAY ratchets down) while the in-flight
     /// streams — including the one that hit the limit — run to completion.
     pub max_requests_per_connection: Option<u64>,
+    /// br-asupersync-mfqfst L4: idle timeout for a fully-quiescent connection
+    /// (h1 parity with `Http1Config::idle_timeout`). When the connection holds
+    /// no active streams, no requests being assembled, no queued frames, and
+    /// is not mid-CONTINUATION for this long, the server closes it with a
+    /// NO_ERROR GOAWAY. This reclaims idle keep-alive connections and is a
+    /// frame-arrival-independent backstop against a client that opens a
+    /// connection and then makes no progress (slowloris). `None` disables it.
+    pub idle_timeout: Option<Duration>,
     /// Time source for shutdown bookkeeping and drain supervision.
     pub time_getter: fn() -> Time,
 }
@@ -1576,6 +1639,7 @@ impl Default for Http2ListenerConfig {
             request_timeout_header_cap: None,
             request_drain_grace: Duration::from_millis(500),
             max_requests_per_connection: Some(1000),
+            idle_timeout: Some(Duration::from_secs(60)),
             time_getter: default_h2_listener_time_getter,
         }
     }
@@ -1664,6 +1728,15 @@ impl Http2ListenerConfig {
     #[must_use]
     pub fn max_requests_per_connection(mut self, max: Option<u64>) -> Self {
         self.max_requests_per_connection = max;
+        self
+    }
+
+    /// Set the idle timeout for a fully-quiescent connection
+    /// (br-asupersync-mfqfst L4). `None` disables it (h1 parity with
+    /// `Http1Config::idle_timeout`).
+    #[must_use]
+    pub fn idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.idle_timeout = timeout;
         self
     }
 
@@ -1868,6 +1941,7 @@ where
             let request_timeout_header_cap = self.config.request_timeout_header_cap;
             let request_drain_grace = self.config.request_drain_grace;
             let max_requests_per_connection = self.config.max_requests_per_connection;
+            let idle_timeout = self.config.idle_timeout;
             let spawn_result = runtime.try_spawn(async move {
                 let peer_addr = Some(addr);
                 if let Err(err) = serve_h2_connection(
@@ -1884,6 +1958,7 @@ where
                     request_timeout_header_cap,
                     request_drain_grace,
                     max_requests_per_connection,
+                    idle_timeout,
                 )
                 .await
                 {
