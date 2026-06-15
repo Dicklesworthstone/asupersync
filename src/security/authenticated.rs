@@ -19,6 +19,17 @@ pub struct AuthenticatedSymbol {
     verified: bool,
 }
 
+/// Public authentication posture of an [`AuthenticatedSymbol`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthenticatedSymbolState {
+    /// The symbol tag has been cryptographically verified.
+    Verified,
+    /// The symbol carries a non-zero tag, but it has not been verified yet.
+    UnverifiedTagged,
+    /// The symbol carries the all-zero unauthenticated sentinel tag.
+    UnauthenticatedSentinel,
+}
+
 impl AuthenticatedSymbol {
     /// Creates a new verified authenticated symbol from an internally trusted source.
     ///
@@ -105,6 +116,20 @@ impl AuthenticatedSymbol {
     #[inline]
     pub fn is_verified(&self) -> bool {
         self.verified
+    }
+
+    /// Returns the symbol's authentication posture without requiring callers to
+    /// inspect the tag bytes directly.
+    #[must_use]
+    #[inline]
+    pub fn authentication_state(&self) -> AuthenticatedSymbolState {
+        if self.verified {
+            AuthenticatedSymbolState::Verified
+        } else if self.tag.is_zero() {
+            AuthenticatedSymbolState::UnauthenticatedSentinel
+        } else {
+            AuthenticatedSymbolState::UnverifiedTagged
+        }
     }
 
     /// Sets the verification status (internal use).

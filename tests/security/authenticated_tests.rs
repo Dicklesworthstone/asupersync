@@ -1,5 +1,7 @@
 use crate::common::*;
-use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
+use asupersync::security::{
+    AuthenticatedSymbol, AuthenticatedSymbolState, AuthenticationTag, SecurityContext,
+};
 use asupersync::types::Symbol;
 
 fn symbol_with(data: &[u8]) -> Symbol {
@@ -35,6 +37,47 @@ fn from_parts_starts_unverified() {
     let verified = auth.is_verified();
     assert_with_log!(!verified, "symbol should be unverified", false, verified);
     test_complete!("from_parts_starts_unverified");
+}
+
+#[test]
+fn authentication_state_distinguishes_verified_tagged_and_sentinel_symbols() {
+    init_test_logging();
+    test_phase!("authentication_state_distinguishes_verified_tagged_and_sentinel_symbols");
+    let symbol = symbol_with(&[4, 5, 6]);
+    let ctx = SecurityContext::for_testing(11);
+
+    let signed = ctx.sign_symbol(&symbol);
+    assert_with_log!(
+        signed.authentication_state() == AuthenticatedSymbolState::Verified,
+        "signed symbol should report verified state",
+        AuthenticatedSymbolState::Verified,
+        signed.authentication_state()
+    );
+
+    let mut received = AuthenticatedSymbol::from_parts(symbol.clone(), *signed.tag());
+    assert_with_log!(
+        received.authentication_state() == AuthenticatedSymbolState::UnverifiedTagged,
+        "received non-zero tag should report unverified-tagged state before verification",
+        AuthenticatedSymbolState::UnverifiedTagged,
+        received.authentication_state()
+    );
+    ctx.verify_authenticated_symbol(&mut received)
+        .expect("signed symbol verifies");
+    assert_with_log!(
+        received.authentication_state() == AuthenticatedSymbolState::Verified,
+        "verified received symbol should report verified state",
+        AuthenticatedSymbolState::Verified,
+        received.authentication_state()
+    );
+
+    let sentinel = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
+    assert_with_log!(
+        sentinel.authentication_state() == AuthenticatedSymbolState::UnauthenticatedSentinel,
+        "zero-tag sentinel should be distinguishable from an unverified real tag",
+        AuthenticatedSymbolState::UnauthenticatedSentinel,
+        sentinel.authentication_state()
+    );
+    test_complete!("authentication_state_distinguishes_verified_tagged_and_sentinel_symbols");
 }
 
 #[test]

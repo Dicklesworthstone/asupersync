@@ -76,7 +76,7 @@ pub mod keys;
 pub mod secret;
 pub mod tag;
 
-pub use authenticated::AuthenticatedSymbol;
+pub use authenticated::{AuthenticatedSymbol, AuthenticatedSymbolState};
 pub use context::{AuthMode, SecurityContext};
 pub use error::{AuthError, AuthErrorKind, AuthResult};
 pub use key::{AUTH_KEY_SIZE, AuthKey, KeyRing};
