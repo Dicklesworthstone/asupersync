@@ -102,10 +102,15 @@ impl CloseReason {
     /// # Errors
     ///
     /// Returns `WsError::InvalidClosePayload` if:
+    /// - Payload exceeds the close-frame payload limit
     /// - Payload is exactly 1 byte (invalid)
     /// - Status code is invalid/reserved for wire use
     /// - Reason text is not valid UTF-8
     pub fn parse(payload: &[u8]) -> Result<Self, WsError> {
+        if payload.len() > MAX_CLOSE_PAYLOAD_BYTES {
+            return Err(WsError::InvalidClosePayload);
+        }
+
         match payload.len() {
             0 => Ok(Self::empty()),
             1 => Err(WsError::InvalidClosePayload),
@@ -551,6 +556,30 @@ mod tests {
         assert_eq!(reason.code, Some(CloseCode::GoingAway));
         assert_eq!(reason.raw_code, Some(1001));
         assert_eq!(reason.text.as_deref(), Some("Going away"));
+    }
+
+    #[test]
+    fn close_reason_parse_accepts_max_payload() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1000u16.to_be_bytes());
+        payload.resize(MAX_CLOSE_PAYLOAD_BYTES, b'a');
+
+        let reason = CloseReason::parse(&payload).unwrap();
+        assert_eq!(reason.code, Some(CloseCode::Normal));
+        assert_eq!(
+            reason.text.as_deref().map(str::len),
+            Some(MAX_CLOSE_PAYLOAD_BYTES - CLOSE_CODE_BYTES)
+        );
+    }
+
+    #[test]
+    fn close_reason_parse_rejects_oversized_payload() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1000u16.to_be_bytes());
+        payload.resize(MAX_CLOSE_PAYLOAD_BYTES + 1, b'a');
+
+        let result = CloseReason::parse(&payload);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
     }
 
     #[test]
