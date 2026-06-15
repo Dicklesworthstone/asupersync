@@ -2768,23 +2768,86 @@ fn contains_ctl_or_whitespace(s: &str) -> bool {
     s.chars().any(|c| c.is_ascii_control() || c.is_whitespace())
 }
 
-fn validate_connect_inputs(
-    target_authority: &str,
-    extra_headers: &[(String, String)],
-    user_agent: Option<&str>,
-) -> Result<(), ClientError> {
+fn invalid_connect_authority(reason: &'static str) -> ClientError {
+    ClientError::InvalidConnectInput(format!(
+        "target authority must be host:port authority-form: {reason}"
+    ))
+}
+
+fn validate_connect_authority_form(target_authority: &str) -> Result<(), ClientError> {
     if target_authority.trim().is_empty() {
         return Err(ClientError::InvalidConnectInput(
             "target authority cannot be empty".into(),
         ));
     }
-    if target_authority.chars().any(char::is_whitespace)
-        || contains_ctl_line_break(target_authority)
-    {
-        return Err(ClientError::InvalidConnectInput(
-            "target authority must be RFC authority-form without whitespace".into(),
+    if contains_ctl_or_whitespace(target_authority) {
+        return Err(invalid_connect_authority(
+            "control characters and whitespace are forbidden",
         ));
     }
+    if target_authority
+        .bytes()
+        .any(|b| matches!(b, b'/' | b'?' | b'#' | b'@'))
+    {
+        return Err(invalid_connect_authority(
+            "scheme, path, query, fragment, and userinfo delimiters are forbidden",
+        ));
+    }
+
+    let port = if let Some(bracketed) = target_authority.strip_prefix('[') {
+        let bracket_end = bracketed
+            .find(']')
+            .ok_or_else(|| invalid_connect_authority("missing closing IPv6 bracket"))?;
+        let host_literal = &bracketed[..bracket_end];
+        if host_literal.is_empty() {
+            return Err(invalid_connect_authority("empty bracketed host"));
+        }
+        if host_literal.chars().any(|c| matches!(c, '[' | ']')) {
+            return Err(invalid_connect_authority(
+                "nested brackets are not valid in a host literal",
+            ));
+        }
+        let after_host = &bracketed[bracket_end.saturating_add(1)..];
+        after_host.strip_prefix(':').ok_or_else(|| {
+            invalid_connect_authority("bracketed hosts require an explicit port")
+        })?
+    } else {
+        if target_authority.chars().any(|c| matches!(c, '[' | ']')) {
+            return Err(invalid_connect_authority(
+                "brackets are only valid around IPv6 host literals",
+            ));
+        }
+        let (host, port) = target_authority
+            .rsplit_once(':')
+            .ok_or_else(|| invalid_connect_authority("missing explicit port"))?;
+        if host.is_empty() {
+            return Err(invalid_connect_authority("empty host"));
+        }
+        if host.contains(':') {
+            return Err(invalid_connect_authority(
+                "IPv6 host literals must be bracketed",
+            ));
+        }
+        port
+    };
+
+    if port.is_empty() {
+        return Err(invalid_connect_authority("empty port"));
+    }
+    if !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid_connect_authority("port must contain only digits"));
+    }
+    port.parse::<u16>()
+        .map_err(|_| invalid_connect_authority("port is outside the u16 range"))?;
+    Ok(())
+}
+
+fn validate_connect_inputs(
+    target_authority: &str,
+    extra_headers: &[(String, String)],
+    user_agent: Option<&str>,
+) -> Result<(), ClientError> {
+    validate_connect_authority_form(target_authority)?;
     if let Some(ua) = user_agent
         && contains_ctl_line_break(ua)
     {
@@ -4227,6 +4290,60 @@ mod tests {
         assert!(written.contains("\r\nUser-Agent: asupersync-test/1.0\r\n"));
         assert!(written.contains("\r\nProxy-Authorization: Basic abc\r\n"));
         assert!(written.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn connect_authority_accepts_bracketed_ipv6_with_port() {
+        let io = ConnectTestIo::new("HTTP/1.1 200 Connection Established\r\n\r\n");
+        let tunnel = block_on(establish_http_connect_tunnel(
+            io,
+            "[2001:db8::1]:443",
+            None,
+            &[],
+        ))
+        .expect("bracketed IPv6 authority should establish");
+        let io = tunnel.into_inner();
+        let written = String::from_utf8(io.written).expect("request should be utf8");
+        assert!(written.starts_with("CONNECT [2001:db8::1]:443 HTTP/1.1\r\n"));
+        assert!(written.contains("\r\nHost: [2001:db8::1]:443\r\n"));
+    }
+
+    #[test]
+    fn connect_authority_rejects_ambiguous_targets() {
+        for target_authority in [
+            "http://example.com:443",
+            "example.com",
+            "example.com:",
+            "example.com:99999",
+            "example.com:443/path",
+            "example.com:443?token=1",
+            "example.com:443#frag",
+            "user@example.com:443",
+            "2001:db8::1:443",
+            "[::1]",
+            "[::1]:",
+            "[::1]@example.com:443",
+            "[]:443",
+            "exa mple.com:443",
+        ] {
+            let io = ConnectTestIo::new("HTTP/1.1 200 OK\r\n\r\n");
+            let err = block_on(establish_http_connect_tunnel(
+                io,
+                target_authority,
+                None,
+                &[],
+            ))
+            .expect_err("malformed CONNECT authority must be rejected");
+            match err {
+                ClientError::InvalidConnectInput(msg) => {
+                    assert!(
+                        msg.contains("authority"),
+                        "unexpected message for {target_authority}: {msg}"
+                    );
+                }
+                other => panic!("unexpected error for {target_authority}: {other:?}"),
+            }
+        }
     }
 
     #[test]
