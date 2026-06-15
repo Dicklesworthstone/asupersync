@@ -1,0 +1,124 @@
+{
+  "schema_version": "proof-traffic-rch-capabilities-v1",
+  "bead_id": "asupersync-proof-traffic-control-kuyx64.1",
+  "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
+  "status": "contract_guarded",
+  "generated_at": "2026-06-15T05:08:00Z",
+  "source_of_truth": {
+    "artifact": "artifacts/proof_traffic_rch_capabilities_v1.json",
+    "operator_doc": "docs/proof_traffic_control.md",
+    "contract_test": "tests/proof_traffic_rch_capability_contract.rs",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md",
+    "clean_overlay_runbook": "docs/clean_overlay_proof_orchestration_runbook.md",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json"
+  },
+  "probe": {
+    "installed_rch_version": "1.0.41",
+    "commands": [
+      {
+        "command": "rch status --jobs",
+        "observed_signal": "Version : 1.0.41"
+      },
+      {
+        "command": "rch exec --help",
+        "observed_signal": "Usage: rch exec [OPTIONS] <COMMAND>..."
+      },
+      {
+        "command": "RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_joinset_spawn_fanout_example\" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -p asupersync --example spawn_fanout",
+        "observed_signal": "remote required; refusing local fallback (no worker assigned)"
+      }
+    ],
+    "help_excerpt": [
+      "Execute a compilation command on a remote worker",
+      "Usage: rch exec [OPTIONS] <COMMAND>...",
+      "-j, --json",
+      "-F, --format <format>",
+      "--robot-triage"
+    ]
+  },
+  "capabilities": {
+    "remote_required_env": {
+      "supported": true,
+      "evidence": "RCH_REQUIRE_REMOTE=1 caused local fallback refusal when no worker was assigned."
+    },
+    "queue_when_busy_env": {
+      "supported": true,
+      "evidence": "RCH_QUEUE_WHEN_BUSY=1 is used by existing repo proof lanes and does not change the no-local-fallback contract."
+    },
+    "json_output": {
+      "supported": true,
+      "evidence": "rch exec --help exposes -j/--json and -F/--format json|toon."
+    },
+    "clean_overlay_flags": {
+      "supported": false,
+      "missing_flags": [
+        "--base",
+        "--clean-overlay",
+        "--overlay-path",
+        "--no-overlay"
+      ],
+      "evidence": "rch exec --help for installed version 1.0.41 exposes no clean-overlay options."
+    },
+    "installed_help_json": {
+      "supported": true,
+      "evidence": "rch exec --help exposes --help-json through the shared command option surface."
+    }
+  },
+  "drift_findings": [
+    {
+      "finding_id": "clean-overlay-docs-advertise-unavailable-exec-flags",
+      "severity": "yellow",
+      "observed": "Clean-overlay runbooks document an overlay-scoped command shape with --base, --clean-overlay, and --overlay-path.",
+      "current_installed_support": "unsupported",
+      "operator_action": "Fail closed to capability-drift receipt; do not emit a Cargo proof command that assumes peer dirt was excluded."
+    },
+    {
+      "finding_id": "remote-required-refusal-is-not-proof",
+      "severity": "yellow",
+      "observed": "RCH can refuse before worker assignment with active_project_exclusion or health preflight pressure.",
+      "current_installed_support": "supported refusal signal",
+      "operator_action": "Record rerun-required or parked proof; never cite the refusal as green evidence."
+    }
+  ],
+  "decision_taxonomy_seed": [
+    "run-now",
+    "queue-wait",
+    "park-rerun-required",
+    "blocked-by-peer",
+    "blocked-by-capability-drift",
+    "remote-required-refused",
+    "report-only"
+  ],
+  "command_policy": {
+    "all_cpu_intensive_cargo_validation_must_use_rch": true,
+    "remote_required_for_proof_admission": true,
+    "local_cargo_fallback_allowed": false,
+    "never_cancel_peer_owned_builds": true,
+    "no_branch_worktree_clone_or_destructive_cleanup": true
+  },
+  "operator_report_required_fields": [
+    "gate_id",
+    "status",
+    "head_commit",
+    "command_intent",
+    "target_dir",
+    "selected_paths",
+    "capability_probe_version",
+    "capability_findings",
+    "rch_worker_or_refusal",
+    "retry_condition",
+    "no_claim_boundaries"
+  ],
+  "no_claim_boundaries": [
+    "No release-readiness claim.",
+    "No broad workspace-health claim.",
+    "No runtime-correctness claim.",
+    "No performance-improvement claim.",
+    "No live RCH fleet-availability claim.",
+    "No local Cargo fallback approval.",
+    "No permission to delete files, clean worktrees, create branches, or create worktrees.",
+    "No claim that documented clean-overlay flags are available unless installed capability evidence says they are supported."
+  ]
+}
