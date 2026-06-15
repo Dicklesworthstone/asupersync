@@ -48,6 +48,8 @@
 
 use std::fmt;
 
+use crate::util::DetRng;
+
 /// Configuration for an erasure-coded channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EcConfig {
@@ -502,6 +504,98 @@ impl MessageReassembler {
     }
 }
 
+/// A deterministic, seeded loss/duplication model for the in-memory transport.
+///
+/// This drives the seeded adversity the channel's correctness story rests on
+/// (AC1 loss tolerance, AC7 deterministic replay): given a fixed seed and rates
+/// it decides, for each symbol frame in a stream, whether the frame is dropped
+/// (lost in transit) and whether a delivered frame is duplicated (delivered more
+/// than once). It is reproducible from the seed alone — the same
+/// `(seed, rates, input)` always produces the same delivered sequence — so a
+/// failing loss scenario replays exactly.
+///
+/// Rates are in parts-per-million so the decision stream stays integer and
+/// platform-independent (no floating-point rounding divergence). Drop and
+/// duplicate rolls are independent. The model composes with
+/// [`MessageReassembler`]: feed [`apply`](Self::apply)'s output into a
+/// reassembler to exercise dedup (duplicates) and the repair budget (drops).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LossModel {
+    /// Probability, in parts-per-million, that a frame is dropped (not
+    /// delivered). `0` never drops; `1_000_000` always drops.
+    pub drop_ppm: u32,
+    /// Probability, in parts-per-million, that a delivered frame is delivered a
+    /// second time. `0` never duplicates; `1_000_000` always duplicates once.
+    pub duplicate_ppm: u32,
+    /// Seed for the deterministic decision stream.
+    pub seed: u64,
+}
+
+impl LossModel {
+    /// One part-per-million denominator for the integer rate rolls.
+    pub const PPM_SCALE: u32 = 1_000_000;
+
+    /// A lossless, duplication-free model with the given seed (an identity
+    /// transport: [`apply`](Self::apply) returns its input unchanged).
+    #[must_use]
+    pub const fn new(seed: u64) -> Self {
+        Self {
+            drop_ppm: 0,
+            duplicate_ppm: 0,
+            seed,
+        }
+    }
+
+    /// Sets the per-frame drop probability (parts-per-million), saturating at
+    /// [`PPM_SCALE`](Self::PPM_SCALE).
+    #[must_use]
+    pub const fn with_drop_ppm(mut self, drop_ppm: u32) -> Self {
+        self.drop_ppm = if drop_ppm > Self::PPM_SCALE {
+            Self::PPM_SCALE
+        } else {
+            drop_ppm
+        };
+        self
+    }
+
+    /// Sets the per-frame duplicate probability (parts-per-million), saturating
+    /// at [`PPM_SCALE`](Self::PPM_SCALE).
+    #[must_use]
+    pub const fn with_duplicate_ppm(mut self, duplicate_ppm: u32) -> Self {
+        self.duplicate_ppm = if duplicate_ppm > Self::PPM_SCALE {
+            Self::PPM_SCALE
+        } else {
+            duplicate_ppm
+        };
+        self
+    }
+
+    /// Applies the model to `frames`, returning the delivered sequence: dropped
+    /// frames are omitted and duplicated frames appear twice (the duplicate
+    /// directly after the original, preserving stream order otherwise).
+    ///
+    /// Deterministic in `(seed, rates, frames.len())`: a fresh decision stream
+    /// is seeded each call, so repeated calls with the same model and input
+    /// yield byte-identical output.
+    #[must_use]
+    pub fn apply(&self, frames: &[SymbolFrame]) -> Vec<SymbolFrame> {
+        let mut rng = DetRng::new(self.seed);
+        let mut delivered = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let drop_roll = rng.next_u32() % Self::PPM_SCALE;
+            if drop_roll < self.drop_ppm {
+                continue;
+            }
+            delivered.push(frame.clone());
+            let dup_roll = rng.next_u32() % Self::PPM_SCALE;
+            if dup_roll < self.duplicate_ppm {
+                delivered.push(frame.clone());
+            }
+        }
+        delivered
+    }
+}
+
 /// Errors from erasure-channel configuration, planning, and framing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EcError {
@@ -938,5 +1032,128 @@ mod tests {
         assert_eq!(fwd, rev);
         assert_eq!(forward.is_ready(), reversed.is_ready());
         assert!(forward.is_ready());
+    }
+
+    fn k5_n8_header(message_id: u64) -> MessageHeader {
+        // symbol_size=4, K=ceil(20/4)=5, repair=3, N=8.
+        let cfg = EcConfig {
+            symbol_size: 4,
+            repair_overhead: 3,
+            max_message_size: 1 << 20,
+        };
+        let layout = cfg.plan(20).expect("plan");
+        assert_eq!(layout.source_symbols, 5);
+        assert_eq!(layout.total_symbols, 8);
+        MessageHeader::from_layout(message_id, &layout).expect("header")
+    }
+
+    fn n_frames(message_id: u64, n: u16) -> Vec<SymbolFrame> {
+        (0..n)
+            .map(|esi| SymbolFrame::new(message_id, esi, vec![esi as u8; 4]))
+            .collect()
+    }
+
+    #[test]
+    fn loss_model_lossless_is_identity() {
+        let frames = n_frames(1, 8);
+        let delivered = LossModel::new(42).apply(&frames);
+        assert_eq!(
+            delivered, frames,
+            "a lossless model must deliver its input verbatim"
+        );
+    }
+
+    #[test]
+    fn loss_model_total_drop_delivers_nothing() {
+        let frames = n_frames(1, 8);
+        let model = LossModel::new(42).with_drop_ppm(LossModel::PPM_SCALE);
+        assert!(model.apply(&frames).is_empty());
+    }
+
+    #[test]
+    fn loss_model_total_duplicate_delivers_each_twice() {
+        let frames = n_frames(1, 4);
+        let model = LossModel::new(42).with_duplicate_ppm(LossModel::PPM_SCALE);
+        let delivered = model.apply(&frames);
+        let expected: Vec<SymbolFrame> =
+            frames.iter().flat_map(|f| [f.clone(), f.clone()]).collect();
+        assert_eq!(
+            delivered, expected,
+            "every frame must be delivered exactly twice"
+        );
+    }
+
+    #[test]
+    fn loss_model_is_deterministic_for_a_seed() {
+        let frames = n_frames(1, 8);
+        let model = LossModel::new(7)
+            .with_drop_ppm(300_000)
+            .with_duplicate_ppm(100_000);
+        // Same model, repeated application: byte-identical (AC7 replayability).
+        assert_eq!(model.apply(&frames), model.apply(&frames));
+        // A second model with the same seed/rates is identical to the first.
+        let twin = LossModel::new(7)
+            .with_drop_ppm(300_000)
+            .with_duplicate_ppm(100_000);
+        assert_eq!(model, twin);
+        assert_eq!(model.apply(&frames), twin.apply(&frames));
+    }
+
+    #[test]
+    fn loss_model_saturates_out_of_range_rates() {
+        let model = LossModel::new(1)
+            .with_drop_ppm(2_000_000)
+            .with_duplicate_ppm(5_000_000);
+        assert_eq!(model.drop_ppm, LossModel::PPM_SCALE);
+        assert_eq!(model.duplicate_ppm, LossModel::PPM_SCALE);
+    }
+
+    #[test]
+    fn loss_model_feeds_reassembler_respecting_repair_budget() {
+        // AC1 at the intake layer: after seeded drops, the reassembler reports
+        // ready iff the number lost stays within the repair budget — the count
+        // complement of the loss margin — exactly tracking BlockLayout.
+        let header = k5_n8_header(55);
+        let frames = n_frames(55, header.total_symbols);
+        let layout = header.block_layout();
+
+        for seed in [1u64, 2, 7, 99, 12_345, 654_321] {
+            let model = LossModel::new(seed).with_drop_ppm(300_000);
+            let delivered = model.apply(&frames);
+
+            let mut ra = MessageReassembler::new(&header);
+            for frame in &delivered {
+                let _ = ra.accept_frame(frame);
+            }
+            let lost = header.total_symbols - ra.distinct_received();
+            assert_eq!(
+                ra.is_ready(),
+                !layout.is_unrecoverable(lost),
+                "seed {seed}: readiness must track the repair budget (lost={lost}, repair={})",
+                layout.repair_symbols
+            );
+        }
+    }
+
+    #[test]
+    fn loss_model_duplicates_never_inflate_distinct_count() {
+        // Duplicates are deduplicated by the reassembler: a heavy duplicate rate
+        // with zero drops still yields exactly the distinct symbol set.
+        let header = k5_n8_header(8);
+        let frames = n_frames(8, header.total_symbols);
+        let model = LossModel::new(3).with_duplicate_ppm(LossModel::PPM_SCALE);
+        let delivered = model.apply(&frames);
+        assert_eq!(delivered.len(), 2 * frames.len());
+
+        let mut ra = MessageReassembler::new(&header);
+        let mut duplicates = 0u32;
+        for frame in &delivered {
+            if ra.accept_frame(frame) == SymbolAccept::Duplicate {
+                duplicates += 1;
+            }
+        }
+        assert_eq!(ra.distinct_received(), header.total_symbols);
+        assert_eq!(duplicates, u32::from(header.total_symbols));
+        assert!(ra.is_ready());
     }
 }
