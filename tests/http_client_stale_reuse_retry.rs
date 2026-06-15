@@ -174,6 +174,75 @@ fn spawn_delayed_response_server(
     (addr, handle)
 }
 
+fn read_optional_next_request(stream: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
+    stream.set_read_timeout(Some(Duration::from_millis(750)))?;
+    match read_until_headers_end(stream) {
+        Ok(raw) if raw.is_empty() => Ok(None),
+        Ok(raw) => Ok(Some(raw)),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn write_fixed_response(
+    conn: &mut TcpStream,
+    body: &'static [u8],
+    close: bool,
+) -> std::io::Result<()> {
+    write!(
+        conn,
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n",
+        body.len()
+    )?;
+    if close {
+        conn.write_all(b"Connection: close\r\n")?;
+    }
+    conn.write_all(b"\r\n")?;
+    conn.write_all(body)?;
+    conn.flush()
+}
+
+fn spawn_connection_reuse_probe_server() -> (SocketAddr, thread::JoinHandle<std::io::Result<usize>>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking listener");
+    let addr = listener.local_addr().expect("listener local_addr");
+
+    let handle = thread::spawn(move || -> std::io::Result<usize> {
+        let mut first = accept_with_timeout(&listener, IO_TIMEOUT)?;
+        first.set_read_timeout(Some(IO_TIMEOUT))?;
+        first.set_write_timeout(Some(IO_TIMEOUT))?;
+        let first_raw = read_until_headers_end(&mut first)?;
+        assert_eq!(request_method(&first_raw), "GET");
+        write_fixed_response(&mut first, b"FIRST", false)?;
+
+        if let Some(second_raw) = read_optional_next_request(&mut first)? {
+            assert_eq!(request_method(&second_raw), "GET");
+            write_fixed_response(&mut first, b"SECOND", true)?;
+            return Ok(1);
+        }
+
+        let mut second = accept_with_timeout(&listener, IO_TIMEOUT)?;
+        second.set_read_timeout(Some(IO_TIMEOUT))?;
+        second.set_write_timeout(Some(IO_TIMEOUT))?;
+        let second_raw = read_until_headers_end(&mut second)?;
+        assert_eq!(request_method(&second_raw), "GET");
+        write_fixed_response(&mut second, b"SECOND", true)?;
+        Ok(2)
+    });
+
+    (addr, handle)
+}
+
 #[test]
 fn stale_pooled_connection_is_transparently_retried_on_fresh_connection() {
     init_test_logging();
@@ -379,4 +448,47 @@ fn fluent_timeout_cannot_extend_ambient_budget() {
     assert_eq!(method, "GET");
 
     test_complete!("fluent_timeout_cannot_extend_ambient_budget");
+}
+
+#[test]
+fn cloned_client_handles_share_connection_pool() {
+    init_test_logging();
+    test_phase!("cloned_client_handles_share_connection_pool");
+
+    let (addr, server) = spawn_connection_reuse_probe_server();
+
+    run_test(|| async move {
+        let cx = Cx::for_testing();
+        let client = HttpClient::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(1)
+            .build();
+        let cloned = client.clone();
+        let url = format!("http://{addr}/shared");
+
+        let first = cloned
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect("first cloned-handle request should succeed");
+        assert_eq!(first.body, b"FIRST");
+
+        let second = client
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect("second original-handle request should reuse shared pool");
+        assert_eq!(second.body, b"SECOND");
+    });
+
+    let connections_seen = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert_eq!(
+        connections_seen, 1,
+        "cloned HttpClient handles must share idle pooled connections"
+    );
+
+    test_complete!("cloned_client_handles_share_connection_pool");
 }

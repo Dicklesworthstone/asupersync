@@ -57,6 +57,7 @@ use std::future::poll_fn;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 const CONNECT_MAX_HEADERS_SIZE: usize = 64 * 1024;
@@ -526,7 +527,7 @@ impl ParsedUrl {
 }
 
 /// Redirect policy for the HTTP client.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedirectPolicy {
     /// Do not follow redirects.
     None,
@@ -1073,6 +1074,9 @@ impl<'a> ClientRequestBuilder<'a> {
 ///
 /// Provides a simple API for making HTTP requests with automatic connection
 /// pooling, DNS resolution, and redirect following.
+/// Cloning the client is cheap and shares the same pool, cookie store, and
+/// immutable configuration; callers still pass an explicit [`Cx`] to every
+/// request, so no process-global ambient client is introduced.
 ///
 /// # Connection Pooling
 ///
@@ -1083,11 +1087,12 @@ impl<'a> ClientRequestBuilder<'a> {
 ///
 /// By default, the client follows up to 10 redirects. The redirect policy
 /// can be configured via [`HttpClientConfig`].
+#[derive(Clone)]
 pub struct HttpClient {
-    config: HttpClientConfig,
-    pool: Mutex<Pool>,
-    idle_connections: Mutex<HashMap<PoolKey, Vec<(u64, ClientIo)>>>,
-    cookies: Mutex<HashMap<String, Vec<StoredCookie>>>,
+    config: Arc<HttpClientConfig>,
+    pool: Arc<Mutex<Pool>>,
+    idle_connections: Arc<Mutex<HashMap<PoolKey, Vec<(u64, ClientIo)>>>>,
+    cookies: Arc<Mutex<HashMap<String, Vec<StoredCookie>>>>,
 }
 
 impl HttpClient {
@@ -1106,12 +1111,12 @@ impl HttpClient {
     /// Create a new client with custom configuration.
     #[must_use]
     pub fn with_config(config: HttpClientConfig) -> Self {
-        let pool = Pool::with_config(config.pool_config.clone());
+        let pool_config = config.pool_config.clone();
         Self {
-            config,
-            pool: Mutex::new(pool),
-            idle_connections: Mutex::new(HashMap::new()),
-            cookies: Mutex::new(HashMap::new()),
+            config: Arc::new(config),
+            pool: Arc::new(Mutex::new(Pool::with_config(pool_config))),
+            idle_connections: Arc::new(Mutex::new(HashMap::new())),
+            cookies: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
