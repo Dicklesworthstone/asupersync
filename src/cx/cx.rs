@@ -3610,6 +3610,125 @@ impl<Caps> Cx<Caps> {
     }
 }
 
+impl Cx<cap::All> {
+    /// Races multiple inline futures with **loser-drain** semantics — the
+    /// drain-correct engine behind the `race!` macro.
+    ///
+    /// Unlike [`Cx::race`], which merely *drops* (cancels) the losing futures,
+    /// this entry point spawns every branch as a task in this context's region
+    /// and resolves them through [`Scope::race_all`](crate::cx::Scope::race_all).
+    /// The first branch to complete wins; every loser is then
+    /// protocol-cancelled **and drained** — awaited to termination — before
+    /// this future returns. This is the project's "losers are drained"
+    /// invariant headline: resources held by a losing branch (obligations,
+    /// finalizers, file handles) are resolved, not abandoned.
+    ///
+    /// Because branches run as spawned tasks, each must be `Send + 'static` and
+    /// the output `T` must be `Send + 'static`, and this context must be
+    /// runtime-wired (carry a spawn gateway). A branch that fails admission
+    /// fails the race closed with [`JoinError::Cancelled`]; already-spawned
+    /// siblings are cancelled as the race future unwinds.
+    ///
+    /// On an empty branch list this is pending until the context is cancelled,
+    /// mirroring [`Cx::race`].
+    pub async fn race_drained<T>(
+        &self,
+        futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
+    ) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+    {
+        if futures.is_empty() {
+            return std::future::poll_fn(|_poll_cx| {
+                if self.checkpoint().is_err() {
+                    let reason = self
+                        .cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("race cancelled"));
+                    std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+        }
+
+        let scope = self.scope();
+        let mut handles = Vec::with_capacity(futures.len());
+        for future in futures {
+            match self.spawn_in(&scope, move |_child| async move { future.await }) {
+                Ok(handle) => handles.push(handle),
+                Err(_spawn_err) => {
+                    // Fail closed: dropping the already-spawned handles requests
+                    // their cancellation. Surface the admission failure as a
+                    // cancellation so the `race!` caller never observes a
+                    // partially-built race silently succeeding.
+                    drop(handles);
+                    return Err(JoinError::Cancelled(CancelReason::user(
+                        "race! branch spawn failed",
+                    )));
+                }
+            }
+        }
+
+        scope
+            .race_all(self, handles)
+            .await
+            .map(|(value, _index)| value)
+    }
+
+    /// Races multiple **named** inline futures with loser-drain semantics.
+    ///
+    /// Names are accepted for source-level symmetry with [`Cx::race_named`];
+    /// the drain machinery itself is name-agnostic. See [`Cx::race_drained`]
+    /// for the full guarantee.
+    pub async fn race_drained_named<T>(&self, futures: NamedFutures<T>) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+    {
+        let futures: Vec<_> = futures.into_iter().map(|(_, f)| f).collect();
+        self.race_drained(futures).await
+    }
+
+    /// Races multiple inline futures with loser-drain semantics and a timeout.
+    ///
+    /// If `duration` elapses before any branch completes, the whole race future
+    /// is abandoned: every branch is cancelled by drop. The loser-*drain*
+    /// guarantee applies to the ordinary win path; the timeout path mirrors
+    /// [`Cx::race_timeout`] (cancel-on-drop, no post-timeout drain).
+    pub async fn race_drained_timeout<T>(
+        &self,
+        duration: Duration,
+        futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
+    ) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+    {
+        let race_fut = std::pin::pin!(self.race_drained(futures));
+        let now = self
+            .handles
+            .timer_driver
+            .as_ref()
+            .map_or_else(wall_clock_now, TimerDriverHandle::now);
+        timeout(now, duration, race_fut)
+            .await
+            .unwrap_or_else(|_| Err(JoinError::Cancelled(CancelReason::timeout())))
+    }
+
+    /// Races multiple **named** inline futures with loser-drain semantics and a
+    /// timeout. See [`Cx::race_drained_timeout`].
+    pub async fn race_drained_timeout_named<T>(
+        &self,
+        duration: Duration,
+        futures: NamedFutures<T>,
+    ) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+    {
+        let futures: Vec<_> = futures.into_iter().map(|(_, f)| f).collect();
+        self.race_drained_timeout(duration, futures).await
+    }
+}
+
 impl Cx<cap::None> {
     /// Creates a detached context that carries cancellation and budget state
     /// but no runtime effect capabilities.
