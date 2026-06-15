@@ -1,0 +1,11 @@
+error[E0382]: borrow of moved value: `open`
+  --> tests/compile_fail/websocket_typed_write_send_after_close.rs:22:5
+   |
+12 |     mut open: OpenWebSocketWrite<IO>,
+   |     -------- move occurs because `open` has type `TypedWebSocketWrite<IO, WebSocketWriteOpen>`, which does not implement the `Copy` trait
+...
+20 |     let _closing = open.close(cx, CloseReason::normal()).await?;
+   |                    ---- value moved here
+21 |     // `open` was moved by the line above; a later data send must not compile.
+22 |     open.send_text(cx, "late payload").await?;
+   |     ^^^^ value borrowed here after move
