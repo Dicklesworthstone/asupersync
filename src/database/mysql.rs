@@ -6992,6 +6992,59 @@ mod tests {
     }
 
     #[test]
+    fn committed_transaction_discharges_obligation_without_leak() {
+        // A transaction whose COMMIT succeeds discharges the obligation via
+        // commit(). We drive the real begin -> commit wire path under a
+        // non-root (for_testing) cx so the obligation is actually reserved;
+        // the test passing (no obligation drop-bomb panic) proves the
+        // discharge. Mirrors the Postgres/SQLite
+        // committed_transaction_discharges_obligation_without_leak tests so
+        // all three backends pin the commit-arm discharge (AC1).
+        const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+
+        let server = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let begin_sql = command_sql(&read_client_command(&mut peer));
+            assert_eq!(begin_sql, "START TRANSACTION");
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, SERVER_STATUS_IN_TRANS));
+
+            let commit_sql = command_sql(&read_client_command(&mut peer));
+            assert_eq!(commit_sql, "COMMIT");
+            write_response_packet(&mut peer, 1, ok_packet_payload(0, 0));
+        });
+
+        let tx = match run(conn.begin(&cx)) {
+            Outcome::Ok(tx) => tx,
+            Outcome::Err(e) => panic!("expected successful BEGIN, got error: {e}"),
+            Outcome::Cancelled(r) => panic!("expected successful BEGIN, got cancel: {r:?}"),
+            Outcome::Panicked(p) => panic!("expected successful BEGIN, got panic: {p:?}"),
+        };
+        assert!(
+            tx.obligation.is_some(),
+            "a non-root begin must reserve the transaction obligation to discharge"
+        );
+        match run(tx.commit(&cx)) {
+            Outcome::Ok(()) => {}
+            other => panic!("expected successful COMMIT, got {other:?}"),
+        }
+
+        server.join().expect("mysql server thread should finish");
+        assert!(
+            !conn.inner.needs_rollback,
+            "a committed transaction must not poison the connection"
+        );
+        assert!(
+            !conn.inner.closed,
+            "a committed transaction must leave the connection open"
+        );
+    }
+
+    #[test]
     fn test_connect_options_parse() {
         let opts = MySqlConnectOptions::parse("mysql://user:pass@localhost:3306/mydb").unwrap();
         assert_eq!(opts.user, "user");
