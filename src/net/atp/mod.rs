@@ -33,6 +33,7 @@ pub mod sdk;
 pub mod streams;
 pub mod stun;
 pub mod transport_common;
+pub mod transport_quic;
 pub mod transport_rq;
 pub mod transport_tcp;
 
