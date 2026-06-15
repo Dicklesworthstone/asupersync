@@ -322,6 +322,15 @@ impl AppSpecV1 {
 
         Ok(app)
     }
+
+    /// Validate this manifest and render its generated supervision topology.
+    ///
+    /// Convenience wrapper over [`compiler_plan`](Self::compiler_plan) and
+    /// [`AppSpecV1CompilerPlan::topology_report`]. Fails closed with the same
+    /// validation diagnostics as the compiler.
+    pub fn topology_report(&self) -> Result<String, AppSpecV1CompileError> {
+        Ok(self.compiler_plan()?.topology_report())
+    }
 }
 
 /// Deterministic compiler projection for an [`AppSpecV1`] manifest.
@@ -343,6 +352,172 @@ pub struct AppSpecV1CompilerPlan {
     pub budgets: Vec<AppBudgetSpecV1>,
     /// Explicit scope limits for this compiler stage.
     pub no_claim_boundaries: Vec<String>,
+}
+
+impl AppSpecV1CompilerPlan {
+    /// Render the generated supervision topology as a deterministic, human- and
+    /// agent-readable report.
+    ///
+    /// The output is pure data: the same plan always renders byte-identical text,
+    /// regardless of build flags or environment. It walks the supervision groups
+    /// in declaration order, lists each service's route/actor/job work units with
+    /// their effective budget, SLO hook, trigger, and explicit authority
+    /// requirements, then the observability sinks and the compiler's no-claim
+    /// boundaries. It is suitable for documentation snapshots and as an artifact
+    /// row consumed by the lab fixture/proof layer.
+    #[must_use]
+    pub fn topology_report(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# AppSpec v1 generated topology\n");
+        out.push_str(&format!("app: {}\n", self.app_name));
+        out.push_str(&format!(
+            "root_group: {} ({})\n",
+            self.root_group,
+            serde_unit_token(&self.root_restart_policy),
+        ));
+        if !self.budgets.is_empty() {
+            let names = self
+                .budgets
+                .iter()
+                .map(|budget| budget.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("budgets: {names}\n"));
+        }
+
+        out.push_str("\nsupervision:\n");
+        for group in &self.service_groups {
+            out.push_str(&format!(
+                "  group {} ({})\n",
+                group.name,
+                serde_unit_token(&group.restart_policy),
+            ));
+            for service in &group.services {
+                out.push_str(&format!("    service {service}\n"));
+                let mut any = false;
+                for child in self
+                    .children
+                    .iter()
+                    .filter(|child| child.group == group.name && child.service == *service)
+                {
+                    any = true;
+                    out.push_str(&render_child_line(child));
+                }
+                if !any {
+                    out.push_str("      (no work units)\n");
+                }
+            }
+        }
+
+        out.push_str("\nobservability:\n");
+        if self.observability_sinks.is_empty() {
+            out.push_str("  (none)\n");
+        } else {
+            for sink in &self.observability_sinks {
+                out.push_str(&format!(
+                    "  sink {} ({})  caps={}\n",
+                    sink.name,
+                    serde_unit_token(&sink.kind),
+                    render_required_capabilities(&sink.required_capabilities),
+                ));
+            }
+        }
+
+        out.push_str("\nno-claim boundaries:\n");
+        for boundary in &self.no_claim_boundaries {
+            out.push_str(&format!("  - {boundary}\n"));
+        }
+        out
+    }
+}
+
+/// Render a serde unit-variant enum to its canonical token (e.g. `one_for_one`).
+fn serde_unit_token<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Render explicit authority requirements as `cx:..|feat:..|res:..`.
+///
+/// Validation guarantees `cx_capabilities` is non-empty, so the `cx:` segment is
+/// always present; the `feat:` and `res:` segments are omitted when empty.
+fn render_required_capabilities(caps: &AppRequiredCapabilitiesV1) -> String {
+    let cx = caps
+        .cx_capabilities
+        .iter()
+        .map(serde_unit_token)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut parts = vec![format!("cx:{cx}")];
+    if !caps.feature_flags.is_empty() {
+        let feat = caps
+            .feature_flags
+            .iter()
+            .map(serde_unit_token)
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!("feat:{feat}"));
+    }
+    if !caps.resources.is_empty() {
+        parts.push(format!("res:{}", caps.resources.join(",")));
+    }
+    parts.join("|")
+}
+
+/// Render a background-job trigger as a compact deterministic token.
+fn render_job_trigger(trigger: &AppJobTriggerV1) -> String {
+    match trigger {
+        AppJobTriggerV1::Startup => "startup".to_string(),
+        AppJobTriggerV1::Interval { every_ms } => format!("interval(every_ms={every_ms})"),
+        AppJobTriggerV1::Signal { source } => format!("signal(source={source})"),
+    }
+}
+
+/// Render a single compiled work unit as one topology-report line.
+fn render_child_line(child: &AppSpecV1CompiledChild) -> String {
+    let caps = render_required_capabilities(&child.required_capabilities);
+    let budget = child.budget.as_deref().unwrap_or("-");
+    match child.kind {
+        AppSpecV1WorkUnitKind::Route => {
+            let route = child
+                .route
+                .as_ref()
+                .expect("compiler_plan attaches a route binding to every route work unit");
+            let slo = child.slo_hook.as_deref().unwrap_or("-");
+            format!(
+                "      route  {}  {} {} -> {}  budget={}  slo={}  caps={}\n",
+                child.name,
+                serde_unit_token(&route.method),
+                route.path,
+                child.entrypoint,
+                budget,
+                slo,
+                caps,
+            )
+        }
+        AppSpecV1WorkUnitKind::Actor => format!(
+            "      actor  {}  -> {}  budget={}  caps={}\n",
+            child.name, child.entrypoint, budget, caps,
+        ),
+        AppSpecV1WorkUnitKind::BackgroundJob => {
+            let trigger = child
+                .trigger
+                .as_ref()
+                .expect("compiler_plan attaches a trigger to every background-job work unit");
+            let slo = child.slo_hook.as_deref().unwrap_or("-");
+            format!(
+                "      job    {}  trigger={} -> {}  budget={}  slo={}  caps={}\n",
+                child.name,
+                render_job_trigger(trigger),
+                child.entrypoint,
+                budget,
+                slo,
+                caps,
+            )
+        }
+    }
 }
 
 /// Compiled supervision group metadata.
