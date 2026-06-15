@@ -376,15 +376,7 @@ fn validate_request_target(method: &Method, uri: &str) -> Result<(), HttpError> 
 
     // authority-form (RFC 9112 §3.2.3)
     if *method == Method::Connect {
-        if uri.starts_with('/') || uri.contains("://") {
-            return Err(HttpError::BadRequestLine);
-        }
-        // Authority-form must be host:port
-        let (host, port) = uri.rsplit_once(':').ok_or(HttpError::BadRequestLine)?;
-        if host.is_empty() || port.is_empty() || !port.as_bytes().iter().all(u8::is_ascii_digit) {
-            return Err(HttpError::BadRequestLine);
-        }
-        return Ok(());
+        return validate_connect_authority(uri);
     }
 
     // origin-form (RFC 9112 §3.2.1)
@@ -415,6 +407,39 @@ fn validate_request_target(method: &Method, uri: &str) -> Result<(), HttpError> 
 
     // If it doesn't match any allowed form, it's invalid.
     Err(HttpError::BadRequestLine)
+}
+
+fn validate_connect_authority(uri: &str) -> Result<(), HttpError> {
+    if uri.starts_with('/') || uri.contains("://") || uri.contains(['/', '?', '#']) {
+        return Err(HttpError::BadRequestLine);
+    }
+
+    // Authority-form must be host:port. Bracketed IPv6 is the only accepted
+    // CONNECT host form that may contain ':' in the host token.
+    if let Some(rest) = uri.strip_prefix('[') {
+        let Some(close_bracket) = rest.find(']') else {
+            return Err(HttpError::BadRequestLine);
+        };
+        let host = &rest[..close_bracket];
+        let port = rest[close_bracket + 1..]
+            .strip_prefix(':')
+            .ok_or(HttpError::BadRequestLine)?;
+        if host.is_empty() || port.is_empty() || !port.as_bytes().iter().all(u8::is_ascii_digit) {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    let (host, port) = uri.rsplit_once(':').ok_or(HttpError::BadRequestLine)?;
+    if host.is_empty()
+        || host.contains(':')
+        || host.contains(['[', ']'])
+        || port.is_empty()
+        || !port.as_bytes().iter().all(u8::is_ascii_digit)
+    {
+        return Err(HttpError::BadRequestLine);
+    }
+    Ok(())
 }
 
 /// Validates an HTTP field-name (RFC 7230 token / tchar set).
@@ -1799,6 +1824,11 @@ mod tests {
             "CONNECT example.com:443x HTTP/1.1",
             "CONNECT example.com: HTTP/1.1",
             "CONNECT :443 HTTP/1.1",
+            "CONNECT 2001:db8::1:443 HTTP/1.1",
+            "CONNECT [2001:db8::1:443 HTTP/1.1",
+            "CONNECT [2001:db8::1]443 HTTP/1.1",
+            "CONNECT []:443 HTTP/1.1",
+            "CONNECT [2001:db8::1]: HTTP/1.1",
         ];
         for line in invalid {
             assert!(
