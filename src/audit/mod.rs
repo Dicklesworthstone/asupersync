@@ -14,3 +14,4 @@ pub mod ambient;
 pub mod blocker_receipt;
 pub mod clean_overlay_planner;
 pub mod meta_audit;
+pub mod overlay_proof_command;
