@@ -438,7 +438,7 @@ impl DecodingPipeline {
             ),
             InsertResult::Inserted {
                 block_progress,
-                threshold_reached,
+                threshold_reached: _,
             } => {
                 self.accepted_symbols_total = self.accepted_symbols_total.saturating_add(1);
                 if !self.config.verify_auth {
@@ -447,12 +447,18 @@ impl DecodingPipeline {
                 if block_progress.k.is_none() {
                     self.configure_block_k();
                 }
-                let needed = block_progress.k.map_or(0, |k| {
+
+                let progress = self
+                    .symbols
+                    .block_progress(sbn)
+                    .copied()
+                    .unwrap_or(block_progress);
+                let needed = progress.k.map_or(0, |k| {
                     required_symbols(k, self.config.repair_overhead, self.config.min_overhead)
                 });
-                let received = block_progress.total();
+                let received = progress.total();
 
-                if threshold_reached {
+                if progress.threshold_reached {
                     // Update state to Decoding
                     if let Some(block) = self.blocks.get_mut(&sbn) {
                         block.state = BlockDecodingState::Decoding;

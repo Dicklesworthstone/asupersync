@@ -2059,6 +2059,80 @@ mod tests {
     }
 
     #[test]
+    fn signed_datagram_feed_reaches_k512_decode_threshold() {
+        let ctx = SecurityContext::for_testing(101);
+        let object_id = entry_object_id("wire-k512", 0);
+        let symbol_size = 1024u16;
+        let max_block_size = DEFAULT_MAX_BLOCK_SIZE;
+        let data: Vec<u8> = (0usize..512 * 1024)
+            .map(|i: usize| (i.wrapping_mul(1_103_515_245) >> 16) as u8)
+            .collect();
+
+        let pool = SymbolPool::new(PoolConfig::default());
+        let mut encoder = EncodingPipeline::new(
+            crate::config::EncodingConfig {
+                repair_overhead: DEFAULT_REPAIR_OVERHEAD,
+                max_block_size,
+                symbol_size,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            pool,
+        );
+        let params = object_params_for(
+            object_id,
+            data.len() as u64,
+            symbol_size,
+            max_block_size as u64,
+        );
+        let mut decoder = DecodingPipeline::with_auth(
+            DecodingConfig {
+                symbol_size,
+                max_block_size,
+                repair_overhead: DEFAULT_REPAIR_OVERHEAD,
+                min_overhead: 0,
+                max_buffered_symbols: 0,
+                block_timeout: std::time::Duration::from_secs(0),
+                verify_auth: true,
+            },
+            ctx.clone(),
+        );
+        decoder
+            .set_object_params(params)
+            .expect("set object params");
+
+        for encoded in encoder.encode_with_repair(object_id, &data, 512) {
+            let sym = encoded.expect("encode").into_symbol();
+            let auth = ctx.sign_symbol(&sym);
+            let dg = encode_symbol_datagram(0xABCD, 0, &sym, Some(auth.tag()));
+            let parsed = parse_symbol_header(&dg, 0xABCD, true).expect("parse signed datagram");
+            let payload = &dg[parsed.header_len..parsed.header_len + parsed.payload_len];
+            let received = Symbol::new(
+                SymbolId::new(object_id, parsed.sbn, parsed.esi),
+                payload.to_vec(),
+                parsed.kind,
+            );
+            let result = decoder
+                .feed(AuthenticatedSymbol::from_parts(
+                    received,
+                    parsed.auth_tag.expect("auth tag"),
+                ))
+                .expect("feed");
+            if matches!(result, SymbolAcceptResult::BlockComplete { .. }) {
+                break;
+            }
+        }
+
+        assert!(
+            decoder.is_complete(),
+            "wire-parsed K=512 symbols must decode"
+        );
+        let mut out = decoder.into_data().expect("decoded data");
+        out.truncate(data.len());
+        assert_eq!(out, data);
+    }
+
+    #[test]
     fn signed_datagram_rejects_missing_tag() {
         let sym = Symbol::new(
             SymbolId::new(ObjectId::new(1, 2), 3, 7),
