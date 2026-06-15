@@ -126,6 +126,13 @@ fn spawn_status_retry_server(
 fn spawn_json_once_server(
     body: &'static [u8],
 ) -> (SocketAddr, thread::JoinHandle<std::io::Result<String>>) {
+    spawn_body_once_server("application/json", body)
+}
+
+fn spawn_body_once_server(
+    content_type: &'static str,
+    body: &'static [u8],
+) -> (SocketAddr, thread::JoinHandle<std::io::Result<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
     listener
         .set_nonblocking(true)
@@ -139,7 +146,7 @@ fn spawn_json_once_server(
         let raw = read_until_headers_end(&mut conn)?;
         write!(
             conn,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         )?;
         conn.write_all(body)?;
@@ -342,6 +349,41 @@ fn fluent_get_to_json_round_trip_uses_explicit_cx() {
     assert_eq!(method, "GET");
 
     test_complete!("fluent_get_to_json_round_trip_uses_explicit_cx");
+}
+
+#[test]
+fn fluent_response_text_and_bytes_helpers_read_same_body() {
+    init_test_logging();
+    test_phase!("fluent_response_text_and_bytes_helpers_read_same_body");
+
+    let body = b"hello from asupersync";
+    let (addr, server) = spawn_body_once_server("text/plain; charset=utf-8", body);
+
+    run_test(|| async move {
+        let cx = Cx::for_testing();
+        let client = HttpClient::new();
+        let url = format!("http://{addr}/message");
+
+        let response = client
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect("GET should complete");
+
+        assert_eq!(
+            response.text().expect("response body is UTF-8"),
+            "hello from asupersync"
+        );
+        assert_eq!(response.bytes(), body);
+    });
+
+    let method = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert_eq!(method, "GET");
+
+    test_complete!("fluent_response_text_and_bytes_helpers_read_same_body");
 }
 
 #[test]
