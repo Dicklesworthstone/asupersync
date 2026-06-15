@@ -174,7 +174,10 @@ fn minimal_manifest_compiles_starts_and_reaches_region_close_quiescence() {
         "no runtime invariant violations, got {:?}",
         report.run.invariant_violations
     );
-    assert!(report.passed(), "compiled-app spork report must pass overall");
+    assert!(
+        report.passed(),
+        "compiled-app spork report must pass overall"
+    );
 }
 
 #[test]
