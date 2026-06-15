@@ -31,7 +31,6 @@
 //! peer, or rejected handshake is a hard error — there is no success path that
 //! moves zero bytes.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -41,20 +40,25 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::atp::object::{ContentId, ContentIdHasher, Object, ObjectEdge, ObjectId, ObjectKind};
+use crate::net::atp::transport_common::{
+    EntryDigest, StagedEntryReceive, StreamingError, collect_entries,
+    flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
+};
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
 // supporting imports are gated to the test build to keep `-D warnings` clean.
 #[cfg(test)]
 use crate::atp::manifest::MerkleRoot;
 #[cfg(test)]
-use crate::atp::object::ObjectGraph;
+use crate::atp::object::{Object, ObjectEdge, ObjectGraph};
 use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
+#[cfg(test)]
+use crate::net::atp::transport_common::flat_merkle_root_from_slices;
 use crate::net::{TcpListener, TcpStream};
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
@@ -177,6 +181,12 @@ pub enum TransportError {
         /// Configured timeout duration.
         timeout: Duration,
     },
+}
+
+impl From<StreamingError> for TransportError {
+    fn from(err: StreamingError) -> Self {
+        Self::Source(err.into_message())
+    }
 }
 
 // ─── Wire control payloads (JSON) ────────────────────────────────────────────
@@ -360,15 +370,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex_encode(&hasher.finalize())
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap_or('0'));
-    }
-    out
-}
-
 /// Build a deterministic flat object graph over `(rel_path, bytes)` entries and
 /// return `(graph, merkle_root_hex)`. The graph is a single directory root whose
 /// edges are keyed by full relative path, so the merkle root commits to every
@@ -397,248 +398,6 @@ fn build_flat_graph(entries: &[(String, Vec<u8>)]) -> (ObjectGraph, String) {
     let _ = graph.add_root(root);
     let merkle = MerkleRoot::from_graph(&graph);
     (graph, merkle.to_hex())
-}
-
-/// Per-entry content digests sufficient to reproduce the flat object-graph
-/// merkle root without holding any file content in memory. The sender fills
-/// these while streaming each file off disk; the receiver fills them while
-/// streaming incoming chunks. Both then call [`flat_merkle_root_from_digests`].
-struct EntryDigest {
-    rel_path: String,
-    size: u64,
-    /// Content-addressed object id (`ContentId::from_bytes` over the content).
-    content_id: ObjectId,
-    /// Plain SHA-256 of the content. Matches the manifest entry hash and the
-    /// `Sha256::digest(content)` term the owned-graph merkle hashes per file.
-    content_sha256: [u8; 32],
-}
-
-/// One node in the flattened object graph used for merkle hashing.
-enum FlatNode<'a> {
-    File {
-        size: u64,
-        content_sha256: &'a [u8; 32],
-    },
-    Dir {
-        kind: ObjectKind,
-        size_bytes: Option<u64>,
-        children: Vec<ObjectEdge>,
-    },
-}
-
-/// Reproduce `MerkleRoot::from_graph` over the flat object graph from per-entry
-/// digests alone — byte-identical hashing to [`build_flat_graph`] /
-/// [`flat_merkle_root_from_slices`], but it never materializes file content, so
-/// peak memory is `O(number_of_entries)` digests rather than `O(total_bytes)`.
-fn flat_merkle_root_from_digests(entries: &[EntryDigest]) -> String {
-    let mut sorted: Vec<&EntryDigest> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-
-    let mut objects: BTreeMap<ObjectId, FlatNode<'_>> = BTreeMap::new();
-    let mut edges = Vec::with_capacity(sorted.len());
-    for entry in sorted {
-        // Content-addressed: identical files collapse to one node (idempotent).
-        objects
-            .entry(entry.content_id.clone())
-            .or_insert(FlatNode::File {
-                size: entry.size,
-                content_sha256: &entry.content_sha256,
-            });
-        edges.push(ObjectEdge::new(
-            entry.content_id.clone(),
-            entry.rel_path.clone(),
-        ));
-    }
-
-    let root = Object::directory(edges);
-    objects.insert(
-        root.id,
-        FlatNode::Dir {
-            kind: root.metadata.kind,
-            size_bytes: root.metadata.size_bytes,
-            children: root.children,
-        },
-    );
-
-    let mut hasher = Sha256::new();
-    for (id, node) in objects {
-        hasher.update(id.hash_bytes());
-        match node {
-            FlatNode::File {
-                size,
-                content_sha256,
-            } => {
-                hasher.update([ObjectKind::FileObject as u8]);
-                hasher.update(size.to_be_bytes());
-                // A file object has no children; its content term is the plain
-                // SHA-256 of the bytes, identical to `Sha256::digest(content)`.
-                hasher.update(content_sha256);
-            }
-            FlatNode::Dir {
-                kind,
-                size_bytes,
-                children,
-            } => {
-                hasher.update([kind as u8]);
-                if let Some(size) = size_bytes {
-                    hasher.update(size.to_be_bytes());
-                }
-                let mut child_indices: Vec<usize> = (0..children.len()).collect();
-                child_indices.sort_by(|&a, &b| children[a].name.cmp(&children[b].name));
-                for idx in child_indices {
-                    let edge = &children[idx];
-                    hasher.update(edge.name.as_bytes());
-                    hasher.update(edge.child_id.hash_bytes());
-                    hasher.update([u8::from(edge.is_symlink)]);
-                    if let Some(target) = &edge.symlink_target {
-                        hasher.update(target.as_os_str().as_encoded_bytes());
-                    }
-                }
-            }
-        }
-    }
-
-    hex_encode(&hasher.finalize())
-}
-
-/// Compute the flat object-graph merkle root from in-memory `(rel_path, bytes)`
-/// slices. Retained for tests and any caller that already holds content; it now
-/// delegates to [`flat_merkle_root_from_digests`] so the slice path and the
-/// digest path can never diverge.
-#[cfg(test)]
-fn flat_merkle_root_from_slices<'a>(
-    entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
-) -> String {
-    let digests: Vec<EntryDigest> = entries
-        .into_iter()
-        .map(|(rel_path, bytes)| EntryDigest {
-            rel_path: rel_path.to_string(),
-            size: bytes.len() as u64,
-            content_id: ObjectId::content(ContentId::from_bytes(bytes)),
-            content_sha256: Sha256::digest(bytes).into(),
-        })
-        .collect();
-    flat_merkle_root_from_digests(&digests)
-}
-
-/// One source file discovered by [`collect_entries`]: its transfer-relative
-/// path and absolute on-disk path. Crucially this carries **no content** — files
-/// are streamed off disk later (size is computed during the streaming hash pass),
-/// never slurped into RAM.
-struct SourceEntry {
-    rel_path: String,
-    abs_path: PathBuf,
-}
-
-/// Walk a path into [`SourceEntry`] metadata (paths only). A single file yields
-/// one entry keyed by its file name; a directory yields one entry per regular
-/// file keyed by path relative to the directory. No bytes are read here.
-async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<SourceEntry>), TransportError> {
-    let meta = crate::fs::metadata(root)
-        .await
-        .map_err(|e| TransportError::Source(format!("{}: {e}", root.display())))?;
-    let root_name = root.file_name().map_or_else(
-        || "transfer".to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-
-    if meta.is_file() {
-        return Ok((
-            root_name.clone(),
-            false,
-            vec![SourceEntry {
-                rel_path: root_name,
-                abs_path: root.to_path_buf(),
-            }],
-        ));
-    }
-    if meta.is_dir() {
-        let mut entries = Vec::new();
-        collect_dir(root, String::new(), &mut entries).await?;
-        entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-        return Ok((root_name, true, entries));
-    }
-    Err(TransportError::Source(format!(
-        "{}: not a regular file or directory",
-        root.display()
-    )))
-}
-
-/// Recursive directory walk producing [`SourceEntry`] metadata with
-/// forward-slash relative paths. Reads directory entries and file types, never
-/// file content.
-fn collect_dir<'a>(
-    dir: &'a Path,
-    prefix: String,
-    out: &'a mut Vec<SourceEntry>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TransportError>> + Send + 'a>> {
-    Box::pin(async move {
-        let mut read_dir = crate::fs::read_dir(dir)
-            .await
-            .map_err(|e| TransportError::Source(format!("{}: {e}", dir.display())))?;
-        // Collect child names first for deterministic ordering.
-        let mut children: Vec<(String, PathBuf, bool)> = Vec::new();
-        while let Some(entry) = read_dir
-            .next_entry()
-            .await
-            .map_err(|e| TransportError::Source(format!("{}: {e}", dir.display())))?
-        {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = entry.path();
-            let ft = entry
-                .file_type()
-                .await
-                .map_err(|e| TransportError::Source(format!("{}: {e}", path.display())))?;
-            children.push((name, path, ft.is_dir()));
-        }
-        children.sort_by(|a, b| a.0.cmp(&b.0));
-
-        for (name, path, is_dir) in children {
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if is_dir {
-                collect_dir(&path, rel, out).await?;
-            } else {
-                out.push(SourceEntry {
-                    rel_path: rel,
-                    abs_path: path,
-                });
-            }
-        }
-        Ok(())
-    })
-}
-
-/// Stream a file off disk in `buf`-sized chunks, computing its size, content id,
-/// and plain SHA-256 without ever holding more than one chunk in memory.
-async fn hash_file_streaming(
-    path: &Path,
-    buf: &mut [u8],
-) -> Result<(u64, ObjectId, [u8; 32]), TransportError> {
-    let mut file = crate::fs::File::open(path)
-        .await
-        .map_err(|e| TransportError::Source(format!("{}: {e}", path.display())))?;
-    let mut sha = Sha256::new();
-    let mut cid: ContentIdHasher = ContentId::streaming();
-    let mut size: u64 = 0;
-    loop {
-        let n = file
-            .read(buf)
-            .await
-            .map_err(|e| TransportError::Source(format!("{}: {e}", path.display())))?;
-        if n == 0 {
-            break;
-        }
-        sha.update(&buf[..n]);
-        cid.update(&buf[..n]);
-        size = size.saturating_add(n as u64);
-    }
-    let content_sha256: [u8; 32] = sha.finalize().into();
-    let content_id = ObjectId::content(cid.finalize());
-    Ok((size, content_id, content_sha256))
 }
 
 /// Stream a file off disk and emit it as `ObjectData` frames, reusing `buf` as
@@ -1157,24 +916,11 @@ pub async fn receive_connection(
     let _ = crate::fs::remove_dir_all(&staging_dir).await;
     crate::fs::create_dir_all(&staging_dir).await?;
 
-    struct EntryRecvState {
-        staging_path: PathBuf,
-        bytes_written: u64,
-        created: bool,
-        sha: Sha256,
-        cid: ContentIdHasher,
-    }
-    let mut states: Vec<EntryRecvState> = manifest
+    let mut states: Vec<StagedEntryReceive> = manifest
         .entries
         .iter()
         .enumerate()
-        .map(|(i, _)| EntryRecvState {
-            staging_path: staging_dir.join(i.to_string()),
-            bytes_written: 0,
-            created: false,
-            sha: Sha256::new(),
-            cid: ContentId::streaming(),
-        })
+        .map(|(i, _)| StagedEntryReceive::new(staging_dir.join(i.to_string())))
         .collect();
     let mut active: Option<(usize, crate::fs::File)> = None;
     let mut received: u64 = 0;
@@ -1216,7 +962,7 @@ pub async fn receive_connection(
                             )));
                         }
                         let file = crate::fs::File::create(&st.staging_path).await?;
-                        st.created = true;
+                        st.mark_created();
                         active = Some((idx, file));
                     }
 
@@ -1250,9 +996,7 @@ pub async fn receive_connection(
                     };
                     file.write_all(chunk).await?;
                     let st = &mut states[idx];
-                    st.sha.update(chunk);
-                    st.cid.update(chunk);
-                    st.bytes_written = st.bytes_written.saturating_add(chunk.len() as u64);
+                    st.update_with_chunk(chunk);
                 }
                 FrameType::ObjectComplete => break,
                 FrameType::Close => break,
@@ -1289,30 +1033,17 @@ pub async fn receive_connection(
     let mut digests: Vec<EntryDigest> = Vec::with_capacity(states.len());
     let mut staging_paths: Vec<PathBuf> = Vec::with_capacity(states.len());
     for (entry, st) in manifest.entries.iter().zip(states) {
-        let EntryRecvState {
-            staging_path,
-            bytes_written,
-            created,
-            sha,
-            cid,
-        } = st;
+        let (digest, staging_path, created) = st.finalize(entry.rel_path.clone());
         if !created {
             if let Err(e) = crate::fs::File::create(&staging_path).await {
                 let _ = crate::fs::remove_dir_all(&staging_dir).await;
                 return Err(TransportError::from(e));
             }
         }
-        let content_sha256: [u8; 32] = sha.finalize().into();
-        let content_id = ObjectId::content(cid.finalize());
-        if bytes_written != entry.size || hex_encode(&content_sha256) != entry.sha256_hex {
+        if digest.size != entry.size || hex_encode(&digest.content_sha256) != entry.sha256_hex {
             sha_ok = false;
         }
-        digests.push(EntryDigest {
-            rel_path: entry.rel_path.clone(),
-            size: bytes_written,
-            content_id,
-            content_sha256,
-        });
+        digests.push(digest);
         staging_paths.push(staging_path);
     }
 
