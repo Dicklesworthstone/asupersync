@@ -54,10 +54,65 @@ impl ContentId {
         }
     }
 
+    /// Start an incremental [`ContentIdHasher`] for content streamed in chunks.
+    ///
+    /// Feeding the same total byte sequence through [`ContentIdHasher::update`]
+    /// and finalizing yields exactly the same id as [`ContentId::from_bytes`]
+    /// over the concatenation, but without ever holding the whole content in
+    /// memory. Bounded-memory transports (e.g. ATP-over-TCP/QUIC) use this to
+    /// compute object ids while streaming files chunk-by-chunk.
+    #[must_use]
+    pub fn streaming() -> ContentIdHasher {
+        ContentIdHasher::new()
+    }
+
     /// Format as hex string for debugging.
     #[must_use]
     pub fn to_hex(&self) -> String {
         hex::encode(self.hash)
+    }
+}
+
+/// Incremental, domain-separated SHA-256 hasher that produces a [`ContentId`]
+/// from chunked input. Equivalent to [`ContentId::from_bytes`] over the
+/// concatenation of all `update` calls, with O(1) memory.
+#[derive(Clone)]
+pub struct ContentIdHasher {
+    hasher: Sha256,
+}
+
+impl ContentIdHasher {
+    /// Create a hasher pre-seeded with the content-id domain separator.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(CONTENT_ID_DOMAIN);
+        Self { hasher }
+    }
+
+    /// Absorb the next chunk of content.
+    pub fn update(&mut self, chunk: &[u8]) {
+        self.hasher.update(chunk);
+    }
+
+    /// Finalize into the content-addressed id.
+    #[must_use]
+    pub fn finalize(self) -> ContentId {
+        ContentId {
+            hash: self.hasher.finalize().into(),
+        }
+    }
+}
+
+impl Default for ContentIdHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for ContentIdHasher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContentIdHasher").finish_non_exhaustive()
     }
 }
 
@@ -787,6 +842,32 @@ mod tests {
         let id1 = ContentId::from_bytes(content);
         let id2 = ContentId::from_bytes(content);
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn content_id_streaming_matches_from_bytes_over_chunks() {
+        // Bounded-memory transports compute content ids chunk-by-chunk; the
+        // streamed result must be byte-identical to the all-at-once digest.
+        let content: Vec<u8> = (0u32..5000).map(|i| (i % 251) as u8).collect();
+        let one_shot = ContentId::from_bytes(&content);
+
+        for chunk_size in [1usize, 7, 64, 256, 4096, content.len()] {
+            let mut hasher = ContentId::streaming();
+            for chunk in content.chunks(chunk_size.max(1)) {
+                hasher.update(chunk);
+            }
+            assert_eq!(
+                hasher.finalize(),
+                one_shot,
+                "streaming content id mismatch at chunk_size={chunk_size}"
+            );
+        }
+
+        // Empty content must also agree.
+        assert_eq!(
+            ContentId::streaming().finalize(),
+            ContentId::from_bytes(&[])
+        );
     }
 
     #[test]
