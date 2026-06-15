@@ -46,9 +46,12 @@
 //! striping for very large messages is a recorded follow-up, as are the QUIC
 //! datagram lane and production WAN hardening.
 
+use std::collections::HashMap;
 use std::fmt;
 
+use crate::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::config::EncodingConfig;
+use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline};
 use crate::encoding::EncodingPipeline;
 use crate::security::AuthenticatedSymbol;
@@ -223,6 +226,11 @@ pub struct EncodedMessage {
 /// reconstruct the block, or [`EcError::Coding`] if the decoder rejects a symbol
 /// or fails to finalize.
 pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<Vec<u8>, EcError> {
+    if header.message_size == 0 {
+        // A zero-length message carries no data symbols; the empty payload is
+        // fully described by the header.
+        return Ok(Vec::new());
+    }
     let object_id = ObjectId::new(header.message_id, 0);
     let source_symbols = header.source_symbols;
 
@@ -265,6 +273,150 @@ pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<
     decoder
         .into_data()
         .map_err(|e| EcError::Coding(e.to_string()))
+}
+
+/// A unit on the erasure channel's in-memory symbol transport: either a message
+/// header (announcing a message's decode geometry) or a single symbol frame of
+/// that message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireUnit {
+    /// Announces a message and the geometry a receiver decodes it against.
+    Header(MessageHeader),
+    /// One erasure symbol of a previously-announced message.
+    Symbol(SymbolFrame),
+}
+
+/// Creates a connected erasure-coded channel: an [`EcSender`] that encodes
+/// messages into symbols and an [`EcReceiver`] that reassembles and decodes
+/// them, joined by an in-memory reliable, ordered symbol transport.
+///
+/// The transport here is loss-free (an unbounded in-memory queue), so this is
+/// the channel-shaped *composition* — the substrate a lossy transport (UDP
+/// fan-out, datagrams) or a seeded [`LossModel`] plugs into at the symbol-frame
+/// boundary. The send obligation resolves at symbol flush (handoff to the
+/// transport), per the module's recorded obligation-semantics decision; `recv`
+/// is async and yields a message once enough of its symbols have arrived.
+#[must_use]
+pub fn channel(config: EcConfig) -> (EcSender, EcReceiver) {
+    let (tx, rx) = unbounded_channel();
+    (
+        EcSender {
+            config,
+            tx,
+            next_message_id: 0,
+        },
+        EcReceiver {
+            rx,
+            pending: HashMap::new(),
+        },
+    )
+}
+
+/// The sending half of an erasure-coded channel.
+pub struct EcSender {
+    config: EcConfig,
+    tx: UnboundedSender<WireUnit>,
+    next_message_id: u64,
+}
+
+impl EcSender {
+    /// Encodes `message` and flushes its header and symbol frames to the
+    /// transport, returning the per-sender message id assigned to it.
+    ///
+    /// Cancel-correct: if `cx` is already cancelled the message is neither
+    /// encoded nor flushed, so nothing partial ever reaches the transport. The
+    /// send obligation resolves once every symbol is handed to the transport —
+    /// not at receiver decode.
+    ///
+    /// # Errors
+    ///
+    /// [`EcError::Cancelled`] if `cx` is cancelled, [`EcError::TransportClosed`]
+    /// if the receiver has been dropped, or an encode error from
+    /// [`EcConfig::encode_message`].
+    pub fn send(&mut self, cx: &Cx, message: &[u8]) -> Result<u64, EcError> {
+        cx.checkpoint().map_err(|_| EcError::Cancelled)?;
+        let message_id = self.next_message_id;
+        let encoded = self.config.encode_message(message_id, message)?;
+        self.tx
+            .send(WireUnit::Header(encoded.header))
+            .map_err(|_| EcError::TransportClosed)?;
+        for frame in encoded.frames {
+            self.tx
+                .send(WireUnit::Symbol(frame))
+                .map_err(|_| EcError::TransportClosed)?;
+        }
+        self.next_message_id = self.next_message_id.wrapping_add(1);
+        Ok(message_id)
+    }
+}
+
+/// The receiving half of an erasure-coded channel.
+pub struct EcReceiver {
+    rx: UnboundedReceiver<WireUnit>,
+    pending: HashMap<u64, (MessageHeader, MessageReassembler)>,
+}
+
+impl EcReceiver {
+    /// Awaits and returns the bytes of the next fully-decoded message.
+    ///
+    /// Ingests transport units, routing each symbol to its message's
+    /// [`MessageReassembler`]; once a message has collected enough distinct
+    /// symbols it is decoded and its bytes returned. Per-sender FIFO order
+    /// follows the ordered transport.
+    ///
+    /// # Errors
+    ///
+    /// [`EcError::TransportClosed`] if the transport closes before a message
+    /// completes, or a decode error from [`decode_message`].
+    pub async fn recv(&mut self, cx: &Cx) -> Result<Vec<u8>, EcError> {
+        loop {
+            let unit = self
+                .rx
+                .recv(cx)
+                .await
+                .map_err(|_| EcError::TransportClosed)?;
+            let message_id = match unit {
+                WireUnit::Header(header) => {
+                    let id = header.message_id;
+                    let reassembler = MessageReassembler::new(&header);
+                    self.pending.entry(id).or_insert((header, reassembler));
+                    id
+                }
+                WireUnit::Symbol(frame) => {
+                    if let Some((_, reassembler)) = self.pending.get_mut(&frame.message_id) {
+                        let _ = reassembler.accept_frame(&frame);
+                    }
+                    frame.message_id
+                }
+            };
+            // Check readiness after EITHER a header or a symbol: a zero-source
+            // (empty) message is decodable the moment its header arrives, with no
+            // symbols of its own.
+            if let Some(bytes) = self.try_complete(message_id)? {
+                return Ok(bytes);
+            }
+        }
+    }
+
+    /// Decodes and removes `message_id` if its reassembler has collected enough
+    /// distinct symbols; returns `Ok(None)` if it is not yet decodable or
+    /// unknown.
+    fn try_complete(&mut self, message_id: u64) -> Result<Option<Vec<u8>>, EcError> {
+        let Some((header, reassembler)) = self.pending.get(&message_id) else {
+            return Ok(None);
+        };
+        if !reassembler.is_ready() {
+            return Ok(None);
+        }
+        let header = *header;
+        let held: Vec<SymbolFrame> = reassembler
+            .symbols()
+            .map(|(esi, bytes)| SymbolFrame::new(header.message_id, esi, bytes.to_vec()))
+            .collect();
+        let bytes = decode_message(&header, &held)?;
+        self.pending.remove(&message_id);
+        Ok(Some(bytes))
+    }
 }
 
 /// The per-message erasure-coding plan derived from a message size.
@@ -782,6 +934,11 @@ pub enum EcError {
         /// Source symbols (`K`) the block needs to decode.
         needed: u16,
     },
+    /// The send context was cancelled before the message was flushed; nothing
+    /// partial reached the transport.
+    Cancelled,
+    /// The channel transport was closed (the peer half was dropped).
+    TransportClosed,
 }
 
 impl fmt::Display for EcError {
@@ -814,6 +971,8 @@ impl fmt::Display for EcError {
                     "insufficient symbols to decode (need {needed} source symbols)"
                 )
             }
+            Self::Cancelled => write!(f, "erasure channel send cancelled before flush"),
+            Self::TransportClosed => write!(f, "erasure channel transport closed"),
         }
     }
 }
