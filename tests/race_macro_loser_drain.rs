@@ -4,22 +4,27 @@
 //! proven *structurally* by the macro crate's token tests
 //! (`asupersync-macros/src/race.rs`). This file pins the *observable behavior*
 //! the macro promises and the original drop-only `race!` lied about: a losing
-//! branch is protocol-cancelled **and drained** — its future fully torn down —
-//! before the race resolves.
+//! branch is protocol-cancelled **and drained** — driven through its own
+//! cancellation path to termination — before the race resolves.
 //!
-//! The discriminating construction is a loser that **never completes on its
-//! own** (`std::future::pending`) while holding a `Drop`-tracking guard. With
-//! the old `Cx::race` (drop-the-losers) semantics the winner value could
-//! surface while a loser was merely cancel-requested; here the loser can only
-//! reach its guard's `Drop` by being force-finalized through the runtime's
-//! cancel lane, which `Scope::race_all` triggers (`abort_with_reason` + an
-//! awaited `join`) for every pending loser on the ordinary-winner path. We
-//! sample the guard from inside the same task at the instant `race_drained`
-//! returns and require it already dropped.
+//! # What discriminates drain from drop
 //!
-//! A pending-forever loser also makes the winner deterministic: a branch that
-//! is never self-ready can never tie the immediately-ready winner, so no
-//! scheduler interleaving can flip which branch wins.
+//! A `Drop`-only signal cannot tell the two apart: dropping a loser future at
+//! its suspend point still runs the destructors of its live locals. The signal
+//! that *only* fires under a real drain is **code that runs after the
+//! suspension point, in response to observed cancellation**. A dropped future
+//! never advances past where it was parked, so that code never executes; a
+//! drained future is polled once more after `abort`, observes its task's
+//! cancellation via [`Cx::current`]`().checkpoint()`, runs its post-cancel
+//! resolution, and returns.
+//!
+//! Each loser here parks (self-waking) until its own task is cancelled, then
+//! flips a `resolved` flag and returns. Because the loser never completes on
+//! its own, it can never tie the immediately-ready winner — the winner is
+//! deterministic — and the loser can only set `resolved` by being drained.
+//! `Scope::race_all` (which `race_drained` delegates to) aborts every pending
+//! loser and *awaits its join* on the ordinary-winner path, so the resolution
+//! has run by the time `race_drained` returns.
 
 #![allow(missing_docs)]
 
@@ -29,16 +34,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-/// A guard whose `Drop` records that the future owning it was torn down. Stands
-/// in for a loser-held obligation/finalizer that must resolve, not leak.
-struct DrainGuard(Arc<AtomicBool>);
-
-impl Drop for DrainGuard {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
+use std::task::Poll;
 
 fn boxed<T: Send + 'static>(
     fut: impl Future<Output = T> + Send + 'static,
@@ -46,54 +42,66 @@ fn boxed<T: Send + 'static>(
     Box::pin(fut)
 }
 
-/// A branch that holds `guard` and never completes on its own — only a real
-/// cancel+drain tears it (and the guard) down.
-fn pending_loser(guard: DrainGuard) -> Pin<Box<dyn Future<Output = u32> + Send>> {
+/// Parks (self-waking) until *this task* is cancelled, then resolves. Only a
+/// real cancel+drain drives it to `Ready`; it never completes on its own.
+async fn park_until_cancelled() -> u32 {
+    std::future::poll_fn(|poll_cx| match Cx::current() {
+        Some(task_cx) if task_cx.checkpoint().is_err() => Poll::Ready(0_u32),
+        _ => {
+            poll_cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
+}
+
+/// A losing branch that resolves a held obligation when (and only when) it is
+/// drained. `resolved` is set on the post-cancellation code path — it stays
+/// `false` if the future is merely dropped at its suspend point.
+fn draining_loser(resolved: Arc<AtomicBool>) -> Pin<Box<dyn Future<Output = u32> + Send>> {
     boxed(async move {
-        let _guard = guard;
-        std::future::pending::<u32>().await
+        let value = park_until_cancelled().await;
+        // Post-cancellation resolution: reached only by a drained (re-polled
+        // after abort) future, never by a dropped one.
+        resolved.store(true, Ordering::SeqCst);
+        value
     })
 }
 
 #[test]
-fn race_drained_returns_winner_and_drains_pending_loser() {
+fn race_drained_returns_winner_and_drains_loser() {
     let mut runtime = LabRuntimeTarget::create_runtime(TestConfig::default());
-    let loser_drained = Arc::new(AtomicBool::new(false));
-    let loser_drained_for_guard = Arc::clone(&loser_drained);
-    let loser_drained_for_read = Arc::clone(&loser_drained);
+    let resolved = Arc::new(AtomicBool::new(false));
+    let resolved_for_branch = Arc::clone(&resolved);
+    let resolved_for_read = Arc::clone(&resolved);
 
-    let (winner_value, drained_before_return) =
+    let (winner_value, resolved_before_return) =
         LabRuntimeTarget::block_on(&mut runtime, async move {
             let cx = Cx::current().expect("LabRuntimeTarget root task installs Cx");
 
             // Winner: ready on the first poll with a sentinel value.
             let winner = boxed(async { 7_u32 });
-            // Loser: holds a drain-tracking guard and parks forever.
-            let loser = pending_loser(DrainGuard(loser_drained_for_guard));
+            // Loser: parks until cancelled, then runs its resolution.
+            let loser = draining_loser(resolved_for_branch);
 
             let result = cx
                 .race_drained(vec![winner, loser])
                 .await
                 .expect("the immediately-ready branch resolves as the winner");
 
-            // Sampled at the instant race_drained resolves: the loser must
-            // already be drained (its future + guard torn down).
-            let drained = loser_drained_for_read.load(Ordering::SeqCst);
+            // Sampled at the instant race_drained resolves.
+            let drained = resolved_for_read.load(Ordering::SeqCst);
             (result, drained)
         });
 
     assert_eq!(
         winner_value, 7,
-        "the immediately-ready branch must win against a never-ready loser"
+        "the immediately-ready branch must win against a park-until-cancelled loser"
     );
     assert!(
-        drained_before_return,
-        "loser must be drained (its future torn down) BEFORE race_drained returns; \
-         drop-only semantics would leave the loser live past the winner value"
-    );
-    assert!(
-        loser_drained.load(Ordering::SeqCst),
-        "loser drain flag must remain set after the race completes"
+        resolved_before_return,
+        "loser must be DRAINED — its post-cancellation resolution run — before race_drained \
+         returns; drop-only semantics would abandon the loser at its suspend point and never run it"
     );
 }
 
@@ -101,37 +109,37 @@ fn race_drained_returns_winner_and_drains_pending_loser() {
 fn race_drained_drains_every_loser_in_an_n_ary_race() {
     let mut runtime = LabRuntimeTarget::create_runtime(TestConfig::default());
 
-    // Three pending-forever losers, one instant winner: every loser must be
-    // drained, exercising the N-ary drain loop (lifts the fixed Race2/3/4
+    // Three park-until-cancelled losers, one instant winner: every loser must
+    // be drained, exercising the N-ary drain loop (lifts the fixed Race2/3/4
     // arity ceiling).
     let flags: Vec<Arc<AtomicBool>> = (0..3).map(|_| Arc::new(AtomicBool::new(false))).collect();
     let flags_for_async = flags.clone();
 
-    let (winner_value, all_drained) = LabRuntimeTarget::block_on(&mut runtime, async move {
+    let (winner_value, all_resolved) = LabRuntimeTarget::block_on(&mut runtime, async move {
         let cx = Cx::current().expect("LabRuntimeTarget root task installs Cx");
 
         let mut branches: Vec<Pin<Box<dyn Future<Output = u32> + Send>>> = Vec::new();
         // Winner first: immediately ready.
         branches.push(boxed(async { 1_u32 }));
-        // Losers: each holds a drain guard and parks forever.
+        // Losers: each resolves its obligation only when drained.
         for flag in &flags_for_async {
-            branches.push(pending_loser(DrainGuard(Arc::clone(flag))));
+            branches.push(draining_loser(Arc::clone(flag)));
         }
 
         let result = cx
             .race_drained(branches)
             .await
             .expect("the immediately-ready branch wins the N-ary race");
-        let drained = flags_for_async
+        let resolved = flags_for_async
             .iter()
             .all(|flag| flag.load(Ordering::SeqCst));
-        (result, drained)
+        (result, resolved)
     });
 
     assert_eq!(winner_value, 1, "the ready branch must win the 4-way race");
     assert!(
-        all_drained,
-        "all three losing branches must be drained before race_drained returns"
+        all_resolved,
+        "all three losing branches must be drained (resolved) before race_drained returns"
     );
 }
 
