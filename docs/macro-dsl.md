@@ -34,7 +34,7 @@ use asupersync::proc_macros::{join, join_all, main, race, scope, spawn, test};
 | `spawn!` | Supported and re-exported by `asupersync` | Unavailable | Expands to `Scope::spawn_registered`; requires ambient `__state` and `__cx` |
 | `join!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Awaits branches sequentially today |
 | `join_all!` | Supported and re-exported by `asupersync` | Unavailable | Awaits branches sequentially today |
-| `race!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Expands to `Cx::race*`; losers are dropped, not drained |
+| `race!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Expands to `Cx::race_drained*`; losers are protocol-cancelled **and drained** |
 | `#[main]` / `#[test]` | Supported and re-exported by `asupersync` | Unavailable | Runs async entry functions on the production runtime and optionally injects the installed root `Cx` |
 | `#[lab_test]` | Supported and re-exported by `asupersync` | Unavailable | Runs deterministic lab tests under one seed or a seed matrix and fails with seed/rerun details |
 
@@ -128,9 +128,12 @@ design target. Keep the following in mind:
   `Scope::region(...)` explicitly.
 - `spawn!` requires a `__state: &mut RuntimeState` variable to exist in scope.
   The supported path is `scope!(cx, state: ..., { ... })`.
-- `race!` expands to implemented `Cx::race*` methods, but those methods cancel
-  losers by dropping them. They do not await loser drain. Use `Scope::race`
-  when drain guarantees matter.
+- `race!` expands to the drain-correct `Cx::race_drained*` methods: each branch
+  is spawned as a region task and resolved through `Scope::race_all`, so every
+  loser is protocol-cancelled **and drained** (awaited to termination) before
+  the macro returns. Branches and their outputs must therefore be `Send +
+  'static`, and `cx` must carry spawn authority. The lower-level drop-on-cancel
+  `Cx::race*` methods remain as an escape hatch for non-`'static` inline races.
 - `join!` and `join_all!` are sequential today. Parallel polling is future work.
 
 These are *phase limitations*, not permanent API choices.
@@ -229,8 +232,11 @@ join_all!(f1, f2, f3)
 
 ### race!
 
-Race inline futures and return the first completion. Losers are cancelled by
-drop; they are not drained.
+Race inline futures and return the first completion. Losers are
+protocol-cancelled **and drained** — awaited to termination — before the macro
+returns, so obligations and finalizers a loser holds are resolved, not
+abandoned. This drain guarantee is the differentiator versus a plain
+drop-the-losers select (e.g. `tokio::select!`).
 
 **Syntax**
 
@@ -242,9 +248,14 @@ race!(cx, timeout: Duration::from_secs(5), { f1, f2 })
 
 **Notes**
 
-- Requires `Cx::race*` methods (implemented today).
-- Semantics: winners return first, losers are cancelled by drop.
-- Use `Scope::race` when loser-drain semantics matter.
+- Expands to the drain-correct `Cx::race_drained*` methods: each branch is
+  spawned as a region task and resolved through `Scope::race_all`.
+- Branches and their outputs must be `Send + 'static`, and `cx` must carry spawn
+  authority (a runtime-wired context).
+- Semantics: the winner returns first; every loser is cancelled and drained.
+  On the `timeout:` path an elapsed deadline abandons the whole race by drop.
+- For a lower-level drop-on-cancel select over non-`'static` inline futures,
+  call `Cx::race*` directly.
 
 ## Patterns
 
