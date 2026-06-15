@@ -756,6 +756,10 @@ required-features = ["test-internals"]
 name = "channel_mpsc_select_e2e"
 required-features = ["channel-mpsc-select-e2e"]
 
+[[example]]
+name = "production_service"
+required-features = ["sqlite"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"
