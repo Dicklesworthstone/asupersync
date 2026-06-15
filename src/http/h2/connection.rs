@@ -4945,6 +4945,16 @@ mod tests {
             true,
         ));
         conn.process_frame(request).unwrap();
+        conn.process_frame(Frame::Data(DataFrame::new(
+            1,
+            Bytes::from_static(b"request"),
+            true,
+        )))
+        .unwrap();
+        assert_eq!(
+            conn.stream(1).unwrap().state(),
+            StreamState::HalfClosedRemote
+        );
 
         conn.send_headers(1, vec![Header::new(":status", "200")], false)
             .unwrap();

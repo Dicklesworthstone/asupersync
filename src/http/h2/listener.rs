@@ -356,26 +356,157 @@ pub(crate) fn request_from_h2_headers(
     })
 }
 
+fn should_strip_h2_response_header(lowered: &str, value: &str) -> bool {
+    CONNECTION_SPECIFIC_HEADERS.contains(&lowered)
+        || (lowered == "te" && !value.eq_ignore_ascii_case("trailers"))
+}
+
+fn is_h2_response_header_name_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'!' | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+            | b'0'..=b'9'
+            | b'a'..=b'z'
+            | b'A'..=b'Z'
+    )
+}
+
+fn validate_h2_response_header_name(name: &str) -> Result<(), H2Error> {
+    if name.is_empty() || name.starts_with(':') {
+        return Err(H2Error::connection(
+            ErrorCode::InternalError,
+            "invalid h2 response header name",
+        ));
+    }
+    if !name.bytes().all(is_h2_response_header_name_byte) {
+        return Err(H2Error::connection(
+            ErrorCode::InternalError,
+            "invalid h2 response header name",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_h2_response_header_value(value: &str) -> Result<(), H2Error> {
+    if value
+        .bytes()
+        .any(|b| b == b'\r' || b == b'\n' || b == b'\0' || (b < 0x20 && b != b'\t') || b == 0x7f)
+    {
+        return Err(H2Error::connection(
+            ErrorCode::InternalError,
+            "invalid h2 response header value",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_h2_content_length(value: &str) -> Result<usize, H2Error> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(H2Error::connection(
+            ErrorCode::InternalError,
+            "invalid h2 response content-length",
+        ));
+    }
+    value.parse::<usize>().map_err(|_| {
+        H2Error::connection(
+            ErrorCode::InternalError,
+            "invalid h2 response content-length",
+        )
+    })
+}
+
+fn validate_h2_response_for_queue(
+    response: &Response,
+    enforce_content_length: bool,
+) -> Result<(), H2Error> {
+    let mut content_length = None;
+    for (name, value) in &response.headers {
+        let lowered = name.to_ascii_lowercase();
+        if should_strip_h2_response_header(lowered.as_str(), value) {
+            continue;
+        }
+        validate_h2_response_header_name(name)?;
+        validate_h2_response_header_value(value)?;
+        if lowered == "content-length" {
+            let declared = parse_h2_content_length(value)?;
+            if content_length.replace(declared).is_some() {
+                return Err(H2Error::connection(
+                    ErrorCode::InternalError,
+                    "duplicate h2 response content-length",
+                ));
+            }
+        }
+    }
+    for (name, value) in &response.trailers {
+        let lowered = name.to_ascii_lowercase();
+        if should_strip_h2_response_header(lowered.as_str(), value) {
+            continue;
+        }
+        validate_h2_response_header_name(name)?;
+        validate_h2_response_header_value(value)?;
+    }
+    if enforce_content_length
+        && let Some(declared) = content_length
+        && declared != response.body.len()
+    {
+        return Err(H2Error::connection(
+            ErrorCode::InternalError,
+            "h2 response content-length does not match body length",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_h2_response_fallback() -> Http2Response {
+    Http2Response::new(Response::new(500, "Internal Server Error", Vec::new()))
+}
+
 /// Map a handler [`Response`] to an h2 response header block.
 ///
 /// Emits `:status` first (RFC 9113 §8.3.2), lowercases field names (h2
-/// field names are lowercase on the wire), and strips connection-specific
-/// h1 headers that MUST NOT appear in h2 messages (RFC 9113 §8.2.2),
-/// including any `te` value other than `trailers`.
-pub(crate) fn h2_headers_from_response(response: &Response) -> Vec<Header> {
+/// field names are lowercase on the wire), validates handler-supplied fields,
+/// and strips connection-specific h1 headers that MUST NOT appear in h2
+/// messages (RFC 9113 §8.2.2), including any `te` value other than
+/// `trailers`.
+pub(crate) fn h2_headers_from_response(response: &Response) -> Result<Vec<Header>, H2Error> {
+    validate_h2_response_for_queue(response, false)?;
     let mut out = Vec::with_capacity(response.headers.len() + 1);
     out.push(Header::new(":status", response.status.to_string()));
     for (name, value) in &response.headers {
         let lowered = name.to_ascii_lowercase();
-        if CONNECTION_SPECIFIC_HEADERS.contains(&lowered.as_str()) {
-            continue;
-        }
-        if lowered == "te" && !value.eq_ignore_ascii_case("trailers") {
+        if should_strip_h2_response_header(lowered.as_str(), value) {
             continue;
         }
         out.push(Header::new(lowered, value.clone()));
     }
-    out
+    Ok(out)
+}
+
+fn h2_trailers_from_response(response: &Response) -> Result<Vec<Header>, H2Error> {
+    let mut out = Vec::with_capacity(response.trailers.len());
+    for (name, value) in &response.trailers {
+        let lowered = name.to_ascii_lowercase();
+        if should_strip_h2_response_header(lowered.as_str(), value) {
+            continue;
+        }
+        validate_h2_response_header_name(name)?;
+        validate_h2_response_header_value(value)?;
+        out.push(Header::new(lowered, value.clone()));
+    }
+    Ok(out)
 }
 
 /// H2-only response wrapper that can carry explicit server-push promises.
@@ -620,11 +751,20 @@ fn queue_h2_response(
     if suppress_response_body {
         suppress_response_body_for_head(&mut response.response);
     }
+    if let Err(err) = validate_h2_response_for_queue(&response.response, !suppress_response_body) {
+        let _ = &err;
+        error!(error = %err, "invalid h2 response headers; synthesizing fallback response");
+        response = invalid_h2_response_fallback();
+    }
     let push_outcomes = queue_h2_server_pushes(conn, stream_id, &response.pushes);
 
-    let header_block = h2_headers_from_response(&response.response);
+    let header_block = h2_headers_from_response(&response.response)
+        .expect("fallback h2 response headers must be valid after validation");
+    let trailer_block = h2_trailers_from_response(&response.response)
+        .expect("fallback h2 response trailers must be valid after validation");
     let body = std::mem::take(&mut response.response.body);
-    let end_stream = body.is_empty();
+    let has_trailers = !trailer_block.is_empty();
+    let end_stream = body.is_empty() && !has_trailers;
     let mut queued_response = false;
     if conn
         .send_headers(stream_id, header_block, end_stream)
@@ -632,7 +772,12 @@ fn queue_h2_response(
     {
         queued_response = true;
         if !end_stream {
-            let _ = conn.send_data(stream_id, crate::bytes::Bytes::from(body), true);
+            if !body.is_empty() {
+                let _ = conn.send_data(stream_id, crate::bytes::Bytes::from(body), !has_trailers);
+            }
+            if has_trailers {
+                let _ = conn.send_headers(stream_id, trailer_block, true);
+            }
         }
     }
 
@@ -666,6 +811,15 @@ fn queue_h2_server_pushes(
 
     let mut outcomes = Vec::with_capacity(pushes.len());
     for push in pushes {
+        let mut pushed_response = push.response.clone();
+        if let Err(err) = validate_h2_response_for_queue(&pushed_response, true) {
+            outcomes.push(Http2PushOutcome::NotPushed {
+                associated_stream_id,
+                reason: classify_push_rejection(&err),
+            });
+            continue;
+        }
+
         let promised_stream_id =
             match conn.send_push_promise(associated_stream_id, push.request_headers.clone()) {
                 Ok(promised_stream_id) => promised_stream_id,
@@ -678,10 +832,13 @@ fn queue_h2_server_pushes(
                 }
             };
 
-        let mut pushed_response = push.response.clone();
-        let header_block = h2_headers_from_response(&pushed_response);
+        let header_block = h2_headers_from_response(&pushed_response)
+            .expect("validated pushed h2 response headers must encode");
+        let trailer_block =
+            h2_trailers_from_response(&pushed_response).expect("validated pushed h2 trailers");
         let body = std::mem::take(&mut pushed_response.body);
-        let end_stream = body.is_empty();
+        let has_trailers = !trailer_block.is_empty();
+        let end_stream = body.is_empty() && !has_trailers;
         if let Err(err) = conn.send_headers(promised_stream_id, header_block, end_stream) {
             conn.reset_stream(promised_stream_id, err.code);
             outcomes.push(Http2PushOutcome::NotPushed {
@@ -690,9 +847,21 @@ fn queue_h2_server_pushes(
             });
             continue;
         }
-        if !end_stream
-            && let Err(err) =
-                conn.send_data(promised_stream_id, crate::bytes::Bytes::from(body), true)
+        if !body.is_empty()
+            && let Err(err) = conn.send_data(
+                promised_stream_id,
+                crate::bytes::Bytes::from(body),
+                !has_trailers,
+            )
+        {
+            conn.reset_stream(promised_stream_id, err.code);
+            outcomes.push(Http2PushOutcome::NotPushed {
+                associated_stream_id,
+                reason: classify_push_rejection(&err),
+            });
+            continue;
+        }
+        if has_trailers && let Err(err) = conn.send_headers(promised_stream_id, trailer_block, true)
         {
             conn.reset_stream(promised_stream_id, err.code);
             outcomes.push(Http2PushOutcome::NotPushed {
@@ -1009,6 +1178,7 @@ fn dispatch_h2_request<F, Fut, R>(
                         // Panic isolation (h1 parity): the connection driver
                         // survives and the stream completes with a 500 instead
                         // of staying active forever.
+                        let _ = &message;
                         error!(message = %message, "h2 handler task panicked");
                         Response::new(500, "Internal Server Error", Vec::new()).into_h2_response()
                     }
@@ -1038,8 +1208,10 @@ fn dispatch_h2_request<F, Fut, R>(
                 match handler_result {
                     Ok(response) => response.into_h2_response(),
                     Err(payload) => {
+                        let message = crate::cx::scope::payload_to_string(&payload);
+                        let _ = &message;
                         error!(
-                            message = %crate::cx::scope::payload_to_string(&payload),
+                            message = %message,
                             "h2 handler task panicked"
                         );
                         Response::new(500, "Internal Server Error", Vec::new()).into_h2_response()
@@ -2097,6 +2269,137 @@ mod tests {
     }
 
     #[test]
+    fn queue_h2_response_synthesizes_500_for_invalid_response_headers() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new()
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/invalid-response"),
+            (":authority", "example.com"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(matches!(received, Some(ReceivedFrame::Headers { .. })));
+
+        let mut response_guards = HashMap::new();
+        let outcomes = queue_h2_response(
+            &mut conn,
+            1,
+            Response::new(200, "OK", b"secret".to_vec()).with_header("x-bad", "ok\r\nbad"),
+            InFlightRequestGuard::acquire(None),
+            false,
+            &mut response_guards,
+        );
+        assert!(outcomes.is_empty());
+
+        let frame = conn.next_frame().expect("fallback response headers");
+        let Frame::Headers(headers) = frame else {
+            panic!("expected fallback response HEADERS, got {frame:?}");
+        };
+        assert!(headers.end_stream, "fallback response has no body");
+        let mut block = headers.header_block;
+        let decoded = crate::http::h2::HpackDecoder::new()
+            .decode(&mut block)
+            .expect("fallback headers decode");
+        assert!(decoded.contains(&Header::new(":status", "500")));
+        assert!(
+            decoded.iter().all(|header| header.name != "x-bad"),
+            "invalid handler header must not reach HPACK output: {decoded:?}"
+        );
+        assert!(conn.next_frame().is_none());
+        assert!(response_guards.is_empty());
+    }
+
+    #[test]
+    fn queue_h2_response_emits_trailing_headers_after_body() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(
+            conn.process_frame(Frame::Settings(crate::http::h2::frame::SettingsFrame::new(
+                Vec::new()
+            )))
+            .expect("initial settings accepted")
+            .is_none()
+        );
+
+        let request_headers = encode_hpack_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/trailers"),
+            (":authority", "example.com"),
+        ]);
+        let received = conn
+            .process_frame(Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+                1,
+                request_headers,
+                true,
+                true,
+            )))
+            .expect("request headers accepted");
+        assert!(matches!(received, Some(ReceivedFrame::Headers { .. })));
+
+        let mut response_guards = HashMap::new();
+        let outcomes = queue_h2_response(
+            &mut conn,
+            1,
+            Response::new(200, "OK", b"hello".to_vec()).with_trailer("X-Trace", "abc123"),
+            InFlightRequestGuard::acquire(None),
+            false,
+            &mut response_guards,
+        );
+        assert!(outcomes.is_empty());
+
+        let mut decoder = crate::http::h2::HpackDecoder::new();
+        match conn.next_frame().expect("response headers") {
+            Frame::Headers(headers) => {
+                assert_eq!(headers.stream_id, 1);
+                assert!(!headers.end_stream);
+                let mut block = headers.header_block;
+                let decoded = decoder.decode(&mut block).expect("response headers decode");
+                assert!(decoded.contains(&Header::new(":status", "200")));
+            }
+            other => panic!("expected response HEADERS, got {other:?}"),
+        }
+        match conn.next_frame().expect("response body") {
+            Frame::Data(data) => {
+                assert_eq!(data.stream_id, 1);
+                assert_eq!(data.data, crate::bytes::Bytes::from_static(b"hello"));
+                assert!(
+                    !data.end_stream,
+                    "DATA must leave the stream open for trailers"
+                );
+            }
+            other => panic!("expected response DATA, got {other:?}"),
+        }
+        match conn.next_frame().expect("response trailers") {
+            Frame::Headers(headers) => {
+                assert_eq!(headers.stream_id, 1);
+                assert!(headers.end_stream);
+                let mut block = headers.header_block;
+                let decoded = decoder
+                    .decode(&mut block)
+                    .expect("response trailers decode");
+                assert_eq!(decoded, vec![Header::new("x-trace", "abc123")]);
+            }
+            other => panic!("expected response trailer HEADERS, got {other:?}"),
+        }
+        assert!(conn.next_frame().is_none());
+    }
+
+    #[test]
     fn handler_panic_maps_to_500_and_releases_guard_after_flush() {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
@@ -2393,7 +2696,7 @@ mod tests {
             body: Vec::new(),
             trailers: Vec::new(),
         };
-        let block = h2_headers_from_response(&response);
+        let block = h2_headers_from_response(&response).expect("valid response headers");
         assert_eq!(block[0], Header::new(":status", "204"));
         assert_eq!(block.len(), 2, "connection-specific headers stripped");
         assert_eq!(block[1], Header::new("x-trace", "abc"));
@@ -2409,9 +2712,51 @@ mod tests {
             body: Vec::new(),
             trailers: Vec::new(),
         };
-        let block = h2_headers_from_response(&response);
+        let block = h2_headers_from_response(&response).expect("valid TE trailers header");
         assert_eq!(block.len(), 2);
         assert_eq!(block[1], Header::new("te", "trailers"));
+    }
+
+    #[test]
+    fn response_mapping_rejects_invalid_handler_supplied_headers() {
+        let crlf = Response::new(200, "OK", Vec::new()).with_header("x-trace", "ok\r\nbad");
+        assert!(h2_headers_from_response(&crlf).is_err());
+
+        let nul = Response::new(200, "OK", Vec::new()).with_header("x-trace", "bad\0value");
+        assert!(h2_headers_from_response(&nul).is_err());
+
+        let bad_name = Response::new(200, "OK", Vec::new()).with_header("x bad", "value");
+        assert!(h2_headers_from_response(&bad_name).is_err());
+
+        let pseudo = Response::new(200, "OK", Vec::new()).with_header(":path", "/forged");
+        assert!(h2_headers_from_response(&pseudo).is_err());
+
+        let bad_trailer =
+            Response::new(200, "OK", Vec::new()).with_trailer("x-trace", "bad\nvalue");
+        assert!(validate_h2_response_for_queue(&bad_trailer, false).is_err());
+    }
+
+    #[test]
+    fn response_content_length_validation_respects_head_suppression() {
+        let mismatch = Response::new(200, "OK", b"abc".to_vec()).with_header("Content-Length", "4");
+        assert!(validate_h2_response_for_queue(&mismatch, true).is_err());
+        assert!(validate_h2_response_for_queue(&mismatch, false).is_ok());
+
+        let invalid = Response::new(200, "OK", b"abc".to_vec()).with_header("Content-Length", "+3");
+        assert!(validate_h2_response_for_queue(&invalid, false).is_err());
+
+        let duplicate = Response {
+            version: Version::Http2,
+            status: 200,
+            reason: "OK".to_owned(),
+            headers: vec![
+                ("Content-Length".to_owned(), "3".to_owned()),
+                ("content-length".to_owned(), "3".to_owned()),
+            ],
+            body: b"abc".to_vec(),
+            trailers: Vec::new(),
+        };
+        assert!(validate_h2_response_for_queue(&duplicate, true).is_err());
     }
 
     #[test]
@@ -2903,7 +3248,7 @@ mod tests {
         assert_eq!(response.header_value("trailer"), None);
         assert_eq!(response.header_value("transfer-encoding"), None);
 
-        let block = h2_headers_from_response(&response);
+        let block = h2_headers_from_response(&response).expect("valid HEAD response headers");
         assert!(
             block
                 .iter()
