@@ -315,7 +315,7 @@ struct KeyStoreRecord {
     keys: Vec<PersistedIdentityKey>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct PersistedIdentityKey {
     generation: u64,
     public_key: String,
@@ -324,6 +324,20 @@ struct PersistedIdentityKey {
     created_at_micros: u64,
     revoked: bool,
     revoked_at_micros: Option<u64>,
+}
+
+impl fmt::Debug for PersistedIdentityKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PersistedIdentityKey")
+            .field("generation", &self.generation)
+            .field("public_key", &self.public_key)
+            .field("seed", &"<redacted>")
+            .field("fingerprint", &self.fingerprint)
+            .field("created_at_micros", &self.created_at_micros)
+            .field("revoked", &self.revoked)
+            .field("revoked_at_micros", &self.revoked_at_micros)
+            .finish()
+    }
 }
 
 impl PersistedIdentityKey {
@@ -653,6 +667,34 @@ mod tests {
         let loaded = IdentityKeyStore::load(&path).expect("load store");
         assert_eq!(loaded.export_public().unwrap(), exported);
         assert_eq!(loaded.platform(), KeyStorePlatform::current());
+    }
+
+    #[test]
+    fn debug_redacts_persisted_seed_material() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("identity.json");
+        let store = IdentityKeyStore::create(&path, strong_seed(4), 100).expect("create store");
+        let persisted_seed = store.record.keys[0].seed.clone();
+
+        let store_debug = format!("{store:?}");
+        assert!(
+            !store_debug.contains(&persisted_seed),
+            "IdentityKeyStore Debug must not expose persisted NKey seed"
+        );
+        assert!(
+            store_debug.contains("seed: \"<redacted>\""),
+            "IdentityKeyStore Debug should show that seed material was redacted"
+        );
+
+        let key_debug = format!("{:?}", store.record.keys[0]);
+        assert!(
+            !key_debug.contains(&persisted_seed),
+            "PersistedIdentityKey Debug must not expose persisted NKey seed"
+        );
+        assert!(
+            key_debug.contains("seed: \"<redacted>\""),
+            "PersistedIdentityKey Debug should show that seed material was redacted"
+        );
     }
 
     #[test]
