@@ -95,3 +95,36 @@ test (library linked in non-test mode):
 - the multi-group boundary is explicit and fail-closed;
 - missing/duplicate/unexpected child factories fail closed;
 - the topology report is byte-stable and complete.
+
+## Reference journey & e2e ([APPSPEC][A4])
+
+`examples/appspec_reference_journey.rs` is the runnable end-to-end journey a new
+user can inspect: a single-service AppSpec (a `GET /health` + `POST /enqueue`
+route surface, a startup worker, a bounded-queue drainer job, a public-socket
+resource, per-unit/per-service budgets, a latency SLO hook, a trace
+observability sink, and `one_for_one` supervision) declared as data, lowered
+through the A2 compiler, and run on the lab runtime for seeds `1/2/3`. Each seed
+reaches region-close quiescence with no orphan tasks, and replay reproduces an
+identical Foata-canonical trace fingerprint — so determinism is demonstrated,
+not asserted. The journey also rehearses failure: a multi-group manifest fails
+closed at builder lowering rather than silently mis-wiring.
+
+Child factories are caller-supplied `ChildSpec`s created via
+`state.create_task(region, budget, …)`, so `Cx`/region semantics stay explicit —
+the example shows why AppSpec beats ad hoc wiring **without** hiding the
+capability and region plumbing.
+
+`scripts/run_appspec_reference_journey_e2e.sh` runs the example through `rch`
+(remote-required; no local cargo fallback) and persists its stdout into diffable
+e2e artifacts under `target/e2e-results/appspec_reference_journey/run_<id>/`:
+
+- `events.ndjson` — the structured lifecycle log (one JSON object per line);
+- `summary.json` — the aggregate (`trace_fingerprints`, `deterministic_replay`,
+  `orphan_tasks`, `failure_rehearsal`, and the line-count/ergonomics note);
+- `topology.txt` — the byte-stable generated topology report;
+- `run_report.json` — the validator verdict.
+
+The script asserts the contract (every seed quiescent and orphan-free, replay
+deterministic across all seeds, and the failure rehearsal fail-closed), exiting
+non-zero on any drift. Re-validate a captured run offline with
+`--from-output <example-stdout-file>`.

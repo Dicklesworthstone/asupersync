@@ -1235,6 +1235,7 @@ deterministic lab runtime.
 - Name leases + registry plumbing: `src/cx/registry.rs`
 - Node-local process-group value layer: `src/spork.rs` (`spork::process_group`)
 - Minimal supervised Spork app walkthrough: `examples/spork_minimal_supervised_app.rs`
+- AppSpec reference journey (declarative topology → lab proof): `examples/appspec_reference_journey.rs`, with the e2e artifact runner `scripts/run_appspec_reference_journey_e2e.sh` (emits `events.ndjson` + `summary.json` + `topology.txt`)
 - Deterministic ordering contracts (Spork): `docs/spork_deterministic_ordering.md`
 - Spork glossary + invariants: `docs/spork_glossary_invariants.md`
 - Crash artifacts + canonical traces: `src/trace/crashpack.rs`
