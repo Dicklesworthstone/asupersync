@@ -47,6 +47,12 @@ pub mod h3 {
 pub mod h3_native;
 pub mod pool;
 
+/// High-level pooled [`Client`] facade.
+///
+/// Home of the capability-gated `Client::default_for_runtime` accessor — the
+/// no-ambient-global entry point to the runtime's default client.
+pub mod client;
+
 pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
 pub use h1::{
     ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, Method,
@@ -54,8 +60,11 @@ pub use h1::{
     ResponseBuilder, RetryPolicy, Scheme, StatusCode, Version,
 };
 
-/// Ergonomic alias for the high-level pooled HTTP client.
-pub type Client = HttpClient;
+/// Ergonomic, capability-gated handle for the high-level pooled HTTP client.
+///
+/// See [`client`] for the no-ambient-global philosophy and
+/// [`Client::default_for_runtime`](client::Client::default_for_runtime).
+pub use client::Client;
 
 // br-asupersync-um5wbj: H3Error is the public-facing alias for
 // H3NativeError; expose it unconditionally (was previously gated behind
