@@ -130,8 +130,11 @@ fn parse_status_line(line: &str) -> Result<(Version, u16, String), HttpError> {
     let reason = parts.next().unwrap_or("").to_owned();
 
     let version = Version::from_bytes(ver.as_bytes()).ok_or(HttpError::UnsupportedVersion)?;
-    let status: u16 = code.parse().map_err(|_| HttpError::BadRequestLine)?;
     // RFC 9110 §15: status codes are three-digit integers (100–999).
+    if code.len() != 3 || !code.as_bytes().iter().all(u8::is_ascii_digit) {
+        return Err(HttpError::BadRequestLine);
+    }
+    let status: u16 = code.parse().map_err(|_| HttpError::BadRequestLine)?;
     if !(100..=999).contains(&status) {
         return Err(HttpError::BadRequestLine);
     }
@@ -1185,6 +1188,44 @@ mod tests {
         assert_eq!(resp.version, Version::Http11);
         assert_eq!(resp.body, b"hello");
         assert!(resp.trailers.is_empty());
+    }
+
+    #[test]
+    fn parse_status_line_rejects_non_three_digit_status_codes() {
+        for line in [
+            "HTTP/1.1 20 OK",
+            "HTTP/1.1 0200 OK",
+            "HTTP/1.1 2000 OK",
+            "HTTP/1.1 2O0 OK",
+            "HTTP/1.1 099 Continue?",
+            "HTTP/1.1 000 Zero",
+        ] {
+            let result = parse_status_line(line);
+            assert!(
+                matches!(result, Err(HttpError::BadRequestLine)),
+                "line {line:?} should reject non-three-digit or out-of-range status code, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rejects_non_three_digit_wire_status_codes() {
+        for line in [
+            "HTTP/1.1 20 OK",
+            "HTTP/1.1 0200 OK",
+            "HTTP/1.1 2000 OK",
+            "HTTP/1.1 2O0 OK",
+        ] {
+            let raw = format!("{line}\r\nContent-Length: 0\r\n\r\n");
+            let mut codec = Http1ClientCodec::new();
+            let mut buf = BytesMut::from(raw.as_bytes());
+            let result = codec.decode(&mut buf);
+
+            assert!(
+                matches!(result, Err(HttpError::BadRequestLine)),
+                "wire status line {line:?} should poison the response decoder, got {result:?}"
+            );
+        }
     }
 
     fn noop_waker() -> Waker {
