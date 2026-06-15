@@ -48,6 +48,12 @@
 
 use std::fmt;
 
+use crate::config::EncodingConfig;
+use crate::decoding::{DecodingConfig, DecodingPipeline};
+use crate::encoding::EncodingPipeline;
+use crate::security::AuthenticatedSymbol;
+use crate::types::resource::{PoolConfig, SymbolPool};
+use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use crate::util::DetRng;
 
 /// Configuration for an erasure-coded channel.
@@ -117,6 +123,148 @@ impl EcConfig {
             padding,
         })
     }
+
+    /// Erasure-encodes `message` into its symbol frames using the runtime
+    /// RaptorQ encoder.
+    ///
+    /// The message is encoded as a single source block (`message.len()` must be
+    /// within [`max_message_size`](Self::max_message_size)) into `source + repair`
+    /// symbols, each wrapped as a [`SymbolFrame`] under `message_id`. The
+    /// returned [`EncodedMessage`] carries a [`MessageHeader`] whose
+    /// `source_symbols`/`total_symbols` reflect the encoder's *actual* output
+    /// (the systematic RaptorQ block geometry), so the receiver plans its decode
+    /// against ground truth rather than the pre-flight [`plan`](Self::plan)
+    /// estimate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EcError::MessageTooLarge`] / config errors from
+    /// [`plan`](Self::plan), [`EcError::SymbolCountOverflow`] if the symbol count
+    /// or an ESI exceeds the on-wire space, or [`EcError::Coding`] if the encoder
+    /// reports an error or the message spans more than one source block.
+    pub fn encode_message(
+        &self,
+        message_id: u64,
+        message: &[u8],
+    ) -> Result<EncodedMessage, EcError> {
+        self.plan(message.len())?;
+        let enc_config = EncodingConfig {
+            symbol_size: self.symbol_size,
+            max_block_size: self.max_message_size,
+            ..EncodingConfig::default()
+        };
+        let mut pipeline =
+            EncodingPipeline::new(enc_config, SymbolPool::new(PoolConfig::default()));
+        let object_id = ObjectId::new(message_id, 0);
+        let repair_count = self.repair_overhead as usize;
+
+        let mut frames = Vec::new();
+        let mut source_symbols: u16 = 0;
+        for result in pipeline.encode_with_repair(object_id, message, repair_count) {
+            let symbol = result.map_err(|e| EcError::Coding(e.to_string()))?;
+            if symbol.id().sbn() != 0 {
+                return Err(EcError::Coding(
+                    "message spans more than one source block".to_string(),
+                ));
+            }
+            let esi = u16::try_from(symbol.id().esi()).map_err(|_| EcError::SymbolCountOverflow)?;
+            if symbol.kind().is_source() {
+                source_symbols = source_symbols
+                    .checked_add(1)
+                    .ok_or(EcError::SymbolCountOverflow)?;
+            }
+            frames.push(SymbolFrame::new(
+                message_id,
+                esi,
+                symbol.symbol().data().to_vec(),
+            ));
+        }
+
+        let total_symbols =
+            u16::try_from(frames.len()).map_err(|_| EcError::SymbolCountOverflow)?;
+        let message_size =
+            u32::try_from(message.len()).map_err(|_| EcError::SymbolCountOverflow)?;
+        let header = MessageHeader {
+            message_id,
+            message_size,
+            symbol_size: self.symbol_size,
+            source_symbols,
+            total_symbols,
+        };
+        Ok(EncodedMessage { header, frames })
+    }
+}
+
+/// A message encoded into its erasure symbol frames plus the [`MessageHeader`]
+/// a receiver needs to plan and perform the decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedMessage {
+    /// The header describing the message geometry (reflects the encoder's actual
+    /// `K`/`N`, not the pre-flight estimate).
+    pub header: MessageHeader,
+    /// The encoded symbol frames (`source + repair`), in emission order.
+    pub frames: Vec<SymbolFrame>,
+}
+
+/// Reconstructs the original message bytes from a set of collected
+/// [`SymbolFrame`]s using the runtime RaptorQ decoder.
+///
+/// `header` is the message's [`MessageHeader`] (typically delivered alongside or
+/// recovered from [`MessageHeader::decode`]); `frames` are the symbols a
+/// [`MessageReassembler`] collected. Decoding is erasure-only here (per-symbol
+/// authentication is enforced by the layer above); a symbol's source/repair role
+/// is recovered from its `esi` relative to `header.source_symbols`. Tolerates up
+/// to the repair budget of lost symbols, modulo the small RaptorQ decode-overhead
+/// epsilon the budget absorbs.
+///
+/// # Errors
+///
+/// Returns [`EcError::IncompleteDecode`] if too few usable symbols survived to
+/// reconstruct the block, or [`EcError::Coding`] if the decoder rejects a symbol
+/// or fails to finalize.
+pub fn decode_message(header: &MessageHeader, frames: &[SymbolFrame]) -> Result<Vec<u8>, EcError> {
+    let object_id = ObjectId::new(header.message_id, 0);
+    let source_symbols = header.source_symbols;
+
+    let mut config = DecodingConfig::without_auth();
+    config.symbol_size = header.symbol_size;
+    config.max_block_size = usize::from(source_symbols) * usize::from(header.symbol_size);
+
+    let mut decoder = DecodingPipeline::new(config);
+    decoder
+        .set_object_params(ObjectParams {
+            object_id,
+            object_size: u64::from(header.message_size),
+            symbol_size: header.symbol_size,
+            source_blocks: 1,
+            symbols_per_block: source_symbols,
+        })
+        .map_err(|e| EcError::Coding(e.to_string()))?;
+
+    for frame in frames {
+        let kind = if frame.esi < source_symbols {
+            SymbolKind::Source
+        } else {
+            SymbolKind::Repair
+        };
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, 0, u32::from(frame.esi)),
+            frame.payload.clone(),
+            kind,
+        );
+        decoder
+            .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
+            .map_err(|e| EcError::Coding(e.to_string()))?;
+    }
+
+    if !decoder.is_complete() {
+        return Err(EcError::IncompleteDecode {
+            needed: source_symbols,
+        });
+    }
+    decoder
+        .into_data()
+        .map_err(|e| EcError::Coding(e.to_string()))
 }
 
 /// The per-message erasure-coding plan derived from a message size.
@@ -626,6 +774,14 @@ pub enum EcError {
         /// Bytes required for the fixed frame header.
         need: usize,
     },
+    /// The RaptorQ encoder or decoder reported an error (the wrapped string is
+    /// the underlying coder diagnostic).
+    Coding(String),
+    /// Too few usable symbols survived to reconstruct the message block.
+    IncompleteDecode {
+        /// Source symbols (`K`) the block needs to decode.
+        needed: u16,
+    },
 }
 
 impl fmt::Display for EcError {
@@ -650,6 +806,13 @@ impl fmt::Display for EcError {
             }
             Self::ShortFrame { got, need } => {
                 write!(f, "symbol frame header needs {need} bytes, got {got}")
+            }
+            Self::Coding(detail) => write!(f, "erasure coder error: {detail}"),
+            Self::IncompleteDecode { needed } => {
+                write!(
+                    f,
+                    "insufficient symbols to decode (need {needed} source symbols)"
+                )
             }
         }
     }
