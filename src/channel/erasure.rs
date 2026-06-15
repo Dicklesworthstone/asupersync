@@ -467,6 +467,23 @@ impl EcSender {
         self.next_message_id = self.next_message_id.wrapping_add(1);
         Ok(message_id)
     }
+
+    /// Serializes `value` and sends it as one erasure-coded message, returning
+    /// its per-sender message id.
+    ///
+    /// This is the typed convenience over [`send`](Self::send): the value is
+    /// serialized to bytes (JSON), then erasure-coded and flushed exactly like a
+    /// raw byte message. A receiver recovers it with
+    /// [`EcReceiver::recv_value`].
+    ///
+    /// # Errors
+    ///
+    /// [`EcError::Serialization`] if `value` cannot be serialized, plus any error
+    /// from [`send`](Self::send).
+    pub fn send_value<T: serde::Serialize>(&mut self, cx: &Cx, value: &T) -> Result<u64, EcError> {
+        let bytes = serde_json::to_vec(value).map_err(|e| EcError::Serialization(e.to_string()))?;
+        self.send(cx, &bytes)
+    }
 }
 
 /// The receiving half of an erasure-coded channel.
@@ -535,6 +552,24 @@ impl EcReceiver {
         let bytes = decode_message(&header, &held)?;
         self.pending.remove(&message_id);
         Ok(Some(bytes))
+    }
+
+    /// Awaits the next message and deserializes it into a `T`.
+    ///
+    /// The typed counterpart to [`recv`](Self::recv) / [`EcSender::send_value`]:
+    /// recovers the message bytes through the erasure decode, then deserializes
+    /// them (from JSON) into `T`.
+    ///
+    /// # Errors
+    ///
+    /// Any error from [`recv`](Self::recv), or [`EcError::Serialization`] if the
+    /// recovered bytes do not deserialize into `T`.
+    pub async fn recv_value<T: serde::de::DeserializeOwned>(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<T, EcError> {
+        let bytes = self.recv(cx).await?;
+        serde_json::from_slice(&bytes).map_err(|e| EcError::Serialization(e.to_string()))
     }
 }
 
@@ -1058,6 +1093,9 @@ pub enum EcError {
     Cancelled,
     /// The channel transport was closed (the peer half was dropped).
     TransportClosed,
+    /// A typed message could not be serialized or deserialized (the wrapped
+    /// string is the underlying serde diagnostic).
+    Serialization(String),
 }
 
 impl fmt::Display for EcError {
@@ -1092,6 +1130,9 @@ impl fmt::Display for EcError {
             }
             Self::Cancelled => write!(f, "erasure channel send cancelled before flush"),
             Self::TransportClosed => write!(f, "erasure channel transport closed"),
+            Self::Serialization(detail) => {
+                write!(f, "erasure channel (de)serialization error: {detail}")
+            }
         }
     }
 }
