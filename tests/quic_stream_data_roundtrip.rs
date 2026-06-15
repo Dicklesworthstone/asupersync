@@ -60,7 +60,10 @@ fn quic_stream_multiframe_roundtrip_with_loss_retransmit_and_reorder() {
         frames.push((offset, data, fin));
     }
 
-    assert!(frames.len() > 2, "payload must span multiple frames: {frames:?}");
+    assert!(
+        frames.len() > 2,
+        "payload must span multiple frames: {frames:?}"
+    );
     let fin_idx = frames.len() - 1;
     assert!(frames[fin_idx].2, "last emitted frame must carry FIN");
     assert!(
