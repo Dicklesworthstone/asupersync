@@ -69,6 +69,7 @@ pub mod http;
 pub mod injection;
 pub mod instrumented_future;
 pub mod ldfi;
+pub mod ldfi_trace;
 pub mod meta;
 pub mod network;
 pub mod numa;
