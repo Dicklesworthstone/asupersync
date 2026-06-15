@@ -22,6 +22,7 @@ mod common;
 
 use asupersync::Cx;
 use asupersync::http::h1::HttpClient;
+use asupersync::types::Budget;
 use common::*;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -143,6 +144,30 @@ fn spawn_json_once_server(
         )?;
         conn.write_all(body)?;
         conn.flush()?;
+        Ok(request_method(&raw))
+    });
+
+    (addr, handle)
+}
+
+fn spawn_delayed_response_server(
+    delay: Duration,
+) -> (SocketAddr, thread::JoinHandle<std::io::Result<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking listener");
+    let addr = listener.local_addr().expect("listener local_addr");
+
+    let handle = thread::spawn(move || -> std::io::Result<String> {
+        let mut conn = accept_with_timeout(&listener, IO_TIMEOUT)?;
+        conn.set_read_timeout(Some(IO_TIMEOUT))?;
+        conn.set_write_timeout(Some(IO_TIMEOUT))?;
+        let raw = read_until_headers_end(&mut conn)?;
+        thread::sleep(delay);
+        let _ = conn
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nDONE");
+        let _ = conn.flush();
         Ok(request_method(&raw))
     });
 
@@ -312,4 +337,46 @@ fn retry_policy_does_not_retry_non_idempotent_post_status() {
     assert_eq!(methods, vec!["POST".to_owned()]);
 
     test_complete!("retry_policy_does_not_retry_non_idempotent_post_status");
+}
+
+#[test]
+fn fluent_timeout_cannot_extend_ambient_budget() {
+    init_test_logging();
+    test_phase!("fluent_timeout_cannot_extend_ambient_budget");
+
+    let (addr, server) = spawn_delayed_response_server(Duration::from_millis(500));
+    let started = Instant::now();
+
+    run_test(|| async move {
+        let budget = Budget::INFINITE
+            .tightened_by_timeout(asupersync::time::wall_now(), Duration::from_millis(50));
+        let cx = Cx::for_request_with_budget(budget);
+        let client = HttpClient::new();
+        let url = format!("http://{addr}/slow");
+
+        let err = client
+            .get(url.as_str())
+            .timeout(Duration::from_secs(5))
+            .send(&cx)
+            .await
+            .expect_err("ambient Cx budget must beat the larger per-call timeout");
+
+        assert!(matches!(
+            err,
+            asupersync::http::h1::ClientError::DeadlineExceeded
+        ));
+    });
+
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "fluent per-call timeout extended past the ambient budget"
+    );
+
+    let method = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert_eq!(method, "GET");
+
+    test_complete!("fluent_timeout_cannot_extend_ambient_budget");
 }
