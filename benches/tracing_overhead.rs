@@ -5,7 +5,10 @@
 
 #![allow(missing_docs)]
 
+use asupersync::config::EncodingConfig;
 use asupersync::runtime::RuntimeState;
+use asupersync::trace::raptorq_journal::JOURNAL_FLAG_CHECKPOINT_BOUNDARY;
+use asupersync::trace::raptorq_journal_writer::encode_and_serialize_epoch;
 use asupersync::trace::{
     CompactTaskId, CompressionMode, ReplayEvent, TraceFileConfig, TraceMetadata, TraceReader,
     TraceWriter,
@@ -130,12 +133,52 @@ fn bench_trace_read_lz4(c: &mut Criterion) {
     });
 }
 
+/// Cost of the crash-durable symbol-journal's checkpoint-boundary encode
+/// (br-asupersync-raptorq-leverage-3bb2pl.2 AC4).
+///
+/// This is the symbol-journal "on" cost — RaptorQ-encoding one checkpoint's
+/// bytes into striped, CRC-protected symbol frames. It runs only at checkpoint
+/// boundaries on a background blocking-pool task, NEVER per trace event, so it
+/// does not touch the per-event recording hot path measured by
+/// `trace_write_uncompressed` (the symbol-journal "off" baseline). Together the
+/// two are the "tracing-overhead bench extended with symbol-journal on/off"; the
+/// deterministic bound proof lives in
+/// `tests/raptorq_journal_overhead_contract.rs`.
+fn bench_symbol_journal_checkpoint_encode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tracing_overhead");
+
+    // A representative 64 KiB checkpoint (varied bytes), 4 repair symbols/block,
+    // 3 failure-domain stripes — the WHAT(4) default striping.
+    let checkpoint: Vec<u8> = (0..64 * 1024u32)
+        .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
+        .collect();
+
+    group.bench_function("symbol_journal_checkpoint_encode_64kib", |b| {
+        b.iter(|| {
+            let out = encode_and_serialize_epoch(
+                std::hint::black_box(1),
+                std::hint::black_box(&checkpoint),
+                EncodingConfig::default(),
+                4,
+                3,
+                JOURNAL_FLAG_CHECKPOINT_BOUNDARY,
+            )
+            .expect("encode ok")
+            .expect("nonzero stripes");
+            std::hint::black_box(out)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_region_creation,
     bench_task_creation,
     bench_trace_write_uncompressed,
-    bench_trace_read_uncompressed
+    bench_trace_read_uncompressed,
+    bench_symbol_journal_checkpoint_encode
 );
 
 #[cfg(feature = "trace-compression")]
