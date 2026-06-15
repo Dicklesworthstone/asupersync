@@ -34,6 +34,8 @@ use crate::codec::{Decoder, Encoder};
 use crate::util::{EntropySource, OsEntropy};
 use std::io;
 
+const CONTROL_FRAME_MAX_PAYLOAD_LEN: usize = 125;
+
 /// WebSocket frame opcode (4 bits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -135,8 +137,16 @@ impl Frame {
     }
 
     /// Create a ping frame with optional payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the payload exceeds the 125-byte control frame limit
+    /// (RFC 6455 section 5.5).
     #[must_use]
     pub fn ping(payload: impl Into<Bytes>) -> Self {
+        let payload = payload.into();
+        assert_control_payload_len("ping", payload.len());
+
         Self {
             fin: true,
             rsv1: false,
@@ -145,13 +155,21 @@ impl Frame {
             opcode: Opcode::Ping,
             masked: false,
             mask_key: None,
-            payload: payload.into(),
+            payload,
         }
     }
 
     /// Create a pong frame with optional payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the payload exceeds the 125-byte control frame limit
+    /// (RFC 6455 section 5.5).
     #[must_use]
     pub fn pong(payload: impl Into<Bytes>) -> Self {
+        let payload = payload.into();
+        assert_control_payload_len("pong", payload.len());
+
         Self {
             fin: true,
             rsv1: false,
@@ -160,7 +178,7 @@ impl Frame {
             opcode: Opcode::Pong,
             masked: false,
             mask_key: None,
-            payload: payload.into(),
+            payload,
         }
     }
 
@@ -195,10 +213,7 @@ impl Frame {
         }
         if let Some(r) = reason {
             let total = 2 + r.len();
-            assert!(
-                total <= 125,
-                "close frame payload ({total} bytes) exceeds 125-byte control frame limit (RFC 6455 §5.5)"
-            );
+            assert_control_payload_len("close", total);
         }
         let payload = match (code, reason) {
             (Some(c), Some(r)) => {
@@ -227,6 +242,13 @@ impl Frame {
             payload,
         }
     }
+}
+
+fn assert_control_payload_len(frame_kind: &str, payload_len: usize) {
+    assert!(
+        payload_len <= CONTROL_FRAME_MAX_PAYLOAD_LEN,
+        "{frame_kind} frame payload ({payload_len} bytes) exceeds 125-byte control frame limit (RFC 6455 section 5.5)"
+    );
 }
 
 /// WebSocket codec errors.
@@ -454,7 +476,7 @@ impl FrameCodec {
             if !frame.fin {
                 return Err(WsError::FragmentedControlFrame);
             }
-            if payload_len > 125 {
+            if payload_len > CONTROL_FRAME_MAX_PAYLOAD_LEN {
                 return Err(WsError::ControlFrameTooLarge(payload_len));
             }
         }
@@ -499,7 +521,7 @@ impl FrameCodec {
         // Write header
         dst.put_u8(first_byte);
 
-        if payload_len <= 125 {
+        if payload_len <= CONTROL_FRAME_MAX_PAYLOAD_LEN {
             dst.put_u8(mask_bit | (payload_len as u8));
         } else if payload_len <= 65535 {
             dst.put_u8(mask_bit | 0x7E);
@@ -588,7 +610,7 @@ impl FrameCodec {
                         if !fin {
                             return Err(WsError::FragmentedControlFrame);
                         }
-                        if payload_len_7 > 125 {
+                        if usize::from(payload_len_7) > CONTROL_FRAME_MAX_PAYLOAD_LEN {
                             return Err(WsError::ControlFrameTooLarge(payload_len_7 as usize));
                         }
                     }
@@ -1106,6 +1128,37 @@ mod tests {
         assert!(pong_response.fin);
         assert_eq!(pong_response.opcode, Opcode::Pong);
         assert_eq!(pong_response.payload.as_ref(), b"pong-data");
+    }
+
+    #[test]
+    fn ping_pong_accept_max_control_payload() {
+        let payload = Bytes::from(vec![0xA5; CONTROL_FRAME_MAX_PAYLOAD_LEN]);
+
+        let ping = Frame::ping(payload.clone());
+        assert_eq!(ping.opcode, Opcode::Ping);
+        assert_eq!(ping.payload.len(), CONTROL_FRAME_MAX_PAYLOAD_LEN);
+        assert_eq!(ping.payload, payload);
+
+        let pong = Frame::pong(payload.clone());
+        assert_eq!(pong.opcode, Opcode::Pong);
+        assert_eq!(pong.payload.len(), CONTROL_FRAME_MAX_PAYLOAD_LEN);
+        assert_eq!(pong.payload, payload);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "ping frame payload (126 bytes) exceeds 125-byte control frame limit"
+    )]
+    fn ping_rejects_oversized_control_payload() {
+        let _ = Frame::ping(Bytes::from(vec![0u8; CONTROL_FRAME_MAX_PAYLOAD_LEN + 1]));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "pong frame payload (126 bytes) exceeds 125-byte control frame limit"
+    )]
+    fn pong_rejects_oversized_control_payload() {
+        let _ = Frame::pong(Bytes::from(vec![0u8; CONTROL_FRAME_MAX_PAYLOAD_LEN + 1]));
     }
 
     #[test]
