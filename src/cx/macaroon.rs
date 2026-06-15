@@ -634,7 +634,7 @@ impl MacaroonKeyRing {
 /// Macaroons support decentralized capability attenuation: any holder
 /// can add caveats (restrictions) without the root key, but only the
 /// issuer (who knows the root key) can verify the token.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MacaroonToken {
     /// The capability identifier (e.g., "spawn:region_42").
     identifier: String,
@@ -657,6 +657,18 @@ pub struct MacaroonToken {
     /// callers must not re-bind across a serialize/deserialize
     /// round-trip.
     bound: bool,
+}
+
+impl fmt::Debug for MacaroonToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MacaroonToken")
+            .field("identifier", &"<redacted>")
+            .field("location", &"<redacted>")
+            .field("caveat_count", &self.caveats.len())
+            .field("signature", &self.signature)
+            .field("bound", &self.bound)
+            .finish()
+    }
 }
 
 struct ThirdPartyVerification<'a> {
@@ -1391,11 +1403,10 @@ impl fmt::Display for MacaroonToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Macaroon(id={:?}, loc={:?}, caveats={}, sig={:?})",
-            self.identifier,
-            self.location,
+            "Macaroon(id=<redacted>, loc=<redacted>, caveats={}, sig={:?}, bound={})",
             self.caveats.len(),
             self.signature,
+            self.bound,
         )
     }
 }
@@ -1856,6 +1867,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn macaroon_token_debug_redacts_bearer_material() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(
+            &key,
+            "spawn:region-secret-debug",
+            "cx/scheduler-secret-debug",
+        )
+        .add_caveat(CaveatPredicate::Custom(
+            "debug-secret-key".into(),
+            "debug-secret-value".into(),
+        ))
+        .add_caveat(CaveatPredicate::ResourceScope(
+            "/tenant/debug-secret/**".into(),
+        ));
+
+        let debug = format!("{token:?}");
+        assert!(debug.contains("MacaroonToken"));
+        assert!(debug.contains("identifier: \"<redacted>\""));
+        assert!(debug.contains("location: \"<redacted>\""));
+        assert!(debug.contains("caveat_count: 2"));
+        assert!(debug.contains("signature: Sig(<redacted>)"));
+        assert!(debug.contains("bound: false"));
+
+        for secret in [
+            "region-secret-debug",
+            "scheduler-secret-debug",
+            "debug-secret-key",
+            "debug-secret-value",
+            "debug-secret",
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "MacaroonToken Debug leaked bearer material: {debug}"
+            );
+        }
+    }
+
+    #[test]
+    fn macaroon_token_display_redacts_bearer_material() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(
+            &key,
+            "spawn:region-secret-display",
+            "cx/scheduler-secret-display",
+        )
+        .add_caveat(CaveatPredicate::Custom(
+            "display-secret-key".into(),
+            "display-secret-value".into(),
+        ));
+
+        let display = format!("{token}");
+        assert_eq!(
+            display,
+            "Macaroon(id=<redacted>, loc=<redacted>, caveats=1, sig=Sig(<redacted>), bound=false)"
+        );
+
+        for secret in [
+            "region-secret-display",
+            "scheduler-secret-display",
+            "display-secret-key",
+            "display-secret-value",
+        ] {
+            assert!(
+                !display.contains(secret),
+                "MacaroonToken Display leaked bearer material: {display}"
+            );
+        }
+    }
+
     // --- Minting and verification ---
 
     #[test]
@@ -2252,8 +2333,12 @@ mod tests {
 
         let display = format!("{token}");
         assert!(display.contains("Macaroon"));
-        assert!(display.contains("spawn:r1"));
+        assert!(display.contains("id=<redacted>"));
+        assert!(display.contains("loc=<redacted>"));
         assert!(display.contains("caveats=1"));
+        assert!(display.contains("bound=false"));
+        assert!(!display.contains("spawn:r1"));
+        assert!(!display.contains("scheduler"));
     }
 
     #[test]
