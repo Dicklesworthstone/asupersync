@@ -611,3 +611,112 @@ fn recover_epoch_attaches_integrity_proof_through_stripe_loss() {
         "recovery must attach consistent integrity evidence, including through stripe loss"
     );
 }
+
+#[test]
+fn recovered_trace_replays_round_trip_into_frankenlab_replay() {
+    // AC5: the crash->recover->replay chain end to end. A fountain-coded trace
+    // checkpoint survives a lost failure domain, and the EXACT recovered bytes
+    // deserialize back into a `ReplayTrace` that the frankenlab `TraceReplayer`
+    // drives to completion event-for-event with zero divergence -- proving the
+    // recovered forensics are not merely byte-exact but genuinely replayable.
+    use asupersync::trace::{ReplayEvent, ReplayTrace, TraceMetadata, TraceReplayer};
+
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    // A deterministic, varied recorded execution worth replaying (a constant
+    // stream would round-trip trivially): interleaved virtual-time + timer events.
+    let mut original = ReplayTrace::new(
+        TraceMetadata::new(0xA5A5_1234).with_description("3bb2pl.2 AC5 replay round-trip"),
+    );
+    for i in 0..8u64 {
+        original.push(ReplayEvent::TimeAdvanced {
+            from_nanos: i * 1_000,
+            to_nanos: (i + 1) * 1_000,
+        });
+        original.push(ReplayEvent::TimerCreated {
+            timer_id: i,
+            deadline_nanos: (i + 1) * 1_000 + 250,
+        });
+        original.push(ReplayEvent::TimerFired { timer_id: i });
+    }
+    let original_events: Vec<ReplayEvent> = original.iter().cloned().collect();
+    assert!(
+        original_events.len() >= 8,
+        "fixture must record a non-trivial trace"
+    );
+    let checkpoint = original.to_bytes().expect("serialize trace checkpoint");
+
+    let events_for_task = original_events.clone();
+    let checkpoint_for_task = checkpoint.clone();
+    let dir_for_task = dir_path.clone();
+
+    let (recovered_bytes, replayed_count, completed, divergence_caught) =
+        runtime.block_on(runtime.handle().spawn(async move {
+            // Repair headroom so losing a whole stripe still leaves >= K' symbols.
+            let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+                directory: dir_for_task.clone(),
+                encoding: EncodingConfig::default(),
+                repair_count: 10,
+                stripe_count: 3,
+            });
+
+            journal
+                .record_epoch(7, &checkpoint_for_task)
+                .await
+                .expect("record trace epoch");
+
+            // A crash destroys a whole failure domain.
+            std::fs::remove_file(dir_for_task.join(stripe_file_name(7, 1))).expect("lose a stripe");
+
+            let recovered = journal
+                .recover_epoch(7)
+                .await
+                .expect("recover trace after stripe loss");
+
+            // Recovered bytes deserialize back into a replayable trace...
+            let reconstructed =
+                ReplayTrace::from_bytes(&recovered).expect("recovered bytes form a valid trace");
+
+            // ...and the frankenlab replayer drives the original execution against
+            // it event-for-event with no divergence (the real replay loop).
+            let mut replayer = TraceReplayer::new(reconstructed);
+            assert_eq!(replayer.event_count(), events_for_task.len());
+            for actual in &events_for_task {
+                replayer
+                    .verify_and_advance(actual)
+                    .expect("recovered trace replays without divergence");
+            }
+            let completed = replayer.is_completed();
+
+            // Non-vacuity: a wrong actual event is actually CAUGHT as a divergence,
+            // proving the replayer verifies rather than blindly accepting.
+            let mut fresh = TraceReplayer::new(replayer.into_trace());
+            let divergence_caught = fresh
+                .verify_and_advance(&ReplayEvent::TimerFired { timer_id: u64::MAX })
+                .is_err();
+
+            // A fresh replayer's run() processes exactly the full recovered trace.
+            let mut counted =
+                TraceReplayer::new(ReplayTrace::from_bytes(&recovered).expect("re-parse"));
+            let replayed_count = counted.run().expect("run replay to completion");
+
+            (recovered, replayed_count, completed, divergence_caught)
+        }));
+
+    assert_eq!(
+        recovered_bytes, checkpoint,
+        "recovery must be byte-exact through stripe loss"
+    );
+    assert_eq!(
+        replayed_count,
+        original_events.len(),
+        "the replayer must process every recovered event"
+    );
+    assert!(completed, "replay must reach completion with no divergence");
+    assert!(
+        divergence_caught,
+        "the replayer must actually verify events -- a wrong event must diverge"
+    );
+}
