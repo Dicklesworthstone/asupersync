@@ -147,6 +147,36 @@ impl BlockLayout {
     pub const fn min_symbols_to_decode(&self) -> u16 {
         self.source_symbols
     }
+
+    /// Whether a receiver holding `distinct_received` distinct symbols may
+    /// attempt a decode — true once it has at least `K`
+    /// ([`min_symbols_to_decode`](Self::min_symbols_to_decode)).
+    ///
+    /// This is the theoretical RaptorQ bound; a real decode may need a few more
+    /// symbols (the small decode-overhead epsilon the repair budget absorbs),
+    /// so the async receiver re-attempts as further symbols arrive.
+    #[must_use]
+    pub const fn is_decodable(&self, distinct_received: u16) -> bool {
+        distinct_received >= self.source_symbols
+    }
+
+    /// How many more distinct symbols a receiver holding `distinct_received`
+    /// must still collect before a decode can be attempted — `0` once
+    /// [`is_decodable`](Self::is_decodable) holds.
+    #[must_use]
+    pub const fn symbols_until_decodable(&self, distinct_received: u16) -> u16 {
+        self.source_symbols.saturating_sub(distinct_received)
+    }
+
+    /// Whether `distinct_lost` permanently lost symbols put a decode out of
+    /// reach: even collecting every symbol still in flight could not reach the
+    /// `K` needed. Equivalent to losing more than the repair budget
+    /// (`distinct_lost > repair_symbols`), the count complement of
+    /// [`loss_margin`](Self::loss_margin).
+    #[must_use]
+    pub const fn is_unrecoverable(&self, distinct_lost: u16) -> bool {
+        distinct_lost > self.repair_symbols
+    }
 }
 
 /// The fixed-size header that precedes a message's symbols on the wire.
@@ -182,6 +212,33 @@ impl MessageHeader {
             source_symbols: layout.source_symbols,
             total_symbols: layout.total_symbols,
         })
+    }
+
+    /// Reconstructs the [`BlockLayout`] a receiver should plan against from
+    /// this header — the inverse of [`from_layout`](Self::from_layout): the
+    /// layout that produced a header round-trips back to an equal layout.
+    ///
+    /// Padding is recomputed from the symbol geometry (`source_symbols *
+    /// symbol_size - message_size`) and the repair count from `total_symbols -
+    /// source_symbols`, so the receiver can reason about loss margin and decode
+    /// progress before any symbol arrives, without trusting a padding field on
+    /// the wire.
+    #[must_use]
+    pub fn block_layout(&self) -> BlockLayout {
+        let symbol_size = self.symbol_size as usize;
+        let source = self.source_symbols as usize;
+        let message_size = self.message_size as usize;
+        let padding = source
+            .saturating_mul(symbol_size)
+            .saturating_sub(message_size);
+        BlockLayout {
+            message_size,
+            symbol_size: self.symbol_size,
+            source_symbols: self.source_symbols,
+            repair_symbols: self.total_symbols.saturating_sub(self.source_symbols),
+            total_symbols: self.total_symbols,
+            padding,
+        }
     }
 
     /// Encodes the header to its fixed-size little-endian byte form.
@@ -386,5 +443,92 @@ mod tests {
                 need: MessageHeader::ENCODED_LEN
             })
         );
+    }
+
+    #[test]
+    fn decode_progress_predicates_track_the_repair_budget() {
+        let cfg = EcConfig {
+            symbol_size: 100,
+            repair_overhead: 5,
+            max_message_size: 1 << 20,
+        };
+        let layout = cfg.plan(500).expect("plan"); // K=5, N=10, repair=5
+        assert_eq!(layout.source_symbols, 5);
+        assert_eq!(layout.total_symbols, 10);
+
+        // Not enough below K; decodable from exactly K onward.
+        assert!(!layout.is_decodable(4));
+        assert!(layout.is_decodable(5));
+        assert!(layout.is_decodable(7));
+
+        // Remaining count shrinks to zero at K and stays there.
+        assert_eq!(layout.symbols_until_decodable(0), 5);
+        assert_eq!(layout.symbols_until_decodable(3), 2);
+        assert_eq!(layout.symbols_until_decodable(5), 0);
+        assert_eq!(layout.symbols_until_decodable(9), 0);
+
+        // Losing up to the whole repair budget stays recoverable; one more is
+        // out of reach (10 - 6 = 4 < K=5).
+        assert!(!layout.is_unrecoverable(5));
+        assert!(layout.is_unrecoverable(6));
+    }
+
+    #[test]
+    fn decode_predicates_are_self_consistent_across_the_range() {
+        let cfg = EcConfig {
+            symbol_size: 64,
+            repair_overhead: 3,
+            max_message_size: 1 << 20,
+        };
+        let layout = cfg.plan(400).expect("plan"); // K=ceil(400/64)=7, N=10
+        let n = layout.total_symbols;
+
+        // is_decodable iff nothing more is needed, monotone as symbols arrive.
+        let mut last_remaining = u16::MAX;
+        for received in 0..=n {
+            let remaining = layout.symbols_until_decodable(received);
+            assert_eq!(layout.is_decodable(received), remaining == 0);
+            assert!(remaining <= last_remaining, "remaining must not grow");
+            last_remaining = remaining;
+        }
+
+        // is_unrecoverable iff losses exceed the repair budget; the boundary is
+        // exactly repair_symbols losable.
+        for lost in 0..=n {
+            assert_eq!(layout.is_unrecoverable(lost), lost > layout.repair_symbols);
+        }
+        assert!(!layout.is_unrecoverable(layout.repair_symbols));
+        assert!(layout.is_unrecoverable(layout.repair_symbols + 1));
+    }
+
+    #[test]
+    fn block_layout_inverts_from_layout() {
+        let cfg = EcConfig::default();
+        for size in [0usize, 1, 10, 1023, 1024, 1025, 5000, 65_535, 1 << 20] {
+            let layout = cfg.plan(size).expect("plan");
+            let header = MessageHeader::from_layout(42, &layout).expect("header");
+            assert_eq!(
+                header.block_layout(),
+                layout,
+                "block_layout must invert from_layout at size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_layout_recomputes_geometry_from_header_fields() {
+        // A header carries no padding/repair fields; block_layout derives both.
+        let header = MessageHeader {
+            message_id: 9,
+            message_size: 250,
+            symbol_size: 100,
+            source_symbols: 3,
+            total_symbols: 7,
+        };
+        let layout = header.block_layout();
+        assert_eq!(layout.repair_symbols, 4); // 7 - 3
+        assert_eq!(layout.padding, 50); // 3*100 - 250
+        assert_eq!(layout.message_size, 250);
+        assert_eq!(layout.min_symbols_to_decode(), 3);
     }
 }
