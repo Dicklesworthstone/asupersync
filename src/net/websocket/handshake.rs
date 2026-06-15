@@ -134,7 +134,10 @@ fn insert_unique_header(
 }
 
 fn validate_url_host(host: &str) -> Result<(), HandshakeError> {
-    if host.bytes().any(|b| matches!(b, 0..=32 | 127)) {
+    if host
+        .bytes()
+        .any(|b| matches!(b, 0..=32 | 127 | b'/' | b'?' | b'#' | b'@' | b'[' | b']'))
+    {
         return Err(HandshakeError::InvalidUrl(
             "host contains an invalid HTTP authority byte".into(),
         ));
@@ -143,12 +146,46 @@ fn validate_url_host(host: &str) -> Result<(), HandshakeError> {
 }
 
 fn validate_url_request_target(path: &str) -> Result<(), HandshakeError> {
+    if path.contains('#') {
+        return Err(HandshakeError::InvalidUrl(
+            "request target must not contain a URI fragment".into(),
+        ));
+    }
     if path.bytes().any(|b| matches!(b, 0..=32 | 127)) {
         return Err(HandshakeError::InvalidUrl(
             "request target contains an invalid HTTP request-line byte".into(),
         ));
     }
     Ok(())
+}
+
+fn split_url_authority_and_target(rest: &str) -> Result<(&str, String), HandshakeError> {
+    if rest.contains('#') {
+        return Err(HandshakeError::InvalidUrl(
+            "WebSocket URL must not contain a fragment".into(),
+        ));
+    }
+
+    let split_at = match (rest.find('/'), rest.find('?')) {
+        (Some(slash), Some(query)) => Some(slash.min(query)),
+        (Some(slash), None) => Some(slash),
+        (None, Some(query)) => Some(query),
+        (None, None) => None,
+    };
+
+    let Some(split_at) = split_at else {
+        return Ok((rest, "/".to_string()));
+    };
+
+    let authority = &rest[..split_at];
+    let target = &rest[split_at..];
+    let target = if target.starts_with('?') {
+        format!("/{target}")
+    } else {
+        target.to_string()
+    };
+
+    Ok((authority, target))
 }
 
 /// Parsed WebSocket URL.
@@ -187,10 +224,9 @@ impl WsUrl {
 
         let default_port = if tls { 443 } else { 80 };
 
-        // Split host:port from path
-        let (host_port, path) = rest
-            .find('/')
-            .map_or((rest, "/"), |idx| (&rest[..idx], &rest[idx..]));
+        // Split authority from the HTTP request target. Query-only WebSocket
+        // URLs use origin-form `/?query`; fragments are never sent on the wire.
+        let (host_port, path) = split_url_authority_and_target(rest)?;
 
         // Parse host and port
         let (host, port) = if host_port.starts_with('[') {
@@ -235,12 +271,12 @@ impl WsUrl {
             return Err(HandshakeError::InvalidUrl("empty host".into()));
         }
         validate_url_host(&host)?;
-        validate_url_request_target(path)?;
+        validate_url_request_target(&path)?;
 
         Ok(Self {
             host,
             port,
-            path: path.to_string(),
+            path,
             tls,
         })
     }
@@ -996,6 +1032,22 @@ mod tests {
     }
 
     #[test]
+    fn ws_url_parse_keeps_query_out_of_authority() {
+        let url = WsUrl::parse("ws://example.com?token=abc").unwrap();
+
+        assert_eq!(url.host, "example.com");
+        assert_eq!(url.port, 80);
+        assert_eq!(url.path, "/?token=abc");
+        assert_eq!(url.host_header(), "example.com");
+
+        let with_path = WsUrl::parse("wss://example.com:8443/chat?token=abc").unwrap();
+        assert_eq!(with_path.host, "example.com");
+        assert_eq!(with_path.port, 8443);
+        assert_eq!(with_path.path, "/chat?token=abc");
+        assert_eq!(with_path.host_header(), "example.com:8443");
+    }
+
+    #[test]
     fn ws_url_parse_rejects_raw_request_line_delimiters() {
         for url in [
             "ws://example.com/chat\r\nX-Injected: yes",
@@ -1012,6 +1064,22 @@ mod tests {
         let encoded = WsUrl::parse("ws://example.com/chat%0D%0AX-Injected:%20yes")
             .expect("percent-encoded delimiters are data, not raw request-line bytes");
         assert_eq!(encoded.path, "/chat%0D%0AX-Injected:%20yes");
+    }
+
+    #[test]
+    fn ws_url_parse_rejects_fragment_and_userinfo_authorities() {
+        for url in [
+            "ws://user@example.com/chat",
+            "ws://example.com/chat#fragment",
+            "ws://example.com?token=abc#fragment",
+            "ws://exam[ple.com/chat",
+        ] {
+            let err = WsUrl::parse(url).expect_err("ambiguous authority must be rejected");
+            assert!(
+                matches!(err, HandshakeError::InvalidUrl(_)),
+                "unexpected error for {url:?}: {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -1061,6 +1129,19 @@ mod tests {
         assert!(text.contains("Sec-WebSocket-Version: 13\r\n"));
         assert!(text.contains("Sec-WebSocket-Protocol: chat\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn client_handshake_request_preserves_query_only_target() {
+        let entropy = DetEntropy::new(9);
+        let handshake = ClientHandshake::new("ws://example.com?token=abc", &entropy).unwrap();
+
+        let request = handshake.request_bytes();
+        let text = String::from_utf8(request).unwrap();
+
+        assert!(text.starts_with("GET /?token=abc HTTP/1.1\r\n"));
+        assert!(text.contains("Host: example.com\r\n"));
+        assert!(!text.contains("Host: example.com?token=abc\r\n"));
     }
 
     #[test]
