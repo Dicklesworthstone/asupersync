@@ -444,7 +444,7 @@ pub use types::{
 // while `scope!`, `spawn!`, and `join_all!` are unavailable until `proc-macros`
 // is re-enabled.
 #[cfg(feature = "proc-macros")]
-pub use asupersync_macros::{join, join_all, lab_test, main, race, scope, spawn, test};
+pub use asupersync_macros::{join, join_all, lab_test, main, race, scope, select, spawn, test};
 
 // Proc macro versions available with explicit path when needed
 #[cfg(feature = "proc-macros")]
@@ -452,10 +452,10 @@ pub mod proc_macros {
     //! Proc-macro structured-concurrency DSL available when `proc-macros` is enabled.
     //!
     //! This module mirrors the supported root re-exports (`scope!`, `spawn!`,
-    //! `join!`, `join_all!`, `race!`, entry attributes) and also exposes
-    //! advanced macros that intentionally remain explicit-path-only, such as
-    //! `session_protocol!`.
+    //! `join!`, `join_all!`, `race!`, `select!`, entry attributes) and also
+    //! exposes advanced macros that intentionally remain explicit-path-only,
+    //! such as `session_protocol!`.
     pub use asupersync_macros::{
-        join, join_all, lab_test, main, race, scope, session_protocol, spawn, test,
+        join, join_all, lab_test, main, race, scope, select, session_protocol, spawn, test,
     };
 }

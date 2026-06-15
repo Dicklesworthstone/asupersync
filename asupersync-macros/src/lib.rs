@@ -11,6 +11,7 @@
 //! - [`join!`] - Join multiple futures, waiting for all to complete
 //! - [`join_all!`] - Join multiple futures into an array
 //! - [`race!`] - Race multiple futures, returning the first to complete
+//! - [`select!`] - Select over heterogeneous branches with an optional `else` arm
 //! - [`#[main]`](macro@main) / [`#[test]`](macro@test) - Production runtime entry attributes
 //! - [`session_protocol!`] - Generate typestate session protocols
 //! - [`conformance`] - Annotate conformance tests
@@ -19,8 +20,8 @@
 //! # Contract With `asupersync`
 //!
 //! The root `asupersync` crate re-exports only the supported runtime DSL:
-//! `scope!`, `spawn!`, `join!`, `join_all!`, and `race!`, and only when the
-//! `proc-macros` feature is enabled.
+//! `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, and `select!`, and only
+//! when the `proc-macros` feature is enabled.
 //!
 //! This crate also defines `session_protocol!` and `#[conformance]`, but those
 //! remain explicit-path macros on `asupersync_macros`; they are not part of the
@@ -48,6 +49,7 @@ mod join;
 mod lab_test;
 mod race;
 mod scope;
+mod select;
 mod session;
 mod spawn;
 mod util;
@@ -277,6 +279,70 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn race(input: TokenStream) -> TokenStream {
     race::race_impl(input)
+}
+
+/// Selects over heterogeneous branches — **losers are drained** — with an
+/// optional non-blocking `else` arm.
+///
+/// `select!` is the N-ary, heterogeneous member of the race family. Each branch
+/// awaits its own future (the branch types may differ) and runs a handler arm;
+/// every handler must yield the same result type `R`. It lifts the fixed
+/// `Race2`/`Race3`/`Race4` arity ceiling and is the drain-correct alternative
+/// to `tokio::select!`.
+///
+/// # Two forms
+///
+/// **Blocking, drain-correct** (no `else` arm): each branch is rewritten into
+/// `async move { let <pat> = <future>.await; <handler> }`, and the homogeneous
+/// per-branch list routes through
+/// [`Cx::race_drained`](asupersync::Cx::race_drained). The first branch to win
+/// resolves the `select!`; every loser is protocol-cancelled **and drained**
+/// (awaited to termination) before the macro returns. Resolves to
+/// `Result<R, JoinError>`. Branch futures and `R` must be `Send + 'static`, and
+/// `cx` must carry spawn authority (`Cx<cap::All>`).
+///
+/// **Non-blocking default** (trailing `else => <handler>` arm): each branch is
+/// polled **exactly once** in source order; the first ready branch wins,
+/// otherwise the `else` handler runs immediately. This is the Go-style
+/// `default` arm — it never waits, so it does not drain; not-ready branches are
+/// dropped. Resolves to `R`.
+///
+/// # Determinism / tie-break
+///
+/// Every `select!` is replay-deterministic: the same seed always produces the
+/// same winner. The blocking form resolves through the runtime drain engine
+/// ([`Scope::race_all`](asupersync::Scope::race_all)), which breaks ties among
+/// same-turn-ready branches with the lab's **seeded** scheduler RNG — fixed by
+/// the seed, not by source position. The `else` form polls in strict **source
+/// order** and takes the first ready branch. The `biased` keyword is accepted
+/// on the blocking form for `tokio::select!` familiarity and documents that
+/// selection is deterministic; it does not impose strict source order — use the
+/// `else` form for that.
+///
+/// # Syntax
+///
+/// ```ignore
+/// // blocking, drain-correct
+/// let r = select!(cx, {
+///     a = primary.fetch()  => use_primary(a),
+///     b = backup.fetch()   => use_backup(b),
+/// })?;
+///
+/// // explicit source-order tie-break
+/// let r = select!(cx, biased, {
+///     a = fast()  => a,
+///     b = slow()  => b,
+/// })?;
+///
+/// // non-blocking Go-style default
+/// let r = select!(cx, {
+///     a = try_recv() => a,
+///     else => default_value(),
+/// });
+/// ```
+#[proc_macro]
+pub fn select(input: TokenStream) -> TokenStream {
+    select::select_impl(input)
 }
 
 /// Instruments a function or impl method with a tracing span.

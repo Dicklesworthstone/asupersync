@@ -1,7 +1,8 @@
 # Structured Concurrency Macro DSL
 
 This document describes the Asupersync macro DSL for structured concurrency:
-`#[main]`, `#[test]`, `scope!`, `spawn!`, `join!`, `join_all!`, and `race!`.
+`#[main]`, `#[test]`, `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, and
+`select!`.
 
 The macros are designed to reduce boilerplate while preserving Asupersync
 invariants: structured concurrency, cancellation correctness, and deterministic
@@ -32,9 +33,10 @@ use asupersync::proc_macros::{join, join_all, main, race, scope, spawn, test};
 |------|----------------------|------------------------|-------------------|
 | `scope!` | Supported and re-exported by `asupersync` | Unavailable | Binds a `Scope` for the current region; does not create a fresh child-region boundary |
 | `spawn!` | Supported and re-exported by `asupersync` | Unavailable | Expands to `Scope::spawn_registered`; requires ambient `__state` and `__cx` |
-| `join!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Awaits branches sequentially today |
-| `join_all!` | Supported and re-exported by `asupersync` | Unavailable | Awaits branches sequentially today |
+| `join!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Polls all branches concurrently in one `poll_fn`; pending branches never block ready ones |
+| `join_all!` | Supported and re-exported by `asupersync` | Unavailable | Concurrent like `join!`, returns an array (branches share one type) |
 | `race!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Expands to `Cx::race_drained*`; losers are protocol-cancelled **and drained** |
+| `select!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | N-ary heterogeneous select; blocking form drains losers via `Cx::race_drained`, optional `else` arm is a non-blocking Go-style default |
 | `#[main]` / `#[test]` | Supported and re-exported by `asupersync` | Unavailable | Runs async entry functions on the production runtime and optionally injects the installed root `Cx` |
 | `#[lab_test]` | Supported and re-exported by `asupersync` | Unavailable | Runs deterministic lab tests under one seed or a seed matrix and fails with seed/rerun details |
 
@@ -134,7 +136,16 @@ design target. Keep the following in mind:
   the macro returns. Branches and their outputs must therefore be `Send +
   'static`, and `cx` must carry spawn authority. The lower-level drop-on-cancel
   `Cx::race*` methods remain as an escape hatch for non-`'static` inline races.
-- `join!` and `join_all!` are sequential today. Parallel polling is future work.
+- `select!` is the heterogeneous, N-ary member of the race family. Its blocking
+  form rewrites each `pat = fut => handler` branch into a single homogeneous
+  `async move { let pat = fut.await; handler }` future and routes the list
+  through `Cx::race_drained`, inheriting the **loser-drain** guarantee. A
+  trailing `else => handler` arm switches it to a non-blocking, poll-once
+  Go-style default that does **not** drain (documented opt-out). See the
+  `select!` reference below for the full tie-break/determinism contract.
+- `join!` and `join_all!` poll all branches concurrently in a single `poll_fn`:
+  each branch is pinned once and only not-yet-ready branches are re-polled per
+  wake, so N same-duration sleeps complete in one duration, not the sum.
 
 These are *phase limitations*, not permanent API choices.
 
@@ -211,8 +222,11 @@ join!(cx; f1, f2, f3)
 
 **Notes**
 
-- Current implementation: sequential awaits (still correct, just not parallel).
-- `cx;` is reserved for future cancellation propagation.
+- Polls all branches concurrently in a single `poll_fn`: each branch is pinned
+  once and only the not-yet-ready branches are re-polled per wake, so a pending
+  branch never blocks the others. Three 10ms sleeps complete in ~10ms, not 30ms.
+- `cx;` is type-checked and reserved for cancellation propagation; the concurrent
+  polling itself needs no scheduler support.
 
 ### join_all!
 
@@ -228,7 +242,8 @@ join_all!(f1, f2, f3)
 
 - All futures must return the same type.
 - Useful when you want to iterate results.
-- Current implementation: sequential awaits (still correct, just not parallel).
+- Concurrent, like `join!`: the same single-`poll_fn` expansion, returning an
+  array instead of a tuple.
 
 ### race!
 
@@ -256,6 +271,60 @@ race!(cx, timeout: Duration::from_secs(5), { f1, f2 })
   On the `timeout:` path an elapsed deadline abandons the whole race by drop.
 - For a lower-level drop-on-cancel select over non-`'static` inline futures,
   call `Cx::race*` directly.
+
+### select!
+
+Select over **heterogeneous** branches — each branch awaits its own future type
+and runs a handler arm; every handler must yield the same result type. `select!`
+lifts the fixed `Race2`/`Race3`/`Race4` arity ceiling and is the drain-correct
+alternative to `tokio::select!`.
+
+**Syntax**
+
+```rust
+// blocking, drain-correct → Result<R, JoinError>
+let r = select!(cx, {
+    a = primary.fetch()  => use_primary(a),
+    b = backup.fetch()   => use_backup(b),
+})?;
+
+// explicit tie-break marker
+let r = select!(cx, biased, {
+    a = fast()  => a,
+    b = slow()  => b,
+})?;
+
+// non-blocking Go-style default → R
+let r = select!(cx, {
+    a = try_recv() => a,
+    else => default_value(),
+});
+```
+
+**Two forms**
+
+- **Blocking** (no `else`): each `pat = fut => handler` branch is rewritten into
+  `async move { let pat = fut.await; handler }`, and the homogeneous per-branch
+  list routes through `Cx::race_drained`. The first branch to win resolves the
+  macro; every loser is protocol-cancelled **and drained** before it returns.
+  Resolves to `Result<R, JoinError>`. Branch futures and `R` must be
+  `Send + 'static`, and `cx` must carry spawn authority.
+- **Non-blocking default** (trailing `else => handler`): each branch is polled
+  **exactly once** in source order; the first ready branch wins, otherwise the
+  `else` handler runs immediately. This never waits, so it does **not** drain —
+  the not-ready branches are dropped. Resolves to `R`.
+
+**Determinism / tie-break**
+
+- Every `select!` is replay-deterministic: same seed ⇒ same winner.
+- The blocking form breaks same-turn ties with the runtime drain engine's
+  **seeded** scheduler RNG (`Scope::race_all`) — fixed by the seed, not by
+  source position, so a different seed may pick a different same-turn winner.
+- The `else` form polls in strict **source order** (first listed ready branch
+  wins, seed-independent).
+- `biased` is accepted on the blocking form for `tokio::select!` familiarity and
+  documents that selection is deterministic; it does not impose strict source
+  order — use the `else` form for that.
 
 ## Patterns
 
