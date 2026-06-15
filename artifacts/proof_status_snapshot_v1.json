@@ -90,7 +90,8 @@
     "validation frontier final signoff",
     "doctor e2e proof lane",
     "Rust crate release provenance contract",
-    "artifact governance final signoff"
+    "artifact governance final signoff",
+    "clean-overlay proof orchestration contract"
   ],
   "claim_categories": [
     {
@@ -963,6 +964,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped artifact-governance final signoff: cite it only as the A6 aggregation gate tying A1-A5, A7, A8, ledger registration, validation harness counts, proof manifest/status rows, README/AGENTS markers, closeout checklist, and no-claim boundaries together. It does not prove release readiness, workspace health, runtime correctness, performance improvement, live RCH fleet availability, full-corpus artifact coverage, tracker closure while .beads is dirty, or permission to delete files."
+    },
+    {
+      "claim_id": "clean-overlay-proof-orchestration-contract",
+      "category": "clean-overlay proof orchestration contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "clean-overlay proof orchestration contract",
+          "clean-overlay-proof-orchestration-contract"
+        ],
+        "AGENTS.md": [
+          "clean-overlay proof orchestration contract",
+          "clean-overlay-proof-orchestration-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "clean-overlay-proof-orchestration-contract"
+      ],
+      "manifest_lane_ids": [
+        "clean-overlay-proof-orchestration-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clean_overlay_proof_orchestration_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test clean_overlay_proof_orchestration_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped clean-overlay proof-orchestration operator packet evidence only; does not prove broad workspace health, release readiness, runtime correctness outside the cited clean-overlay planner/blocker/overlay-command surfaces, performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval."
     }
   ],
   "proof_reuse_status_rows": [

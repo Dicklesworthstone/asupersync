@@ -1,0 +1,124 @@
+{
+  "schema_version": "clean-overlay-proof-orchestration-contract-v1",
+  "bead_id": "asupersync-proof-orch-clean-overlay-5ve2ao.4",
+  "parent_bead_id": "asupersync-proof-orch-clean-overlay-5ve2ao",
+  "status": "contract_guarded",
+  "generated_on": "2026-06-14",
+  "source_of_truth": {
+    "contract": "artifacts/clean_overlay_proof_orchestration_v1.json",
+    "runbook": "docs/clean_overlay_proof_orchestration_runbook.md",
+    "contract_test": "tests/clean_overlay_proof_orchestration_contract.rs",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "a1_planner": "src/audit/clean_overlay_planner.rs",
+    "a1_planner_contract": "tests/clean_overlay_proof_planner_contract.rs",
+    "a2_blocker_receipt": "src/audit/blocker_receipt.rs",
+    "a3_overlay_command": "src/audit/overlay_proof_command.rs",
+    "a3_focused_e2e": "tests/proof_orch_clean_overlay_e2e.rs"
+  },
+  "proof_lane": {
+    "lane_id": "clean-overlay-proof-orchestration-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clean_overlay_proof_orchestration_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test clean_overlay_proof_orchestration_contract -- --nocapture",
+    "covers": "Clean-overlay proof-orchestration A4 operator runbook, when-to-use prerequisites, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty blocker receipts, non-destructive cleanup/rollback, Agent Mail and br comment handoff templates, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries stay aligned with the A1-A3 lane surfaces.",
+    "explicit_not_covered": "Does not prove runtime correctness, broad workspace health, release readiness, performance improvement, live RCH fleet availability, permission to delete files or clean worktrees, or local Cargo fallback approval."
+  },
+  "when_to_use": [
+    "You are on main only and need to prove a focused slice without syncing peer dirt.",
+    "You hold an Agent Mail reservation for every path you intend to overlay.",
+    "RCH is reachable; you will never fall back to a local Cargo build."
+  ],
+  "reservation_expectations": {
+    "selected_paths_must_be_reserved": true,
+    "unreserved_selection_is_fail_closed": true,
+    "shared_reservation_is_excluded_unless_holder": true,
+    "renew_long_running_leases": "renew_file_reservations",
+    "release_after_receipt": "release_file_reservations"
+  },
+  "stale_progress_guidance": {
+    "heartbeat_fresh_progress_stale_is_the_signature_case": true,
+    "never_cancel_peer_owned_builds": true,
+    "cancel_only_own_progress_stale_job": true,
+    "stale_or_partial_job_is_rerun_required_not_passed": true
+  },
+  "peer_dirty_blocker": {
+    "blocked_manifest_is_never_admitted": true,
+    "blocked_emits_no_cargo_invocation": true,
+    "blocked_marker": "# BLOCKED: clean-overlay refused; no RCH proof command emitted",
+    "report_only_marker": "# REPORT-ONLY: clean-overlay dry run; no RCH proof command emitted",
+    "exclusion_reasons": [
+      "PeerDirtyUnselected",
+      "UnreservedSelection",
+      "DeletedSelectionRefused"
+    ]
+  },
+  "non_destructive_cleanup": {
+    "performs_no_io": true,
+    "never_branches_clones_worktrees_or_deletes": true,
+    "rollback_action": "leave peer dirt unstaged; re-run overlay-scoped command after owned edits settle",
+    "forbidden_operations": [
+      "git branch",
+      "git worktree",
+      "git clone",
+      "git clean",
+      "git reset",
+      "rm -rf"
+    ]
+  },
+  "agent_mail_handoff_template": {
+    "thread_id": "asupersync-proof-orch-clean-overlay-5ve2ao.4",
+    "subject": "[clean-overlay proof] <focused slice> — <admitted|blocked|report-only>",
+    "body_required_fields": [
+      "gate_id",
+      "status",
+      "head_commit",
+      "overlay_paths",
+      "excluded_paths",
+      "proof_command",
+      "rch_worker_or_refusal",
+      "dirty_frontier",
+      "rollback_action",
+      "no_claim_boundaries"
+    ]
+  },
+  "br_comment_handoff_template": {
+    "command": "br comments add asupersync-proof-orch-clean-overlay-5ve2ao.4 --author <agent> --message <body>",
+    "body_required_fields": [
+      "status",
+      "head_commit",
+      "overlay_paths",
+      "excluded_paths",
+      "proof_command",
+      "no_claim_boundaries"
+    ]
+  },
+  "bead_closeout_checklist": [
+    "Overlay scoped to owned, reserved paths; peer dirt excluded, not synced.",
+    "Proof receipt (admitted command or blocker line) captured in bead and Agent Mail thread.",
+    "No branch/worktree/clone/deletion performed; no local Cargo fallback cited.",
+    "Reservations renewed (if continuing) or released (if done).",
+    "Claim cites only this lane's exact guarantee and no-claim boundaries."
+  ],
+  "proof_manifest_row": {
+    "manifest_lane_id": "clean-overlay-proof-orchestration-contract",
+    "guarantee_id": "clean-overlay-proof-orchestration-contract",
+    "kind": "artifact_contract",
+    "resource_envelope_class": "artifact-contract-medium"
+  },
+  "proof_status_row": {
+    "claim_id": "clean-overlay-proof-orchestration-contract",
+    "category": "clean-overlay proof orchestration contract",
+    "status": "yellow_scoped",
+    "proof_evidence_status": "rerun-required"
+  },
+  "no_claim_boundaries": [
+    "No release-readiness claim.",
+    "No broad workspace-health claim.",
+    "No runtime-correctness claim outside the cited clean-overlay planner, blocker, and overlay-command surfaces.",
+    "No performance-improvement claim.",
+    "No live RCH fleet-availability claim.",
+    "No local Cargo fallback approval.",
+    "No permission to delete files, clean worktrees, create branches, or create worktrees."
+  ]
+}

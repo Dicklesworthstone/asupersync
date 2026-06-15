@@ -436,7 +436,8 @@
     "semantic-lint-proof-lane-contract",
     "rust-crate-release-provenance-contract",
     "artifact-governance-validation-harness",
-    "artifact-governance-final-signoff"
+    "artifact-governance-final-signoff",
+    "clean-overlay-proof-orchestration-contract"
   ],
   "lanes": [
     {
@@ -1454,6 +1455,32 @@
         "README.md",
         "AGENTS.md"
       ]
+    },
+    {
+      "lane_id": "clean-overlay-proof-orchestration-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clean_overlay_proof_orchestration_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test clean_overlay_proof_orchestration_contract -- --nocapture",
+      "guarantee_ids": [
+        "clean-overlay-proof-orchestration-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "clean_overlay_proof_orchestration_contract tests pass",
+      "source_paths": [
+        "artifacts/clean_overlay_proof_orchestration_v1.json",
+        "docs/clean_overlay_proof_orchestration_runbook.md",
+        "tests/clean_overlay_proof_orchestration_contract.rs",
+        "README.md",
+        "AGENTS.md",
+        "src/audit/clean_overlay_planner.rs",
+        "src/audit/blocker_receipt.rs",
+        "src/audit/overlay_proof_command.rs",
+        "tests/proof_orch_clean_overlay_e2e.rs",
+        "tests/clean_overlay_proof_planner_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ]
     }
   ],
   "guarantees": [
@@ -1749,6 +1776,12 @@
       "guarantee_id": "artifact-governance-final-signoff",
       "lane_ids": [
         "artifact-governance-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "clean-overlay-proof-orchestration-contract",
+      "lane_ids": [
+        "clean-overlay-proof-orchestration-contract"
       ]
     }
   ]
