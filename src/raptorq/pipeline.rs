@@ -55,6 +55,22 @@ pub struct ReceiveOutcome {
     pub authentication: ReceiveAuthenticationSummary,
 }
 
+impl ReceiveOutcome {
+    /// Returns true when the receive path verified every accepted decode symbol.
+    #[must_use]
+    pub fn all_symbols_verified(&self) -> bool {
+        self.authenticated
+            && self.authentication.total() == self.symbols_received
+            && self.authentication.all_verified()
+    }
+
+    /// Returns true when any accepted decode symbol was not verified.
+    #[must_use]
+    pub fn has_unverified_symbols(&self) -> bool {
+        self.authentication.has_unverified_symbols()
+    }
+}
+
 /// Authentication posture counts for symbols accepted into a receive decode set.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReceiveAuthenticationSummary {
@@ -105,6 +121,12 @@ impl ReceiveAuthenticationSummary {
     #[must_use]
     pub const fn has_unverified_tagged(self) -> bool {
         self.unverified_tagged > 0
+    }
+
+    /// Returns true when any represented symbol was not cryptographically verified.
+    #[must_use]
+    pub const fn has_unverified_symbols(self) -> bool {
+        self.has_unverified_tagged() || self.has_unauthenticated_sentinel()
     }
 }
 

@@ -16,6 +16,43 @@ use crate::transport::sink::SymbolSink;
 use crate::transport::stream::SymbolStream;
 use crate::types::symbol::ObjectId;
 
+#[test]
+fn receive_authentication_summary_is_public_and_flags_unverified_symbols() {
+    let partial = crate::raptorq::ReceiveAuthenticationSummary {
+        verified: 2,
+        unverified_tagged: 1,
+        unauthenticated_sentinel: 1,
+    };
+    assert_eq!(partial.total(), 4);
+    assert!(partial.has_unverified_tagged());
+    assert!(partial.has_unauthenticated_sentinel());
+    assert!(partial.has_unverified_symbols());
+    assert!(!partial.all_verified());
+
+    let partial_outcome = crate::raptorq::ReceiveOutcome {
+        data: Vec::new(),
+        symbols_received: 4,
+        authenticated: false,
+        authentication: partial,
+    };
+    assert!(partial_outcome.has_unverified_symbols());
+    assert!(!partial_outcome.all_symbols_verified());
+
+    let verified = crate::raptorq::ReceiveAuthenticationSummary {
+        verified: 3,
+        unverified_tagged: 0,
+        unauthenticated_sentinel: 0,
+    };
+    let verified_outcome = crate::raptorq::ReceiveOutcome {
+        data: Vec::new(),
+        symbols_received: 3,
+        authenticated: true,
+        authentication: verified,
+    };
+    assert!(!verified_outcome.has_unverified_symbols());
+    assert!(verified_outcome.all_symbols_verified());
+}
+
 // =========================================================================
 // In-memory test transport
 // =========================================================================

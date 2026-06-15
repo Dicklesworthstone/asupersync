@@ -34,7 +34,10 @@ pub mod rfc6330;
 pub mod systematic;
 
 pub use builder::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
-pub use pipeline::{RaptorQReceiver, RaptorQSender, ReceiveOutcome, SendOutcome, SendProgress};
+pub use pipeline::{
+    RaptorQReceiver, RaptorQSender, ReceiveAuthenticationSummary, ReceiveOutcome, SendOutcome,
+    SendProgress,
+};
 pub use proof::{DecodeConfig, DecodeProof, DecodeProofBuilder, FailureReason, ProofOutcome};
 
 #[cfg(any(test, feature = "test-internals"))]
