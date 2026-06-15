@@ -100,7 +100,8 @@ fn select_blocking_returns_winner_and_drains_heterogeneous_loser() {
 fn select_blocking_drains_every_loser_at_arity_8() {
     // The drain loop is arity-agnostic (a `Vec` of spawned tasks); arity 8 with
     // one winner + seven parked losers exercises the N-ary expansion the macro
-    // generates. (Lower arities 2/3/5 drive the identical engine.)
+    // generates. (Arities 2/3/5 are pinned by the sibling tests, completing the
+    // AC3 "arity 2,3,5,8" matrix for select!.)
     let mut runtime = LabRuntimeTarget::create_runtime(TestConfig::default());
     let flags: Vec<Arc<AtomicBool>> = (0..7).map(|_| Arc::new(AtomicBool::new(false))).collect();
     let f0 = Arc::clone(&flags[0]);
@@ -134,6 +135,62 @@ fn select_blocking_drains_every_loser_at_arity_8() {
     assert!(
         all_drained,
         "all seven losing branches must be drained before select! returns"
+    );
+}
+
+#[test]
+fn select_blocking_drains_every_loser_at_arity_3() {
+    let mut runtime = LabRuntimeTarget::create_runtime(TestConfig::default());
+    let flags: Vec<Arc<AtomicBool>> = (0..2).map(|_| Arc::new(AtomicBool::new(false))).collect();
+    let f0 = Arc::clone(&flags[0]);
+    let f1 = Arc::clone(&flags[1]);
+
+    let (winner, all_drained) = LabRuntimeTarget::block_on(&mut runtime, async move {
+        let cx = Cx::current().expect("LabRuntimeTarget root task installs Cx");
+        let result: u32 = select!(cx, {
+            _w = async { 3_u32 } => 3_u32,
+            _l0 = draining_loser_u32(f0) => 0_u32,
+            _l1 = draining_loser_u32(f1) => 0_u32,
+        })
+        .expect("the instantly-ready branch wins the 3-way select");
+        let all = flags.iter().all(|flag| flag.load(Ordering::SeqCst));
+        (result, all)
+    });
+
+    assert_eq!(winner, 3, "the ready branch must win the 3-way select");
+    assert!(
+        all_drained,
+        "both losing branches must be drained in the arity-3 select"
+    );
+}
+
+#[test]
+fn select_blocking_drains_every_loser_at_arity_5() {
+    let mut runtime = LabRuntimeTarget::create_runtime(TestConfig::default());
+    let flags: Vec<Arc<AtomicBool>> = (0..4).map(|_| Arc::new(AtomicBool::new(false))).collect();
+    let f0 = Arc::clone(&flags[0]);
+    let f1 = Arc::clone(&flags[1]);
+    let f2 = Arc::clone(&flags[2]);
+    let f3 = Arc::clone(&flags[3]);
+
+    let (winner, all_drained) = LabRuntimeTarget::block_on(&mut runtime, async move {
+        let cx = Cx::current().expect("LabRuntimeTarget root task installs Cx");
+        let result: u32 = select!(cx, {
+            _w = async { 5_u32 } => 5_u32,
+            _l0 = draining_loser_u32(f0) => 0_u32,
+            _l1 = draining_loser_u32(f1) => 0_u32,
+            _l2 = draining_loser_u32(f2) => 0_u32,
+            _l3 = draining_loser_u32(f3) => 0_u32,
+        })
+        .expect("the instantly-ready branch wins the 5-way select");
+        let all = flags.iter().all(|flag| flag.load(Ordering::SeqCst));
+        (result, all)
+    });
+
+    assert_eq!(winner, 5, "the ready branch must win the 5-way select");
+    assert!(
+        all_drained,
+        "all four losing branches must be drained in the arity-5 select"
     );
 }
 

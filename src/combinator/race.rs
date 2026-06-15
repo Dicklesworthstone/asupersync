@@ -854,30 +854,26 @@ pub fn make_race_all_result<T, E>(
 /// Without that feature, use the `Scope` APIs (`Scope::race`,
 /// `Scope::race_all`) when racing spawned tasks.
 ///
-/// # Basic Usage
+/// # Real `race!` contract (with `proc-macros`)
+///
+/// The shipped `race!` is the proc macro re-exported at the crate root. It takes
+/// an explicit `cx` first and braces its branch list; there is no positional or
+/// `biased;` form (that biasing lives on `select!`). Every loser is
+/// protocol-cancelled **and drained** before it returns — it never drops losers
+/// — and it resolves to `Result<T, JoinError>`:
 ///
 /// ```ignore
-/// let winner: Race2<A, B> = race!(fut_a, fut_b).await;
-/// let winner: Race3<A, B, C> = race!(fut_a, fut_b, fut_c).await;
+/// let winner = race!(cx, { primary.fetch(), backup.fetch() })?;
+/// let winner = race!(cx, { "fast" => a(), "slow" => b() })?;
+/// let winner = race!(cx, timeout: Duration::from_secs(5), { a(), b() })?;
 /// ```
 ///
-/// # Biased Mode
+/// # Without `proc-macros`
 ///
-/// Use `biased;` for left-to-right polling priority (useful for fallback patterns):
-///
-/// ```ignore
-/// race! { biased;
-///     check_cache(key),
-///     query_database(key),
-/// }
-/// ```
-///
-/// # Key Properties
-///
-/// 1. First future to return `Poll::Ready` is the winner
-/// 2. All non-winning futures go through the cancellation protocol
-/// 3. `race!` waits for all losers to complete before returning
-/// 4. Losers complete with `Outcome::Cancelled(RaceLost)`
+/// This fallback is intentionally inert: it expands to a `compile_error!` rather
+/// than pretending a fallback macro exists. Use the `Scope` APIs (`Scope::race`,
+/// `Scope::race_all`) for drained task races, or `Cx::race` for a drop-on-cancel
+/// inline future race.
 #[cfg(not(feature = "proc-macros"))]
 #[macro_export]
 macro_rules! race {
