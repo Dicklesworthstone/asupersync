@@ -373,3 +373,161 @@ fn recover_epoch_byte_exact_after_losing_any_single_stripe() {
         );
     }
 }
+
+#[test]
+fn torn_write_tail_yields_exact_bytes_or_a_clean_incomplete_never_corruption() {
+    // AC1 core: a crash mid-write tears the in-flight stripe at an arbitrary byte
+    // offset. Exhaustively truncating one stripe across the whole file (with a
+    // sibling failure domain already lost, so the surviving symbol count straddles
+    // K as the torn stripe shrinks) must, at EVERY torn point, either reconstruct
+    // the EXACT original bytes or fail closed with `Incomplete` — never a panic, an
+    // I/O error, or silent wrong bytes. Both outcomes must actually occur, proving
+    // the recoverability boundary is genuinely crossed. This is the deterministic,
+    // exhaustively reproducible form of the bead's SIGKILL torn-write matrix.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let (recovered, incomplete) = runtime.block_on(runtime.handle().spawn(async move {
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(),
+            repair_count: 4,
+            stripe_count: 3,
+        });
+
+        let data = varied_payload(900);
+        journal.record_epoch(13, &data).await.expect("record epoch");
+
+        // A whole failure domain (stripe 0) is also lost, so as the torn stripe
+        // shrinks the surviving symbol count falls through the K boundary.
+        std::fs::remove_file(dir_path.join(stripe_file_name(13, 0))).expect("lose stripe 0");
+
+        // Tear stripe 2 (the "in-flight" final write) at a fine sweep of offsets.
+        let torn_path = dir_path.join(stripe_file_name(13, 2));
+        let full = std::fs::read(&torn_path).expect("read torn stripe");
+
+        let mut recovered = 0usize;
+        let mut incomplete = 0usize;
+        let mut offset = 0usize;
+        loop {
+            std::fs::write(&torn_path, &full[..offset]).expect("tear stripe at offset");
+            match journal.recover_epoch(13).await {
+                Ok(bytes) => {
+                    assert_eq!(
+                        bytes, data,
+                        "a recovered torn-write epoch must be byte-exact (offset {offset})"
+                    );
+                    recovered += 1;
+                }
+                Err(DurableJournalError::Incomplete) => incomplete += 1,
+                Err(other) => panic!(
+                    "torn write must fail only as Incomplete, got {other:?} at offset {offset}"
+                ),
+            }
+            if offset >= full.len() {
+                break;
+            }
+            // A small stride keeps the sweep fast while `.min` guarantees the
+            // final, untruncated offset is always exercised (the recover case).
+            offset = (offset + 7).min(full.len());
+        }
+        (recovered, incomplete)
+    }));
+
+    assert!(
+        recovered > 0,
+        "the torn-write sweep must reconstruct exactly at large surviving offsets"
+    );
+    assert!(
+        incomplete > 0,
+        "the torn-write sweep must fail closed once too few symbols survive"
+    );
+}
+
+#[test]
+fn k_minus_one_surviving_symbols_fail_closed_with_clear_diagnostic() {
+    // AC1 boundary: with no repair redundancy the stripe holds exactly K source
+    // frames, so all K recover the exact bytes, but a torn write that drops the
+    // journal's final symbol — leaving only K-1 — must fail CLOSED with a clear,
+    // typed diagnostic rather than returning wrong bytes or panicking. This pins
+    // the documented bound ("reconstructs when >= K symbol frames survive; K-1
+    // fails with a clear diagnostic") tested exactly at the K / K-1 boundary.
+    let dir = tempdir().expect("tempdir");
+    let dir_path = dir.path().to_path_buf();
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+
+    let ok = runtime.block_on(runtime.handle().spawn(async move {
+        // Single stripe, zero repair => the stripe holds exactly K source-symbol
+        // frames, so the boundary is reached by tearing frames off the tail with
+        // no redundancy to mask the loss.
+        let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+            directory: dir_path.clone(),
+            encoding: EncodingConfig::default(), // symbol_size 256
+            repair_count: 0,
+            stripe_count: 1,
+        });
+
+        // 1200 bytes / 256 = ceil 5 source symbols in a single block (< 1 MiB).
+        let data = varied_payload(1200);
+        journal.record_epoch(64, &data).await.expect("record epoch");
+
+        let stripe_path = dir_path.join(stripe_file_name(64, 0));
+        let full = std::fs::read(&stripe_path).expect("read stripe");
+        let (frames, _) = scan_frames(&full);
+        let k = frames.len();
+        assert!(
+            k >= 2,
+            "fixture must produce >= 2 source symbols for a meaningful K-1 boundary (got {k})"
+        );
+        // Uniform frame size: fixed header + padded symbol payload + trailing CRC.
+        assert_eq!(full.len() % k, 0, "journal frames must be uniform-sized");
+        let frame_size = full.len() / k;
+
+        // All K frames present (untorn) -> exact byte recovery.
+        let recovered = journal.recover_epoch(64).await.expect("recover full");
+        assert_eq!(recovered, data, "all K symbol frames must recover exactly");
+
+        // Drop exactly the last frame -> only K-1 survive -> fail closed.
+        std::fs::write(&stripe_path, &full[..(k - 1) * frame_size]).expect("drop last frame");
+        let k_minus_one = journal.recover_epoch(64).await;
+        assert!(
+            matches!(&k_minus_one, Err(DurableJournalError::Incomplete)),
+            "exactly K-1 surviving symbols must fail closed as Incomplete, got {k_minus_one:?}"
+        );
+
+        // A torn tail one byte into the final frame tears that frame off too
+        // (scan_frames stops cleanly) -> still K-1 -> the same clear diagnostic.
+        std::fs::write(&stripe_path, &full[..full.len() - 1]).expect("tear final byte");
+        let torn_tail = journal.recover_epoch(64).await;
+        assert!(
+            matches!(&torn_tail, Err(DurableJournalError::Incomplete)),
+            "a torn final write must fail closed as Incomplete, got {torn_tail:?}"
+        );
+
+        // The diagnostic must be human-clear (not an opaque code or empty string).
+        let message = torn_tail.unwrap_err().to_string();
+        assert!(
+            message.contains("incomplete") && message.contains("K'"),
+            "diagnostic must clearly state the epoch is incomplete: {message:?}"
+        );
+
+        // The whole final write lost (empty stripe) is still a clean Incomplete,
+        // never a panic or wrong bytes.
+        std::fs::write(&stripe_path, b"").expect("empty stripe");
+        assert!(matches!(
+            journal.recover_epoch(64).await,
+            Err(DurableJournalError::Incomplete)
+        ));
+
+        // Restoring the full stripe recovers exactly again (the boundary is the
+        // only thing that gates recovery — the bytes were never corrupted).
+        std::fs::write(&stripe_path, &full).expect("restore stripe");
+        journal.recover_epoch(64).await.expect("recover restored") == data
+    }));
+
+    assert!(
+        ok,
+        "the K/K-1 boundary must recover exactly at K and fail closed with a clear diagnostic at K-1"
+    );
+}
