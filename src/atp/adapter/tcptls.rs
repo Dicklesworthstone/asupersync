@@ -315,6 +315,8 @@ impl TcpTlsAdapter {
 
     /// Negotiate TCP/TLS adapter with performance caveats.
     pub async fn negotiate(&self, trace_id: TraceId) -> Result<AdapterNegotiation> {
+        validate_tcptls_security_config(&self.config)?;
+
         let performance_caveats = vec![
             PerformanceCaveat::HeadOfLineBlocking,
             PerformanceCaveat::NoMultiplexing,
@@ -339,6 +341,7 @@ impl TcpTlsAdapter {
     /// Establish TCP/TLS connection to remote endpoint.
     pub async fn connect(&mut self, object_id: ObjectId, endpoint: &str) -> Result<String> {
         validate_tcptls_endpoint(endpoint)?;
+        validate_tcptls_security_config(&self.config)?;
 
         let connection_id = format!(
             "tcptls-{}-{}",
@@ -655,6 +658,16 @@ fn validate_tcptls_endpoint(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_tcptls_security_config(config: &TcpTlsConfig) -> Result<()> {
+    match config.tls_config.cert_validation {
+        TlsCertValidation::Full => Ok(()),
+        mode => Err(Error::new(ErrorKind::ConfigError).with_message(format!(
+            "TCP/TLS fallback adapter cert_validation={mode:?} is not wired to a real TLS \
+             verifier; use TlsCertValidation::Full until that verifier path is implemented"
+        ))),
+    }
+}
+
 fn estimate_tcp_connect_time(endpoint: &str, config: &TcpTlsConfig) -> Duration {
     let host_len = endpoint.split(':').next().map_or(0, str::len);
     let buffer_factor = ((config.connection_config.send_buffer_size
@@ -817,6 +830,42 @@ mod tests {
                 .any(|c| matches!(c, PerformanceCaveat::HeadOfLineBlocking));
             assert!(has_hol_blocking);
         });
+    }
+
+    #[test]
+    fn tcptls_rejects_unwired_insecure_cert_validation_modes() {
+        for mode in [
+            TlsCertValidation::SkipHostname,
+            TlsCertValidation::AcceptSelfSigned,
+            TlsCertValidation::Disabled,
+        ] {
+            let mut config = TcpTlsConfig::default();
+            config.tls_config.cert_validation = mode;
+            let mut adapter = TcpTlsAdapter::new(config);
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([2; 32]));
+
+            let connect_err = block_on(adapter.connect(object_id, "server.example.com:443"))
+                .expect_err("unwired weak certificate-validation mode must fail closed");
+            assert_eq!(connect_err.kind(), ErrorKind::ConfigError);
+            let message = connect_err
+                .message()
+                .expect("fail-closed config error should explain the unwired TLS verifier path");
+            assert!(
+                message.contains("cert_validation") && message.contains(&format!("{mode:?}")),
+                "unexpected connect error message for {mode:?}: {message}"
+            );
+
+            let negotiation_err = block_on(adapter.negotiate(TraceId::from_parts(2, 2)))
+                .expect_err("negotiation must not advertise unwired weak cert validation");
+            assert_eq!(negotiation_err.kind(), ErrorKind::ConfigError);
+            let message = negotiation_err
+                .message()
+                .expect("negotiation config error should explain the unwired TLS verifier path");
+            assert!(
+                message.contains("real TLS verifier"),
+                "unexpected negotiation error message for {mode:?}: {message}"
+            );
+        }
     }
 
     #[test]

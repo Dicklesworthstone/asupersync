@@ -236,6 +236,8 @@ impl WebTransportAdapter {
 
     /// Negotiate WebTransport adapter capabilities.
     pub async fn negotiate(&self, trace_id: TraceId) -> Result<AdapterNegotiation> {
+        validate_webtransport_security_policy(&self.config.security_policy)?;
+
         // Check browser WebTransport support
         if !self
             .config
@@ -281,6 +283,7 @@ impl WebTransportAdapter {
     /// Start WebTransport session for object transfer.
     pub async fn start_session(&mut self, object_id: ObjectId, url: &str) -> Result<String> {
         validate_webtransport_url(url)?;
+        validate_webtransport_security_policy(&self.config.security_policy)?;
 
         let session_id = format!(
             "wt-{}-{}",
@@ -517,6 +520,17 @@ fn validate_webtransport_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_webtransport_security_policy(policy: &BrowserSecurityPolicy) -> Result<()> {
+    match policy.cert_validation {
+        CertValidationPolicy::RequireValid => Ok(()),
+        mode => Err(Error::new(ErrorKind::ConfigError).with_message(format!(
+            "WebTransport cert_validation={mode:?} is not wired to a browser certificate \
+             verifier; use CertValidationPolicy::RequireValid until that verifier path is \
+             implemented"
+        ))),
+    }
+}
+
 impl Default for WebTransportConfig {
     fn default() -> Self {
         Self {
@@ -645,6 +659,41 @@ mod tests {
                 FeatureSupport::Partial
             );
         });
+    }
+
+    #[test]
+    fn webtransport_rejects_unwired_cert_validation_policies() {
+        for mode in [
+            CertValidationPolicy::AllowSelfSigned,
+            CertValidationPolicy::CustomValidation,
+        ] {
+            let mut config = WebTransportConfig::default();
+            config.security_policy.cert_validation = mode;
+            let mut adapter = WebTransportAdapter::new(config);
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([3; 32]));
+
+            let session_err = block_on(adapter.start_session(object_id, "https://example.com"))
+                .expect_err("unwired WebTransport cert policy must fail closed");
+            assert_eq!(session_err.kind(), ErrorKind::ConfigError);
+            let message = session_err
+                .message()
+                .expect("fail-closed config error should explain the unwired verifier path");
+            assert!(
+                message.contains("cert_validation") && message.contains(&format!("{mode:?}")),
+                "unexpected session error message for {mode:?}: {message}"
+            );
+
+            let negotiation_err = block_on(adapter.negotiate(TraceId::from_parts(3, 3)))
+                .expect_err("negotiation must not advertise unwired cert validation");
+            assert_eq!(negotiation_err.kind(), ErrorKind::ConfigError);
+            let message = negotiation_err
+                .message()
+                .expect("negotiation config error should explain the unwired verifier path");
+            assert!(
+                message.contains("browser certificate verifier"),
+                "unexpected negotiation error message for {mode:?}: {message}"
+            );
+        }
     }
 
     #[test]
