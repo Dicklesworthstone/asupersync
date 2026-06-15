@@ -216,72 +216,68 @@ fn generate_select(input: &SelectInput) -> TokenStream2 {
 
     let branch_futs: Vec<TokenStream2> = branches.iter().map(branch_future).collect();
 
-    match els {
-        None => {
-            // Blocking, drain-correct path: route the homogeneous per-branch
-            // future list through the proven `race_drained` engine so every
-            // loser is protocol-cancelled and drained before the macro returns.
-            let boxed: Vec<TokenStream2> = branch_futs
-                .iter()
-                .map(|fut| quote! { ::std::boxed::Box::pin(#fut) })
-                .collect();
-            quote! {
-                {
-                    (#cx).race_drained(::std::vec![#(#boxed),*]).await
-                }
+    if els.is_none() {
+        // Blocking, drain-correct path: route the homogeneous per-branch
+        // future list through the proven `race_drained` engine so every
+        // loser is protocol-cancelled and drained before the macro returns.
+        let boxed: Vec<TokenStream2> = branch_futs
+            .iter()
+            .map(|fut| quote! { ::std::boxed::Box::pin(#fut) })
+            .collect();
+        quote! {
+            {
+                (#cx).race_drained(::std::vec![#(#boxed),*]).await
             }
         }
-        Some(else_handler) => {
-            // Non-blocking default path: poll each branch exactly once in source
-            // order, take the first ready branch, otherwise run `else`. The
-            // not-ready branches are dropped (this path does not drain — it is
-            // the explicit non-blocking opt-out).
-            let fut_idents: Vec<_> = (0..branches.len())
-                .map(|i| {
-                    syn::Ident::new(&format!("__select_fut_{i}"), proc_macro2::Span::call_site())
-                })
-                .collect();
+    } else {
+        let else_handler = els.as_ref().expect("checked select! else arm exists");
+        // Non-blocking default path: poll each branch exactly once in source
+        // order, take the first ready branch, otherwise run `else`. The
+        // not-ready branches are dropped (this path does not drain — it is
+        // the explicit non-blocking opt-out).
+        let fut_idents: Vec<_> = (0..branches.len())
+            .map(|i| syn::Ident::new(&format!("__select_fut_{i}"), proc_macro2::Span::call_site()))
+            .collect();
 
-            let bindings: Vec<TokenStream2> = fut_idents
-                .iter()
-                .zip(branch_futs.iter())
-                .map(|(id, fut)| quote! { let mut #id = ::core::pin::pin!(#fut); })
-                .collect();
+        let bindings: Vec<TokenStream2> = fut_idents
+            .iter()
+            .zip(branch_futs.iter())
+            .map(|(id, fut)| quote! { let mut #id = ::core::pin::pin!(#fut); })
+            .collect();
 
-            let polls: Vec<TokenStream2> = fut_idents
-                .iter()
-                .map(|id| {
-                    quote! {
-                        match ::core::future::Future::poll(
-                            ::core::pin::Pin::as_mut(&mut #id),
-                            __select_cx,
-                        ) {
-                            ::core::task::Poll::Ready(__select_value) => {
-                                return ::core::task::Poll::Ready(__select_value);
-                            }
-                            ::core::task::Poll::Pending => {}
+        let polls: Vec<TokenStream2> = fut_idents
+            .iter()
+            .map(|id| {
+                quote! {
+                    match ::core::future::Future::poll(
+                        ::core::pin::Pin::as_mut(&mut #id),
+                        __select_cx,
+                    ) {
+                        ::core::task::Poll::Ready(__select_value) => {
+                            return ::core::task::Poll::Ready(__select_value);
                         }
+                        ::core::task::Poll::Pending => {}
                     }
-                })
-                .collect();
-
-            quote! {
-                {
-                    let _ = &(#cx);
-                    #(#bindings)*
-                    // Hold the `else` handler in a one-shot `FnOnce` so the
-                    // poll closure (an `FnMut`) can run it by value exactly once
-                    // without moving a captured value out of an `FnMut`. The
-                    // handler stays lazy — it runs only when no branch is ready.
-                    let mut __select_else = ::core::option::Option::Some(move || #else_handler);
-                    ::core::future::poll_fn(|__select_cx| {
-                        #(#polls)*
-                        let __select_default = ::core::option::Option::take(&mut __select_else)
-                            .expect("select! else arm polled after completion");
-                        ::core::task::Poll::Ready(__select_default())
-                    })
-                    .await
                 }
+            })
+            .collect();
+
+        quote! {
+            {
+                let _ = &(#cx);
+                #(#bindings)*
+                // Hold the `else` handler in a one-shot `FnOnce` so the
+                // poll closure (an `FnMut`) can run it by value exactly once
+                // without moving a captured value out of an `FnMut`. The
+                // handler stays lazy — it runs only when no branch is ready.
+                let mut __select_else = ::core::option::Option::Some(move || #else_handler);
+                ::core::future::poll_fn(|__select_cx| {
+                    #(#polls)*
+                    let __select_default = ::core::option::Option::take(&mut __select_else)
+                        .expect("select! else arm polled after completion");
+                    ::core::task::Poll::Ready(__select_default())
+                })
+                .await
             }
         }
     }

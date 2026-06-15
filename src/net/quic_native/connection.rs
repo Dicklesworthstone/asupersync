@@ -17,6 +17,8 @@ use std::task::{Context as TaskContext, Poll, Waker};
 
 use super::streams::{QuicStreamError, StreamId, StreamRole, StreamTable, StreamTableError};
 use super::tls::{CryptoLevel, KeyUpdateEvent, QuicTlsError, QuicTlsMachine};
+#[cfg(feature = "tls")]
+use super::tls::{QuicServerIdentityVerification, QuicServerIdentityVerifier};
 use super::transport::{
     AckEvent, AckRange, PacketNumberSpace, QuicConnectionState, QuicTransportMachine,
     SentPacketMeta, TransportError,
@@ -359,7 +361,75 @@ impl NativeQuicConnection {
         self.transport.on_established()?;
         self.tls.on_handshake_confirmed()?;
         self.peer_address_validated = true;
+        let server_identity_verified = if self.role == StreamRole::Client {
+            "true"
+        } else {
+            "not_applicable"
+        };
+        quic_trace(
+            cx,
+            "atp_quic.handshake.confirmed",
+            &[
+                ("role", self.role_label()),
+                ("server_identity_verified", server_identity_verified),
+            ],
+        );
         Ok(())
+    }
+
+    /// Verify the peer's X.509 server identity and confirm the handshake.
+    ///
+    /// This is the client-side production path for the server-identity gate:
+    /// WebPKI/rustls must accept the presented chain for the configured roots
+    /// and hostname before the connection records `server_identity_verified`
+    /// and transitions to 1-RTT established. Bad roots, expired certificates,
+    /// wrong hostnames, empty chains, and malformed names all fail closed before
+    /// any application data can be sent.
+    #[cfg(feature = "tls")]
+    pub fn verify_server_identity_and_confirm_handshake(
+        &mut self,
+        cx: &Cx,
+        verifier: &QuicServerIdentityVerifier,
+        hostname: &str,
+        presented_chain: crate::tls::CertificateChain,
+        now: rustls_pki_types::UnixTime,
+    ) -> Result<QuicServerIdentityVerification, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        if self.role != StreamRole::Client {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "server identity verification is client-only",
+            ));
+        }
+        quic_trace(
+            cx,
+            "atp_quic.cert_verify.start",
+            &[("role", self.role_label())],
+        );
+        let receipt = match verifier.verify_server_chain(hostname, presented_chain, now) {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                quic_trace(
+                    cx,
+                    "atp_quic.cert_verify.fail",
+                    &[("role", self.role_label()), ("code", err.code())],
+                );
+                return Err(NativeQuicConnectionError::Tls(err));
+            }
+        };
+        self.record_verified_server_identity();
+        let chain_len = receipt.chain_len.to_string();
+        let root_count = receipt.root_count.to_string();
+        quic_trace(
+            cx,
+            "atp_quic.cert_verify.ok",
+            &[
+                ("role", self.role_label()),
+                ("chain_len", chain_len.as_str()),
+                ("root_count", root_count.as_str()),
+            ],
+        );
+        self.on_handshake_confirmed(cx)?;
+        Ok(receipt)
     }
 
     /// Open a local bidirectional stream.
@@ -851,6 +921,13 @@ impl NativeQuicConnection {
         }
         Ok(())
     }
+
+    fn role_label(&self) -> &'static str {
+        match self.role {
+            StreamRole::Client => "client",
+            StreamRole::Server => "server",
+        }
+    }
 }
 
 fn checkpoint(cx: &Cx) -> Result<(), NativeQuicConnectionError> {
@@ -862,6 +939,12 @@ fn map_stream_table_error(err: StreamTableError) -> NativeQuicConnectionError {
     match err {
         StreamTableError::Stream(stream_err) => NativeQuicConnectionError::Stream(stream_err),
         other => NativeQuicConnectionError::StreamTable(other),
+    }
+}
+
+fn quic_trace(cx: &Cx, event: &str, fields: &[(&str, &str)]) {
+    if std::env::var_os("ATP_QUIC_TRACE").is_some() {
+        cx.trace_with_fields(event, fields);
     }
 }
 

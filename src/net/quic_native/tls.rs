@@ -117,6 +117,17 @@ pub enum QuicTlsError {
         /// Requested key phase bit.
         key_phase: bool,
     },
+    /// Server identity verification was configured with no trust anchors.
+    ServerIdentityRootStoreEmpty,
+    /// Peer did not present a certificate chain.
+    ServerCertificateChainEmpty,
+    /// Configured DNS name was not valid for WebPKI verification.
+    InvalidServerName,
+    /// rustls/WebPKI rejected the server certificate chain.
+    ServerCertificateRejected {
+        /// Stable, redaction-safe rejection reason.
+        code: &'static str,
+    },
     /// Packet-protection keys were already discarded for this packet space.
     KeyDiscarded {
         /// Packet number space.
@@ -174,6 +185,18 @@ impl fmt::Display for QuicTlsError {
                     space.as_str()
                 )
             }
+            Self::ServerIdentityRootStoreEmpty => {
+                write!(f, "server identity root store is empty")
+            }
+            Self::ServerCertificateChainEmpty => {
+                write!(f, "server certificate chain is empty")
+            }
+            Self::InvalidServerName => {
+                write!(f, "invalid server name for certificate verification")
+            }
+            Self::ServerCertificateRejected { code } => {
+                write!(f, "server certificate rejected: code={code}")
+            }
             Self::KeyDiscarded { space } => {
                 write!(
                     f,
@@ -228,6 +251,10 @@ impl QuicTlsError {
             Self::InvalidTransition { .. } => "invalid_transition",
             Self::StalePeerKeyPhase(_) => "stale_peer_key_phase",
             Self::MissingKeys { .. } => "missing_keys",
+            Self::ServerIdentityRootStoreEmpty => "server_identity_root_store_empty",
+            Self::ServerCertificateChainEmpty => "server_certificate_chain_empty",
+            Self::InvalidServerName => "invalid_server_name",
+            Self::ServerCertificateRejected { code } => code,
             Self::KeyDiscarded { .. } => "key_discarded",
             Self::BadPacketTag { .. } => "bad_packet_tag",
             Self::WrongKeyPhase { .. } => "wrong_key_phase",
@@ -237,6 +264,94 @@ impl QuicTlsError {
             Self::ServerCertificateUnverified => "server_certificate_unverified",
         }
     }
+}
+
+#[cfg(feature = "tls")]
+fn server_identity_failure(code: &'static str) -> QuicTlsError {
+    match code {
+        "server_identity_root_store_empty" => QuicTlsError::ServerIdentityRootStoreEmpty,
+        "server_certificate_chain_empty" => QuicTlsError::ServerCertificateChainEmpty,
+        "invalid_server_name" => QuicTlsError::InvalidServerName,
+        code => QuicTlsError::ServerCertificateRejected { code },
+    }
+}
+
+/// Redaction-safe receipt for a successful server identity verification.
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicServerIdentityVerification {
+    /// Number of certificates supplied by the peer, leaf first.
+    pub chain_len: usize,
+    /// Number of trust anchors in the configured root store.
+    pub root_count: usize,
+}
+
+/// rustls/WebPKI-backed verifier for native QUIC server identities.
+///
+/// This type verifies the peer's X.509 server certificate chain against an
+/// explicit root store and hostname before the connection records the
+/// server-identity gate. It deliberately exposes no insecure skip-verify path.
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone)]
+pub struct QuicServerIdentityVerifier {
+    verifier: Arc<rustls::client::WebPkiServerVerifier>,
+    root_count: usize,
+}
+
+#[cfg(feature = "tls")]
+impl QuicServerIdentityVerifier {
+    /// Construct a verifier from an explicit root store.
+    pub fn from_root_store(root_store: crate::tls::RootCertStore) -> Result<Self, QuicTlsError> {
+        let root_count = root_store.len();
+        if root_count == 0 {
+            return Err(server_identity_failure("server_identity_root_store_empty"));
+        }
+        let verifier =
+            rustls::client::WebPkiServerVerifier::builder(Arc::new(root_store.into_inner()))
+                .build()
+                .map_err(|_| server_identity_failure("server_identity_verifier_build_failed"))?;
+        Ok(Self {
+            verifier,
+            root_count,
+        })
+    }
+
+    /// Verify a presented server chain against the configured roots and name.
+    pub fn verify_server_chain(
+        &self,
+        hostname: &str,
+        presented_chain: crate::tls::CertificateChain,
+        now: rustls_pki_types::UnixTime,
+    ) -> Result<QuicServerIdentityVerification, QuicTlsError> {
+        use rustls::client::danger::ServerCertVerifier;
+
+        let certs = presented_chain.into_inner();
+        let (leaf, intermediates) = certs
+            .split_first()
+            .ok_or_else(|| server_identity_failure("server_certificate_chain_empty"))?;
+        let server_name = rustls_pki_types::ServerName::try_from(hostname.to_string())
+            .map_err(|_| server_identity_failure("invalid_server_name"))?;
+        self.verifier
+            .verify_server_cert(leaf, intermediates, &server_name, &[], now)
+            .map_err(map_server_cert_verification_error)?;
+        Ok(QuicServerIdentityVerification {
+            chain_len: certs.len(),
+            root_count: self.root_count,
+        })
+    }
+}
+
+#[cfg(feature = "tls")]
+fn map_server_cert_verification_error(err: rustls::Error) -> QuicTlsError {
+    let code = match err {
+        rustls::Error::InvalidCertificate(_) => "server_certificate_invalid",
+        rustls::Error::NoCertificatesPresented => "server_certificate_chain_empty",
+        rustls::Error::UnsupportedNameType => "server_certificate_unsupported_name",
+        rustls::Error::InvalidMessage(_) => "server_certificate_bad_encoding",
+        rustls::Error::General(_) => "server_certificate_general_failure",
+        _ => "server_certificate_rejected",
+    };
+    server_identity_failure(code)
 }
 
 /// Redaction-safe transcript hash used by provider proofs and errors.
@@ -1497,6 +1612,29 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    #[cfg(feature = "tls")]
+    use crate::tls::{Certificate, CertificateChain, RootCertStore};
+    #[cfg(feature = "tls")]
+    use std::time::Duration;
+
+    #[cfg(feature = "tls")]
+    const TEST_CERT_PEM: &[u8] = include_bytes!("../../../tests/fixtures/tls/server.crt");
+
+    #[cfg(feature = "tls")]
+    fn fixed_cert_validity_time() -> rustls_pki_types::UnixTime {
+        rustls_pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1_780_000_000))
+    }
+
+    #[cfg(feature = "tls")]
+    fn trusted_localhost_verifier() -> (QuicServerIdentityVerifier, CertificateChain) {
+        let certs = Certificate::from_pem(TEST_CERT_PEM).expect("fixture cert parses");
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(&certs[0])
+            .expect("fixture cert can be a test trust anchor");
+        let verifier = QuicServerIdentityVerifier::from_root_store(roots).expect("build verifier");
+        (verifier, CertificateChain::from(certs))
+    }
 
     #[test]
     fn level_transitions_are_monotonic() {
@@ -1523,6 +1661,49 @@ mod tests {
         m.on_1rtt_keys_available().expect("1rtt");
         let err = m.request_local_key_update().expect_err("must fail");
         assert_eq!(err, QuicTlsError::HandshakeNotConfirmed);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn server_identity_verifier_rejects_empty_root_store() {
+        let err = QuicServerIdentityVerifier::from_root_store(RootCertStore::empty())
+            .expect_err("empty roots must fail closed");
+        assert_eq!(err.code(), "server_identity_root_store_empty");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn server_identity_verifier_rejects_empty_presented_chain() {
+        let (verifier, _) = trusted_localhost_verifier();
+        let err = verifier
+            .verify_server_chain(
+                "localhost",
+                CertificateChain::new(),
+                fixed_cert_validity_time(),
+            )
+            .expect_err("empty peer chain must fail closed");
+        assert_eq!(err.code(), "server_certificate_chain_empty");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn server_identity_verifier_rejects_wrong_hostname() {
+        let (verifier, chain) = trusted_localhost_verifier();
+        let err = verifier
+            .verify_server_chain("not-localhost.example", chain, fixed_cert_validity_time())
+            .expect_err("wrong hostname must fail closed");
+        assert!(err.code().starts_with("server_certificate_"));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn server_identity_verifier_accepts_trusted_localhost_chain() {
+        let (verifier, chain) = trusted_localhost_verifier();
+        let receipt = verifier
+            .verify_server_chain("localhost", chain, fixed_cert_validity_time())
+            .expect("trusted localhost chain verifies");
+        assert_eq!(receipt.chain_len, 1);
+        assert_eq!(receipt.root_count, 1);
     }
 
     #[test]
