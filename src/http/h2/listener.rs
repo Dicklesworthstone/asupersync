@@ -1253,6 +1253,7 @@ async fn serve_h2_connection<F, Fut, R>(
     request_timeout: Option<Duration>,
     request_timeout_header_cap: Option<Duration>,
     request_drain_grace: Duration,
+    max_requests_per_connection: Option<u64>,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -1280,6 +1281,10 @@ where
     let mut finalize_at: Option<Time> = None;
     let mut response_guards: HashMap<u32, InFlightRequestGuard> = HashMap::new();
     let mut associated_pushes: HashMap<u32, Vec<u32>> = HashMap::new();
+    // br-asupersync-mfqfst L4: count requests dispatched to the handler on
+    // this connection so it can be recycled once the configured budget is
+    // reached (see the recycle check at the end of the loop body).
+    let mut requests_dispatched: u64 = 0;
 
     loop {
         pump_writes(&mut conn, &mut framed).await?;
@@ -1397,6 +1402,7 @@ where
                             request_timeout_header_cap,
                             request_drain_grace,
                         );
+                        requests_dispatched = requests_dispatched.saturating_add(1);
                     } else if end_stream {
                         dispatch_h2_request(
                             &mut conn,
@@ -1414,6 +1420,7 @@ where
                             request_timeout_header_cap,
                             request_drain_grace,
                         );
+                        requests_dispatched = requests_dispatched.saturating_add(1);
                     } else {
                         pending_requests.insert(stream_id, (headers, Vec::new()));
                     }
@@ -1454,6 +1461,7 @@ where
                                     request_timeout_header_cap,
                                     request_drain_grace,
                                 );
+                                requests_dispatched = requests_dispatched.saturating_add(1);
                             }
                         }
                     }
@@ -1475,6 +1483,22 @@ where
                 );
                 record_promised_pushes(&mut associated_pushes, &outcomes);
             }
+        }
+
+        // br-asupersync-mfqfst L4: recycle the connection once it has served
+        // its configured request budget (h1 parity with
+        // `Http1Config::max_requests_per_connection`). A graceful shutdown
+        // stops admitting new streams while letting the in-flight streams —
+        // including the one that hit the limit — run to completion; the
+        // existing two-stage GOAWAY + drain machinery then closes the
+        // transport. No-op once any GOAWAY is already on the wire (e.g. a
+        // server-initiated drain), so it never double-arms the shutdown.
+        if !conn.goaway_sent()
+            && max_requests_per_connection.is_some_and(|max| requests_dispatched >= max)
+        {
+            conn.begin_graceful_shutdown(crate::bytes::Bytes::from_static(
+                b"max requests per connection reached",
+            ));
         }
     }
 }
@@ -1519,6 +1543,15 @@ pub struct Http2ListenerConfig {
     /// deadline or a connection cancel — the handler gets this long to observe
     /// the cancel and finish cleanly before the drop backstop (h1 parity).
     pub request_drain_grace: Duration,
+    /// br-asupersync-mfqfst L4: maximum number of requests served on a single
+    /// connection before the server recycles it with a graceful GOAWAY (h1
+    /// parity with `Http1Config::max_requests_per_connection`). `None` means
+    /// unlimited. Bounds per-connection resource accumulation and lets a load
+    /// balancer rebalance long-lived multiplexed connections. When the limit
+    /// is reached the server begins a graceful shutdown: new streams are
+    /// refused (after the two-stage GOAWAY ratchets down) while the in-flight
+    /// streams — including the one that hit the limit — run to completion.
+    pub max_requests_per_connection: Option<u64>,
     /// Time source for shutdown bookkeeping and drain supervision.
     pub time_getter: fn() -> Time,
 }
@@ -1542,6 +1575,7 @@ impl Default for Http2ListenerConfig {
             request_timeout: None,
             request_timeout_header_cap: None,
             request_drain_grace: Duration::from_millis(500),
+            max_requests_per_connection: Some(1000),
             time_getter: default_h2_listener_time_getter,
         }
     }
@@ -1620,6 +1654,16 @@ impl Http2ListenerConfig {
     #[must_use]
     pub fn request_drain_grace(mut self, grace: Duration) -> Self {
         self.request_drain_grace = grace;
+        self
+    }
+
+    /// Set the maximum number of requests served per connection before the
+    /// server recycles it with a graceful GOAWAY (br-asupersync-mfqfst L4).
+    /// `None` is unlimited (h1 parity with
+    /// `Http1Config::max_requests_per_connection`).
+    #[must_use]
+    pub fn max_requests_per_connection(mut self, max: Option<u64>) -> Self {
+        self.max_requests_per_connection = max;
         self
     }
 
@@ -1823,6 +1867,7 @@ where
             let request_timeout = self.config.request_timeout;
             let request_timeout_header_cap = self.config.request_timeout_header_cap;
             let request_drain_grace = self.config.request_drain_grace;
+            let max_requests_per_connection = self.config.max_requests_per_connection;
             let spawn_result = runtime.try_spawn(async move {
                 let peer_addr = Some(addr);
                 if let Err(err) = serve_h2_connection(
@@ -1838,6 +1883,7 @@ where
                     request_timeout,
                     request_timeout_header_cap,
                     request_drain_grace,
+                    max_requests_per_connection,
                 )
                 .await
                 {
