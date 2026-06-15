@@ -77,6 +77,8 @@ pub enum QuicFrameType {
     ConnectionCloseApp = 0x1d,
     /// HANDSHAKE_DONE frame
     HandshakeDone = 0x1e,
+    /// DATAGRAM frames (0x30 without length, 0x31 with explicit length) — RFC 9221.
+    Datagram = 0x30,
 }
 
 impl QuicFrameType {
@@ -116,6 +118,7 @@ impl QuicFrameType {
             0x1c => Ok(QuicFrameType::ConnectionCloseQuic),
             0x1d => Ok(QuicFrameType::ConnectionCloseApp),
             0x1e => Ok(QuicFrameType::HandshakeDone),
+            0x30 | 0x31 => Ok(QuicFrameType::Datagram), // DATAGRAM frames (LEN bit)
             other => Err(QuicFrameError::UnknownFrameType(other)),
         }
     }
@@ -260,6 +263,12 @@ pub enum QuicFrame {
 
     /// HANDSHAKE_DONE frame (no payload)
     HandshakeDone,
+
+    /// DATAGRAM frame (RFC 9221) — unreliable application datagram.
+    Datagram {
+        /// Opaque datagram payload (e.g. a RaptorQ symbol).
+        data: Bytes,
+    },
 }
 
 /// ACK range in an ACK frame
@@ -551,6 +560,30 @@ impl QuicFrame {
                 QuicFrameType::HandshakeDone
                     .to_varint()
                     .encode_to_buf(buf)?;
+            }
+
+            QuicFrame::Datagram { data } => {
+                // Encode with the LEN bit set (type 0x31) so a DATAGRAM frame
+                // may be followed by other frames in the same packet (RFC 9221
+                // §4); a 0x30 frame would have to be the packet's last frame.
+                let frame_type = QuicFrameType::Datagram as u64 | 0x01;
+                match VarInt::new(frame_type) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid datagram frame type".to_string(),
+                        ));
+                    }
+                }
+                match VarInt::new(data.len() as u64) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid datagram data length".to_string(),
+                        ));
+                    }
+                }
+                buf.put_slice(data);
             }
         }
 
@@ -853,6 +886,25 @@ impl QuicFrame {
                 Ok(Some(QuicFrame::HandshakeDone))
             }
 
+            0x30 | 0x31 => {
+                // DATAGRAM (RFC 9221). The low bit (LEN) selects whether an
+                // explicit length prefix is present (0x31) or the payload runs
+                // to the end of the packet (0x30).
+                let has_len = (frame_type_value & 0x01) != 0;
+                let data = if has_len {
+                    let length =
+                        VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                    if buf.remaining() < length.value() as usize {
+                        return Err(QuicFrameError::UnexpectedEof);
+                    }
+                    copy_to_bytes_from_buf(buf, length.value() as usize)
+                } else {
+                    // Rest of packet.
+                    copy_to_bytes_from_buf(buf, buf.remaining())
+                };
+                Ok(Some(QuicFrame::Datagram { data }))
+            }
+
             other => Err(QuicFrameError::UnknownFrameType(other)),
         }
     }
@@ -1021,5 +1073,79 @@ mod tests {
         assert!(QuicFrameType::is_stream_frame(0x08));
         assert!(QuicFrameType::is_stream_frame(0x0f));
         assert!(!QuicFrameType::is_stream_frame(0x10));
+        // Both DATAGRAM type bytes (LEN bit unset/set) map to the same kind.
+        assert_eq!(
+            QuicFrameType::from_varint(VarInt::new(0x30).unwrap()).unwrap(),
+            QuicFrameType::Datagram
+        );
+        assert_eq!(
+            QuicFrameType::from_varint(VarInt::new(0x31).unwrap()).unwrap(),
+            QuicFrameType::Datagram
+        );
+    }
+
+    #[test]
+    fn test_datagram_frame_round_trip() {
+        let frame = QuicFrame::Datagram {
+            data: Bytes::from_static(b"raptorq-symbol-payload"),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        // Encoded with the LEN bit set (type 0x31) so it is self-delimiting.
+        assert_eq!(buf.as_ref()[0], 0x31);
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_datagram_frame_empty_payload_round_trips() {
+        let frame = QuicFrame::Datagram { data: Bytes::new() };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_datagram_frame_no_length_consumes_rest_of_packet() {
+        // A 0x30 DATAGRAM (no LEN bit) carries its payload to the end of the
+        // packet; decode must surface exactly the remaining bytes.
+        let mut buf = BytesMut::new();
+        VarInt::new(0x30).unwrap().encode_to_buf(&mut buf).unwrap();
+        buf.put_slice(b"tail-bytes");
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(
+            decoded,
+            QuicFrame::Datagram {
+                data: Bytes::from_static(b"tail-bytes"),
+            }
+        );
+    }
+
+    #[test]
+    fn test_datagram_length_prefixed_leaves_trailing_frame() {
+        // A 0x31 DATAGRAM is self-delimiting: a trailing PING must still decode.
+        let datagram = QuicFrame::Datagram {
+            data: Bytes::from_static(b"symbol"),
+        };
+        let mut buf = BytesMut::new();
+        datagram.encode(&mut buf).unwrap();
+        QuicFrame::Ping.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        assert_eq!(
+            QuicFrame::decode(&mut decode_buf).unwrap().unwrap(),
+            datagram
+        );
+        assert_eq!(
+            QuicFrame::decode(&mut decode_buf).unwrap().unwrap(),
+            QuicFrame::Ping
+        );
     }
 }

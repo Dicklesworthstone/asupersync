@@ -145,6 +145,10 @@ impl PrioritizedFrame {
             // ACK frames - not retransmittable but important
             QuicFrame::Ack { .. } => (60, false, false),
 
+            // DATAGRAM frames (RFC 9221) are ack-eliciting but unreliable, so
+            // they are never retransmitted on loss (fountain-tolerant).
+            QuicFrame::Datagram { .. } => (70, false, true),
+
             // Low priority frames
             QuicFrame::Ping => (40, true, true),
             QuicFrame::Padding { .. } => (0, false, false),
@@ -198,6 +202,7 @@ impl PrioritizedFrame {
                 12 + reason_phrase.len() // Type + error + frame_type + length + phrase
             }
             QuicFrame::HandshakeDone => 1, // Just type
+            QuicFrame::Datagram { data } => 4 + data.len(), // Type + length + data
         }
     }
 

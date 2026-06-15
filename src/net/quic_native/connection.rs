@@ -7,7 +7,7 @@
 //!
 //! It intentionally stays runtime-agnostic and does not perform socket I/O.
 
-use crate::bytes::BytesMut;
+use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
 use crate::net::atp::protocol::varint::VarInt;
@@ -180,7 +180,18 @@ pub struct NativeQuicConnection {
     anti_amplification_bytes_received: u64,
     anti_amplification_bytes_sent: u64,
     pending_control_frames: VecDeque<QuicFrame>,
+    /// Bounded inbound queue of decoded DATAGRAM payloads awaiting the
+    /// application's `recv_datagram` (RFC 9221). Drop-oldest on overflow keeps
+    /// the queue fountain-tolerant: a stale unreliable symbol is expendable.
+    inbound_datagrams: VecDeque<Bytes>,
+    /// Total DATAGRAM frames accepted on receive (anti-amplification + metrics),
+    /// counted before any drop-oldest eviction so the figure reflects the wire.
+    datagrams_received: u64,
 }
+
+/// Maximum number of decoded inbound DATAGRAM payloads buffered before the
+/// oldest is dropped to bound memory under a fast producer / slow consumer.
+const MAX_INBOUND_DATAGRAMS: usize = 256;
 
 impl NativeQuicConnection {
     /// Construct a new connection machine.
@@ -209,6 +220,8 @@ impl NativeQuicConnection {
             anti_amplification_bytes_received: 0,
             anti_amplification_bytes_sent: 0,
             pending_control_frames: VecDeque::new(),
+            inbound_datagrams: VecDeque::new(),
+            datagrams_received: 0,
         }
     }
 
@@ -960,11 +973,48 @@ impl NativeQuicConnection {
                 }
                 Ok(())
             }
+            QuicFrame::Datagram { data } => {
+                // Surface the unreliable datagram payload to the application via
+                // the bounded inbound queue. Count every accepted frame first,
+                // then drop the oldest payload if the queue is full so a slow
+                // consumer can never make the connection unbounded (RFC 9221).
+                self.datagrams_received = self.datagrams_received.saturating_add(1);
+                if self.inbound_datagrams.len() >= MAX_INBOUND_DATAGRAMS {
+                    self.inbound_datagrams.pop_front();
+                }
+                self.inbound_datagrams.push_back(data.clone());
+                Ok(())
+            }
             QuicFrame::MaxStreams { .. }
             | QuicFrame::DataBlocked { .. }
             | QuicFrame::StreamDataBlocked { .. }
             | QuicFrame::StreamsBlocked { .. } => Ok(()),
         }
+    }
+
+    /// Receive the next decoded DATAGRAM payload, if one is buffered.
+    ///
+    /// This is the application-facing receive surface for RFC 9221 datagrams:
+    /// frames decoded by [`Self::process_packet_payload`] are enqueued in a
+    /// bounded, fountain-tolerant queue and handed out here in arrival order.
+    /// Returns `None` when no datagram is currently available; it does not
+    /// block, so a higher-level `poll_recv_datagram` can layer a waker on top.
+    pub fn recv_datagram(&mut self) -> Option<Bytes> {
+        self.inbound_datagrams.pop_front()
+    }
+
+    /// Number of inbound DATAGRAM payloads currently buffered for the
+    /// application.
+    #[must_use]
+    pub fn pending_datagram_count(&self) -> usize {
+        self.inbound_datagrams.len()
+    }
+
+    /// Total DATAGRAM frames accepted on receive, counted at the wire before any
+    /// drop-oldest eviction (anti-amplification accounting + metrics).
+    #[must_use]
+    pub fn datagrams_received(&self) -> u64 {
+        self.datagrams_received
     }
 
     /// Drain queued control frames for packet assembly.
