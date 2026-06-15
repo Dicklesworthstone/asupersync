@@ -684,6 +684,17 @@ impl<T> StreamingRequest<T> {
     /// - `Poll::Ready(Err(_))` when the stream is closed — the producer should
     ///   stop rather than spin.
     pub fn poll_reserve(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        // A call-scoped cancel must stop the producer too, not just the
+        // consumer: a producer parked at a full window when the peer cancels
+        // would otherwise hang on a window that never reopens. Fail closed with
+        // the call's terminal status so one cancel drives BOTH halves (AC1).
+        if let Some(status) = self
+            .call_cancellation
+            .as_ref()
+            .and_then(CallCancellation::status)
+        {
+            return Poll::Ready(Err(status));
+        }
         if self.closed {
             return Poll::Ready(Err(Status::failed_precondition(
                 "cannot reserve capacity on a closed streaming request",
@@ -693,6 +704,11 @@ impl<T> StreamingRequest<T> {
             return Poll::Ready(Ok(()));
         }
         self.capacity_waiter = Some(cx.waker().clone());
+        // Also park on the call cancellation so a cancel (not just a consumer
+        // drain) unparks the producer.
+        if let Some(call_cancellation) = &self.call_cancellation {
+            call_cancellation.register(cx.waker());
+        }
         Poll::Pending
     }
 

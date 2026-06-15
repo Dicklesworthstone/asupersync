@@ -44,7 +44,7 @@
 //!       `poll_reserve` is immediately `Ready(Ok)` and registers no waker.
 
 use asupersync::grpc::status::Code;
-use asupersync::grpc::streaming::{Streaming, StreamingRequest};
+use asupersync::grpc::streaming::{CallCancellation, Streaming, StreamingRequest};
 use asupersync::grpc::{MAX_STREAM_BUFFERED, ResponseStream};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -328,4 +328,46 @@ fn response_stream_memory_ceiling_holds_under_reserve_gated_production() {
         let _ = Pin::new(&mut stream).poll_next(&mut ccx);
     }
     assert_eq!(max_seen, CAP);
+}
+
+// ---------------------------------------------------------------------------
+// AC1 × AC2 composition: one call-scoped cancel drives the producer half too
+// ---------------------------------------------------------------------------
+
+#[test]
+fn streaming_request_parked_producer_fails_closed_on_call_scoped_cancel() {
+    // The AC1 `CallCancellation` couples both halves of a call. A producer
+    // parked on `poll_reserve` at a full window must observe that SAME cancel
+    // (not just the consumer's `poll_next`), so one cancel drives the whole
+    // call: the producer fails closed instead of hanging on a window that will
+    // never reopen.
+    let cc = CallCancellation::new();
+    let mut stream = StreamingRequest::<u32>::open_in_call(cc.clone());
+    for i in 0..(CAP as u32) {
+        stream.push(i).expect("fill to window");
+    }
+
+    let producer = CountingWaker::new();
+    let pw = Waker::from(producer.clone());
+    let mut pcx = Context::from_waker(&pw);
+    assert!(matches!(stream.poll_reserve(&mut pcx), Poll::Pending));
+    assert_eq!(producer.count(), 0);
+
+    // One call-scoped cancel — the same op a client RST_STREAM / deadline /
+    // server-Cx cancel drives — must unpark the parked producer.
+    cc.cancel(asupersync::grpc::status::Status::cancelled(
+        "peer RST_STREAM",
+    ));
+    assert!(
+        producer.count() >= 1,
+        "call-scoped cancel must wake the parked producer",
+    );
+    match stream.poll_reserve(&mut pcx) {
+        Poll::Ready(Err(status)) => assert_eq!(
+            status.code(),
+            Code::Cancelled,
+            "producer must fail closed with the call's terminal status",
+        ),
+        other => panic!("expected Ready(Err(Cancelled)), got {other:?}"),
+    }
 }
