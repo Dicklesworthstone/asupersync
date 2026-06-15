@@ -59,6 +59,15 @@ pub enum NativeQuicConnectionError {
         /// Maximum bytes permitted before validation.
         limit: u64,
     },
+    /// DATAGRAM payload would encode to a frame larger than the peer's limit.
+    DatagramTooLarge {
+        /// Application payload bytes requested by the caller.
+        payload_len: usize,
+        /// Encoded DATAGRAM frame bytes including type and length fields.
+        encoded_len: usize,
+        /// Current maximum DATAGRAM frame size.
+        max_frame_size: usize,
+    },
     /// Invalid operation for current connection state.
     InvalidState(&'static str),
 }
@@ -88,6 +97,14 @@ impl fmt::Display for NativeQuicConnectionError {
             } => write!(
                 f,
                 "anti-amplification limit exceeded: requested={requested}, sent={bytes_sent}, received={bytes_received}, limit={limit}"
+            ),
+            Self::DatagramTooLarge {
+                payload_len,
+                encoded_len,
+                max_frame_size,
+            } => write!(
+                f,
+                "datagram frame too large: payload_len={payload_len}, encoded_len={encoded_len}, max_frame_size={max_frame_size}"
             ),
             Self::InvalidState(msg) => write!(f, "invalid native quic connection state: {msg}"),
         }
@@ -199,6 +216,8 @@ pub struct NativeQuicConnection {
     outbound_datagrams: VecDeque<Bytes>,
     /// Total DATAGRAM frames emitted onto the wire by `generate_frames`.
     datagrams_sent: u64,
+    /// Total outbound DATAGRAM payloads evicted by the bounded drop-oldest queue.
+    datagrams_dropped_on_send: u64,
 }
 
 /// Maximum number of decoded inbound DATAGRAM payloads buffered before the
@@ -206,7 +225,7 @@ pub struct NativeQuicConnection {
 const MAX_INBOUND_DATAGRAMS: usize = 256;
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
-/// applies backpressure (rejects the enqueue) instead of growing unbounded.
+/// drops the oldest queued payload to keep the unreliable send path bounded.
 const MAX_OUTBOUND_DATAGRAMS: usize = 256;
 
 /// Largest DATAGRAM *frame* (RFC 9221 `max_datagram_frame_size` semantics) this
@@ -257,6 +276,7 @@ impl NativeQuicConnection {
             inbound_datagram_waker: None,
             outbound_datagrams: VecDeque::new(),
             datagrams_sent: 0,
+            datagrams_dropped_on_send: 0,
         }
     }
 
@@ -1095,13 +1115,14 @@ impl NativeQuicConnection {
                 // then drop the oldest payload if the queue is full so a slow
                 // consumer can never make the connection unbounded (RFC 9221).
                 self.datagrams_received = self.datagrams_received.saturating_add(1);
-                let mut dropped_oldest = false;
-                if self.inbound_datagrams.len() >= MAX_INBOUND_DATAGRAMS {
+                let dropped_oldest = if self.inbound_datagrams.len() >= MAX_INBOUND_DATAGRAMS {
                     self.inbound_datagrams.pop_front();
                     self.datagrams_dropped_on_receive =
                         self.datagrams_dropped_on_receive.saturating_add(1);
-                    dropped_oldest = true;
-                }
+                    true
+                } else {
+                    false
+                };
                 self.inbound_datagrams.push_back(data.clone());
                 quictrace!(
                     "event=datagram_recv size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} dropped_oldest={} total_received={} total_dropped={}",
@@ -1188,35 +1209,108 @@ impl NativeQuicConnection {
     /// Queue an unreliable application datagram (RFC 9221) for transmission.
     ///
     /// The payload is later drained by [`Self::generate_frames`] into a
-    /// `QuicFrame::Datagram` carried in a 1-RTT packet. Unlike the loss-tolerant
-    /// receive queue, the send side never silently drops: an enqueue that would
-    /// exceed the bounded outbound queue applies backpressure by failing.
+    /// `QuicFrame::Datagram` carried in a 1-RTT packet. The queue is bounded and
+    /// fountain-tolerant: on overflow, the oldest not-yet-emitted payload is
+    /// dropped so a fast producer cannot grow memory without bound.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeQuicConnectionError::InvalidState`] if the encoded frame
-    /// would exceed the maximum DATAGRAM frame size, or if the outbound queue is
-    /// full.
-    pub fn send_datagram(&mut self, payload: Bytes) -> Result<(), NativeQuicConnectionError> {
+    /// Returns [`NativeQuicConnectionError::DatagramTooLarge`] if the encoded
+    /// frame would exceed the maximum DATAGRAM frame size, or
+    /// [`NativeQuicConnectionError::Cancelled`] if `cx` is cancelled before the
+    /// enqueue.
+    pub fn send_datagram(
+        &mut self,
+        cx: &Cx,
+        payload: Bytes,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+
         // RFC 9221: a sender MUST NOT send a DATAGRAM frame larger than the
         // peer-advertised max_datagram_frame_size. Bound the encoded frame so a
         // single datagram always fits one 1-RTT packet.
+        let payload_len = payload.len();
         let frame = QuicFrame::Datagram {
             data: payload.clone(),
         };
         let mut probe = BytesMut::new();
         frame.encode(&mut probe)?;
         if probe.len() > MAX_DATAGRAM_FRAME_SIZE {
-            return Err(NativeQuicConnectionError::InvalidState(
-                "datagram frame exceeds max_datagram_frame_size",
-            ));
+            let encoded_len_s = probe.len().to_string();
+            let max_frame_size_s = MAX_DATAGRAM_FRAME_SIZE.to_string();
+            let payload_len_s = payload_len.to_string();
+            quic_trace(
+                cx,
+                "ATP_QUIC_TRACE datagram_send_drop",
+                &[
+                    ("reason", "too_large"),
+                    ("payload_len", payload_len_s.as_str()),
+                    ("encoded_len", encoded_len_s.as_str()),
+                    ("max_frame_size", max_frame_size_s.as_str()),
+                    ("pn", "none"),
+                ],
+            );
+            quictrace!(
+                "event=datagram_send_drop reason=too_large size={} encoded_len={} max_frame_size={} pn=none",
+                payload_len,
+                probe.len(),
+                MAX_DATAGRAM_FRAME_SIZE
+            );
+            return Err(NativeQuicConnectionError::DatagramTooLarge {
+                payload_len,
+                encoded_len: probe.len(),
+                max_frame_size: MAX_DATAGRAM_FRAME_SIZE,
+            });
         }
+
+        let mut dropped_oldest = false;
         if self.outbound_datagrams.len() >= MAX_OUTBOUND_DATAGRAMS {
-            return Err(NativeQuicConnectionError::InvalidState(
-                "outbound datagram queue is full",
-            ));
+            if let Some(dropped) = self.outbound_datagrams.pop_front() {
+                self.datagrams_dropped_on_send = self.datagrams_dropped_on_send.saturating_add(1);
+                dropped_oldest = true;
+                let dropped_len_s = dropped.len().to_string();
+                let dropped_total_s = self.datagrams_dropped_on_send.to_string();
+                quic_trace(
+                    cx,
+                    "ATP_QUIC_TRACE datagram_send_drop",
+                    &[
+                        ("reason", "queue_full_drop_oldest"),
+                        ("payload_len", dropped_len_s.as_str()),
+                        ("total_dropped", dropped_total_s.as_str()),
+                        ("pn", "pending"),
+                    ],
+                );
+                quictrace!(
+                    "event=datagram_send_drop reason=queue_full_drop_oldest size={} total_dropped={} pn=pending",
+                    dropped.len(),
+                    self.datagrams_dropped_on_send
+                );
+            }
         }
         self.outbound_datagrams.push_back(payload);
+        let queue_len_s = self.outbound_datagrams.len().to_string();
+        let dropped_s = dropped_oldest.to_string();
+        let dropped_total_s = self.datagrams_dropped_on_send.to_string();
+        let payload_len_s = payload_len.to_string();
+        quic_trace(
+            cx,
+            "ATP_QUIC_TRACE datagram_send_enqueue",
+            &[
+                ("reason", "queued"),
+                ("payload_len", payload_len_s.as_str()),
+                ("queue_len", queue_len_s.as_str()),
+                ("dropped_oldest", dropped_s.as_str()),
+                ("total_dropped", dropped_total_s.as_str()),
+                ("pn", "pending"),
+            ],
+        );
+        quictrace!(
+            "event=datagram_send_enqueue reason=queued size={} queue_len={} dropped_oldest={} total_dropped={} pn=pending",
+            payload_len,
+            self.outbound_datagrams.len(),
+            dropped_oldest,
+            self.datagrams_dropped_on_send
+        );
         Ok(())
     }
 
@@ -1230,6 +1324,12 @@ impl NativeQuicConnection {
     #[must_use]
     pub fn datagrams_sent(&self) -> u64 {
         self.datagrams_sent
+    }
+
+    /// Total outbound DATAGRAM payloads dropped by the bounded send queue.
+    #[must_use]
+    pub fn datagrams_dropped_on_send(&self) -> u64 {
+        self.datagrams_dropped_on_send
     }
 
     /// Drain queued control frames (and, in 1-RTT, queued DATAGRAM payloads)
@@ -1278,6 +1378,28 @@ impl NativeQuicConnection {
                 }
                 used = used.saturating_add(frame_len);
                 self.datagrams_sent = self.datagrams_sent.saturating_add(1);
+                let size_s = frame_len.to_string();
+                let total_sent_s = self.datagrams_sent.to_string();
+                let queue_len_s = self.outbound_datagrams.len().to_string();
+                let pn_hint_s = self.next_packet_numbers[2].to_string();
+                quic_trace(
+                    cx,
+                    "ATP_QUIC_TRACE datagram_send_emit",
+                    &[
+                        ("reason", "emitted"),
+                        ("encoded_len", size_s.as_str()),
+                        ("queue_len", queue_len_s.as_str()),
+                        ("total_sent", total_sent_s.as_str()),
+                        ("pn", pn_hint_s.as_str()),
+                    ],
+                );
+                quictrace!(
+                    "event=datagram_send_emit reason=emitted encoded_len={} queue_len={} total_sent={} pn={}",
+                    frame_len,
+                    self.outbound_datagrams.len(),
+                    self.datagrams_sent,
+                    self.next_packet_numbers[2]
+                );
                 frames.push(frame);
                 if used >= max_frame_bytes {
                     break;
@@ -2162,6 +2284,19 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "invalid native quic connection state: test message"
+        );
+    }
+
+    #[test]
+    fn display_datagram_too_large() {
+        let err = NativeQuicConnectionError::DatagramTooLarge {
+            payload_len: 4096,
+            encoded_len: 4099,
+            max_frame_size: 1200,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "datagram frame too large: payload_len=4096, encoded_len=4099, max_frame_size=1200"
         );
     }
 

@@ -52,7 +52,7 @@ fn datagrams_sent_are_recovered_byte_identical_on_receive() {
         .map(|i| Bytes::from(vec![i; 16 + usize::from(i)]))
         .collect();
     for p in &payloads {
-        tx.send_datagram(p.clone()).expect("enqueue datagram");
+        tx.send_datagram(&cx, p.clone()).expect("enqueue datagram");
     }
 
     let packet = assemble_app_packet(&mut tx, &cx, 100_000);
@@ -75,11 +75,17 @@ fn datagram_delivery_is_independent_of_packetization_metamorphic() {
     let mut tx_one = fresh_connection();
     let mut rx_one = fresh_connection();
     for p in &payloads {
-        tx_one.send_datagram(p.clone()).expect("enqueue");
+        tx_one.send_datagram(&cx, p.clone()).expect("enqueue");
     }
     let single_packet = assemble_app_packet(&mut tx_one, &cx, 100_000);
     rx_one
-        .process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 0, &single_packet, 0)
+        .process_packet_payload(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            0,
+            &single_packet,
+            0,
+        )
         .expect("receive single packet");
     let single = drain(&mut rx_one);
 
@@ -87,7 +93,7 @@ fn datagram_delivery_is_independent_of_packetization_metamorphic() {
     let mut tx_many = fresh_connection();
     let mut rx_many = fresh_connection();
     for p in &payloads {
-        tx_many.send_datagram(p.clone()).expect("enqueue");
+        tx_many.send_datagram(&cx, p.clone()).expect("enqueue");
     }
     let mut packet_number = 0u64;
     loop {

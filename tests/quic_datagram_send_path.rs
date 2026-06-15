@@ -12,8 +12,8 @@
 //!   Initial/Handshake;
 //! - a small per-packet byte budget emits a prefix and leaves the remainder
 //!   queued (no datagrams dropped on the floor), draining FIFO on the next call;
-//! - an over-sized datagram is rejected, and the bounded outbound queue applies
-//!   backpressure (the send side never silently grows unbounded).
+//! - an over-sized datagram is rejected with a typed error, and the bounded
+//!   outbound queue drops oldest with accounting rather than growing unbounded.
 //!
 //! Scope: the queue→frame generation half of A1 on committed `HEAD` plus this
 //! slice. The packet protection (A4) and UDP endpoint hand-off remain open.
@@ -21,6 +21,7 @@
 #![allow(missing_docs)]
 
 use asupersync::bytes::Bytes;
+use asupersync::bytes::BytesMut;
 use asupersync::cx::Cx;
 use asupersync::net::atp::protocol::quic_frames::QuicFrame;
 use asupersync::net::quic_native::{
@@ -53,7 +54,8 @@ fn queued_datagrams_emit_as_frames_in_fifo_order() {
         Bytes::from_static(b"symbol-2"),
     ];
     for p in &payloads {
-        conn.send_datagram(p.clone()).expect("enqueue datagram");
+        conn.send_datagram(&cx, p.clone())
+            .expect("enqueue datagram");
     }
     assert_eq!(conn.pending_outbound_datagram_count(), 3);
     assert_eq!(conn.datagrams_sent(), 0);
@@ -79,8 +81,10 @@ fn datagrams_only_emitted_in_application_data_space() {
     let cx = Cx::for_testing();
     let mut conn = fresh_connection();
 
-    conn.send_datagram(Bytes::from_static(b"a")).expect("enqueue");
-    conn.send_datagram(Bytes::from_static(b"b")).expect("enqueue");
+    conn.send_datagram(&cx, Bytes::from_static(b"a"))
+        .expect("enqueue");
+    conn.send_datagram(&cx, Bytes::from_static(b"b"))
+        .expect("enqueue");
 
     // Initial and Handshake spaces must never carry DATAGRAM frames.
     let initial = conn
@@ -111,7 +115,7 @@ fn small_budget_emits_prefix_and_leaves_remainder_queued() {
     // Four ~100-byte datagrams; each encoded frame is ~103 bytes.
     let payloads: Vec<Bytes> = (0u8..4).map(|i| Bytes::from(vec![i; 100])).collect();
     for p in &payloads {
-        conn.send_datagram(p.clone()).expect("enqueue");
+        conn.send_datagram(&cx, p.clone()).expect("enqueue");
     }
 
     // A 250-byte budget fits two frames (~206), not three (~309).
@@ -135,35 +139,77 @@ fn small_budget_emits_prefix_and_leaves_remainder_queued() {
 }
 
 #[test]
-fn oversized_datagram_rejected_and_full_queue_backpressures() {
+fn oversized_datagram_rejected_and_full_queue_drops_oldest() {
+    let cx = Cx::for_testing();
     let mut conn = fresh_connection();
 
     // A payload whose encoded frame exceeds the max DATAGRAM frame size is
     // rejected, and nothing is enqueued.
     let err = conn
-        .send_datagram(Bytes::from(vec![0u8; 4096]))
+        .send_datagram(&cx, Bytes::from(vec![0u8; 4096]))
         .expect_err("oversized datagram must be rejected");
-    assert!(matches!(err, NativeQuicConnectionError::InvalidState(_)));
+    assert!(matches!(
+        err,
+        NativeQuicConnectionError::DatagramTooLarge {
+            payload_len: 4096,
+            max_frame_size: 1200,
+            ..
+        }
+    ));
     assert_eq!(conn.pending_outbound_datagram_count(), 0);
 
-    // The bounded outbound queue applies backpressure rather than growing
-    // unbounded: small enqueues succeed up to the cap, then fail closed. We do
-    // not hardcode the cap — only that backpressure engages and never drops.
-    let mut accepted = 0usize;
-    let mut backpressured = false;
-    for i in 0u32..10_000 {
-        match conn.send_datagram(Bytes::from(i.to_be_bytes().to_vec())) {
-            Ok(()) => accepted += 1,
-            Err(NativeQuicConnectionError::InvalidState(_)) => {
-                backpressured = true;
-                break;
-            }
-            Err(other) => panic!("unexpected send error: {other:?}"),
-        }
+    // The bounded outbound queue is loss-tolerant: once full, each new symbol
+    // evicts the oldest queued symbol and records the drop.
+    for i in 0u32..300 {
+        conn.send_datagram(&cx, Bytes::from(i.to_be_bytes().to_vec()))
+            .expect("small datagram enqueue must stay infallible");
     }
-    assert!(backpressured, "outbound queue must apply backpressure when full");
-    assert!(accepted > 0);
-    // Every accepted datagram is still queued — backpressure never drops.
-    assert_eq!(conn.pending_outbound_datagram_count(), accepted);
+    assert_eq!(conn.pending_outbound_datagram_count(), 256);
+    assert_eq!(conn.datagrams_dropped_on_send(), 44);
     assert_eq!(conn.datagrams_sent(), 0);
+
+    let frames = conn
+        .generate_frames(&cx, PacketNumberSpace::ApplicationData, 100_000)
+        .expect("drain queued datagrams");
+    let payloads = datagram_payloads(&frames);
+    assert_eq!(payloads.len(), 256);
+    assert_eq!(payloads[0], Bytes::from(44u32.to_be_bytes().to_vec()));
+    assert_eq!(payloads[255], Bytes::from(299u32.to_be_bytes().to_vec()));
+}
+
+#[test]
+fn cancelled_cx_rejects_datagram_without_enqueueing() {
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+    let mut conn = fresh_connection();
+
+    let err = conn
+        .send_datagram(&cx, Bytes::from_static(b"cancelled"))
+        .expect_err("cancelled cx must reject enqueue");
+
+    assert_eq!(err, NativeQuicConnectionError::Cancelled);
+    assert_eq!(conn.pending_outbound_datagram_count(), 0);
+    assert_eq!(conn.datagrams_dropped_on_send(), 0);
+}
+
+#[test]
+fn datagram_coalesces_with_pending_ack_frame() {
+    let cx = Cx::for_testing();
+    let mut conn = fresh_connection();
+    let mut inbound = BytesMut::new();
+    QuicFrame::Ping.encode(&mut inbound).expect("encode ping");
+
+    conn.process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 41, &inbound, 0)
+        .expect("process ack-eliciting ping");
+    conn.send_datagram(&cx, Bytes::from_static(b"symbol"))
+        .expect("enqueue datagram");
+
+    let frames = conn
+        .generate_frames(&cx, PacketNumberSpace::ApplicationData, 100_000)
+        .expect("generate coalesced frames");
+
+    assert!(matches!(frames.first(), Some(QuicFrame::Ack { .. })));
+    assert!(
+        matches!(frames.get(1), Some(QuicFrame::Datagram { data }) if data.as_ref() == b"symbol")
+    );
 }
