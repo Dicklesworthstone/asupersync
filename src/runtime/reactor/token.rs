@@ -319,9 +319,7 @@ impl TokenSlab {
     /// is incremented to invalidate any remaining references to this slot.
     pub fn remove(&mut self, token: SlabToken) -> Option<Waker> {
         let index = token.index as usize;
-        let Some(entry) = self.entries.get_mut(index) else {
-            return None;
-        };
+        let entry = self.entries.get_mut(index)?;
 
         let current_generation = match entry {
             Entry::Occupied { generation, .. } if *generation == token.generation => *generation,
@@ -700,6 +698,45 @@ mod tests {
         let get_none = slab.get(token).is_none();
         crate::assert_with_log!(get_none, "invalid token get none", true, get_none);
         crate::test_complete!("slab_get_invalid_index");
+    }
+
+    #[test]
+    fn slab_remove_invalid_index_preserves_state() {
+        init_test("slab_remove_invalid_index_preserves_state");
+        let mut slab = TokenSlab::new();
+        let token = slab.insert(test_waker());
+        let invalid = SlabToken::new(token.index() + 10, token.generation());
+
+        let removed = slab.remove(invalid);
+        crate::assert_with_log!(
+            removed.is_none(),
+            "invalid-index remove returns none",
+            true,
+            removed.is_none()
+        );
+        crate::assert_with_log!(
+            slab.len() == 1,
+            "invalid-index remove keeps len",
+            1usize,
+            slab.len()
+        );
+        let contains = slab.contains(token);
+        crate::assert_with_log!(contains, "original token still valid", true, contains);
+
+        let removed_original = slab.remove(token);
+        crate::assert_with_log!(
+            removed_original.is_some(),
+            "original remove still succeeds",
+            true,
+            removed_original.is_some()
+        );
+        crate::assert_with_log!(
+            slab.is_empty(),
+            "slab empty after original remove",
+            true,
+            slab.is_empty()
+        );
+        crate::test_complete!("slab_remove_invalid_index_preserves_state");
     }
 
     #[test]
