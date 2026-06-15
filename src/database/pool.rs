@@ -450,6 +450,14 @@ pub struct DbPoolStats {
     /// Total disconnect failures.
     /// br-asupersync-sxhome: Tracks connection disconnect failure events.
     pub total_disconnect_failures: u64,
+    /// Acquirers currently parked in the async FIFO waiter queue.
+    ///
+    /// br-asupersync-eeexl1.5 AC3: callers blocked inside an async `acquire`
+    /// awaiting a released or freshly created connection, ordered by arrival.
+    /// Always `0` for the synchronous pool, which never parks waiters. A
+    /// sustained nonzero value signals the pool is saturated and acquisitions
+    /// are queueing FIFO (rather than failing fast with `DbPoolError::Full`).
+    pub pending_waiters: usize,
 }
 
 impl DbPoolStats {
@@ -687,6 +695,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 .total_retry_limits_exceeded
                 .load(Ordering::Relaxed),
             total_disconnect_failures: self.stats.total_disconnect_failures.load(Ordering::Relaxed),
+            pending_waiters: inner.waiters.len(),
         }
     }
 
@@ -2033,6 +2042,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 .total_retry_limits_exceeded
                 .load(Ordering::Relaxed),
             total_disconnect_failures: self.stats.total_disconnect_failures.load(Ordering::Relaxed),
+            pending_waiters: inner.waiters.len(),
         }
     }
 
@@ -3303,6 +3313,50 @@ mod tests {
         fn clear_authentication_state(&self, _conn: &mut Self::Connection) -> bool {
             self.clear_ok.load(Ordering::SeqCst)
         }
+    }
+
+    #[test]
+    fn db_pool_stats_reports_pending_async_waiter_depth() {
+        // br-asupersync-eeexl1.5 AC3: DbPoolStats surfaces the async FIFO
+        // waiter-queue depth so saturation / no-thundering-herd is observable.
+        init_test("db_pool_stats_reports_pending_async_waiter_depth");
+        let pool = DbPool::new(TestManager::new(), DbPoolConfig::default());
+
+        // Fresh pool: nothing parked in the FIFO waiter queue.
+        assert_eq!(pool.stats().pending_waiters, 0);
+        let baseline = pool.stats();
+
+        // Park three acquirers (white-box mirror of the saturated acquire path,
+        // which pushes one Arc<AsyncPoolWaiter> per blocked caller).
+        {
+            let mut inner = pool.inner.lock();
+            for _ in 0..3 {
+                inner.waiters.push_back(Arc::new(AsyncPoolWaiter::new()));
+            }
+        }
+        let saturated = pool.stats();
+        assert_eq!(
+            saturated.pending_waiters, 3,
+            "stats().pending_waiters must reflect the live waiter-queue length"
+        );
+        // Waiter accounting is independent of connection inventory.
+        assert_eq!(saturated.idle, baseline.idle, "idle unaffected by waiters");
+        assert_eq!(
+            saturated.active, baseline.active,
+            "active unaffected by waiters"
+        );
+        assert_eq!(
+            saturated.total, baseline.total,
+            "total unaffected by waiters"
+        );
+
+        // Waking the FIFO head (pop_front) decrements the reported depth — the
+        // field tracks the live queue, not a monotonic counter.
+        {
+            let mut inner = pool.inner.lock();
+            inner.waiters.pop_front();
+        }
+        assert_eq!(pool.stats().pending_waiters, 2);
     }
 
     #[test]
