@@ -33,6 +33,20 @@ fn bench_watch_receiver_count_hot_path(c: &mut Criterion) {
     });
 }
 
+fn bench_watch_send_liveness_gate(c: &mut Criterion) {
+    let (sender, _receiver) = watch::channel(0u64);
+    let mut value = 0u64;
+
+    c.bench_function("watch_send_liveness_gate", |b| {
+        b.iter(|| {
+            value = value.wrapping_add(1);
+            sender
+                .send(black_box(value))
+                .expect("watch sender remains live");
+        })
+    });
+}
+
 fn bench_atomic_ordering_comparison(c: &mut Criterion) {
     let counter = AtomicUsize::new(0);
 
@@ -63,11 +77,23 @@ fn bench_broadcast_telemetry_snapshot(c: &mut Criterion) {
     });
 }
 
+fn bench_watch_telemetry_snapshot(c: &mut Criterion) {
+    let (sender, _) = watch::channel(42u32);
+
+    c.bench_function("watch_telemetry_snapshot", |b| {
+        b.iter(|| {
+            black_box(sender.telemetry_snapshot(1));
+        })
+    });
+}
+
 criterion_group!(
     memory_ordering_benches,
     bench_broadcast_receiver_count_hot_path,
     bench_watch_receiver_count_hot_path,
+    bench_watch_send_liveness_gate,
     bench_atomic_ordering_comparison,
-    bench_broadcast_telemetry_snapshot
+    bench_broadcast_telemetry_snapshot,
+    bench_watch_telemetry_snapshot
 );
 criterion_main!(memory_ordering_benches);

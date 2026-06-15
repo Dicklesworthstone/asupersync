@@ -257,6 +257,18 @@ impl<T> Shared<T> {
 
 impl<T> Channel<T> {
     #[inline]
+    fn receiver_count_snapshot(&self) -> usize {
+        // Telemetry and public count APIs report an observational counter only;
+        // receiver cursor state remains protected by `inner`.
+        self.receiver_count.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn has_receivers_snapshot(&self) -> bool {
+        self.receiver_count_snapshot() != 0
+    }
+
+    #[inline]
     fn record_cancellation(&self) {
         self.inner.lock().record_cancellation();
     }
@@ -268,7 +280,7 @@ impl<T> Channel<T> {
         receiver_next_index: Option<u64>,
     ) -> BroadcastTelemetrySnapshot {
         let inner = self.inner.lock();
-        let receiver_count = self.receiver_count.load(Ordering::Relaxed);
+        let receiver_count = self.receiver_count_snapshot();
         let sender_count = self.sender_count.load(Ordering::Relaxed);
         let queued_messages = inner.buffer.len();
         let recv_waiter_count = inner.wakers.len();
@@ -341,7 +353,7 @@ impl<T: Clone> Sender<T> {
             return Err(SendError::Cancelled(()));
         }
 
-        if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
+        if !self.channel.has_receivers_snapshot() {
             return Err(SendError::Closed(()));
         }
 
@@ -382,10 +394,14 @@ impl<T: Clone> Sender<T> {
     }
 
     /// Returns the number of active receivers.
+    ///
+    /// This is an observational snapshot for telemetry and routing decisions,
+    /// not a synchronization primitive. Receiver cursor state remains protected
+    /// by the channel mutex.
     #[must_use]
     #[inline]
     pub fn receiver_count(&self) -> usize {
-        self.channel.receiver_count.load(Ordering::Relaxed)
+        self.channel.receiver_count_snapshot()
     }
 
     /// Returns the number of messages currently buffered in the channel.
@@ -2270,6 +2286,35 @@ mod tests {
         drop(rx1);
         drop(rx3);
         assert_eq!(tx.receiver_count(), 0);
+    }
+
+    #[test]
+    fn telemetry_receiver_count_tracks_active_receivers() {
+        init_test("broadcast_telemetry_receiver_count");
+        let (tx, rx1) = channel::<i32>(16);
+
+        let initial = tx.telemetry_snapshot(7);
+        assert_eq!(initial.receiver_count, 1);
+        assert!(!initial.closed);
+
+        let rx2 = tx.subscribe();
+        let rx3 = rx1.clone();
+
+        let with_subscribers = tx.telemetry_snapshot(7);
+        assert_eq!(with_subscribers.receiver_count, 3);
+        assert!(!with_subscribers.closed);
+
+        drop(rx2);
+        let after_drop = tx.telemetry_snapshot(7);
+        assert_eq!(after_drop.receiver_count, 2);
+        assert!(!after_drop.closed);
+
+        drop(rx1);
+        drop(rx3);
+        let closed = tx.telemetry_snapshot(7);
+        assert_eq!(closed.receiver_count, 0);
+        assert!(closed.closed);
+        crate::test_complete!("broadcast_telemetry_receiver_count");
     }
 
     #[test]

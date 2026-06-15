@@ -191,6 +191,18 @@ impl<T> WatchInner<T> {
         self.sender_dropped.load(Ordering::Acquire)
     }
 
+    #[inline]
+    fn receiver_count_snapshot(&self) -> usize {
+        // Telemetry and public count APIs report an observational counter only;
+        // value/version state remains protected by `value`.
+        self.receiver_count.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn has_receivers_snapshot(&self) -> bool {
+        self.receiver_count_snapshot() != 0
+    }
+
     fn current_version(&self) -> u64 {
         self.value.read().1
     }
@@ -237,7 +249,7 @@ impl<T> WatchInner<T> {
         receiver_seen_version: Option<u64>,
     ) -> WatchTelemetrySnapshot {
         let current_version = self.current_version();
-        let receiver_count = self.receiver_count.load(Ordering::Acquire);
+        let receiver_count = self.receiver_count_snapshot();
         let recv_waiter_count = self.recv_waiter_count();
         let lagged_receiver_count = self.lagged_receiver_count(current_version);
         let sender_dropped = self.is_sender_dropped();
@@ -436,7 +448,7 @@ impl<T> Sender<T> {
             old
         };
 
-        if self.inner.receiver_count.load(Ordering::Acquire) != 0 {
+        if self.inner.has_receivers_snapshot() {
             self.inner.wake_all_waiters();
         }
 
@@ -484,7 +496,7 @@ impl<T> Sender<T> {
             guard.1 = guard.1.wrapping_add(1);
         }
 
-        if self.inner.receiver_count.load(Ordering::Acquire) != 0 {
+        if self.inner.has_receivers_snapshot() {
             self.inner.wake_all_waiters();
         }
 
@@ -530,17 +542,21 @@ impl<T> Sender<T> {
     }
 
     /// Returns the number of active receivers (excluding sender).
+    ///
+    /// This is an observational snapshot for telemetry and routing decisions,
+    /// not a synchronization primitive. The send path keeps its own liveness
+    /// check before waking waiters.
     #[inline]
     #[must_use]
     pub fn receiver_count(&self) -> usize {
-        self.inner.receiver_count.load(Ordering::Relaxed)
+        self.inner.receiver_count_snapshot()
     }
 
     /// Returns true if all receivers have been dropped.
     #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.inner.receiver_count.load(Ordering::Acquire) == 0
+        !self.inner.has_receivers_snapshot()
     }
 
     /// Builds an opt-in redacted telemetry snapshot.
@@ -1148,6 +1164,64 @@ mod tests {
         let closed = tx.is_closed();
         crate::assert_with_log!(closed, "tx closed", true, closed);
         crate::test_complete!("receiver_count");
+    }
+
+    #[test]
+    fn telemetry_receiver_count_tracks_active_receivers() {
+        init_test("watch_telemetry_receiver_count");
+        let (tx, rx1) = channel::<i32>(0);
+
+        let initial = tx.telemetry_snapshot(11);
+        crate::assert_with_log!(
+            initial.receiver_count == 1,
+            "initial telemetry count",
+            1,
+            initial.receiver_count
+        );
+        crate::assert_with_log!(
+            !initial.closed,
+            "initial telemetry open",
+            false,
+            initial.closed
+        );
+
+        let rx2 = rx1.clone();
+        let rx3 = tx.subscribe();
+
+        let with_subscribers = tx.telemetry_snapshot(11);
+        crate::assert_with_log!(
+            with_subscribers.receiver_count == 3,
+            "telemetry count with subscribers",
+            3,
+            with_subscribers.receiver_count
+        );
+        crate::assert_with_log!(
+            !with_subscribers.closed,
+            "telemetry open with subscribers",
+            false,
+            with_subscribers.closed
+        );
+
+        drop(rx2);
+        let after_drop = tx.telemetry_snapshot(11);
+        crate::assert_with_log!(
+            after_drop.receiver_count == 2,
+            "telemetry count after drop",
+            2,
+            after_drop.receiver_count
+        );
+
+        drop(rx1);
+        drop(rx3);
+        let closed = tx.telemetry_snapshot(11);
+        crate::assert_with_log!(
+            closed.receiver_count == 0,
+            "closed telemetry count",
+            0,
+            closed.receiver_count
+        );
+        crate::assert_with_log!(closed.closed, "closed telemetry state", true, closed.closed);
+        crate::test_complete!("watch_telemetry_receiver_count");
     }
 
     #[test]
