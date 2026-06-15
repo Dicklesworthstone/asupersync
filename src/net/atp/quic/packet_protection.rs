@@ -5,12 +5,16 @@
 //! from cryptographic primitive operations.
 
 use crate::cx::Cx;
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, ProtocolError};
+use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, AuthError, ProtocolError};
 use crate::net::quic_native::tls::{
     HeaderProtectionMask, PacketProtectionRequest, PacketProtectionSpace, ProtectedPacket,
     ProtectionKeySnapshot, QuicHandshakeTranscript, QuicPacketProtectionProvider, QuicTlsError,
     TranscriptHash, UnprotectedPacket,
 };
+use std::collections::{BTreeMap, BTreeSet};
+
+const REPLAY_WINDOW_CAPACITY: usize = 1024;
+const REPLAY_WINDOW_SPAN: u64 = REPLAY_WINDOW_CAPACITY as u64 - 1;
 
 #[cfg(test)]
 use crate::net::quic_native::tls::DeterministicQuicCryptoProvider;
@@ -88,6 +92,56 @@ pub struct AtpPacketProtection {
     config: AtpPacketProtectionConfig,
     /// Provider kind for logging.
     provider_kind: &'static str,
+    /// Bounded accepted-packet windows by packet-number space. QUIC packet
+    /// numbers must not be reused inside a space, including across key phases.
+    accepted_packets: BTreeMap<PacketProtectionSpace, PacketReplayWindow>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PacketReplayWindow {
+    highest_seen: Option<u64>,
+    seen: BTreeSet<u64>,
+}
+
+impl PacketReplayWindow {
+    fn rejects(&self, packet_number: u64) -> bool {
+        if self.seen.contains(&packet_number) {
+            return true;
+        }
+
+        self.highest_seen
+            .is_some_and(|highest| packet_number < highest.saturating_sub(REPLAY_WINDOW_SPAN))
+    }
+
+    fn accept(&mut self, packet_number: u64) {
+        self.highest_seen = Some(
+            self.highest_seen
+                .map_or(packet_number, |highest| highest.max(packet_number)),
+        );
+        self.seen.insert(packet_number);
+        self.prune();
+    }
+
+    fn prune(&mut self) {
+        let Some(highest) = self.highest_seen else {
+            return;
+        };
+        let floor = highest.saturating_sub(REPLAY_WINDOW_SPAN);
+
+        while self
+            .seen
+            .iter()
+            .next()
+            .is_some_and(|oldest| *oldest < floor || self.seen.len() > REPLAY_WINDOW_CAPACITY)
+        {
+            let oldest = *self.seen.iter().next().expect("window not empty");
+            self.seen.remove(&oldest);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.seen.len()
+    }
 }
 
 impl AtpPacketProtection {
@@ -160,12 +214,22 @@ impl AtpPacketProtection {
             provider,
             config,
             provider_kind,
+            accepted_packets: BTreeMap::new(),
         })
     }
 
     /// Get the provider kind for logging.
     pub fn provider_kind(&self) -> &'static str {
         self.provider_kind
+    }
+
+    /// Number of unique protected packets accepted by this boundary.
+    #[must_use]
+    pub fn accepted_packet_count(&self) -> usize {
+        self.accepted_packets
+            .values()
+            .map(PacketReplayWindow::len)
+            .sum()
     }
 
     /// Derive and install packet protection keys with ATP error handling.
@@ -269,6 +333,24 @@ impl AtpPacketProtection {
         packet: &ProtectedPacket,
         associated_data: &[u8],
     ) -> AtpOutcome<UnprotectedPacket> {
+        if self
+            .accepted_packets
+            .get(&packet.space)
+            .is_some_and(|window| window.rejects(packet.packet_number))
+        {
+            if cx.trace_buffer().is_some() {
+                cx.trace_with_fields(
+                    "atp_packet_protection_replay_rejected",
+                    &[
+                        ("space", packet.space.as_str()),
+                        ("pn", &packet.packet_number.to_string()),
+                        ("phase", &packet.key_phase.to_string()),
+                    ],
+                );
+            }
+            return Outcome::err(AtpError::Auth(AuthError::ReplayedNonce));
+        }
+
         if cx.trace_buffer().is_some() {
             cx.trace_with_fields(
                 "atp_packet_protection_unprotect",
@@ -285,6 +367,13 @@ impl AtpPacketProtection {
             .unprotect_packet(packet, associated_data)
             .map_err(|e| self.map_tls_error(e))
             .into();
+
+        if let Outcome::Ok(_) = &result {
+            self.accepted_packets
+                .entry(packet.space)
+                .or_default()
+                .accept(packet.packet_number);
+        }
 
         if self.config.enable_proof_logging {
             match &result {
@@ -392,6 +481,12 @@ impl AtpPacketProtection {
             | QuicTlsError::ServerCertificateUnverified => {
                 AtpError::Protocol(ProtocolError::SessionStateMismatch)
             }
+            QuicTlsError::ServerIdentityRootStoreEmpty
+            | QuicTlsError::ServerCertificateChainEmpty
+            | QuicTlsError::InvalidServerName
+            | QuicTlsError::ServerCertificateRejected { .. } => {
+                AtpError::Auth(AuthError::InvalidCertificate)
+            }
             QuicTlsError::MissingKeys { .. } | QuicTlsError::KeyDiscarded { .. } => {
                 AtpError::Protocol(ProtocolError::UnexpectedFrame)
             }
@@ -473,7 +568,11 @@ impl AtpPacketProtection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytes::{Bytes, BytesMut};
     use crate::cx::{Cx, cap};
+    use crate::net::atp::protocol::quic_frames::QuicFrame;
+    use crate::net::atp::protocol::varint::VarInt;
+    use crate::trace::TraceBufferHandle;
     use crate::types::{Budget, RegionId, TaskId};
 
     fn test_cx() -> Cx<cap::All> {
@@ -482,6 +581,66 @@ mod tests {
             TaskId::testing_default(),
             Budget::INFINITE,
         )
+    }
+
+    fn encoded_application_payload() -> Vec<u8> {
+        let mut payload = BytesMut::new();
+        QuicFrame::Stream {
+            stream_id: VarInt::from_u64_unchecked(0),
+            offset: Some(VarInt::from_u64_unchecked(0)),
+            data: Bytes::from_static(b"control-stream-bytes"),
+            fin: false,
+        }
+        .encode(&mut payload)
+        .expect("encode STREAM frame");
+        QuicFrame::Datagram {
+            data: Bytes::from_static(b"raptorq-symbol-datagram"),
+        }
+        .encode(&mut payload)
+        .expect("encode DATAGRAM frame");
+        payload.to_vec()
+    }
+
+    async fn deterministic_one_rtt_protection(
+        cx: &Cx<cap::All>,
+        seed: &'static [u8],
+    ) -> AtpPacketProtection {
+        let mut protection =
+            AtpPacketProtection::new_client(true).expect("deterministic protection");
+        let mut transcript = QuicHandshakeTranscript::new();
+        transcript.record("client-finished", b"client");
+        transcript.record("server-finished", b"server");
+        let snapshot = protection
+            .derive_keys(cx, PacketProtectionSpace::OneRtt, &transcript, seed)
+            .await
+            .expect("derive 1-rtt keys");
+        assert_eq!(snapshot.space, PacketProtectionSpace::OneRtt);
+        assert!(!snapshot.key_phase);
+        protection
+    }
+
+    async fn deterministic_one_rtt_protection_with_logging(
+        cx: &Cx<cap::All>,
+        seed: &'static [u8],
+        enable_proof_logging: bool,
+    ) -> AtpPacketProtection {
+        let mut protection = AtpPacketProtection::new(AtpPacketProtectionConfig {
+            use_deterministic: true,
+            enable_transcript_verification: true,
+            enable_proof_logging,
+            provider_options: ProviderOptions::Deterministic {
+                scenario: "a4-packet-protection".to_string(),
+            },
+        })
+        .expect("deterministic protection");
+        let mut transcript = QuicHandshakeTranscript::new();
+        transcript.record("client-finished", b"client");
+        transcript.record("server-finished", b"server");
+        protection
+            .derive_keys(cx, PacketProtectionSpace::OneRtt, &transcript, seed)
+            .await
+            .expect("derive 1-rtt keys");
+        protection
     }
 
     #[test]
@@ -551,6 +710,303 @@ mod tests {
                 }
                 _ => panic!("Unexpected error mapping: {:?}", atp_error),
             }
+        });
+    }
+
+    #[test]
+    fn replay_window_is_bounded_and_stale_packets_fail_closed() {
+        let mut window = PacketReplayWindow::default();
+        let packet_count = REPLAY_WINDOW_CAPACITY as u64 + 8;
+
+        for packet_number in 0..packet_count {
+            assert!(
+                !window.rejects(packet_number),
+                "fresh packet {packet_number} should be inside the replay window"
+            );
+            window.accept(packet_number);
+        }
+
+        assert!(window.len() <= REPLAY_WINDOW_CAPACITY);
+        assert!(window.rejects(0), "stale packet below the window is closed");
+        assert!(
+            window.rejects(packet_count - 1),
+            "duplicate packet number is closed"
+        );
+        assert!(
+            !window.rejects(packet_count),
+            "next packet number is still accepted"
+        );
+    }
+
+    #[test]
+    fn one_rtt_application_payload_roundtrips_and_replay_fails_closed() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection =
+                deterministic_one_rtt_protection(&cx, b"one-rtt-roundtrip-seed").await;
+            let payload = encoded_application_payload();
+            let aad = b"short-header pn=41 key_phase=0";
+
+            let protected = protection
+                .protect_packet(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::OneRtt,
+                        key_phase: false,
+                        packet_number: 41,
+                        associated_data: aad,
+                        payload: &payload,
+                    },
+                )
+                .await
+                .expect("protect 1-rtt app payload");
+
+            assert_eq!(protected.space, PacketProtectionSpace::OneRtt);
+            assert_ne!(
+                protected.ciphertext, payload,
+                "payload should be protected, not copied as plaintext"
+            );
+
+            let unprotected = protection
+                .unprotect_packet(&cx, &protected, aad)
+                .await
+                .expect("unprotect 1-rtt app payload");
+            assert_eq!(unprotected.plaintext, payload);
+            assert_eq!(protection.accepted_packet_count(), 1);
+
+            let replay = protection
+                .unprotect_packet(&cx, &protected, aad)
+                .await
+                .expect_err("same packet number in same space must be rejected");
+            assert_eq!(replay, AtpError::Auth(AuthError::ReplayedNonce));
+            assert_eq!(protection.accepted_packet_count(), 1);
+        });
+    }
+
+    #[test]
+    fn replay_guard_is_active_when_proof_logging_is_disabled() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection = deterministic_one_rtt_protection_with_logging(
+                &cx,
+                b"proof-logging-disabled-seed",
+                false,
+            )
+            .await;
+            let payload = encoded_application_payload();
+            let aad = b"short-header pn=55 key_phase=0";
+            let protected = protection
+                .protect_packet(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::OneRtt,
+                        key_phase: false,
+                        packet_number: 55,
+                        associated_data: aad,
+                        payload: &payload,
+                    },
+                )
+                .await
+                .expect("protect");
+            protection
+                .unprotect_packet(&cx, &protected, aad)
+                .await
+                .expect("first decrypt succeeds");
+            let replay = protection
+                .unprotect_packet(&cx, &protected, aad)
+                .await
+                .expect_err("proof logging must not gate anti-replay");
+            assert_eq!(replay, AtpError::Auth(AuthError::ReplayedNonce));
+        });
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails_closed_without_poisoning_replay_guard() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection = deterministic_one_rtt_protection(&cx, b"tamper-seed").await;
+            let payload = encoded_application_payload();
+            let aad = b"short-header pn=7 key_phase=0";
+            let protected = protection
+                .protect_packet(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::OneRtt,
+                        key_phase: false,
+                        packet_number: 7,
+                        associated_data: aad,
+                        payload: &payload,
+                    },
+                )
+                .await
+                .expect("protect");
+
+            let mut tampered = protected.clone();
+            tampered.ciphertext[0] ^= 0x5a;
+            let err = protection
+                .unprotect_packet(&cx, &tampered, aad)
+                .await
+                .expect_err("tampered ciphertext must fail authentication");
+            assert_eq!(
+                err,
+                AtpError::Protocol(ProtocolError::InvalidFrameType),
+                "BadPacketTag maps to fail-closed protocol rejection"
+            );
+            assert_eq!(
+                protection.accepted_packet_count(),
+                0,
+                "failed authentication must not poison replay state"
+            );
+
+            let unprotected = protection
+                .unprotect_packet(&cx, &protected, aad)
+                .await
+                .expect("original packet still decrypts after tampered attempt");
+            assert_eq!(unprotected.plaintext, payload);
+            assert_eq!(protection.accepted_packet_count(), 1);
+        });
+    }
+
+    #[test]
+    fn header_protection_and_key_phase_update_are_covered() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection = deterministic_one_rtt_protection(&cx, b"key-phase-seed").await;
+            let mask = protection
+                .header_protection_mask(&cx, PacketProtectionSpace::OneRtt, b"1234567890abcdef")
+                .await
+                .expect("header mask");
+            assert_ne!(mask.bytes, [0; 5]);
+
+            let update = protection
+                .update_key(&cx, PacketProtectionSpace::OneRtt, true)
+                .await
+                .expect("key update");
+            assert!(update.key_phase);
+            assert_eq!(update.generation, 1);
+
+            let payload = encoded_application_payload();
+            let protected = protection
+                .protect_packet(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::OneRtt,
+                        key_phase: true,
+                        packet_number: 9,
+                        associated_data: b"short-header pn=9 key_phase=1",
+                        payload: &payload,
+                    },
+                )
+                .await
+                .expect("protect updated phase");
+            let unprotected = protection
+                .unprotect_packet(&cx, &protected, b"short-header pn=9 key_phase=1")
+                .await
+                .expect("unprotect updated phase");
+            assert_eq!(unprotected.plaintext, payload);
+            assert!(unprotected.proof.key_phase);
+            assert_eq!(unprotected.proof.generation, 1);
+        });
+    }
+
+    #[test]
+    fn packet_number_replay_is_rejected_across_key_phase() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection = deterministic_one_rtt_protection(&cx, b"phase-replay-seed").await;
+            let payload = encoded_application_payload();
+            let first = protection
+                .protect_packet(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::OneRtt,
+                        key_phase: false,
+                        packet_number: 12,
+                        associated_data: b"pn=12 phase=0",
+                        payload: &payload,
+                    },
+                )
+                .await
+                .expect("protect first phase");
+            protection
+                .unprotect_packet(&cx, &first, b"pn=12 phase=0")
+                .await
+                .expect("accept first phase packet");
+
+            protection
+                .update_key(&cx, PacketProtectionSpace::OneRtt, true)
+                .await
+                .expect("update phase");
+            let second = protection
+                .protect_packet(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::OneRtt,
+                        key_phase: true,
+                        packet_number: 12,
+                        associated_data: b"pn=12 phase=1",
+                        payload: &payload,
+                    },
+                )
+                .await
+                .expect("protect reused packet number with new phase");
+            let err = protection
+                .unprotect_packet(&cx, &second, b"pn=12 phase=1")
+                .await
+                .expect_err("packet numbers cannot be reused inside a PN space");
+            assert_eq!(err, AtpError::Auth(AuthError::ReplayedNonce));
+        });
+    }
+
+    #[test]
+    fn packet_protection_traces_are_redacted() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let trace = TraceBufferHandle::new(16);
+            cx.set_trace_buffer(trace.clone());
+            let secret_seed = b"super-secret-a4-seed";
+            let sensitive_payload = b"ATP_QUIC_TRACE_SECRET_PAYLOAD";
+            let mut protection = deterministic_one_rtt_protection(&cx, secret_seed).await;
+            let protected = protection
+                .protect_packet(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::OneRtt,
+                        key_phase: false,
+                        packet_number: 31,
+                        associated_data: b"trace-aad",
+                        payload: sensitive_payload,
+                    },
+                )
+                .await
+                .expect("protect");
+            protection
+                .unprotect_packet(&cx, &protected, b"trace-aad")
+                .await
+                .expect("unprotect");
+            let replay = protection
+                .unprotect_packet(&cx, &protected, b"trace-aad")
+                .await
+                .expect_err("replay");
+            assert_eq!(replay, AtpError::Auth(AuthError::ReplayedNonce));
+
+            let rendered = trace
+                .snapshot()
+                .iter()
+                .map(|event| format!("{:?}", event.data))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains("atp_packet_protection_protect"));
+            assert!(rendered.contains("atp_packet_protection_unprotect"));
+            assert!(rendered.contains("atp_packet_protection_replay_rejected"));
+            assert!(
+                !rendered.contains("super-secret-a4-seed"),
+                "trace must not contain key seed material: {rendered}"
+            );
+            assert!(
+                !rendered.contains("ATP_QUIC_TRACE_SECRET_PAYLOAD"),
+                "trace must not contain plaintext payload material: {rendered}"
+            );
         });
     }
 }
