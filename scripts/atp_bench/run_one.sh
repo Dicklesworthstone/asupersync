@@ -9,8 +9,8 @@ set -euo pipefail
 LABEL="$1"; BYTES="$2"; shift 2
 [[ "$1" == "--" ]] && shift
 
-TMP=$(mktemp -d /tmp/atp_bench_one.XXXXXX)
-trap 'rm -rf "$TMP"' EXIT
+TMP_ROOT="${ATP_BENCH_TMPDIR:-/tmp}"
+TMP=$(mktemp -d "$TMP_ROOT/atp_bench_one.XXXXXX")
 TIME_OUT="$TMP/time.txt"
 PERF_OUT="$TMP/perf.txt"
 
@@ -63,5 +63,5 @@ fi
 cmd_stderr=$(head -c 500 "$TMP/cmd.stderr" | tr '\n' ' ' | tr '"' "'")
 
 cat <<EOF
-{"label":"$LABEL","bytes":$BYTES,"status":$STATUS,"wall_s":${wall_s:-null},"user_s":${user_s:-null},"sys_s":${sys_s:-null},"max_rss_kb":${max_rss_kb:-null},"cycles":$cycles,"instructions":$instructions,"task_clock_ms":$task_clock_ms,"cores":$cores,"avg_core_util_pct":$avg_core_util,"load1_start":$START_LOAD,"load1_end":$END_LOAD,"stderr_head":"$cmd_stderr"}
+{"label":"$LABEL","bytes":$BYTES,"status":$STATUS,"wall_s":${wall_s:-null},"user_s":${user_s:-null},"sys_s":${sys_s:-null},"max_rss_kb":${max_rss_kb:-null},"cycles":$cycles,"instructions":$instructions,"task_clock_ms":$task_clock_ms,"cores":$cores,"avg_core_util_pct":$avg_core_util,"load1_start":$START_LOAD,"load1_end":$END_LOAD,"tmp_dir":"$TMP","stderr_head":"$cmd_stderr"}
 EOF

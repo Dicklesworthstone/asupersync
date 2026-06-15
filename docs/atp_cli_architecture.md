@@ -134,13 +134,19 @@ All ATP commands support JSON output for machine parsing. Output format is autom
 # Send a directory with automatic profile selection
 asupersync atp send /home/user/documents/ peer123
 
-# Send with rsync-like SSH bootstrap syntax. SSH authenticates and starts the
-# remote receiver; ATP still moves bulk bytes over the selected ATP transport.
+# Send with rsync-like SSH bootstrap syntax. SSH authenticates, starts the
+# remote receiver, and passes a generated RQ symbol-auth key; ATP still moves
+# bulk bytes over the selected ATP transport.
 atp send /home/user/documents/ user@host:/srv/inbox --transport rq
 
 # Prefer a Tailscale data endpoint when the remote host reports one, while
 # falling back to the SSH host/public address if Tailscale is unavailable.
 atp send /home/user/documents/ user@host:/srv/inbox --transport rq --prefer tailscale
+
+# Direct host:port RQ requires an explicit shared symbol-auth key.
+KEY=$(atp rq-keygen)
+atp recv /srv/inbox --listen 0.0.0.0:8472 --transport rq --rq-auth-key-hex "$KEY"
+atp send /home/user/documents/ host:8472 --transport rq --rq-auth-key-hex "$KEY"
 
 # Send with specific profile and progress
 asupersync atp send /project/ peer456 --profile=sync-tree --progress
@@ -216,7 +222,8 @@ The rsync-like target syntax `user@host:/path` means:
 
 1. open an SSH control connection to `user@host`;
 2. start the remote `atp recv /path --once` command with the selected ATP
-   transport;
+   transport, generating and passing a per-transfer RQ symbol-auth key when
+   `--transport rq` is used and no explicit key was supplied;
 3. discover the best reachable ATP data endpoint, preferring an explicit
    `--data-host` first, then a Tailscale address when `--prefer tailscale` is
    set, then the SSH host address;
@@ -229,6 +236,12 @@ a fallback mode and must be reported separately in benchmark results. Today
 `--transport rq` means RaptorQ over UDP with a TCP control plane; the native
 QUIC lane should replace the data/control split without changing the SSH
 bootstrap contract.
+
+Direct `host:port` RQ transfers do not have an SSH bootstrap channel, so they
+fail closed unless both sides receive the same 32-byte key via
+`--rq-auth-key-hex` or `ATP_RQ_AUTH_KEY_HEX`. `--rq-allow-unauthenticated-lab`
+is reserved for loopback/lab-only runs and must not be used for open-internet
+benchmarks.
 
 ### Configuration Examples
 

@@ -22,11 +22,16 @@ bit-for-bit SHA-256 verification of every single transfer.
     ATP control row, `rsyncd` is the plaintext rsync ceiling, and
     rsync-over-ssh is the realistic-usage row. This is stated in the report
     rather than hidden.
-- **3 measured runs + 1 warmup** per (tool × payload), receiver destination
-  wiped between runs.
+- **3 measured runs + 1 warmup** per (tool × payload). Each cell writes to a
+  unique receiver directory under `/root/atp-bench/recv/<run-id>/...`; the
+  harness retains artifacts instead of deleting prior runs.
 - **Verification**: a SHA-256 manifest is generated at payload creation; after
   EVERY transfer the receiver runs `sha256sum -c` over the manifest. A failed
   verification fails the run (recorded, not discarded).
+- **RQ symbol authentication**: `atp-rq` uses a 32-byte symbol-auth key. The
+  harness generates one with `atp rq-keygen` per run unless
+  `--atp-rq-auth-key-hex` is supplied; the key is injected through
+  `ATP_RQ_AUTH_KEY_HEX` and is not written to `conditions.json`.
 
 ## Metrics captured
 
@@ -44,10 +49,12 @@ bit-for-bit SHA-256 verification of every single transfer.
 
 - `gen_payloads.sh` — run on the **sender**: builds `/root/atp-bench/payloads`
   (512KB/1MB/10MB/100MB/1GB urandom files + heterogeneous nested tree) and
-  SHA-256 manifests. Idempotent.
+  SHA-256 manifests. Idempotent; if an existing payload does not match its
+  manifest, the script fails closed rather than overwriting it.
 - `collect_metrics.sh` — background process sampler (`ps`/loadavg → JSONL).
 - `run_one.sh` — runs one sender command under `/usr/bin/time -v` (+ `perf
-  stat` if present), emits a JSON result line.
+  stat` if present), emits a JSON result line, and retains its temp directory
+  path in the `tmp_dir` field.
 - `run_bench.sh` — orchestrator (run from the dev box): deploys binaries +
   scripts, iterates payload × tool × run, collects sender+receiver metrics,
   verifies hashes, writes `results.jsonl`.
@@ -64,6 +71,7 @@ work continues.
 --atp-rq-symbol-size 1024
 --atp-rq-repair-overhead 1.15
 --atp-rq-tail-drain-ms 2
+--atp-rq-auth-key-hex <64-char-hex> # optional; default is per-run generated
 ```
 
 Those values are recorded in `conditions.json` for every run. Sweep them when
@@ -73,13 +81,21 @@ round trips. Tail drain is the receiver-side quiet window after each fountain
 round marker; increasing it can prevent false `NeedMore` rounds on high-RTT
 paths where TCP control beats queued UDP symbols to user space.
 
+`run_bench.sh` also accepts `--run-id <A-Za-z0-9._->` and
+`--base <remote-dir>`. Supplying a run id makes reruns easy to correlate across
+sender, receiver, and local artifacts. Use `--base` when the sender is not
+`root`; the directory must be writable on both machines. Cleanup is
+intentionally manual: inspect or archive `<base>/recv/<run-id>` and
+`<base>/runs/<run-id>` on the receiver before removing anything.
+
 ## Usage
 
 ```bash
 # from the repo root on the dev box
 scripts/atp_bench/run_bench.sh \
-  --sender root@87.99.133.171 --sender-key ~/.ssh/contabo_vps_ed25519 \
-  --receiver root@178.18.254.243 --receiver-key ~/.ssh/contabo_vps_ed25519 \
+  --sender hz1 --sender-key ~/.ssh/contabo_vps_ed25519 \
+  --receiver vmi1156319 --receiver-key ~/.ssh/contabo_vps_ed25519 \
+  --base /home/ubuntu/atp-bench \
   --atp-binary target/release/atp \
   --payloads 512k,1m,10m,100m,1g,tree \
   --tools atp-rq,atp-tcp,rsync-ssh,rsyncd \
@@ -87,6 +103,7 @@ scripts/atp_bench/run_bench.sh \
   --atp-rq-symbol-size 1024 \
   --atp-rq-repair-overhead 1.15 \
   --atp-rq-tail-drain-ms 2 \
+  --run-id atp-rq-open-internet-$(date -u +%Y%m%dT%H%M%SZ) \
   --runs 3 \
   --out artifacts/atp_bench/$(date +%Y-%m-%d)
 

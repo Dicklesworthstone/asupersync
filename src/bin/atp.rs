@@ -14,12 +14,14 @@
 //!   high-latency path and tolerate packet loss without head-of-line blocking.
 //!
 //! ```text
+//! KEY=$(atp rq-keygen)
 //! # on the receiver
-//! atp recv ./inbox --listen 0.0.0.0:8472
+//! atp recv ./inbox --listen 0.0.0.0:8472 --transport rq --rq-auth-key-hex "$KEY"
 //! # on the sender
-//! atp send ./my-folder receiver-host:8472 --transport rq --streams 8
+//! atp send ./my-folder receiver-host:8472 --transport rq --streams 8 --rq-auth-key-hex "$KEY"
 //!
 //! # rsync-like remote bootstrap over SSH; bulk bytes still use ATP
+//! # and RQ symbol auth is generated/passed to the remote receiver.
 //! atp send ./my-folder user@receiver:/srv/inbox --transport rq --prefer tailscale
 //! ```
 
@@ -862,8 +864,7 @@ fn rq_send_json(report: &transport_rq::SendReport) -> serde_json::Value {
 mod tests {
     use super::*;
 
-    const VALID_KEY_HEX: &str =
-        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
     #[test]
     fn rq_auth_key_hex_accepts_valid_32_byte_key_and_normalizes_case() {
@@ -889,10 +890,7 @@ mod tests {
             Ok(_) => panic!("direct rq without auth must fail closed"),
             Err(err) => err,
         };
-        assert!(
-            missing
-                .contains("requires symbol authentication")
-        );
+        assert!(missing.contains("requires symbol authentication"));
 
         assert!(rq_config(1024, 1024, 1, 1.0, 2, Some(VALID_KEY_HEX), false).is_ok());
         assert!(rq_config(1024, 1024, 1, 1.0, 2, None, true).is_ok());

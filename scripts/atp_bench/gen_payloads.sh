@@ -24,6 +24,11 @@ have() { [[ -s "$MANIFESTS/$1.sha256" ]] && (cd "$PAYLOADS" && sha256sum --statu
 gen_file() { # gen_file <name> <bytes>
     local name="$1" bytes="$2"
     if have "$name"; then note "$name: exists + verifies, skipping"; return; fi
+    if [[ -e "$PAYLOADS/$name.bin" ]]; then
+        note "$name: payload exists but manifest is missing or invalid; refusing to overwrite it"
+        note "choose a fresh BASE or move the existing payload aside after manual review"
+        exit 1
+    fi
     note "generating $name (${bytes} bytes)"
     head -c "$bytes" /dev/urandom > "$PAYLOADS/$name.bin"
     manifest "$name" "$name.bin"
@@ -39,9 +44,12 @@ gen_file single_1g  1073741824
 # ~800 small (4-64KB), ~150 medium (256KB-4MB), 6 large (64MB) => ~1.3 GB.
 if have tree; then
     note "tree: exists + verifies, skipping"
+elif [[ -e "$PAYLOADS/tree" ]]; then
+    note "tree exists but does not match its manifest; refusing to delete it"
+    note "choose a fresh BASE or move the existing tree aside after manual review"
+    exit 1
 else
     note "generating heterogeneous tree (this takes a minute)"
-    rm -rf "$PAYLOADS/tree"
     mkdir -p "$PAYLOADS/tree"
     for d1 in a b c d; do
         for d2 in 0 1 2 3 4; do
