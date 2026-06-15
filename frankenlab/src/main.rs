@@ -11,11 +11,16 @@
 //! frankenlab replay examples/scenarios/01_race_condition.yaml
 //! ```
 
+use asupersync::config::EncodingConfig;
 use asupersync::lab::scenario::Scenario;
 use asupersync::lab::scenario_runner::{
     ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
 };
+use asupersync::runtime::RuntimeBuilder;
 use asupersync::trace::minimizer::LogicalMinimizerClock;
+use asupersync::trace::raptorq_journal_writer::{
+    DurableJournalError, DurableTraceJournal, DurableTraceJournalConfig,
+};
 use asupersync::trace::{
     IncidentOracleKind, IncidentReplayMinimizationConfig, IncidentReplayMinimizationReport,
     IncidentReplayMinimizationVerdict, IncidentReplayOracle, IncidentReplayPackage,
@@ -66,6 +71,9 @@ enum Command {
 
     /// Run the built-in time-travel demo pipeline
     Demo(DemoArgs),
+
+    /// Recover a crash-durable RaptorQ trace journal from its surviving stripes
+    TraceRecover(TraceRecoverArgs),
 }
 
 #[derive(Args, Debug)]
@@ -135,6 +143,27 @@ enum DemoStage {
     Run,
     /// Explore seeds to find failures
     Explore,
+}
+
+#[derive(Args, Debug)]
+struct TraceRecoverArgs {
+    /// Directory holding the durable RaptorQ trace journal (stripe + manifest +
+    /// params files written by `DurableTraceJournal::record_epoch`)
+    journal_dir: PathBuf,
+
+    /// Recover this specific epoch instead of the latest recoverable one
+    #[arg(long)]
+    epoch: Option<u64>,
+
+    /// Number of stripe files (failure domains) each epoch was spread across;
+    /// must match the journal's writer configuration
+    #[arg(long, default_value_t = 3)]
+    stripe_count: usize,
+
+    /// Write the recovered checkpoint bytes to this file (otherwise only a
+    /// recovery summary is reported)
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,6 +1060,101 @@ fn collect_yaml_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Trace recover
+// ---------------------------------------------------------------------------
+
+/// Result of a [`cmd_trace_recover`] journal scan: the recorded epochs plus,
+/// when recovery succeeds, the restored epoch and its decoded bytes.
+type RecoverOutcome = Result<(Vec<u64>, Option<(u64, Vec<u8>)>), DurableJournalError>;
+
+/// Restore a crash-durable RaptorQ trace journal from the stripe files that
+/// survived a crash.
+///
+/// Wraps [`DurableTraceJournal`]: given only a journal directory, it finds the
+/// newest still-decodable checkpoint epoch (or a `--epoch`-selected one), runs
+/// the real RaptorQ decoder over the surviving stripes, and reconstructs the
+/// original checkpoint bytes — tolerating the loss of any minority of stripe
+/// files. With `--output`, the recovered bytes are written to disk; otherwise a
+/// recovery summary is reported. Returns an error (nonzero exit) when no
+/// recorded epoch still recovers.
+#[allow(clippy::needless_pass_by_value)]
+fn cmd_trace_recover(args: TraceRecoverArgs, json: bool) -> Result<(), String> {
+    if args.stripe_count == 0 {
+        return Err("--stripe-count must be at least 1".to_string());
+    }
+
+    let journal = DurableTraceJournal::new(DurableTraceJournalConfig {
+        directory: args.journal_dir.clone(),
+        // `encoding`/`repair_count` are write-path only; recovery reads the
+        // persisted object-params record for the decode layout.
+        encoding: EncodingConfig::default(),
+        repair_count: 0,
+        stripe_count: args.stripe_count,
+    });
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .map_err(|e| format!("build runtime: {e}"))?;
+
+    let selected_epoch = args.epoch;
+    let outcome: RecoverOutcome = runtime.block_on(runtime.handle().spawn(async move {
+        let recorded = journal.recorded_epochs().await?;
+        let restored = match selected_epoch {
+            Some(epoch) => Some((epoch, journal.recover_epoch(epoch).await?)),
+            None => journal.recover_latest().await?,
+        };
+        Ok((recorded, restored))
+    }));
+
+    let (recorded, restored) = outcome.map_err(|e| format!("trace-recover: {e}"))?;
+
+    let written = match (&args.output, &restored) {
+        (Some(path), Some((_, bytes))) => {
+            fs::write(path, bytes)
+                .map_err(|e| format!("write recovered trace to {}: {e}", path.display()))?;
+            Some(path.clone())
+        }
+        _ => None,
+    };
+
+    if json {
+        let report = serde_json::json!({
+            "journal_dir": args.journal_dir.display().to_string(),
+            "stripe_count": args.stripe_count,
+            "recorded_epochs": recorded,
+            "recovered": restored.is_some(),
+            "epoch": restored.as_ref().map(|(epoch, _)| *epoch),
+            "bytes": restored.as_ref().map(|(_, bytes)| bytes.len()),
+            "output": written.as_ref().map(|p| p.display().to_string()),
+        });
+        println!("{}", pretty_json_or(&report, ""));
+    } else if let Some((epoch, bytes)) = &restored {
+        let suffix = written
+            .as_ref()
+            .map(|path| format!("; wrote {}", path.display()))
+            .unwrap_or_default();
+        println!(
+            "Recovered epoch {epoch} from {} ({} bytes, {} recorded epoch(s)){suffix}",
+            args.journal_dir.display(),
+            bytes.len(),
+            recorded.len()
+        );
+    } else {
+        println!(
+            "No recoverable checkpoint in {} ({} recorded epoch(s))",
+            args.journal_dir.display(),
+            recorded.len()
+        );
+    }
+
+    if restored.is_some() {
+        Ok(())
+    } else {
+        Err("no recoverable checkpoint found".to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1044,6 +1168,7 @@ fn main() -> ExitCode {
         Command::Explore(args) => cmd_explore(args, cli.json),
         Command::Minimize(args) => cmd_minimize(args, cli.json),
         Command::Demo(args) => cmd_demo(args, cli.json),
+        Command::TraceRecover(args) => cmd_trace_recover(args, cli.json),
     };
 
     match result {
