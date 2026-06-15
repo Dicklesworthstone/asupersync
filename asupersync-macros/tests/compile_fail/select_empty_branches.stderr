@@ -1,0 +1,7 @@
+error: select! requires at least one branch
+ --> tests/compile_fail/select_empty_branches.rs:5:13
+  |
+5 |     let _ = select!(cx, {});
+  |             ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `select` (in Nightly builds, run with -Z macro-backtrace for more info)

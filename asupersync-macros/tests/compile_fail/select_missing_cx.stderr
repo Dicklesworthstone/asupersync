@@ -1,0 +1,5 @@
+error: select! requires cx argument
+ --> tests/compile_fail/select_missing_cx.rs:5:21
+  |
+5 |     let _ = select!({ a = fut_a() => a, b = fut_b() => b });
+  |                     ^

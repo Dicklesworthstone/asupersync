@@ -1,0 +1,7 @@
+error: race! requires at least two branches
+ --> tests/compile_fail/race_single_branch.rs:5:13
+  |
+5 |     let _ = race!(cx, { fut_a() });
+  |             ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `race` (in Nightly builds, run with -Z macro-backtrace for more info)

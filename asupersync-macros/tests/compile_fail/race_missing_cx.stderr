@@ -1,0 +1,5 @@
+error: race! requires cx argument
+ --> tests/compile_fail/race_missing_cx.rs:5:19
+  |
+5 |     let _ = race!({ fut_a(), fut_b() });
+  |                   ^
