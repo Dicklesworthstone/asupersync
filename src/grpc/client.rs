@@ -14,7 +14,7 @@ use std::time::Duration;
 use crate::bytes::Bytes;
 
 use super::codec::{Codec, FramedCodec, IdentityCodec};
-use super::status::{GrpcError, Status};
+use super::status::{GrpcError, Status, TransportErrorKind};
 use super::streaming::{MAX_STREAM_BUFFERED, Metadata, Request, Response, Streaming};
 
 /// Supported gRPC message compression encodings for channel negotiation.
@@ -259,7 +259,11 @@ impl ChannelBuilder {
         self
     }
 
-    /// Enable TLS.
+    /// Require a TLS-backed gRPC transport.
+    ///
+    /// The current gRPC client transport is loopback/localhost-only and does
+    /// not negotiate TLS, so [`ChannelBuilder::connect`] fails closed when this
+    /// flag is set.
     #[must_use]
     pub fn tls(mut self) -> Self {
         self.config.use_tls = true;
@@ -303,6 +307,7 @@ impl Channel {
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
         validate_channel_uri(uri)?;
+        validate_channel_security(uri, &config)?;
         Ok(Self {
             uri: uri.to_string(),
             config,
@@ -654,14 +659,14 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     if uri.is_empty() {
         return Err(GrpcError::transport("channel URI cannot be empty"));
     }
-    if !(uri.starts_with("http://") || uri.starts_with("https://")) {
+    let (scheme, remainder) = uri
+        .split_once("://")
+        .ok_or_else(|| GrpcError::transport("channel URI is missing a scheme separator"))?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return Err(GrpcError::transport(
             "channel URI must start with http:// or https://",
         ));
     }
-    let (_, remainder) = uri
-        .split_once("://")
-        .ok_or_else(|| GrpcError::transport("channel URI is missing a scheme separator"))?;
     let authority = remainder
         .split(['/', '?', '#'])
         .next()
@@ -682,6 +687,22 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     {
         return Err(GrpcError::transport(
             "gRPC client transport supports loopback and localhost only; use a URI with host `loopback`, `localhost`, or `127.0.0.1`",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_channel_security(uri: &str, config: &ChannelConfig) -> Result<(), GrpcError> {
+    let (scheme, _) = uri
+        .split_once("://")
+        .ok_or_else(|| GrpcError::transport("channel URI is missing a scheme separator"))?;
+    if scheme.eq_ignore_ascii_case("https") || config.use_tls {
+        return Err(GrpcError::transport_kind(
+            TransportErrorKind::ProtocolViolation,
+            "gRPC TLS channel requested, but the current gRPC client transport \
+             is loopback/localhost-only and does not negotiate TLS; use http:// \
+             loopback without ChannelBuilder::tls() until a TLS-backed gRPC \
+             transport is wired",
         ));
     }
     Ok(())
@@ -2398,12 +2419,69 @@ mod tests {
         for uri in [
             "http://loopback:50051",
             "http://localhost:50051",
-            "https://LOCALHOST:50051/service",
             "http://127.0.0.1:50051",
         ] {
             let channel = futures_lite::future::block_on(Channel::connect(uri))
                 .expect("loopback and localhost targets should connect");
             assert_eq!(channel.uri(), uri);
+        }
+    }
+
+    #[test]
+    fn channel_connect_rejects_tls_marked_loopback_until_tls_transport_exists() {
+        for (uri, result) in [
+            (
+                "https://LOCALHOST:50051/service",
+                futures_lite::future::block_on(Channel::connect("https://LOCALHOST:50051/service")),
+            ),
+            (
+                "HTTPS://LOCALHOST:50051/service",
+                futures_lite::future::block_on(Channel::connect("HTTPS://LOCALHOST:50051/service")),
+            ),
+            (
+                "http://loopback:50051 via .tls()",
+                futures_lite::future::block_on(
+                    Channel::builder("http://loopback:50051").tls().connect(),
+                ),
+            ),
+        ] {
+            let error = result.expect_err("TLS-marked gRPC channel must fail closed");
+            match error {
+                GrpcError::Transport(TransportErrorKind::ProtocolViolation, message) => {
+                    assert!(
+                        message.contains("does not negotiate TLS"),
+                        "expected TLS enforcement message for {uri}, got: {message}"
+                    );
+                }
+                other => panic!(
+                    "expected TLS protocol-violation transport error for {uri}, got: {other:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn channel_connect_with_config_rejects_tls_until_tls_transport_exists() {
+        let config = ChannelConfig {
+            use_tls: true,
+            ..ChannelConfig::default()
+        };
+        let error = futures_lite::future::block_on(Channel::connect_with_config(
+            "http://localhost:50051",
+            config,
+        ))
+        .expect_err("TLS-enabled config must fail closed");
+
+        match error {
+            GrpcError::Transport(TransportErrorKind::ProtocolViolation, message) => {
+                assert!(
+                    message.contains("does not negotiate TLS"),
+                    "expected TLS enforcement message, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected TLS protocol-violation transport error for direct config, got: {other:?}"
+            ),
         }
     }
 

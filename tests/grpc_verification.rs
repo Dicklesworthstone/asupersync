@@ -1116,16 +1116,32 @@ fn grpc_verify_036_channel_builder() {
         .initial_connection_window_size(2 * 1024 * 1024)
         .initial_stream_window_size(512 * 1024)
         .keepalive_interval(Duration::from_secs(60))
-        .keepalive_timeout(Duration::from_secs(20))
-        .tls();
+        .keepalive_timeout(Duration::from_secs(20));
 
-    // ChannelBuilder has a public config field based on the test patterns
-    // Connect produces a Channel
     futures_lite::future::block_on(async {
         let channel = builder.connect().await.unwrap();
         assert_eq!(channel.uri(), "http://loopback:50051");
-        assert!(channel.config().use_tls);
+        assert!(!channel.config().use_tls);
         assert_eq!(channel.config().connect_timeout, Duration::from_secs(10));
+
+        let error = Channel::builder("http://loopback:50051")
+            .tls()
+            .connect()
+            .await
+            .expect_err("TLS-marked loopback channel must fail closed");
+        match error {
+            GrpcError::Transport(kind, message) => {
+                assert_eq!(
+                    kind,
+                    asupersync::grpc::status::TransportErrorKind::ProtocolViolation
+                );
+                assert!(
+                    message.contains("does not negotiate TLS"),
+                    "unexpected TLS enforcement message: {message}"
+                );
+            }
+            other => panic!("expected transport error for phantom TLS channel, got {other:?}"),
+        }
     });
 
     test_complete!("grpc_verify_036_channel_builder");

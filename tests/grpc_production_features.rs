@@ -23,6 +23,7 @@ use asupersync::grpc::{
     Code,
     CompressionEncoding,
     FnInterceptor,
+    GrpcError,
     HealthCheckRequest,
     HealthCheckResponse,
     HealthReporter,
@@ -926,7 +927,6 @@ fn channel_config_defaults() {
 
 #[test]
 fn channel_builder_fluent_api() {
-    // ChannelBuilder should accept all config options
     let channel = futures_lite::future::block_on(
         Channel::builder("http://loopback:50051")
             .connect_timeout(Duration::from_secs(10))
@@ -937,18 +937,36 @@ fn channel_builder_fluent_api() {
             .keepalive_timeout(Duration::from_secs(20))
             .send_compression(CompressionEncoding::Gzip)
             .accept_compression(CompressionEncoding::Gzip)
-            .tls()
             .connect(),
     )
-    .expect("connect should succeed");
+    .expect("non-TLS loopback connect should succeed");
 
     assert_eq!(channel.uri(), "http://loopback:50051");
     assert_eq!(channel.config().timeout, Some(Duration::from_secs(30)));
-    assert!(channel.config().use_tls);
+    assert!(!channel.config().use_tls);
     assert_eq!(
         channel.config().send_compression,
         Some(CompressionEncoding::Gzip)
     );
+
+    // TLS remains fail-closed until a TLS-backed gRPC transport exists.
+    let error =
+        futures_lite::future::block_on(Channel::builder("http://loopback:50051").tls().connect())
+            .expect_err("TLS-marked loopback channel must fail closed");
+
+    match error {
+        GrpcError::Transport(kind, message) => {
+            assert_eq!(
+                kind,
+                asupersync::grpc::status::TransportErrorKind::ProtocolViolation
+            );
+            assert!(
+                message.contains("does not negotiate TLS"),
+                "unexpected TLS enforcement message: {message}"
+            );
+        }
+        other => panic!("expected transport error for phantom TLS channel, got {other:?}"),
+    }
 }
 
 #[test]
