@@ -195,6 +195,36 @@ the renderer emits a fresh parked blocker marker instead.
 Parked, refused, and stale attempts are not green proof evidence. They can be
 cited only as handoff context for a future retry.
 
+## Proof-Traffic A5 Blocked-Loop E2E
+
+`asupersync-proof-traffic-control-kuyx64.5` composes the A2 admission receipt,
+A3 clean-overlay handshake, and A4 parking lot into a deterministic blocked
+proof-loop e2e packet in `src/audit/proof_traffic_blocked_loop_e2e.rs`. It is
+checked by `tests/proof_traffic_blocked_loop_e2e_contract.rs`; the machine
+artifact is `artifacts/proof_traffic_blocked_loop_e2e_v1.json`.
+
+The A5 fixture simulates a fresh agent trying to validate a focused proof slice
+while shared-main hazards are present. It covers:
+
+- an owned dirty path with exclusive self reservations,
+- a peer poison path that would not compile if it entered an admitted command,
+- missing overlay capability in the installed RCH command surface,
+- active-project refusal,
+- a progress-stale peer build,
+- one admitted-command positive control so the peer poison exclusion is tested
+  against a real rendered command.
+
+Each step emits structured logs with `input_command`, `selected_paths`,
+`reservation_state`, `queue_snapshot`, `decision`, `rendered_handoff`,
+`no_claim_boundary`, and `replay_or_resume_command`. The artifact bundle includes
+a JSON receipt, Markdown report, Agent Mail body, `br` comment body, and replay
+or resume command.
+
+The e2e fails closed if any admitted proof command contains local Cargo
+fallback, branch/worktree/scratch-clone setup, peer build cancellation, file
+deletion, `git clean`, `git reset`, or the peer poison path. Live RCH fleet state
+may be attached only as operator evidence. In A5, deterministic fixtures are the correctness source.
+
 ## No-Claim Boundaries
 
 This gate does not prove release readiness, broad workspace health, runtime
