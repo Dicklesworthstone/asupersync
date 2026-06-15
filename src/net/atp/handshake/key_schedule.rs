@@ -9,12 +9,21 @@ use crate::types::outcome::Outcome;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::fmt;
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct HkdfSha256 {
     prk: Vec<u8>,
+}
+
+impl fmt::Debug for HkdfSha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HkdfSha256")
+            .field("prk", &"<redacted>")
+            .finish()
+    }
 }
 
 impl HkdfSha256 {
@@ -80,7 +89,7 @@ impl KeyPhase {
 }
 
 /// Key material for packet protection
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KeyMaterial {
     /// Packet protection key
     pub key: Vec<u8>,
@@ -88,6 +97,16 @@ pub struct KeyMaterial {
     pub iv: Vec<u8>,
     /// Header protection key
     pub hp_key: Vec<u8>,
+}
+
+impl fmt::Debug for KeyMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyMaterial")
+            .field("key", &"<redacted>")
+            .field("iv", &"<redacted>")
+            .field("hp_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl KeyMaterial {
@@ -682,6 +701,79 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn key_material_debug_redacts_packet_protection_secrets() {
+        let keys = KeyMaterial::new(vec![0x11; 16], vec![0x22; 12], vec![0x33; 16]);
+        let raw_key_debug = format!("{:?}", keys.key);
+        let raw_iv_debug = format!("{:?}", keys.iv);
+        let raw_hp_key_debug = format!("{:?}", keys.hp_key);
+
+        let debug = format!("{keys:?}");
+        assert!(debug.contains("KeyMaterial"));
+        assert!(debug.contains("key"));
+        assert!(debug.contains("iv"));
+        assert!(debug.contains("hp_key"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(&raw_key_debug), "packet key leaked: {debug}");
+        assert!(!debug.contains(&raw_iv_debug), "packet IV leaked: {debug}");
+        assert!(
+            !debug.contains(&raw_hp_key_debug),
+            "header protection key leaked: {debug}"
+        );
+    }
+
+    #[test]
+    fn key_schedule_debug_redacts_nested_key_material() {
+        let mut schedule = KeySchedule::new();
+        let local_keys = initial_test_keys(0x31);
+        let remote_keys = initial_test_keys(0x71);
+        let local_key_debug = format!("{:?}", local_keys.key);
+        let remote_key_debug = format!("{:?}", remote_keys.key);
+        let local_hp_key_debug = format!("{:?}", local_keys.hp_key);
+        let remote_hp_key_debug = format!("{:?}", remote_keys.hp_key);
+
+        schedule
+            .install_initial_keys(local_keys, remote_keys)
+            .expect("install initial keys");
+
+        let debug = format!("{schedule:?}");
+        assert!(debug.contains("KeySchedule"));
+        assert!(debug.contains("current_keys"));
+        assert!(debug.contains("<redacted>"));
+        assert!(
+            !debug.contains(&local_key_debug),
+            "local packet key leaked through KeySchedule Debug: {debug}"
+        );
+        assert!(
+            !debug.contains(&remote_key_debug),
+            "remote packet key leaked through KeySchedule Debug: {debug}"
+        );
+        assert!(
+            !debug.contains(&local_hp_key_debug),
+            "local header-protection key leaked through KeySchedule Debug: {debug}"
+        );
+        assert!(
+            !debug.contains(&remote_hp_key_debug),
+            "remote header-protection key leaked through KeySchedule Debug: {debug}"
+        );
+    }
+
+    #[test]
+    fn hkdf_debug_redacts_pseudorandom_key() {
+        let prk = vec![0xabu8; 32];
+        let raw_prk_debug = format!("{prk:?}");
+        let hkdf = HkdfSha256::from_prk(&prk).expect("valid prk");
+
+        let debug = format!("{hkdf:?}");
+        assert!(debug.contains("HkdfSha256"));
+        assert!(debug.contains("prk"));
+        assert!(debug.contains("<redacted>"));
+        assert!(
+            !debug.contains(&raw_prk_debug),
+            "HKDF pseudorandom key leaked through Debug: {debug}"
+        );
     }
 
     #[test]
