@@ -10579,6 +10579,85 @@ mod tests {
     }
 
     #[test]
+    fn commit_with_pending_savepoints_releases_them_via_commit() {
+        // br-asupersync-server-stack-hardening-eeexl1.5 AC2 — committing a
+        // transaction that still holds open (unreleased) savepoints must
+        // succeed: the server implicitly releases every pending savepoint at
+        // COMMIT, the transaction obligation discharges via commit() (not
+        // abort()), and the connection returns to idle ('I') poison-free and
+        // pool-reusable. The three-deep test above tears its savepoints down
+        // explicitly and never reaches a real COMMIT (it sets finished); this
+        // pins the complementary path where COMMIT itself is the savepoint
+        // teardown.
+        init_test("postgres_commit_with_pending_savepoints");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.transaction_status = b'T';
+        let cx = Cx::for_testing();
+
+        let io_thread = std::thread::spawn(move || {
+            for (needle, tag, rfq) in [
+                (b"SAVEPOINT sp1".as_slice(), b"SAVEPOINT\0".as_slice(), b'T'),
+                (b"SAVEPOINT sp2".as_slice(), b"SAVEPOINT\0".as_slice(), b'T'),
+                (b"SAVEPOINT sp3".as_slice(), b"SAVEPOINT\0".as_slice(), b'T'),
+                // COMMIT closes the transaction: ReadyForQuery reports idle.
+                (b"COMMIT".as_slice(), b"COMMIT\0".as_slice(), b'I'),
+            ] {
+                let _ = read_until_contains(&mut peer, needle);
+                std::io::Write::write_all(&mut peer, &backend_message(b'C', tag))
+                    .expect("write CommandComplete");
+                std::io::Write::write_all(&mut peer, &ready_for_query(rfq))
+                    .expect("write ReadyForQuery");
+            }
+        });
+
+        let commit_outcome = run(async {
+            let mut tx = PgTransaction {
+                conn: &mut conn,
+                finished: false,
+                isolation_level: None,
+                read_only: false,
+                // Non-root region (Cx::for_testing) => the transaction is
+                // obligation-tracked, so this also proves the obligation
+                // discharges cleanly across the pending-savepoint COMMIT.
+                obligation: reserve_transaction_obligation(&cx),
+            };
+
+            // Open three nested savepoints via the raw command path so they
+            // stay PENDING — no PgSavepoint guard is created, so nothing
+            // releases them or poisons the transaction on drop.
+            for name in ["sp1", "sp2", "sp3"] {
+                match tx.execute_unchecked(&cx, &format!("SAVEPOINT {name}")).await {
+                    Outcome::Ok(_) => {}
+                    other => panic!("expected {name} savepoint to open, got {other:?}"),
+                }
+            }
+
+            // Commit with all three savepoints still pending.
+            tx.commit(&cx).await
+        });
+
+        io_thread
+            .join()
+            .expect("postgres savepoint peer thread should finish cleanly");
+        assert!(
+            matches!(commit_outcome, Outcome::Ok(())),
+            "commit with pending savepoints must succeed, got {commit_outcome:?}"
+        );
+        assert_eq!(
+            conn.inner.transaction_status, b'I',
+            "commit must return the connection to idle (no open transaction)"
+        );
+        assert!(
+            !conn.inner.needs_rollback,
+            "a clean commit must not poison the connection for rollback"
+        );
+        assert!(
+            !conn.inner.needs_discard,
+            "a clean commit must not force a pool discard"
+        );
+    }
+
+    #[test]
     fn ensure_no_orphaned_transaction_maps_cancellation_to_outcome() {
         let mut conn = make_test_connection();
         conn.inner.needs_rollback = true;

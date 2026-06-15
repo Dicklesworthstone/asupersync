@@ -21,6 +21,11 @@
 //!      into its parent's scope, then `ROLLBACK TO` the MIDDLE savepoint —
 //!      both the middle and the (folded-in) inner rows are discarded together,
 //!      while the outermost level survives.
+//!   3. `..._unresolved_savepoint_fails_transaction_closed`: the AC2
+//!      "commit-with-pending-savepoints" corner for SQLite — a `SqliteSavepoint`
+//!      guard dropped without release/rollback poisons the transaction, so
+//!      `with_sqlite_transaction` rolls back and persists nothing (the safe API
+//!      makes committing with a pending savepoint fail closed).
 //!
 //! Run with:
 //!     rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_lib \
@@ -203,6 +208,55 @@ fn sqlite_savepoint_3deep_cascade_rollback_to_middle_discards_inner() {
             names(&conn, &cx).await,
             vec!["base".to_string(), "lvl1".to_string()],
             "rollback to the middle savepoint must cascade-discard lvl2 and lvl3"
+        );
+    });
+}
+
+#[test]
+fn sqlite_unresolved_savepoint_fails_transaction_closed() {
+    // AC2 corner — "commit-with-pending-savepoints", the SQLite answer: the
+    // safe `SqliteSavepoint` guard deliberately makes committing with a still-
+    // PENDING (unresolved) savepoint impossible. A guard dropped without an
+    // explicit `release`/`rollback` poisons the transaction; the surrounding
+    // `with_sqlite_transaction` then rolls back instead of committing, so NO
+    // work — not even rows written before the savepoint — is persisted.
+    //
+    // (The safe public API rejects raw `SAVEPOINT`/control statements with
+    // `UnsafeSql`, so leaving a savepoint genuinely pending at COMMIT is only
+    // reachable through the guard; this pins the guard's fail-closed behaviour
+    // in the verifiable integration lane, complementing the inline unit twin
+    // `with_sqlite_transaction_dropped_savepoint_refuses_commit`.)
+    run_test_with_cx(|cx| async move {
+        let conn = setup(&cx).await;
+
+        let tx_outcome = with_sqlite_transaction(&conn, &cx, |tx, cx| {
+            Box::pin(async move {
+                insert(tx, cx, "base").await;
+
+                {
+                    let _sp1 = match SqliteSavepoint::new(tx, cx, "sp1").await {
+                        Outcome::Ok(sp) => sp,
+                        other => panic!("sp1 create failed: {other:?}"),
+                    };
+                    insert(tx, cx, "in_savepoint").await;
+                    // `_sp1` is dropped here WITHOUT release/rollback — leaving
+                    // the savepoint pending poisons the transaction.
+                }
+
+                // Even though the closure reports success, the poisoned
+                // transaction must not commit.
+                Outcome::Ok(())
+            })
+        })
+        .await;
+
+        assert!(
+            !matches!(tx_outcome, Outcome::Ok(())),
+            "an unresolved (pending) savepoint must fail the transaction closed, got {tx_outcome:?}"
+        );
+        assert!(
+            names(&conn, &cx).await.is_empty(),
+            "a fail-closed transaction must persist nothing — not even pre-savepoint rows"
         );
     });
 }
