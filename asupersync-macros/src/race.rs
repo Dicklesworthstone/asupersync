@@ -1,10 +1,13 @@
 //! Implementation of the `race!` macro.
 //!
-//! The race macro runs multiple inline futures via `Cx::race*` and returns the
-//! first result.
+//! The race macro runs multiple inline futures and returns the first result.
 //!
-//! Losing futures are dropped, which requests cancellation but does not await a
-//! full drain path. Use `Scope::race` when loser-drain semantics are required.
+//! Losing branches are protocol-cancelled **and drained** before the macro
+//! returns: the expansion routes through `Cx::race_drained*`, which spawns each
+//! branch as a region task and resolves them via `Scope::race_all`. This is the
+//! drain guarantee that differentiates `race!` from a plain drop-the-losers
+//! select — resources held by a losing branch are resolved, not abandoned. The
+//! older drop-only expansion (`Cx::race*`) is no longer emitted.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -125,8 +128,9 @@ impl Parse for RaceInput {
 
 /// Generates the race implementation.
 ///
-/// This expands to a `cx.race(...)`/`cx.race_named(...)` call (or timeout variants),
-/// with each branch wrapped in an `async move` block.
+/// This expands to a drain-correct `cx.race_drained(...)`/`cx.race_drained_named(...)`
+/// call (or timeout variants), with each branch boxed and spawned by the
+/// `Cx::race_drained*` engine so losers are cancelled and drained.
 pub fn race_impl(input: TokenStream) -> TokenStream {
     let RaceInput {
         cx,
@@ -158,16 +162,16 @@ fn generate_race(cx: &Expr, timeout: Option<&Expr>, branches: &[RaceBranch]) -> 
 
     let call = match (timeout, named) {
         (Some(timeout_expr), true) => quote! {
-            (#cx).race_timeout_named(#timeout_expr, vec![#(#boxed_futures),*]).await
+            (#cx).race_drained_timeout_named(#timeout_expr, vec![#(#boxed_futures),*]).await
         },
         (Some(timeout_expr), false) => quote! {
-            (#cx).race_timeout(#timeout_expr, vec![#(#boxed_futures),*]).await
+            (#cx).race_drained_timeout(#timeout_expr, vec![#(#boxed_futures),*]).await
         },
         (None, true) => quote! {
-            (#cx).race_named(vec![#(#boxed_futures),*]).await
+            (#cx).race_drained_named(vec![#(#boxed_futures),*]).await
         },
         (None, false) => quote! {
-            (#cx).race(vec![#(#boxed_futures),*]).await
+            (#cx).race_drained(vec![#(#boxed_futures),*]).await
         },
     };
 
@@ -207,5 +211,116 @@ mod tests {
         let parsed: RaceInput = syn::parse2(input).unwrap();
         assert!(parsed.timeout.is_some());
         assert_eq!(parsed.branches.len(), 2);
+    }
+
+    fn unnamed_branch(future: Expr) -> RaceBranch {
+        RaceBranch { name: None, future }
+    }
+
+    fn named_branch(name: &str, future: Expr) -> RaceBranch {
+        RaceBranch {
+            name: Some(LitStr::new(name, proc_macro2::Span::call_site())),
+            future,
+        }
+    }
+
+    /// The drain guarantee (u1z5hn.6 "lie #2") is structural: the unnamed
+    /// expansion must route through the drain-correct `race_drained` engine,
+    /// never the drop-only `Cx::race`.
+    #[test]
+    fn unnamed_race_expands_to_drained_engine() {
+        let cx: Expr = syn::parse_quote!(cx);
+        let branches = vec![
+            unnamed_branch(syn::parse_quote!(fut_a())),
+            unnamed_branch(syn::parse_quote!(fut_b())),
+        ];
+        let tokens = generate_race(&cx, None, &branches).to_string();
+        assert!(
+            tokens.contains("race_drained"),
+            "unnamed race! must use the drained engine, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("race_named") && !tokens.contains("race_timeout"),
+            "unnamed race! must not emit the named/timeout variants, got: {tokens}"
+        );
+    }
+
+    /// A regression guard: the old drop-only `(cx).race(...)` /
+    /// `(cx).race_named(...)` expansions must never reappear. We check that the
+    /// only `race`-prefixed call tokens are the drained ones by asserting the
+    /// expansion contains no bare `race` method call segment.
+    #[test]
+    fn race_expansions_never_emit_drop_only_calls() {
+        let cx: Expr = syn::parse_quote!(cx);
+        let timeout: Expr = syn::parse_quote!(dur);
+
+        let unnamed = vec![
+            unnamed_branch(syn::parse_quote!(a())),
+            unnamed_branch(syn::parse_quote!(b())),
+        ];
+        let named = vec![
+            named_branch("primary", syn::parse_quote!(a())),
+            named_branch("replica", syn::parse_quote!(b())),
+        ];
+
+        let cases = [
+            generate_race(&cx, None, &unnamed).to_string(),
+            generate_race(&cx, None, &named).to_string(),
+            generate_race(&cx, Some(&timeout), &unnamed).to_string(),
+            generate_race(&cx, Some(&timeout), &named).to_string(),
+        ];
+
+        for tokens in cases {
+            assert!(
+                tokens.contains("race_drained"),
+                "every race! expansion must route through race_drained, got: {tokens}"
+            );
+            // `. race (` would be the drop-only method call; `race_drained`
+            // tokenizes as a single ident so it cannot match this.
+            assert!(
+                !tokens.replace("race_drained", "").contains("race"),
+                "no drop-only race* call may survive, got: {tokens}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_race_expands_to_drained_named_engine() {
+        let cx: Expr = syn::parse_quote!(cx);
+        let branches = vec![
+            named_branch("primary", syn::parse_quote!(fut_a())),
+            named_branch("replica", syn::parse_quote!(fut_b())),
+        ];
+        let tokens = generate_race(&cx, None, &branches).to_string();
+        assert!(
+            tokens.contains("race_drained_named"),
+            "named race! must use race_drained_named, got: {tokens}"
+        );
+    }
+
+    #[test]
+    fn timeout_race_expands_to_drained_timeout_engine() {
+        let cx: Expr = syn::parse_quote!(cx);
+        let timeout: Expr = syn::parse_quote!(std::time::Duration::from_secs(5));
+        let unnamed = vec![
+            unnamed_branch(syn::parse_quote!(fut_a())),
+            unnamed_branch(syn::parse_quote!(fut_b())),
+        ];
+        let named = vec![
+            named_branch("primary", syn::parse_quote!(fut_a())),
+            named_branch("replica", syn::parse_quote!(fut_b())),
+        ];
+        assert!(
+            generate_race(&cx, Some(&timeout), &unnamed)
+                .to_string()
+                .contains("race_drained_timeout"),
+            "timeout race! must use race_drained_timeout"
+        );
+        assert!(
+            generate_race(&cx, Some(&timeout), &named)
+                .to_string()
+                .contains("race_drained_timeout_named"),
+            "named timeout race! must use race_drained_timeout_named"
+        );
     }
 }

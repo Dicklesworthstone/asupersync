@@ -229,13 +229,21 @@ pub fn join_all(input: TokenStream) -> TokenStream {
     join::join_all_impl(input)
 }
 
-/// Races multiple futures, returning the first to complete.
+/// Races multiple futures, returning the first to complete — **losers are
+/// drained**.
 ///
-/// The `race!` macro expands to the inline [`Cx::race*`](asupersync::Cx::race)
-/// family. The losing futures are cancelled by drop, but they are not drained.
+/// The `race!` macro expands to the drain-correct
+/// [`Cx::race_drained*`](asupersync::Cx::race_drained) family: each branch is
+/// spawned as a region task and resolved through
+/// [`Scope::race_all`](asupersync::Scope::race_all), so every losing branch is
+/// protocol-cancelled **and drained** (awaited to termination) before the macro
+/// returns. This is the drain guarantee that differentiates `race!` from a
+/// plain drop-the-losers select.
 ///
-/// If you need the stronger "losers are drained" invariant, race spawned tasks
-/// with [`Scope::race`](asupersync::Scope::race) instead.
+/// Because branches run as spawned tasks, each branch and its output must be
+/// `Send + 'static`, and `cx` must be a runtime-wired context carrying spawn
+/// authority. For a lower-level drop-on-cancel select over non-`'static`
+/// inline futures, call [`Cx::race`](asupersync::Cx::race) directly.
 ///
 /// # Syntax
 ///
@@ -251,8 +259,11 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 ///
 /// # Loser Cleanup
 ///
-/// All non-winning futures are dropped, which requests cancellation for inline
-/// futures but does not await their cleanup path.
+/// All non-winning branches are cancelled and drained: the macro does not
+/// return until each loser task has terminated, so obligations and finalizers
+/// held by a loser are resolved rather than abandoned. (On the `timeout:` path,
+/// an elapsed deadline abandons the whole race by drop, matching
+/// [`Cx::race_drained_timeout`](asupersync::Cx::race_drained_timeout).)
 ///
 /// # Example
 ///
@@ -261,7 +272,7 @@ pub fn join_all(input: TokenStream) -> TokenStream {
 ///     primary_service.fetch().await,
 ///     backup_service.fetch().await,
 /// });
-/// // One completed; the loser was cancelled by drop but not drained.
+/// // One completed; the loser was cancelled AND drained before this returned.
 /// ```
 #[proc_macro]
 pub fn race(input: TokenStream) -> TokenStream {
