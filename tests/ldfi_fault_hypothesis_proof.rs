@@ -10,7 +10,10 @@
 //!
 //! Run with: `cargo test --test ldfi_fault_hypothesis_proof --features test-internals`.
 
-use asupersync::lab::ldfi::{FaultEventId, HittingSetBudget, SupportGraph};
+use asupersync::lab::ldfi::{
+    FaultEventId, HittingSetBudget, LdfiExperimentBudget, LdfiExperimentObservation,
+    LdfiExperimentStatus, SupportGraph,
+};
 
 fn ev(i: u64) -> FaultEventId {
     FaultEventId::new(i)
@@ -30,11 +33,7 @@ fn finds_known_single_fault_with_far_fewer_experiments_than_blind_chaos() {
     let result = graph.minimal_hitting_sets(HittingSetBudget::default());
 
     // LDFI finds the single-fault hypothesis {e1} at depth 1.
-    let single_faults: Vec<_> = result
-        .hypotheses
-        .iter()
-        .filter(|h| h.len() == 1)
-        .collect();
+    let single_faults: Vec<_> = result.hypotheses.iter().filter(|h| h.len() == 1).collect();
     assert!(
         single_faults.iter().any(|h| h.contains(&ev(1))),
         "LDFI did not surface the known single-fault {{e1}}"
@@ -50,7 +49,11 @@ fn finds_known_single_fault_with_far_fewer_experiments_than_blind_chaos() {
         result.hypotheses.len(),
         blind_chaos_single_fault_experiments
     );
-    assert_eq!(result.hypotheses.len(), 1, "expected exactly one minimal hitting set");
+    assert_eq!(
+        result.hypotheses.len(),
+        1,
+        "expected exactly one minimal hitting set"
+    );
     // Note: `exhausted` may be false here — with 19 derivations the bounded
     // search hits its raw-transversal cap before the minimal filter collapses
     // everything to {e1}. That does not affect correctness of the result.
@@ -79,4 +82,76 @@ fn fault_tolerant_fixture_yields_coverage_certificate() {
     assert!(result.is_empty());
     assert!(result.unbreakable);
     assert_eq!(result.coverage_certificate(), Some(3));
+}
+
+#[test]
+fn experiment_loop_stops_on_first_observed_violation() {
+    let mut graph = SupportGraph::new();
+    graph.add_derivation([ev(1), ev(2)]);
+    graph.add_derivation([ev(1), ev(3)]);
+    let result = graph.minimal_hitting_sets(HittingSetBudget::default());
+
+    let report = result.run_experiments(LdfiExperimentBudget::default(), |hypothesis| {
+        if hypothesis.contains(&ev(1)) {
+            LdfiExperimentObservation::InvariantViolated
+        } else {
+            LdfiExperimentObservation::InvariantHeld
+        }
+    });
+
+    assert_eq!(report.experiments_run, 1);
+    assert!(report.refuted.is_empty());
+    assert_eq!(
+        report.status,
+        LdfiExperimentStatus::FoundViolation {
+            hypothesis: [ev(1)].into_iter().collect()
+        }
+    );
+    assert_eq!(report.coverage_certificate(), None);
+}
+
+#[test]
+fn experiment_loop_refutes_exhausted_hypotheses_into_coverage() {
+    let mut graph = SupportGraph::new();
+    graph.add_derivation([ev(1)]);
+    graph.add_derivation([ev(2)]);
+    let result = graph.minimal_hitting_sets(HittingSetBudget::default());
+    assert!(result.exhausted, "fixture must fully enumerate hypotheses");
+
+    let report = result.run_experiments(LdfiExperimentBudget::default(), |_| {
+        LdfiExperimentObservation::InvariantHeld
+    });
+
+    assert_eq!(
+        report.status,
+        LdfiExperimentStatus::RefutedUpToDepth { max_depth: 3 }
+    );
+    assert_eq!(report.experiments_run, result.len());
+    assert_eq!(report.refuted, result.hypotheses);
+    assert_eq!(report.coverage_certificate(), Some(3));
+}
+
+#[test]
+fn experiment_loop_budget_exhaustion_does_not_claim_coverage() {
+    let mut graph = SupportGraph::new();
+    graph.add_derivation([ev(1), ev(2)]);
+    graph.add_derivation([ev(3), ev(4)]);
+    let result = graph.minimal_hitting_sets(HittingSetBudget::default());
+    assert!(
+        result.len() > 1,
+        "fixture needs multiple generated hypotheses"
+    );
+
+    let report = result.run_experiments(LdfiExperimentBudget { max_experiments: 1 }, |_| {
+        LdfiExperimentObservation::InvariantHeld
+    });
+
+    assert_eq!(report.experiments_run, 1);
+    assert_eq!(
+        report.status,
+        LdfiExperimentStatus::ExperimentBudgetExhausted {
+            remaining_hypotheses: result.len() - 1
+        }
+    );
+    assert_eq!(report.coverage_certificate(), None);
 }

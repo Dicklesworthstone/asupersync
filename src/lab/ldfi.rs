@@ -12,11 +12,12 @@
 //! depth budget, giving orders of magnitude fewer experiments than blind chaos.
 //!
 //! This module is the pure algorithmic core (bead
-//! `asupersync-adaptive-control-plane-yj2nxx.4`, WHAT step 2): the support graph
-//! and the bounded, budgeted minimal-hitting-set generator. It has no I/O, no
-//! clock, and no dependency on the chaos machinery — trace-lineage extraction
-//! (consuming `trace/causality`), the experiment loop, and the `frankenlab
-//! ldfi` CLI build on top of it in sibling slices.
+//! `asupersync-adaptive-control-plane-yj2nxx.4`): the support graph, the
+//! bounded minimal-hitting-set generator, causal-cone extraction, and the
+//! deterministic experiment-loop state machine. It has no I/O, no clock, and no
+//! dependency on the chaos machinery — the lab-runtime adapter (consuming
+//! `trace/causality`), fault injection, and the `frankenlab ldfi` CLI build on
+//! top of it in sibling slices.
 //!
 //! # Soundness note
 //!
@@ -111,6 +112,148 @@ impl HittingSetResult {
             Some(self.max_depth)
         } else {
             None
+        }
+    }
+
+    /// Runs the deterministic LDFI experiment loop over the generated
+    /// hypotheses.
+    ///
+    /// The caller supplies the actual experiment executor (today usually a lab
+    /// or chaos adapter). This pure loop owns the admission policy: test
+    /// hypotheses in their deterministic minimal order, stop at the first
+    /// invariant violation, and refuse to over-claim coverage when either the
+    /// experiment budget or the hypothesis-search budget cut the run short.
+    pub fn run_experiments<F>(
+        &self,
+        budget: LdfiExperimentBudget,
+        mut experiment: F,
+    ) -> LdfiExperimentReport
+    where
+        F: FnMut(&BTreeSet<FaultEventId>) -> LdfiExperimentObservation,
+    {
+        let mut refuted = Vec::new();
+        if self.hypotheses.is_empty() {
+            let status = if self.exhausted || self.unbreakable {
+                LdfiExperimentStatus::RefutedUpToDepth {
+                    max_depth: self.max_depth,
+                }
+            } else {
+                LdfiExperimentStatus::HypothesisSearchTruncated
+            };
+            return LdfiExperimentReport {
+                status,
+                experiments_run: 0,
+                refuted,
+            };
+        }
+
+        let max_experiments = budget.max_experiments.min(self.hypotheses.len());
+        for hypothesis in self.hypotheses.iter().take(max_experiments) {
+            match experiment(hypothesis) {
+                LdfiExperimentObservation::InvariantViolated => {
+                    return LdfiExperimentReport {
+                        status: LdfiExperimentStatus::FoundViolation {
+                            hypothesis: hypothesis.clone(),
+                        },
+                        experiments_run: refuted.len() + 1,
+                        refuted,
+                    };
+                }
+                LdfiExperimentObservation::InvariantHeld => {
+                    refuted.push(hypothesis.clone());
+                }
+            }
+        }
+
+        let status = if refuted.len() < self.hypotheses.len() {
+            LdfiExperimentStatus::ExperimentBudgetExhausted {
+                remaining_hypotheses: self.hypotheses.len() - refuted.len(),
+            }
+        } else if self.exhausted {
+            LdfiExperimentStatus::RefutedUpToDepth {
+                max_depth: self.max_depth,
+            }
+        } else {
+            LdfiExperimentStatus::HypothesisSearchTruncated
+        };
+
+        LdfiExperimentReport {
+            experiments_run: refuted.len(),
+            status,
+            refuted,
+        }
+    }
+}
+
+/// Budget for the deterministic experiment loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LdfiExperimentBudget {
+    /// Maximum generated hypotheses to execute in this loop.
+    pub max_experiments: usize,
+}
+
+impl Default for LdfiExperimentBudget {
+    fn default() -> Self {
+        Self {
+            max_experiments: usize::MAX,
+        }
+    }
+}
+
+/// Result of one injected-fault experiment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LdfiExperimentObservation {
+    /// The invariant still held under this hypothesis.
+    InvariantHeld,
+    /// The invariant failed under this hypothesis.
+    InvariantViolated,
+}
+
+/// Stop condition for the LDFI experiment loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LdfiExperimentStatus {
+    /// A concrete hypothesis broke the invariant.
+    FoundViolation {
+        /// The fault hypothesis that produced the violation.
+        hypothesis: BTreeSet<FaultEventId>,
+    },
+    /// Every generated hypothesis was refuted and the hypothesis generator
+    /// exhausted the requested depth, so this trace corpus has no counterexample
+    /// at or below `max_depth`.
+    RefutedUpToDepth {
+        /// The fault depth covered for this trace corpus.
+        max_depth: usize,
+    },
+    /// The experiment budget ran out before every generated hypothesis ran.
+    ExperimentBudgetExhausted {
+        /// Generated hypotheses still untested.
+        remaining_hypotheses: usize,
+    },
+    /// The hitting-set generator itself was truncated, so even refuting all
+    /// returned hypotheses is not a coverage proof.
+    HypothesisSearchTruncated,
+}
+
+/// Deterministic summary of a pure LDFI experiment-loop run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LdfiExperimentReport {
+    /// Why the loop stopped.
+    pub status: LdfiExperimentStatus,
+    /// Number of hypotheses actually executed.
+    pub experiments_run: usize,
+    /// Hypotheses that were tested and did not violate the invariant.
+    pub refuted: Vec<BTreeSet<FaultEventId>>,
+}
+
+impl LdfiExperimentReport {
+    /// Per-corpus coverage certificate from this experiment run, if any.
+    #[must_use]
+    pub fn coverage_certificate(&self) -> Option<usize> {
+        match self.status {
+            LdfiExperimentStatus::RefutedUpToDepth { max_depth } => Some(max_depth),
+            LdfiExperimentStatus::FoundViolation { .. }
+            | LdfiExperimentStatus::ExperimentBudgetExhausted { .. }
+            | LdfiExperimentStatus::HypothesisSearchTruncated => None,
         }
     }
 }
