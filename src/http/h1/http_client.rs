@@ -4,6 +4,30 @@
 //! [`HttpClient`] integrates [`Http1Client`], [`Pool`], DNS resolution,
 //! and optional TLS into a simple API for making HTTP requests.
 //!
+//! # No Ambient Client
+//!
+//! The pooled client is explicit by design. Construct or receive a
+//! [`HttpClient`] handle and pass an explicit [`Cx`] into [`send`](ClientRequestBuilder::send);
+//! there is no process-global default client or hidden ambient runtime handle.
+//!
+//! ```compile_fail
+//! # async fn demo(client: asupersync::http::Client) -> Result<(), Box<dyn std::error::Error>> {
+//! let _: serde_json::Value = client.get("http://127.0.0.1/user").send().await?.json()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # GET to JSON
+//!
+//! ```no_run
+//! # async fn demo(cx: &asupersync::Cx) -> Result<(), Box<dyn std::error::Error>> {
+//! let client = asupersync::http::Client::new();
+//! let user: serde_json::Value = client.get("http://127.0.0.1:8080/user").send(cx).await?.json()?;
+//! assert_eq!(user["ok"], true);
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Example
 //!
 //! ```ignore
@@ -531,13 +555,43 @@ pub enum RetryPolicy {
     /// retried by this policy because the server may have observed the request.
     #[default]
     SafeMethodsOnStaleReuse,
+    /// Retry idempotent methods on retryable response status codes.
+    ///
+    /// A valid `Retry-After` delta-seconds header is honored before the retry.
+    /// The same policy also keeps the stale pooled-connection retry enabled.
+    IdempotentStatusCodes {
+        /// Maximum number of response-status retries after the first attempt.
+        max_retries: u32,
+    },
 }
 
 impl RetryPolicy {
     fn should_retry_reused_connection_failure(&self, method: &Method, err: &ClientError) -> bool {
-        matches!(self, Self::SafeMethodsOnStaleReuse)
-            && method_is_safe_to_retry_after_stale_reuse(method)
+        matches!(
+            self,
+            Self::SafeMethodsOnStaleReuse | Self::IdempotentStatusCodes { .. }
+        ) && method_is_safe_to_retry_after_stale_reuse(method)
             && client_error_looks_like_stale_reuse(err)
+    }
+
+    fn response_retry_delay(
+        &self,
+        method: &Method,
+        response: &Response,
+        retries_so_far: u32,
+    ) -> Option<std::time::Duration> {
+        let max_retries = match self {
+            Self::IdempotentStatusCodes { max_retries } => *max_retries,
+            Self::None | Self::SafeMethodsOnStaleReuse => return None,
+        };
+        if retries_so_far >= max_retries
+            || !method_is_idempotent_for_response_retry(method)
+            || !status_is_retriable_response(response.status)
+        {
+            return None;
+        }
+
+        Some(retry_after_delay(&response.headers).unwrap_or(std::time::Duration::ZERO))
     }
 }
 
@@ -644,6 +698,17 @@ impl HttpClientBuilder {
     #[must_use]
     pub fn retry_safe_methods_on_stale_reuse(mut self) -> Self {
         self.config.retry_policy = RetryPolicy::SafeMethodsOnStaleReuse;
+        self
+    }
+
+    /// Retries idempotent methods on retryable response status codes.
+    ///
+    /// Valid `Retry-After` delta-seconds response headers are honored before
+    /// retrying. Use [`Self::no_retries`] when no automatic retry behavior is
+    /// desired.
+    #[must_use]
+    pub fn retry_idempotent_statuses(mut self, max_retries: u32) -> Self {
+        self.config.retry_policy = RetryPolicy::IdempotentStatusCodes { max_retries };
         self
     }
 
@@ -1184,7 +1249,7 @@ impl HttpClient {
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
-        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0);
+        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0, 0);
         drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
     }
 
@@ -1211,7 +1276,7 @@ impl HttpClient {
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
-        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0);
+        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0, 0);
         drive_with_budget_deadline(cx, self.config.request_timeout, Some(timeout), fut).await
     }
 
@@ -1294,6 +1359,7 @@ impl HttpClient {
         extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
         redirect_count: u32,
+        retry_count: u32,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Response, ClientError>> + Send + 'a>,
     > {
@@ -1349,11 +1415,31 @@ impl HttpClient {
                                     next_headers,
                                     next_body,
                                     redirect_count.saturating_add(1),
+                                    retry_count,
                                 )
                                 .await;
                         }
                     }
                 }
+            }
+
+            if let Some(delay) =
+                self.config
+                    .retry_policy
+                    .response_retry_delay(&method, &resp, retry_count)
+            {
+                sleep_before_retry(cx, delay).await?;
+                return self
+                    .execute_with_redirects(
+                        cx,
+                        method,
+                        parsed,
+                        extra_headers,
+                        body,
+                        redirect_count,
+                        retry_count.saturating_add(1),
+                    )
+                    .await;
             }
 
             Ok(resp)
@@ -2646,6 +2732,41 @@ fn method_is_safe_to_retry_after_stale_reuse(method: &Method) -> bool {
     )
 }
 
+fn method_is_idempotent_for_response_retry(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::Get | Method::Head | Method::Put | Method::Delete | Method::Options | Method::Trace
+    )
+}
+
+fn status_is_retriable_response(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
+fn retry_after_delay(headers: &[(String, String)]) -> Option<std::time::Duration> {
+    get_header(headers, "Retry-After").and_then(|value| parse_retry_after_delta(&value))
+}
+
+fn parse_retry_after_delta(value: &str) -> Option<std::time::Duration> {
+    let seconds = value.trim().parse::<u64>().ok()?;
+    Some(std::time::Duration::from_secs(seconds))
+}
+
+fn cx_timer_now(cx: &Cx) -> Time {
+    cx.timer_driver()
+        .or_else(|| Cx::with_current(|ambient| ambient.timer_driver()).flatten())
+        .map_or_else(crate::time::wall_now, |timer| timer.now())
+}
+
+async fn sleep_before_retry(cx: &Cx, delay: std::time::Duration) -> Result<(), ClientError> {
+    if delay.is_zero() {
+        return Ok(());
+    }
+    check_cx(cx)?;
+    crate::time::sleep(cx_timer_now(cx), delay).await;
+    check_cx(cx)
+}
+
 fn client_error_looks_like_stale_reuse(err: &ClientError) -> bool {
     match err {
         ClientError::Io(io_err) => io_error_looks_like_stale_reuse(io_err),
@@ -2808,9 +2929,9 @@ fn validate_connect_authority_form(target_authority: &str) -> Result<(), ClientE
             ));
         }
         let after_host = &bracketed[bracket_end.saturating_add(1)..];
-        after_host.strip_prefix(':').ok_or_else(|| {
-            invalid_connect_authority("bracketed hosts require an explicit port")
-        })?
+        after_host
+            .strip_prefix(':')
+            .ok_or_else(|| invalid_connect_authority("bracketed hosts require an explicit port"))?
     } else {
         if target_authority.chars().any(|c| matches!(c, '[' | ']')) {
             return Err(invalid_connect_authority(
@@ -4511,6 +4632,69 @@ mod tests {
         assert!(
             !RetryPolicy::None.should_retry_reused_connection_failure(&Method::Get, &stale_err())
         );
+    }
+
+    #[test]
+    fn retry_policy_response_status_matrix_is_idempotent_and_retry_after_aware() {
+        let response = Response {
+            version: Version::Http11,
+            status: 503,
+            reason: "Service Unavailable".to_owned(),
+            headers: vec![("Retry-After".to_owned(), "7".to_owned())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        let policy = RetryPolicy::IdempotentStatusCodes { max_retries: 1 };
+
+        assert_eq!(
+            policy.response_retry_delay(&Method::Get, &response, 0),
+            Some(std::time::Duration::from_secs(7))
+        );
+        assert_eq!(
+            policy.response_retry_delay(&Method::Put, &response, 0),
+            Some(std::time::Duration::from_secs(7))
+        );
+        assert_eq!(
+            policy.response_retry_delay(&Method::Post, &response, 0),
+            None
+        );
+        assert_eq!(
+            policy.response_retry_delay(&Method::Patch, &response, 0),
+            None
+        );
+        assert_eq!(
+            policy.response_retry_delay(&Method::Get, &response, 1),
+            None
+        );
+
+        let mut non_retriable = response;
+        non_retriable.status = 400;
+        assert_eq!(
+            policy.response_retry_delay(&Method::Get, &non_retriable, 0),
+            None
+        );
+        assert_eq!(
+            RetryPolicy::SafeMethodsOnStaleReuse.response_retry_delay(
+                &Method::Get,
+                &non_retriable,
+                0
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_after_delta_parser_rejects_invalid_values() {
+        assert_eq!(
+            parse_retry_after_delta(" 12 "),
+            Some(std::time::Duration::from_secs(12))
+        );
+        assert_eq!(
+            parse_retry_after_delta("Wed, 21 Oct 2015 07:28:00 GMT"),
+            None
+        );
+        assert_eq!(parse_retry_after_delta("-1"), None);
+        assert_eq!(parse_retry_after_delta("abc"), None);
     }
 
     #[test]

@@ -24,7 +24,7 @@ use asupersync::Cx;
 use asupersync::http::h1::HttpClient;
 use common::*;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,90 @@ fn read_until_headers_end(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
         }
     }
     Ok(buf)
+}
+
+fn request_method(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let first_line = text.lines().next().unwrap_or_default();
+    first_line
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn spawn_status_retry_server(
+    first_status: u16,
+    first_reason: &'static str,
+    first_retry_after: Option<&'static str>,
+    final_body: &'static [u8],
+    max_conns: usize,
+) -> (SocketAddr, thread::JoinHandle<std::io::Result<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking listener");
+    let addr = listener.local_addr().expect("listener local_addr");
+
+    let handle = thread::spawn(move || -> std::io::Result<Vec<String>> {
+        let mut methods = Vec::with_capacity(max_conns);
+        for index in 0..max_conns {
+            let mut conn = accept_with_timeout(&listener, IO_TIMEOUT)?;
+            conn.set_read_timeout(Some(IO_TIMEOUT))?;
+            conn.set_write_timeout(Some(IO_TIMEOUT))?;
+            let raw = read_until_headers_end(&mut conn)?;
+            methods.push(request_method(&raw));
+
+            if index == 0 {
+                write!(
+                    conn,
+                    "HTTP/1.1 {first_status} {first_reason}\r\nContent-Length: 0\r\nConnection: close\r\n"
+                )?;
+                if let Some(retry_after) = first_retry_after {
+                    write!(conn, "Retry-After: {retry_after}\r\n")?;
+                }
+                conn.write_all(b"\r\n")?;
+            } else {
+                write!(
+                    conn,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    final_body.len()
+                )?;
+                conn.write_all(final_body)?;
+            }
+            conn.flush()?;
+        }
+        Ok(methods)
+    });
+
+    (addr, handle)
+}
+
+fn spawn_json_once_server(
+    body: &'static [u8],
+) -> (SocketAddr, thread::JoinHandle<std::io::Result<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking listener");
+    let addr = listener.local_addr().expect("listener local_addr");
+
+    let handle = thread::spawn(move || -> std::io::Result<String> {
+        let mut conn = accept_with_timeout(&listener, IO_TIMEOUT)?;
+        conn.set_read_timeout(Some(IO_TIMEOUT))?;
+        conn.set_write_timeout(Some(IO_TIMEOUT))?;
+        let raw = read_until_headers_end(&mut conn)?;
+        write!(
+            conn,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )?;
+        conn.write_all(body)?;
+        conn.flush()?;
+        Ok(request_method(&raw))
+    });
+
+    (addr, handle)
 }
 
 #[test]
@@ -131,4 +215,101 @@ fn stale_pooled_connection_is_transparently_retried_on_fresh_connection() {
     );
 
     test_complete!("stale_pooled_connection_is_transparently_retried_on_fresh_connection");
+}
+
+#[test]
+fn fluent_get_to_json_round_trip_uses_explicit_cx() {
+    init_test_logging();
+    test_phase!("fluent_get_to_json_round_trip_uses_explicit_cx");
+
+    let (addr, server) = spawn_json_once_server(br#"{"ok":true,"name":"asupersync"}"#);
+
+    run_test(|| async move {
+        let cx = Cx::for_testing();
+        let client = HttpClient::new();
+        let url = format!("http://{addr}/user");
+
+        let user: serde_json::Value = client
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect("GET should complete")
+            .json()
+            .expect("response body should decode as JSON");
+
+        assert_eq!(user["ok"], true);
+        assert_eq!(user["name"], "asupersync");
+    });
+
+    let method = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert_eq!(method, "GET");
+
+    test_complete!("fluent_get_to_json_round_trip_uses_explicit_cx");
+}
+
+#[test]
+fn retry_policy_retries_idempotent_status_after_retry_after_zero() {
+    init_test_logging();
+    test_phase!("retry_policy_retries_idempotent_status_after_retry_after_zero");
+
+    let (addr, server) =
+        spawn_status_retry_server(503, "Service Unavailable", Some("0"), b"READY", 2);
+
+    run_test(|| async move {
+        let cx = Cx::for_testing();
+        let client = HttpClient::builder().retry_idempotent_statuses(1).build();
+        let url = format!("http://{addr}/resource");
+
+        let response = client
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect("idempotent GET should retry 503 once and succeed");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"READY");
+    });
+
+    let methods = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert_eq!(methods, vec!["GET".to_owned(), "GET".to_owned()]);
+
+    test_complete!("retry_policy_retries_idempotent_status_after_retry_after_zero");
+}
+
+#[test]
+fn retry_policy_does_not_retry_non_idempotent_post_status() {
+    init_test_logging();
+    test_phase!("retry_policy_does_not_retry_non_idempotent_post_status");
+
+    let (addr, server) =
+        spawn_status_retry_server(503, "Service Unavailable", Some("0"), b"UNUSED", 1);
+
+    run_test(|| async move {
+        let cx = Cx::for_testing();
+        let client = HttpClient::builder().retry_idempotent_statuses(1).build();
+        let url = format!("http://{addr}/mutate");
+
+        let response = client
+            .post(url.as_str())
+            .body(b"create".to_vec())
+            .send(&cx)
+            .await
+            .expect("POST should return the 503 response without retrying");
+
+        assert_eq!(response.status, 503);
+    });
+
+    let methods = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    assert_eq!(methods, vec!["POST".to_owned()]);
+
+    test_complete!("retry_policy_does_not_retry_non_idempotent_post_status");
 }
