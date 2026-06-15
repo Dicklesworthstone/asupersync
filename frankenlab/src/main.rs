@@ -26,6 +26,11 @@ use asupersync::trace::{
     IncidentReplayMinimizationVerdict, IncidentReplayOracle, IncidentReplayPackage,
     IncidentReplaySourceRole, ScenarioElement, TraceMinimizer, minimize_incident_replay_package,
 };
+use asupersync::lab::ldfi::HittingSetBudget;
+use asupersync::lab::ldfi_trace::{
+    LdfiReport, TraceLineageConfig, blind_chaos_single_fault_count, ldfi_report, support_graph_for,
+};
+use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use serde::Serialize;
 use std::cell::{Cell, RefCell};
@@ -74,6 +79,9 @@ enum Command {
 
     /// Recover a crash-durable RaptorQ trace journal from its surviving stripes
     TraceRecover(TraceRecoverArgs),
+
+    /// Run lineage-driven fault injection over a recorded trace
+    Ldfi(LdfiArgs),
 }
 
 #[derive(Args, Debug)]
@@ -164,6 +172,30 @@ struct TraceRecoverArgs {
     /// recovery summary is reported)
     #[arg(long)]
     output: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct LdfiArgs {
+    /// Path to a JSON file holding the recorded trace (a serialized `Vec<TraceEvent>`)
+    trace: PathBuf,
+
+    /// `stable_name` of the trace event kind that produces the target invariant
+    /// outcome (the "oracle"), e.g. `user_trace`, `obligation_commit`, `down_delivered`
+    #[arg(long, default_value = "user_trace")]
+    outcome_kind: String,
+
+    /// For `user_trace` outcomes, only treat events whose message contains this
+    /// substring as the outcome
+    #[arg(long)]
+    outcome_contains: Option<String>,
+
+    /// Maximum fault depth k to enumerate
+    #[arg(long, default_value_t = 3)]
+    depth: usize,
+
+    /// Maximum number of minimal fault hypotheses to return
+    #[arg(long, default_value_t = 64)]
+    max_hypotheses: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,6 +1187,81 @@ fn cmd_trace_recover(args: TraceRecoverArgs, json: bool) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// LDFI (lineage-driven fault injection)
+// ---------------------------------------------------------------------------
+
+/// Builds the LDFI report for a recorded trace: extract the lineage, take the
+/// fault-able causal cone of each outcome-kind event as a derivation, enumerate
+/// the minimal breaking hypotheses, and pair them with the blind-chaos baseline.
+/// Pure and deterministic — the `cmd_ldfi` wrapper only adds file IO and output.
+fn run_ldfi(
+    trace: &[TraceEvent],
+    outcome_kind: &str,
+    outcome_contains: Option<&str>,
+    budget: HittingSetBudget,
+) -> Result<LdfiReport, String> {
+    let kind = TraceEventKind::ALL
+        .iter()
+        .copied()
+        .find(|k| k.stable_name() == outcome_kind)
+        .ok_or_else(|| format!("unknown outcome kind '{outcome_kind}'"))?;
+    let graph = support_graph_for(trace, TraceLineageConfig::default(), |ev| {
+        ev.kind == kind
+            && match outcome_contains {
+                Some(sub) => matches!(&ev.data, TraceData::Message(m) if m.contains(sub)),
+                None => true,
+            }
+    });
+    if graph.is_empty() {
+        return Err(format!(
+            "no outcome events of kind '{outcome_kind}' in the trace"
+        ));
+    }
+    let result = graph.minimal_hitting_sets(budget);
+    Ok(ldfi_report(&result, blind_chaos_single_fault_count(trace)))
+}
+
+fn cmd_ldfi(args: LdfiArgs, json: bool) -> Result<(), String> {
+    if args.depth == 0 {
+        return Err("--depth must be at least 1".to_string());
+    }
+    let content = fs::read_to_string(&args.trace)
+        .map_err(|e| format!("read trace {}: {e}", args.trace.display()))?;
+    let trace: Vec<TraceEvent> = serde_json::from_str(&content)
+        .map_err(|e| format!("parse trace {}: {e}", args.trace.display()))?;
+
+    let report = run_ldfi(
+        &trace,
+        &args.outcome_kind,
+        args.outcome_contains.as_deref(),
+        HittingSetBudget {
+            max_depth: args.depth,
+            max_hypotheses: args.max_hypotheses,
+        },
+    )?;
+
+    if json {
+        println!("{}", pretty_json_or(&report, ""));
+    } else {
+        let certificate = match report.coverage_certificate {
+            Some(k) => format!(", coverage certificate: no <= {k}-fault counterexample"),
+            None => String::new(),
+        };
+        println!(
+            "LDFI: {} fault hypothes(es) vs {} blind-chaos single-fault experiments, depth {}{}",
+            report.hypotheses.len(),
+            report.blind_chaos_single_fault_experiments,
+            report.max_depth,
+            certificate,
+        );
+        for (i, hypothesis) in report.hypotheses.iter().enumerate() {
+            println!("  #{i}: {hypothesis:?}");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1169,6 +1276,7 @@ fn main() -> ExitCode {
         Command::Minimize(args) => cmd_minimize(args, cli.json),
         Command::Demo(args) => cmd_demo(args, cli.json),
         Command::TraceRecover(args) => cmd_trace_recover(args, cli.json),
+        Command::Ldfi(args) => cmd_ldfi(args, cli.json),
     };
 
     match result {
@@ -1191,6 +1299,55 @@ mod tests {
         IncidentSourceKind,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn ldfi_cli_core_finds_single_shared_fault() {
+        use asupersync::remote::NodeId;
+        use asupersync::trace::distributed::{LogicalTime, VectorClock};
+        use asupersync::types::Time;
+
+        let net = NodeId::new("net");
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        let mut send = VectorClock::new();
+        send.increment(&net);
+        let mut ack_a = send.clone();
+        ack_a.increment(&a);
+        let mut ack_b = send.clone();
+        ack_b.increment(&b);
+        let mut ok_a = ack_a.clone();
+        ok_a.increment(&a);
+        let mut ok_b = ack_b.clone();
+        ok_b.increment(&b);
+
+        let trace = vec![
+            TraceEvent::io_result(1, Time::ZERO, 10, 4).with_logical_time(LogicalTime::Vector(send)),
+            TraceEvent::io_ready(2, Time::ZERO, 20, 1).with_logical_time(LogicalTime::Vector(ack_a)),
+            TraceEvent::io_ready(3, Time::ZERO, 30, 1).with_logical_time(LogicalTime::Vector(ack_b)),
+            TraceEvent::user_trace(10, Time::ZERO, "delivered-a")
+                .with_logical_time(LogicalTime::Vector(ok_a)),
+            TraceEvent::user_trace(11, Time::ZERO, "delivered-b")
+                .with_logical_time(LogicalTime::Vector(ok_b)),
+        ];
+
+        let budget = HittingSetBudget {
+            max_depth: 3,
+            max_hypotheses: 64,
+        };
+        let report = run_ldfi(&trace, "user_trace", None, budget).expect("report");
+        assert_eq!(report.hypotheses[0], vec![1u64]);
+        assert_eq!(report.blind_chaos_single_fault_experiments, 3);
+        assert_eq!(report.coverage_certificate, None);
+        assert_eq!(report.schema, "ldfi-report-v1");
+
+        let json = serde_json::to_string(&report).expect("serialize");
+        let back: LdfiReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, report);
+
+        // Unknown outcome kind and a kind with no matching events are clean errors.
+        assert!(run_ldfi(&trace, "bogus-kind", None, budget).is_err());
+        assert!(run_ldfi(&trace, "down_delivered", None, budget).is_err());
+    }
 
     fn disk_pressure_fault(at_ms: u64, path: &str) -> FaultEvent {
         let mut args = BTreeMap::new();
