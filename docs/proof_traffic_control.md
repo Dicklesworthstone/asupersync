@@ -118,6 +118,49 @@ peer-owned build, creating a branch/worktree/scratch clone, or deleting files.
 Peer-owned stale-progress builds are handoff evidence only; they do not grant
 authority to interrupt another agent's RCH work.
 
+## Proof-Traffic A3 Clean-Overlay Handshake
+
+`asupersync-proof-traffic-control-kuyx64.3` connects the existing
+`clean_overlay_planner` and `overlay_proof_command` surfaces to the installed RCH
+capability evidence from `artifacts/proof_traffic_rch_capabilities_v1.json`.
+The checked contract is
+`tests/proof_traffic_clean_overlay_runner_handshake_contract.rs`; the machine
+artifact is `artifacts/proof_traffic_clean_overlay_runner_handshake_v1.json`.
+
+The handshake accepts a fixed snapshot:
+
+- the clean-overlay planner request,
+- the exact `target_dir`,
+- the installed clean-overlay capability probe,
+- the gate id used in Agent Mail and `br` handoffs.
+
+It admits a proof command only when all of the following are true:
+
+- selected dirty or untracked paths are covered by exclusive self reservations,
+- selected deleted paths are absent,
+- peer-dirty unselected paths are absent from the enforced proof,
+- installed `rch exec` supports the clean-overlay flags required by the rendered
+  command,
+- the request is not report-only.
+
+Unsupported backend capability emits `blocked-by-capability-drift` and a blocker
+marker instead of an RCH/Cargo command. This is the current installed state for
+`rch 1.0.41`, whose help text lacks `--base`, `--clean-overlay`,
+`--overlay-path`, and `--no-overlay`.
+
+Peer-dirty and unselected paths fail closed in enforced mode. The contract uses
+a poison peer path fixture to prove that an unowned path cannot appear in an
+admitted command. Report-only mode may name excluded paths in Markdown/JSON, but
+still emits no proof command and makes no proof claim.
+
+The A3 report includes `selected_paths`, `included_paths`, `excluded_paths`,
+`reservation_evidence`, `capability_probe_version`, `clean_overlay_supported`,
+`missing_flags`, `capability_findings`, `rendered_command`, retry condition, and
+no-claim boundaries. Agent Mail and `br` bodies are structured-field-first.
+
+No handshake path uses local Cargo fallback, branch creation, worktree creation,
+scratch clones, file deletion, `git clean`, or `git reset`.
+
 ## No-Claim Boundaries
 
 This gate does not prove release readiness, broad workspace health, runtime

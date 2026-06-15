@@ -15,4 +15,5 @@ pub mod blocker_receipt;
 pub mod clean_overlay_planner;
 pub mod meta_audit;
 pub mod overlay_proof_command;
+pub mod proof_traffic_overlay_handshake;
 pub mod proof_traffic_receipt;

@@ -1,0 +1,99 @@
+{
+  "schema_version": "proof-traffic-clean-overlay-runner-handshake-v1",
+  "receipt_schema_version": "proof-traffic-clean-overlay-handshake-v1",
+  "bead_id": "asupersync-proof-traffic-control-kuyx64.3",
+  "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
+  "status": "contract_guarded",
+  "generated_at": "2026-06-15T06:55:00Z",
+  "source_of_truth": {
+    "artifact": "artifacts/proof_traffic_clean_overlay_runner_handshake_v1.json",
+    "operator_doc": "docs/proof_traffic_control.md",
+    "contract_test": "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
+    "rust_module": "src/audit/proof_traffic_overlay_handshake.rs",
+    "planner_module": "src/audit/clean_overlay_planner.rs",
+    "command_module": "src/audit/overlay_proof_command.rs",
+    "capability_artifact": "artifacts/proof_traffic_rch_capabilities_v1.json"
+  },
+  "decision_outputs": [
+    "run-now",
+    "park-rerun-required",
+    "blocked-by-peer",
+    "blocked-by-capability-drift",
+    "report-only"
+  ],
+  "required_fixture_coverage": [
+    "reservation-matched-dirty-path",
+    "reservation-matched-untracked-path",
+    "peer-reservation-conflict",
+    "report-only-mode",
+    "admitted-mode",
+    "unsupported-backend-mode",
+    "deleted-selection-refused",
+    "poison-peer-path-excluded"
+  ],
+  "admission_rules": [
+    {
+      "rule_id": "selected-dirty-requires-exclusive-self-reservation",
+      "expected_decision_if_missing": "park-rerun-required"
+    },
+    {
+      "rule_id": "selected-untracked-requires-exclusive-self-reservation",
+      "expected_decision_if_missing": "park-rerun-required"
+    },
+    {
+      "rule_id": "clean-overlay-capability-required-for-command-emission",
+      "expected_decision_if_missing": "blocked-by-capability-drift"
+    },
+    {
+      "rule_id": "peer-dirty-unselected-fails-closed",
+      "expected_decision_if_present": "blocked-by-peer"
+    },
+    {
+      "rule_id": "deleted-selected-path-refused",
+      "expected_decision_if_present": "park-rerun-required"
+    },
+    {
+      "rule_id": "report-only-emits-no-proof-command",
+      "expected_decision_if_enabled": "report-only"
+    }
+  ],
+  "required_report_fields": [
+    "gate_id",
+    "status",
+    "head_commit",
+    "command_intent",
+    "target_dir",
+    "selected_paths",
+    "included_paths",
+    "excluded_paths",
+    "reservation_evidence",
+    "capability_probe_version",
+    "clean_overlay_supported",
+    "missing_flags",
+    "capability_findings",
+    "rendered_command",
+    "retry_condition",
+    "no_claim_boundaries"
+  ],
+  "forbidden_command_surface": [
+    "local Cargo fallback",
+    "peer build cancellation",
+    "branch creation",
+    "worktree creation",
+    "scratch clone",
+    "file deletion",
+    "git clean",
+    "git reset"
+  ],
+  "no_claim_boundaries": [
+    "No release-readiness claim.",
+    "No broad workspace-health claim.",
+    "No runtime-correctness claim.",
+    "No performance-improvement claim.",
+    "No live RCH fleet-availability claim.",
+    "No local Cargo fallback approval.",
+    "No peer-owned build cancellation authority.",
+    "No permission to delete files, clean worktrees, create branches, or create worktrees.",
+    "No claim that peer dirt was excluded unless the installed RCH clean-overlay capability is supported."
+  ]
+}
