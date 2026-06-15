@@ -5496,6 +5496,92 @@ impl MySqlPreparedStatementCache {
     }
 }
 
+/// Realized effectiveness of the prepared-statement cache over a workload
+/// (br-asupersync-server-stack-hardening-eeexl1.5 AC8).
+///
+/// Exposed only under `test-internals` so production callers cannot depend on
+/// it; it backs the `mysql_prepared_cache` benchmark and its assertion test.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct PreparedCacheBenchReport {
+    /// Hit/miss/eviction counters realized by the production cache.
+    pub stats: MySqlPreparedCacheStats,
+    /// Total query executions issued by the workload.
+    pub executions: u64,
+    /// Wire prepares actually issued (cache misses).
+    pub prepares_issued: u64,
+    /// Wire prepares avoided by cache reuse (cache hits).
+    pub prepares_avoided: u64,
+}
+
+#[cfg(feature = "test-internals")]
+impl PreparedCacheBenchReport {
+    /// Fraction of executions that reused a cached statement (and so avoided a
+    /// wire prepare round-trip), in `[0.0, 1.0]`. This is the headline
+    /// "cache benefit" figure for AC8.
+    #[must_use]
+    pub fn prepares_avoided_ratio(&self) -> f64 {
+        self.stats.hit_ratio()
+    }
+}
+
+/// Drive the production [`MySqlPreparedStatementCache`] through a repeated-query
+/// workload and return the realized cache effectiveness
+/// (br-asupersync-server-stack-hardening-eeexl1.5 AC8).
+///
+/// `distinct_queries` distinct SQL texts form the working set; the workload
+/// makes `repetitions` passes over them in order — a hot repeated-query loop.
+/// Every miss constructs a fresh statement and inserts it (modeling one wire
+/// `COM_STMT_PREPARE`), every hit reuses the cached handle (one prepare
+/// avoided). The cache is the real bounded LRU, so the returned counters
+/// reflect genuine eviction/LRU behavior at the chosen `capacity`.
+///
+/// Exposed only under `test-internals`.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+#[must_use]
+pub fn bench_prepared_cache_repeated_workload(
+    capacity: usize,
+    distinct_queries: usize,
+    repetitions: usize,
+) -> PreparedCacheBenchReport {
+    let mut cache = MySqlPreparedStatementCache::new(capacity);
+    let queries: Vec<String> = (0..distinct_queries)
+        .map(|i| format!("SELECT c0, c1 FROM bench_t WHERE k = ? /* q{i} */"))
+        .collect();
+    // Distinct statement ids so evictions surface distinct COM_STMT_CLOSE ids,
+    // matching how a real server hands them out.
+    let mut next_statement_id: u32 = 1;
+    let mut executions: u64 = 0;
+    for _ in 0..repetitions {
+        for sql in &queries {
+            executions += 1;
+            // Fixed owner id/epoch: one logical checkout reusing one session.
+            if cache.get_and_touch(sql, 1, 1).is_none() {
+                let stmt = MySqlStatement {
+                    statement_id: next_statement_id,
+                    owner_connection_id: 1,
+                    owner_prepared_statement_epoch: 1,
+                    param_count: 1,
+                    column_count: 2,
+                    params: Vec::new(),
+                    columns: Vec::new(),
+                };
+                next_statement_id = next_statement_id.wrapping_add(1);
+                cache.insert_returning_evicted_id(sql.clone(), stmt);
+            }
+        }
+    }
+    let stats = cache.stats();
+    PreparedCacheBenchReport {
+        stats,
+        executions,
+        prepares_issued: stats.misses,
+        prepares_avoided: stats.hits,
+    }
+}
+
 /// Pool manager for MySQL connections.
 ///
 /// This manager treats each checkout as a distinct logical session for

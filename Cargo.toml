@@ -735,6 +735,11 @@ path = "benches/atp/autotune/decision.rs"
 harness = false
 required-features = ["criterion-benches"]
 
+[[bench]]
+name = "mysql_prepared_cache"
+harness = false
+required-features = ["mysql", "test-internals", "criterion-benches"]
+
 [[test]]
 name = "atp_autotune_safety_regression"
 path = "tests/atp/autotune_regression/safety.rs"
