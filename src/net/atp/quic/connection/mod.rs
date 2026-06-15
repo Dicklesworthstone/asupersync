@@ -7,6 +7,7 @@ use crate::net::atp::path::{
 };
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 /// Maximum QUIC connection ID length from RFC 9000.
 pub const MAX_CONNECTION_ID_LEN: usize = 20;
@@ -42,12 +43,23 @@ impl Default for AtpQuicConnectionConfig {
 }
 
 /// A QUIC connection ID and its stateless reset token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct QuicConnectionId {
     sequence: u64,
     bytes: Vec<u8>,
     stateless_reset_token: [u8; STATELESS_RESET_TOKEN_LEN],
     issued_at_micros: u64,
+}
+
+impl fmt::Debug for QuicConnectionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuicConnectionId")
+            .field("sequence", &self.sequence)
+            .field("bytes", &self.bytes)
+            .field("stateless_reset_token", &"<redacted>")
+            .field("issued_at_micros", &self.issued_at_micros)
+            .finish()
+    }
 }
 
 impl QuicConnectionId {
@@ -831,6 +843,30 @@ mod tests {
         assert_eq!(
             err,
             AtpQuicConnectionError::CannotRetireActiveConnectionId { sequence: 0 }
+        );
+    }
+
+    #[test]
+    fn connection_id_debug_redacts_stateless_reset_token() {
+        let reset_token = [0xabu8; STATELESS_RESET_TOKEN_LEN];
+        let raw_token_debug = format!("{reset_token:?}");
+        let cid =
+            QuicConnectionId::new(7, vec![1, 2, 3, 4], reset_token, 99).expect("connection id");
+
+        let cid_debug = format!("{cid:?}");
+        assert!(cid_debug.contains("QuicConnectionId"));
+        assert!(cid_debug.contains("stateless_reset_token"));
+        assert!(cid_debug.contains("<redacted>"));
+        assert!(
+            !cid_debug.contains(&raw_token_debug),
+            "QuicConnectionId Debug must not expose stateless reset token: {cid_debug}"
+        );
+
+        let registry = ConnectionIdRegistry::new(cid, 2).expect("registry");
+        let registry_debug = format!("{registry:?}");
+        assert!(
+            !registry_debug.contains(&raw_token_debug),
+            "ConnectionIdRegistry Debug must not expose nested stateless reset tokens: {registry_debug}"
         );
     }
 
