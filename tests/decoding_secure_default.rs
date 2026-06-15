@@ -11,8 +11,9 @@
 //! accepted forged / unauthenticated symbols (decode-matrix poisoning).
 
 use asupersync::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
-use asupersync::security::AuthenticatedSymbol;
+use asupersync::net::atp::transport_rq::{RqConfig, RqError, RqSymbolAuthMode};
 use asupersync::security::tag::AuthenticationTag;
+use asupersync::security::{AuthenticatedSymbol, SecurityContext};
 use asupersync::types::symbol::{ObjectId, Symbol, SymbolId, SymbolKind};
 
 fn unauthenticated_symbol(object_value: u64, symbol_size: u16) -> AuthenticatedSymbol {
@@ -83,4 +84,43 @@ fn without_auth_pipeline_accepts_symbol_as_explicit_opt_out() {
         1,
         "the accepted-without-auth symbol must be counted for operator audit"
     );
+}
+
+#[test]
+fn atp_rq_config_reports_fail_closed_symbol_auth_posture() {
+    let default_config = RqConfig::default();
+    assert_eq!(
+        default_config.symbol_auth_mode(),
+        RqSymbolAuthMode::MissingAuthenticationContext,
+        "ATP RaptorQ must report the fail-closed missing-auth state by default"
+    );
+    assert!(
+        matches!(
+            default_config.validate_symbol_auth_mode(),
+            Err(RqError::Authentication(message)) if message.contains("symbol_auth_context")
+        ),
+        "default ATP RaptorQ config must reject an implicit unauthenticated symbol plane"
+    );
+
+    let trusted_lab_config = RqConfig::default().allow_unauthenticated_for_trusted_transport();
+    assert_eq!(
+        trusted_lab_config.symbol_auth_mode(),
+        RqSymbolAuthMode::TrustedUnauthenticated,
+        "trusted unauthenticated mode must be visible as an explicit opt-out"
+    );
+    trusted_lab_config
+        .validate_symbol_auth_mode()
+        .expect("trusted unauthenticated mode is deliberate");
+
+    let authenticated_config = RqConfig::default()
+        .allow_unauthenticated_for_trusted_transport()
+        .with_symbol_auth(SecurityContext::for_testing(42));
+    assert_eq!(
+        authenticated_config.symbol_auth_mode(),
+        RqSymbolAuthMode::Authenticated,
+        "a configured SecurityContext must take precedence over the trusted opt-out"
+    );
+    authenticated_config
+        .validate_symbol_auth_mode()
+        .expect("configured symbol auth is valid");
 }

@@ -168,6 +168,21 @@ pub struct RqConfig {
     pub allow_unauthenticated_symbols: bool,
 }
 
+/// Public per-symbol authentication posture for ATP-over-RaptorQ.
+///
+/// This reports whether the UDP symbol plane is configured to verify tags. It
+/// does not claim full Byzantine symbol-injection protection by itself because
+/// the TCP control channel and manifest still need authenticated transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RqSymbolAuthMode {
+    /// Symbols are signed and verified with a configured [`SecurityContext`].
+    Authenticated,
+    /// Symbols are deliberately unauthenticated on a trusted loopback/lab link.
+    TrustedUnauthenticated,
+    /// No auth context was configured and no explicit trusted opt-out was set.
+    MissingAuthenticationContext,
+}
+
 impl Default for RqConfig {
     fn default() -> Self {
         Self {
@@ -200,6 +215,23 @@ impl RqConfig {
         self.symbol_auth_context = None;
         self.allow_unauthenticated_symbols = true;
         self
+    }
+
+    /// Return the configured per-symbol authentication posture.
+    #[must_use]
+    pub fn symbol_auth_mode(&self) -> RqSymbolAuthMode {
+        if self.symbol_auth_context.is_some() {
+            return RqSymbolAuthMode::Authenticated;
+        }
+        if self.allow_unauthenticated_symbols {
+            return RqSymbolAuthMode::TrustedUnauthenticated;
+        }
+        RqSymbolAuthMode::MissingAuthenticationContext
+    }
+
+    /// Validate that the symbol-auth posture is deliberate.
+    pub fn validate_symbol_auth_mode(&self) -> Result<(), RqError> {
+        self.symbol_auth_context().map(|_| ())
     }
 
     fn symbol_auth_context(&self) -> Result<Option<SecurityContext>, RqError> {
