@@ -23,7 +23,8 @@ use asupersync::lab::ldfi::{
     LdfiExperimentStatus, SupportGraph,
 };
 use asupersync::lab::ldfi_trace::{
-    TraceLineageConfig, build_causal_lineage, default_faultable, outcome_events, support_graph_for,
+    LDFI_REPORT_SCHEMA, LdfiReport, TraceLineageConfig, blind_chaos_single_fault_count,
+    build_causal_lineage, default_faultable, ldfi_report, outcome_events, support_graph_for,
 };
 use asupersync::record::ObligationKind;
 use asupersync::remote::NodeId;
@@ -272,4 +273,55 @@ fn classifier_taxonomy_smoke() {
     ] {
         assert!(!default_faultable(kind), "{kind:?} should be structural");
     }
+}
+
+/// AC5 — the JSON report is byte-stable and round-trips through serde.
+#[test]
+fn ac5_json_report_is_deterministic_and_roundtrips() {
+    let trace = delivery_trace_vector();
+    let graph = support_graph_for(&trace, TraceLineageConfig::default(), is_outcome);
+    let result = graph.minimal_hitting_sets(HittingSetBudget::default());
+    let baseline = blind_chaos_single_fault_count(&trace);
+    let report = ldfi_report(&result, baseline);
+
+    assert_eq!(report.schema, LDFI_REPORT_SCHEMA);
+    assert_eq!(report.blind_chaos_single_fault_experiments, 3);
+    assert_eq!(report.hypotheses[0], vec![1u64]);
+    assert_eq!(report.coverage_certificate, None);
+    assert!(report.experiment.is_none());
+
+    let json = serde_json::to_string(&report).expect("serialize");
+    let json_again = serde_json::to_string(&report).expect("serialize");
+    assert_eq!(json, json_again, "serialization is deterministic");
+    let round_trip: LdfiReport = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(round_trip, report);
+}
+
+/// AC5 — the report carries the experiment-loop violation verdict.
+#[test]
+fn ac5_report_carries_experiment_violation() {
+    let trace = delivery_trace_vector();
+    let graph = support_graph_for(&trace, TraceLineageConfig::default(), is_outcome);
+    let result = graph.minimal_hitting_sets(HittingSetBudget::default());
+    let derivations: Vec<BTreeSet<FaultEventId>> = graph.derivations().to_vec();
+    let experiment = result.run_experiments(LdfiExperimentBudget::default(), |hypothesis| {
+        if derivations.iter().any(|d| d.is_disjoint(hypothesis)) {
+            LdfiExperimentObservation::InvariantHeld
+        } else {
+            LdfiExperimentObservation::InvariantViolated
+        }
+    });
+
+    let report =
+        ldfi_report(&result, blind_chaos_single_fault_count(&trace)).with_experiment(&experiment);
+    let summary = report.experiment.as_ref().expect("experiment summary attached");
+    assert_eq!(summary.status, "found_violation");
+    assert_eq!(summary.experiments_run, 1);
+    assert_eq!(summary.violating_hypothesis, Some(vec![1]));
+    assert!(summary.refuted.is_empty());
+
+    // The whole report still round-trips with the experiment attached.
+    let json = serde_json::to_string(&report).expect("serialize");
+    let back: LdfiReport = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, report);
 }

@@ -35,9 +35,14 @@
 //! to the total order (still sound, but every earlier event joins the cone), so
 //! prefer vector clocks or the structural sources (1)/(2) for precise lineages.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::lab::ldfi::{CausalLineage, FaultEventId, SupportGraph};
+use serde::{Deserialize, Serialize};
+
+use crate::lab::ldfi::{
+    CausalLineage, FaultEventId, HittingSetResult, LdfiExperimentReport, LdfiExperimentStatus,
+    SupportGraph,
+};
 use crate::trace::distributed::CausalOrder;
 use crate::trace::{TraceData, TraceEvent, TraceEventKind};
 use crate::types::{ObligationId, TaskId};
@@ -261,6 +266,136 @@ where
 {
     let lineage = build_causal_lineage(events, config);
     SupportGraph::from_causal_cones(&lineage, outcome_events(events, predicate))
+}
+
+/// Schema token stamped into every serialized [`LdfiReport`]; bump on any
+/// breaking change to the report shape.
+pub const LDFI_REPORT_SCHEMA: &str = "ldfi-report-v1";
+
+/// A deterministic, serde-serializable view of an LDFI run, suitable for the
+/// `frankenlab ldfi --json` output (AC5).
+///
+/// Every fault hypothesis is rendered as a sorted list of raw event ids, so the
+/// JSON is byte-stable across runs of the same input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LdfiReport {
+    /// Report schema token ([`LDFI_REPORT_SCHEMA`]).
+    pub schema: String,
+    /// Fault depth `k` the hitting-set search ran under.
+    pub max_depth: usize,
+    /// Whether the bounded hypothesis space was explored without truncation.
+    pub exhausted: bool,
+    /// Whether some derivation had no fault-able support (outcome unbreakable).
+    pub unbreakable: bool,
+    /// Minimal fault hypotheses, smallest-first, each a sorted event-id list.
+    pub hypotheses: Vec<Vec<u64>>,
+    /// Per-corpus coverage certificate `Some(k)`: no `<= k`-fault counterexample
+    /// exists for this trace, or `None` if the search was inconclusive.
+    pub coverage_certificate: Option<usize>,
+    /// How many single-fault experiments undirected blind chaos would run on this
+    /// trace (one per fault-able event) — the baseline LDFI improves on.
+    pub blind_chaos_single_fault_experiments: usize,
+    /// The experiment-loop summary, present once hypotheses have been executed.
+    pub experiment: Option<LdfiExperimentSummary>,
+}
+
+/// A serde-serializable view of an [`LdfiExperimentReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LdfiExperimentSummary {
+    /// Stop-condition token: `found_violation`, `refuted_up_to_depth`,
+    /// `experiment_budget_exhausted`, or `hypothesis_search_truncated`.
+    pub status: String,
+    /// Number of hypotheses actually executed.
+    pub experiments_run: usize,
+    /// The hypothesis that broke the invariant, if any (sorted event ids).
+    pub violating_hypothesis: Option<Vec<u64>>,
+    /// Hypotheses tested without violating the invariant (sorted event ids).
+    pub refuted: Vec<Vec<u64>>,
+    /// Generated hypotheses left untested when the experiment budget ran out.
+    pub remaining_hypotheses: Option<usize>,
+    /// Fault depth covered when the corpus was refuted up to depth.
+    pub max_depth: Option<usize>,
+    /// Per-corpus coverage certificate from this experiment run, if any.
+    pub coverage_certificate: Option<usize>,
+}
+
+impl LdfiExperimentSummary {
+    /// Projects an [`LdfiExperimentReport`] into its serializable summary.
+    #[must_use]
+    pub fn from_report(report: &LdfiExperimentReport) -> Self {
+        let (status, violating_hypothesis, remaining_hypotheses, max_depth) = match &report.status {
+            LdfiExperimentStatus::FoundViolation { hypothesis } => {
+                ("found_violation", Some(event_ids(hypothesis)), None, None)
+            }
+            LdfiExperimentStatus::RefutedUpToDepth { max_depth } => {
+                ("refuted_up_to_depth", None, None, Some(*max_depth))
+            }
+            LdfiExperimentStatus::ExperimentBudgetExhausted {
+                remaining_hypotheses,
+            } => (
+                "experiment_budget_exhausted",
+                None,
+                Some(*remaining_hypotheses),
+                None,
+            ),
+            LdfiExperimentStatus::HypothesisSearchTruncated => {
+                ("hypothesis_search_truncated", None, None, None)
+            }
+        };
+        Self {
+            status: status.to_string(),
+            experiments_run: report.experiments_run,
+            violating_hypothesis,
+            refuted: report.refuted.iter().map(event_ids).collect(),
+            remaining_hypotheses,
+            max_depth,
+            coverage_certificate: report.coverage_certificate(),
+        }
+    }
+}
+
+impl LdfiReport {
+    /// Attaches an experiment-loop summary to the report.
+    #[must_use]
+    pub fn with_experiment(mut self, report: &LdfiExperimentReport) -> Self {
+        self.experiment = Some(LdfiExperimentSummary::from_report(report));
+        self
+    }
+}
+
+/// Builds a deterministic [`LdfiReport`] from a hitting-set result and the
+/// blind-chaos baseline (see [`blind_chaos_single_fault_count`]).
+#[must_use]
+pub fn ldfi_report(
+    result: &HittingSetResult,
+    blind_chaos_single_fault_experiments: usize,
+) -> LdfiReport {
+    LdfiReport {
+        schema: LDFI_REPORT_SCHEMA.to_string(),
+        max_depth: result.max_depth,
+        exhausted: result.exhausted,
+        unbreakable: result.unbreakable,
+        hypotheses: result.hypotheses.iter().map(event_ids).collect(),
+        coverage_certificate: result.coverage_certificate(),
+        blind_chaos_single_fault_experiments,
+        experiment: None,
+    }
+}
+
+/// The number of single-fault experiments undirected blind chaos would run on
+/// this trace: one per fault-able event. This is the baseline the directed LDFI
+/// hypothesis count is compared against (AC1's committed count comparison).
+#[must_use]
+pub fn blind_chaos_single_fault_count(events: &[TraceEvent]) -> usize {
+    events
+        .iter()
+        .filter(|ev| default_faultable(ev.kind))
+        .count()
+}
+
+/// Renders a hypothesis as a sorted list of raw event ids for stable output.
+fn event_ids(hypothesis: &BTreeSet<FaultEventId>) -> Vec<u64> {
+    hypothesis.iter().map(|e| e.get()).collect()
 }
 
 /// The single owning task of an event whose data names exactly one task, used for
