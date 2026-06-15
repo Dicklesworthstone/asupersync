@@ -589,6 +589,9 @@ pub struct StreamingRequest<T> {
     terminal_status: Option<Status>,
     /// Last waker waiting for a new item.
     waiter: Option<Waker>,
+    /// Last producer waker parked on [`StreamingRequest::poll_reserve`] when
+    /// the bounded buffer is full; woken on the next consumer drain.
+    capacity_waiter: Option<Waker>,
     /// Call-scoped cancellation shared with the response half, if any.
     call_cancellation: Option<CallCancellation>,
 }
@@ -603,6 +606,7 @@ impl<T> StreamingRequest<T> {
             graceful_terminal: false,
             terminal_status: None,
             waiter: None,
+            capacity_waiter: None,
             call_cancellation: None,
         }
     }
@@ -616,6 +620,7 @@ impl<T> StreamingRequest<T> {
             graceful_terminal: false,
             terminal_status: None,
             waiter: None,
+            capacity_waiter: None,
             call_cancellation: None,
         }
     }
@@ -631,6 +636,7 @@ impl<T> StreamingRequest<T> {
             graceful_terminal: false,
             terminal_status: None,
             waiter: None,
+            capacity_waiter: None,
             call_cancellation: Some(call_cancellation),
         }
     }
@@ -658,6 +664,36 @@ impl<T> StreamingRequest<T> {
     #[must_use]
     pub fn is_full(&self) -> bool {
         self.items.len() >= MAX_STREAM_BUFFERED
+    }
+
+    /// Polls for buffer capacity, *suspending* the producer at the
+    /// bounded-buffer window when it is exhausted.
+    ///
+    /// This is the suspend/resume counterpart to [`push`](Self::push) /
+    /// [`push_result`](Self::push_result): where those fail fast with
+    /// [`Code::ResourceExhausted`](crate::grpc::status::Code::ResourceExhausted)
+    /// once the buffer is full, `poll_reserve` instead parks the producer
+    /// until the consumer drains an item (the "window update"), then wakes it
+    /// so the next push is guaranteed a free slot. A producer that gates each
+    /// push behind `poll_reserve` is flow-controlled — it cannot outrun a slow
+    /// consumer, and the buffer never exceeds [`MAX_STREAM_BUFFERED`].
+    ///
+    /// Returns:
+    /// - `Poll::Ready(Ok(()))` when at least one slot is free,
+    /// - `Poll::Pending` (registering `cx`'s waker) when the buffer is full,
+    /// - `Poll::Ready(Err(_))` when the stream is closed — the producer should
+    ///   stop rather than spin.
+    pub fn poll_reserve(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        if self.closed {
+            return Poll::Ready(Err(Status::failed_precondition(
+                "cannot reserve capacity on a closed streaming request",
+            )));
+        }
+        if self.items.len() < MAX_STREAM_BUFFERED {
+            return Poll::Ready(Ok(()));
+        }
+        self.capacity_waiter = Some(cx.waker().clone());
+        Poll::Pending
     }
 
     /// Pushes a message into the stream queue.
@@ -692,6 +728,10 @@ impl<T> StreamingRequest<T> {
         self.closed = true;
         self.graceful_terminal = true;
         wake_waiter(&mut self.waiter);
+        // Wake any producer parked on `poll_reserve` so it re-polls, observes
+        // the close, and stops rather than hanging on a window that will never
+        // reopen.
+        wake_waiter(&mut self.capacity_waiter);
     }
 
     /// Cancels the stream with an error status (fail-closed).
@@ -700,6 +740,7 @@ impl<T> StreamingRequest<T> {
         if self.graceful_terminal && self.terminal_status.is_none() {
             self.closed = true;
             wake_waiter(&mut self.waiter);
+            wake_waiter(&mut self.capacity_waiter);
             return;
         }
         self.closed = true;
@@ -707,6 +748,7 @@ impl<T> StreamingRequest<T> {
             self.terminal_status = Some(status);
         }
         wake_waiter(&mut self.waiter);
+        wake_waiter(&mut self.capacity_waiter);
     }
 }
 
@@ -725,6 +767,9 @@ impl<T: Send + std::marker::Unpin> Streaming for StreamingRequest<T> {
     ) -> Poll<Option<Result<Self::Message, Status>>> {
         let this = self.get_mut();
         if let Some(next) = this.items.pop_front() {
+            // A buffer slot just freed: wake a producer parked on
+            // `poll_reserve` so it observes the window update and resumes.
+            wake_waiter(&mut this.capacity_waiter);
             return Poll::Ready(Some(next));
         }
         // Apply a call-scoped cancellation: buffered items above are drained

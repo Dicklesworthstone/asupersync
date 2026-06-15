@@ -845,6 +845,9 @@ struct ResponseStreamState<T> {
     terminal_status: Option<Status>,
     terminal_metadata: Metadata,
     waiters: Vec<Waker>,
+    /// Producer wakers parked on [`ResponseStream::poll_reserve`] while the
+    /// bounded buffer is full; woken on the next consumer drain or on close.
+    producer_waiters: Vec<Waker>,
 }
 
 impl<T> fmt::Debug for ResponseStreamState<T> {
@@ -855,6 +858,7 @@ impl<T> fmt::Debug for ResponseStreamState<T> {
             .field("terminal_status", &self.terminal_status)
             .field("terminal_metadata", &self.terminal_metadata)
             .field("waiters_len", &self.waiters.len())
+            .field("producer_waiters_len", &self.producer_waiters.len())
             .finish()
     }
 }
@@ -867,6 +871,7 @@ impl<T> ResponseStreamState<T> {
             terminal_status: None,
             terminal_metadata: Metadata::new(),
             waiters: Vec::new(),
+            producer_waiters: Vec::new(),
         }
     }
 
@@ -877,6 +882,7 @@ impl<T> ResponseStreamState<T> {
             terminal_status: None,
             terminal_metadata: Metadata::new(),
             waiters: Vec::new(),
+            producer_waiters: Vec::new(),
         }
     }
 
@@ -895,6 +901,24 @@ impl<T> ResponseStreamState<T> {
                 evicted.wake();
             }
             self.waiters.push(waker.clone());
+        }
+    }
+
+    fn take_producer_waiters(&mut self) -> Vec<Waker> {
+        std::mem::take(&mut self.producer_waiters)
+    }
+
+    fn register_producer_waiter(&mut self, waker: &Waker) {
+        if !self
+            .producer_waiters
+            .iter()
+            .any(|existing| existing.will_wake(waker))
+        {
+            if self.producer_waiters.len() >= 32 {
+                let evicted = self.producer_waiters.remove(0);
+                evicted.wake();
+            }
+            self.producer_waiters.push(waker.clone());
         }
     }
 }
@@ -1000,14 +1024,50 @@ impl<T> ResponseStream<T> {
         lock_unpoisoned(&self.state).items.len() >= MAX_STREAM_BUFFERED
     }
 
+    /// Polls for outbound buffer capacity, *suspending* the producer at the
+    /// bounded-buffer window when it is exhausted.
+    ///
+    /// This is the suspend/resume counterpart to [`push`](Self::push): where
+    /// `push` fails fast with
+    /// [`Code::ResourceExhausted`](crate::grpc::status::Code::ResourceExhausted)
+    /// once the buffer is full, `poll_reserve` instead parks the producer until
+    /// the consumer drains an item (the "window update"), then wakes it so the
+    /// next `push` is guaranteed a free slot. A server-streaming handler that
+    /// gates each `push` behind `poll_reserve` is flow-controlled: it cannot
+    /// outrun a slow consumer, and the buffer never exceeds
+    /// [`MAX_STREAM_BUFFERED`](crate::grpc::MAX_STREAM_BUFFERED).
+    ///
+    /// Returns:
+    /// - `Poll::Ready(Ok(()))` when at least one slot is free,
+    /// - `Poll::Pending` (registering `cx`'s waker) when the buffer is full,
+    /// - `Poll::Ready(Err(_))` when the stream is closed — the producer should
+    ///   stop rather than spin.
+    pub fn poll_reserve(&self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        let mut state = lock_unpoisoned(&self.state);
+        if state.closed {
+            return Poll::Ready(Err(Status::failed_precondition(
+                "cannot reserve capacity on a closed response stream",
+            )));
+        }
+        if state.items.len() < MAX_STREAM_BUFFERED {
+            return Poll::Ready(Ok(()));
+        }
+        state.register_producer_waiter(cx.waker());
+        Poll::Pending
+    }
+
     /// Close the stream.
     pub fn close(&self) {
-        let waiters = {
+        let (waiters, producers) = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
-            state.take_waiters()
+            (state.take_waiters(), state.take_producer_waiters())
         };
         for waker in waiters {
+            waker.wake();
+        }
+        // Wake parked producers so they re-poll, observe the close, and stop.
+        for waker in producers {
             waker.wake();
         }
     }
@@ -1023,7 +1083,7 @@ impl<T> ResponseStream<T> {
         metadata: Metadata,
         discard_buffered: bool,
     ) -> bool {
-        let (waiters, inserted) = {
+        let (waiters, producers, inserted) = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
             let inserted = state.terminal_status.is_none();
@@ -1034,9 +1094,17 @@ impl<T> ResponseStream<T> {
                 state.terminal_status = Some(status);
                 state.terminal_metadata = metadata;
             }
-            (state.take_waiters(), inserted)
+            (
+                state.take_waiters(),
+                state.take_producer_waiters(),
+                inserted,
+            )
         };
         for waker in waiters {
+            waker.wake();
+        }
+        // Wake parked producers so they re-poll, observe the close, and stop.
+        for waker in producers {
             waker.wake();
         }
         inserted
@@ -1085,6 +1153,13 @@ impl<T: Send> Streaming for ResponseStream<T> {
     ) -> Poll<Option<Result<Self::Message, Status>>> {
         let mut state = lock_unpoisoned(&self.state);
         if let Some(item) = state.items.pop_front() {
+            // A buffer slot just freed: wake any producer parked on
+            // `poll_reserve` so it observes the window update and resumes.
+            let producers = state.take_producer_waiters();
+            drop(state);
+            for waker in producers {
+                waker.wake();
+            }
             return Poll::Ready(Some(item));
         }
         if let Some(status) = state.terminal_status.take() {
