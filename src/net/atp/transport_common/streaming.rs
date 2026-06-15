@@ -525,7 +525,8 @@ mod tests {
         assert_eq!(path, PathBuf::from("stage/0"));
         assert_eq!(digest.rel_path, "greeting.txt");
         assert_eq!(digest.size, 5);
-        assert_eq!(digest.content_sha256, Sha256::digest(b"hello").into());
+        let expected_sha: [u8; 32] = Sha256::digest(b"hello").into();
+        assert_eq!(digest.content_sha256, expected_sha);
         assert_eq!(
             digest.content_id,
             ObjectId::content(ContentId::from_bytes(b"hello"))
