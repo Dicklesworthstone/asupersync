@@ -61,12 +61,12 @@
 //!
 //! The accepted-connection receiver keeps `transport_tcp`'s fail-closed
 //! integrity guarantee (per-entry SHA-256 + rebuilt flat-object-graph merkle
-//! root vs. the manifest, atomic commit only on a full match). The Phase B QUIC
-//! bridge is not yet B5 bounded-memory evidence: the sender still materializes
-//! entry bytes for the current [`EncodingPipeline`] API and the receiver stores
-//! decoded entry bytes before `write_atomic`. B5 must replace those transitional
-//! `Vec<u8>` bridges with streaming/staging equivalents before claiming
-//! `O(symbol/chunk size)` RSS.
+//! root vs. the manifest, atomic commit only on a full match). The native UDP
+//! QUIC sender uses file-backed encoders that read one source block at a time,
+//! and the receiver stages decoded blocks directly to disk before final
+//! verification/commit. The in-memory encoder/decoder helpers remain for unit
+//! tests and scaffold-only drivers; they are not the B5 bounded-memory proof
+//! path.
 
 #[cfg(feature = "tls")]
 pub mod native_link;
@@ -767,8 +767,194 @@ fn manifest_from_entries(
 struct QuicEntryEncoder {
     index: u32,
     object_id: ObjectId,
-    bytes: Vec<u8>,
-    repair_cursor: usize,
+    source: QuicEntryEncoderSource,
+    repair_cursors: Vec<usize>,
+}
+
+#[allow(dead_code)]
+enum QuicEntryEncoderSource {
+    Memory(Vec<u8>),
+    File {
+        abs_path: PathBuf,
+        size: u64,
+        sha256_hex: String,
+    },
+}
+
+#[allow(dead_code)]
+impl QuicEntryEncoder {
+    fn memory(index: u32, object_id: ObjectId, bytes: Vec<u8>, config: &QuicConfig) -> Self {
+        let block_count = block_count_for_len(bytes.len() as u64, config).unwrap_or(1);
+        Self {
+            index,
+            object_id,
+            source: QuicEntryEncoderSource::Memory(bytes),
+            repair_cursors: vec![0; block_count],
+        }
+    }
+
+    fn file(entry: &QuicSourceEntry, config: &QuicConfig) -> Result<Self, QuicTransportError> {
+        Ok(Self {
+            index: entry.index,
+            object_id: entry.object_id,
+            source: QuicEntryEncoderSource::File {
+                abs_path: entry.abs_path.clone(),
+                size: entry.size,
+                sha256_hex: entry.sha256_hex.clone(),
+            },
+            repair_cursors: vec![0; block_count_for_len(entry.size, config)?],
+        })
+    }
+
+    fn size(&self) -> u64 {
+        match &self.source {
+            QuicEntryEncoderSource::Memory(bytes) => bytes.len() as u64,
+            QuicEntryEncoderSource::File { size, .. } => *size,
+        }
+    }
+
+    fn memory_bytes(&self) -> Result<&[u8], QuicTransportError> {
+        match &self.source {
+            QuicEntryEncoderSource::Memory(bytes) => Ok(bytes),
+            QuicEntryEncoderSource::File { abs_path, .. } => {
+                Err(QuicTransportError::Source(format!(
+                    "file-backed QUIC encoder for {} must be streamed block-by-block",
+                    abs_path.display()
+                )))
+            }
+        }
+    }
+
+    fn in_memory_block(&self, sbn: u8, config: &QuicConfig) -> Result<&[u8], QuicTransportError> {
+        let bytes = self.memory_bytes()?;
+        let block_start = usize::from(sbn)
+            .checked_mul(config.max_block_size)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity("source request block offset overflow".to_string())
+            })?;
+        if block_start >= bytes.len() {
+            return Err(QuicTransportError::Integrity(format!(
+                "source request block {sbn} outside entry {} ({} bytes)",
+                self.index,
+                bytes.len()
+            )));
+        }
+        let block_len = config.max_block_size.min(bytes.len() - block_start);
+        Ok(&bytes[block_start..block_start + block_len])
+    }
+
+    fn block_count(&self, config: &QuicConfig) -> Result<usize, QuicTransportError> {
+        block_count_for_len(self.size(), config)
+    }
+
+    fn block_len(&self, sbn: u8, config: &QuicConfig) -> Result<usize, QuicTransportError> {
+        let block_start = u64::from(sbn)
+            .checked_mul(config.max_block_size as u64)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity("source request block offset overflow".to_string())
+            })?;
+        let size = self.size();
+        if block_start >= size {
+            return Err(QuicTransportError::Integrity(format!(
+                "source request block {sbn} outside entry {} ({size} bytes)",
+                self.index
+            )));
+        }
+        Ok(
+            usize::try_from((size - block_start).min(config.max_block_size as u64))
+                .unwrap_or(usize::MAX),
+        )
+    }
+
+    async fn read_block(
+        &self,
+        cx: &Cx,
+        sbn: u8,
+        config: &QuicConfig,
+    ) -> Result<Vec<u8>, QuicTransportError> {
+        let offset = u64::from(sbn)
+            .checked_mul(config.max_block_size as u64)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity("source request block offset overflow".to_string())
+            })?;
+        let block_len = self.block_len(sbn, config)?;
+        match &self.source {
+            QuicEntryEncoderSource::Memory(bytes) => {
+                let start = usize::try_from(offset).map_err(|_| {
+                    QuicTransportError::Integrity(
+                        "source request block offset overflow".to_string(),
+                    )
+                })?;
+                let end = start.saturating_add(block_len);
+                Ok(bytes[start..end].to_vec())
+            }
+            QuicEntryEncoderSource::File {
+                abs_path,
+                size,
+                sha256_hex: _,
+            } => {
+                cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                let mut file = crate::fs::File::open(abs_path).await.map_err(|err| {
+                    QuicTransportError::Source(format!("{}: {err}", abs_path.display()))
+                })?;
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .await
+                    .map_err(|err| {
+                        QuicTransportError::Source(format!("{}: {err}", abs_path.display()))
+                    })?;
+                let mut block = vec![0_u8; block_len];
+                let mut read = 0usize;
+                while read < block_len {
+                    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+                    let n = file.read(&mut block[read..]).await.map_err(|err| {
+                        QuicTransportError::Source(format!("{}: {err}", abs_path.display()))
+                    })?;
+                    if n == 0 {
+                        return Err(QuicTransportError::Source(format!(
+                            "{} changed while preparing QUIC symbols (short read at block {sbn}, \
+                             read {read} of {block_len} bytes, manifest size {size})",
+                            abs_path.display()
+                        )));
+                    }
+                    read += n;
+                }
+                Ok(block)
+            }
+        }
+    }
+
+    fn repair_cursor(&self, sbn: u8) -> usize {
+        self.repair_cursors
+            .get(usize::from(sbn))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn set_repair_cursor(&mut self, sbn: u8, cursor: usize) {
+        let idx = usize::from(sbn);
+        if idx >= self.repair_cursors.len() {
+            self.repair_cursors.resize(idx + 1, 0);
+        }
+        self.repair_cursors[idx] = cursor;
+    }
+}
+
+fn block_count_for_len(size: u64, config: &QuicConfig) -> Result<usize, QuicTransportError> {
+    if size == 0 {
+        return Ok(0);
+    }
+    let max_block = u64::try_from(config.max_block_size.max(1)).unwrap_or(u64::MAX);
+    let blocks = size.div_ceil(max_block);
+    if blocks > u64::from(u8::MAX) + 1 {
+        return Err(QuicTransportError::TooLarge {
+            size,
+            max: max_block.saturating_mul(u64::from(u8::MAX) + 1),
+        });
+    }
+    usize::try_from(blocks).map_err(|_| QuicTransportError::TooLarge {
+        size,
+        max: max_block.saturating_mul(u64::from(u8::MAX) + 1),
+    })
 }
 
 #[allow(dead_code)]
@@ -797,6 +983,12 @@ struct QuicEntryDecoder {
     pipeline: Option<DecodingPipeline>,
     complete: bool,
     data: Vec<u8>,
+}
+
+pub(crate) struct QuicDecodedBlock {
+    pub(crate) entry: u32,
+    pub(crate) sbn: u8,
+    pub(crate) data: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -843,15 +1035,18 @@ fn encoders_from_entries(
     manifest: &TransferManifest,
     entries: &[(String, Vec<u8>)],
 ) -> Vec<QuicEntryEncoder> {
+    let config = QuicConfig::default();
     manifest
         .entries
         .iter()
         .zip(entries)
-        .map(|(entry, (_, bytes))| QuicEntryEncoder {
-            index: entry.index,
-            object_id: entry_object_id(&manifest.transfer_id, entry.index),
-            bytes: bytes.clone(),
-            repair_cursor: 0,
+        .map(|(entry, (_, bytes))| {
+            QuicEntryEncoder::memory(
+                entry.index,
+                entry_object_id(&manifest.transfer_id, entry.index),
+                bytes.clone(),
+                &config,
+            )
         })
         .collect()
 }
@@ -1115,22 +1310,22 @@ fn spray_symbol_round(
         .filter(|entry| pending.contains(&entry.index))
     {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let already = entry.repair_cursor;
+        let bytes = entry.memory_bytes()?;
+        let already = entry.repair_cursor(0);
         let target_repair = if with_source {
-            initial_repair_per_block(entry.bytes.len(), config)
+            initial_repair_per_block(bytes.len(), config)
         } else {
             already.saturating_add(repair_batch)
         };
         let repair_count = target_repair.saturating_sub(already);
         if !with_source && repair_count == 0 {
-            entry.repair_cursor = target_repair;
+            entry.set_repair_cursor(0, target_repair);
             continue;
         }
 
         let mut pipeline = encoding_pipeline(config);
         if with_source {
-            for encoded in pipeline.encode_with_repair(entry.object_id, &entry.bytes, target_repair)
-            {
+            for encoded in pipeline.encode_with_repair(entry.object_id, bytes, target_repair) {
                 let symbol = encoded
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
@@ -1140,7 +1335,7 @@ fn spray_symbol_round(
             }
         } else {
             for encoded in
-                pipeline.encode_repair_range(entry.object_id, &entry.bytes, already, repair_count)
+                pipeline.encode_repair_range(entry.object_id, bytes, already, repair_count)
             {
                 let symbol = encoded
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
@@ -1150,7 +1345,77 @@ fn spray_symbol_round(
                 sent = sent.saturating_add(1);
             }
         }
-        entry.repair_cursor = target_repair;
+        entry.set_repair_cursor(0, target_repair);
+    }
+    Ok(sent)
+}
+
+#[allow(dead_code)]
+async fn spray_streaming_symbol_round(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    pending: &std::collections::BTreeSet<u32>,
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+    with_source: bool,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut sent = 0u64;
+    let repair_batch = repair_batch_per_block(config);
+    for entry in encoders
+        .iter_mut()
+        .filter(|entry| pending.contains(&entry.index))
+    {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        for block_index in 0..entry.block_count(config)? {
+            let sbn = u8::try_from(block_index).map_err(|_| QuicTransportError::TooLarge {
+                size: entry.size(),
+                max: u64::try_from(config.max_block_size.max(1))
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::from(u8::MAX) + 1),
+            })?;
+            let block = entry.read_block(cx, sbn, config).await?;
+            let already = entry.repair_cursor(sbn);
+            let target_repair = if with_source {
+                initial_repair_per_block(block.len(), config)
+            } else {
+                already.saturating_add(repair_batch)
+            };
+            let repair_count = target_repair.saturating_sub(already);
+            if !with_source && repair_count == 0 {
+                entry.set_repair_cursor(sbn, target_repair);
+                continue;
+            }
+
+            let mut pipeline = encoding_pipeline(config);
+            let encoded = if with_source {
+                EitherNativeEncoding::Source(pipeline.encode_single_block_with_repair(
+                    entry.object_id,
+                    sbn,
+                    &block,
+                    target_repair,
+                ))
+            } else {
+                EitherNativeEncoding::Repair(pipeline.encode_single_block_repair_range(
+                    entry.object_id,
+                    sbn,
+                    &block,
+                    already,
+                    repair_count,
+                ))
+            };
+            for symbol in encoded {
+                let symbol = symbol
+                    .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                    .into_symbol();
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
+                sent = sent.saturating_add(1);
+            }
+            entry.set_repair_cursor(sbn, target_repair);
+        }
     }
     Ok(sent)
 }
@@ -1168,21 +1433,8 @@ fn source_symbol_for_request(
         )));
     }
     let symbol_size = usize::from(config.symbol_size.max(1));
-    let block_start = usize::from(request.sbn)
-        .checked_mul(config.max_block_size)
-        .ok_or_else(|| {
-            QuicTransportError::Integrity("source request block offset overflow".to_string())
-        })?;
-    if block_start >= enc.bytes.len() {
-        return Err(QuicTransportError::Integrity(format!(
-            "source request block {} outside entry {} ({} bytes)",
-            request.sbn,
-            enc.index,
-            enc.bytes.len()
-        )));
-    }
-
-    let block_len = config.max_block_size.min(enc.bytes.len() - block_start);
+    let block = enc.in_memory_block(request.sbn, config)?;
+    let block_len = block.len();
     let block_k = block_len.div_ceil(symbol_size).max(1);
     let esi = usize::try_from(request.esi).map_err(|_| {
         QuicTransportError::Integrity("source request ESI does not fit usize".to_string())
@@ -1194,11 +1446,11 @@ fn source_symbol_for_request(
         )));
     }
 
-    let start = block_start + esi * symbol_size;
-    let end = (start + symbol_size).min(block_start + block_len);
+    let start = esi * symbol_size;
+    let end = (start + symbol_size).min(block_len);
     let mut buffer = vec![0u8; symbol_size];
     if start < end {
-        buffer[..end - start].copy_from_slice(&enc.bytes[start..end]);
+        buffer[..end - start].copy_from_slice(&block[start..end]);
     }
     Ok(Symbol::new(
         SymbolId::new(enc.object_id, request.sbn, request.esi),
@@ -1396,13 +1648,7 @@ async fn encoders_from_prepared_source(
     let mut encoders = Vec::with_capacity(prepared.entries.len());
     for entry in &prepared.entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let bytes = read_source_entry_bytes(cx, entry, config).await?;
-        encoders.push(QuicEntryEncoder {
-            index: entry.index,
-            object_id: entry.object_id,
-            bytes,
-            repair_cursor: 0,
-        });
+        encoders.push(QuicEntryEncoder::file(entry, config)?);
     }
     Ok(encoders)
 }
@@ -1435,7 +1681,25 @@ async fn send_prepared_source_manifest_symbols_complete(
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(&prepared.manifest, config)?;
     let mut encoders = encoders_from_prepared_source(cx, prepared, config).await?;
-    send_manifest_symbols_complete(cx, conn, control, &prepared.manifest, &mut encoders, config)
+    let symbol_auth = config.symbol_auth_context()?;
+    send_manifest(cx, conn, control, &prepared.manifest)?;
+    let pending = encoders
+        .iter()
+        .map(|entry| entry.index)
+        .collect::<std::collections::BTreeSet<_>>();
+    let symbols_sent = spray_streaming_symbol_round(
+        cx,
+        conn,
+        &prepared.manifest,
+        &mut encoders,
+        &pending,
+        config,
+        symbol_auth.as_ref(),
+        true,
+    )
+    .await?;
+    send_object_complete(cx, conn, control)?;
+    Ok(symbols_sent)
 }
 
 #[allow(dead_code)]
@@ -1547,6 +1811,42 @@ fn feed_authenticated_symbol(
             QuicTransportError::Integrity("symbol authentication failed".to_string()),
         ),
         Ok(SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_)) => Ok(false),
+        Err(err) => Err(QuicTransportError::Control(format!(
+            "RaptorQ decoder rejected symbol: {err}"
+        ))),
+    }
+}
+
+fn feed_authenticated_symbol_take_block(
+    decoder: &mut QuicEntryDecoder,
+    auth_symbol: AuthenticatedSymbol,
+) -> Result<(bool, Option<QuicDecodedBlock>), QuicTransportError> {
+    if decoder.complete {
+        return Ok((false, None));
+    }
+    let Some(pipeline) = decoder.pipeline.as_mut() else {
+        return Ok((false, None));
+    };
+    match pipeline.feed(auth_symbol) {
+        Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
+            let _ = pipeline.take_decoded_block(block_sbn);
+            decoder.complete = pipeline.is_complete();
+            Ok((
+                true,
+                Some(QuicDecodedBlock {
+                    entry: decoder.index,
+                    sbn: block_sbn,
+                    data,
+                }),
+            ))
+        }
+        Ok(SymbolAcceptResult::Accepted { .. } | SymbolAcceptResult::DecodingStarted { .. }) => {
+            Ok((true, None))
+        }
+        Ok(SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed)) => Err(
+            QuicTransportError::Integrity("symbol authentication failed".to_string()),
+        ),
+        Ok(SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_)) => Ok((false, None)),
         Err(err) => Err(QuicTransportError::Control(format!(
             "RaptorQ decoder rejected symbol: {err}"
         ))),
@@ -2397,7 +2697,7 @@ fn send_native_symbol(
 }
 
 #[allow(dead_code)]
-fn spray_native_symbol_round(
+async fn spray_native_symbol_round(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
     manifest: &TransferManifest,
@@ -2415,48 +2715,75 @@ fn spray_native_symbol_round(
         .filter(|entry| pending.contains(&entry.index))
     {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let already = entry.repair_cursor;
-        let target_repair = if with_source {
-            initial_repair_per_block(entry.bytes.len(), config)
-        } else {
-            already.saturating_add(repair_batch)
-        };
-        let repair_count = target_repair.saturating_sub(already);
-        if !with_source && repair_count == 0 {
-            entry.repair_cursor = target_repair;
-            continue;
-        }
+        for block_index in 0..entry.block_count(config)? {
+            let sbn = u8::try_from(block_index).map_err(|_| QuicTransportError::TooLarge {
+                size: entry.size(),
+                max: u64::try_from(config.max_block_size.max(1))
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::from(u8::MAX) + 1),
+            })?;
+            let block = entry.read_block(cx, sbn, config).await?;
+            let already = entry.repair_cursor(sbn);
+            let target_repair = if with_source {
+                initial_repair_per_block(block.len(), config)
+            } else {
+                already.saturating_add(repair_batch)
+            };
+            let repair_count = target_repair.saturating_sub(already);
+            if !with_source && repair_count == 0 {
+                entry.set_repair_cursor(sbn, target_repair);
+                continue;
+            }
 
-        let mut pipeline = encoding_pipeline(config);
-        if with_source {
-            for encoded in pipeline.encode_with_repair(entry.object_id, &entry.bytes, target_repair)
-            {
-                let symbol = encoded
+            let mut pipeline = encoding_pipeline(config);
+            let encoded = if with_source {
+                EitherNativeEncoding::Source(pipeline.encode_single_block_with_repair(
+                    entry.object_id,
+                    sbn,
+                    &block,
+                    target_repair,
+                ))
+            } else {
+                EitherNativeEncoding::Repair(pipeline.encode_single_block_repair_range(
+                    entry.object_id,
+                    sbn,
+                    &block,
+                    already,
+                    repair_count,
+                ))
+            };
+            for symbol in encoded {
+                let symbol = symbol
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
                 let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
                 send_native_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
             }
-        } else {
-            for encoded in
-                pipeline.encode_repair_range(entry.object_id, &entry.bytes, already, repair_count)
-            {
-                let symbol = encoded
-                    .map_err(|err| QuicTransportError::Control(err.to_string()))?
-                    .into_symbol();
-                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
-                send_native_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
-                sent = sent.saturating_add(1);
-            }
+            entry.set_repair_cursor(sbn, target_repair);
         }
-        entry.repair_cursor = target_repair;
     }
     Ok(sent)
 }
 
+enum EitherNativeEncoding<'a> {
+    Source(crate::encoding::EncodingIterator<'a>),
+    Repair(crate::encoding::RepairEncodingIterator<'a>),
+}
+
+impl Iterator for EitherNativeEncoding<'_> {
+    type Item = Result<crate::encoding::EncodedSymbol, crate::encoding::EncodingError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Source(iter) => iter.next(),
+            Self::Repair(iter) => iter.next(),
+        }
+    }
+}
+
 #[allow(dead_code)]
-fn spray_native_initial_symbols(
+async fn spray_native_initial_symbols(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
     manifest: &TransferManifest,
@@ -2478,10 +2805,50 @@ fn spray_native_initial_symbols(
         symbol_auth,
         true,
     )
+    .await
 }
 
 #[allow(dead_code)]
-fn send_native_source_symbol_requests(
+async fn native_source_symbol_for_request(
+    cx: &Cx,
+    enc: &QuicEntryEncoder,
+    request: QuicSourceSymbolRequest,
+    config: &QuicConfig,
+) -> Result<Symbol, QuicTransportError> {
+    if request.entry != enc.index {
+        return Err(QuicTransportError::Integrity(format!(
+            "source request entry mismatch: request={}, encoder={}",
+            request.entry, enc.index
+        )));
+    }
+    let block = enc.read_block(cx, request.sbn, config).await?;
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let block_k = block.len().div_ceil(symbol_size).max(1);
+    let esi = usize::try_from(request.esi).map_err(|_| {
+        QuicTransportError::Integrity("source request ESI does not fit usize".to_string())
+    })?;
+    if esi >= block_k {
+        return Err(QuicTransportError::Integrity(format!(
+            "source request esi {} outside entry {} block {} K={}",
+            request.esi, enc.index, request.sbn, block_k
+        )));
+    }
+
+    let start = esi * symbol_size;
+    let end = (start + symbol_size).min(block.len());
+    let mut buffer = vec![0u8; symbol_size];
+    if start < end {
+        buffer[..end - start].copy_from_slice(&block[start..end]);
+    }
+    Ok(Symbol::new(
+        SymbolId::new(enc.object_id, request.sbn, request.esi),
+        buffer,
+        SymbolKind::Source,
+    ))
+}
+
+#[allow(dead_code)]
+async fn send_native_source_symbol_requests(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
     manifest: &TransferManifest,
@@ -2503,7 +2870,7 @@ fn send_native_source_symbol_requests(
                     request.entry
                 ))
             })?;
-        let symbol = source_symbol_for_request(enc, *request, config)?;
+        let symbol = native_source_symbol_for_request(cx, enc, *request, config).await?;
         let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
         send_native_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
         sent = sent.saturating_add(1);
@@ -2512,7 +2879,7 @@ fn send_native_source_symbol_requests(
 }
 
 #[allow(dead_code)]
-fn send_native_repair_round_and_object_complete(
+async fn send_native_repair_round_and_object_complete(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
     control: &mut NativeQuicFrameTransport,
@@ -2561,7 +2928,8 @@ fn send_native_repair_round_and_object_complete(
             config,
             symbol_auth,
             false,
-        )?
+        )
+        .await?
     } else {
         send_native_source_symbol_requests(
             cx,
@@ -2571,14 +2939,15 @@ fn send_native_repair_round_and_object_complete(
             &need.source_symbols,
             config,
             symbol_auth,
-        )?
+        )
+        .await?
     };
     send_native_object_complete(cx, conn, control)?;
     Ok(sent)
 }
 
 #[allow(dead_code)]
-fn send_native_manifest_symbols_complete(
+async fn send_native_manifest_symbols_complete(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
     control: &mut NativeQuicFrameTransport,
@@ -2590,7 +2959,8 @@ fn send_native_manifest_symbols_complete(
     let symbol_auth = config.symbol_auth_context()?;
     send_native_manifest(cx, conn, control, manifest)?;
     let symbols_sent =
-        spray_native_initial_symbols(cx, conn, manifest, encoders, config, symbol_auth.as_ref())?;
+        spray_native_initial_symbols(cx, conn, manifest, encoders, config, symbol_auth.as_ref())
+            .await?;
     send_native_object_complete(cx, conn, control)?;
     Ok(symbols_sent)
 }
@@ -2612,7 +2982,8 @@ async fn send_native_prepared_source_manifest_symbols_complete(
         &prepared.manifest,
         &mut encoders,
         config,
-    )?;
+    )
+    .await?;
     Ok((encoders, symbols_sent))
 }
 
@@ -2646,7 +3017,7 @@ fn finish_native_sender_transfer(
 }
 
 #[allow(dead_code)]
-fn handle_native_sender_feedback_or_proof(
+async fn handle_native_sender_feedback_or_proof(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
     control: &mut NativeQuicFrameTransport,
@@ -2678,7 +3049,8 @@ fn handle_native_sender_feedback_or_proof(
                 &need,
                 state.config,
                 symbol_auth.as_ref(),
-            )?;
+            )
+            .await?;
             state.symbols_sent = state.symbols_sent.saturating_add(sent);
             Ok(None)
         }
@@ -2736,7 +3108,7 @@ where
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         if let Some(report) =
-            handle_native_sender_feedback_or_proof(cx, conn, &mut control, &mut state)?
+            handle_native_sender_feedback_or_proof(cx, conn, &mut control, &mut state).await?
         {
             return Ok(report);
         }
@@ -2797,6 +3169,53 @@ fn drain_native_symbol_datagrams(
         }
     }
     Ok(accepted)
+}
+
+fn drain_native_symbol_datagrams_with_blocks(
+    conn: &mut NativeQuicConnection,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+) -> Result<(u64, Vec<QuicDecodedBlock>), QuicTransportError> {
+    let symbol_auth = config.symbol_auth_context()?;
+    let auth_required = symbol_auth.is_some();
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut accepted = 0u64;
+    let mut completed = Vec::new();
+    while let Some(envelope) = recv_native_symbol_envelope(conn, auth_required)? {
+        if envelope.transfer_tag != tag {
+            return Err(QuicTransportError::Integrity(format!(
+                "symbol transfer tag mismatch: got {}, expected {tag}",
+                envelope.transfer_tag
+            )));
+        }
+        if envelope.payload.len() != usize::from(config.symbol_size) {
+            return Err(QuicTransportError::Integrity(format!(
+                "symbol payload has {} bytes, expected {}",
+                envelope.payload.len(),
+                config.symbol_size
+            )));
+        }
+        let decoder = decoders
+            .iter_mut()
+            .find(|decoder| decoder.index == envelope.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "symbol for unknown manifest entry {}",
+                    envelope.entry
+                ))
+            })?;
+        let auth_symbol =
+            authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
+        let (was_accepted, block) = feed_authenticated_symbol_take_block(decoder, auth_symbol)?;
+        if was_accepted {
+            accepted = accepted.saturating_add(1);
+        }
+        if let Some(block) = block {
+            completed.push(block);
+        }
+    }
+    Ok((accepted, completed))
 }
 
 fn validate_quic_manifest(
@@ -5476,12 +5895,12 @@ mod tests {
             ..trusted_quic_config()
         };
         let bytes: Vec<u8> = (0..1500).map(|i| (i % 251) as u8).collect();
-        let enc = QuicEntryEncoder {
-            index: 7,
-            object_id: entry_object_id("source-request", 7),
-            bytes: bytes.clone(),
-            repair_cursor: 0,
-        };
+        let enc = QuicEntryEncoder::memory(
+            7,
+            entry_object_id("source-request", 7),
+            bytes.clone(),
+            &config,
+        );
 
         let first_block_tail = source_symbol_for_request(
             &enc,

@@ -51,8 +51,9 @@
 //! ([`QuicConfig::debug_drop_one_in`]), so the control channel stays intact.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use rustls::pki_types::ServerName;
@@ -60,8 +61,12 @@ use rustls::{ClientConfig, ServerConfig};
 
 use crate::bytes::BytesMut;
 use crate::cx::Cx;
+use crate::io::AsyncWriteExt;
 use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
+use crate::net::atp::transport_common::{
+    EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
+};
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::handshake_driver::{
     ATP_QUIC_ALPN, HandshakeLevel, QuicHandshakeDriver, client_handshake_over_udp,
@@ -100,6 +105,8 @@ const ATP_QUIC_INITIAL_DCID: &[u8] = &[0xA7, 0x9C, 0x10, 0xB2, 0xC3, 0xD4, 0xE5,
 const ATP_QUIC_CLIENT_SCID: &[u8] = &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
 /// Server source connection ID carried in the server's handshake long headers.
 const ATP_QUIC_SERVER_SCID: &[u8] = &[0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
+/// Process-unique counter for QUIC receive staging directories.
+static QUIC_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Bytes of the simplified 1-RTT data-plane header (flags + 8-byte packet number).
 const ONE_RTT_HEADER_LEN: usize = 9;
@@ -121,10 +128,10 @@ const ATP_QUIC_UDP_MAX_PACKET: usize = 16 * 1024;
 /// bounded (256) inbound DATAGRAM queue from overflowing between drains.
 const INBOUND_PUMP_BATCH: usize = 32;
 
-/// Flush the outbound 1-RTT packets once the connection's bounded (256) outbound
-/// DATAGRAM queue reaches this depth, so a large spray never drops symbols on the
-/// floor before they reach the wire.
-const SPRAY_FLUSH_THRESHOLD: usize = 192;
+/// Flush the outbound 1-RTT packets once the connection has one endpoint send
+/// batch queued. Large sprays otherwise run far ahead of the receiver and bury
+/// the control marker behind thousands of DATAGRAM packets on loopback UDP.
+const SPRAY_FLUSH_THRESHOLD: usize = 32;
 
 /// Monotonic data-plane clock step (microseconds) fed to the connection per pump
 /// operation. The transfer's correctness does not depend on real time; this only
@@ -738,46 +745,58 @@ async fn spray_round(
             continue;
         };
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let already = entry.repair_cursor;
-        let target_repair = if with_source {
-            super::initial_repair_per_block(entry.bytes.len(), config)
-        } else {
-            already.saturating_add(repair_batch)
-        };
-        let repair_count = target_repair.saturating_sub(already);
-        if !with_source && repair_count == 0 {
-            entry.repair_cursor = target_repair;
-            continue;
-        }
-        let mut pipeline = super::encoding_pipeline(config);
-        let object_id = entry.object_id;
-        let entry_index = entry.index;
-        let encoded: Vec<Symbol> = if with_source {
-            pipeline
-                .encode_with_repair(object_id, &entry.bytes, target_repair)
-                .map(|encoded| encoded.map(|symbol| symbol.into_symbol()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| QuicTransportError::Control(err.to_string()))?
-        } else {
-            pipeline
-                .encode_repair_range(object_id, &entry.bytes, already, repair_count)
-                .map(|encoded| encoded.map(|symbol| symbol.into_symbol()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| QuicTransportError::Control(err.to_string()))?
-        };
-        entry.repair_cursor = target_repair;
-        for symbol in &encoded {
-            // Deterministic test-only symbol loss: skip on the initial spray only,
-            // so the receiver must drive a repair round, and never on a repair round
-            // (otherwise it could fail to converge). Control frames are unaffected.
-            sprayed = sprayed.saturating_add(1);
-            if with_source && drop_one_in > 0 && sprayed % u64::from(drop_one_in) == 0 {
+        for block_idx in 0..entry.block_count(config)? {
+            let sbn = u8::try_from(block_idx).map_err(|_| {
+                QuicTransportError::Integrity("source block index exceeded u8 range".to_string())
+            })?;
+            let block = entry.read_block(cx, sbn, config).await?;
+            let already = entry.repair_cursor(sbn);
+            let target_repair = if with_source {
+                super::initial_repair_per_block(block.len(), config)
+            } else {
+                already.saturating_add(repair_batch)
+            };
+            let repair_count = target_repair.saturating_sub(already);
+            if !with_source && repair_count == 0 {
+                entry.set_repair_cursor(sbn, target_repair);
                 continue;
             }
-            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(symbol).tag().as_bytes());
-            link.spray_symbol(cx, symbol, tag, entry_index, auth_tag)
-                .await?;
-            sent = sent.saturating_add(1);
+            let mut pipeline = super::encoding_pipeline(config);
+            let object_id = entry.object_id;
+            let entry_index = entry.index;
+            let encoded = if with_source {
+                super::EitherNativeEncoding::Source(pipeline.encode_single_block_with_repair(
+                    object_id,
+                    sbn,
+                    &block,
+                    target_repair,
+                ))
+            } else {
+                super::EitherNativeEncoding::Repair(pipeline.encode_single_block_repair_range(
+                    object_id,
+                    sbn,
+                    &block,
+                    already,
+                    repair_count,
+                ))
+            };
+            for encoded_symbol in encoded {
+                let symbol = encoded_symbol
+                    .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                    .into_symbol();
+                // Deterministic test-only symbol loss: skip on the initial spray only,
+                // so the receiver must drive a repair round, and never on a repair round
+                // (otherwise it could fail to converge). Control frames are unaffected.
+                sprayed = sprayed.saturating_add(1);
+                if with_source && drop_one_in > 0 && sprayed % u64::from(drop_one_in) == 0 {
+                    continue;
+                }
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                link.spray_symbol(cx, &symbol, tag, entry_index, auth_tag)
+                    .await?;
+                sent = sent.saturating_add(1);
+            }
+            entry.set_repair_cursor(sbn, target_repair);
         }
     }
     Ok(sent)
@@ -806,7 +825,29 @@ async fn spray_source_requests(
                     request.entry
                 ))
             })?;
-        let symbol = super::source_symbol_for_request(enc, *request, config)?;
+        let block = enc.read_block(cx, request.sbn, config).await?;
+        let symbol_size = usize::from(config.symbol_size.max(1));
+        let block_k = block.len().div_ceil(symbol_size).max(1);
+        let esi = usize::try_from(request.esi).map_err(|_| {
+            QuicTransportError::Integrity("source request ESI does not fit usize".to_string())
+        })?;
+        if esi >= block_k {
+            return Err(QuicTransportError::Integrity(format!(
+                "source request esi {} outside entry {} block {} K={block_k}",
+                request.esi, enc.index, request.sbn
+            )));
+        }
+        let start = esi * symbol_size;
+        let end = (start + symbol_size).min(block.len());
+        let mut buffer = vec![0u8; symbol_size];
+        if start < end {
+            buffer[..end - start].copy_from_slice(&block[start..end]);
+        }
+        let symbol = Symbol::new(
+            crate::types::symbol::SymbolId::new(enc.object_id, request.sbn, request.esi),
+            buffer,
+            crate::types::symbol::SymbolKind::Source,
+        );
         let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
         link.spray_symbol(cx, &symbol, tag, request.entry, auth_tag)
             .await?;
@@ -1001,6 +1042,152 @@ async fn run_sender_session(
 
 // ─── Receiver session ───────────────────────────────────────────────────────
 
+struct QuicStagedEntryReceive {
+    staging_path: PathBuf,
+    created: bool,
+}
+
+impl QuicStagedEntryReceive {
+    fn new(staging_path: PathBuf) -> Self {
+        Self {
+            staging_path,
+            created: false,
+        }
+    }
+
+    async fn write_block(
+        &mut self,
+        entry: &super::ManifestEntry,
+        block_sbn: u8,
+        data: &[u8],
+        config: &QuicConfig,
+    ) -> Result<(), QuicTransportError> {
+        let offset = u64::from(block_sbn)
+            .checked_mul(config.max_block_size as u64)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity("decoded block offset overflow".to_string())
+            })?;
+        if offset >= entry.size && !data.is_empty() {
+            return Err(QuicTransportError::Integrity(format!(
+                "decoded block {block_sbn} starts outside entry {} ({} bytes)",
+                entry.index, entry.size
+            )));
+        }
+        let end = offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        if end > entry.size {
+            return Err(QuicTransportError::Integrity(format!(
+                "decoded block {block_sbn} overruns entry {}: end {end}, size {}",
+                entry.index, entry.size
+            )));
+        }
+        if let Some(parent) = self.staging_path.parent() {
+            crate::fs::create_dir_all(parent).await?;
+        }
+        let mut file = crate::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&self.staging_path)
+            .await?;
+        if !self.created {
+            file.set_len(entry.size).await?;
+            self.created = true;
+        }
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        file.write_all(data).await?;
+        file.flush().await?;
+        Ok(())
+    }
+
+    async fn ensure_created(&mut self, size: u64) -> Result<(), QuicTransportError> {
+        if self.created {
+            return Ok(());
+        }
+        if let Some(parent) = self.staging_path.parent() {
+            crate::fs::create_dir_all(parent).await?;
+        }
+        let file = crate::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&self.staging_path)
+            .await?;
+        file.set_len(size).await?;
+        self.created = true;
+        Ok(())
+    }
+}
+
+async fn commit_staged_entries(
+    cx: &Cx,
+    dest_dir: &Path,
+    manifest: &TransferManifest,
+    staged: &mut [QuicStagedEntryReceive],
+    config: &QuicConfig,
+) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
+    let mut read_buf = vec![0_u8; config.chunk_size.max(1)];
+    let mut sha_ok = true;
+    let mut digests = Vec::with_capacity(manifest.entries.len());
+    for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter_mut()) {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        staged_entry.ensure_created(entry.size).await?;
+        let (size, content_id, content_sha256) =
+            hash_file_streaming(&staged_entry.staging_path, &mut read_buf).await?;
+        if size != entry.size || hex_encode(&content_sha256) != entry.sha256_hex {
+            sha_ok = false;
+        }
+        digests.push(EntryDigest {
+            rel_path: entry.rel_path.clone(),
+            size,
+            content_id,
+            content_sha256,
+        });
+    }
+
+    let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex;
+    let committed = sha_ok && merkle_ok;
+    let mut committed_paths = Vec::new();
+    if committed {
+        let base = super::quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+        for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter()) {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let out_path = if manifest.is_directory {
+                super::quic_join_relative(&base, &entry.rel_path)?
+            } else {
+                base.clone()
+            };
+            if let Some(parent) = out_path.parent() {
+                crate::fs::create_dir_all(parent).await?;
+            }
+            crate::fs::rename(&staged_entry.staging_path, &out_path).await?;
+            committed_paths.push(out_path);
+        }
+    }
+
+    let bytes_received = digests
+        .iter()
+        .fold(0u64, |acc, digest| acc.saturating_add(digest.size));
+    Ok((
+        ReceiveReceipt {
+            committed,
+            bytes_received,
+            files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+            sha_ok,
+            merkle_ok,
+            reason: if committed {
+                None
+            } else if !sha_ok {
+                Some("per-entry SHA-256 mismatch".to_string())
+            } else {
+                Some("merkle-root mismatch".to_string())
+            },
+            committed_paths: committed_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        },
+        committed_paths,
+    ))
+}
+
 /// Drive a full ATP-over-QUIC receive over an established link: Hello+ack,
 /// manifest, then symbol rounds with fountain feedback until every entry decodes,
 /// then verify + atomic commit and return a [`ReceiveReport`].
@@ -1050,6 +1237,19 @@ async fn run_receiver_session(
     super::validate_quic_manifest(&manifest, config)?;
 
     let mut decoders = super::decoders_from_manifest(&manifest, config)?;
+    let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging_dir = dest_dir.join(format!(
+        ".atp-quic-staging-{}-{}-{staging_seq}",
+        manifest.transfer_id,
+        std::process::id()
+    ));
+    crate::fs::create_dir_all(&staging_dir).await?;
+    let mut staged = manifest
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, _)| QuicStagedEntryReceive::new(staging_dir.join(i.to_string())))
+        .collect::<Vec<_>>();
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
 
@@ -1060,13 +1260,36 @@ async fn run_receiver_session(
         // no symbol is dropped while we wait. `pump_inbound` returns 0 only after a
         // full idle window with no traffic, which means the sender went silent.
         loop {
-            symbols_accepted =
-                symbols_accepted.saturating_add(super::drain_native_symbol_datagrams(
-                    &mut link.conn,
-                    &manifest,
-                    &mut decoders,
-                    config,
-                )?);
+            let (accepted, completed_blocks) = super::drain_native_symbol_datagrams_with_blocks(
+                &mut link.conn,
+                &manifest,
+                &mut decoders,
+                config,
+            )?;
+            symbols_accepted = symbols_accepted.saturating_add(accepted);
+            for block in completed_blocks {
+                let entry = manifest
+                    .entries
+                    .iter()
+                    .find(|entry| entry.index == block.entry)
+                    .ok_or_else(|| {
+                        QuicTransportError::Integrity(format!(
+                            "decoded block for unknown entry {}",
+                            block.entry
+                        ))
+                    })?;
+                let staged_entry = staged
+                    .get_mut(usize::try_from(block.entry).unwrap_or(usize::MAX))
+                    .ok_or_else(|| {
+                        QuicTransportError::Integrity(format!(
+                            "decoded block for out-of-range entry {}",
+                            block.entry
+                        ))
+                    })?;
+                staged_entry
+                    .write_block(entry, block.sbn, &block.data, config)
+                    .await?;
+            }
             if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
                 if frame.frame_type() != FrameType::ObjectComplete {
                     return Err(QuicTransportError::Unexpected {
@@ -1084,7 +1307,6 @@ async fn run_receiver_session(
                 });
             }
         }
-        super::assemble_completed_entries(&mut decoders);
 
         let pending = super::pending_entries(&decoders);
         if pending.is_empty() {
@@ -1116,7 +1338,7 @@ async fn run_receiver_session(
         ],
     );
     let (receipt, committed_paths) =
-        super::commit_decoded_entries(cx, dest_dir, &manifest, &decoders).await?;
+        commit_staged_entries(cx, dest_dir, &manifest, &mut staged, config).await?;
     super::send_native_proof(cx, &mut link.conn, &mut control, &receipt)?;
     link.flush(cx).await?;
     let _ = super::send_native_close(cx, &mut link.conn, &mut control);
