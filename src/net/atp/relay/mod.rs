@@ -1415,7 +1415,23 @@ impl RelaySocketLoop {
 
         for accepted in tcp_streams.iter_mut() {
             let stream_id = accepted.stream_id();
-            if self.endpoints.peer_for_tcp_tls_stream(stream_id).is_err() {
+            let Ok(peer_id) = self.endpoints.peer_for_tcp_tls_stream(stream_id) else {
+                continue;
+            };
+            // A peer may briefly have two admitted streams during a
+            // reconnect/handoff. The per-peer egress queue is ordered, so only
+            // the directory-preferred (most-recently-admitted) stream may pull
+            // NEW records off it — otherwise both streams drain the shared queue
+            // and split one peer's ordered record stream across two connections
+            // (the exact "drain to a stale writer" hazard `first_tcp_tls_stream_
+            // for_peer` exists to prevent). A stream that already owns a partial
+            // write must still be serviced so it can finish that in-flight record.
+            let is_preferred = self
+                .endpoints
+                .first_tcp_tls_stream_for_peer(peer_id)
+                .map(|preferred| preferred == stream_id)
+                .unwrap_or(false);
+            if !is_preferred && !self.tcp_tls_pending_writes.contains_key(&stream_id) {
                 continue;
             }
             match self.send_accepted_tcp_tls_stream_once(service, accepted) {
