@@ -271,3 +271,38 @@ fn empty_directory_round_trips_and_preserves_mode() {
         "regular file alongside the empty dir still round-trips"
     );
 }
+
+#[test]
+fn non_preserved_symlink_is_followed_to_target_content() {
+    // Under a policy that does NOT preserve symlinks (portable), a symlink must
+    // be FOLLOWED and arrive as a regular file carrying its target's content —
+    // never a silent empty placeholder (regression for the symlink-without-
+    // preserve_symlinks data-loss bug).
+    let root = unique_tmp("followsym");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    std::fs::write(tree.join("data.txt"), b"real payload\n").unwrap();
+    std::os::unix::fs::symlink("data.txt", tree.join("alias.txt")).unwrap();
+
+    // MetadataPolicy::portable() has preserve_symlinks = false.
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), MetadataPolicy::portable());
+    let send = run_sender(addr, tree.clone(), MetadataPolicy::portable()).expect("send");
+    let recv = recv_handle.join().expect("recv thread").expect("recv");
+    assert!(send.receipt.committed && recv.committed);
+
+    let out_alias = dst_dir.join("project").join("alias.txt");
+    let meta = std::fs::symlink_metadata(&out_alias).expect("alias present on receiver");
+    assert!(
+        meta.file_type().is_file() && !meta.file_type().is_symlink(),
+        "a non-preserved symlink must arrive as a regular file, not a link or empty file"
+    );
+    assert_eq!(
+        std::fs::read(&out_alias).unwrap(),
+        b"real payload\n",
+        "followed symlink must carry the target's content"
+    );
+}
