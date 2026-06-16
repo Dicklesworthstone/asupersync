@@ -504,9 +504,29 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
     match &event.data {
         TraceData::Task { task, region }
         | TraceData::Cancel { task, region, .. }
-        | TraceData::Futurelock { task, region, .. }
         | TraceData::Budget { task, region, .. } => {
             (k, pack_arena(task.0), pack_arena(region.0), 0)
+        }
+        TraceData::Futurelock {
+            task,
+            region,
+            idle_steps,
+            held,
+        } => {
+            // Two futurelock observations on the same task+region have a
+            // read-only footprint, so they are INDEPENDENT and share a Foata
+            // layer. The intra-layer sort is stable, so a key of only
+            // (kind, task, region) would let the canonical form preserve input
+            // order — i.e. it would not be a total, input-order-independent
+            // ordering. That breaks the documented monoid-equivalence law
+            // (`from_events(w1) == from_events(w2)` iff `w1 ≡_I w2`) and makes
+            // `equivalent` (fingerprint) disagree with `equivalent_exact`.
+            // Fold the distinguishing fields into the key so distinct
+            // observations get distinct, deterministic keys.
+            let mut hasher = DetHasher::default();
+            idle_steps.hash(&mut hasher);
+            held.hash(&mut hasher);
+            (k, pack_arena(task.0), pack_arena(region.0), hasher.finish())
         }
         TraceData::Region { region, parent } => (
             k,
