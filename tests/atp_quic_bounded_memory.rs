@@ -9,20 +9,25 @@
 use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 
 use asupersync::cx::Cx;
 use asupersync::net::atp::transport_quic::native_link::{
     QuicClientTls, QuicServerTls, bind_server_endpoint, receive_on_endpoint,
 };
-use asupersync::net::atp::transport_quic::{QuicConfig, send_path};
+use asupersync::net::atp::transport_quic::{
+    QuicConfig, QuicTransportError, ReceiveReport, SendReport, send_path,
+};
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
+use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::SecurityContext;
-use futures_lite::future::{block_on, zip};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 
 const TRANSFER_BYTES: usize = 8 * 1024 * 1024;
 const PEAK_RSS_GROWTH_CEILING: u64 = 5 * 1024 * 1024;
 const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const HARNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 const LEAF_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIBwTCCAWigAwIBAgIUTQyiZ96ufyKHVqRYRZBXpRQABGMwCgYIKoZIzj0EAwIw\n\
@@ -169,6 +174,73 @@ fn config_pair(seed: u64) -> (QuicConfig, QuicConfig) {
     (send, recv)
 }
 
+fn spawn_receiver(
+    dest_dir: PathBuf,
+    recv_cfg: QuicConfig,
+) -> (
+    SocketAddr,
+    mpsc::Receiver<Result<ReceiveReport, QuicTransportError>>,
+    thread::JoinHandle<()>,
+) {
+    let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+    let (result_tx, result_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let runtime = RuntimeBuilder::multi_thread()
+            .build()
+            .expect("receiver runtime");
+        let result = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap_or_else(Cx::for_testing);
+            let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let server_endpoint = bind_server_endpoint(&cx, listen).await?;
+            let server_addr = server_endpoint.local_addr();
+            addr_tx.send(server_addr).expect("send receiver address");
+            receive_on_endpoint(
+                &cx,
+                server_endpoint,
+                &dest_dir,
+                &recv_cfg,
+                "atp-quic-server",
+            )
+            .await
+        }));
+        result_tx.send(result).expect("send receiver result");
+    });
+    let addr = addr_rx
+        .recv_timeout(HARNESS_TIMEOUT)
+        .expect("receiver bound address");
+    (addr, result_rx, handle)
+}
+
+fn spawn_sender(
+    addr: SocketAddr,
+    source: PathBuf,
+    send_cfg: QuicConfig,
+) -> (
+    mpsc::Receiver<Result<SendReport, QuicTransportError>>,
+    thread::JoinHandle<()>,
+) {
+    let (result_tx, result_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let runtime = RuntimeBuilder::multi_thread()
+            .build()
+            .expect("sender runtime");
+        let result = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap_or_else(Cx::for_testing);
+            send_path(&cx, addr, &source, send_cfg, "atp-quic-client").await
+        }));
+        result_tx.send(result).expect("send sender result");
+    });
+    (result_rx, handle)
+}
+
+fn recv_transfer_result<T>(
+    label: &'static str,
+    rx: mpsc::Receiver<Result<T, QuicTransportError>>,
+) -> Result<T, QuicTransportError> {
+    rx.recv_timeout(HARNESS_TIMEOUT)
+        .unwrap_or_else(|err| panic!("{label} did not finish within {HARNESS_TIMEOUT:?}: {err}"))
+}
+
 #[test]
 fn real_udp_quic_large_file_is_byte_identical_and_bounded_memory() {
     let root = unique_tmp("large");
@@ -182,19 +254,12 @@ fn real_udp_quic_large_file_is_byte_identical_and_bounded_memory() {
     let baseline_rss = peak_rss_bytes();
 
     let (send_cfg, recv_cfg) = config_pair(0xB05);
-    let (send, recv) = block_on(async {
-        let cx = Cx::for_testing();
-        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let server_endpoint = bind_server_endpoint(&cx, listen)
-            .await
-            .expect("bind server endpoint");
-        let server_addr = server_endpoint.local_addr();
-        zip(
-            send_path(&cx, server_addr, &source, send_cfg, "atp-quic-client"),
-            receive_on_endpoint(&cx, server_endpoint, &dst_dir, &recv_cfg, "atp-quic-server"),
-        )
-        .await
-    });
+    let (addr, recv_rx, receiver) = spawn_receiver(dst_dir.clone(), recv_cfg);
+    let (send_rx, sender) = spawn_sender(addr, source.clone(), send_cfg);
+    let send = recv_transfer_result("sender", send_rx);
+    let recv = recv_transfer_result("receiver", recv_rx);
+    sender.join().expect("sender thread");
+    receiver.join().expect("receiver thread");
 
     let (send, recv) = match (send, recv) {
         (Ok(send), Ok(recv)) => (send, recv),

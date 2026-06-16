@@ -226,7 +226,11 @@ fn decode_one_rtt_packet(
         return None;
     }
     let flags = packet[0];
-    if flags & ONE_RTT_FIXED_BIT == 0 {
+    // A 1-RTT short header has the QUIC fixed bit (0x40) set and the long-header
+    // form bit (0x80) clear. Reject long-header packets (e.g. a late handshake
+    // retransmit arriving on this socket) up front, consistent with
+    // `is_long_header`, rather than relying on AEAD failure to drop them.
+    if flags & 0x80 != 0 || flags & ONE_RTT_FIXED_BIT == 0 {
         return None;
     }
     let key_phase = flags & ONE_RTT_KEY_PHASE_BIT != 0;

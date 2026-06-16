@@ -152,6 +152,19 @@ fn run_transfer(
     })
 }
 
+/// Assert the receiver left no `.atp-quic-staging-*` residue in the destination
+/// (the staging directory must be reclaimed on every path).
+fn assert_no_staging_residue(dest_dir: &Path) {
+    for entry in std::fs::read_dir(dest_dir).expect("read dest dir") {
+        let name = entry.expect("dir entry").file_name();
+        let name = name.to_string_lossy();
+        assert!(
+            !name.starts_with(".atp-quic-staging"),
+            "receiver leaked a staging directory: {name}"
+        );
+    }
+}
+
 #[test]
 fn real_udp_quic_transfer_single_file_authenticated() {
     let src = tempfile::tempdir().expect("src dir");
@@ -177,6 +190,7 @@ fn real_udp_quic_transfer_single_file_authenticated() {
         payload,
         "committed bytes must match the source"
     );
+    assert_no_staging_residue(dst.path());
 }
 
 #[test]
@@ -206,6 +220,7 @@ fn real_udp_quic_transfer_directory_tree_authenticated() {
     assert_eq!(std::fs::read(base.join("a.bin")).expect("read a"), a);
     assert_eq!(std::fs::read(base.join("sub/b.bin")).expect("read b"), b);
     assert_eq!(std::fs::read(base.join("sub/c.txt")).expect("read c"), c);
+    assert_no_staging_residue(dst.path());
 }
 
 #[test]

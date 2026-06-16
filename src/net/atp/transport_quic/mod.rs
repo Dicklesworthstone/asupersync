@@ -96,8 +96,8 @@ use crate::net::atp::transport_common::{
     flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
 };
 use crate::net::quic_native::{
-    ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, QuicConnection,
-    StreamDirection, StreamId, StreamRole,
+    ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionError,
+    QuicConnection, StreamDirection, StreamId, StreamRole, StreamTableError,
 };
 use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
@@ -2232,7 +2232,15 @@ impl NativeQuicFrameTransport {
             return Ok(Some(frame));
         }
 
-        let chunk = conn.read_stream_bytes(cx, self.stream, CONTROL_READ_CHUNK)?;
+        let chunk = match conn.read_stream_bytes(cx, self.stream, CONTROL_READ_CHUNK) {
+            Ok(chunk) => chunk,
+            Err(NativeQuicConnectionError::StreamTable(StreamTableError::UnknownStream(
+                stream,
+            ))) if stream == self.stream => {
+                return Ok(None);
+            }
+            Err(err) => return Err(err.into()),
+        };
         if chunk.is_empty() {
             return Ok(None);
         }
@@ -4284,6 +4292,18 @@ mod tests {
                 .expect("empty control stream")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn native_frame_transport_missing_stream_reads_as_eof() {
+        let (cx, _client, server) = established_pair();
+        let mut native_server = server.inner().clone();
+        let mut rx = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
+
+        let frame = rx
+            .try_recv(&cx, &mut native_server)
+            .expect("missing local stream behaves like EOF");
+        assert!(frame.is_none());
     }
 
     #[test]
