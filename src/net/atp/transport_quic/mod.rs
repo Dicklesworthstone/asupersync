@@ -74,6 +74,7 @@ use crate::config::EncodingConfig;
 use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline, MissingSourceSymbol, SymbolAcceptResult};
 use crate::encoding::EncodingPipeline;
+use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::transport_common::{
@@ -583,6 +584,7 @@ struct QuicEntryDecoder {
 #[allow(dead_code)]
 struct QuicConnectionTransferOutcome {
     manifest: TransferManifest,
+    send_report: SendReport,
     receipt: ReceiveReceipt,
     symbols_sent: u64,
     symbols_accepted: u64,
@@ -853,6 +855,150 @@ fn spray_initial_symbols(
         }
     }
     Ok(sent)
+}
+
+#[allow(dead_code)]
+async fn read_source_entry_bytes(
+    cx: &Cx,
+    entry: &QuicSourceEntry,
+    config: &QuicConfig,
+) -> Result<Vec<u8>, QuicTransportError> {
+    // Transitional bridge: the manifest hash pass is streaming, but the
+    // current EncodingPipeline API still accepts an in-memory object payload.
+    // Do not use this helper as bounded-memory evidence for B5.
+    let capacity = usize::try_from(entry.size).map_err(|_| QuicTransportError::TooLarge {
+        size: entry.size,
+        max: config.max_transfer_bytes,
+    })?;
+    let mut file = crate::fs::File::open(&entry.abs_path)
+        .await
+        .map_err(|err| {
+            QuicTransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+        })?;
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut buf = vec![0_u8; config.chunk_size.max(1)];
+    let mut read = 0u64;
+    loop {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let n = file.read(&mut buf).await.map_err(|err| {
+            QuicTransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+        })?;
+        if n == 0 {
+            break;
+        }
+        read = read.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        if read > entry.size {
+            return Err(QuicTransportError::Source(format!(
+                "{} grew while preparing QUIC symbols (read {read} bytes, manifest size {})",
+                entry.abs_path.display(),
+                entry.size
+            )));
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+
+    if read != entry.size {
+        return Err(QuicTransportError::Source(format!(
+            "{} changed while preparing QUIC symbols (read {read} bytes, manifest size {})",
+            entry.abs_path.display(),
+            entry.size
+        )));
+    }
+    let got_sha = sha256_hex(&bytes);
+    if got_sha != entry.sha256_hex {
+        return Err(QuicTransportError::Integrity(format!(
+            "{} changed while preparing QUIC symbols (sha256 {got_sha}, manifest {})",
+            entry.abs_path.display(),
+            entry.sha256_hex
+        )));
+    }
+    Ok(bytes)
+}
+
+#[allow(dead_code)]
+async fn encoders_from_prepared_source(
+    cx: &Cx,
+    prepared: &QuicPreparedSource,
+    config: &QuicConfig,
+) -> Result<Vec<QuicEntryEncoder>, QuicTransportError> {
+    let mut encoders = Vec::with_capacity(prepared.entries.len());
+    for entry in &prepared.entries {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let bytes = read_source_entry_bytes(cx, entry, config).await?;
+        encoders.push(QuicEntryEncoder {
+            index: entry.index,
+            object_id: entry.object_id,
+            bytes,
+        });
+    }
+    Ok(encoders)
+}
+
+#[allow(dead_code)]
+fn send_manifest_symbols_complete(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    manifest: &TransferManifest,
+    encoders: &[QuicEntryEncoder],
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    validate_quic_manifest(manifest, config)?;
+    send_manifest(cx, conn, control, manifest)?;
+    let symbols_sent = spray_initial_symbols(cx, conn, manifest, encoders, config)?;
+    send_object_complete(cx, conn, control)?;
+    Ok(symbols_sent)
+}
+
+#[allow(dead_code)]
+async fn send_prepared_source_manifest_symbols_complete(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    prepared: &QuicPreparedSource,
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    validate_quic_manifest(&prepared.manifest, config)?;
+    let encoders = encoders_from_prepared_source(cx, prepared, config).await?;
+    send_manifest_symbols_complete(cx, conn, control, &prepared.manifest, &encoders, config)
+}
+
+#[allow(dead_code)]
+fn receive_proof_close_and_report(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    manifest: &TransferManifest,
+    peer: SocketAddr,
+) -> Result<SendReport, QuicTransportError> {
+    let receipt = match receive_proof_or_need_more(cx, conn, control)? {
+        QuicControlReply::Proof(receipt) => receipt,
+        QuicControlReply::NeedMore(need) => {
+            return Err(QuicTransportError::Integrity(format!(
+                "sender received NeedMore instead of proof for entries {:?}",
+                need.pending
+            )));
+        }
+    };
+
+    send_close(cx, conn, control)?;
+    if !receipt.committed {
+        return Err(QuicTransportError::Integrity(
+            receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "receiver did not commit".to_string()),
+        ));
+    }
+
+    Ok(SendReport {
+        transfer_id: manifest.transfer_id.clone(),
+        bytes_sent: manifest.total_bytes,
+        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        merkle_root_hex: manifest.merkle_root_hex.clone(),
+        receipt,
+        peer,
+    })
 }
 
 #[allow(dead_code)]
@@ -2143,10 +2289,15 @@ mod tests {
         let ack = receive_sender_hello_ack(cx, sender, &mut sender_control)?;
         assert_eq!(ack.peer_id, "receiver-peer");
 
-        send_manifest(cx, sender, &mut sender_control, &manifest)?;
         let encoders = encoders_from_entries(&manifest, entries);
-        let symbols_sent = spray_initial_symbols(cx, sender, &manifest, &encoders, &config)?;
-        send_object_complete(cx, sender, &mut sender_control)?;
+        let symbols_sent = send_manifest_symbols_complete(
+            cx,
+            sender,
+            &mut sender_control,
+            &manifest,
+            &encoders,
+            &config,
+        )?;
         pump_until_idle(cx, sender, receiver, DEFAULT_MAX_PACKET_BYTES, 5_002)
             .expect("deliver manifest, symbols, and object-complete");
 
@@ -2179,17 +2330,10 @@ mod tests {
         pump_until_idle(cx, receiver, sender, DEFAULT_MAX_PACKET_BYTES, 5_003)
             .expect("deliver proof");
 
-        let receipt = match receive_proof_or_need_more(cx, sender, &mut sender_control)? {
-            QuicControlReply::Proof(receipt) => receipt,
-            QuicControlReply::NeedMore(need) => {
-                return Err(QuicTransportError::Integrity(format!(
-                    "loopback transfer unexpectedly needed more symbols: {:?}",
-                    need.pending
-                )));
-            }
-        };
-
-        send_close(cx, sender, &mut sender_control)?;
+        let peer = "127.0.0.1:4433".parse().expect("peer addr");
+        let send_report =
+            receive_proof_close_and_report(cx, sender, &mut sender_control, &manifest, peer)?;
+        let receipt = send_report.receipt.clone();
         pump_until_idle(cx, sender, receiver, DEFAULT_MAX_PACKET_BYTES, 5_004)
             .expect("deliver close");
         let close =
@@ -2203,6 +2347,7 @@ mod tests {
 
         Ok(QuicConnectionTransferOutcome {
             manifest,
+            send_report,
             receipt,
             symbols_sent,
             symbols_accepted,
@@ -2853,6 +2998,20 @@ mod tests {
         assert_eq!(outcome.receipt.bytes_received, 1_284);
         assert_eq!(outcome.receipt.files, 2);
         assert_eq!(outcome.manifest.entries.len(), 2);
+        assert_eq!(
+            outcome.send_report.transfer_id,
+            outcome.manifest.transfer_id
+        );
+        assert_eq!(outcome.send_report.bytes_sent, outcome.manifest.total_bytes);
+        assert_eq!(outcome.send_report.files, 2);
+        assert_eq!(
+            outcome.send_report.merkle_root_hex,
+            outcome.manifest.merkle_root_hex
+        );
+        assert_eq!(
+            outcome.send_report.receipt.committed_paths,
+            outcome.receipt.committed_paths
+        );
         assert!(
             outcome.symbols_sent > 0,
             "sender must emit QUIC DATAGRAM symbols"
@@ -2867,6 +3026,128 @@ mod tests {
                 .committed_paths
                 .contains(&"/quic-memory/payload/nested/beta.bin".to_string())
         );
+    }
+
+    #[test]
+    fn quic_prepared_source_loopback_transfer_reaches_proof_from_disk_files() {
+        let (cx, mut client, mut server) = established_pair();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(root.join("nested")).expect("create nested dir");
+        let alpha = varied_bytes(384, 41);
+        let beta = varied_bytes(640, 43);
+        std::fs::write(root.join("alpha.bin"), &alpha).expect("write alpha");
+        std::fs::write(root.join("nested/beta.bin"), &beta).expect("write beta");
+        let config = QuicConfig {
+            chunk_size: 31,
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.25,
+            ..QuicConfig::default()
+        };
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("source manifest prepares from disk");
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+
+        send_sender_hello(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )
+        .expect("send hello");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_000,
+        )
+        .expect("deliver sender hello");
+        receive_sender_hello_and_ack(
+            &cx,
+            &mut server,
+            &mut receiver_control,
+            &config,
+            "receiver-peer",
+            false,
+        )
+        .expect("receiver accepts hello");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_001,
+        )
+        .expect("deliver hello ack");
+        receive_sender_hello_ack(&cx, &mut client, &mut sender_control)
+            .expect("sender receives ack");
+
+        let symbols_sent = block_on(send_prepared_source_manifest_symbols_complete(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &prepared,
+            &config,
+        ))
+        .expect("prepared source sends manifest and symbols");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_002,
+        )
+        .expect("deliver prepared source transfer");
+
+        let received_manifest = receive_manifest(&cx, &mut server, &mut receiver_control)
+            .expect("receiver decodes manifest");
+        assert_eq!(received_manifest, prepared.manifest);
+        let mut decoders = decoders_from_manifest(&received_manifest, &config).expect("decoders");
+        let symbols_accepted =
+            drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
+                .expect("receiver drains symbols");
+        receive_object_complete(&cx, &mut server, &mut receiver_control)
+            .expect("receiver sees object complete");
+        assemble_completed_entries(&mut decoders);
+        assert!(
+            pending_entries(&decoders).is_empty(),
+            "prepared source symbols should decode without repair feedback"
+        );
+        let receipt = verify_in_memory_receipt(&received_manifest, &decoders);
+        assert!(receipt.committed);
+        send_proof(&cx, &mut server, &mut receiver_control, &receipt).expect("send proof");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_003,
+        )
+        .expect("deliver proof");
+
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let report = receive_proof_close_and_report(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &prepared.manifest,
+            peer,
+        )
+        .expect("sender receives proof report");
+        assert_eq!(report.transfer_id, prepared.manifest.transfer_id);
+        assert_eq!(report.bytes_sent, 1_024);
+        assert_eq!(report.files, 2);
+        assert_eq!(report.receipt.bytes_received, 1_024);
+        assert!(symbols_sent > 0);
+        assert!(symbols_accepted > 0);
+        assert_eq!(prepared.entries[0].rel_path, "alpha.bin");
+        assert_eq!(prepared.entries[1].rel_path, "nested/beta.bin");
     }
 
     #[test]
