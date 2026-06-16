@@ -894,8 +894,17 @@ pub fn decode_packet_number_reconstruct(
     // Reconstruct candidate packet number
     let mut candidate_pn = (expected_pn & !pn_mask) | (truncated_pn as u64);
 
-    // Adjust candidate based on RFC 9000 §A.2 conditions
-    if candidate_pn <= expected_pn.saturating_sub(pn_hwin)
+    // Adjust candidate based on RFC 9000 §A.3 conditions. The reference
+    // algorithm evaluates `candidate_pn <= expected_pn - pn_hwin` with SIGNED
+    // arithmetic: when `expected_pn < pn_hwin` (early in a connection) the RHS is
+    // negative, so the condition is always false and the branch must not fire.
+    // A `saturating_sub` would floor the RHS to 0, degenerating the test into
+    // `candidate_pn <= 0` and wrongly reconstructing e.g. truncated PN 0 (with
+    // largest_pn 0) as `pn_win` instead of 0 — which then breaks AEAD nonce
+    // derivation and makes the first packet undecryptable. Guard the subtraction
+    // with `expected_pn >= pn_hwin` to preserve the signed semantics.
+    if expected_pn >= pn_hwin
+        && candidate_pn <= expected_pn - pn_hwin
         && candidate_pn < (QUIC_PACKET_NUMBER_MAX + 1) - pn_win
     {
         candidate_pn += pn_win;
