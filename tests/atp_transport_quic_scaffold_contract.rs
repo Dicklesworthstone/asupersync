@@ -27,6 +27,7 @@ use asupersync::net::atp::transport_quic::{
 use asupersync::net::quic_native::{
     ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionConfig,
 };
+use asupersync::observability::{DiagnosticContext, LogCollector, LogLevel};
 
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     futures_lite::future::block_on(fut)
@@ -261,6 +262,61 @@ fn send_path_rejects_missing_source_before_native_connect() {
         matches!(result, Err(QuicTransportError::Source(_))),
         "missing source should fail before native connect, got {result:?}"
     );
+}
+
+#[test]
+fn send_path_start_trace_carries_stable_structured_fields() {
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let missing = temp.path().join("trace-before-native-connect.bin");
+    let result: Result<SendReport, QuicTransportError> = block_on(send_path(
+        &cx,
+        addr,
+        &missing,
+        trusted_quic_config(),
+        "sender",
+    ));
+    assert!(
+        matches!(result, Err(QuicTransportError::Source(_))),
+        "missing source should still fail before native connect, got {result:?}"
+    );
+
+    let entries = collector.peek();
+    let start = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.transport.start")
+        .expect("transport start trace entry");
+    assert_eq!(start.level(), LogLevel::Trace);
+    assert_eq!(start.get_field("operation"), Some("send_path"));
+    assert_eq!(start.get_field("protocol"), Some("3"));
+    assert_eq!(start.get_field("peer_id"), Some("sender"));
+
+    for required in [
+        "chunk_size",
+        "symbol_size",
+        "max_block_size",
+        "max_datagram_size",
+        "repair_overhead",
+        "max_transfer_bytes",
+        "idle_timeout",
+        "handshake_timeout",
+        "accept_timeout",
+        "max_active_connections",
+        "max_feedback_rounds",
+        "datagram_fanout",
+    ] {
+        assert!(
+            start
+                .get_field(required)
+                .is_some_and(|value| !value.is_empty()),
+            "transport start trace must include non-empty {required}"
+        );
+    }
 }
 
 #[test]
