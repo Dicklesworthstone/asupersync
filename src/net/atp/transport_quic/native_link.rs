@@ -124,14 +124,30 @@ const ONE_RTT_KEY_PHASE_BIT: u8 = 0x04;
 /// fragmentation is follow-up work.
 const ATP_QUIC_UDP_MAX_PACKET: usize = 16 * 1024;
 
-/// Packets pulled from the socket per inbound pump. Keeps the connection's
-/// bounded (256) inbound DATAGRAM queue from overflowing between drains.
-const INBOUND_PUMP_BATCH: usize = 32;
+/// Fixed socket buffer budget for the native ATP-QUIC link. This is intentionally
+/// a constant envelope, not proportional to object size, so large transfers cannot
+/// force process/object-sized buffering while loopback proof runs avoid kernel
+/// receive-buffer drops during one-round RaptorQ sprays.
+const ATP_QUIC_UDP_SOCKET_BUFFER: usize = 16 * 1024 * 1024;
 
-/// Flush the outbound 1-RTT packets once the connection has one endpoint send
-/// batch queued. Large sprays otherwise run far ahead of the receiver and bury
-/// the control marker behind thousands of DATAGRAM packets on loopback UDP.
-const SPRAY_FLUSH_THRESHOLD: usize = 32;
+/// Packets pulled from the socket per inbound pump. The receiver session drains
+/// the connection's bounded (`MAX_INBOUND_DATAGRAMS` = 256) inbound DATAGRAM
+/// queue to empty at the top of every loop iteration *before* pumping again, so a
+/// pump may safely ingest up to the full queue depth without drop-oldest losses.
+/// Sized to the queue depth (not a small constant like 32) so a real cross-machine
+/// sender spraying thousands of symbols per round is drained fast enough to keep
+/// up with the wire instead of overflowing the kernel receive buffer — on a real
+/// link an 8–32-packet drain falls hopelessly behind and decodes nothing.
+const INBOUND_PUMP_BATCH: usize = 256;
+
+/// Flush the outbound 1-RTT packets before a full endpoint batch accumulates.
+/// Large sprays otherwise run far ahead of the receiver and bury the control
+/// marker behind hundreds of DATAGRAM packets on loopback UDP.
+const SPRAY_FLUSH_THRESHOLD: usize = 8;
+/// Wall-clock pause after each spray flush. A cooperative yield is not enough on
+/// all RCH workers because the receiver runs in a separate runtime thread and
+/// the sender can still refill the UDP socket faster than loopback drains it.
+const SPRAY_FLUSH_PAUSE: Duration = Duration::from_millis(1);
 
 /// Monotonic data-plane clock step (microseconds) fed to the connection per pump
 /// operation. The transfer's correctness does not depend on real time; this only
@@ -325,10 +341,23 @@ impl QuicLink {
         }
         let count = packets.len();
         if !packets.is_empty() {
-            self.endpoint
+            let report = self
+                .endpoint
                 .send_batch(cx, &packets)
                 .await
                 .map_err(map_udp_error)?;
+            if let Some(error) = report.error {
+                return Err(QuicTransportError::Quic(format!(
+                    "udp endpoint sent {} of {} QUIC packets before error: {error}",
+                    report.packets_processed, count
+                )));
+            }
+            if report.packets_processed != count {
+                return Err(QuicTransportError::Quic(format!(
+                    "udp endpoint sent {} of {} QUIC packets without reporting an error",
+                    report.packets_processed, count
+                )));
+            }
         }
         Ok(count)
     }
@@ -428,6 +457,7 @@ impl QuicLink {
     ) -> Result<(), QuicTransportError> {
         if self.conn.pending_outbound_datagram_count() >= SPRAY_FLUSH_THRESHOLD {
             self.flush(cx).await?;
+            crate::time::sleep(cx.now(), SPRAY_FLUSH_PAUSE).await;
         }
         super::send_native_symbol(cx, &mut self.conn, symbol, tag, entry, auth_tag)
     }
@@ -465,6 +495,15 @@ impl QuicLink {
 async fn bind_endpoint(cx: &Cx, local: SocketAddr) -> Result<QuicUdpEndpoint, QuicTransportError> {
     let udp_config = QuicUdpEndpointConfig {
         max_packet_size: ATP_QUIC_UDP_MAX_PACKET,
+        socket_recv_buffer_size: Some(ATP_QUIC_UDP_SOCKET_BUFFER),
+        socket_send_buffer_size: Some(ATP_QUIC_UDP_SOCKET_BUFFER),
+        // The endpoint batch ceiling governs how many packets a single
+        // `receive_batch` may drain. It must be the *receiver* drain width
+        // (`INBOUND_PUMP_BATCH`), NOT the send-pacing `SPRAY_FLUSH_THRESHOLD`:
+        // capping the receiver at 8 packets/pump starves it on a real link where
+        // the sender sprays thousands of symbols per round. `send_batch` only
+        // chunks by this value, so a larger ceiling is strictly better for sends.
+        max_batch_size: INBOUND_PUMP_BATCH,
         ..QuicUdpEndpointConfig::default()
     };
     QuicUdpEndpoint::bind(cx, local, udp_config)

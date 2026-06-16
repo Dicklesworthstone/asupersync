@@ -985,6 +985,7 @@ struct QuicEntryDecoder {
     data: Vec<u8>,
 }
 
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
 pub(crate) struct QuicDecodedBlock {
     pub(crate) entry: u32,
     pub(crate) sbn: u8,
@@ -1817,6 +1818,7 @@ fn feed_authenticated_symbol(
     }
 }
 
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
 fn feed_authenticated_symbol_take_block(
     decoder: &mut QuicEntryDecoder,
     auth_symbol: AuthenticatedSymbol,
@@ -2305,19 +2307,25 @@ fn reject_hello_reason(
     if hello.max_block_size == 0 {
         return Some("max_block_size must be greater than 0".to_string());
     }
+    if hello.symbol_size != config.symbol_size {
+        return Some(format!(
+            "sender symbol_size ({}) must match receiver symbol_size ({})",
+            hello.symbol_size, config.symbol_size
+        ));
+    }
+    let receiver_max_block_size = u64::try_from(config.max_block_size).unwrap_or(u64::MAX);
+    if hello.max_block_size != receiver_max_block_size {
+        return Some(format!(
+            "sender max_block_size ({}) must match receiver max_block_size ({receiver_max_block_size})",
+            hello.max_block_size
+        ));
+    }
     let min_datagram = usize::from(hello.symbol_size) + AUTH_ENVELOPE_HEADER_LEN;
     if min_datagram > config.max_datagram_size {
         return Some(format!(
             "sender symbol_size ({}) plus {AUTH_ENVELOPE_HEADER_LEN}-byte authenticated envelope \
              header exceeds receiver max_datagram_size ({})",
             hello.symbol_size, config.max_datagram_size
-        ));
-    }
-    let max_block_size = u64::try_from(config.max_block_size).unwrap_or(u64::MAX);
-    if hello.max_block_size > max_block_size {
-        return Some(format!(
-            "sender max_block_size ({}) exceeds receiver max_block_size ({max_block_size})",
-            hello.max_block_size
         ));
     }
     if hello.symbol_auth != expected_symbol_auth {
@@ -3179,6 +3187,7 @@ fn drain_native_symbol_datagrams(
     Ok(accepted)
 }
 
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
 fn drain_native_symbol_datagrams_with_blocks(
     conn: &mut NativeQuicConnection,
     manifest: &TransferManifest,
@@ -6068,6 +6077,36 @@ mod tests {
             QuicTransportError::HandshakeRejected(reason)
                 if reason.contains("unsupported protocol")
         ));
+    }
+
+    #[test]
+    fn quic_control_handshake_rejects_encoding_layout_mismatch() {
+        let config = trusted_quic_config();
+        let mut bad_hello = QuicHello {
+            protocol: ATP_QUIC_PROTOCOL,
+            role: "sender".to_string(),
+            peer_id: "sender-peer".to_string(),
+            symbol_size: config.symbol_size.saturating_div(2).max(1),
+            max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
+            symbol_auth: false,
+        };
+
+        let reason = reject_hello_reason(&bad_hello, &config, false)
+            .expect("symbol size mismatch must reject at handshake");
+        assert!(
+            reason.contains("symbol_size") && reason.contains(&config.symbol_size.to_string()),
+            "{reason}"
+        );
+
+        bad_hello.symbol_size = config.symbol_size;
+        bad_hello.max_block_size = u64::try_from(config.max_block_size / 2).unwrap_or(1).max(1);
+        let reason = reject_hello_reason(&bad_hello, &config, false)
+            .expect("block layout mismatch must reject at handshake");
+        assert!(
+            reason.contains("max_block_size")
+                && reason.contains(&config.max_block_size.to_string()),
+            "{reason}"
+        );
     }
 
     #[test]

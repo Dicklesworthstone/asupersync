@@ -528,6 +528,11 @@ path = "tests/lock_contention_atlas_contract.rs"
 name = "timer_wheel_advance_invariants"
 path = "tests/metamorphic/timer_wheel_advance_invariants.rs"
 
+[[test]]
+name = "atp_quic_bounded_memory"
+path = "tests/atp_quic_bounded_memory.rs"
+required-features = ["tls", "test-internals"]
+
 [[bench]]
 name = "phase0_baseline"
 harness = false
