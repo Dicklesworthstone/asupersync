@@ -551,6 +551,7 @@ struct QuicEntryEncoder {
     index: u32,
     object_id: ObjectId,
     bytes: Vec<u8>,
+    repair_cursor: usize,
 }
 
 #[allow(dead_code)]
@@ -603,6 +604,7 @@ fn encoders_from_entries(
             index: entry.index,
             object_id: entry_object_id(&manifest.transfer_id, entry.index),
             bytes: bytes.clone(),
+            repair_cursor: 0,
         })
         .collect()
 }
@@ -832,28 +834,118 @@ fn initial_repair_per_block(data_len: usize, config: &QuicConfig) -> usize {
     }
 }
 
+fn repair_batch_per_block(config: &QuicConfig) -> usize {
+    let block_k = config
+        .max_block_size
+        .div_ceil(usize::from(config.symbol_size.max(1)))
+        .max(1);
+    (block_k / 4).max(16)
+}
+
+#[allow(dead_code)]
+fn spray_symbol_round(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    pending: &std::collections::BTreeSet<u32>,
+    config: &QuicConfig,
+    with_source: bool,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut sent = 0u64;
+    let repair_batch = repair_batch_per_block(config);
+    for entry in encoders
+        .iter_mut()
+        .filter(|entry| pending.contains(&entry.index))
+    {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let already = entry.repair_cursor;
+        let target_repair = if with_source {
+            initial_repair_per_block(entry.bytes.len(), config)
+        } else {
+            already.saturating_add(repair_batch)
+        };
+        let repair_count = target_repair.saturating_sub(already);
+        if !with_source && repair_count == 0 {
+            entry.repair_cursor = target_repair;
+            continue;
+        }
+
+        let mut pipeline = encoding_pipeline(config);
+        if with_source {
+            for encoded in pipeline.encode_with_repair(entry.object_id, &entry.bytes, target_repair)
+            {
+                let symbol = encoded
+                    .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                    .into_symbol();
+                send_symbol(cx, conn, &symbol, tag, entry.index, None)?;
+                sent = sent.saturating_add(1);
+            }
+        } else {
+            for encoded in
+                pipeline.encode_repair_range(entry.object_id, &entry.bytes, already, repair_count)
+            {
+                let symbol = encoded
+                    .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                    .into_symbol();
+                send_symbol(cx, conn, &symbol, tag, entry.index, None)?;
+                sent = sent.saturating_add(1);
+            }
+        }
+        entry.repair_cursor = target_repair;
+    }
+    Ok(sent)
+}
+
 #[allow(dead_code)]
 fn spray_initial_symbols(
     cx: &Cx,
     conn: &mut QuicConnection,
     manifest: &TransferManifest,
-    encoders: &[QuicEntryEncoder],
+    encoders: &mut [QuicEntryEncoder],
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
-    let tag = transfer_tag(&manifest.transfer_id);
-    let mut sent = 0u64;
-    for entry in encoders {
-        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let repair = initial_repair_per_block(entry.bytes.len(), config);
-        let mut pipeline = encoding_pipeline(config);
-        for encoded in pipeline.encode_with_repair(entry.object_id, &entry.bytes, repair) {
-            let symbol = encoded
-                .map_err(|err| QuicTransportError::Control(err.to_string()))?
-                .into_symbol();
-            send_symbol(cx, conn, &symbol, tag, entry.index, None)?;
-            sent = sent.saturating_add(1);
+    let pending = encoders
+        .iter()
+        .map(|entry| entry.index)
+        .collect::<std::collections::BTreeSet<_>>();
+    spray_symbol_round(cx, conn, manifest, encoders, &pending, config, true)
+}
+
+#[allow(dead_code)]
+fn send_repair_round_and_object_complete(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    need: &QuicNeedMore,
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    validate_quic_manifest(manifest, config)?;
+    if need.pending.is_empty() {
+        send_object_complete(cx, conn, control)?;
+        return Ok(0);
+    }
+    for entry in &need.pending {
+        if !manifest
+            .entries
+            .iter()
+            .any(|manifest| manifest.index == *entry)
+        {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested repair for unknown entry {entry}"
+            )));
         }
     }
+    let pending = need
+        .pending
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let sent = spray_symbol_round(cx, conn, manifest, encoders, &pending, config, false)?;
+    send_object_complete(cx, conn, control)?;
     Ok(sent)
 }
 
@@ -929,6 +1021,7 @@ async fn encoders_from_prepared_source(
             index: entry.index,
             object_id: entry.object_id,
             bytes,
+            repair_cursor: 0,
         });
     }
     Ok(encoders)
@@ -940,7 +1033,7 @@ fn send_manifest_symbols_complete(
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
     manifest: &TransferManifest,
-    encoders: &[QuicEntryEncoder],
+    encoders: &mut [QuicEntryEncoder],
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
@@ -959,8 +1052,8 @@ async fn send_prepared_source_manifest_symbols_complete(
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(&prepared.manifest, config)?;
-    let encoders = encoders_from_prepared_source(cx, prepared, config).await?;
-    send_manifest_symbols_complete(cx, conn, control, &prepared.manifest, &encoders, config)
+    let mut encoders = encoders_from_prepared_source(cx, prepared, config).await?;
+    send_manifest_symbols_complete(cx, conn, control, &prepared.manifest, &mut encoders, config)
 }
 
 #[allow(dead_code)]
@@ -2289,13 +2382,13 @@ mod tests {
         let ack = receive_sender_hello_ack(cx, sender, &mut sender_control)?;
         assert_eq!(ack.peer_id, "receiver-peer");
 
-        let encoders = encoders_from_entries(&manifest, entries);
+        let mut encoders = encoders_from_entries(&manifest, entries);
         let symbols_sent = send_manifest_symbols_complete(
             cx,
             sender,
             &mut sender_control,
             &manifest,
-            &encoders,
+            &mut encoders,
             &config,
         )?;
         pump_until_idle(cx, sender, receiver, DEFAULT_MAX_PACKET_BYTES, 5_002)
@@ -3151,6 +3244,171 @@ mod tests {
     }
 
     #[test]
+    fn quic_sender_repair_feedback_round_recovers_after_source_loss() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.0,
+            ..QuicConfig::default()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(384, 47))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+
+        send_sender_hello(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )
+        .expect("send hello");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_000,
+        )
+        .expect("deliver sender hello");
+        receive_sender_hello_and_ack(
+            &cx,
+            &mut server,
+            &mut receiver_control,
+            &config,
+            "receiver-peer",
+            false,
+        )
+        .expect("receiver accepts hello");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_001,
+        )
+        .expect("deliver hello ack");
+        receive_sender_hello_ack(&cx, &mut client, &mut sender_control)
+            .expect("sender receives ack");
+
+        let mut encoders = encoders_from_entries(&manifest, &entries);
+        let initial_sent = send_manifest_symbols_complete(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &manifest,
+            &mut encoders,
+            &config,
+        )
+        .expect("send source-only round");
+        assert_eq!(initial_sent, 3);
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_002,
+        )
+        .expect("deliver source-only round");
+
+        let dropped = server.recv_datagram().expect("drop one source datagram");
+        assert!(!dropped.is_empty());
+        let received_manifest = receive_manifest(&cx, &mut server, &mut receiver_control)
+            .expect("receiver decodes manifest");
+        let mut decoders = decoders_from_manifest(&received_manifest, &config).expect("decoders");
+        let accepted_before =
+            drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
+                .expect("receiver drains surviving source symbols");
+        assert_eq!(accepted_before, 2);
+        receive_object_complete(&cx, &mut server, &mut receiver_control)
+            .expect("receiver sees initial object complete");
+        assemble_completed_entries(&mut decoders);
+        let pending = pending_entries(&decoders);
+        assert_eq!(pending, vec![0]);
+        let need = QuicNeedMore {
+            pending,
+            source_symbols: source_symbol_requests(&decoders, 2048),
+        };
+        assert!(
+            !need.source_symbols.is_empty(),
+            "receiver should report sparse missing source symbols"
+        );
+        send_need_more(&cx, &mut server, &mut receiver_control, &need).expect("send need-more");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_003,
+        )
+        .expect("deliver need-more");
+
+        let got_need = match receive_proof_or_need_more(&cx, &mut client, &mut sender_control)
+            .expect("sender receives need-more")
+        {
+            QuicControlReply::NeedMore(need) => need,
+            QuicControlReply::Proof(receipt) => panic!("unexpected proof: {receipt:?}"),
+        };
+        assert_eq!(got_need.pending, vec![0]);
+        let repair_sent = send_repair_round_and_object_complete(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &manifest,
+            &mut encoders,
+            &got_need,
+            &config,
+        )
+        .expect("send repair feedback round");
+        assert!(repair_sent > 0);
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_004,
+        )
+        .expect("deliver repair round");
+
+        let accepted_repair =
+            drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
+                .expect("receiver drains repair symbols");
+        assert!(accepted_repair > 0);
+        receive_object_complete(&cx, &mut server, &mut receiver_control)
+            .expect("receiver sees repair object complete");
+        assemble_completed_entries(&mut decoders);
+        assert!(
+            pending_entries(&decoders).is_empty(),
+            "repair round should converge after a dropped source symbol"
+        );
+        let receipt = verify_in_memory_receipt(&received_manifest, &decoders);
+        assert!(receipt.committed);
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+        send_proof(&cx, &mut server, &mut receiver_control, &receipt).expect("send proof");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_005,
+        )
+        .expect("deliver proof");
+
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let report =
+            receive_proof_close_and_report(&cx, &mut client, &mut sender_control, &manifest, peer)
+                .expect("sender receives proof report");
+        assert_eq!(report.transfer_id, manifest.transfer_id);
+        assert_eq!(report.receipt.bytes_received, 384);
+        assert_eq!(report.files, 1);
+    }
+
+    #[test]
     fn receive_connection_commits_established_native_quic_transfer() {
         let (cx, mut client, mut server) = established_pair();
         let config = QuicConfig {
@@ -3177,9 +3435,9 @@ mod tests {
         )
         .expect("send hello");
         send_manifest(&cx, &mut client, &mut sender_control, &manifest).expect("send manifest");
-        let encoders = encoders_from_entries(&manifest, &entries);
-        let sent =
-            spray_initial_symbols(&cx, &mut client, &manifest, &encoders, &config).expect("spray");
+        let mut encoders = encoders_from_entries(&manifest, &entries);
+        let sent = spray_initial_symbols(&cx, &mut client, &manifest, &mut encoders, &config)
+            .expect("spray");
         assert!(sent > 0);
         send_object_complete(&cx, &mut client, &mut sender_control).expect("send complete");
         pump_until_idle(
