@@ -574,6 +574,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "atp_rq_symbol_datagram_parse"
+path = "fuzz_targets/atp_rq_symbol_datagram_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_quic_tls_state_machine"
 path = "fuzz_targets/quic_tls_state_machine.rs"
 test = false
@@ -6216,6 +6223,5 @@ path = "fuzz_targets/replay_minimization_invariants.rs"
 test = false
 doc = false
 bench = false
-
 
 

@@ -743,24 +743,48 @@ struct ParsedDatagram {
     header_len: usize,
 }
 
-fn parse_symbol_header(buf: &[u8], expect_tag: u64, auth_required: bool) -> Option<ParsedDatagram> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymbolDatagramParseError {
+    TruncatedHeader { len: usize, min: usize },
+    BadMagic { found: u32 },
+    WrongTransferTag { found: u64, expected: u64 },
+    PayloadTooLarge { declared: usize, max: usize },
+    TruncatedPayload { len: usize, min: usize },
+}
+
+fn parse_symbol_header_checked(
+    buf: &[u8],
+    expect_tag: u64,
+    auth_required: bool,
+    max_payload_len: Option<usize>,
+) -> Result<ParsedDatagram, SymbolDatagramParseError> {
     let header_len = if auth_required {
         AUTH_DGRAM_HEADER
     } else {
         DGRAM_HEADER
     };
     if buf.len() < header_len {
-        return None;
+        return Err(SymbolDatagramParseError::TruncatedHeader {
+            len: buf.len(),
+            min: header_len,
+        });
     }
-    if u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) != SYMBOL_MAGIC {
-        return None;
+
+    let found_magic = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if found_magic != SYMBOL_MAGIC {
+        return Err(SymbolDatagramParseError::BadMagic { found: found_magic });
     }
+
     let tag = u64::from_be_bytes([
         buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11],
     ]);
     if tag != expect_tag {
-        return None;
+        return Err(SymbolDatagramParseError::WrongTransferTag {
+            found: tag,
+            expected: expect_tag,
+        });
     }
+
     let entry = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
     let sbn = buf[16];
     let esi = u32::from_be_bytes([buf[17], buf[18], buf[19], buf[20]]);
@@ -770,6 +794,16 @@ fn parse_symbol_header(buf: &[u8], expect_tag: u64, auth_required: bool) -> Opti
         SymbolKind::Repair
     };
     let payload_len = usize::from(u16::from_be_bytes([buf[22], buf[23]]));
+
+    if let Some(max) = max_payload_len
+        && payload_len > max
+    {
+        return Err(SymbolDatagramParseError::PayloadTooLarge {
+            declared: payload_len,
+            max,
+        });
+    }
+
     let auth_tag = if auth_required {
         let mut tag_bytes = [0u8; TAG_SIZE];
         tag_bytes.copy_from_slice(&buf[DGRAM_HEADER..AUTH_DGRAM_HEADER]);
@@ -777,10 +811,16 @@ fn parse_symbol_header(buf: &[u8], expect_tag: u64, auth_required: bool) -> Opti
     } else {
         None
     };
-    if buf.len() < header_len + payload_len {
-        return None;
+
+    let min = header_len + payload_len;
+    if buf.len() < min {
+        return Err(SymbolDatagramParseError::TruncatedPayload {
+            len: buf.len(),
+            min,
+        });
     }
-    Some(ParsedDatagram {
+
+    Ok(ParsedDatagram {
         entry,
         sbn,
         esi,
@@ -788,6 +828,114 @@ fn parse_symbol_header(buf: &[u8], expect_tag: u64, auth_required: bool) -> Opti
         auth_tag,
         payload_len,
         header_len,
+    })
+}
+
+fn parse_symbol_header(buf: &[u8], expect_tag: u64, auth_required: bool) -> Option<ParsedDatagram> {
+    parse_symbol_header_checked(buf, expect_tag, auth_required, None).ok()
+}
+
+/// Fuzz-visible symbol-datagram parser result.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RqSymbolDatagramFuzzParse {
+    /// Manifest entry index carried by the datagram.
+    pub entry: u32,
+    /// RaptorQ source-block number.
+    pub sbn: u8,
+    /// RaptorQ encoding-symbol id.
+    pub esi: u32,
+    /// Whether the datagram carries a repair symbol.
+    pub is_repair: bool,
+    /// Optional per-symbol authentication tag bytes.
+    pub auth_tag: Option<[u8; TAG_SIZE]>,
+    /// Offset where the symbol payload begins.
+    pub payload_offset: usize,
+    /// Declared symbol payload length.
+    pub payload_len: usize,
+}
+
+/// Typed fuzz-visible parser error for ATP-over-RaptorQ UDP symbol datagrams.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RqSymbolDatagramFuzzError {
+    /// The datagram ended before the required header.
+    TruncatedHeader {
+        /// Observed byte length.
+        len: usize,
+        /// Minimum required byte length.
+        min: usize,
+    },
+    /// The magic prefix was not `ATRQ`.
+    BadMagic {
+        /// Observed magic value.
+        found: u32,
+    },
+    /// The transfer tag did not match the expected transfer.
+    WrongTransferTag {
+        /// Observed transfer tag.
+        found: u64,
+        /// Expected transfer tag.
+        expected: u64,
+    },
+    /// The declared payload length exceeds the fuzz harness budget.
+    PayloadTooLarge {
+        /// Declared payload length.
+        declared: usize,
+        /// Maximum payload length accepted by the harness.
+        max: usize,
+    },
+    /// The datagram ended before the declared payload bytes.
+    TruncatedPayload {
+        /// Observed byte length.
+        len: usize,
+        /// Minimum required byte length.
+        min: usize,
+    },
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+impl From<SymbolDatagramParseError> for RqSymbolDatagramFuzzError {
+    fn from(error: SymbolDatagramParseError) -> Self {
+        match error {
+            SymbolDatagramParseError::TruncatedHeader { len, min } => {
+                Self::TruncatedHeader { len, min }
+            }
+            SymbolDatagramParseError::BadMagic { found } => Self::BadMagic { found },
+            SymbolDatagramParseError::WrongTransferTag { found, expected } => {
+                Self::WrongTransferTag { found, expected }
+            }
+            SymbolDatagramParseError::PayloadTooLarge { declared, max } => {
+                Self::PayloadTooLarge { declared, max }
+            }
+            SymbolDatagramParseError::TruncatedPayload { len, min } => {
+                Self::TruncatedPayload { len, min }
+            }
+        }
+    }
+}
+
+/// Parse an ATP-over-RaptorQ UDP symbol datagram with typed errors for fuzzing.
+#[cfg(any(test, feature = "fuzz"))]
+#[doc(hidden)]
+pub fn parse_symbol_datagram_for_fuzz(
+    buf: &[u8],
+    expect_tag: u64,
+    auth_required: bool,
+    max_payload_len: usize,
+) -> Result<RqSymbolDatagramFuzzParse, RqSymbolDatagramFuzzError> {
+    let parsed =
+        parse_symbol_header_checked(buf, expect_tag, auth_required, Some(max_payload_len))?;
+    Ok(RqSymbolDatagramFuzzParse {
+        entry: parsed.entry,
+        sbn: parsed.sbn,
+        esi: parsed.esi,
+        is_repair: parsed.kind.is_repair(),
+        auth_tag: parsed.auth_tag.map(|tag| *tag.as_bytes()),
+        payload_offset: parsed.header_len,
+        payload_len: parsed.payload_len,
     })
 }
 
