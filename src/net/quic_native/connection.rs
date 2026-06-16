@@ -2481,6 +2481,37 @@ mod tests {
     }
 
     #[test]
+    fn disable_resumption_0rtt_revokes_client_early_data() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx)
+            .expect("handshake keys");
+        conn.enable_resumption_0rtt(&cx).expect("enable 0-rtt");
+        assert!(conn.can_send_0rtt());
+
+        conn.disable_resumption_0rtt(&cx).expect("disable 0-rtt");
+
+        assert!(!conn.can_send_0rtt());
+        let err = conn
+            .on_packet_sent(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1200,
+                true,
+                true,
+                10_000,
+            )
+            .expect_err("application data must fail after disabling 0-rtt");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::InvalidState(
+                "application-data packets require established 1-RTT state"
+            )
+        );
+    }
+
+    #[test]
     fn server_cannot_enable_0rtt_resumption() {
         let cx = test_cx();
         let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig {
@@ -2772,6 +2803,13 @@ mod tests {
     }
 
     #[test]
+    fn from_quic_frame_error() {
+        let frame_err = QuicFrameError::UnexpectedEof;
+        let conn_err: NativeQuicConnectionError = frame_err.clone().into();
+        assert_eq!(conn_err, NativeQuicConnectionError::Frame(frame_err));
+    }
+
+    #[test]
     fn from_stream_table_error() {
         let st_err = StreamTableError::UnknownStream(StreamId(99));
         let conn_err: NativeQuicConnectionError = st_err.clone().into();
@@ -2799,6 +2837,13 @@ mod tests {
             to: QuicConnectionState::Closed,
         };
         let err = NativeQuicConnectionError::Transport(inner.clone());
+        assert_eq!(format!("{err}"), format!("{inner}"));
+    }
+
+    #[test]
+    fn display_frame_error_passthrough() {
+        let inner = QuicFrameError::UnknownFrameType(0x40);
+        let err = NativeQuicConnectionError::Frame(inner.clone());
         assert_eq!(format!("{err}"), format!("{inner}"));
     }
 
