@@ -8,12 +8,19 @@
 #![allow(dead_code)]
 
 use crate::cx::Cx;
-use crate::net::quic_core::{ConnectionId, LongPacketType, PacketHeader, QuicCoreError};
+use crate::net::atp::quic::AtpPacketProtection;
+use crate::net::quic_core::{
+    ConnectionId, LongPacketType, PacketHeader, QuicCoreError, ShortHeader,
+};
 use crate::net::quic_native::{
     NativeQuicConnection, NativeQuicConnectionConfig, OutgoingPacket, ReceivedPacket,
 };
-use crate::net::quic_native::{NativeQuicConnectionError, PacketNumberSpace};
+use crate::net::quic_native::{
+    NativeQuicConnectionError, PacketNumberSpace, PacketProtectionRequest, PacketProtectionSpace,
+    ProtectedPacket, ProtectionProof, TranscriptHash,
+};
 use crate::time::Sleep;
+use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -36,6 +43,8 @@ pub struct ConnectionRouter {
 pub struct ConnectionHandle {
     /// The underlying QUIC connection state machine.
     connection: NativeQuicConnection,
+    /// Packet-protection provider for 1-RTT UDP handoff.
+    packet_protection: Option<ConnectionPacketProtection>,
     /// Remote peer address.
     peer_addr: SocketAddr,
     /// Last activity timestamp for connection timeout tracking.
@@ -44,6 +53,18 @@ pub struct ConnectionHandle {
     established_at: Option<Instant>,
     /// Pending timer deadline for this connection.
     next_timer_deadline: Option<Instant>,
+}
+
+struct ConnectionPacketProtection {
+    protection: AtpPacketProtection,
+}
+
+impl std::fmt::Debug for ConnectionPacketProtection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionPacketProtection")
+            .field("provider_kind", &self.protection.provider_kind())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Timer event for a specific connection.
@@ -123,6 +144,11 @@ pub enum ConnectionRouterError {
         /// Processing error.
         reason: String,
     },
+    /// Application-data frames were ready, but no 1-RTT packet protection was installed.
+    PacketProtectionUnavailable {
+        /// Connection ID.
+        connection_id: ConnectionId,
+    },
 }
 
 impl std::fmt::Display for ConnectionRouterError {
@@ -148,6 +174,12 @@ impl std::fmt::Display for ConnectionRouterError {
                 write!(
                     f,
                     "packet processing failed for {connection_id:?}: {reason}"
+                )
+            }
+            Self::PacketProtectionUnavailable { connection_id } => {
+                write!(
+                    f,
+                    "packet protection unavailable for application-data packet on {connection_id:?}"
                 )
             }
         }
@@ -203,13 +235,27 @@ impl ConnectionRouter {
                     reason: "header length exceeded datagram length".to_string(),
                 }
             })?;
+            let plaintext_payload = if routing_info.space == PacketNumberSpace::ApplicationData {
+                unprotect_1rtt_packet(
+                    cx,
+                    connection_id,
+                    handle,
+                    &packet.data[..routing_info.header_len],
+                    payload,
+                    routing_info.packet_number,
+                    routing_info.key_phase,
+                )
+                .await?
+            } else {
+                payload.to_vec()
+            };
             handle
                 .connection
                 .process_packet_payload(
                     cx,
                     routing_info.space,
                     routing_info.packet_number,
-                    payload,
+                    &plaintext_payload,
                     now_micros,
                 )
                 .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
@@ -223,7 +269,9 @@ impl ConnectionRouter {
                 routing_info.space,
                 packet.src_addr,
                 packet.receive_time,
-            )?;
+                now_micros,
+            )
+            .await?;
             Self::refresh_connection_timer(
                 cx,
                 connection_id,
@@ -288,6 +336,7 @@ impl ConnectionRouter {
 
         let handle = ConnectionHandle {
             connection,
+            packet_protection: None,
             peer_addr,
             last_activity: Instant::now(),
             established_at: None,
@@ -300,6 +349,30 @@ impl ConnectionRouter {
             "Created new connection {connection_id:?} for peer {peer_addr}"
         ));
 
+        Ok(())
+    }
+
+    /// Install packet protection for a managed connection's 1-RTT
+    /// UDP handoff path.
+    ///
+    /// Once installed, application-data frames drained by this router are
+    /// assembled as short-header packets and protected before being passed to
+    /// the UDP endpoint.
+    pub fn install_packet_protection(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        protection: AtpPacketProtection,
+    ) -> Result<(), ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        handle.packet_protection = Some(ConnectionPacketProtection { protection });
         Ok(())
     }
 
@@ -409,14 +482,18 @@ impl ConnectionRouter {
                         }
                     })?;
                     let peer_addr = handle.peer_addr;
-                    outgoing_packets.extend(drain_connection_frames(
-                        cx,
-                        *connection_id,
-                        handle,
-                        PacketNumberSpace::ApplicationData,
-                        peer_addr,
-                        current_time,
-                    )?);
+                    outgoing_packets.extend(
+                        drain_connection_frames(
+                            cx,
+                            *connection_id,
+                            handle,
+                            PacketNumberSpace::ApplicationData,
+                            peer_addr,
+                            current_time,
+                            instant_micros_from(origin, current_time),
+                        )
+                        .await?,
+                    );
                     Self::refresh_connection_timer(
                         cx,
                         *connection_id,
@@ -514,6 +591,7 @@ struct PacketRoutingInfo {
     kind: PacketRoutingKind,
     space: PacketNumberSpace,
     packet_number: u64,
+    key_phase: bool,
     header_len: usize,
 }
 
@@ -539,6 +617,7 @@ impl PacketRoutingInfo {
                     kind,
                     space,
                     packet_number: header.packet_number,
+                    key_phase: false,
                     header_len,
                 })
             }
@@ -547,6 +626,7 @@ impl PacketRoutingInfo {
                 kind: PacketRoutingKind::Retry,
                 space: PacketNumberSpace::Initial,
                 packet_number: 0,
+                key_phase: false,
                 header_len,
             }),
             PacketHeader::Short(header) => Ok(Self {
@@ -554,6 +634,7 @@ impl PacketRoutingInfo {
                 kind: PacketRoutingKind::OneRtt,
                 space: PacketNumberSpace::ApplicationData,
                 packet_number: header.packet_number,
+                key_phase: header.key_phase,
                 header_len,
             }),
         }
@@ -568,17 +649,26 @@ fn instant_micros_from(origin: Instant, instant: Instant) -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn drain_connection_frames(
+async fn drain_connection_frames(
     cx: &Cx,
     connection_id: ConnectionId,
     handle: &mut ConnectionHandle,
     space: PacketNumberSpace,
     dst_addr: SocketAddr,
     now: Instant,
+    now_micros: u64,
 ) -> Result<Vec<OutgoingPacket>, ConnectionRouterError> {
+    let max_frame_bytes = if space == PacketNumberSpace::ApplicationData {
+        if handle.packet_protection.is_none() {
+            return Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id });
+        }
+        PROTECTED_1RTT_MAX_PACKET_BYTES.saturating_sub(protected_1rtt_packet_len(connection_id, 0))
+    } else {
+        PROTECTED_1RTT_MAX_PACKET_BYTES
+    };
     let frames = handle
         .connection
-        .generate_frames(cx, space, 1_200)
+        .generate_frames(cx, space, max_frame_bytes)
         .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
             connection_id,
             reason: err.to_string(),
@@ -587,19 +677,203 @@ fn drain_connection_frames(
         return Ok(Vec::new());
     }
 
-    let mut data = crate::bytes::BytesMut::new();
-    NativeQuicConnection::encode_frames(&frames, &mut data).map_err(
+    let mut payload = crate::bytes::BytesMut::new();
+    NativeQuicConnection::encode_frames(&frames, &mut payload).map_err(
         |err: NativeQuicConnectionError| ConnectionRouterError::PacketProcessingFailed {
             connection_id,
             reason: err.to_string(),
         },
     )?;
+    let data = if space == PacketNumberSpace::ApplicationData {
+        match handle.packet_protection.as_mut() {
+            Some(packet_protection) => {
+                assemble_protected_1rtt_packet(
+                    cx,
+                    connection_id,
+                    &mut handle.connection,
+                    packet_protection,
+                    payload.as_ref(),
+                    now_micros,
+                    frames.iter().any(is_ack_eliciting),
+                )
+                .await?
+            }
+            None => {
+                return Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id });
+            }
+        }
+    } else {
+        payload.to_vec()
+    };
 
     Ok(vec![OutgoingPacket {
         dst_addr,
-        data: data.to_vec(),
+        data,
         send_time: Some(now),
     }])
+}
+
+async fn assemble_protected_1rtt_packet(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    connection: &mut NativeQuicConnection,
+    packet_protection: &mut ConnectionPacketProtection,
+    payload: &[u8],
+    now_micros: u64,
+    ack_eliciting: bool,
+) -> Result<Vec<u8>, ConnectionRouterError> {
+    let packet_len = protected_1rtt_packet_len(connection_id, payload.len());
+    if packet_len > PROTECTED_1RTT_MAX_PACKET_BYTES {
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!(
+                "protected 1-RTT packet length {packet_len} exceeds max {PROTECTED_1RTT_MAX_PACKET_BYTES}"
+            ),
+        });
+    }
+    let packet_number = connection
+        .on_packet_sent(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            packet_len as u64,
+            ack_eliciting,
+            true,
+            now_micros,
+        )
+        .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: err.to_string(),
+        })?;
+    let key_phase = connection.tls().local_key_phase();
+    let header = PacketHeader::Short(ShortHeader {
+        spin: false,
+        key_phase,
+        dst_cid: connection_id,
+        packet_number,
+        packet_number_len: PROTECTED_1RTT_PACKET_NUMBER_LEN,
+    });
+    let mut header_bytes = Vec::new();
+    header.encode(&mut header_bytes).map_err(|err| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: err.to_string(),
+        }
+    })?;
+    let protected = match packet_protection
+        .protection
+        .protect_packet(
+            cx,
+            PacketProtectionRequest {
+                space: PacketProtectionSpace::OneRtt,
+                key_phase,
+                packet_number,
+                associated_data: &header_bytes,
+                payload,
+            },
+        )
+        .await
+    {
+        Outcome::Ok(packet) => packet,
+        Outcome::Err(err) => {
+            return Err(ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: format!("1-RTT packet protection failed: {err:?}"),
+            });
+        }
+        Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+        Outcome::Panicked(payload) => {
+            return Err(ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: format!("1-RTT packet protection panicked: {payload:?}"),
+            });
+        }
+    };
+
+    let mut packet =
+        Vec::with_capacity(header_bytes.len() + protected.ciphertext.len() + protected.tag.len());
+    packet.extend_from_slice(&header_bytes);
+    packet.extend_from_slice(&protected.ciphertext);
+    packet.extend_from_slice(&protected.tag);
+    Ok(packet)
+}
+
+async fn unprotect_1rtt_packet(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    handle: &mut ConnectionHandle,
+    associated_data: &[u8],
+    protected_payload: &[u8],
+    packet_number: u64,
+    key_phase: bool,
+) -> Result<Vec<u8>, ConnectionRouterError> {
+    let Some(packet_protection) = handle.packet_protection.as_mut() else {
+        return Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id });
+    };
+    if protected_payload.len() < PROTECTED_1RTT_TAG_LEN {
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!(
+                "protected 1-RTT packet too short: payload_len={}, tag_len={PROTECTED_1RTT_TAG_LEN}",
+                protected_payload.len()
+            ),
+        });
+    }
+
+    let tag_offset = protected_payload.len() - PROTECTED_1RTT_TAG_LEN;
+    let tag: [u8; PROTECTED_1RTT_TAG_LEN] = protected_payload[tag_offset..]
+        .try_into()
+        .expect("tag length checked above");
+    let protected = ProtectedPacket {
+        space: PacketProtectionSpace::OneRtt,
+        key_phase,
+        packet_number,
+        ciphertext: protected_payload[..tag_offset].to_vec(),
+        tag,
+        proof: ProtectionProof {
+            provider_kind: packet_protection.protection.provider_kind(),
+            space: PacketProtectionSpace::OneRtt,
+            key_phase,
+            generation: 0,
+            transcript_hash: TranscriptHash::from_bytes([0; 32]),
+            failure_code: None,
+        },
+    };
+
+    match packet_protection
+        .protection
+        .unprotect_packet(cx, &protected, associated_data)
+        .await
+    {
+        Outcome::Ok(packet) => Ok(packet.plaintext),
+        Outcome::Err(err) => Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!("1-RTT packet unprotection failed: {err:?}"),
+        }),
+        Outcome::Cancelled(_) => Err(ConnectionRouterError::Cancelled),
+        Outcome::Panicked(payload) => Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!("1-RTT packet unprotection panicked: {payload:?}"),
+        }),
+    }
+}
+
+const PROTECTED_1RTT_MAX_PACKET_BYTES: usize = 1_200;
+const PROTECTED_1RTT_PACKET_NUMBER_LEN: u8 = 4;
+const PROTECTED_1RTT_TAG_LEN: usize = 16;
+
+fn protected_1rtt_packet_len(connection_id: ConnectionId, payload_len: usize) -> usize {
+    1 + connection_id.len()
+        + usize::from(PROTECTED_1RTT_PACKET_NUMBER_LEN)
+        + payload_len
+        + PROTECTED_1RTT_TAG_LEN
+}
+
+fn is_ack_eliciting(frame: &crate::net::atp::protocol::quic_frames::QuicFrame) -> bool {
+    !matches!(
+        frame,
+        crate::net::atp::protocol::quic_frames::QuicFrame::Padding { .. }
+            | crate::net::atp::protocol::quic_frames::QuicFrame::Ack { .. }
+    )
 }
 
 /// Statistics about the connection router state.
@@ -723,9 +997,10 @@ impl Default for QuicTimerScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytes::BytesMut;
+    use crate::bytes::{Bytes, BytesMut};
     use crate::net::atp::protocol::quic_frames::QuicFrame;
     use crate::net::quic_core::{LongHeader, LongPacketType, PacketHeader};
+    use crate::net::quic_native::QuicHandshakeTranscript;
     use crate::test_utils::run_test_with_cx;
 
     #[test]
@@ -829,6 +1104,178 @@ mod tests {
     }
 
     #[test]
+    fn test_application_datagram_handoff_uses_protected_short_header_packet() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = ConnectionId::new(&[0xa1, 0x01, 0x00, 0x01]).expect("cid");
+            let peer_addr: SocketAddr = "127.0.0.1:4435".parse().unwrap();
+            router
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("connection creation should succeed");
+            router
+                .install_packet_protection(
+                    &cx,
+                    connection_id,
+                    deterministic_one_rtt_protection(&cx).await,
+                )
+                .expect("install packet protection");
+            let mut receiver = ConnectionRouter::new(config);
+            receiver
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("receiver connection creation should succeed");
+            receiver
+                .install_packet_protection(
+                    &cx,
+                    connection_id,
+                    deterministic_one_rtt_protection(&cx).await,
+                )
+                .expect("install receiver packet protection");
+
+            let datagram = Bytes::from_static(b"a1 protected udp symbol");
+            {
+                let handle = router
+                    .connections
+                    .get_mut(&connection_id)
+                    .expect("connection handle");
+                establish_for_application_data(&cx, &mut handle.connection);
+                handle
+                    .connection
+                    .send_datagram(&cx, datagram.clone())
+                    .expect("queue datagram");
+            }
+
+            let now = Instant::now();
+            let packets = {
+                let handle = router
+                    .connections
+                    .get_mut(&connection_id)
+                    .expect("connection handle");
+                drain_connection_frames(
+                    &cx,
+                    connection_id,
+                    handle,
+                    PacketNumberSpace::ApplicationData,
+                    peer_addr,
+                    now,
+                    42_000,
+                )
+                .await
+                .expect("drain protected packet")
+            };
+            assert_eq!(packets.len(), 1);
+            assert_eq!(packets[0].dst_addr, peer_addr);
+            assert_eq!(packets[0].send_time, Some(now));
+            assert!(packets[0].data.len() <= PROTECTED_1RTT_MAX_PACKET_BYTES);
+
+            let mut raw_frame_payload = BytesMut::new();
+            QuicFrame::Datagram { data: datagram }
+                .encode(&mut raw_frame_payload)
+                .expect("encode raw DATAGRAM frame");
+            let packet = &packets[0].data;
+            assert_ne!(packet.as_slice(), raw_frame_payload.as_ref());
+
+            let (decoded, header_len) =
+                PacketHeader::decode(packet, connection_id.len()).expect("decode short header");
+            let PacketHeader::Short(header) = decoded else {
+                panic!("expected a protected 1-RTT short header packet");
+            };
+            assert!(!header.spin);
+            assert!(!header.key_phase);
+            assert_eq!(header.dst_cid, connection_id);
+            assert_eq!(header.packet_number, 0);
+            assert_eq!(header.packet_number_len, PROTECTED_1RTT_PACKET_NUMBER_LEN);
+
+            let protected_payload = &packet[header_len..];
+            assert_eq!(
+                protected_payload.len(),
+                raw_frame_payload.len() + PROTECTED_1RTT_TAG_LEN
+            );
+            assert_ne!(
+                &protected_payload[..raw_frame_payload.len()],
+                raw_frame_payload.as_ref()
+            );
+
+            {
+                let handle = receiver
+                    .connections
+                    .get_mut(&connection_id)
+                    .expect("receiver connection handle");
+                establish_for_application_data(&cx, &mut handle.connection);
+            }
+            let received = ReceivedPacket {
+                src_addr: peer_addr,
+                data: packet.clone(),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+            match receiver
+                .route_packet(&cx, received)
+                .await
+                .expect("route protected packet")
+            {
+                RoutingResult::Routed {
+                    connection_id: routed_id,
+                    ..
+                } => assert_eq!(routed_id, connection_id),
+                other => panic!("expected routed protected packet, got {other:?}"),
+            }
+            let received_datagram = receiver
+                .connections
+                .get_mut(&connection_id)
+                .expect("receiver connection handle")
+                .connection
+                .recv_datagram()
+                .expect("datagram delivered after unprotect");
+            assert_eq!(received_datagram.as_ref(), b"a1 protected udp symbol");
+        });
+    }
+
+    #[test]
+    fn test_application_datagram_handoff_without_protection_fails_closed() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = ConnectionId::new(&[0xa1, 0x01, 0x00, 0x02]).expect("cid");
+            let peer_addr: SocketAddr = "127.0.0.1:4436".parse().unwrap();
+            router
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("connection creation should succeed");
+
+            let handle = router
+                .connections
+                .get_mut(&connection_id)
+                .expect("connection handle");
+            establish_for_application_data(&cx, &mut handle.connection);
+            handle
+                .connection
+                .send_datagram(&cx, Bytes::from_static(b"must not leak raw"))
+                .expect("queue datagram");
+
+            let err = drain_connection_frames(
+                &cx,
+                connection_id,
+                handle,
+                PacketNumberSpace::ApplicationData,
+                peer_addr,
+                Instant::now(),
+                42_000,
+            )
+            .await
+            .expect_err("missing 1-RTT packet protection must fail closed");
+            assert!(matches!(
+                err,
+                ConnectionRouterError::PacketProtectionUnavailable { connection_id: id }
+                    if id == connection_id
+            ));
+            assert_eq!(handle.connection.pending_outbound_datagram_count(), 1);
+        });
+    }
+
+    #[test]
     fn test_timer_scheduler_basic() {
         run_test_with_cx(|cx| async move {
             let mut scheduler = QuicTimerScheduler::new();
@@ -869,5 +1316,35 @@ mod tests {
         header.encode(&mut out).expect("header encode");
         out.extend_from_slice(&payload);
         out
+    }
+
+    async fn deterministic_one_rtt_protection(cx: &Cx) -> AtpPacketProtection {
+        let mut transcript = QuicHandshakeTranscript::new();
+        transcript.record("client_initial", b"a1 client hello");
+        transcript.record("server_handshake", b"a1 server hello");
+        let mut protection =
+            AtpPacketProtection::new_client(true).expect("deterministic ATP packet protection");
+        protection
+            .derive_keys(
+                cx,
+                PacketProtectionSpace::OneRtt,
+                &transcript,
+                b"asupersync a1 protected udp handoff",
+            )
+            .await
+            .expect("derive 1-RTT keys");
+        protection
+    }
+
+    fn establish_for_application_data(cx: &Cx, connection: &mut NativeQuicConnection) {
+        connection.begin_handshake(cx).expect("begin");
+        connection
+            .on_handshake_keys_available(cx)
+            .expect("handshake keys");
+        connection.on_1rtt_keys_available(cx).expect("1rtt keys");
+        connection.record_verified_server_identity();
+        connection
+            .on_handshake_confirmed(cx)
+            .expect("handshake confirmed");
     }
 }
