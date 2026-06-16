@@ -715,7 +715,12 @@ impl RecoveryTelemetry {
         }
 
         let largest_acked = space.largest_acked?;
-        let time_threshold_micros = now_micros.saturating_sub(loss_delay_micros);
+        // Only apply the time-threshold test once enough time has actually
+        // elapsed. A saturating subtraction would floor the boundary to 0 and
+        // mark a packet sent at t=0 as time-lost before the loss delay (which is
+        // ~375ms with no RTT samples) is even reachable. This mirrors the
+        // documented `checked_sub` fix in `net/atp/loss/detector.rs`.
+        let time_threshold_boundary = now_micros.checked_sub(loss_delay_micros);
         let mut lost_packets = Vec::new();
         let mut lost_bytes = 0u64;
         let mut packet_threshold_lost = false;
@@ -725,7 +730,8 @@ impl RecoveryTelemetry {
         while let Some(packet) = space.sent_packets.pop_front() {
             let lost_by_packet_threshold = packet.packet_number.saturating_add(3) <= largest_acked;
             let lost_by_time_threshold = packet.packet_number <= largest_acked
-                && packet.time_sent_micros <= time_threshold_micros;
+                && time_threshold_boundary
+                    .is_some_and(|boundary| packet.time_sent_micros <= boundary);
 
             if lost_by_packet_threshold || lost_by_time_threshold {
                 packet_threshold_lost |= lost_by_packet_threshold;
