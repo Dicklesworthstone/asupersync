@@ -181,7 +181,16 @@ fn response_body_kind(
     }
 
     if let Some(cl) = cl {
-        let content_length: u64 = cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
+        // RFC 9110 §8.6: Content-Length = 1*DIGIT (no sign). `str::parse` accepts
+        // a leading '+' (e.g. "+5"), which can disagree with stricter
+        // intermediaries (nginx/envoy) and is a response-smuggling primitive.
+        // Reject any non-digit input before parsing, mirroring the hardened
+        // server request path in codec.rs.
+        let cl_str = cl.trim();
+        if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(HttpError::BadContentLength);
+        }
+        let content_length: u64 = cl_str.parse().map_err(|_| HttpError::BadContentLength)?;
         if content_length == 0 {
             return Ok(ClientBodyKind::Empty);
         }
@@ -304,8 +313,14 @@ impl Http1ClientCodec {
                     }
 
                     if let Some(cl) = cl {
+                        // RFC 9110 §8.6: Content-Length = 1*DIGIT (no sign);
+                        // reject non-digit input (smuggling parity with codec.rs).
+                        let cl_str = cl.trim();
+                        if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
+                            return Err(HttpError::BadContentLength);
+                        }
                         let content_length: usize =
-                            cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
+                            cl_str.parse().map_err(|_| HttpError::BadContentLength)?;
 
                         if content_length == 0 {
                             *state = ClientDecodeState::Head;
@@ -498,7 +513,13 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
         }
         if !chunked {
             if let Some(cl) = cl {
-                let declared: usize = cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
+                // RFC 9110 §8.6: Content-Length = 1*DIGIT (no sign); reject
+                // non-digit input (smuggling parity with codec.rs).
+                let cl_str = cl.trim();
+                if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(HttpError::BadContentLength);
+                }
+                let declared: usize = cl_str.parse().map_err(|_| HttpError::BadContentLength)?;
                 if declared != req.body.len() {
                     return Err(HttpError::BadContentLength);
                 }
