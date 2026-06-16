@@ -233,6 +233,37 @@ impl BlockingPoolAffinityState {
         self.spill_dispatches.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Steal a task from any *other* cohort's queue, used only as a last resort
+    /// after the worker's own cohort queue and the global queue are both empty.
+    ///
+    /// Without this, a task routed to a cohort that currently has no live worker
+    /// would never be dequeued and its waiter would hang forever. That happens
+    /// whenever `cohort_count` exceeds the live worker count (the cohort count is
+    /// derived from the scheduler worker map and is independent of the blocking
+    /// pool's `min_threads`/`max_threads`), or when idle retirement shrinks the
+    /// live worker set back to `min_threads` and leaves a cohort uncovered. Since
+    /// worker cohorts are assigned by spawn order, neither routing nor the
+    /// thread-id-derived spawn cohort guarantees coverage. Cohort affinity is a
+    /// locality *preference*, not a hard partition, so stealing as a last resort
+    /// preserves locality (own cohort and global are tried first) while keeping
+    /// the pool work-conserving and deadlock-free.
+    fn steal_foreign_cohort(
+        &self,
+        own_cohort: usize,
+    ) -> Option<(BlockingTask, BlockingTaskDequeueKind)> {
+        for (idx, queue) in self.cohort_queues.iter().enumerate() {
+            if idx == own_cohort {
+                continue;
+            }
+            if let Some(task) = queue.pop() {
+                self.cohort_pending_counts[idx].fetch_sub(1, Ordering::Relaxed);
+                self.spill_dispatches.fetch_add(1, Ordering::Relaxed);
+                return Some((task, BlockingTaskDequeueKind::Spill));
+            }
+        }
+        None
+    }
+
     fn snapshot(&self, global_pending_count: usize) -> BlockingPoolAffinityMetricsSnapshot {
         BlockingPoolAffinityMetricsSnapshot {
             enabled: true,
@@ -1049,9 +1080,14 @@ fn pop_next_blocking_task(
     };
 
     if prefer_local_turn {
-        affinity.pop_local(cohort).or_else(pop_global)
+        affinity
+            .pop_local(cohort)
+            .or_else(pop_global)
+            .or_else(|| affinity.steal_foreign_cohort(cohort))
     } else {
-        pop_global().or_else(|| affinity.pop_local(cohort))
+        pop_global()
+            .or_else(|| affinity.pop_local(cohort))
+            .or_else(|| affinity.steal_foreign_cohort(cohort))
     }
 }
 
