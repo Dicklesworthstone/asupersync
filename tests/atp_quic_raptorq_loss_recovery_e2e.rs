@@ -16,12 +16,18 @@
 
 #![allow(clippy::cast_possible_truncation)]
 
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use asupersync::config::EncodingConfig;
 use asupersync::cx::Cx;
 use asupersync::decoding::{DecodingConfig, DecodingPipeline};
 use asupersync::encoding::EncodingPipeline;
+use asupersync::net::atp::sdk::object::{
+    ManifestBuilder, ManifestEntry, ObjectHash, ObjectManifest, ObjectMetadata,
+};
 use asupersync::net::atp::transport_quic::{envelope_to_symbol, recv_symbol_envelope, send_symbol};
 use asupersync::net::quic_native::{
     DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, QuicConnection, establish_loopback,
@@ -31,6 +37,7 @@ use asupersync::security::tag::AuthenticationTag;
 use asupersync::security::{AuthenticatedSymbol, SecurityContext};
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolKind};
+use sha2::{Digest, Sha256};
 
 const SYMBOL_SIZE: u16 = 256;
 const MAX_BLOCK_SIZE: usize = 8192;
@@ -46,6 +53,14 @@ fn test_cx() -> Cx {
 fn make_data(len: usize) -> Vec<u8> {
     (0..len)
         .map(|i| ((i as u64).wrapping_mul(31).wrapping_add(7) % 251) as u8)
+        .collect()
+}
+
+fn make_seeded_data(len: usize, seed: u8) -> Vec<u8> {
+    make_data(len)
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| b ^ seed.wrapping_add((i % 251) as u8))
         .collect()
 }
 
@@ -193,6 +208,161 @@ fn recover_object_authenticated(
     pipeline.into_data().map_err(|_| ())
 }
 
+#[derive(Debug)]
+struct TreeFixtureEntry {
+    object_id: ObjectId,
+    path: &'static str,
+    content_type: &'static str,
+    data: Vec<u8>,
+    hash: ObjectHash,
+}
+
+impl TreeFixtureEntry {
+    fn new(
+        object_id: ObjectId,
+        path: &'static str,
+        content_type: &'static str,
+        data: Vec<u8>,
+    ) -> Self {
+        let hash = ObjectHash::from_data(&data);
+        Self {
+            object_id,
+            path,
+            content_type,
+            data,
+            hash,
+        }
+    }
+}
+
+fn tree_fixture() -> Vec<TreeFixtureEntry> {
+    vec![
+        TreeFixtureEntry::new(
+            ObjectId::from_u128(0xD0_01),
+            "docs/readme.txt",
+            "text/plain",
+            make_seeded_data(DATA_LEN / 2, 0x11),
+        ),
+        TreeFixtureEntry::new(
+            ObjectId::from_u128(0xD0_02),
+            "bin/payload.dat",
+            "application/octet-stream",
+            make_seeded_data(MAX_BLOCK_SIZE + usize::from(SYMBOL_SIZE) * 3, 0x27),
+        ),
+        TreeFixtureEntry::new(
+            ObjectId::from_u128(0xD0_03),
+            "nested/deep/config.json",
+            "application/json",
+            br#"{"mode":"b4","transport":"quic","commit":"atomic"}"#.to_vec(),
+        ),
+    ]
+}
+
+fn tree_root_hash(entries: &[TreeFixtureEntry]) -> ObjectHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.tests.atp_quic_tree_manifest.v1");
+    for entry in entries {
+        hasher.update(entry.path.as_bytes());
+        hasher.update([0]);
+        hasher.update(entry.hash.as_bytes());
+        hasher.update(
+            u64::try_from(entry.data.len())
+                .expect("fixture length fits u64")
+                .to_le_bytes(),
+        );
+    }
+    ObjectHash::new(hasher.finalize().into())
+}
+
+fn tree_manifest(entries: &[TreeFixtureEntry]) -> ObjectManifest {
+    let mut builder = ManifestBuilder::new();
+    for entry in entries {
+        builder.add_object(
+            entry.hash.clone(),
+            entry.path.to_string(),
+            u64::try_from(entry.data.len()).expect("fixture length fits u64"),
+            entry.content_type.to_string(),
+            ObjectMetadata::with_filename(entry.path),
+        );
+    }
+    builder.add_metadata("shape".to_string(), "directory-tree".to_string());
+    builder.build(tree_root_hash(entries))
+}
+
+fn drop_one_source_symbol_per_block(symbols: &[Symbol]) -> Vec<Symbol> {
+    let mut dropped_by_block = BTreeMap::new();
+    let mut sent = Vec::new();
+    for symbol in symbols {
+        if matches!(symbol.kind(), SymbolKind::Source) {
+            let dropped = dropped_by_block.entry(symbol.sbn()).or_insert(0usize);
+            if *dropped == 0 {
+                *dropped += 1;
+                continue;
+            }
+        }
+        sent.push(symbol.clone());
+    }
+    assert!(
+        !dropped_by_block.is_empty(),
+        "fixture must drop at least one source symbol"
+    );
+    sent
+}
+
+fn recover_tree_entry_over_quic(
+    cx: &Cx,
+    client: &mut QuicConnection,
+    server: &mut QuicConnection,
+    entry: &TreeFixtureEntry,
+) -> Vec<u8> {
+    let symbols = encode_symbols(entry.object_id, &entry.data, 8);
+    let sent = drop_one_source_symbol_per_block(&symbols);
+    let datagrams_before = server.datagrams_received();
+
+    let received = spray_and_collect(cx, client, server, &sent, entry.object_id);
+
+    assert_eq!(received.len(), sent.len());
+    assert_eq!(
+        server.datagrams_received() - datagrams_before,
+        sent.len() as u64
+    );
+    recover_object(entry.object_id, entry.data.len(), &received)
+        .expect("tree entry recovers after per-block source loss")
+}
+
+fn destination_path(root: &Path, manifest_path: &str) -> PathBuf {
+    let rel = Path::new(manifest_path);
+    assert!(!rel.is_absolute(), "manifest paths must be relative");
+    assert!(
+        !rel.components()
+            .any(|component| matches!(component, std::path::Component::ParentDir)),
+        "manifest paths must not escape the destination root"
+    );
+    root.join(rel)
+}
+
+fn verify_and_commit_entry(
+    root: &Path,
+    manifest_entry: &ManifestEntry,
+    decoded: &[u8],
+) -> Result<PathBuf, String> {
+    if ObjectHash::from_data(decoded) != manifest_entry.hash {
+        return Err(format!("hash mismatch for {}", manifest_entry.path));
+    }
+    if decoded.len() as u64 != manifest_entry.size_bytes {
+        return Err(format!("size mismatch for {}", manifest_entry.path));
+    }
+
+    let final_path = destination_path(root, &manifest_entry.path);
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let tmp_path = final_path.with_extension("asupersync-tmp");
+    fs::write(&tmp_path, decoded).map_err(|err| err.to_string())?;
+    fs::rename(&tmp_path, &final_path).map_err(|err| err.to_string())?;
+    Ok(final_path)
+}
+
 #[test]
 fn raptorq_symbols_recover_over_quic_datagrams_with_source_loss() {
     let cx = test_cx();
@@ -312,6 +482,48 @@ fn multi_block_object_recovers_over_quic_datagrams_with_cross_block_source_loss(
     assert_eq!(
         decoded, data,
         "multi-block recovered bytes match the original exactly"
+    );
+}
+
+#[test]
+fn directory_tree_recovers_verifies_and_commits_atomically_after_datagram_loss() {
+    let cx = test_cx();
+    let (mut client, mut server) = established_pair(&cx);
+    let entries = tree_fixture();
+    let manifest = tree_manifest(&entries);
+    let destination = tempfile::tempdir().expect("temp destination");
+
+    assert_eq!(manifest.objects.len(), entries.len());
+    assert_eq!(manifest.root_hash, tree_root_hash(&entries));
+    assert_eq!(manifest.metadata.get("shape"), Some("directory-tree"));
+
+    for (entry, manifest_entry) in entries.iter().zip(&manifest.objects) {
+        assert_eq!(manifest_entry.hash, entry.hash);
+        assert_eq!(manifest_entry.path, entry.path);
+
+        let decoded = recover_tree_entry_over_quic(&cx, &mut client, &mut server, entry);
+        assert_eq!(decoded, entry.data);
+
+        let committed =
+            verify_and_commit_entry(destination.path(), manifest_entry, &decoded).expect("commit");
+        assert_eq!(
+            fs::read(&committed).expect("read committed entry"),
+            entry.data,
+            "committed bytes match the recovered tree entry"
+        );
+    }
+
+    let mut corrupted = entries[0].data.clone();
+    corrupted[0] ^= 0x80;
+    let corrupt_root = tempfile::tempdir().expect("corrupt temp destination");
+    let corrupt_path = destination_path(corrupt_root.path(), &manifest.objects[0].path);
+    assert!(
+        verify_and_commit_entry(corrupt_root.path(), &manifest.objects[0], &corrupted).is_err(),
+        "hash mismatch must fail closed before commit"
+    );
+    assert!(
+        !corrupt_path.exists(),
+        "failed verification must leave the final destination absent"
     );
 }
 
