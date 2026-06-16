@@ -534,7 +534,7 @@ pub struct CancelReason {
     /// br-asupersync-dyao05 — `deserialize_with` routes the
     /// recursive parse through `deserialize_bounded_cause` which
     /// rejects chains deeper than
-    /// `MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH = 256` BEFORE the recursion
+    /// `MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH = 64` BEFORE the recursion
     /// can blow the stack or OOM. The runtime cap
     /// `CancelAttributionConfig::max_chain_depth` (default 16) still
     /// applies post-deserialize for the application-level truncation;
