@@ -1333,7 +1333,6 @@ async fn run_receiver_session(
         manifest.transfer_id,
         std::process::id()
     ));
-    let _ = crate::fs::remove_dir_all(&staging_dir).await;
     crate::fs::create_dir_all(&staging_dir).await?;
     let mut staged = manifest
         .entries
@@ -1471,7 +1470,6 @@ async fn run_receiver_session(
     }
     .await;
 
-    let _ = crate::fs::remove_dir_all(&staging_dir).await;
     receive_result
 }
 
