@@ -65,14 +65,19 @@ use sha2::{Digest, Sha256};
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
+use crate::config::EncodingConfig;
 use crate::cx::Cx;
+use crate::decoding::{DecodingConfig, DecodingPipeline, MissingSourceSymbol, SymbolAcceptResult};
+use crate::encoding::EncodingPipeline;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
-use crate::net::atp::transport_common::StreamingError;
+use crate::net::atp::transport_common::{StreamingError, flat_merkle_root_from_slices, hex_encode};
 use crate::net::quic_native::{
     ManagedQuicEndpoint, NativeQuicConnection, QuicConnection, StreamId,
 };
-use crate::types::symbol::ObjectId;
+use crate::security::AuthenticatedSymbol;
+use crate::types::resource::{PoolConfig, SymbolPool};
+use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
 
 // Reuse the manifest / receipt / report wire+value types so QUIC and TCP share
 // one schema (see module docs). These are the "reuse manifest/report/receipt"
@@ -348,6 +353,12 @@ impl From<crate::net::quic_native::NativeQuicConnectionError> for QuicTransportE
     }
 }
 
+impl From<SymbolDatagramError> for QuicTransportError {
+    fn from(err: SymbolDatagramError) -> Self {
+        Self::Quic(err.to_string())
+    }
+}
+
 // ─── Control-plane payloads (JSON over one QUIC stream) ─────────────────────
 
 #[allow(dead_code)]
@@ -468,6 +479,433 @@ fn transfer_tag(transfer_id: &str) -> u64 {
     u64::from_be_bytes([
         digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
     ])
+}
+
+#[allow(dead_code)]
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_encode(&hasher.finalize())
+}
+
+#[allow(dead_code)]
+fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.atp.quic.transfer-id.v1\0");
+    hasher.update(merkle_root_hex.as_bytes());
+    hasher.update(total_bytes.to_be_bytes());
+    hasher.update(u64::try_from(file_count).unwrap_or(u64::MAX).to_be_bytes());
+    let digest = hasher.finalize();
+    hex_encode(&digest[..16])
+}
+
+#[allow(dead_code)]
+fn manifest_from_entries(
+    root_name: &str,
+    is_directory: bool,
+    entries: &[(String, Vec<u8>)],
+) -> TransferManifest {
+    let total_bytes = entries.iter().fold(0u64, |acc, (_, bytes)| {
+        acc.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+    });
+    let merkle_root_hex = flat_merkle_root_from_slices(
+        entries
+            .iter()
+            .map(|(rel_path, bytes)| (rel_path.as_str(), bytes.as_slice())),
+    );
+    let manifest_entries = entries
+        .iter()
+        .enumerate()
+        .map(|(i, (rel_path, bytes))| ManifestEntry {
+            index: u32::try_from(i).unwrap_or(u32::MAX),
+            rel_path: rel_path.clone(),
+            size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            sha256_hex: sha256_hex(bytes),
+            metadata: None,
+        })
+        .collect::<Vec<_>>();
+    let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
+    TransferManifest {
+        transfer_id,
+        root_name: root_name.to_string(),
+        is_directory,
+        total_bytes,
+        merkle_root_hex,
+        metadata_root_hex: None,
+        entries: manifest_entries,
+    }
+}
+
+#[allow(dead_code)]
+struct QuicEntryEncoder {
+    index: u32,
+    object_id: ObjectId,
+    bytes: Vec<u8>,
+}
+
+#[allow(dead_code)]
+struct QuicEntryDecoder {
+    index: u32,
+    object_id: ObjectId,
+    size: u64,
+    pipeline: Option<DecodingPipeline>,
+    complete: bool,
+    data: Vec<u8>,
+}
+
+#[allow(dead_code)]
+struct QuicConnectionTransferOutcome {
+    manifest: TransferManifest,
+    receipt: ReceiveReceipt,
+    symbols_sent: u64,
+    symbols_accepted: u64,
+}
+
+#[allow(dead_code)]
+fn encoders_from_entries(
+    manifest: &TransferManifest,
+    entries: &[(String, Vec<u8>)],
+) -> Vec<QuicEntryEncoder> {
+    manifest
+        .entries
+        .iter()
+        .zip(entries)
+        .map(|(entry, (_, bytes))| QuicEntryEncoder {
+            index: entry.index,
+            object_id: entry_object_id(&manifest.transfer_id, entry.index),
+            bytes: bytes.clone(),
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+fn object_params_for(
+    object_id: ObjectId,
+    size: u64,
+    symbol_size: u16,
+    max_block_size: usize,
+) -> ObjectParams {
+    let symbol_size_usize = usize::from(symbol_size.max(1));
+    let total = usize::try_from(size).unwrap_or(usize::MAX);
+    let mut blocks = 0u16;
+    let mut max_k = 0usize;
+    if total > 0 {
+        let mut offset = 0usize;
+        let block_limit = max_block_size.max(1);
+        while offset < total {
+            let len = (total - offset).min(block_limit);
+            let k = len.div_ceil(symbol_size_usize);
+            max_k = max_k.max(k);
+            blocks = blocks.saturating_add(1);
+            offset += len;
+        }
+    }
+    ObjectParams::new(
+        object_id,
+        size,
+        symbol_size,
+        blocks,
+        u16::try_from(max_k).unwrap_or(u16::MAX),
+    )
+}
+
+#[allow(dead_code)]
+fn decoders_from_manifest(
+    manifest: &TransferManifest,
+    config: &QuicConfig,
+) -> Result<Vec<QuicEntryDecoder>, QuicTransportError> {
+    manifest
+        .entries
+        .iter()
+        .map(|entry| {
+            let object_id = entry_object_id(&manifest.transfer_id, entry.index);
+            let mut pipeline = DecodingPipeline::new(DecodingConfig {
+                symbol_size: config.symbol_size,
+                max_block_size: config.max_block_size,
+                repair_overhead: config.repair_overhead,
+                min_overhead: 0,
+                max_buffered_symbols: 0,
+                block_timeout: Duration::from_secs(0),
+                verify_auth: false,
+            });
+            let params = object_params_for(
+                object_id,
+                entry.size,
+                config.symbol_size,
+                config.max_block_size,
+            );
+            pipeline.set_object_params(params).map_err(|err| {
+                QuicTransportError::Control(format!(
+                    "entry {} RaptorQ object metadata rejected: {err}",
+                    entry.index
+                ))
+            })?;
+            Ok(QuicEntryDecoder {
+                index: entry.index,
+                object_id,
+                size: entry.size,
+                pipeline: Some(pipeline),
+                complete: entry.size == 0,
+                data: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+fn encoding_pipeline(config: &QuicConfig) -> EncodingPipeline {
+    EncodingPipeline::new(
+        EncodingConfig {
+            repair_overhead: config.repair_overhead,
+            max_block_size: config.max_block_size,
+            symbol_size: config.symbol_size,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        },
+        SymbolPool::new(PoolConfig::default()),
+    )
+}
+
+#[allow(
+    dead_code,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn initial_repair_per_block(data_len: usize, config: &QuicConfig) -> usize {
+    if config.repair_overhead <= 1.0 {
+        0
+    } else {
+        let block_source_symbols = data_len
+            .min(config.max_block_size.max(1))
+            .div_ceil(usize::from(config.symbol_size.max(1)))
+            .max(1);
+        ((block_source_symbols as f64) * (config.repair_overhead - 1.0)).ceil() as usize
+    }
+}
+
+#[allow(dead_code)]
+fn spray_initial_symbols(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    manifest: &TransferManifest,
+    encoders: &[QuicEntryEncoder],
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut sent = 0u64;
+    for entry in encoders {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let repair = initial_repair_per_block(entry.bytes.len(), config);
+        let mut pipeline = encoding_pipeline(config);
+        for encoded in pipeline.encode_with_repair(entry.object_id, &entry.bytes, repair) {
+            let symbol = encoded
+                .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                .into_symbol();
+            send_symbol(cx, conn, &symbol, tag, entry.index, None)?;
+            sent = sent.saturating_add(1);
+        }
+    }
+    Ok(sent)
+}
+
+#[allow(dead_code)]
+fn feed_decoded_symbol(
+    decoder: &mut QuicEntryDecoder,
+    symbol: Symbol,
+) -> Result<bool, QuicTransportError> {
+    if decoder.complete {
+        return Ok(false);
+    }
+    let Some(pipeline) = decoder.pipeline.as_mut() else {
+        return Ok(false);
+    };
+    match pipeline.feed(AuthenticatedSymbol::new_unauthenticated(symbol)) {
+        Ok(
+            SymbolAcceptResult::Accepted { .. }
+            | SymbolAcceptResult::DecodingStarted { .. }
+            | SymbolAcceptResult::BlockComplete { .. },
+        ) => Ok(true),
+        Ok(SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_)) => Ok(false),
+        Err(err) => Err(QuicTransportError::Control(format!(
+            "RaptorQ decoder rejected symbol: {err}"
+        ))),
+    }
+}
+
+#[allow(dead_code)]
+fn drain_symbol_datagrams(
+    conn: &mut QuicConnection,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut accepted = 0u64;
+    while let Some(envelope) = recv_symbol_envelope(conn, false)? {
+        if envelope.transfer_tag != tag {
+            return Err(QuicTransportError::Integrity(format!(
+                "symbol transfer tag mismatch: got {}, expected {tag}",
+                envelope.transfer_tag
+            )));
+        }
+        if envelope.payload.len() != usize::from(config.symbol_size) {
+            return Err(QuicTransportError::Integrity(format!(
+                "symbol payload has {} bytes, expected {}",
+                envelope.payload.len(),
+                config.symbol_size
+            )));
+        }
+        let decoder = decoders
+            .iter_mut()
+            .find(|decoder| decoder.index == envelope.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "symbol for unknown manifest entry {}",
+                    envelope.entry
+                ))
+            })?;
+        let symbol = envelope_to_symbol(&envelope, decoder.object_id);
+        if feed_decoded_symbol(decoder, symbol)? {
+            accepted = accepted.saturating_add(1);
+        }
+    }
+    Ok(accepted)
+}
+
+#[allow(dead_code)]
+fn assemble_completed_entries(decoders: &mut [QuicEntryDecoder]) {
+    for decoder in decoders {
+        if decoder.complete
+            || !decoder
+                .pipeline
+                .as_ref()
+                .is_some_and(DecodingPipeline::is_complete)
+        {
+            continue;
+        }
+        let Some(pipeline) = decoder.pipeline.take() else {
+            continue;
+        };
+        if let Ok(mut bytes) = pipeline.into_data() {
+            bytes.truncate(usize::try_from(decoder.size).unwrap_or(usize::MAX));
+            decoder.data = bytes;
+            decoder.complete = true;
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn pending_entries(decoders: &[QuicEntryDecoder]) -> Vec<u32> {
+    decoders
+        .iter()
+        .filter(|decoder| !decoder.complete)
+        .map(|decoder| decoder.index)
+        .collect()
+}
+
+#[allow(dead_code)]
+fn source_symbol_requests(
+    decoders: &[QuicEntryDecoder],
+    limit: usize,
+) -> Vec<QuicSourceSymbolRequest> {
+    let mut requests = Vec::new();
+    for decoder in decoders {
+        if decoder.complete {
+            continue;
+        }
+        let Some(pipeline) = decoder.pipeline.as_ref() else {
+            continue;
+        };
+        let remaining = if limit == 0 {
+            0
+        } else {
+            limit.saturating_sub(requests.len())
+        };
+        if limit != 0 && remaining == 0 {
+            break;
+        }
+        requests.extend(pipeline.missing_source_symbols(remaining).into_iter().map(
+            |MissingSourceSymbol { sbn, esi }| QuicSourceSymbolRequest {
+                entry: decoder.index,
+                sbn,
+                esi,
+            },
+        ));
+        if limit != 0 && requests.len() >= limit {
+            break;
+        }
+    }
+    requests
+}
+
+#[allow(dead_code)]
+fn verify_in_memory_receipt(
+    manifest: &TransferManifest,
+    decoders: &[QuicEntryDecoder],
+) -> ReceiveReceipt {
+    let mut decoded = std::collections::HashMap::new();
+    for decoder in decoders {
+        decoded.insert(decoder.index, decoder.data.clone());
+    }
+
+    let mut sha_ok = true;
+    let mut received = 0u64;
+    for entry in &manifest.entries {
+        let Some(bytes) = decoded.get(&entry.index) else {
+            sha_ok = false;
+            continue;
+        };
+        received = received.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != entry.size
+            || sha256_hex(bytes) != entry.sha256_hex
+        {
+            sha_ok = false;
+        }
+    }
+
+    let rebuilt = manifest
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.rel_path.clone(),
+                decoded.get(&entry.index).cloned().unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let merkle_ok = flat_merkle_root_from_slices(
+        rebuilt
+            .iter()
+            .map(|(rel_path, bytes)| (rel_path.as_str(), bytes.as_slice())),
+    ) == manifest.merkle_root_hex;
+    let committed = sha_ok && merkle_ok && pending_entries(decoders).is_empty();
+    let committed_paths = if committed {
+        manifest
+            .entries
+            .iter()
+            .map(|entry| format!("/quic-memory/{}/{}", manifest.root_name, entry.rel_path))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ReceiveReceipt {
+        committed,
+        bytes_received: received,
+        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        sha_ok,
+        merkle_ok,
+        reason: if committed {
+            None
+        } else if !sha_ok {
+            Some("per-entry SHA-256 mismatch".to_string())
+        } else if !merkle_ok {
+            Some("merkle-root mismatch".to_string())
+        } else {
+            Some("entries still pending".to_string())
+        },
+        committed_paths,
+    }
 }
 
 /// Maximum control-stream chunk read per decode attempt.
@@ -1046,6 +1484,120 @@ mod tests {
         }
     }
 
+    fn varied_bytes(len: usize, seed: u8) -> Vec<u8> {
+        (0..len)
+            .map(|i| {
+                let i = u64::try_from(i).unwrap_or(u64::MAX);
+                let mixed = i
+                    .wrapping_mul(37)
+                    .wrapping_add(u64::from(seed).wrapping_mul(11))
+                    % 251;
+                u8::try_from(mixed).unwrap_or(0)
+            })
+            .collect()
+    }
+
+    fn drive_in_memory_loopback_transfer(
+        cx: &Cx,
+        sender: &mut QuicConnection,
+        receiver: &mut QuicConnection,
+        entries: &[(String, Vec<u8>)],
+        config: QuicConfig,
+    ) -> Result<QuicConnectionTransferOutcome, QuicTransportError> {
+        config.validate()?;
+        let manifest = manifest_from_entries("payload", true, entries);
+        let mut sender_control = QuicFrameTransport::open(cx, sender)?;
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+
+        send_sender_hello(
+            cx,
+            sender,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )?;
+        pump_until_idle(cx, sender, receiver, DEFAULT_MAX_PACKET_BYTES, 5_000)
+            .expect("deliver sender hello");
+        receive_sender_hello_and_ack(
+            cx,
+            receiver,
+            &mut receiver_control,
+            &config,
+            "receiver-peer",
+            false,
+        )?;
+        pump_until_idle(cx, receiver, sender, DEFAULT_MAX_PACKET_BYTES, 5_001)
+            .expect("deliver sender hello ack");
+        let ack = receive_sender_hello_ack(cx, sender, &mut sender_control)?;
+        assert_eq!(ack.peer_id, "receiver-peer");
+
+        send_manifest(cx, sender, &mut sender_control, &manifest)?;
+        let encoders = encoders_from_entries(&manifest, entries);
+        let symbols_sent = spray_initial_symbols(cx, sender, &manifest, &encoders, &config)?;
+        send_object_complete(cx, sender, &mut sender_control)?;
+        pump_until_idle(cx, sender, receiver, DEFAULT_MAX_PACKET_BYTES, 5_002)
+            .expect("deliver manifest, symbols, and object-complete");
+
+        let received_manifest = receive_manifest(cx, receiver, &mut receiver_control)?;
+        if received_manifest != manifest {
+            return Err(QuicTransportError::Integrity(
+                "receiver decoded a different manifest".to_string(),
+            ));
+        }
+        let mut decoders = decoders_from_manifest(&received_manifest, &config)?;
+        let symbols_accepted =
+            drain_symbol_datagrams(receiver, &received_manifest, &mut decoders, &config)?;
+        receive_object_complete(cx, receiver, &mut receiver_control)?;
+        assemble_completed_entries(&mut decoders);
+        let pending = pending_entries(&decoders);
+        if pending.is_empty() {
+            let receipt = verify_in_memory_receipt(&received_manifest, &decoders);
+            send_proof(cx, receiver, &mut receiver_control, &receipt)?;
+        } else {
+            send_need_more(
+                cx,
+                receiver,
+                &mut receiver_control,
+                &QuicNeedMore {
+                    pending,
+                    source_symbols: source_symbol_requests(&decoders, 2048),
+                },
+            )?;
+        }
+        pump_until_idle(cx, receiver, sender, DEFAULT_MAX_PACKET_BYTES, 5_003)
+            .expect("deliver proof");
+
+        let receipt = match receive_proof_or_need_more(cx, sender, &mut sender_control)? {
+            QuicControlReply::Proof(receipt) => receipt,
+            QuicControlReply::NeedMore(need) => {
+                return Err(QuicTransportError::Integrity(format!(
+                    "loopback transfer unexpectedly needed more symbols: {:?}",
+                    need.pending
+                )));
+            }
+        };
+
+        send_close(cx, sender, &mut sender_control)?;
+        pump_until_idle(cx, sender, receiver, DEFAULT_MAX_PACKET_BYTES, 5_004)
+            .expect("deliver close");
+        let close =
+            next_control_frame(cx, receiver, &mut receiver_control, "receive sender close")?;
+        if close.frame_type() != FrameType::Close {
+            return Err(QuicTransportError::Unexpected {
+                got: close.frame_type(),
+                expected: "Close",
+            });
+        }
+
+        Ok(QuicConnectionTransferOutcome {
+            manifest,
+            receipt,
+            symbols_sent,
+            symbols_accepted,
+        })
+    }
+
     #[test]
     fn default_config_validates() {
         assert!(QuicConfig::default().validate().is_ok());
@@ -1555,6 +2107,87 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn quic_connection_level_transfer_reaches_proof_over_control_and_datagrams() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.25,
+            ..QuicConfig::default()
+        };
+        let entries = vec![
+            ("alpha.bin".to_string(), varied_bytes(384, 3)),
+            ("nested/beta.bin".to_string(), varied_bytes(900, 7)),
+        ];
+
+        let outcome =
+            drive_in_memory_loopback_transfer(&cx, &mut client, &mut server, &entries, config)
+                .expect("connection-level transfer reaches proof");
+
+        assert!(outcome.receipt.committed);
+        assert!(outcome.receipt.sha_ok);
+        assert!(outcome.receipt.merkle_ok);
+        assert_eq!(outcome.receipt.bytes_received, 1_284);
+        assert_eq!(outcome.receipt.files, 2);
+        assert_eq!(outcome.manifest.entries.len(), 2);
+        assert!(
+            outcome.symbols_sent > 0,
+            "sender must emit QUIC DATAGRAM symbols"
+        );
+        assert!(
+            outcome.symbols_accepted > 0,
+            "receiver must feed decoded QUIC DATAGRAM symbols"
+        );
+        assert!(
+            outcome
+                .receipt
+                .committed_paths
+                .contains(&"/quic-memory/payload/nested/beta.bin".to_string())
+        );
+    }
+
+    #[test]
+    fn quic_receiver_feedback_synthesizes_missing_source_symbol_requests() {
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.0,
+            ..QuicConfig::default()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(384, 13))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+
+        let first_two = source_symbol_requests(&decoders, 2);
+        assert_eq!(
+            first_two,
+            vec![
+                QuicSourceSymbolRequest {
+                    entry: 0,
+                    sbn: 0,
+                    esi: 0,
+                },
+                QuicSourceSymbolRequest {
+                    entry: 0,
+                    sbn: 0,
+                    esi: 1,
+                },
+            ]
+        );
+
+        let all = source_symbol_requests(&decoders, 0);
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all[2],
+            QuicSourceSymbolRequest {
+                entry: 0,
+                sbn: 0,
+                esi: 2,
+            }
+        );
     }
 
     #[test]
