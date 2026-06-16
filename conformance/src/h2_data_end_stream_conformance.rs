@@ -92,11 +92,7 @@ impl From<DataFrame> for SerializableDataFrame {
 
 impl From<SerializableDataFrame> for DataFrame {
     fn from(frame: SerializableDataFrame) -> Self {
-        Self {
-            stream_id: frame.stream_id,
-            data: Bytes::from(frame.data),
-            end_stream: frame.end_stream,
-        }
+        Self::new(frame.stream_id, Bytes::from(frame.data), frame.end_stream)
     }
 }
 
