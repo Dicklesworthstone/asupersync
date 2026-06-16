@@ -264,6 +264,26 @@ fn send_path_rejects_missing_source_before_native_connect() {
 }
 
 #[test]
+fn send_path_observes_cancel_before_source_preflight() {
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+    let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let missing = temp.path().join("cancel-before-source-check.bin");
+    let result: Result<SendReport, QuicTransportError> = block_on(send_path(
+        &cx,
+        addr,
+        &missing,
+        trusted_quic_config(),
+        "sender",
+    ));
+    assert!(
+        matches!(result, Err(QuicTransportError::Cancelled)),
+        "cancelled send_path must fail closed before source preflight, got {result:?}"
+    );
+}
+
+#[test]
 fn send_path_valid_source_fails_closed_at_native_connect_boundary() {
     let cx = Cx::for_testing();
     let temp = tempfile::tempdir().expect("temp dir");
