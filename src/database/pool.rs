@@ -2170,6 +2170,18 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
         if self.effective_max_size() == 0 {
+            // Symmetric cleanup with the cancel/closed/timeout exits below: if we
+            // are re-entering with an already-registered waiter (the acquire loop
+            // returns here via the `Wait` arm without clearing the slot), it must
+            // be removed from `inner.waiters` and the next waiter woken. Otherwise
+            // the orphaned waiter is never marked cancelled, never reaped by
+            // `prune_cancelled_async_pool_waiters_locked`, and wedges the pool's
+            // FIFO turn handoff for every other acquirer once capacity returns.
+            if let Some(waiter) = waiter_slot.as_ref() {
+                let waiter = Arc::clone(waiter);
+                self.cancel_async_pool_waiter(&waiter);
+                waiter_slot.take();
+            }
             trace_async_pool_event(cx, "wait", "full", client_scope);
             return Err(DbPoolError::Full);
         }
