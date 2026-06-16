@@ -41,22 +41,26 @@ impl Default for CompressionPolicy {
 }
 
 impl CompressionPolicy {
-    fn accept_compressed(self, original_len: usize, encoded_len: usize) -> CompressionSkipReason {
+    fn rejected_reason(
+        self,
+        original_len: usize,
+        encoded_len: usize,
+    ) -> Option<CompressionSkipReason> {
         if encoded_len >= original_len {
-            return CompressionSkipReason::NotSmaller;
+            return Some(CompressionSkipReason::NotSmaller);
         }
         let saved = original_len - encoded_len;
         if saved < self.min_savings_bytes {
-            return CompressionSkipReason::SavingsBelowThreshold;
+            return Some(CompressionSkipReason::SavingsBelowThreshold);
         }
         let saved_u128 = u128::try_from(saved).unwrap_or(u128::MAX);
         let original_u128 = u128::try_from(original_len).unwrap_or(u128::MAX);
         let savings_bps = saved_u128.saturating_mul(10_000) / original_u128.max(1);
         let required_bps = u128::from(self.min_savings_bps.min(10_000));
         if savings_bps < required_bps {
-            return CompressionSkipReason::SavingsBelowThreshold;
+            return Some(CompressionSkipReason::SavingsBelowThreshold);
         }
-        CompressionSkipReason::Accepted
+        None
     }
 }
 
@@ -87,8 +91,6 @@ pub enum PreEncodeCompression {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompressionSkipReason {
-    /// Internal sentinel used by [`CompressionPolicy::accept_compressed`].
-    Accepted,
     /// The crate was built without the `compression` feature.
     FeatureDisabled,
     /// Empty inputs are already minimal.
@@ -149,8 +151,8 @@ pub fn maybe_compress_pre_encode(
     }
 
     let encoded = compress_with(policy.algorithm, raw)?;
-    match policy.accept_compressed(raw.len(), encoded.len()) {
-        CompressionSkipReason::Accepted => Ok(PreEncodeCompression::Compressed {
+    match policy.rejected_reason(raw.len(), encoded.len()) {
+        None => Ok(PreEncodeCompression::Compressed {
             descriptor: CompressionDescriptor {
                 algorithm: policy.algorithm,
                 original_size: u64::try_from(raw.len()).unwrap_or(u64::MAX),
@@ -158,7 +160,7 @@ pub fn maybe_compress_pre_encode(
             },
             bytes: encoded,
         }),
-        reason => Ok(PreEncodeCompression::Skipped { reason }),
+        Some(reason) => Ok(PreEncodeCompression::Skipped { reason }),
     }
 }
 
