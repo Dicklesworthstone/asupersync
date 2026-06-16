@@ -223,6 +223,15 @@ pub struct BlockStatus {
     pub state: BlockStateKind,
 }
 
+/// Missing systematic source symbol for an incomplete source block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingSourceSymbol {
+    /// Source block number.
+    pub sbn: u8,
+    /// Encoding symbol id within the source block.
+    pub esi: u32,
+}
+
 /// High-level block state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockStateKind {
@@ -242,6 +251,18 @@ struct BlockDecoder {
     decoded: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct PipelineBlockCounts {
+    source_symbols: usize,
+    repair_symbols: usize,
+}
+
+impl PipelineBlockCounts {
+    const fn total(self) -> usize {
+        self.source_symbols + self.repair_symbols
+    }
+}
+
 #[derive(Debug)]
 enum BlockDecodingState {
     Collecting,
@@ -256,6 +277,7 @@ pub struct DecodingPipeline {
     config: DecodingConfig,
     symbols: SymbolSet,
     accepted_symbols_total: usize,
+    block_symbol_counts: HashMap<u8, PipelineBlockCounts>,
     blocks: HashMap<u8, BlockDecoder>,
     completed_blocks: HashSet<u8>,
     object_id: Option<ObjectId>,
@@ -290,6 +312,7 @@ impl DecodingPipeline {
             config,
             symbols: SymbolSet::with_config(threshold),
             accepted_symbols_total: 0,
+            block_symbol_counts: HashMap::new(),
             blocks: HashMap::new(),
             completed_blocks: HashSet::new(),
             object_id: None,
@@ -415,6 +438,7 @@ impl DecodingPipeline {
         }
 
         let sbn = symbol.sbn();
+        let kind = symbol.kind();
         if self.block_plans.is_some() && self.block_plan(sbn).is_none() {
             return Ok(SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata));
         }
@@ -444,6 +468,14 @@ impl DecodingPipeline {
                 if !self.config.verify_auth {
                     self.skipped_verifications = self.skipped_verifications.saturating_add(1);
                 }
+                let counts = self.block_symbol_counts.entry(sbn).or_default();
+                match kind {
+                    SymbolKind::Source => counts.source_symbols += 1,
+                    SymbolKind::Repair => counts.repair_symbols += 1,
+                }
+                let received = counts.total();
+                let source_received = counts.source_symbols;
+
                 if block_progress.k.is_none() {
                     self.configure_block_k();
                 }
@@ -453,12 +485,18 @@ impl DecodingPipeline {
                     .block_progress(sbn)
                     .copied()
                     .unwrap_or(block_progress);
-                let needed = progress.k.map_or(0, |k| {
-                    required_symbols(k, self.config.repair_overhead, self.config.min_overhead)
+                let k = self
+                    .block_plan(sbn)
+                    .map(|plan| plan.k)
+                    .or_else(|| progress.k.map(usize::from));
+                let needed = k.map_or(0, |k| {
+                    required_symbols(
+                        u16::try_from(k).unwrap_or(u16::MAX),
+                        self.config.repair_overhead,
+                        self.config.min_overhead,
+                    )
                 });
-                let received = progress.total();
-
-                if progress.threshold_reached {
+                if k.is_some_and(|k| source_received >= k || received >= needed) {
                     // Update state to Decoding
                     if let Some(block) = self.blocks.get_mut(&sbn) {
                         block.state = BlockDecodingState::Decoding;
@@ -657,6 +695,7 @@ impl DecodingPipeline {
 
         self.completed_blocks.insert(sbn);
         self.symbols.clear_block(sbn);
+        self.block_symbol_counts.remove(&sbn);
 
         Some(SymbolAcceptResult::BlockComplete {
             block_sbn: sbn,
@@ -668,6 +707,42 @@ impl DecodingPipeline {
         self.block_plans
             .as_ref()
             .and_then(|plans| plans.iter().find(|plan| plan.sbn == sbn))
+    }
+
+    /// Returns missing systematic source symbols for incomplete blocks.
+    ///
+    /// This is used by ATP-RQ as a cheap first feedback step: retransmitting a
+    /// sparse set of missing systematic symbols avoids constructing the
+    /// CPU-heavy RaptorQ repair encoder when the receiver only dropped a few
+    /// datagrams. `limit == 0` means unbounded.
+    #[must_use]
+    pub fn missing_source_symbols(&self, limit: usize) -> Vec<MissingSourceSymbol> {
+        let Some(object_id) = self.object_id else {
+            return Vec::new();
+        };
+        let Some(plans) = &self.block_plans else {
+            return Vec::new();
+        };
+
+        let mut missing = Vec::new();
+        for plan in plans {
+            if self.completed_blocks.contains(&plan.sbn) {
+                continue;
+            }
+            for esi in 0..plan.k {
+                let Ok(esi) = u32::try_from(esi) else {
+                    break;
+                };
+                let id = SymbolId::new(object_id, plan.sbn, esi);
+                if !self.symbols.contains(&id) {
+                    missing.push(MissingSourceSymbol { sbn: plan.sbn, esi });
+                    if limit != 0 && missing.len() >= limit {
+                        return missing;
+                    }
+                }
+            }
+        }
+        missing
     }
 }
 
@@ -1066,6 +1141,35 @@ mod tests {
             ))
             .expect("params");
         decoder
+    }
+
+    #[test]
+    fn missing_source_symbols_reports_absent_source_esis() {
+        init_test("missing_source_symbols_reports_absent_source_esis");
+        let config = encoding_config();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id = ObjectId::new_for_test(101);
+        let data = vec![7u8; 768];
+        let mut decoder = decoder_with_params(&config, object_id, data.len(), 1.0, 0);
+
+        for encoded in encoder.encode_with_repair(object_id, &data, 0) {
+            let symbol = encoded.expect("encode").into_symbol();
+            if symbol.esi() == 1 {
+                continue;
+            }
+            decoder
+                .feed(AuthenticatedSymbol::new_unauthenticated(symbol))
+                .expect("feed");
+        }
+
+        assert_eq!(
+            decoder.missing_source_symbols(0),
+            vec![MissingSourceSymbol { sbn: 0, esi: 1 }]
+        );
+        assert_eq!(
+            decoder.missing_source_symbols(1),
+            vec![MissingSourceSymbol { sbn: 0, esi: 1 }]
+        );
     }
 
     #[test]

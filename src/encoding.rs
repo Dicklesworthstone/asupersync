@@ -187,6 +187,43 @@ impl EncodingPipeline {
         self.encode_internal(object_id, data, Some(repair_count))
     }
 
+    /// Encodes only repair symbols for each block, starting at `first_repair`.
+    ///
+    /// `first_repair` is zero-based relative to the block's first repair symbol,
+    /// so `first_repair == 0` emits public ESI `K`, `first_repair == 1` emits
+    /// public ESI `K + 1`, and so on. This avoids emitting or copying
+    /// systematic source symbols when a transport only needs fresh RaptorQ
+    /// repair.
+    pub(crate) fn encode_repair_range<'a>(
+        &'a mut self,
+        object_id: ObjectId,
+        data: &'a [u8],
+        first_repair: usize,
+        repair_count: usize,
+    ) -> RepairEncodingIterator<'a> {
+        let (blocks, symbol_size, plan_error) = match self.plan_blocks(data) {
+            Ok((blocks, symbol_size)) => (blocks, symbol_size, None),
+            Err(err) => (Vec::new(), 0, Some(err)),
+        };
+
+        self.stats.reset_for(data.len(), blocks.len());
+
+        RepairEncodingIterator {
+            pipeline: self,
+            object_id,
+            data,
+            blocks,
+            block_index: 0,
+            repair_index: 0,
+            first_repair,
+            repair_count,
+            symbol_size,
+            plan_error,
+            systematic_encoder: None,
+            systematic_block_index: None,
+        }
+    }
+
     fn encode_internal<'a>(
         &'a mut self,
         object_id: ObjectId,
@@ -477,6 +514,128 @@ impl EncodingIterator<'_> {
             .as_ref()
             .expect("systematic encoder must be initialized"))
     }
+}
+
+/// Iterator over repair-only encoded symbols.
+pub struct RepairEncodingIterator<'a> {
+    pipeline: &'a mut EncodingPipeline,
+    object_id: ObjectId,
+    data: &'a [u8],
+    blocks: Vec<BlockPlan>,
+    block_index: usize,
+    repair_index: usize,
+    first_repair: usize,
+    repair_count: usize,
+    symbol_size: usize,
+    plan_error: Option<EncodingError>,
+    systematic_encoder: Option<SystematicEncoder>,
+    systematic_block_index: Option<usize>,
+}
+
+impl Iterator for RepairEncodingIterator<'_> {
+    type Item = Result<EncodedSymbol, EncodingError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(err) = self.plan_error.take() {
+            return Some(Err(err));
+        }
+        if self.repair_count == 0 {
+            return None;
+        }
+
+        while self.block_index < self.blocks.len() {
+            let block = self.blocks[self.block_index].clone();
+            if block.k == 0 {
+                self.advance_block();
+                continue;
+            }
+            if self.repair_index >= self.repair_count {
+                self.advance_block();
+                continue;
+            }
+
+            let esi = match repair_esi(block.k, self.first_repair, self.repair_index) {
+                Ok(esi) => esi,
+                Err(err) => return Some(Err(err)),
+            };
+            self.repair_index += 1;
+            return Some(self.emit_repair(&block, esi).map(EncodedSymbol::new));
+        }
+
+        None
+    }
+}
+
+impl RepairEncodingIterator<'_> {
+    fn advance_block(&mut self) {
+        self.block_index += 1;
+        self.repair_index = 0;
+        self.systematic_encoder = None;
+        self.systematic_block_index = None;
+    }
+
+    fn emit_repair(&mut self, block: &BlockPlan, esi: u32) -> Result<Symbol, EncodingError> {
+        let mut buffer = self.pipeline.allocate_buffer(self.symbol_size)?;
+        buffer.fill(0);
+
+        let encoder = self.systematic_encoder_for(block)?;
+        let repair = encoder.repair_symbol(esi);
+        if repair.len() != self.symbol_size {
+            return Err(EncodingError::ComputationFailed {
+                details: format!(
+                    "systematic repair symbol size mismatch: expected {}, got {}",
+                    self.symbol_size,
+                    repair.len()
+                ),
+            });
+        }
+        buffer.copy_from_slice(&repair);
+
+        self.pipeline.stats.repair_symbols += 1;
+        Ok(Symbol::new(
+            SymbolId::new(self.object_id, block.sbn, esi),
+            buffer,
+            SymbolKind::Repair,
+        ))
+    }
+
+    fn systematic_encoder_for(
+        &mut self,
+        block: &BlockPlan,
+    ) -> Result<&SystematicEncoder, EncodingError> {
+        let needs_rebuild = self.systematic_block_index != Some(self.block_index);
+        if needs_rebuild {
+            let source_symbols = build_source_symbols(self.data, block, self.symbol_size);
+            let seed = seed_for_block(self.object_id, block.sbn);
+            let encoder = SystematicEncoder::new(&source_symbols, self.symbol_size, seed)
+                .ok_or_else(|| EncodingError::ComputationFailed {
+                    details: "systematic encoder failed: singular constraint matrix".to_string(),
+                })?;
+            self.systematic_encoder = Some(encoder);
+            self.systematic_block_index = Some(self.block_index);
+        }
+
+        Ok(self
+            .systematic_encoder
+            .as_ref()
+            .expect("systematic encoder must be initialized"))
+    }
+}
+
+fn repair_esi(
+    block_k: usize,
+    first_repair: usize,
+    repair_index: usize,
+) -> Result<u32, EncodingError> {
+    let esi = block_k
+        .checked_add(first_repair)
+        .and_then(|esi| esi.checked_add(repair_index))
+        .ok_or_else(|| EncodingError::InvalidConfig {
+            reason: "repair ESI overflow".to_string(),
+        })?;
+    u32::try_from(esi).map_err(|_| EncodingError::InvalidConfig {
+        reason: format!("repair ESI {esi} exceeds u32::MAX"),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -808,6 +967,47 @@ mod tests {
             let expected = encoder.repair_symbol(esi);
             assert_eq!(sym.symbol().data(), expected.as_slice());
         }
+    }
+
+    #[test]
+    fn test_encode_repair_range_skips_sources_and_preserves_repair_esis() {
+        let symbol_size = 4usize;
+        let max_block_size = 8usize;
+        let data = b"ABCDEFGHIJKLMNOP";
+        let object_id = ObjectId::new_for_test(14);
+
+        let mut pipeline = EncodingPipeline::new(
+            test_config(symbol_size as u16, max_block_size, 1.0),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let symbols: Vec<_> = pipeline
+            .encode_repair_range(object_id, data, 1, 2)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(symbols.len(), 4);
+        assert!(symbols.iter().all(|s| s.kind() == SymbolKind::Repair));
+        assert_eq!(pipeline.stats().source_symbols, 0);
+        assert_eq!(pipeline.stats().repair_symbols, 4);
+
+        let ids: Vec<(u8, u32)> = symbols
+            .iter()
+            .map(|s| (s.id().sbn(), s.id().esi()))
+            .collect();
+        assert_eq!(ids, vec![(0, 3), (0, 4), (1, 3), (1, 4)]);
+
+        let first_block = BlockPlan {
+            sbn: 0,
+            start: 0,
+            len: max_block_size,
+            k: 2,
+        };
+        let source_symbols = build_source_symbols(data, &first_block, symbol_size);
+        let encoder =
+            SystematicEncoder::new(&source_symbols, symbol_size, seed_for_block(object_id, 0))
+                .expect("encoder");
+        assert_eq!(symbols[0].symbol().data(), encoder.repair_symbol(3));
+        assert_eq!(symbols[1].symbol().data(), encoder.repair_symbol(4));
     }
 
     #[test]

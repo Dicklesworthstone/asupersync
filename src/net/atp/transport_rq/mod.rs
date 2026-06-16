@@ -30,8 +30,9 @@
 //! v1 uses a bounded request/response loop rather than a continuous concurrent
 //! ARQ, which keeps it correct on the current runtime:
 //!
-//! 1. Sender sprays every entry's source symbols + `repair_overhead` extra
-//!    repair symbols across the UDP sockets, then sends `ObjectComplete` on TCP.
+//! 1. Sender sprays every entry's source symbols across the UDP sockets, plus
+//!    optional initial repair symbols when `repair_overhead > 1.0`, then sends
+//!    `ObjectComplete` on TCP.
 //! 2. Receiver feeds arriving symbols into a per-entry [`DecodingPipeline`].
 //!    On `ObjectComplete` it replies with either a `Proof` receipt (all entries
 //!    decoded → verified + committed) or a `NeedMore` list of still-incomplete
@@ -63,8 +64,8 @@ use crate::atp::object::{Object, ObjectEdge, ObjectGraph};
 use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
-use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
-use crate::encoding::EncodingPipeline;
+use crate::decoding::{DecodingConfig, DecodingPipeline, MissingSourceSymbol, SymbolAcceptResult};
+use crate::encoding::{EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
@@ -96,9 +97,23 @@ pub const DEFAULT_SYMBOL_SIZE: u16 = 1024;
 /// is a `u8`), i.e. up to ~2 GiB per entry.
 pub const DEFAULT_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
-/// Default fraction of *extra* repair symbols sprayed in round 0, on top of the
-/// systematic source symbols (0.15 = +15%).
-pub const DEFAULT_REPAIR_OVERHEAD: f64 = 1.15;
+/// Target source-symbol count for the effective transfer block size.
+///
+/// RaptorQ's matrix work grows sharply with K. A K~512 block is small enough to
+/// keep decode/repair work bounded on commodity fleet hosts while still sending
+/// large enough UDP bursts to amortize control feedback. For very large files,
+/// the effective block size grows only as much as required to stay within the
+/// 256-block SBN wire limit.
+const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
+
+/// Default round-0 repair multiplier.
+///
+/// The default keeps the fast source-first shape while adding a tiny proactive
+/// RaptorQ tail (K512 => one repair symbol per block). Fully source-first mode
+/// remains available with `repair_overhead <= 1.0`; sparse systematic-symbol
+/// retransmit is a separate opt-in knob because it can amplify WAN feedback
+/// latency when loss is not genuinely sparse.
+pub const DEFAULT_REPAIR_OVERHEAD: f64 = 1.001;
 
 /// Default number of UDP sockets the sender sprays across.
 pub const DEFAULT_UDP_FANOUT: usize = 4;
@@ -112,6 +127,18 @@ pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 
 /// Default receiver-side quiet drain after each round-complete marker.
 pub const DEFAULT_ROUND_TAIL_DRAIN_MS: u64 = 2;
+
+/// Default source-retransmit feedback rounds.
+///
+/// Disabled by default on the WAN path. Source retransmit is useful only when
+/// a receiver is missing a very small sparse set of systematic symbols; otherwise
+/// it behaves like ARQ and adds extra RTTs before the fountain repair path.
+pub const DEFAULT_SOURCE_RETRANSMIT_ROUNDS: u32 = 0;
+
+/// Hard cap on source-symbol retransmit requests in one feedback frame. Larger
+/// loss bursts fall back to fountain repair rather than creating huge JSON
+/// control messages.
+pub const DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS: usize = 2048;
 
 /// Default receiver-side quiet drain after each round-complete marker.
 pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROUND_TAIL_DRAIN_MS);
@@ -154,6 +181,18 @@ pub struct RqConfig {
     /// drained all UDP symbols already queued in the kernel. This window lets
     /// the receiver consume that tail before it asks for repair symbols.
     pub round_tail_drain: Duration,
+    /// Number of early feedback rounds that may request missing systematic
+    /// source symbols instead of repair symbols when `repair_overhead <= 1.0`.
+    ///
+    /// Defaults to zero for WAN throughput. Positive values are intended for
+    /// controlled lab or very low-loss links where sparse source retransmit is
+    /// known to converge faster than constructing repair symbols.
+    pub source_retransmit_rounds: u32,
+    /// Maximum source-symbol retransmit requests in one feedback frame.
+    ///
+    /// `0` means unbounded, but only after `source_retransmit_rounds` explicitly
+    /// opts the transport into source retransmit feedback.
+    pub max_source_retransmit_requests: usize,
     /// Test-only: deterministically drop 1-in-N sprayed source symbols on the
     /// sender to exercise the repair/feedback path. 0 disables.
     pub debug_drop_one_in: u32,
@@ -193,6 +232,8 @@ impl Default for RqConfig {
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
             round_tail_drain: DEFAULT_ROUND_TAIL_DRAIN,
+            source_retransmit_rounds: DEFAULT_SOURCE_RETRANSMIT_ROUNDS,
+            max_source_retransmit_requests: DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS,
             debug_drop_one_in: 0,
             symbol_auth_context: None,
             allow_unauthenticated_symbols: false,
@@ -367,6 +408,17 @@ pub struct TransferManifest {
 struct NeedMore {
     /// Entry indices that have not yet decoded.
     pending: Vec<u32>,
+    /// Sparse systematic source symbols missing from incomplete blocks.
+    #[serde(default)]
+    source_symbols: Vec<SourceSymbolRequest>,
+}
+
+/// Request for retransmission of one systematic source symbol.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct SourceSymbolRequest {
+    entry: u32,
+    sbn: u8,
+    esi: u32,
 }
 
 /// Receipt returned by the receiver in the `Proof` frame.
@@ -743,9 +795,60 @@ fn parse_symbol_header(buf: &[u8], expect_tag: u64, auth_required: bool) -> Opti
 
 /// Compute the source-symbol count for an entry of `size` bytes given the
 /// symbol size (`ceil(size / symbol_size)`, with a 1-symbol floor for empties).
+#[cfg(test)]
 fn source_symbol_count(size: u64, symbol_size: u16) -> usize {
     let s = u64::from(symbol_size.max(1));
     usize::try_from(size.div_ceil(s).max(1)).unwrap_or(usize::MAX)
+}
+
+fn max_block_source_symbol_count(size: u64, symbol_size: u16, max_block_size: usize) -> usize {
+    if size == 0 {
+        return 1;
+    }
+    let s = usize::from(symbol_size.max(1));
+    let capped_block = usize::try_from(size)
+        .unwrap_or(usize::MAX)
+        .min(max_block_size.max(1));
+    capped_block.div_ceil(s).max(1)
+}
+
+fn effective_transfer_max_block_size(
+    config: &RqConfig,
+    entries: &[(String, Vec<u8>)],
+) -> Result<usize, RqError> {
+    let max_entry_len = entries
+        .iter()
+        .map(|(_, bytes)| bytes.len())
+        .max()
+        .unwrap_or(0);
+    effective_max_block_size_for_largest_entry(config, max_entry_len)
+}
+
+fn effective_max_block_size_for_largest_entry(
+    config: &RqConfig,
+    max_entry_len: usize,
+) -> Result<usize, RqError> {
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let configured_max = config.max_block_size.max(symbol_size);
+    let max_supported = max_object_size(configured_max);
+    if max_entry_len > max_supported {
+        return Err(RqError::TooLarge {
+            size: max_entry_len as u64,
+            max: max_supported as u64,
+        });
+    }
+
+    let target = symbol_size.saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK);
+    let min_for_block_limit = max_entry_len
+        .div_ceil(MAX_SOURCE_BLOCKS)
+        .max(symbol_size)
+        .div_ceil(symbol_size)
+        .saturating_mul(symbol_size);
+
+    Ok(target
+        .max(min_for_block_limit)
+        .min(configured_max)
+        .max(symbol_size))
 }
 
 /// Sender-side encoder state for one entry. Holds the bytes so successive
@@ -784,7 +887,7 @@ pub async fn send_path(
     cx: &Cx,
     addr: SocketAddr,
     source: &Path,
-    config: RqConfig,
+    mut config: RqConfig,
     peer_id: &str,
 ) -> Result<SendReport, RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
@@ -799,6 +902,7 @@ pub async fn send_path(
             max: config.max_transfer_bytes,
         });
     }
+    config.max_block_size = effective_transfer_max_block_size(&config, &entries)?;
 
     let merkle_root_hex = flat_merkle_root(&entries);
     let manifest_entries: Vec<ManifestEntry> = entries
@@ -890,7 +994,7 @@ pub async fn send_path(
         })
         .collect();
 
-    // Send the manifest, then spray round 0 (source + overhead repair).
+    // Send the manifest, then spray round 0 (source + optional overhead repair).
     control
         .send(&json_frame(FrameType::ObjectManifest, &manifest)?)
         .await?;
@@ -900,7 +1004,7 @@ pub async fn send_path(
     let mut dropper = 0u32;
     let mut feedback_rounds = 0u32;
 
-    // Round 0: every entry, source symbols + repair_overhead extra.
+    // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
     spray_round(
         cx,
@@ -966,28 +1070,46 @@ pub async fn send_path(
                         pending: need.pending.len(),
                     });
                 }
+                let source_symbols = need.source_symbols;
                 pending = need.pending.into_iter().collect();
                 if pending.is_empty() {
                     // Receiver says nothing pending but did not send Proof yet;
                     // loop again to fetch the Proof.
                     continue;
                 }
-                // Fresh repair symbols (true encoder ESIs, via the cumulative
-                // cursor in each EntryEncoder) for the still-pending entries.
-                spray_round(
-                    cx,
-                    &mut sockets,
-                    &mut rr,
-                    &mut symbols_sent,
-                    &mut dropper,
-                    tag,
-                    &mut encoders,
-                    &pending,
-                    &config,
-                    symbol_auth.as_ref(),
-                    /* with_source */ false,
-                )
-                .await?;
+                if source_symbols.is_empty() {
+                    // Fresh repair symbols (true encoder ESIs, via the
+                    // cumulative cursor in each EntryEncoder) for the
+                    // still-pending entries.
+                    spray_round(
+                        cx,
+                        &mut sockets,
+                        &mut rr,
+                        &mut symbols_sent,
+                        &mut dropper,
+                        tag,
+                        &mut encoders,
+                        &pending,
+                        &config,
+                        symbol_auth.as_ref(),
+                        /* with_source */ false,
+                    )
+                    .await?;
+                } else {
+                    spray_source_requests(
+                        cx,
+                        &mut sockets,
+                        &mut rr,
+                        &mut symbols_sent,
+                        &mut dropper,
+                        tag,
+                        &encoders,
+                        &source_symbols,
+                        &config,
+                        symbol_auth.as_ref(),
+                    )
+                    .await?;
+                }
             }
             other => {
                 return Err(RqError::Unexpected {
@@ -1009,9 +1131,28 @@ fn repair_batch_per_block(config: &RqConfig) -> usize {
     (block_k / 4).max(16)
 }
 
+fn initial_repair_target_per_block(block_source_n: usize, repair_overhead: f64) -> usize {
+    if repair_overhead <= 1.0 {
+        0
+    } else {
+        ((block_source_n as f64) * (repair_overhead - 1.0)).ceil() as usize
+    }
+}
+
+fn source_retransmit_request_limit(config: &RqConfig, feedback_round: u32) -> Option<usize> {
+    if config.repair_overhead <= 1.0
+        && config.source_retransmit_rounds > 0
+        && feedback_round <= config.source_retransmit_rounds
+    {
+        Some(config.max_source_retransmit_requests)
+    } else {
+        None
+    }
+}
+
 /// Spray one round of symbols for the `pending` entries across the UDP sockets.
 ///
-/// Round 0 (`with_source`) sends every block's source symbols plus
+/// Round 0 (`with_source`) sends every block's source symbols plus optional
 /// `repair_overhead` extra repair. Feedback rounds send only *newly minted*
 /// repair symbols, identified per block by the encoder's own (sbn, esi) — the
 /// repair payload is bound to its ESI, so it is emitted verbatim and never
@@ -1031,11 +1172,14 @@ async fn spray_round(
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
 ) -> Result<(), RqError> {
-    let fanout = sockets.len().max(1);
     let batch = repair_batch_per_block(config);
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        let source_n = source_symbol_count(enc.bytes.len() as u64, config.symbol_size);
+        let block_source_n = max_block_source_symbol_count(
+            enc.bytes.len() as u64,
+            config.symbol_size,
+            config.max_block_size,
+        );
 
         // Cumulative repair count requested from the encoder this round. The
         // encoder always yields repair symbols at deterministic ESIs starting at
@@ -1044,11 +1188,16 @@ async fn spray_round(
         // rounds) and emit the rest at their TRUE ESIs.
         let already = enc.repair_cursor;
         let target_repair = if with_source {
-            ((source_n as f64) * (config.repair_overhead - 1.0)).ceil() as usize
+            initial_repair_target_per_block(block_source_n, config.repair_overhead)
         } else {
             already + batch
+        };
+
+        let repair_count = target_repair.saturating_sub(already);
+        if !with_source && repair_count == 0 {
+            enc.repair_cursor = target_repair;
+            continue;
         }
-        .max(already + 1);
 
         // The encoder's `Symbol` output owns its payload buffer, so buffers
         // allocated from `SymbolPool` are consumed rather than returned to the
@@ -1067,64 +1216,177 @@ async fn spray_round(
             pool,
         );
 
-        // Per-block running index of repair symbols seen this iteration, keyed by
-        // SBN, so we can skip the `already`-sent prefix per block.
-        let mut repair_seen: std::collections::HashMap<u8, usize> =
-            std::collections::HashMap::new();
-
-        for encoded in pipeline.encode_with_repair(enc.object_id, &enc.bytes, target_repair) {
-            let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
-            let sym = encoded.symbol();
-
-            if sym.kind().is_source() {
-                // Source symbols only on round 0 (systematic; sent verbatim).
-                if !with_source {
-                    continue;
-                }
-            } else {
-                // Repair symbol: per-block index decides whether it's new.
-                let sbn = sym.id().sbn();
-                let idx = repair_seen.entry(sbn).or_insert(0);
-                let this_idx = *idx;
-                *idx += 1;
-                if this_idx < already {
-                    continue; // already sent in an earlier round
-                }
+        if with_source {
+            for encoded in pipeline.encode_with_repair(enc.object_id, &enc.bytes, target_repair) {
+                let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
+                let sym = encoded.symbol();
+                send_symbol_datagram(
+                    cx,
+                    sockets,
+                    rr,
+                    symbols_sent,
+                    dropper,
+                    tag,
+                    enc.index,
+                    sym,
+                    config,
+                    symbol_auth,
+                )
+                .await?;
             }
-
-            // Test-only deterministic loss injection.
-            if config.debug_drop_one_in > 0 {
-                *dropper = dropper.wrapping_add(1);
-                if *dropper % config.debug_drop_one_in == 0 {
-                    continue;
-                }
-            }
-
-            // Emit the symbol VERBATIM (true ESI preserved), with an
-            // authenticated tag when this transport was configured with one.
-            let auth = symbol_auth.map(|ctx| ctx.sign_symbol(sym));
-            let dgram = encode_symbol_datagram(
-                tag,
-                enc.index,
-                sym,
-                auth.as_ref().map(AuthenticatedSymbol::tag),
-            );
-            let sock = &mut sockets[*rr % fanout];
-            *rr = rr.wrapping_add(1);
-            sock.send(&dgram).await?;
-            *symbols_sent += 1;
-
-            // Pace: periodically yield so the spray loop cannot monopolize a
-            // worker (and so the kernel/loopback path drains between bursts).
-            // This also breaks any residual `WouldBlock` busy-spin on a full
-            // UDP send buffer.
-            if *symbols_sent % 64 == 0 {
-                crate::runtime::yield_now().await;
+        } else {
+            for encoded in
+                pipeline.encode_repair_range(enc.object_id, &enc.bytes, already, repair_count)
+            {
+                let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
+                let sym = encoded.symbol();
+                send_symbol_datagram(
+                    cx,
+                    sockets,
+                    rr,
+                    symbols_sent,
+                    dropper,
+                    tag,
+                    enc.index,
+                    sym,
+                    config,
+                    symbol_auth,
+                )
+                .await?;
             }
         }
         enc.repair_cursor = target_repair;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spray_source_requests(
+    cx: &Cx,
+    sockets: &mut [UdpSocket],
+    rr: &mut usize,
+    symbols_sent: &mut u64,
+    dropper: &mut u32,
+    tag: u64,
+    encoders: &[EntryEncoder],
+    requests: &[SourceSymbolRequest],
+    config: &RqConfig,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<(), RqError> {
+    for request in requests {
+        let enc = encoders
+            .iter()
+            .find(|enc| enc.index == request.entry)
+            .ok_or_else(|| {
+                RqError::Coding(format!(
+                    "receiver requested source symbol for unknown entry {}",
+                    request.entry
+                ))
+            })?;
+        let sym = source_symbol_for_request(enc, *request, config)?;
+
+        send_symbol_datagram(
+            cx,
+            sockets,
+            rr,
+            symbols_sent,
+            dropper,
+            tag,
+            enc.index,
+            &sym,
+            config,
+            symbol_auth,
+        )
+        .await?;
+    }
+    rqtrace!(
+        "sender: retransmitted {} requested source symbols",
+        requests.len()
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_symbol_datagram(
+    cx: &Cx,
+    sockets: &mut [UdpSocket],
+    rr: &mut usize,
+    symbols_sent: &mut u64,
+    dropper: &mut u32,
+    tag: u64,
+    entry: u32,
+    sym: &Symbol,
+    config: &RqConfig,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<(), RqError> {
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    if config.debug_drop_one_in > 0 {
+        *dropper = dropper.wrapping_add(1);
+        if *dropper % config.debug_drop_one_in == 0 {
+            return Ok(());
+        }
+    }
+
+    let auth = symbol_auth.map(|ctx| ctx.sign_symbol(sym));
+    let dgram =
+        encode_symbol_datagram(tag, entry, sym, auth.as_ref().map(AuthenticatedSymbol::tag));
+    let fanout = sockets.len().max(1);
+    let sock = &mut sockets[*rr % fanout];
+    *rr = rr.wrapping_add(1);
+    sock.send(&dgram).await?;
+    *symbols_sent += 1;
+    if *symbols_sent % 64 == 0 {
+        crate::runtime::yield_now().await;
+    }
+    Ok(())
+}
+
+fn source_symbol_for_request(
+    enc: &EntryEncoder,
+    request: SourceSymbolRequest,
+    config: &RqConfig,
+) -> Result<Symbol, RqError> {
+    if request.entry != enc.index {
+        return Err(RqError::Coding(format!(
+            "source request entry mismatch: request={}, encoder={}",
+            request.entry, enc.index
+        )));
+    }
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let block_start = usize::from(request.sbn)
+        .checked_mul(config.max_block_size)
+        .ok_or_else(|| RqError::Coding("source request block offset overflow".to_string()))?;
+    if block_start >= enc.bytes.len() {
+        return Err(RqError::Coding(format!(
+            "source request block {} outside entry {} ({} bytes)",
+            request.sbn,
+            enc.index,
+            enc.bytes.len()
+        )));
+    }
+
+    let block_len = config.max_block_size.min(enc.bytes.len() - block_start);
+    let block_k = block_len.div_ceil(symbol_size).max(1);
+    let esi = usize::try_from(request.esi)
+        .map_err(|_| RqError::Coding("source request ESI does not fit usize".to_string()))?;
+    if esi >= block_k {
+        return Err(RqError::Coding(format!(
+            "source request esi {} outside entry {} block {} K={}",
+            request.esi, enc.index, request.sbn, block_k
+        )));
+    }
+
+    let start = block_start + esi * symbol_size;
+    let end = (start + symbol_size).min(block_start + block_len);
+    let mut buffer = vec![0u8; symbol_size];
+    if start < end {
+        buffer[..end - start].copy_from_slice(&enc.bytes[start..end]);
+    }
+    Ok(Symbol::new(
+        SymbolId::new(enc.object_id, request.sbn, request.esi),
+        buffer,
+        SymbolKind::Source,
+    ))
 }
 
 // ─── Public API: receive ─────────────────────────────────────────────────────
@@ -1436,10 +1698,16 @@ pub async fn receive_connection(
                         pending: pending.len(),
                     });
                 }
+                let source_symbols = source_retransmit_request_limit(&config, feedback_rounds)
+                    .map_or_else(Vec::new, |limit| collect_source_requests(&decoders, limit));
+
                 control
                     .send(&json_frame(
                         FrameType::ObjectRequest,
-                        &NeedMore { pending },
+                        &NeedMore {
+                            pending,
+                            source_symbols,
+                        },
                     )?)
                     .await?;
             }
@@ -1462,6 +1730,37 @@ pub async fn receive_connection(
 /// Feed one received symbol into an entry's decoding pipeline. Returns true if
 /// the symbol was a well-formed candidate the pipeline accepted or considered
 /// (used only for the accepted-datagram counter, not correctness).
+fn collect_source_requests(decoders: &[EntryDecoder], limit: usize) -> Vec<SourceSymbolRequest> {
+    let mut requests = Vec::new();
+    for decoder in decoders {
+        if decoder.complete {
+            continue;
+        }
+        let Some(pipeline) = decoder.pipeline.as_ref() else {
+            continue;
+        };
+        let remaining = if limit == 0 {
+            0
+        } else {
+            limit.saturating_sub(requests.len())
+        };
+        if limit != 0 && remaining == 0 {
+            break;
+        }
+        requests.extend(pipeline.missing_source_symbols(remaining).into_iter().map(
+            |MissingSourceSymbol { sbn, esi }| SourceSymbolRequest {
+                entry: decoder.index,
+                sbn,
+                esi,
+            },
+        ));
+        if limit != 0 && requests.len() >= limit {
+            break;
+        }
+    }
+    requests
+}
+
 fn feed_symbol(
     dec: &mut EntryDecoder,
     parsed: &ParsedDatagram,
@@ -2103,6 +2402,9 @@ mod tests {
 
         for encoded in encoder.encode_with_repair(object_id, &data, 512) {
             let sym = encoded.expect("encode").into_symbol();
+            if sym.kind().is_source() && sym.esi() < 33 {
+                continue;
+            }
             let auth = ctx.sign_symbol(&sym);
             let dg = encode_symbol_datagram(0xABCD, 0, &sym, Some(auth.tag()));
             let parsed = parse_symbol_header(&dg, 0xABCD, true).expect("parse signed datagram");
@@ -2207,6 +2509,138 @@ mod tests {
         assert_eq!(source_symbol_count(1, 1024), 1);
         assert_eq!(source_symbol_count(1024, 1024), 1);
         assert_eq!(source_symbol_count(1025, 1024), 2);
+    }
+
+    #[test]
+    fn source_symbol_request_rebuilds_exact_source_payload() {
+        let config = RqConfig {
+            symbol_size: 512,
+            max_block_size: 1024,
+            ..RqConfig::default()
+        };
+        let bytes: Vec<u8> = (0..1500).map(|i| (i % 251) as u8).collect();
+        let enc = EntryEncoder {
+            index: 7,
+            object_id: entry_object_id("source-request", 7),
+            bytes: bytes.clone(),
+            repair_cursor: 0,
+        };
+
+        let first_block_tail = source_symbol_for_request(
+            &enc,
+            SourceSymbolRequest {
+                entry: 7,
+                sbn: 0,
+                esi: 1,
+            },
+            &config,
+        )
+        .expect("source symbol");
+        assert!(first_block_tail.kind().is_source());
+        assert_eq!(first_block_tail.sbn(), 0);
+        assert_eq!(first_block_tail.esi(), 1);
+        assert_eq!(first_block_tail.data(), &bytes[512..1024]);
+
+        let final_block = source_symbol_for_request(
+            &enc,
+            SourceSymbolRequest {
+                entry: 7,
+                sbn: 1,
+                esi: 0,
+            },
+            &config,
+        )
+        .expect("final source symbol");
+        assert_eq!(&final_block.data()[..476], &bytes[1024..]);
+        assert!(final_block.data()[476..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn default_repair_overhead_is_minimal_proactive_tail() {
+        assert_eq!(
+            initial_repair_target_per_block(512, DEFAULT_REPAIR_OVERHEAD),
+            1
+        );
+    }
+
+    #[test]
+    fn source_first_initial_repair_target_is_zero() {
+        assert_eq!(initial_repair_target_per_block(512, 1.0), 0);
+    }
+
+    #[test]
+    fn source_retransmit_is_disabled_by_default_even_in_source_first_mode() {
+        let config = RqConfig {
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+
+        assert_eq!(source_retransmit_request_limit(&config, 1), None);
+    }
+
+    #[test]
+    fn source_retransmit_requires_explicit_round_budget() {
+        let config = RqConfig {
+            repair_overhead: 1.0,
+            source_retransmit_rounds: 2,
+            max_source_retransmit_requests: 17,
+            ..RqConfig::default()
+        };
+
+        assert_eq!(source_retransmit_request_limit(&config, 1), Some(17));
+        assert_eq!(source_retransmit_request_limit(&config, 2), Some(17));
+        assert_eq!(source_retransmit_request_limit(&config, 3), None);
+    }
+
+    #[test]
+    fn source_retransmit_does_not_override_proactive_repair_mode() {
+        let config = RqConfig {
+            repair_overhead: DEFAULT_REPAIR_OVERHEAD,
+            source_retransmit_rounds: 2,
+            max_source_retransmit_requests: 17,
+            ..RqConfig::default()
+        };
+
+        assert_eq!(source_retransmit_request_limit(&config, 1), None);
+    }
+
+    #[test]
+    fn proactive_initial_repair_target_ceilings_extra_fraction() {
+        assert_eq!(initial_repair_target_per_block(512, 1.15), 77);
+        assert_eq!(initial_repair_target_per_block(1, 1.01), 1);
+    }
+
+    #[test]
+    fn effective_block_size_targets_k512_for_normal_files() {
+        let config = RqConfig::default();
+        assert_eq!(
+            effective_max_block_size_for_largest_entry(&config, 10 * 1024 * 1024)
+                .expect("10MiB should fit"),
+            512 * 1024
+        );
+    }
+
+    #[test]
+    fn effective_block_size_grows_only_to_fit_sbn_limit() {
+        let config = RqConfig::default();
+        let one_gib = 1024 * 1024 * 1024;
+        assert_eq!(
+            effective_max_block_size_for_largest_entry(&config, one_gib)
+                .expect("1GiB should fit default transfer geometry"),
+            4 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn max_block_source_symbols_uses_effective_block_not_entry_size() {
+        assert_eq!(
+            max_block_source_symbol_count(10 * 1024 * 1024, 1024, 512 * 1024),
+            512
+        );
+        assert_eq!(
+            max_block_source_symbol_count(10 * 1024 * 1024, 1024, 8 * 1024 * 1024),
+            8192
+        );
     }
 
     #[test]
