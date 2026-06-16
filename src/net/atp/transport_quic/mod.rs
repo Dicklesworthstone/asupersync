@@ -110,6 +110,11 @@ pub use symbol_datagram::{
     SymbolDatagramError, envelope_to_symbol, recv_symbol_envelope, send_symbol, symbol_to_envelope,
 };
 
+pub use crate::net::atp::transport_rq::adaptive::{
+    AdaptiveController as QuicAdaptiveController, AdaptivePolicy as QuicAdaptivePolicy,
+    BlockPlan as QuicAdaptiveBlockPlan, PathEstimate as QuicPathEstimate,
+};
+
 /// Protocol identifier carried in the QUIC handshake; bump on wire-incompatible
 /// changes. Distinct from `transport_tcp` (`1`) and `transport_rq` (`2`).
 pub const ATP_QUIC_PROTOCOL: u32 = 3;
@@ -154,6 +159,14 @@ pub const DEFAULT_MAX_ACTIVE_CONNECTIONS: usize = 64;
 /// Default bound on fountain feedback rounds before failing closed.
 pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 
+/// Default adaptive datagram fan-out hint.
+///
+/// Phase D wires true multi-connection fan-out. Until then this remains a
+/// bounded, explicit controller output carried in the transfer config so C1 can
+/// prove deterministic arm application without changing the single-connection
+/// B2/B3 data path.
+pub const DEFAULT_DATAGRAM_FANOUT: usize = 1;
+
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
 /// Mirrors the role of [`transport_tcp::TransferConfig`] while adding the
@@ -187,6 +200,12 @@ pub struct QuicConfig {
     pub max_active_connections: usize,
     /// Maximum fountain feedback rounds before a transfer fails closed.
     pub max_feedback_rounds: u32,
+    /// Adaptive controller's datagram fan-out hint.
+    ///
+    /// The current B2/B3 QUIC implementation uses one connection. This field
+    /// intentionally records the selected C1 arm now; Phase D consumes it for
+    /// multi-connection fan-out.
+    pub datagram_fanout: usize,
 }
 
 impl Default for QuicConfig {
@@ -203,6 +222,7 @@ impl Default for QuicConfig {
             accept_timeout: DEFAULT_ACCEPT_TIMEOUT,
             max_active_connections: DEFAULT_MAX_ACTIVE_CONNECTIONS,
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
+            datagram_fanout: DEFAULT_DATAGRAM_FANOUT,
         }
     }
 }
@@ -272,8 +292,83 @@ impl QuicConfig {
                 "max_feedback_rounds must be greater than 0".to_string(),
             ));
         }
+        if self.datagram_fanout == 0 {
+            return Err(QuicTransportError::Config(
+                "datagram_fanout must be greater than 0".to_string(),
+            ));
+        }
         Ok(())
     }
+}
+
+/// QUIC-side adaptive arm selected by the deterministic C1 controller.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuicAdaptiveArm {
+    /// Source symbols per RaptorQ block.
+    pub k: u32,
+    /// QUIC transfer repair multiplier (`1.0 + extra_repair_fraction`).
+    pub repair_overhead: f64,
+    /// Datagram fan-out hint for Phase D multi-connection spray.
+    pub datagram_fanout: usize,
+}
+
+impl QuicAdaptiveArm {
+    /// Convert the shared adaptive controller's block plan into QUIC config
+    /// terms. The shared controller reports overhead as an extra fraction; the
+    /// QUIC transfer config stores the multiplier used by the encoder.
+    pub fn from_block_plan(plan: QuicAdaptiveBlockPlan) -> Result<Self, QuicTransportError> {
+        if plan.k == 0 {
+            return Err(QuicTransportError::Config(
+                "adaptive arm k must be greater than 0".to_string(),
+            ));
+        }
+        if !plan.overhead.is_finite() || plan.overhead < 0.0 {
+            return Err(QuicTransportError::Config(format!(
+                "adaptive arm overhead ({}) must be finite and >= 0.0",
+                plan.overhead
+            )));
+        }
+        if plan.fanout == 0 {
+            return Err(QuicTransportError::Config(
+                "adaptive arm fanout must be greater than 0".to_string(),
+            ));
+        }
+        Ok(Self {
+            k: plan.k,
+            repair_overhead: 1.0 + plan.overhead,
+            datagram_fanout: plan.fanout,
+        })
+    }
+
+    /// Apply this arm to a transfer config. This is pure and side-effect-free;
+    /// the caller can run it once per epoch and pass the returned config into
+    /// the existing B2/B3 transfer helpers.
+    pub fn apply_to_config(self, mut config: QuicConfig) -> Result<QuicConfig, QuicTransportError> {
+        let k = usize::try_from(self.k).map_err(|_| {
+            QuicTransportError::Config(format!("adaptive arm k ({}) does not fit usize", self.k))
+        })?;
+        config.max_block_size =
+            usize::from(config.symbol_size)
+                .checked_mul(k)
+                .ok_or_else(|| {
+                    QuicTransportError::Config(format!(
+                        "adaptive arm k ({}) overflows max_block_size for symbol_size {}",
+                        self.k, config.symbol_size
+                    ))
+                })?;
+        config.repair_overhead = self.repair_overhead;
+        config.datagram_fanout = self.datagram_fanout;
+        config.validate()?;
+        Ok(config)
+    }
+}
+
+/// Apply a shared adaptive controller block plan to QUIC transfer configuration.
+pub fn apply_quic_adaptive_block_plan(
+    config: QuicConfig,
+    plan: QuicAdaptiveBlockPlan,
+) -> Result<QuicConfig, QuicTransportError> {
+    QuicAdaptiveArm::from_block_plan(plan)?.apply_to_config(config)
 }
 
 /// Errors from the ATP-over-QUIC transport.
@@ -2144,6 +2239,7 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
     let accept_timeout = format!("{:?}", config.accept_timeout);
     let max_active_connections = config.max_active_connections.to_string();
     let max_feedback_rounds = config.max_feedback_rounds.to_string();
+    let datagram_fanout = config.datagram_fanout.to_string();
     cx.trace_with_fields(
         "atp_quic.transport.start",
         &[
@@ -2161,6 +2257,7 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
             ("accept_timeout", &accept_timeout),
             ("max_active_connections", &max_active_connections),
             ("max_feedback_rounds", &max_feedback_rounds),
+            ("datagram_fanout", &datagram_fanout),
         ],
     );
 }
@@ -2465,6 +2562,7 @@ mod tests {
         assert_eq!(c.accept_timeout, DEFAULT_ACCEPT_TIMEOUT);
         assert_eq!(c.max_active_connections, DEFAULT_MAX_ACTIVE_CONNECTIONS);
         assert_eq!(c.max_feedback_rounds, DEFAULT_MAX_FEEDBACK_ROUNDS);
+        assert_eq!(c.datagram_fanout, DEFAULT_DATAGRAM_FANOUT);
     }
 
     #[test]
@@ -2528,6 +2626,126 @@ mod tests {
             nan.validate(),
             Err(QuicTransportError::Config(m)) if m.contains("repair_overhead")
         ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_datagram_fanout() {
+        let c = QuicConfig {
+            datagram_fanout: 0,
+            ..QuicConfig::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(QuicTransportError::Config(m)) if m.contains("datagram_fanout")
+        ));
+    }
+
+    fn quic_path_estimate(loss: f64, bw: f64) -> QuicPathEstimate {
+        QuicPathEstimate {
+            rtt_s: 0.075,
+            loss_p_hat: loss,
+            loss_p_bar: loss,
+            bw_median_bps: bw,
+            bw_trough_bps: bw * 0.7,
+            enc_symbols_per_s: 2_000_000.0,
+            dec_symbols_per_s: 1_500_000.0,
+            coding_ref_k: 1024,
+            coding_gamma: 1.5,
+            samples: 8,
+        }
+    }
+
+    #[test]
+    fn quic_adaptive_controller_is_deterministic_given_seed() {
+        let run = || {
+            let mut controller = QuicAdaptiveController::new(QuicAdaptivePolicy::default(), 0xA7A7);
+            controller.update_estimate(quic_path_estimate(0.02, 12_000_000.0));
+            let mut trajectory = Vec::new();
+            for _ in 0..24 {
+                let plan = controller
+                    .next_block_plan(DEFAULT_SYMBOL_SIZE)
+                    .expect("enough evidence activates the controller");
+                let quic_arm =
+                    QuicAdaptiveArm::from_block_plan(plan).expect("valid controller arm");
+                trajectory.push((
+                    quic_arm.k,
+                    quic_arm.repair_overhead,
+                    quic_arm.datagram_fanout,
+                ));
+                controller.observe(
+                    u64::from(plan.k),
+                    u64::from(plan.k),
+                    0.01,
+                    u64::from(plan.k) * u64::from(DEFAULT_SYMBOL_SIZE),
+                );
+            }
+            trajectory
+        };
+
+        assert_eq!(run(), run(), "same seed and rewards must replay exactly");
+    }
+
+    #[test]
+    fn quic_adaptive_arm_rejects_invalid_controller_output() {
+        assert!(matches!(
+            QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
+                k: 0,
+                overhead: 0.1,
+                fanout: 1,
+            }),
+            Err(QuicTransportError::Config(m)) if m.contains("k")
+        ));
+        assert!(matches!(
+            QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
+                k: 128,
+                overhead: f64::NAN,
+                fanout: 1,
+            }),
+            Err(QuicTransportError::Config(m)) if m.contains("overhead")
+        ));
+        assert!(matches!(
+            QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
+                k: 128,
+                overhead: 0.1,
+                fanout: 0,
+            }),
+            Err(QuicTransportError::Config(m)) if m.contains("fanout")
+        ));
+    }
+
+    #[test]
+    fn quic_adaptive_arm_applies_to_loopback_transfer_config() {
+        let plan = QuicAdaptiveBlockPlan {
+            k: 2,
+            overhead: 0.25,
+            fanout: 3,
+        };
+        let config = apply_quic_adaptive_block_plan(
+            QuicConfig {
+                symbol_size: 128,
+                ..QuicConfig::default()
+            },
+            plan,
+        )
+        .expect("adaptive plan applies to QUIC config");
+
+        assert_eq!(config.max_block_size, 256);
+        assert_eq!(config.repair_overhead, 1.25);
+        assert_eq!(config.datagram_fanout, 3);
+
+        let (cx, mut sender, mut receiver) = established_pair();
+        let entries = vec![("adaptive.txt".to_string(), varied_bytes(192, 17))];
+        let outcome =
+            drive_in_memory_loopback_transfer(&cx, &mut sender, &mut receiver, &entries, config)
+                .expect("adapted QUIC config drives the existing loopback transfer");
+
+        assert!(outcome.receipt.committed);
+        assert_eq!(outcome.send_report.files, 1);
+        assert_eq!(outcome.send_report.bytes_sent, 192);
+        assert!(
+            outcome.symbols_sent >= 3,
+            "source symbols plus adaptive repair should be sprayed"
+        );
     }
 
     #[test]
