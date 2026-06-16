@@ -163,8 +163,12 @@ pub mod registry {
 /// join/broadcast surface is built on top of these identifiers, deterministic
 /// snapshots, and membership events.
 pub mod process_group {
+    use crate::channel::mpsc;
+    use crate::cx::Cx;
     use crate::monitor::DownReason;
     use crate::remote::NodeId;
+    use crate::types::cancel::{CancelKind, CancelReason};
+    use crate::types::outcome::Outcome;
     use crate::types::{TaskId, Time};
     use std::collections::BTreeMap;
     use std::fmt;
@@ -1534,6 +1538,84 @@ pub mod process_group {
             self.summary().is_all_delivered()
         }
     }
+
+    /// Executes a deterministic [`GroupBroadcastPlan`] against live member
+    /// mailboxes, applying the plan's [`BroadcastBackpressurePolicy`] through
+    /// the channel's two-phase `reserve`/`send` discipline.
+    ///
+    /// `mailboxes` maps each member to the sending half of its mailbox.
+    /// Delivery follows the plan's deterministic recipient order. For each
+    /// recipient the executor reserves a slot *before* committing the cloned
+    /// message, so a cancelled or budget-exhausted broadcast can never leave a
+    /// message half-delivered: the unused reservation is released on drop and
+    /// the original message value is retained by the caller.
+    ///
+    /// Backpressure handling per policy:
+    /// - [`BroadcastBackpressurePolicy::Wait`] awaits the reservation within
+    ///   the caller's `cx` budget. If `cx` is cancelled or its budget is
+    ///   exhausted while waiting, the whole broadcast resolves to
+    ///   [`Outcome::Cancelled`] with the message preserved (no silent drop).
+    /// - [`BroadcastBackpressurePolicy::Skip`] probes once with `try_reserve`
+    ///   and records [`GroupBroadcastRecipientStatus::Skipped`] for a member
+    ///   that cannot accept immediately.
+    /// - [`BroadcastBackpressurePolicy::Error`] probes once and records
+    ///   [`GroupBroadcastRecipientStatus::Backpressured`] for such a member, so
+    ///   the caller observes `is_all_delivered() == false`.
+    ///
+    /// A recipient with no live mailbox (absent sender or dropped receiver) is
+    /// accounted exactly like a member that cannot accept the message — never
+    /// silently omitted. The returned [`GroupBroadcastReport`] therefore always
+    /// accounts for every planned recipient exactly once, in plan order: the
+    /// no-silent-drop boundary.
+    pub async fn execute_broadcast<M>(
+        cx: &Cx,
+        plan: &GroupBroadcastPlan,
+        message: &M,
+        mailboxes: &BTreeMap<GroupMemberId, mpsc::Sender<M>>,
+    ) -> Outcome<GroupBroadcastReport, ProcessGroupError>
+    where
+        M: Clone,
+    {
+        let blocked = plan.blocked_recipient_status();
+        let mut recipients = Vec::with_capacity(plan.len());
+
+        for member in plan.recipients() {
+            let status = match mailboxes.get(member) {
+                None => blocked,
+                Some(sender) => match plan.policy() {
+                    BroadcastBackpressurePolicy::Wait => match sender.reserve(cx).await {
+                        Ok(permit) => match permit.send(message.clone()) {
+                            Outcome::Ok(()) => GroupBroadcastRecipientStatus::Delivered,
+                            _ => blocked,
+                        },
+                        Err(mpsc::SendError::Cancelled(())) => {
+                            return Outcome::Cancelled(
+                                cx.cancel_reason()
+                                    .unwrap_or_else(|| CancelReason::new(CancelKind::Deadline)),
+                            );
+                        }
+                        Err(_) => blocked,
+                    },
+                    BroadcastBackpressurePolicy::Skip | BroadcastBackpressurePolicy::Error => {
+                        match sender.try_reserve() {
+                            Ok(permit) => match permit.send(message.clone()) {
+                                Outcome::Ok(()) => GroupBroadcastRecipientStatus::Delivered,
+                                _ => blocked,
+                            },
+                            Err(_) => blocked,
+                        }
+                    }
+                },
+            };
+            recipients.push(GroupBroadcastRecipientReport::new(member.clone(), status));
+        }
+
+        Outcome::Ok(GroupBroadcastReport {
+            group: plan.group().clone(),
+            policy: plan.policy(),
+            recipients,
+        })
+    }
 }
 
 /// Unidirectional down notifications.
@@ -1616,7 +1698,7 @@ pub mod prelude {
         GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupBroadcastSummary, GroupEvent,
         GroupEventBatch, GroupEventCursor, GroupEventKind, GroupEventSubscriber, GroupMember,
         GroupMemberId, GroupMembership, GroupMonitorDelivery, GroupMonitorDeliveryError, GroupName,
-        GroupNameError, GroupSnapshot, ProcessGroupError, ProcessGroupState,
+        GroupNameError, GroupSnapshot, ProcessGroupError, ProcessGroupState, execute_broadcast,
     };
 
     // -- Monitor --
