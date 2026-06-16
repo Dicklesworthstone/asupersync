@@ -489,6 +489,16 @@ pub enum QuicTransportError {
     /// Integrity verification failed (SHA-256 or merkle-root mismatch).
     #[error("integrity verification failed: {0}")]
     Integrity(String),
+    /// The fountain feedback loop exhausted its configured round budget.
+    #[error(
+        "transfer did not converge after {rounds} feedback rounds ({pending} entries still incomplete)"
+    )]
+    NoConvergence {
+        /// Feedback rounds attempted.
+        rounds: u32,
+        /// Entries still undecoded.
+        pending: usize,
+    },
     /// The source path was invalid (missing, unsupported type).
     #[error("invalid source path: {0}")]
     Source(String),
@@ -773,6 +783,36 @@ struct QuicConnectionTransferOutcome {
 }
 
 #[allow(dead_code)]
+struct QuicSenderFeedbackState<'a> {
+    manifest: &'a TransferManifest,
+    encoders: &'a mut [QuicEntryEncoder],
+    config: &'a QuicConfig,
+    peer: SocketAddr,
+    feedback_rounds: u32,
+    symbols_sent: u64,
+}
+
+#[allow(dead_code)]
+impl<'a> QuicSenderFeedbackState<'a> {
+    fn new(
+        manifest: &'a TransferManifest,
+        encoders: &'a mut [QuicEntryEncoder],
+        config: &'a QuicConfig,
+        peer: SocketAddr,
+        symbols_sent: u64,
+    ) -> Self {
+        Self {
+            manifest,
+            encoders,
+            config,
+            peer,
+            feedback_rounds: 0,
+            symbols_sent,
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn encoders_from_entries(
     manifest: &TransferManifest,
     entries: &[(String, Vec<u8>)],
@@ -1030,13 +1070,6 @@ fn repair_batch_per_block(config: &QuicConfig) -> usize {
     (block_k / 4).max(16)
 }
 
-fn auth_tag_for_symbol(
-    symbol_auth: Option<&SecurityContext>,
-    symbol: &Symbol,
-) -> Option<[u8; crate::security::tag::TAG_SIZE]> {
-    symbol_auth.map(|ctx| *ctx.sign_symbol(symbol).tag().as_bytes())
-}
-
 #[allow(dead_code)]
 fn spray_symbol_round(
     cx: &Cx,
@@ -1075,7 +1108,7 @@ fn spray_symbol_round(
                 let symbol = encoded
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
-                let auth_tag = auth_tag_for_symbol(symbol_auth, &symbol);
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
                 send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
             }
@@ -1086,7 +1119,7 @@ fn spray_symbol_round(
                 let symbol = encoded
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
-                let auth_tag = auth_tag_for_symbol(symbol_auth, &symbol);
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
                 send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
             }
@@ -1172,7 +1205,7 @@ fn send_source_symbol_requests(
                 ))
             })?;
         let symbol = source_symbol_for_request(enc, *request, config)?;
-        let auth_tag = auth_tag_for_symbol(symbol_auth, &symbol);
+        let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
         send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
         sent = sent.saturating_add(1);
     }
@@ -1380,23 +1413,14 @@ async fn send_prepared_source_manifest_symbols_complete(
 }
 
 #[allow(dead_code)]
-fn receive_proof_close_and_report(
+fn finish_sender_transfer(
     cx: &Cx,
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
     manifest: &TransferManifest,
     peer: SocketAddr,
+    receipt: ReceiveReceipt,
 ) -> Result<SendReport, QuicTransportError> {
-    let receipt = match receive_proof_or_need_more(cx, conn, control)? {
-        QuicControlReply::Proof(receipt) => receipt,
-        QuicControlReply::NeedMore(need) => {
-            return Err(QuicTransportError::Integrity(format!(
-                "sender received NeedMore instead of proof for entries {:?}",
-                need.pending
-            )));
-        }
-    };
-
     send_close(cx, conn, control)?;
     if !receipt.committed {
         return Err(QuicTransportError::Integrity(
@@ -1415,6 +1439,65 @@ fn receive_proof_close_and_report(
         receipt,
         peer,
     })
+}
+
+#[allow(dead_code)]
+fn handle_sender_feedback_or_proof(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    state: &mut QuicSenderFeedbackState<'_>,
+) -> Result<Option<SendReport>, QuicTransportError> {
+    match receive_proof_or_need_more(cx, conn, control)? {
+        QuicControlReply::Proof(receipt) => {
+            finish_sender_transfer(cx, conn, control, state.manifest, state.peer, receipt).map(Some)
+        }
+        QuicControlReply::NeedMore(need) => {
+            state.feedback_rounds = state.feedback_rounds.saturating_add(1);
+            if state.feedback_rounds > state.config.max_feedback_rounds {
+                return Err(QuicTransportError::NoConvergence {
+                    rounds: state.feedback_rounds,
+                    pending: need.pending.len(),
+                });
+            }
+            if need.pending.is_empty() && need.source_symbols.is_empty() {
+                return Ok(None);
+            }
+            let symbol_auth = state.config.symbol_auth_context()?;
+            let sent = send_repair_round_and_object_complete(
+                cx,
+                conn,
+                control,
+                state.manifest,
+                state.encoders,
+                &need,
+                state.config,
+                symbol_auth.as_ref(),
+            )?;
+            state.symbols_sent = state.symbols_sent.saturating_add(sent);
+            Ok(None)
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn receive_proof_close_and_report(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    manifest: &TransferManifest,
+    peer: SocketAddr,
+) -> Result<SendReport, QuicTransportError> {
+    let receipt = match receive_proof_or_need_more(cx, conn, control)? {
+        QuicControlReply::Proof(receipt) => receipt,
+        QuicControlReply::NeedMore(need) => {
+            return Err(QuicTransportError::Integrity(format!(
+                "sender received NeedMore instead of proof for entries {:?}",
+                need.pending
+            )));
+        }
+    };
+    finish_sender_transfer(cx, conn, control, manifest, peer, receipt)
 }
 
 #[allow(dead_code)]
@@ -2812,8 +2895,19 @@ mod tests {
             .expect("deliver proof");
 
         let peer = "127.0.0.1:4433".parse().expect("peer addr");
-        let send_report =
-            receive_proof_close_and_report(cx, sender, &mut sender_control, &manifest, peer)?;
+        let (send_report, symbols_sent) = {
+            let mut feedback =
+                QuicSenderFeedbackState::new(&manifest, &mut encoders, &config, peer, symbols_sent);
+            let report =
+                handle_sender_feedback_or_proof(cx, sender, &mut sender_control, &mut feedback)?
+                    .ok_or_else(|| {
+                        QuicTransportError::Integrity(
+                            "sender received repair feedback in no-repair loopback transfer"
+                                .to_string(),
+                        )
+                    })?;
+            (report, feedback.symbols_sent)
+        };
         let receipt = send_report.receipt.clone();
         pump_until_idle(cx, sender, receiver, DEFAULT_MAX_PACKET_BYTES, 5_004)
             .expect("deliver close");
@@ -3655,6 +3749,10 @@ mod tests {
             ("alpha.bin".to_string(), varied_bytes(384, 53)),
             ("nested/beta.bin".to_string(), varied_bytes(640, 59)),
         ];
+        let expected_source_symbols = entries
+            .iter()
+            .map(|(_, bytes)| bytes.len().div_ceil(usize::from(config.symbol_size)))
+            .sum::<usize>();
 
         let outcome =
             drive_in_memory_loopback_transfer(&cx, &mut client, &mut server, &entries, config)
@@ -3662,7 +3760,11 @@ mod tests {
 
         assert!(outcome.receipt.committed);
         assert_eq!(outcome.send_report.bytes_sent, 1_024);
-        assert_eq!(outcome.symbols_accepted, outcome.symbols_sent);
+        assert_eq!(
+            outcome.symbols_accepted,
+            u64::try_from(expected_source_symbols).unwrap_or(u64::MAX)
+        );
+        assert!(outcome.symbols_sent >= outcome.symbols_accepted);
     }
 
     #[test]
@@ -3918,33 +4020,15 @@ mod tests {
         )
         .expect("deliver need-more");
 
-        let got_need = match receive_proof_or_need_more(&cx, &mut client, &mut sender_control)
-            .expect("sender receives need-more")
-        {
-            QuicControlReply::NeedMore(need) => need,
-            QuicControlReply::Proof(receipt) => panic!("unexpected proof: {receipt:?}"),
-        };
-        assert_eq!(got_need.pending, vec![0]);
-        assert_eq!(
-            got_need.source_symbols,
-            vec![QuicSourceSymbolRequest {
-                entry: 0,
-                sbn: 0,
-                esi: 0,
-            }]
-        );
-        let feedback_sent = send_repair_round_and_object_complete(
-            &cx,
-            &mut client,
-            &mut sender_control,
-            &manifest,
-            &mut encoders,
-            &got_need,
-            &config,
-            None,
-        )
-        .expect("send repair feedback round");
-        assert_eq!(feedback_sent, 1);
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let mut feedback =
+            QuicSenderFeedbackState::new(&manifest, &mut encoders, &config, peer, initial_sent);
+        let report =
+            handle_sender_feedback_or_proof(&cx, &mut client, &mut sender_control, &mut feedback)
+                .expect("sender handles need-more");
+        assert!(report.is_none());
+        assert_eq!(feedback.feedback_rounds, 1);
+        assert_eq!(feedback.symbols_sent, 4);
         pump_until_idle(
             &cx,
             &mut client,
@@ -3991,13 +4075,15 @@ mod tests {
         )
         .expect("deliver proof");
 
-        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
         let report =
-            receive_proof_close_and_report(&cx, &mut client, &mut sender_control, &manifest, peer)
-                .expect("sender receives proof report");
+            handle_sender_feedback_or_proof(&cx, &mut client, &mut sender_control, &mut feedback)
+                .expect("sender receives proof report")
+                .expect("proof completes transfer");
         assert_eq!(report.transfer_id, manifest.transfer_id);
         assert_eq!(report.receipt.bytes_received, 384);
         assert_eq!(report.files, 1);
+        assert_eq!(feedback.feedback_rounds, 1);
+        assert_eq!(feedback.symbols_sent, 4);
     }
 
     #[test]
