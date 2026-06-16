@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const REPLAY_WINDOW_CAPACITY: usize = 1024;
 const REPLAY_WINDOW_SPAN: u64 = REPLAY_WINDOW_CAPACITY as u64 - 1;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 use crate::net::quic_native::tls::DeterministicQuicCryptoProvider;
 
 #[cfg(feature = "tls")]
@@ -151,7 +151,7 @@ impl AtpPacketProtection {
             Box<dyn QuicPacketProtectionProvider + Send + Sync>,
             &'static str,
         ) = if config.use_deterministic {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             match &config.provider_options {
                 ProviderOptions::Deterministic { .. } => {
                     let provider = DeterministicQuicCryptoProvider::new();
@@ -163,9 +163,9 @@ impl AtpPacketProtection {
                     (Box::new(provider), "deterministic")
                 }
             }
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-internals")))]
             {
-                // SECURITY: Deterministic crypto must never be used in production builds
+                // SECURITY: Deterministic crypto must never be used in production builds.
                 panic!(
                     "Deterministic crypto provider requested in production build - this is a security vulnerability"
                 );
@@ -181,17 +181,17 @@ impl AtpPacketProtection {
                         ));
                     }
                 },
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-internals"))]
                 ProviderOptions::Deterministic { .. } => {
                     let provider = DeterministicQuicCryptoProvider::new();
                     (Box::new(provider), "deterministic")
                 }
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "test-internals")))]
                 ProviderOptions::Deterministic { .. } => {
                     return Outcome::err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
                 }
             }
-            #[cfg(all(not(feature = "tls"), test))]
+            #[cfg(all(not(feature = "tls"), any(test, feature = "test-internals")))]
             {
                 match &config.provider_options {
                     ProviderOptions::Deterministic { .. } => {
@@ -200,9 +200,9 @@ impl AtpPacketProtection {
                     }
                 }
             }
-            #[cfg(all(not(feature = "tls"), not(test)))]
+            #[cfg(all(not(feature = "tls"), not(any(test, feature = "test-internals"))))]
             {
-                // SECURITY: Deterministic crypto must never be used in production builds
+                // SECURITY: Deterministic crypto must never be used in production builds.
                 panic!(
                     "Deterministic crypto provider requested in production build - this is a security vulnerability"
                 );

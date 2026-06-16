@@ -376,6 +376,54 @@ impl ConnectionRouter {
         Ok(())
     }
 
+    /// Borrow a managed connection for focused integration tests.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn connection_mut_for_testing(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+    ) -> Result<&mut NativeQuicConnection, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        self.connections
+            .get_mut(&connection_id)
+            .map(|handle| &mut handle.connection)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))
+    }
+
+    /// Drain one batch of protected application-data packets for focused
+    /// integration tests that need to cross the real UDP endpoint boundary.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub async fn drain_application_data_for_testing(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        dst_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<Vec<OutgoingPacket>, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let now_micros = self.instant_micros(now);
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        drain_connection_frames(
+            cx,
+            connection_id,
+            handle,
+            PacketNumberSpace::ApplicationData,
+            dst_addr,
+            now,
+            now_micros,
+        )
+        .await
+    }
+
     /// Remove a connection from the routing table.
     pub fn remove_connection(
         &mut self,
