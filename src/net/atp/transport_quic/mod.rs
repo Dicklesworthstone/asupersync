@@ -404,7 +404,7 @@ fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, QuicTrans
         serde_json::to_vec(value).map_err(|err| QuicTransportError::Control(err.to_string()))?;
     let frame = Frame::new(ProtocolVersion::CURRENT, ty, payload)
         .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
-    let encoded_len = frame.encoded_len() as u64;
+    let encoded_len = u64::try_from(frame.encoded_len()).unwrap_or(u64::MAX);
     if encoded_len > MAX_FRAME_SIZE {
         return Err(QuicTransportError::Frame(format!(
             "{ty:?} JSON frame encodes to {encoded_len} bytes (max {MAX_FRAME_SIZE}); \
@@ -1612,7 +1612,7 @@ mod tests {
             .expect("sender receives accepted ack");
         assert!(ack.accepted);
         assert_eq!(ack.peer_id, "receiver-peer");
-        assert_eq!(ack.reason, None);
+        assert!(ack.reason.is_none());
     }
 
     #[test]
