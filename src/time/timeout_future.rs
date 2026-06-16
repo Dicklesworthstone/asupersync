@@ -173,7 +173,14 @@ impl<F> TimeoutFuture<F> {
     }
 
     /// Resets the timeout to a new deadline.
+    ///
+    /// This can re-arm an uncompleted timeout or one that previously elapsed.
+    /// It deliberately does not re-arm after the inner future has completed,
+    /// because `TimeoutFuture` cannot replace a consumed inner future.
     pub fn reset(&mut self, deadline: Time) {
+        if self.completed && !self.timed_out {
+            return;
+        }
         self.completed = false;
         self.timed_out = false;
         self.sleep.reset(deadline);
@@ -181,6 +188,9 @@ impl<F> TimeoutFuture<F> {
 
     /// Resets the timeout to expire after the given duration.
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
+        if self.completed && !self.timed_out {
+            return;
+        }
         self.completed = false;
         self.timed_out = false;
         self.sleep.reset_after(now, duration);
@@ -421,6 +431,22 @@ mod tests {
 
     impl Unpin for CountingFuture {}
 
+    struct ReadyOncePanicsOnRepoll {
+        polled: bool,
+    }
+
+    impl Future for ReadyOncePanicsOnRepoll {
+        type Output = &'static str;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            assert!(!self.polled, "inner future was polled after completion");
+            self.polled = true;
+            Poll::Ready("done")
+        }
+    }
+
+    impl Unpin for ReadyOncePanicsOnRepoll {}
+
     struct ReadyAtTime {
         ready_at: Time,
     }
@@ -624,6 +650,44 @@ mod tests {
             t.deadline()
         );
         crate::test_complete!("reset_after_changes_deadline");
+    }
+
+    #[test]
+    fn reset_after_inner_success_stays_terminal_for_poll_with_time() {
+        init_test("reset_after_inner_success_stays_terminal_for_poll_with_time");
+        let mut t = TimeoutFuture::new(
+            ReadyOncePanicsOnRepoll { polled: false },
+            Time::from_secs(5),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = t.poll_with_time(&mut cx, Time::from_secs(1));
+        assert!(matches!(first, Poll::Ready(Ok("done"))));
+
+        t.reset(Time::from_secs(10));
+        let second = t.poll_with_time(&mut cx, Time::from_secs(2));
+        assert!(matches!(second, Poll::Ready(Err(_))));
+        crate::test_complete!("reset_after_inner_success_stays_terminal_for_poll_with_time");
+    }
+
+    #[test]
+    fn reset_after_inner_success_stays_terminal_for_future_poll() {
+        init_test("reset_after_inner_success_stays_terminal_for_future_poll");
+        let mut t = TimeoutFuture::new(
+            ReadyOncePanicsOnRepoll { polled: false },
+            Time::from_secs(5),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut t).poll(&mut cx);
+        assert!(matches!(first, Poll::Ready(Ok("done"))));
+
+        t.reset_after(Time::from_secs(3), Duration::from_secs(7));
+        let second = Pin::new(&mut t).poll(&mut cx);
+        assert!(matches!(second, Poll::Ready(Err(_))));
+        crate::test_complete!("reset_after_inner_success_stays_terminal_for_future_poll");
     }
 
     // =========================================================================
