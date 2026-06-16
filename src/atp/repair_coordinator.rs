@@ -403,6 +403,22 @@ impl Default for ModeStatistics {
     }
 }
 
+fn trim_oldest_to_limit<T>(items: &mut Vec<T>, limit: usize) {
+    if items.len() <= limit {
+        return;
+    }
+
+    if limit == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len() - limit;
+    let batch = (limit / 10).max(1);
+    let drain_count = overflow.max(batch).min(items.len());
+    items.drain(0..drain_count);
+}
+
 impl RepairCoordinator {
     /// Create a new repair coordinator
     pub fn new(config: RepairCoordinatorConfig) -> Self {
@@ -507,10 +523,7 @@ impl RepairCoordinator {
         self.decision_history.push(decision.clone());
 
         // Keep history bounded to prevent memory exhaustion attacks
-        if self.decision_history.len() > self.config.max_decision_history {
-            let drain_count = self.config.max_decision_history / 10; // Remove 10% when over limit
-            self.decision_history.drain(0..drain_count);
-        }
+        trim_oldest_to_limit(&mut self.decision_history, self.config.max_decision_history);
 
         Ok(decision)
     }
@@ -544,10 +557,7 @@ impl RepairCoordinator {
         self.telemetry.push(telemetry);
 
         // Keep telemetry bounded to prevent memory exhaustion attacks
-        if self.telemetry.len() > self.config.max_telemetry_history {
-            let drain_count = self.config.max_telemetry_history / 10; // Remove 10% when over limit
-            self.telemetry.drain(0..drain_count);
-        }
+        trim_oldest_to_limit(&mut self.telemetry, self.config.max_telemetry_history);
 
         Ok(())
     }
@@ -909,6 +919,35 @@ mod tests {
         }
     }
 
+    fn create_test_telemetry() -> RepairTelemetry {
+        RepairTelemetry {
+            object_id: test_object_id(),
+            mode: RepairMode::Tail,
+            predicted_roi: RepairRoi {
+                expected_time_saved: Duration::from_millis(100),
+                encode_cpu_cost: Duration::from_millis(10),
+                decode_cpu_cost: Duration::from_millis(5),
+                bandwidth_overhead: 1000,
+                memory_overhead: 500,
+                coordination_cost: Duration::ZERO,
+                benefit_score: 2.0,
+                cost_score: 1.0,
+                roi_ratio: 1.5,
+                confidence: 0.8,
+            },
+            actual_repair_time: Duration::from_millis(90),
+            actual_encode_cpu: Duration::from_millis(12),
+            actual_decode_cpu: Duration::from_millis(6),
+            actual_bandwidth_used: 1200,
+            repair_symbols_sent: 5,
+            repair_symbols_decoded: 5,
+            success: true,
+            actual_benefit_score: 2.1,
+            actual_roi_ratio: 1.6,
+            measured_at: SystemTime::now(),
+        }
+    }
+
     #[test]
     fn test_repair_coordinator_creation() {
         let config = RepairCoordinatorConfig::default();
@@ -1014,42 +1053,60 @@ mod tests {
     }
 
     #[test]
+    fn decision_history_zero_limit_retains_no_entries() -> Result<()> {
+        let config = RepairCoordinatorConfig {
+            max_decision_history: 0,
+            max_decisions_per_minute: 10,
+            ..RepairCoordinatorConfig::default()
+        };
+        let mut coordinator = RepairCoordinator::new(config);
+        let path = create_test_path();
+        let transfer = create_test_transfer();
+
+        coordinator.decide_repair_mode(
+            test_object_id(),
+            &path,
+            &transfer,
+            TraceId::from_parts(1, 1),
+        )?;
+
+        assert!(coordinator.decision_history.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn decision_history_sub_ten_limit_drains_oldest_entries() -> Result<()> {
+        let config = RepairCoordinatorConfig {
+            max_decision_history: 2,
+            max_decisions_per_minute: 10,
+            ..RepairCoordinatorConfig::default()
+        };
+        let mut coordinator = RepairCoordinator::new(config);
+        let path = create_test_path();
+        let transfer = create_test_transfer();
+
+        for sequence in 0..5 {
+            coordinator.decide_repair_mode(
+                test_object_id(),
+                &path,
+                &transfer,
+                TraceId::from_parts(1, sequence),
+            )?;
+        }
+
+        assert_eq!(coordinator.decision_history.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_telemetry_recording() {
         let config = RepairCoordinatorConfig::default();
         let mut coordinator = RepairCoordinator::new(config);
 
-        let telemetry = RepairTelemetry {
-            object_id: test_object_id(),
-            mode: RepairMode::Tail,
-            predicted_roi: RepairRoi {
-                roi_ratio: 1.5,
-                ..RepairRoi {
-                    expected_time_saved: Duration::from_millis(100),
-                    encode_cpu_cost: Duration::from_millis(10),
-                    decode_cpu_cost: Duration::from_millis(5),
-                    bandwidth_overhead: 1000,
-                    memory_overhead: 500,
-                    coordination_cost: Duration::ZERO,
-                    benefit_score: 2.0,
-                    cost_score: 1.0,
-                    roi_ratio: 1.5,
-                    confidence: 0.8,
-                }
-            },
-            actual_repair_time: Duration::from_millis(90),
-            actual_encode_cpu: Duration::from_millis(12),
-            actual_decode_cpu: Duration::from_millis(6),
-            actual_bandwidth_used: 1200,
-            repair_symbols_sent: 5,
-            repair_symbols_decoded: 5,
-            success: true,
-            actual_benefit_score: 2.1,
-            actual_roi_ratio: 1.6,
-            measured_at: SystemTime::now(),
-        };
-
         coordinator
-            .record_telemetry(telemetry)
+            .record_telemetry(create_test_telemetry())
             .expect("Telemetry recording failed");
 
         assert_eq!(coordinator.telemetry.len(), 1);
@@ -1058,5 +1115,41 @@ mod tests {
         let stats = &coordinator.mode_statistics[&RepairMode::Tail];
         assert_eq!(stats.usage_count, 1);
         assert_eq!(stats.success_rate, 1.0);
+    }
+
+    #[test]
+    fn telemetry_history_zero_limit_retains_no_entries() {
+        let config = RepairCoordinatorConfig {
+            max_telemetry_history: 0,
+            max_telemetry_per_minute: 10,
+            ..RepairCoordinatorConfig::default()
+        };
+        let mut coordinator = RepairCoordinator::new(config);
+
+        coordinator
+            .record_telemetry(create_test_telemetry())
+            .expect("Telemetry recording failed");
+
+        assert!(coordinator.telemetry.is_empty());
+    }
+
+    #[test]
+    fn telemetry_history_sub_ten_limit_drains_oldest_entries() {
+        let config = RepairCoordinatorConfig {
+            max_telemetry_history: 2,
+            max_telemetry_per_minute: 10,
+            ..RepairCoordinatorConfig::default()
+        };
+        let mut coordinator = RepairCoordinator::new(config);
+
+        for sequence in 0..5 {
+            let mut telemetry = create_test_telemetry();
+            telemetry.actual_roi_ratio += sequence as f64;
+            coordinator
+                .record_telemetry(telemetry)
+                .expect("Telemetry recording failed");
+        }
+
+        assert_eq!(coordinator.telemetry.len(), 2);
     }
 }
