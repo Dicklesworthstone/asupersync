@@ -545,6 +545,42 @@ fn validate_manifest_rel_path(rel: &str) -> Result<(), TransportError> {
     Ok(())
 }
 
+/// Reject a manifest where any entry path is nested under another entry declared
+/// as a symlink. `join_relative` only blocks lexical `..`, so committing a
+/// symlink and then writing a nested entry would traverse the freshly-created
+/// link and escape `dest_dir` (a symlink-slip / tar-slip class escape). Checked
+/// up front, before any filesystem mutation, so the transfer fails closed.
+fn reject_symlink_traversal(manifest: &TransferManifest) -> Result<(), TransportError> {
+    let symlink_paths: Vec<&str> = manifest
+        .entries
+        .iter()
+        .filter(|e| {
+            e.metadata
+                .as_ref()
+                .is_some_and(|m| matches!(m.file_kind, FileKind::Symlink))
+        })
+        .map(|e| e.rel_path.as_str())
+        .collect();
+    if symlink_paths.is_empty() {
+        return Ok(());
+    }
+    for entry in &manifest.entries {
+        let p = entry.rel_path.as_str();
+        for sym in &symlink_paths {
+            // `p` is nested under symlink `sym` iff `sym` is a strict,
+            // component-aligned prefix of `p` (so `p` would be written through
+            // the link). The symlink entry itself (`p == sym`) is fine.
+            if p.len() > sym.len() && p.as_bytes()[sym.len()] == b'/' && p.starts_with(sym) {
+                return Err(TransportError::Source(format!(
+                    "manifest entry {p} is nested under symlink entry {sym}; refusing to \
+                     write through a link (would escape the destination)"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn data_frame(index: u32, offset: u64, chunk: &[u8]) -> Result<Frame, TransportError> {
     let mut payload = Vec::with_capacity(12 + chunk.len());
     payload.extend_from_slice(&index.to_be_bytes());
@@ -951,6 +987,9 @@ pub async fn receive_connection(
     // The manifest is attacker-controlled — validate its bounds before
     // allocating any receive buffers.
     validate_manifest(&manifest, &config)?;
+    // Reject symlink-traversal escapes (writing a nested entry through a
+    // manifest-declared symlink) before any filesystem mutation.
+    reject_symlink_traversal(&manifest)?;
 
     // Bounded-memory streaming receive: every entry is written straight to a
     // staging file as chunks arrive, with incremental SHA-256 + content-id
@@ -1623,6 +1662,71 @@ mod tests {
             validate_manifest(&m, &TransferConfig::default()),
             Err(TransportError::TooLarge { .. })
         ));
+    }
+
+    fn symlink_entry(index: u32, rel: &str, target: &str) -> ManifestEntry {
+        ManifestEntry {
+            index,
+            rel_path: rel.to_string(),
+            size: 0,
+            sha256_hex: "0".repeat(64),
+            metadata: Some(EntryMetadata {
+                file_kind: FileKind::Symlink,
+                symlink_target: Some(target.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn named_entry(index: u32, rel: &str) -> ManifestEntry {
+        ManifestEntry {
+            index,
+            rel_path: rel.to_string(),
+            size: 0,
+            sha256_hex: "0".repeat(64),
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn reject_symlink_traversal_blocks_entries_nested_under_a_symlink() {
+        // A file written through a manifest-declared symlink would escape dest.
+        let bad = manifest_with(
+            vec![
+                symlink_entry(0, "x", "/etc"),
+                named_entry(1, "x/payload"),
+            ],
+            0,
+        );
+        assert!(
+            matches!(reject_symlink_traversal(&bad), Err(TransportError::Source(_))),
+            "entry nested under a symlink must be rejected"
+        );
+
+        // Nested symlink-under-symlink is also rejected.
+        let bad2 = manifest_with(
+            vec![symlink_entry(0, "a", "/x"), symlink_entry(1, "a/b", "/y")],
+            0,
+        );
+        assert!(reject_symlink_traversal(&bad2).is_err());
+    }
+
+    #[test]
+    fn reject_symlink_traversal_allows_siblings_and_links_without_nesting() {
+        // "xy" is a sibling of symlink "x", not nested under it; a normal link
+        // with no entries beneath it is fine.
+        let ok = manifest_with(
+            vec![
+                symlink_entry(0, "x", "data.txt"),
+                named_entry(1, "xy"),
+                named_entry(2, "data.txt"),
+            ],
+            0,
+        );
+        assert!(reject_symlink_traversal(&ok).is_ok());
+        // No symlinks at all: trivially ok.
+        let plain = manifest_with(vec![entry(0, 10), entry(1, 20)], 30);
+        assert!(reject_symlink_traversal(&plain).is_ok());
     }
 
     #[test]

@@ -199,14 +199,18 @@ impl MetadataApplyReport {
 
 /// Capture filesystem metadata for `abs_path`, honoring `policy`.
 ///
-/// Uses `symlink_metadata` so a symlink is recorded as a [`FileKind::Symlink`]
-/// with its target rather than being followed. Returns a bare [`EntryMetadata`]
-/// on non-unix targets.
+/// When `policy.preserve_symlinks` is set, a symlink is recorded as a
+/// [`FileKind::Symlink`] carrying its target (never followed). Otherwise the link
+/// is **followed** and the entry takes its target's kind/content/metadata — so a
+/// non-preserved symlink to a file transfers as that file rather than being
+/// silently dropped to an empty placeholder. Returns a bare [`EntryMetadata`] on
+/// non-unix targets.
 ///
 /// # Errors
 ///
-/// Returns [`StreamingError`] if the path cannot be stat'd or a symlink target
-/// cannot be read.
+/// Returns [`StreamingError`] if the path cannot be stat'd, a preserved symlink's
+/// target cannot be read, or a non-preserved symlink dangles (stat through the
+/// link fails).
 #[cfg(unix)]
 pub async fn read_entry_metadata(
     abs_path: &Path,
@@ -220,24 +224,33 @@ pub async fn read_entry_metadata(
 
     let mut meta = EntryMetadata::default();
 
-    if lmeta.is_symlink() {
+    if lmeta.is_symlink() && policy.preserve_symlinks {
         meta.file_kind = FileKind::Symlink;
-        if policy.preserve_symlinks {
-            let target = crate::fs::read_link(abs_path)
-                .await
-                .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
-            meta.symlink_target = Some(target.to_string_lossy().into_owned());
-        }
+        let target = crate::fs::read_link(abs_path)
+            .await
+            .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
+        meta.symlink_target = Some(target.to_string_lossy().into_owned());
         // Mode/owner/time on a symlink itself are rarely meaningful and need
         // lchown/lutimes; ATP preserves the link + target, not link metadata.
         return Ok(meta);
     }
 
-    if lmeta.is_dir() {
+    // For a non-preserved symlink, stat through the link so the entry reflects
+    // its target (the streaming hash also follows the link); otherwise use the
+    // path's own metadata.
+    let effective = if lmeta.is_symlink() {
+        crate::fs::metadata(abs_path)
+            .await
+            .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?
+    } else {
+        lmeta
+    };
+
+    if effective.is_dir() {
         meta.file_kind = FileKind::Directory;
     }
 
-    let inner = &lmeta.inner;
+    let inner = &effective.inner;
     if policy.preserve_unix_permissions {
         meta.unix_mode = Some(inner.mode() & 0o7777);
     }
@@ -252,23 +265,25 @@ pub async fn read_entry_metadata(
     Ok(meta)
 }
 
-/// Non-unix capture: file kind only (regular vs directory), no platform metadata.
+/// Non-unix capture: file kind only (regular vs directory), no platform
+/// metadata. Symlinks are not represented on non-unix targets, so the link is
+/// followed and the entry takes its target's kind (avoids an empty placeholder).
 ///
 /// # Errors
 ///
-/// Returns [`StreamingError`] if the path cannot be stat'd.
+/// Returns [`StreamingError`] if the path cannot be stat'd (a dangling symlink
+/// fails closed here).
 #[cfg(not(unix))]
 pub async fn read_entry_metadata(
     abs_path: &Path,
     _policy: &MetadataPolicy,
 ) -> Result<EntryMetadata, StreamingError> {
-    let lmeta = crate::fs::symlink_metadata(abs_path)
+    // `metadata` follows symlinks, so the recorded kind is the target's.
+    let effective = crate::fs::metadata(abs_path)
         .await
         .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
     let mut meta = EntryMetadata::default();
-    if lmeta.is_symlink() {
-        meta.file_kind = FileKind::Symlink;
-    } else if lmeta.is_dir() {
+    if effective.is_dir() {
         meta.file_kind = FileKind::Directory;
     }
     Ok(meta)
