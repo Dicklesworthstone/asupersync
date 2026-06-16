@@ -41,9 +41,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::net::atp::transport_common::{
-    EntryDigest, StagedEntryReceive, StreamingError, collect_entries,
-    flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
+    EntryDigest, EntryMetadata, FileKind, StagedEntryReceive, StreamingError, apply_entry_metadata,
+    collect_entries, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
+    metadata_commitment, read_entry_metadata,
 };
+use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
 // supporting imports are gated to the test build to keep `-D warnings` clean.
@@ -104,7 +106,10 @@ const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
 pub const DEFAULT_MAX_ACTIVE_CONNECTIONS: usize = 64;
 
 /// Transport tuning knobs.
-#[derive(Debug, Clone, Copy)]
+///
+/// Holds a [`MetadataPolicy`] (non-`Copy`), so `TransferConfig` is `Clone`; the
+/// persistent `serve()` loop clones it per accepted connection.
+#[derive(Debug, Clone)]
 pub struct TransferConfig {
     /// Bulk-data chunk size in bytes.
     pub chunk_size: usize,
@@ -119,6 +124,11 @@ pub struct TransferConfig {
     /// Maximum number of connections `serve()` may process concurrently.
     /// Values of zero are treated as one active connection.
     pub max_active_connections: usize,
+    /// Filesystem-metadata fidelity policy (mode/mtime/owner/symlinks). Defaults
+    /// to [`MetadataPolicy::default`] (`~= rsync -a` minus timestamps); the sender
+    /// captures gated metadata into the manifest and the receiver applies it on
+    /// commit.
+    pub metadata_policy: MetadataPolicy,
 }
 
 impl Default for TransferConfig {
@@ -129,6 +139,7 @@ impl Default for TransferConfig {
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             accept_timeout: DEFAULT_ACCEPT_TIMEOUT,
             max_active_connections: DEFAULT_MAX_ACTIVE_CONNECTIONS,
+            metadata_policy: MetadataPolicy::default(),
         }
     }
 }
@@ -213,10 +224,16 @@ pub struct ManifestEntry {
     pub index: u32,
     /// Path relative to the transfer root.
     pub rel_path: String,
-    /// Entry size in bytes.
+    /// Entry size in bytes. Symlinks contribute zero content bytes (their target
+    /// rides in `metadata`).
     pub size: u64,
     /// Lowercase hex SHA-256 of the entry content.
     pub sha256_hex: String,
+    /// Captured filesystem metadata (mode/mtime/owner/symlink) when the sender's
+    /// [`MetadataPolicy`] preserves it. Omitted from the wire for a portable
+    /// transfer, in which case it deserializes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<EntryMetadata>,
 }
 
 /// Transfer manifest carried in the `ObjectManifest` frame.
@@ -232,6 +249,12 @@ pub struct TransferManifest {
     pub total_bytes: u64,
     /// Lowercase hex of `MerkleRoot::from_graph` over the flat object graph.
     pub merkle_root_hex: String,
+    /// Independent commitment over per-entry filesystem metadata (sorted by
+    /// path), present only when at least one entry carries metadata. The receiver
+    /// recomputes and verifies it so metadata-block corruption fails closed, the
+    /// same way a content-merkle mismatch does. `None` for a portable transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_root_hex: Option<String>,
     /// File entries in manifest order.
     pub entries: Vec<ManifestEntry>,
 }
@@ -642,11 +665,21 @@ pub async fn send_path(
     // reused across files, so peak memory is `chunk_size`, not the transfer size.
     let mut read_buf = vec![0u8; config.chunk_size.max(1)];
     let mut digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());
+    let mut metadatas: Vec<EntryMetadata> = Vec::with_capacity(entries.len());
     let mut total_bytes: u64 = 0;
     for entry in &entries {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        let (size, content_id, content_sha256) =
-            hash_file_streaming(&entry.abs_path, &mut read_buf).await?;
+        let metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
+        let (size, content_id, content_sha256) = if matches!(metadata.file_kind, FileKind::Symlink)
+        {
+            // A symlink carries no content bytes — its target rides in `metadata`.
+            // Emit the canonical empty-content digest so the receiver (which sees
+            // zero ObjectData frames for this entry) reconstructs the same digest.
+            let empty_sha: [u8; 32] = Sha256::digest(b"").into();
+            (0u64, ObjectId::content(ContentId::from_bytes(b"")), empty_sha)
+        } else {
+            hash_file_streaming(&entry.abs_path, &mut read_buf).await?
+        };
         total_bytes = total_bytes.saturating_add(size);
         if total_bytes > config.max_transfer_bytes {
             return Err(TransportError::TooLarge {
@@ -660,17 +693,26 @@ pub async fn send_path(
             content_id,
             content_sha256,
         });
+        metadatas.push(metadata);
     }
 
     let merkle_root_hex = flat_merkle_root_from_digests(&digests);
+    let metadata_pairs: Vec<(&str, &EntryMetadata)> = digests
+        .iter()
+        .zip(&metadatas)
+        .map(|(d, m)| (d.rel_path.as_str(), m))
+        .collect();
+    let metadata_root_hex = metadata_commitment(&metadata_pairs);
     let manifest_entries: Vec<ManifestEntry> = digests
         .iter()
+        .zip(&metadatas)
         .enumerate()
-        .map(|(i, d)| ManifestEntry {
+        .map(|(i, (d, m))| ManifestEntry {
             index: u32::try_from(i).unwrap_or(u32::MAX),
             rel_path: d.rel_path.clone(),
             size: d.size,
             sha256_hex: hex_encode(&d.content_sha256),
+            metadata: if m.is_bare() { None } else { Some(m.clone()) },
         })
         .collect();
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
@@ -680,6 +722,7 @@ pub async fn send_path(
         is_directory,
         total_bytes,
         merkle_root_hex: merkle_root_hex.clone(),
+        metadata_root_hex,
         entries: manifest_entries,
     };
 
@@ -740,6 +783,11 @@ pub async fn send_path(
     // the sender never holds a whole file (or the whole transfer) in memory.
     for (i, entry) in entries.iter().enumerate() {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        // Symlinks carry no content bytes; the receiver creates the link from the
+        // manifest metadata at commit, so emit no ObjectData frames for them.
+        if matches!(metadatas[i].file_kind, FileKind::Symlink) {
+            continue;
+        }
         let index = u32::try_from(i).unwrap_or(u32::MAX);
         send_file_streaming(
             cx,
@@ -1050,8 +1098,20 @@ pub async fn receive_connection(
     let rebuilt_root = flat_merkle_root_from_digests(&digests);
     let merkle_ok = rebuilt_root == manifest.merkle_root_hex;
 
+    // Recompute the metadata commitment over the received manifest and verify it
+    // against the sender's, so a corrupted metadata block fails closed exactly
+    // like a content-merkle mismatch.
+    let meta_pairs: Vec<(String, EntryMetadata)> = manifest
+        .entries
+        .iter()
+        .map(|e| (e.rel_path.clone(), e.metadata.clone().unwrap_or_default()))
+        .collect();
+    let meta_refs: Vec<(&str, &EntryMetadata)> =
+        meta_pairs.iter().map(|(p, m)| (p.as_str(), m)).collect();
+    let metadata_ok = metadata_commitment(&meta_refs) == manifest.metadata_root_hex;
+
     let mut committed_paths: Vec<PathBuf> = Vec::new();
-    let committed = sha_ok && merkle_ok;
+    let committed = sha_ok && merkle_ok && metadata_ok;
     if committed {
         // Commit by atomic rename from staging into the destination. The base
         // path is sanitized so a hostile `root_name` cannot escape `dest_dir`.
@@ -1066,7 +1126,41 @@ pub async fn receive_connection(
                 if let Some(parent) = out_path.parent() {
                     crate::fs::create_dir_all(parent).await?;
                 }
+
+                // A symlink commits by creating the link from its recorded target
+                // rather than renaming the (empty) staged file into place.
+                let symlink_target = entry.metadata.as_ref().and_then(|m| {
+                    matches!(m.file_kind, FileKind::Symlink)
+                        .then(|| m.symlink_target.clone())
+                        .flatten()
+                });
+                if let Some(target) = symlink_target {
+                    let _ = crate::fs::remove_file(&out_path).await;
+                    crate::fs::symlink(&target, &out_path).await?;
+                    committed_paths.push(out_path);
+                    continue;
+                }
+
                 crate::fs::rename(staging_path, &out_path).await?;
+
+                // Apply captured metadata (mode/mtime/owner) best-effort; skips
+                // (e.g. chown without privilege) are traced, never fatal.
+                if let Some(meta) = &entry.metadata {
+                    let report = apply_entry_metadata(&out_path, meta).await?;
+                    if cx.trace_buffer().is_some() {
+                        let path_str = out_path.display().to_string();
+                        for (field, reason) in &report.skipped {
+                            cx.trace_with_fields(
+                                "atp_tcp_metadata_skipped",
+                                &[
+                                    ("path", path_str.as_str()),
+                                    ("field", *field),
+                                    ("reason", reason.as_str()),
+                                ],
+                            );
+                        }
+                    }
+                }
                 committed_paths.push(out_path);
             }
             Ok(())
@@ -1092,8 +1186,10 @@ pub async fn receive_connection(
             None
         } else if !sha_ok {
             Some("per-entry SHA-256 mismatch".to_string())
-        } else {
+        } else if !merkle_ok {
             Some("merkle-root mismatch".to_string())
+        } else {
+            Some("metadata commitment mismatch".to_string())
         },
         committed_paths: committed_paths
             .iter()
@@ -1227,6 +1323,7 @@ where
                 consecutive_failures = 0;
                 let dest_dir = dest_dir.clone();
                 let peer_id = peer_id.clone();
+                let config = config.clone();
                 match cx.spawn(move |child| async move {
                     receive_connection(&child, stream, peer, &dest_dir, config, &peer_id).await
                 }) {
@@ -1343,11 +1440,13 @@ mod tests {
             is_directory: true,
             total_bytes: 9,
             merkle_root_hex: "00".repeat(32),
+            metadata_root_hex: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "a/b.txt".to_string(),
                 size: 9,
                 sha256_hex: "ff".repeat(32),
+                metadata: None,
             }],
         };
         let json = serde_json::to_vec(&manifest).unwrap();
@@ -1363,6 +1462,7 @@ mod tests {
             is_directory: true,
             total_bytes: 0,
             merkle_root_hex: "00".repeat(32),
+            metadata_root_hex: None,
             entries: Vec::new(),
         };
         assert!(matches!(
@@ -1467,6 +1567,7 @@ mod tests {
             is_directory: true,
             total_bytes,
             merkle_root_hex: "0".repeat(64),
+            metadata_root_hex: None,
             entries,
         }
     }
@@ -1477,6 +1578,7 @@ mod tests {
             rel_path: format!("f{index}"),
             size,
             sha256_hex: "0".repeat(64),
+            metadata: None,
         }
     }
 

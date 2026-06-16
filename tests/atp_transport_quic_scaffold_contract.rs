@@ -55,6 +55,7 @@ fn manifest_and_receipt_types_are_reused_from_transport_tcp() {
         is_directory: false,
         total_bytes: 0,
         merkle_root_hex: "00".repeat(32),
+        metadata_root_hex: None,
         entries: vec![],
     };
     let quic_manifest: TransferManifest = tcp_manifest;
@@ -173,18 +174,21 @@ fn manifest_json_roundtrips() {
         is_directory: true,
         total_bytes: 1234,
         merkle_root_hex: "ab".repeat(32),
+        metadata_root_hex: None,
         entries: vec![
             ManifestEntry {
                 index: 0,
                 rel_path: "dir/a.txt".to_string(),
                 size: 1000,
                 sha256_hex: "11".repeat(32),
+                metadata: None,
             },
             ManifestEntry {
                 index: 1,
                 rel_path: "dir/b.bin".to_string(),
                 size: 234,
                 sha256_hex: "22".repeat(32),
+                metadata: None,
             },
         ],
     };

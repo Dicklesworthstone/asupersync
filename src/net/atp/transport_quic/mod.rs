@@ -665,11 +665,16 @@ mod tests {
             is_directory: true,
             total_bytes: 9,
             merkle_root_hex: "00".repeat(32),
+            // J1 (b0k8qo.11.1, LilacPine): shared manifest gained an optional
+            // metadata commitment + per-entry metadata; portable transfers leave
+            // them None. Additive cross-edit to keep HEAD compiling.
+            metadata_root_hex: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "a/b.txt".to_string(),
                 size: 9,
                 sha256_hex: "ff".repeat(32),
+                metadata: None,
             }],
         };
         let json = serde_json::to_vec(&manifest).unwrap();
