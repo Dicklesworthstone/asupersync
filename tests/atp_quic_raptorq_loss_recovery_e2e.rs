@@ -27,8 +27,8 @@ use asupersync::net::quic_native::{
     DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, QuicConnection, establish_loopback,
     pump_until_idle,
 };
-use asupersync::security::AuthenticatedSymbol;
 use asupersync::security::tag::AuthenticationTag;
+use asupersync::security::{AuthenticatedSymbol, SecurityContext};
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolKind};
 
@@ -134,15 +134,61 @@ fn spray_and_collect(
     received
 }
 
+/// Spray signed `symbols` over the QUIC datagram plane and preserve their tags
+/// for decoder-side authentication.
+fn spray_and_collect_authenticated(
+    cx: &Cx,
+    client: &mut QuicConnection,
+    server: &mut QuicConnection,
+    symbols: &[Symbol],
+    object_id: ObjectId,
+    signer: &SecurityContext,
+) -> Vec<AuthenticatedSymbol> {
+    for s in symbols {
+        let signed = signer.sign_symbol(s);
+        send_symbol(cx, client, s, 1, 0, Some(*signed.tag().as_bytes()))
+            .expect("send signed symbol");
+    }
+    pump_until_idle(cx, client, server, DEFAULT_MAX_PACKET_BYTES, 1_000).expect("pump");
+    let mut received = Vec::new();
+    while let Some(env) = recv_symbol_envelope(server, true).expect("decode authed envelope") {
+        let tag = env.auth_tag.expect("authenticated envelope carries a tag");
+        let symbol = envelope_to_symbol(&env, object_id);
+        received.push(AuthenticatedSymbol::from_parts(
+            symbol,
+            AuthenticationTag::from_bytes(tag),
+        ));
+    }
+    received
+}
+
 /// Feed `symbols` into a fresh RaptorQ decoder for the object and attempt to
 /// recover the original bytes.
-fn decode(object_id: ObjectId, data_len: usize, symbols: &[Symbol]) -> Result<Vec<u8>, ()> {
+fn recover_object(object_id: ObjectId, data_len: usize, symbols: &[Symbol]) -> Result<Vec<u8>, ()> {
     let params = object_params(object_id, data_len);
     let mut pipeline = DecodingPipeline::new(decoding_config());
     pipeline.set_object_params(params).expect("set params");
     for s in symbols {
         let auth = AuthenticatedSymbol::from_parts(s.clone(), AuthenticationTag::zero());
         let _ = pipeline.feed(auth).expect("feed symbol");
+    }
+    pipeline.into_data().map_err(|_| ())
+}
+
+/// Recover authenticated symbols with a receiver-held security context.
+fn recover_object_authenticated(
+    object_id: ObjectId,
+    data_len: usize,
+    symbols: &[AuthenticatedSymbol],
+    verifier: SecurityContext,
+) -> Result<Vec<u8>, ()> {
+    let params = object_params(object_id, data_len);
+    let mut config = decoding_config();
+    config.verify_auth = true;
+    let mut pipeline = DecodingPipeline::with_auth(config, verifier);
+    pipeline.set_object_params(params).expect("set params");
+    for s in symbols {
+        let _ = pipeline.feed(s.clone()).map_err(|_| ())?;
     }
     pipeline.into_data().map_err(|_| ())
 }
@@ -180,9 +226,47 @@ fn raptorq_symbols_recover_over_quic_datagrams_with_source_loss() {
     );
     assert_eq!(server.datagrams_received(), sent.len() as u64);
 
-    let decoded = decode(object_id, DATA_LEN, &received)
+    let decoded = recover_object(object_id, DATA_LEN, &received)
         .expect("K-of-N survivors recover the object despite the lost source symbols");
     assert_eq!(decoded, data, "recovered bytes match the original exactly");
+}
+
+#[test]
+fn authenticated_symbols_recover_over_quic_datagrams_with_source_loss() {
+    let cx = test_cx();
+    let (mut client, mut server) = established_pair(&cx);
+    let auth = SecurityContext::for_testing(0xB4A6_0001);
+    let object_id = ObjectId::from_u128(0xA17);
+    let data = make_data(DATA_LEN);
+    let block_k = DATA_LEN.div_ceil(usize::from(SYMBOL_SIZE)); // 8
+
+    let symbols = encode_symbols(object_id, &data, 8);
+    let mut sent = Vec::new();
+    let mut dropped_source = 0usize;
+    for s in &symbols {
+        if matches!(s.kind(), SymbolKind::Source) && dropped_source < 4 {
+            dropped_source += 1;
+            continue;
+        }
+        sent.push(s.clone());
+    }
+    assert_eq!(dropped_source, 4);
+    assert!(sent.len() >= block_k);
+
+    let received =
+        spray_and_collect_authenticated(&cx, &mut client, &mut server, &sent, object_id, &auth);
+    assert_eq!(received.len(), sent.len());
+    assert_eq!(server.datagrams_received(), sent.len() as u64);
+
+    let decoded = recover_object_authenticated(object_id, DATA_LEN, &received, auth.clone())
+        .expect("matching auth key verifies symbols and recovers after source loss");
+    assert_eq!(decoded, data);
+
+    let wrong_key = SecurityContext::for_testing(0xB4A6_0002);
+    assert!(
+        recover_object_authenticated(object_id, DATA_LEN, &received, wrong_key).is_err(),
+        "a receiver with the wrong key must fail closed instead of decoding"
+    );
 }
 
 #[test]
@@ -223,7 +307,7 @@ fn multi_block_object_recovers_over_quic_datagrams_with_cross_block_source_loss(
         "bridge must deliver symbols from both source blocks"
     );
 
-    let decoded = decode(object_id, data.len(), &received)
+    let decoded = recover_object(object_id, data.len(), &received)
         .expect("multi-block K-of-N survivors recover after cross-block source loss");
     assert_eq!(
         decoded, data,
@@ -232,7 +316,7 @@ fn multi_block_object_recovers_over_quic_datagrams_with_cross_block_source_loss(
 }
 
 #[test]
-fn below_threshold_symbol_count_fails_to_decode() {
+fn below_threshold_symbol_count_fails_to_recover() {
     let cx = test_cx();
     let (mut client, mut server) = established_pair(&cx);
     let object_id = ObjectId::from_u128(0xB8);
@@ -246,7 +330,7 @@ fn below_threshold_symbol_count_fails_to_decode() {
     assert_eq!(received.len(), block_k - 1);
 
     assert!(
-        decode(object_id, DATA_LEN, &received).is_err(),
+        recover_object(object_id, DATA_LEN, &received).is_err(),
         "fewer than K symbols must not decode (fountain threshold, fail closed)"
     );
 }
