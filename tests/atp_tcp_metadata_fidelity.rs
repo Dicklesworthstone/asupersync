@@ -132,6 +132,20 @@ fn run_sender(addr: SocketAddr, source: PathBuf, policy: MetadataPolicy) -> Resu
     }))
 }
 
+fn run_sender_with_config(
+    addr: SocketAddr,
+    source: PathBuf,
+    config: TransferConfig,
+) -> Result<SendReport, TransportError> {
+    let runtime = RuntimeBuilder::multi_thread()
+        .build()
+        .expect("sender runtime");
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("sender cx");
+        send_path(&cx, addr, &source, config, "sender").await
+    }))
+}
+
 #[test]
 fn metadata_roundtrip_preserves_mode_mtime_and_symlink() {
     let root = unique_tmp("fidelity");
@@ -467,5 +481,47 @@ fn sparse_file_round_trips_and_stays_sparse() {
         out_meta.blocks() * 512 < TOTAL / 2,
         "receiver file must stay sparse (allocated {} of {TOTAL} bytes)",
         out_meta.blocks() * 512
+    );
+}
+
+#[test]
+fn hardlinks_are_preserved_when_enabled() {
+    // 7qatur: with the opt-in preserve_hardlinks flag, two source files sharing
+    // an inode are sent once and re-linked on the receiver — both arrive with
+    // the content AND share an inode (not duplicated).
+    let root = unique_tmp("hardlink");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    std::fs::write(tree.join("original.txt"), b"shared content\n").unwrap();
+    std::fs::hard_link(tree.join("original.txt"), tree.join("link.txt")).unwrap();
+    assert_eq!(
+        std::fs::metadata(tree.join("original.txt")).unwrap().ino(),
+        std::fs::metadata(tree.join("link.txt")).unwrap().ino(),
+        "source files must be hardlinked"
+    );
+
+    // Hardlink detection is sender-side; the receiver honors the manifest's
+    // hardlink_target unconditionally.
+    let send_config = TransferConfig {
+        preserve_hardlinks: true,
+        ..TransferConfig::default()
+    };
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), MetadataPolicy::portable());
+    let send = run_sender_with_config(addr, tree.clone(), send_config).expect("send");
+    let recv = recv_handle.join().expect("recv thread").expect("recv");
+    assert!(send.receipt.committed && recv.committed);
+
+    let out_a = dst_dir.join("project").join("original.txt");
+    let out_b = dst_dir.join("project").join("link.txt");
+    assert_eq!(std::fs::read(&out_a).unwrap(), b"shared content\n");
+    assert_eq!(std::fs::read(&out_b).unwrap(), b"shared content\n");
+    assert_eq!(
+        std::fs::metadata(&out_a).unwrap().ino(),
+        std::fs::metadata(&out_b).unwrap().ino(),
+        "receiver files must be hardlinked (share an inode), not duplicated"
     );
 }

@@ -122,6 +122,12 @@ pub struct EntryMetadata {
     /// Symlink target (forward-slash or platform path text) for `Symlink` kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symlink_target: Option<String>,
+    /// Hardlink primary: when set, this entry is a hardlink to another entry in
+    /// the same transfer (the value is that primary's transfer-relative path).
+    /// Such an entry carries no content — the receiver `hard_link`s it to the
+    /// primary (which sorts earlier and is committed first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardlink_target: Option<String>,
 }
 
 impl EntryMetadata {
@@ -136,6 +142,7 @@ impl EntryMetadata {
             && self.uid.is_none()
             && self.gid.is_none()
             && self.symlink_target.is_none()
+            && self.hardlink_target.is_none()
     }
 
     /// Append this entry's canonical, domain-separated encoding to `hasher`. The
@@ -150,14 +157,19 @@ impl EntryMetadata {
         hash_opt_u32(hasher, self.mtime_nanos);
         hash_opt_u32(hasher, self.uid);
         hash_opt_u32(hasher, self.gid);
-        match &self.symlink_target {
-            Some(t) => {
-                hasher.update([1u8]);
-                hasher.update((t.len() as u64).to_be_bytes());
-                hasher.update(t.as_bytes());
-            }
-            None => hasher.update([0u8]),
+        hash_opt_str(hasher, self.symlink_target.as_deref());
+        hash_opt_str(hasher, self.hardlink_target.as_deref());
+    }
+}
+
+fn hash_opt_str(hasher: &mut Sha256, v: Option<&str>) {
+    match v {
+        Some(s) => {
+            hasher.update([1u8]);
+            hasher.update((s.len() as u64).to_be_bytes());
+            hasher.update(s.as_bytes());
         }
+        None => hasher.update([0u8]),
     }
 }
 
@@ -328,6 +340,37 @@ pub async fn read_entry_metadata(
         meta.file_kind = FileKind::Directory;
     }
     Ok(meta)
+}
+
+/// Returns the `(dev, ino)` identity of `abs_path` when it is a regular file —
+/// the basis for detecting hardlinks within a transfer (two entries sharing an
+/// inode are hardlinks). Returns `None` for symlinks/dirs/special files, or on
+/// non-unix targets.
+///
+/// # Errors
+///
+/// Returns [`StreamingError`] if the path cannot be stat'd.
+#[cfg(unix)]
+pub async fn inode_key_if_regular(abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+    use std::os::unix::fs::MetadataExt;
+    let lmeta = crate::fs::symlink_metadata(abs_path)
+        .await
+        .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?;
+    if lmeta.is_file() {
+        Ok(Some((lmeta.inner.dev(), lmeta.inner.ino())))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Non-unix: hardlink detection is unsupported; never reports an inode identity.
+///
+/// # Errors
+///
+/// Never returns an error on non-unix targets.
+#[cfg(not(unix))]
+pub async fn inode_key_if_regular(_abs_path: &Path) -> Result<Option<(u64, u64)>, StreamingError> {
+    Ok(None)
 }
 
 /// Apply captured metadata to a committed regular file at `out_path`.
@@ -550,6 +593,7 @@ mod tests {
             uid: Some(1000),
             gid: Some(1000),
             symlink_target: Some("../t".to_string()),
+            hardlink_target: None,
         };
         let js = serde_json::to_string(&m).expect("ser");
         let back: EntryMetadata = serde_json::from_str(&js).expect("de");

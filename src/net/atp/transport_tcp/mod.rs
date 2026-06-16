@@ -140,6 +140,12 @@ pub struct TransferConfig {
     /// unchanged — the per-entry SHA-256 / merkle still covers the full logical
     /// bytes (holes read back as zeros), so a hole-punching error fails closed.
     pub sparse_files: bool,
+    /// Opt-in hardlink preservation (rsync `-H`). When `true`, files that share
+    /// an inode within the transfer are sent once (the first by path carries the
+    /// content); the receiver `hard_link`s the rest to it instead of writing
+    /// duplicate copies. When `false` (default), each is sent and written
+    /// independently.
+    pub preserve_hardlinks: bool,
 }
 
 impl Default for TransferConfig {
@@ -153,6 +159,7 @@ impl Default for TransferConfig {
             metadata_policy: MetadataPolicy::default(),
             allow_special_files: false,
             sparse_files: false,
+            preserve_hardlinks: false,
         }
     }
 }
@@ -772,14 +779,32 @@ pub async fn send_path(
     let mut digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());
     let mut metadatas: Vec<EntryMetadata> = Vec::with_capacity(entries.len());
     let mut total_bytes: u64 = 0;
+    // Hardlink detection: the first entry (by sorted path) for a given inode is
+    // the primary that carries the content; later entries sharing the inode are
+    // hardlinks to it (sent content-free, `hard_link`ed on the receiver).
+    let mut hardlink_primary: std::collections::HashMap<(u64, u64), String> =
+        std::collections::HashMap::new();
     for entry in &entries {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        let metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
+        let mut metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
+        if config.preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
+            if let Some(key) =
+                crate::net::atp::transport_common::metadata::inode_key_if_regular(&entry.abs_path)
+                    .await?
+            {
+                if let Some(primary) = hardlink_primary.get(&key) {
+                    metadata.hardlink_target = Some(primary.clone());
+                } else {
+                    hardlink_primary.insert(key, entry.rel_path.clone());
+                }
+            }
+        }
         // Only regular files carry content bytes. Symlinks (target in
-        // `metadata`), empty directories, and special files (FIFO/socket/device)
-        // are zero-content — crucially this avoids `hash_file_streaming` opening a
-        // FIFO, which would block the sender waiting for a writer.
-        let zero_content = !matches!(metadata.file_kind, FileKind::Regular);
+        // `metadata`), empty directories, special files (FIFO/socket/device),
+        // and hardlinks-to-a-primary are zero-content — crucially this avoids
+        // `hash_file_streaming` opening a FIFO, which would block the sender.
+        let zero_content =
+            !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some();
         let (size, content_id, content_sha256) = if zero_content {
             // Emit the canonical empty-content digest so the receiver — which
             // sees zero ObjectData frames for this entry — reconstructs the same
@@ -892,10 +917,13 @@ pub async fn send_path(
     // the sender never holds a whole file (or the whole transfer) in memory.
     for (i, entry) in entries.iter().enumerate() {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        // Non-regular entries (symlinks, empty dirs, special files) carry no
-        // content bytes; the receiver materializes them (or skips+logs them)
-        // from the manifest metadata at commit, so emit no ObjectData frames.
-        if !matches!(metadatas[i].file_kind, FileKind::Regular) {
+        // Non-regular entries (symlinks, empty dirs, special files) and
+        // hardlinks-to-a-primary carry no content bytes; the receiver
+        // materializes them from the manifest metadata at commit, so emit no
+        // ObjectData frames.
+        if !matches!(metadatas[i].file_kind, FileKind::Regular)
+            || metadatas[i].hardlink_target.is_some()
+        {
             continue;
         }
         let index = u32::try_from(i).unwrap_or(u32::MAX);
@@ -1316,6 +1344,22 @@ pub async fn receive_connection(
                 if let Some(target) = symlink_target {
                     let _ = crate::fs::remove_file(&out_path).await;
                     crate::fs::symlink(&target, &out_path).await?;
+                    committed_paths.push(out_path);
+                    continue;
+                }
+
+                // A hardlink commits by linking to its primary — which sorts
+                // earlier in the manifest and is therefore already on disk —
+                // rather than writing a duplicate copy. The primary path is
+                // sanitized through `join_relative` (kept under the destination).
+                let hardlink_target = entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.hardlink_target.clone());
+                if let Some(primary_rel) = hardlink_target {
+                    let primary_path = join_relative(&base, &primary_rel)?;
+                    let _ = crate::fs::remove_file(&out_path).await;
+                    crate::fs::hard_link(&primary_path, &out_path).await?;
                     committed_paths.push(out_path);
                     continue;
                 }
