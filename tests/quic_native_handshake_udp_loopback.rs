@@ -10,15 +10,22 @@
 
 #![cfg(all(feature = "tls", feature = "test-internals"))]
 
+use asupersync::bytes::Bytes;
 use asupersync::cx::Cx;
+use asupersync::net::atp::quic::{AtpPacketProtection, AtpPacketProtectionConfig};
 use asupersync::net::quic_core::ConnectionId;
 use asupersync::net::quic_native::handshake_driver::{
     ATP_QUIC_ALPN, QuicHandshakeDriver, client_config, client_handshake_over_udp, server_config,
     server_handshake_over_udp,
 };
-use asupersync::net::quic_native::{QuicUdpEndpoint, QuicUdpEndpointConfig};
+use asupersync::net::quic_native::{
+    ConnectionRouter, NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
+    QuicUdpEndpoint, QuicUdpEndpointConfig, RoutingResult, StreamId,
+};
+use asupersync::time::{timeout, wall_now};
 use futures_lite::future::{block_on, zip};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use std::time::{Duration, Instant};
 
 // Canonical CA + leaf chain (P-256), leaf has SAN DNS:localhost / IP:127.0.0.1 and
 // the serverAuth EKU rustls-webpki requires; the client trusts the CA. Exercises
@@ -151,5 +158,204 @@ fn real_tls13_handshake_completes_over_real_loopback_udp() {
             server.peer_transport_parameters(),
             Some(b"client-transport-params".as_slice())
         );
+    });
+}
+
+/// Advance a freshly-created connection's TLS level machine to the
+/// application-data (Established) state. The actual AEAD keys live in the
+/// installed `AtpPacketProtection`; this only moves the level/key-phase state.
+fn establish_for_application_data(
+    cx: &Cx,
+    connection: &mut NativeQuicConnection,
+) -> Result<(), NativeQuicConnectionError> {
+    connection.begin_handshake(cx)?;
+    connection.on_handshake_keys_available(cx)?;
+    connection.on_1rtt_keys_available(cx)?;
+    connection.record_verified_server_identity();
+    connection.on_handshake_confirmed(cx)
+}
+
+/// End-to-end proof that application data flows over a connection whose 1-RTT
+/// keys were agreed by a REAL handshake over real UDP: run the handshake, hand
+/// the handshake-derived provider to the data plane via
+/// `AtpPacketProtection::from_provider`, then cross a control stream + two
+/// datagrams (the shapes ATP uses for its control protocol + RaptorQ symbols)
+/// over the same real sockets.
+#[test]
+fn datagram_and_stream_cross_real_udp_after_real_handshake() {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let udp_config = QuicUdpEndpointConfig {
+            max_packet_size: 16384,
+            ..QuicUdpEndpointConfig::default()
+        };
+        let mut client_ep =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                .await
+                .expect("bind client UDP");
+        let mut server_ep = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+            .await
+            .expect("bind server UDP");
+        let client_addr = client_ep.local_addr();
+        let server_addr = server_ep.local_addr();
+
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let server_cfg = server_config(
+            vec![parse_one_cert(LEAF_CERT_PEM)],
+            leaf_key(),
+            alpn.clone(),
+        )
+        .expect("server config");
+        let client_cfg =
+            client_config(vec![parse_one_cert(CA_CERT_PEM)], alpn).expect("client config");
+        let mut client_driver = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-transport-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server_driver =
+            QuicHandshakeDriver::server(server_cfg, b"server-transport-params".to_vec())
+                .expect("server driver");
+
+        let dcid =
+            ConnectionId::new(&[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18]).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x44]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).expect("server scid");
+
+        // 1. Real handshake over real UDP.
+        let (client_result, server_result) = zip(
+            client_handshake_over_udp(
+                &cx,
+                &mut client_ep,
+                server_addr,
+                &mut client_driver,
+                dcid,
+                client_scid,
+            ),
+            server_handshake_over_udp(&cx, &mut server_ep, &mut server_driver, dcid, server_scid),
+        )
+        .await;
+        client_result.expect("client handshake");
+        server_result.expect("server handshake");
+        assert!(client_driver.one_rtt_keys_installed() && server_driver.one_rtt_keys_installed());
+
+        // 2. Hand the handshake-derived 1-RTT keys to the existing data plane.
+        let app_cid =
+            ConnectionId::new(&[0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89]).expect("app cid");
+        let config = NativeQuicConnectionConfig::default();
+        let mut client_router = ConnectionRouter::new(config);
+        let mut server_router = ConnectionRouter::new(config);
+        client_router
+            .create_connection(&cx, app_cid, server_addr, false)
+            .await
+            .expect("create client connection");
+        server_router
+            .create_connection(&cx, app_cid, client_addr, true)
+            .await
+            .expect("create server connection");
+        client_router
+            .install_packet_protection(
+                &cx,
+                app_cid,
+                AtpPacketProtection::from_provider(
+                    Box::new(client_driver.into_provider()),
+                    AtpPacketProtectionConfig::default(),
+                ),
+            )
+            .expect("install client protection");
+        server_router
+            .install_packet_protection(
+                &cx,
+                app_cid,
+                AtpPacketProtection::from_provider(
+                    Box::new(server_driver.into_provider()),
+                    AtpPacketProtectionConfig::default(),
+                ),
+            )
+            .expect("install server protection");
+        establish_for_application_data(
+            &cx,
+            client_router
+                .connection_mut_for_testing(&cx, app_cid)
+                .expect("client connection"),
+        )
+        .expect("client reaches app data");
+        establish_for_application_data(
+            &cx,
+            server_router
+                .connection_mut_for_testing(&cx, app_cid)
+                .expect("server connection"),
+        )
+        .expect("server reaches app data");
+
+        // 3. Enqueue an ATP-shaped control stream + two RaptorQ-shaped datagrams.
+        let stream: StreamId;
+        {
+            let conn = client_router
+                .connection_mut_for_testing(&cx, app_cid)
+                .expect("client connection");
+            stream = conn.open_local_bidi(&cx).expect("open control stream");
+            conn.write_stream_bytes(
+                &cx,
+                stream,
+                Bytes::from_static(b"ATP manifest over real QUIC"),
+                true,
+            )
+            .expect("write control bytes");
+            conn.send_datagram(&cx, Bytes::from_static(b"raptorq-symbol-0"))
+                .expect("queue datagram 0");
+            conn.send_datagram(&cx, Bytes::from_static(b"raptorq-symbol-1"))
+                .expect("queue datagram 1");
+        }
+
+        let packets = client_router
+            .drain_application_data_for_testing(&cx, app_cid, server_addr, Instant::now())
+            .await
+            .expect("drain app-data packets");
+        assert!(!packets.is_empty(), "expected protected app-data packets");
+        client_ep
+            .send_batch(&cx, &packets)
+            .await
+            .expect("send app data over real UDP");
+
+        // 4. Server receives, routes, then reads the stream + datagrams.
+        let received = timeout(
+            wall_now(),
+            Duration::from_secs(10),
+            server_ep.receive_batch(&cx, 16),
+        )
+        .await
+        .expect("app-data recv timed out")
+        .expect("receive app data over real UDP");
+        assert!(!received.is_empty(), "expected app-data UDP batch");
+        for packet in received {
+            match server_router
+                .route_packet(&cx, packet)
+                .await
+                .expect("route")
+            {
+                RoutingResult::Routed { .. } => {}
+                other => panic!("expected routed app-data packet, got {other:?}"),
+            }
+        }
+
+        let conn = server_router
+            .connection_mut_for_testing(&cx, app_cid)
+            .expect("server connection");
+        let control = conn
+            .read_stream_bytes(&cx, stream, 1024)
+            .expect("read control bytes");
+        assert_eq!(control.as_ref(), b"ATP manifest over real QUIC");
+        assert!(conn.is_stream_read_eof(stream).expect("control eof"));
+        assert_eq!(
+            conn.recv_datagram().as_deref(),
+            Some(&b"raptorq-symbol-0"[..])
+        );
+        assert_eq!(
+            conn.recv_datagram().as_deref(),
+            Some(&b"raptorq-symbol-1"[..])
+        );
+        assert!(conn.recv_datagram().is_none());
     });
 }
