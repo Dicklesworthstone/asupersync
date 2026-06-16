@@ -36,11 +36,11 @@ use std::time::{Duration, Instant};
 
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
+use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD, DEFAULT_ROUND_TAIL_DRAIN_MS,
     DEFAULT_SYMBOL_SIZE, DEFAULT_UDP_FANOUT, RqConfig,
 };
-use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_tcp::{
     self, DEFAULT_MAX_TRANSFER_BYTES, ReceiveReport, SendReport, TransferConfig, TransportError,
 };
@@ -298,15 +298,38 @@ fn load_private_key(
 }
 
 /// Best-effort default SNI: the host portion of a `host:port` target.
-#[cfg(feature = "tls")]
 fn default_server_name(target: &str) -> String {
-    let host = match target.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
-        _ => target,
+    let target = target.trim();
+    let host = if let Some(after_open) = target.strip_prefix('[') {
+        match after_open.split_once(']') {
+            Some((host, "")) => host,
+            Some((host, after_close))
+                if after_close.strip_prefix(':').is_some_and(|port| {
+                    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+                }) =>
+            {
+                host
+            }
+            None => target,
+            _ => target,
+        }
+    } else {
+        match target.rsplit_once(':') {
+            Some((host, port))
+                if target.matches(':').count() == 1
+                    && !port.is_empty()
+                    && port.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                host
+            }
+            _ => target,
+        }
     };
-    host.trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_string()
+    host.to_string()
+}
+
+fn default_quic_server_name_for_ssh(remote: &RemoteTarget) -> String {
+    default_server_name(ssh_host_without_user(&remote.ssh_host))
 }
 
 /// Apply the shared RQ/QUIC per-symbol auth posture to a base QUIC config.
@@ -342,8 +365,8 @@ fn quic_config_send(
         .server_name
         .clone()
         .unwrap_or_else(|| default_server_name(&args.target));
-    let server_name =
-        ServerName::try_from(name.clone()).map_err(|e| format!("invalid --server-name {name:?}: {e}"))?;
+    let server_name = ServerName::try_from(name.clone())
+        .map_err(|e| format!("invalid --server-name {name:?}: {e}"))?;
     let config = client_config(roots, vec![ATP_QUIC_ALPN.to_vec()])
         .map_err(|e| format!("build QUIC client TLS config: {e:?}"))?;
 
@@ -373,10 +396,9 @@ fn quic_config_recv(
     use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicServerTls};
     use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, server_config};
 
-    let cert_path = args
-        .server_cert
-        .as_deref()
-        .ok_or_else(|| "atp recv --transport quic requires --server-cert <PEM chain>".to_string())?;
+    let cert_path = args.server_cert.as_deref().ok_or_else(|| {
+        "atp recv --transport quic requires --server-cert <PEM chain>".to_string()
+    })?;
     let key_path = args
         .server_key
         .as_deref()
@@ -714,13 +736,18 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
     if args.transport == Transport::Quic
         && (args.server_cert.is_none() || args.server_key.is_none())
     {
-        return Err("SSH bootstrap with --transport quic requires --server-cert and \
+        return Err(
+            "SSH bootstrap with --transport quic requires --server-cert and \
                     --server-key (paths on the remote host to the receiver's PEM \
                     certificate chain and private key)"
-            .to_string());
+                .to_string(),
+        );
     }
 
     let data_host = choose_data_host(&args, remote);
+    if args.transport == Transport::Quic && args.server_name.is_none() {
+        args.server_name = Some(default_quic_server_name_for_ssh(remote));
+    }
     let data_target = socket_target(&data_host, args.remote_listen.port());
     let addr = resolve(&data_target)?;
     let mut child = spawn_remote_receiver(&args, remote, rq_auth.as_ref())?;
@@ -1278,6 +1305,30 @@ mod tests {
         assert!(command.starts_with("ATP_RQ_AUTH_KEY_HEX='000102"));
         assert!(command.contains("'atp' 'recv' '/srv/in box'"));
         assert!(!command.contains("--rq-auth-key-hex"));
+    }
+
+    #[test]
+    fn default_server_name_extracts_host_without_port() {
+        assert_eq!(
+            default_server_name("receiver.example:8472"),
+            "receiver.example"
+        );
+        assert_eq!(default_server_name("[2001:db8::1]:8472"), "2001:db8::1");
+        assert_eq!(default_server_name("[2001:db8::1]"), "2001:db8::1");
+        assert_eq!(default_server_name("2001:db8::1"), "2001:db8::1");
+        assert_eq!(default_server_name("receiver.example"), "receiver.example");
+    }
+
+    #[test]
+    fn ssh_quic_default_server_name_uses_ssh_host_not_remote_path() {
+        let remote = RemoteTarget::parse("user@receiver.example:/srv/inbox").unwrap();
+        assert_eq!(
+            default_quic_server_name_for_ssh(&remote),
+            "receiver.example"
+        );
+
+        let remote_v6 = RemoteTarget::parse("user@[2001:db8::10]:/srv/inbox").unwrap();
+        assert_eq!(default_quic_server_name_for_ssh(&remote_v6), "2001:db8::10");
     }
 }
 
