@@ -122,6 +122,10 @@ pub const DEFAULT_UDP_FANOUT: usize = 4;
 /// matrices live in memory in v1).
 pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Maximum number of files a single transfer manifest may declare. This bounds
+/// receiver bookkeeping derived from attacker-controlled control-plane JSON.
+const MAX_MANIFEST_ENTRIES: usize = 4 * 1024 * 1024;
+
 /// Default bound on fountain feedback rounds before failing closed.
 pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 
@@ -712,6 +716,94 @@ fn safe_base_for_root_name(dest_dir: &Path, root_name: &str) -> Result<PathBuf, 
         )));
     }
     Ok(dest_dir.join(component))
+}
+
+/// Validate an incoming transfer manifest before allocating per-entry decoders.
+///
+/// The manifest is fully controlled by the peer. `total_bytes` alone is not a
+/// sufficient memory bound because each entry size also drives RaptorQ decoder
+/// metadata and each entry creates receiver bookkeeping.
+fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(), RqError> {
+    if manifest.transfer_id.is_empty()
+        || manifest.transfer_id.len() > 64
+        || !manifest
+            .transfer_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric())
+    {
+        return Err(RqError::Frame(format!(
+            "unsafe manifest transfer_id: {}",
+            manifest.transfer_id
+        )));
+    }
+    if manifest.total_bytes > config.max_transfer_bytes {
+        return Err(RqError::TooLarge {
+            size: manifest.total_bytes,
+            max: config.max_transfer_bytes,
+        });
+    }
+    if manifest.entries.len() > MAX_MANIFEST_ENTRIES {
+        return Err(RqError::Frame(format!(
+            "manifest declares {} entries (max {MAX_MANIFEST_ENTRIES})",
+            manifest.entries.len()
+        )));
+    }
+    if !manifest.is_directory && manifest.entries.len() != 1 {
+        return Err(RqError::Frame(format!(
+            "single-file transfer manifest declares {} entries",
+            manifest.entries.len()
+        )));
+    }
+
+    let mut seen_rel_paths = BTreeSet::new();
+    let declared_total =
+        manifest
+            .entries
+            .iter()
+            .enumerate()
+            .try_fold(0u64, |acc, (position, entry)| {
+                let expected = u32::try_from(position).map_err(|_| {
+                    RqError::Frame("manifest contains too many indexed entries".to_string())
+                })?;
+                if entry.index != expected {
+                    return Err(RqError::Frame(format!(
+                        "manifest entry index {} does not match position {expected}",
+                        entry.index
+                    )));
+                }
+                validate_manifest_rel_path(&entry.rel_path)?;
+                if !seen_rel_paths.insert(entry.rel_path.as_str()) {
+                    return Err(RqError::Frame(format!(
+                        "duplicate manifest rel_path: {}",
+                        entry.rel_path
+                    )));
+                }
+                Ok(acc.saturating_add(entry.size))
+            })?;
+    if declared_total > config.max_transfer_bytes {
+        return Err(RqError::TooLarge {
+            size: declared_total,
+            max: config.max_transfer_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn validate_manifest_rel_path(rel: &str) -> Result<(), RqError> {
+    if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
+        return Err(RqError::Source(format!("unsafe manifest rel_path: {rel}")));
+    }
+    for component in rel.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.contains('\\')
+            || component.contains(':')
+        {
+            return Err(RqError::Source(format!("unsafe manifest rel_path: {rel}")));
+        }
+    }
+    Ok(())
 }
 
 /// Join `base` with a forward-slash relative path, rejecting any component that
@@ -1676,12 +1768,7 @@ pub async fn receive_connection(
         });
     }
     let manifest: TransferManifest = parse_json(&manifest_frame)?;
-    if manifest.total_bytes > config.max_transfer_bytes {
-        return Err(RqError::TooLarge {
-            size: manifest.total_bytes,
-            max: config.max_transfer_bytes,
-        });
-    }
+    validate_manifest(&manifest, &config)?;
     let symbol_size = hello.symbol_size;
 
     // Per-entry decoders.
@@ -2521,6 +2608,125 @@ mod tests {
         assert!(safe_base_for_root_name(dest, "").is_err());
         assert!(safe_base_for_root_name(dest, "/").is_err());
         assert!(safe_base_for_root_name(dest, "..").is_err());
+    }
+
+    fn manifest_with(entries: Vec<ManifestEntry>, total_bytes: u64) -> TransferManifest {
+        TransferManifest {
+            transfer_id: "rqtransfer1".to_string(),
+            root_name: "payload".to_string(),
+            is_directory: true,
+            total_bytes,
+            merkle_root_hex: "0".repeat(64),
+            entries,
+        }
+    }
+
+    fn manifest_entry(index: u32, size: u64) -> ManifestEntry {
+        ManifestEntry {
+            index,
+            rel_path: format!("f{index}"),
+            size,
+            sha256_hex: "0".repeat(64),
+        }
+    }
+
+    #[test]
+    fn validate_manifest_accepts_sane_bounds() {
+        let manifest = manifest_with(vec![manifest_entry(0, 100), manifest_entry(1, 200)], 300);
+        assert!(validate_manifest(&manifest, &RqConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_rejects_lying_entry_size() {
+        let manifest = manifest_with(vec![manifest_entry(0, u64::MAX)], 10);
+        assert!(matches!(
+            validate_manifest(&manifest, &RqConfig::default()),
+            Err(RqError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_declared_sum_over_limit() {
+        let config = RqConfig {
+            max_transfer_bytes: 1000,
+            ..RqConfig::default()
+        };
+        let manifest = manifest_with(vec![manifest_entry(0, 600), manifest_entry(1, 600)], 1200);
+        assert!(matches!(
+            validate_manifest(&manifest, &config),
+            Err(RqError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_single_file_with_multiple_entries() {
+        let mut manifest = manifest_with(vec![manifest_entry(0, 10), manifest_entry(1, 20)], 30);
+        manifest.is_directory = false;
+        assert!(matches!(
+            validate_manifest(&manifest, &RqConfig::default()),
+            Err(RqError::Frame(msg)) if msg.contains("single-file transfer")
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_duplicate_relative_paths() {
+        let mut entries = vec![manifest_entry(0, 10), manifest_entry(1, 20)];
+        entries[1].rel_path = entries[0].rel_path.clone();
+        let manifest = manifest_with(entries, 30);
+        assert!(matches!(
+            validate_manifest(&manifest, &RqConfig::default()),
+            Err(RqError::Frame(msg)) if msg.contains("duplicate manifest rel_path")
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_nonsequential_indexes() {
+        let manifest = manifest_with(vec![manifest_entry(0, 10), manifest_entry(7, 20)], 30);
+        assert!(matches!(
+            validate_manifest(&manifest, &RqConfig::default()),
+            Err(RqError::Frame(msg)) if msg.contains("does not match position")
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_unsafe_relative_paths() {
+        for rel_path in [
+            "",
+            "/abs",
+            "\\abs",
+            "../escape",
+            "a/../escape",
+            "a//b",
+            "a\\b",
+            "c:drive",
+        ] {
+            let mut entry = manifest_entry(0, 10);
+            entry.rel_path = rel_path.to_string();
+            let manifest = manifest_with(vec![entry], 10);
+            assert!(
+                matches!(
+                    validate_manifest(&manifest, &RqConfig::default()),
+                    Err(RqError::Source(msg)) if msg.contains("unsafe manifest rel_path")
+                ),
+                "rel_path {rel_path:?} should fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_manifest_rejects_unsafe_transfer_id() {
+        let long = "x".repeat(65);
+        for transfer_id in ["", "../escape", "with/slash", "with-hyphen", long.as_str()] {
+            let mut manifest = manifest_with(vec![manifest_entry(0, 10)], 10);
+            manifest.transfer_id = transfer_id.to_string();
+            assert!(
+                matches!(
+                    validate_manifest(&manifest, &RqConfig::default()),
+                    Err(RqError::Frame(msg)) if msg.contains("unsafe manifest transfer_id")
+                ),
+                "transfer_id {transfer_id:?} should fail closed"
+            );
+        }
     }
 
     #[test]
