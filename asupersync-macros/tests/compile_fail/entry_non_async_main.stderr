@@ -3,3 +3,9 @@ error: asupersync entry macros require an async function
   |
 4 | fn main() {}
   | ^^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/compile_fail/entry_non_async_main.rs:4:13
+  |
+4 | fn main() {}
+  |             ^ consider adding a `main` function to `$DIR/tests/compile_fail/entry_non_async_main.rs`

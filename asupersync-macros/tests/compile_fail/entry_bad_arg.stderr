@@ -3,3 +3,9 @@ error: unsupported asupersync entry argument `flavour`; valid arguments are `fla
   |
 3 | #[main(flavour = "current_thread")]
   |        ^^^^^^^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/compile_fail/entry_bad_arg.rs:4:19
+  |
+4 | async fn main() {}
+  |                   ^ consider adding a `main` function to `$DIR/tests/compile_fail/entry_bad_arg.rs`

@@ -3,3 +3,9 @@ error: asupersync entry macros support only `()` or `Result<(), E>` return types
   |
 4 | async fn returns_u8() -> u8 {
   |                          ^^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/compile_fail/entry_bad_return.rs:6:2
+  |
+6 | }
+  |  ^ consider adding a `main` function to `$DIR/tests/compile_fail/entry_bad_return.rs`

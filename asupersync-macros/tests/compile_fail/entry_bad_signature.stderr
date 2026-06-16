@@ -2,4 +2,10 @@ error: asupersync entry macros support only `()` or `(cx: &Cx)` parameters
  --> tests/compile_fail/entry_bad_signature.rs:4:20
   |
 4 | async fn takes_two(cx: &asupersync::Cx, other: u8) {}
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+ --> tests/compile_fail/entry_bad_signature.rs:4:54
+  |
+4 | async fn takes_two(cx: &asupersync::Cx, other: u8) {}
+  |                                                      ^ consider adding a `main` function to `$DIR/tests/compile_fail/entry_bad_signature.rs`
