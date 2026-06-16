@@ -52,6 +52,7 @@ fn client_config() -> NativeQuicConnectionConfig {
         recv_window: 1 << 18,
         connection_send_limit: 4 << 20,
         connection_recv_limit: 4 << 20,
+        max_datagram_frame_size: 1_200,
         drain_timeout_micros: 2_000_000,
     }
 }

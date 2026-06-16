@@ -24,6 +24,7 @@ use asupersync::bytes::Bytes;
 use asupersync::bytes::BytesMut;
 use asupersync::cx::Cx;
 use asupersync::net::atp::protocol::quic_frames::QuicFrame;
+use asupersync::net::quic_core::TransportParameters;
 use asupersync::net::quic_native::{
     NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, PacketNumberSpace,
 };
@@ -175,6 +176,55 @@ fn oversized_datagram_rejected_and_full_queue_drops_oldest() {
     assert_eq!(payloads.len(), 256);
     assert_eq!(payloads[0], Bytes::from(44u32.to_be_bytes().to_vec()));
     assert_eq!(payloads[255], Bytes::from(299u32.to_be_bytes().to_vec()));
+}
+
+#[test]
+fn negotiated_max_datagram_frame_size_rejects_payload_above_peer_cap() {
+    let cx = Cx::for_testing();
+    let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+    let peer_params = TransportParameters {
+        max_datagram_frame_size: Some(10),
+        ..TransportParameters::default()
+    };
+    conn.apply_peer_transport_parameters(&cx, &peer_params)
+        .expect("apply peer DATAGRAM transport parameter");
+
+    conn.send_datagram(&cx, Bytes::from_static(b"12345678"))
+        .expect("encoded frame fits negotiated cap");
+    let err = conn
+        .send_datagram(&cx, Bytes::from_static(b"123456789"))
+        .expect_err("encoded frame exceeds negotiated cap");
+
+    assert!(matches!(
+        err,
+        NativeQuicConnectionError::DatagramTooLarge {
+            payload_len: 9,
+            max_frame_size: 10,
+            ..
+        }
+    ));
+    assert_eq!(conn.pending_outbound_datagram_count(), 1);
+}
+
+#[test]
+fn absent_peer_max_datagram_frame_size_disables_datagram_send() {
+    let cx = Cx::for_testing();
+    let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+    conn.apply_peer_transport_parameters(&cx, &TransportParameters::default())
+        .expect("apply peer params without DATAGRAM support");
+
+    let err = conn
+        .send_datagram(&cx, Bytes::from_static(b"x"))
+        .expect_err("peer did not negotiate DATAGRAM support");
+    assert!(matches!(
+        err,
+        NativeQuicConnectionError::DatagramTooLarge {
+            payload_len: 1,
+            max_frame_size: 0,
+            ..
+        }
+    ));
+    assert_eq!(conn.pending_outbound_datagram_count(), 0);
 }
 
 #[test]

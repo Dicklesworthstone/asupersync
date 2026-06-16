@@ -11,6 +11,7 @@ use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
 use crate::net::atp::protocol::varint::VarInt;
+use crate::net::quic_core::TransportParameters;
 use std::collections::VecDeque;
 use std::fmt;
 use std::task::{Context as TaskContext, Poll, Waker};
@@ -163,6 +164,8 @@ pub struct NativeQuicConnectionConfig {
     pub connection_send_limit: u64,
     /// Connection-level receive-data limit.
     pub connection_recv_limit: u64,
+    /// Peer-advertised RFC 9221 `max_datagram_frame_size` cap for DATAGRAM frames.
+    pub max_datagram_frame_size: usize,
     /// Drain timeout used by graceful close.
     pub drain_timeout_micros: u64,
 }
@@ -177,6 +180,7 @@ impl Default for NativeQuicConnectionConfig {
             recv_window: 1 << 20,
             connection_send_limit: 16 << 20,
             connection_recv_limit: 16 << 20,
+            max_datagram_frame_size: MAX_DATAGRAM_FRAME_SIZE,
             drain_timeout_micros: 3_000_000,
         }
     }
@@ -221,6 +225,8 @@ pub struct NativeQuicConnection {
     datagrams_sent: u64,
     /// Total outbound DATAGRAM payloads evicted by the bounded drop-oldest queue.
     datagrams_dropped_on_send: u64,
+    /// Peer-advertised maximum DATAGRAM frame size.
+    max_datagram_frame_size: usize,
 }
 
 /// Maximum number of decoded inbound DATAGRAM payloads buffered before the
@@ -280,6 +286,7 @@ impl NativeQuicConnection {
             outbound_datagrams: VecDeque::new(),
             datagrams_sent: 0,
             datagrams_dropped_on_send: 0,
+            max_datagram_frame_size: config.max_datagram_frame_size,
         }
     }
 
@@ -736,6 +743,29 @@ impl NativeQuicConnection {
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         self.migration_disabled = disabled;
+        Ok(())
+    }
+
+    /// Apply peer transport parameters that affect the native data plane.
+    ///
+    /// RFC 9221 DATAGRAM support is opt-in: if the peer omits
+    /// `max_datagram_frame_size`, this connection fails closed for later
+    /// DATAGRAM sends by setting the effective cap to zero.
+    pub fn apply_peer_transport_parameters(
+        &mut self,
+        cx: &Cx,
+        params: &TransportParameters,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.migration_disabled = params.disable_active_migration;
+        self.max_datagram_frame_size = match params.max_datagram_frame_size {
+            Some(max) => usize::try_from(max).map_err(|_| {
+                NativeQuicConnectionError::InvalidState(
+                    "peer max_datagram_frame_size exceeds platform usize",
+                )
+            })?,
+            None => 0,
+        };
         Ok(())
     }
 
@@ -1316,9 +1346,10 @@ impl NativeQuicConnection {
         };
         let mut probe = BytesMut::new();
         frame.encode(&mut probe)?;
-        if probe.len() > MAX_DATAGRAM_FRAME_SIZE {
+        let max_frame_size = self.max_datagram_frame_size;
+        if probe.len() > max_frame_size {
             let encoded_len_s = probe.len().to_string();
-            let max_frame_size_s = MAX_DATAGRAM_FRAME_SIZE.to_string();
+            let max_frame_size_s = max_frame_size.to_string();
             let payload_len_s = payload_len.to_string();
             quic_trace(
                 cx,
@@ -1335,12 +1366,12 @@ impl NativeQuicConnection {
                 "event=datagram_send_drop reason=too_large size={} encoded_len={} max_frame_size={} pn=none",
                 payload_len,
                 probe.len(),
-                MAX_DATAGRAM_FRAME_SIZE
+                max_frame_size
             );
             return Err(NativeQuicConnectionError::DatagramTooLarge {
                 payload_len,
                 encoded_len: probe.len(),
-                max_frame_size: MAX_DATAGRAM_FRAME_SIZE,
+                max_frame_size,
             });
         }
 

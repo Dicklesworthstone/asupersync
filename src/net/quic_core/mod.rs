@@ -37,6 +37,8 @@ pub const TP_ACK_DELAY_EXPONENT: u64 = 0x0a;
 pub const TP_MAX_ACK_DELAY: u64 = 0x0b;
 /// Transport parameter: disable_active_migration.
 pub const TP_DISABLE_ACTIVE_MIGRATION: u64 = 0x0c;
+/// Transport parameter: max_datagram_frame_size (RFC 9221).
+pub const TP_MAX_DATAGRAM_FRAME_SIZE: u64 = 0x20;
 
 /// Errors returned by QUIC core codecs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,6 +282,8 @@ pub struct TransportParameters {
     pub max_ack_delay: Option<u64>,
     /// Whether active migration is disabled.
     pub disable_active_migration: bool,
+    /// Maximum DATAGRAM frame size the endpoint is willing to receive.
+    pub max_datagram_frame_size: Option<u64>,
     /// Unknown parameters preserved from decode.
     pub unknown: Vec<UnknownTransportParameter>,
 }
@@ -320,6 +324,11 @@ impl TransportParameters {
         if self.disable_active_migration {
             encode_parameter(out, TP_DISABLE_ACTIVE_MIGRATION, &[])?;
         }
+        encode_known_u64(
+            out,
+            TP_MAX_DATAGRAM_FRAME_SIZE,
+            self.max_datagram_frame_size,
+        )?;
         for p in &self.unknown {
             encode_parameter(out, p.id, &p.value)?;
         }
@@ -386,6 +395,9 @@ impl TransportParameters {
                         return Err(QuicCoreError::InvalidTransportParameter(id));
                     }
                     tp.disable_active_migration = true;
+                }
+                TP_MAX_DATAGRAM_FRAME_SIZE => {
+                    set_unique_u64(&mut tp.max_datagram_frame_size, id, value)?;
                 }
                 _ => tp.unknown.push(UnknownTransportParameter {
                     id,
@@ -1401,6 +1413,7 @@ mod tests {
             ack_delay_exponent: Some(3),
             max_ack_delay: Some(25),
             disable_active_migration: true,
+            max_datagram_frame_size: Some(1200),
             unknown: vec![],
         };
         let mut encoded = Vec::new();

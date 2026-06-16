@@ -22,6 +22,7 @@ fn native_quic_public_surface_starts_idle_and_rejects_early_app_streams() {
         recv_window: 2048,
         connection_send_limit: 4096,
         connection_recv_limit: 8192,
+        max_datagram_frame_size: 1_200,
         drain_timeout_micros: 10_000,
     };
     let mut connection = QuicConnection::new(config);

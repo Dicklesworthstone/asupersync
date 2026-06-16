@@ -107,6 +107,7 @@ mod parameter_id_tests {
         assert_eq!(TP_ACK_DELAY_EXPONENT, 0x0a);
         assert_eq!(TP_MAX_ACK_DELAY, 0x0b);
         assert_eq!(TP_DISABLE_ACTIVE_MIGRATION, 0x0c);
+        assert_eq!(TP_MAX_DATAGRAM_FRAME_SIZE, 0x20);
     }
 
     #[test]
@@ -263,6 +264,25 @@ mod parameter_value_tests {
                 err,
                 QuicCoreError::InvalidTransportParameter(TP_ACK_DELAY_EXPONENT)
             );
+        }
+    }
+
+    #[test]
+    fn max_datagram_frame_size_roundtrip() {
+        // RFC 9221 §3: presence of this varint transport parameter advertises
+        // DATAGRAM frame support and the maximum frame size the endpoint accepts.
+        for value in [0, 1, 1200, 65_535, QUIC_VARINT_MAX] {
+            let params = TransportParameters {
+                max_datagram_frame_size: Some(value),
+                ..Default::default()
+            };
+            let mut encoded = Vec::new();
+            params
+                .encode(&mut encoded)
+                .expect("encode max_datagram_frame_size");
+            let decoded =
+                TransportParameters::decode(&encoded).expect("decode max_datagram_frame_size");
+            assert_eq!(decoded.max_datagram_frame_size, Some(value));
         }
     }
 
@@ -463,6 +483,7 @@ mod comprehensive_tests {
             ack_delay_exponent: Some(20), // Maximum allowed
             max_ack_delay: Some(QUIC_VARINT_MAX),
             disable_active_migration: true,
+            max_datagram_frame_size: Some(QUIC_VARINT_MAX),
             unknown: vec![
                 UnknownTransportParameter {
                     id: 0xff00,
@@ -499,6 +520,7 @@ mod comprehensive_tests {
             ack_delay_exponent: Some(0),
             max_ack_delay: Some(0),
             disable_active_migration: false,
+            max_datagram_frame_size: Some(0),
             unknown: vec![],
         };
 
