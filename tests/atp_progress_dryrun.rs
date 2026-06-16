@@ -12,15 +12,25 @@
 
 use std::time::Duration;
 
+use asupersync::atp::object::MetadataPolicy;
 use asupersync::cx::Cx;
 use asupersync::net::atp::transport_common::{TransferPlan, TransferProgress, plan_transfer};
 
 const HELLO_WORLD_SHA256: &str =
     "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
 
+/// Plan with the same defaults the `atp` CLI / real TCP send uses
+/// (`MetadataPolicy::default()`, hardlinks off).
 fn plan(source: &std::path::Path) -> TransferPlan {
     let cx = Cx::for_testing();
-    futures_lite::future::block_on(plan_transfer(&cx, source, 4096)).unwrap()
+    futures_lite::future::block_on(plan_transfer(
+        &cx,
+        source,
+        4096,
+        &MetadataPolicy::default(),
+        false,
+    ))
+    .unwrap()
 }
 
 #[test]
@@ -56,6 +66,75 @@ fn dry_run_plan_of_directory_lists_every_file() {
     assert!(rels.contains("a.txt"));
     assert!(rels.contains("sub/b.txt"));
     assert_eq!(p.merkle_root_hex.len(), 64);
+}
+
+#[test]
+fn dry_run_plan_handles_empty_dirs_without_eisdir() {
+    // Regression: `plan_transfer` used to hash *every* entry, but
+    // `collect_entries` emits an explicit entry for an empty subdir (J2). Opening
+    // a directory as a file and reading it yields `EISDIR`, so the dry-run errored
+    // on any tree with an empty dir. The faithful plan classifies it as a
+    // zero-content directory entry — exactly what the sender commits.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    std::fs::write(base.join("a.txt"), b"aaaa").unwrap(); // 4 bytes of content
+    std::fs::create_dir_all(base.join("empty")).unwrap(); // empty subdir -> J2 entry
+
+    let p = plan(base); // must not error
+    assert!(p.is_directory);
+    // Only the regular file contributes bytes; the directory is zero-content.
+    assert_eq!(p.total_bytes, 4);
+    let by_rel: std::collections::BTreeMap<&str, u64> =
+        p.entries.iter().map(|e| (e.rel_path.as_str(), e.size)).collect();
+    assert_eq!(by_rel.get("a.txt"), Some(&4));
+    assert_eq!(
+        by_rel.get("empty"),
+        Some(&0),
+        "empty dir is a zero-content plan entry, not a hashed file"
+    );
+    assert_eq!(p.merkle_root_hex.len(), 64);
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_plan_treats_symlink_as_zero_content() {
+    // With `preserve_symlinks` (the default), a symlink carries its target as
+    // metadata and contributes zero content bytes — it must NOT be followed and
+    // hashed as if it were the target's bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    std::fs::write(base.join("real.txt"), b"hello world").unwrap(); // 11 bytes
+    std::os::unix::fs::symlink("real.txt", base.join("link.txt")).unwrap();
+
+    let p = plan(base);
+    let by_rel: std::collections::BTreeMap<&str, u64> =
+        p.entries.iter().map(|e| (e.rel_path.as_str(), e.size)).collect();
+    assert_eq!(by_rel.get("real.txt"), Some(&11));
+    assert_eq!(
+        by_rel.get("link.txt"),
+        Some(&0),
+        "symlink carries no content bytes in the plan"
+    );
+    // The target's bytes are counted once (for the real file), not twice.
+    assert_eq!(p.total_bytes, 11);
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_plan_tolerates_dangling_symlink() {
+    // Regression: the old code did `File::open` on the symlink, which `ENOENT`s on
+    // a dangling link and failed the whole dry-run. A preserved symlink records
+    // its (possibly broken) target as metadata and is zero-content.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    std::fs::write(base.join("real.txt"), b"data!").unwrap(); // 5 bytes
+    std::os::unix::fs::symlink("nonexistent-target", base.join("dangling")).unwrap();
+
+    let p = plan(base); // must not error
+    let by_rel: std::collections::BTreeMap<&str, u64> =
+        p.entries.iter().map(|e| (e.rel_path.as_str(), e.size)).collect();
+    assert_eq!(by_rel.get("dangling"), Some(&0));
+    assert_eq!(p.total_bytes, 5);
 }
 
 #[test]

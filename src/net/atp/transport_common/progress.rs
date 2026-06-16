@@ -16,11 +16,16 @@
 //! independent of the wire transport (TCP, RaptorQ, QUIC). Rendering a plan or a
 //! progress line to a CLI is the consumer's job (Phase F).
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
+use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
 use crate::cx::Cx;
 
+use super::metadata::{FileKind, inode_key_if_regular, read_entry_metadata};
 use super::streaming::{
     EntryDigest, StreamingError, collect_entries, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode,
@@ -78,10 +83,23 @@ impl From<StreamingError> for PlanError {
 /// SHA-256s, total bytes, and merkle root — matches exactly what a real transfer
 /// would commit to. `chunk_size` is the streaming read-buffer size (clamped to
 /// at least 1).
+///
+/// `metadata_policy` and `preserve_hardlinks` must match the real send's
+/// [`TransferConfig`](crate::net::atp::transport_tcp::TransferConfig) so the plan
+/// is faithful: like the sender's first pass, only regular, non-hardlink-secondary
+/// files carry content. Symlinks (whose target is metadata), directories
+/// (including explicit empty-dir entries), special files (FIFO/socket/device), and
+/// hardlinks to an already-seen inode are zero-content and use the canonical empty
+/// digest — they are **not** opened by [`hash_file_streaming`], which would
+/// `EISDIR` on a directory or follow and hash a symlink's target. With these
+/// inputs the per-entry digests, and hence the flat merkle root, are byte-for-byte
+/// what the sender commits in the manifest.
 pub async fn plan_transfer(
     cx: &Cx,
     source: &Path,
     chunk_size: usize,
+    metadata_policy: &MetadataPolicy,
+    preserve_hardlinks: bool,
 ) -> Result<TransferPlan, PlanError> {
     cx.checkpoint().map_err(|_| PlanError::Cancelled)?;
 
@@ -90,10 +108,32 @@ pub async fn plan_transfer(
     let mut read_buf = vec![0u8; chunk_size.max(1)];
     let mut digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());
     let mut total_bytes: u64 = 0;
+    // Hardlink detection mirrors the sender: the first entry (by sorted path) for
+    // a given inode is the primary that carries content; later entries sharing the
+    // inode are hardlinks sent content-free.
+    let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
     for entry in &entries {
         cx.checkpoint().map_err(|_| PlanError::Cancelled)?;
-        let (size, content_id, content_sha256) =
-            hash_file_streaming(&entry.abs_path, &mut read_buf).await?;
+        let metadata = read_entry_metadata(&entry.abs_path, metadata_policy).await?;
+        let mut is_hardlink_secondary = false;
+        if preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
+            if let Some(key) = inode_key_if_regular(&entry.abs_path).await? {
+                // `insert` returns `false` when the inode was already seen, i.e.
+                // this entry is a hardlink to an earlier primary (zero content).
+                is_hardlink_secondary = !seen_inodes.insert(key);
+            }
+        }
+        // Only regular, non-hardlink-secondary files carry content; everything
+        // else gets the canonical empty digest — identical to the sender's first
+        // pass — and is never opened by `hash_file_streaming`.
+        let zero_content =
+            !matches!(metadata.file_kind, FileKind::Regular) || is_hardlink_secondary;
+        let (size, content_id, content_sha256) = if zero_content {
+            let empty_sha: [u8; 32] = Sha256::digest(b"").into();
+            (0u64, ObjectId::content(ContentId::from_bytes(b"")), empty_sha)
+        } else {
+            hash_file_streaming(&entry.abs_path, &mut read_buf).await?
+        };
         total_bytes = total_bytes.saturating_add(size);
         digests.push(EntryDigest {
             rel_path: entry.rel_path.clone(),

@@ -378,11 +378,21 @@ fn run_send(args: SendArgs) -> Result<(), String> {
 fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     let runtime = build_runtime(args.workers)?;
     let source = args.source.clone();
-    let chunk_size = tcp_config(args.max_bytes).chunk_size;
+    // Use the exact config a real TCP send would (`tcp_config`) so the printed
+    // plan matches what the transfer commits: same chunk size, metadata policy
+    // (symlink/dir/special-file handling), and hardlink dedup.
+    let cfg = tcp_config(args.max_bytes);
     let plan = runtime
         .block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("dry-run cx");
-            plan_transfer(&cx, &source, chunk_size).await
+            plan_transfer(
+                &cx,
+                &source,
+                cfg.chunk_size,
+                &cfg.metadata_policy,
+                cfg.preserve_hardlinks,
+            )
+            .await
         }))
         .map_err(|e| e.to_string())?;
     print_json(&plan);
