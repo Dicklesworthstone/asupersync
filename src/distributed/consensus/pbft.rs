@@ -240,7 +240,14 @@ impl<T: PbftTransport> PbftNode<T> {
 
         let state = PbftState {
             view: ViewNumber::new(0),
-            sequence: SequenceNumber::new(0),
+            // Sequence numbers are assigned starting at 1. `last_executed` is the
+            // watermark of the highest sequence already executed, and starts at 0
+            // to mean "nothing executed yet". Execution is gap-free and gated on
+            // `sequence == last_executed.next()` (see `handle_commit`), so the
+            // first batch MUST be sequence 1 — otherwise `0 == 0.next() == 1` is
+            // never satisfied and the first batch (and thus the whole pipeline)
+            // can never execute.
+            sequence: SequenceNumber::new(1),
             log: HashMap::new(),
             pending_requests: VecDeque::new(),
             last_executed: SequenceNumber::new(0),
