@@ -4,10 +4,10 @@
 //! churn): the ATP-over-QUIC transport exposes a public API that mirrors
 //! `transport_tcp`'s shapes EXACTLY, reuses the manifest/report/receipt wire
 //! types, validates its `QuicConfig`, and makes unwired transfer entry points
-//! FAIL CLOSED with a typed `QuicTransportError::NotImplemented`, never a fake
-//! success. B3 has since wired `receive_connection`; this contract now also
-//! pins that it fails closed on invalid connection state instead of regressing
-//! to the old scaffold.
+//! FAIL CLOSED with typed errors, never fake success. B2 has since wired
+//! `send_path` source preflight before the native connect boundary, and B3 has
+//! wired `receive_connection`; this contract pins those boundaries instead of
+//! the old all-`NotImplemented` scaffold.
 //!
 //! These tests drive the real public functions (no mocks). The async entry
 //! points are exercised with a runtime-free `block_on`, and `Cx::for_testing`
@@ -22,9 +22,11 @@ use std::time::Duration;
 use asupersync::cx::Cx;
 use asupersync::net::atp::transport_quic::{
     self, ManifestEntry, QuicConfig, QuicTransportError, ReceiveReceipt, ReceiveReport, SendReport,
-    TransferManifest, receive_connection, send_path,
+    TransferManifest, receive_connection, receive_once, send_path,
 };
-use asupersync::net::quic_native::{NativeQuicConnection, NativeQuicConnectionConfig};
+use asupersync::net::quic_native::{
+    ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionConfig,
+};
 
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     futures_lite::future::block_on(fut)
@@ -232,16 +234,33 @@ fn receipt_json_roundtrips_committed_and_rejected() {
     }
 }
 
-// ─── Fail-closed: every unwired op returns a typed error, never fake success ──
+// ─── Fail-closed: unwired boundaries return typed errors, never fake success ──
 
 #[test]
-fn send_path_fails_closed_not_fake_success() {
+fn send_path_rejects_missing_source_before_native_connect() {
     let cx = Cx::for_testing();
     let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
     let result: Result<SendReport, QuicTransportError> = block_on(send_path(
         &cx,
         addr,
         Path::new("/nonexistent"),
+        QuicConfig::default(),
+        "sender",
+    ));
+    assert!(matches!(result, Err(QuicTransportError::Source(_))));
+}
+
+#[test]
+fn send_path_valid_source_fails_closed_at_native_connect_boundary() {
+    let cx = Cx::for_testing();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let source = temp.path().join("payload.bin");
+    std::fs::write(&source, b"payload").expect("write source");
+    let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let result: Result<SendReport, QuicTransportError> = block_on(send_path(
+        &cx,
+        addr,
+        &source,
         QuicConfig::default(),
         "sender",
     ));
@@ -286,5 +305,39 @@ fn receive_connection_rejects_missing_control_stream_without_fake_success() {
             ..
         }) => panic!("receive_connection should stay wired past the B1 scaffold"),
         Err(_) => {}
+    }
+}
+
+#[test]
+fn receive_once_rejects_empty_endpoint_without_fake_success() {
+    let cx = Cx::for_testing();
+    let mut endpoint = block_on(ManagedQuicEndpoint::bind(
+        &cx,
+        "127.0.0.1:0".parse().unwrap(),
+        ManagedEndpointConfig {
+            is_server: true,
+            ..ManagedEndpointConfig::default()
+        },
+    ))
+    .expect("managed endpoint should bind");
+
+    let result: Result<ReceiveReport, QuicTransportError> = block_on(receive_once(
+        &cx,
+        &mut endpoint,
+        Path::new("/tmp"),
+        QuicConfig::default(),
+        "receiver",
+    ));
+    match result {
+        Ok(report) => panic!("empty endpoint must not fake success: {report:?}"),
+        Err(QuicTransportError::Timeout {
+            operation: "receive_once accept",
+            ..
+        }) => {}
+        Err(QuicTransportError::NotImplemented {
+            operation: "receive_once",
+            ..
+        }) => panic!("receive_once should stay wired past the B1 scaffold"),
+        Err(err) => panic!("empty endpoint should fail closed as accept timeout, got {err:?}"),
     }
 }

@@ -14,9 +14,14 @@
 //! - [`send_path`] → `asupersync-arq-quic-epic-b0k8qo.2.2` (B2: QUIC sender
 //!   coroutine — connect, verify identity, manifest, encode + spray RaptorQ
 //!   symbols across QUIC DATAGRAMs, fountain feedback).
-//! - [`receive_once`] / [`serve`] →
-//!   `asupersync-arq-quic-epic-b0k8qo.2.3` (B3: QUIC receiver coroutine —
-//!   accept, manifest, feed the decoder from DATAGRAMs, verify, commit).
+//! - [`receive_once`] consumes one connection already routed into a
+//!   [`ManagedQuicEndpoint`] and delegates to the wired accepted-connection
+//!   receiver body. Live endpoint pumping and persistent serving remain B3
+//!   follow-up work.
+//! - [`serve`] →
+//!   `asupersync-arq-quic-epic-b0k8qo.2.3` (B3: persistent QUIC receiver
+//!   coroutine — accept loop, manifest, feed the decoder from DATAGRAMs,
+//!   verify, commit).
 //!
 //! Until a given transfer entry point is wired, it **fails closed**: it
 //! validates its configuration, emits a structured config summary, and returns
@@ -25,9 +30,10 @@
 //! "every unwired op fails closed (typed error, never fake success)" rule.
 //! [`receive_connection`] is the first wired B3 receiver surface: it consumes an
 //! already-established native QUIC connection, verifies decoded entries, commits
-//! them under the destination root, and returns a real report. Endpoint
-//! accept/connect wiring remains fail-closed until [`receive_once`], [`serve`],
-//! and [`send_path`] are wired.
+//! them under the destination root, and returns a real report. [`receive_once`]
+//! now removes a routed endpoint connection and drives that same body. Live
+//! endpoint event-loop pumping, persistent [`serve`], and sender-side
+//! [`send_path`] wiring remain fail-closed until their B2/B3 slices land.
 //!
 //! # Why a scaffold can land ahead of the Phase A data plane
 //!
@@ -82,12 +88,12 @@ use crate::net::atp::transport_common::{
     flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
 };
 use crate::net::quic_native::{
-    ManagedQuicEndpoint, NativeQuicConnection, QuicConnection, StreamDirection, StreamId,
-    StreamRole,
+    ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, QuicConnection,
+    StreamDirection, StreamId, StreamRole,
 };
 use crate::security::AuthenticatedSymbol;
 use crate::types::resource::{PoolConfig, SymbolPool};
-use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
+use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 
 // Reuse the manifest / receipt / report wire+value types so QUIC and TCP share
 // one schema (see module docs). These are the "reuse manifest/report/receipt"
@@ -455,6 +461,15 @@ impl From<StreamingError> for QuicTransportError {
 impl From<crate::net::quic_native::NativeQuicConnectionError> for QuicTransportError {
     fn from(err: crate::net::quic_native::NativeQuicConnectionError) -> Self {
         Self::Quic(err.to_string())
+    }
+}
+
+impl From<ManagedEndpointError> for QuicTransportError {
+    fn from(err: ManagedEndpointError) -> Self {
+        match err {
+            ManagedEndpointError::Cancelled => Self::Cancelled,
+            other => Self::Quic(other.to_string()),
+        }
     }
 }
 
@@ -994,6 +1009,87 @@ fn spray_symbol_round(
 }
 
 #[allow(dead_code)]
+fn source_symbol_for_request(
+    enc: &QuicEntryEncoder,
+    request: QuicSourceSymbolRequest,
+    config: &QuicConfig,
+) -> Result<Symbol, QuicTransportError> {
+    if request.entry != enc.index {
+        return Err(QuicTransportError::Integrity(format!(
+            "source request entry mismatch: request={}, encoder={}",
+            request.entry, enc.index
+        )));
+    }
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let block_start = usize::from(request.sbn)
+        .checked_mul(config.max_block_size)
+        .ok_or_else(|| {
+            QuicTransportError::Integrity("source request block offset overflow".to_string())
+        })?;
+    if block_start >= enc.bytes.len() {
+        return Err(QuicTransportError::Integrity(format!(
+            "source request block {} outside entry {} ({} bytes)",
+            request.sbn,
+            enc.index,
+            enc.bytes.len()
+        )));
+    }
+
+    let block_len = config.max_block_size.min(enc.bytes.len() - block_start);
+    let block_k = block_len.div_ceil(symbol_size).max(1);
+    let esi = usize::try_from(request.esi).map_err(|_| {
+        QuicTransportError::Integrity("source request ESI does not fit usize".to_string())
+    })?;
+    if esi >= block_k {
+        return Err(QuicTransportError::Integrity(format!(
+            "source request esi {} outside entry {} block {} K={}",
+            request.esi, enc.index, request.sbn, block_k
+        )));
+    }
+
+    let start = block_start + esi * symbol_size;
+    let end = (start + symbol_size).min(block_start + block_len);
+    let mut buffer = vec![0u8; symbol_size];
+    if start < end {
+        buffer[..end - start].copy_from_slice(&enc.bytes[start..end]);
+    }
+    Ok(Symbol::new(
+        SymbolId::new(enc.object_id, request.sbn, request.esi),
+        buffer,
+        SymbolKind::Source,
+    ))
+}
+
+#[allow(dead_code)]
+fn send_source_symbol_requests(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    manifest: &TransferManifest,
+    encoders: &[QuicEntryEncoder],
+    requests: &[QuicSourceSymbolRequest],
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut sent = 0u64;
+    for request in requests {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let enc = encoders
+            .iter()
+            .find(|entry| entry.index == request.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "receiver requested source symbol for unknown entry {}",
+                    request.entry
+                ))
+            })?;
+        let symbol = source_symbol_for_request(enc, *request, config)?;
+        send_symbol(cx, conn, &symbol, tag, request.entry, None)?;
+        sent = sent.saturating_add(1);
+    }
+    Ok(sent)
+}
+
+#[allow(dead_code)]
 fn spray_initial_symbols(
     cx: &Cx,
     conn: &mut QuicConnection,
@@ -1019,7 +1115,7 @@ fn send_repair_round_and_object_complete(
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
-    if need.pending.is_empty() {
+    if need.pending.is_empty() && need.source_symbols.is_empty() {
         send_object_complete(cx, conn, control)?;
         return Ok(0);
     }
@@ -1039,7 +1135,19 @@ fn send_repair_round_and_object_complete(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
-    let sent = spray_symbol_round(cx, conn, manifest, encoders, &pending, config, false)?;
+    for request in &need.source_symbols {
+        if !pending.contains(&request.entry) {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested source symbol for non-pending entry {}",
+                request.entry
+            )));
+        }
+    }
+    let sent = if need.source_symbols.is_empty() {
+        spray_symbol_round(cx, conn, manifest, encoders, &pending, config, false)?
+    } else {
+        send_source_symbol_requests(cx, conn, manifest, encoders, &need.source_symbols, config)?
+    };
     send_object_complete(cx, conn, control)?;
     Ok(sent)
 }
@@ -2266,9 +2374,9 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
 
 /// Transfer the file or directory at `source` to `addr` over a QUIC connection.
 ///
-/// Mirrors [`transport_tcp::send_path`]. **Scaffold:** validates the config,
-/// emits a config summary, then fails closed with
-/// [`QuicTransportError::NotImplemented`]. Wired by B2
+/// Mirrors [`transport_tcp::send_path`]. The B2 sender now performs the
+/// streaming source walk/hash/manifest preflight, then fails closed at the
+/// still-unwired native QUIC connect/identity boundary. Wired by B2
 /// (`asupersync-arq-quic-epic-b0k8qo.2.2`).
 ///
 /// [`transport_tcp::send_path`]: crate::net::atp::transport_tcp::send_path
@@ -2282,12 +2390,11 @@ pub async fn send_path(
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
     trace_config_summary(cx, "send_path", &config, peer_id);
-    // Inputs accepted but the wire path is not yet implemented; reference them so
-    // the API shape is fixed without an unused-parameter warning.
-    let _ = (&addr, source);
+    let prepared = prepare_source_manifest(cx, source, &config).await?;
+    let _ = (addr, prepared);
     Err(QuicTransportError::NotImplemented {
         operation: "send_path",
-        wired_by: "asupersync-arq-quic-epic-b0k8qo.2.2 (B2: QUIC sender coroutine)",
+        wired_by: "asupersync-arq-quic-epic-b0k8qo.2.2 (B2: native QUIC connect + identity)",
     })
 }
 
@@ -2297,14 +2404,16 @@ pub async fn send_path(
 /// and return a report.
 ///
 /// Mirrors [`transport_tcp::receive_once`] (with a [`ManagedQuicEndpoint`] in
-/// place of a `TcpListener`). **Scaffold:** validates the config, emits a config
-/// summary, then fails closed with [`QuicTransportError::NotImplemented`]. Wired
-/// by B3 (`asupersync-arq-quic-epic-b0k8qo.2.3`).
+/// place of a `TcpListener`). This entry point consumes the next connection
+/// already routed into the managed endpoint and delegates to
+/// [`receive_connection`]. Endpoint packet pumping is still owned by the native
+/// endpoint layer; when no routed connection is available, this function fails
+/// closed with a typed accept timeout rather than reporting fake success.
 ///
 /// [`transport_tcp::receive_once`]: crate::net::atp::transport_tcp::receive_once
 pub async fn receive_once(
     cx: &Cx,
-    endpoint: &ManagedQuicEndpoint,
+    endpoint: &mut ManagedQuicEndpoint,
     dest_dir: &Path,
     config: QuicConfig,
     peer_id: &str,
@@ -2312,11 +2421,34 @@ pub async fn receive_once(
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
     trace_config_summary(cx, "receive_once", &config, peer_id);
-    let _ = (endpoint, dest_dir);
-    Err(QuicTransportError::NotImplemented {
-        operation: "receive_once",
-        wired_by: "asupersync-arq-quic-epic-b0k8qo.2.3 (B3: QUIC receiver coroutine)",
-    })
+
+    let Some(accepted) = endpoint.take_next_connection(cx)? else {
+        return Err(QuicTransportError::Timeout {
+            operation: "receive_once accept",
+            timeout: config.accept_timeout,
+        });
+    };
+
+    let connection_id = format!("{:?}", accepted.connection_id);
+    let peer = accepted.peer_addr.to_string();
+    cx.trace_with_fields(
+        "atp_quic.receive_once.accepted",
+        &[
+            ("connection_id", connection_id.as_str()),
+            ("peer", peer.as_str()),
+            ("peer_id", peer_id),
+        ],
+    );
+
+    receive_established_native_connection(
+        cx,
+        accepted.connection,
+        accepted.peer_addr,
+        dest_dir,
+        config,
+        peer_id,
+    )
+    .await
 }
 
 /// Drive a single accepted QUIC connection through the receive protocol.
@@ -3572,7 +3704,15 @@ mod tests {
             QuicControlReply::Proof(receipt) => panic!("unexpected proof: {receipt:?}"),
         };
         assert_eq!(got_need.pending, vec![0]);
-        let repair_sent = send_repair_round_and_object_complete(
+        assert_eq!(
+            got_need.source_symbols,
+            vec![QuicSourceSymbolRequest {
+                entry: 0,
+                sbn: 0,
+                esi: 0,
+            }]
+        );
+        let feedback_sent = send_repair_round_and_object_complete(
             &cx,
             &mut client,
             &mut sender_control,
@@ -3582,7 +3722,7 @@ mod tests {
             &config,
         )
         .expect("send repair feedback round");
-        assert!(repair_sent > 0);
+        assert_eq!(feedback_sent, 1);
         pump_until_idle(
             &cx,
             &mut client,
@@ -3592,10 +3732,20 @@ mod tests {
         )
         .expect("deliver repair round");
 
-        let accepted_repair =
+        let source_envelope = recv_symbol_envelope(&mut server, false)
+            .expect("source retransmit envelope parses")
+            .expect("source retransmit datagram delivered");
+        assert!(!source_envelope.is_repair);
+        assert_eq!(source_envelope.entry, 0);
+        assert_eq!(source_envelope.sbn, 0);
+        assert_eq!(source_envelope.esi, 0);
+        let source_symbol = envelope_to_symbol(&source_envelope, decoders[0].object_id);
+        assert!(source_symbol.kind().is_source());
+        assert!(feed_decoded_symbol(&mut decoders[0], source_symbol).expect("feed source"));
+        let accepted_extra =
             drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
-                .expect("receiver drains repair symbols");
-        assert!(accepted_repair > 0);
+                .expect("receiver drains any extra feedback symbols");
+        assert_eq!(accepted_extra, 0);
         receive_object_complete(&cx, &mut server, &mut receiver_control)
             .expect("receiver sees repair object complete");
         assemble_completed_entries(&mut decoders);
@@ -3733,6 +3883,50 @@ mod tests {
                 esi: 2,
             }
         );
+    }
+
+    #[test]
+    fn quic_source_symbol_request_rebuilds_exact_source_payload() {
+        let config = QuicConfig {
+            symbol_size: 512,
+            max_block_size: 1024,
+            ..QuicConfig::default()
+        };
+        let bytes: Vec<u8> = (0..1500).map(|i| (i % 251) as u8).collect();
+        let enc = QuicEntryEncoder {
+            index: 7,
+            object_id: entry_object_id("source-request", 7),
+            bytes: bytes.clone(),
+            repair_cursor: 0,
+        };
+
+        let first_block_tail = source_symbol_for_request(
+            &enc,
+            QuicSourceSymbolRequest {
+                entry: 7,
+                sbn: 0,
+                esi: 1,
+            },
+            &config,
+        )
+        .expect("source symbol");
+        assert!(first_block_tail.kind().is_source());
+        assert_eq!(first_block_tail.sbn(), 0);
+        assert_eq!(first_block_tail.esi(), 1);
+        assert_eq!(first_block_tail.data(), &bytes[512..1024]);
+
+        let final_block = source_symbol_for_request(
+            &enc,
+            QuicSourceSymbolRequest {
+                entry: 7,
+                sbn: 1,
+                esi: 0,
+            },
+            &config,
+        )
+        .expect("final source symbol");
+        assert_eq!(&final_block.data()[..476], &bytes[1024..]);
+        assert!(final_block.data()[476..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
@@ -3908,13 +4102,30 @@ mod tests {
     }
 
     #[test]
-    fn send_path_fails_closed_with_not_implemented() {
+    fn send_path_rejects_missing_source_before_connect() {
         let cx = Cx::for_testing();
         let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
         let result = block_on(send_path(
             &cx,
             addr,
             Path::new("/nonexistent/source"),
+            QuicConfig::default(),
+            "sender",
+        ));
+        assert!(matches!(result, Err(QuicTransportError::Source(_))));
+    }
+
+    #[test]
+    fn send_path_valid_source_fails_closed_at_native_connect_boundary() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("payload.bin");
+        std::fs::write(&source, b"payload").expect("write source");
+        let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let result = block_on(send_path(
+            &cx,
+            addr,
+            &source,
             QuicConfig::default(),
             "sender",
         ));
