@@ -20,7 +20,9 @@ use crate::channel::mpsc;
 use crate::channel::mpsc::{RecvError, SendError};
 use crate::cx::Cx;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
-use crate::http::h1::codec::{HttpError, validate_header_field};
+use crate::http::h1::codec::{
+    HttpError, is_forbidden_trailer, parse_chunk_size_line, validate_header_field,
+};
 
 const DEFAULT_MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_TRAILERS_SIZE: usize = 16 * 1024;
@@ -395,15 +397,13 @@ impl IncomingBodyWriter {
                     };
 
                     let line = &self.buffer.as_ref()[..line_end];
-                    let line_str =
-                        std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
-                    let size_part = line_str.split(';').next().unwrap_or("").trim();
-                    if size_part.is_empty() {
-                        return Err(HttpError::BadChunkedEncoding);
-                    }
-
-                    let chunk_size = usize::from_str_radix(size_part, 16)
-                        .map_err(|_| HttpError::BadChunkedEncoding)?;
+                    // Use the hardened shared parser: it rejects leading/trailing
+                    // whitespace and any non-hexdigit prefix (e.g. "+5", " 5"),
+                    // which a bare trim()+from_str_radix here would accept. That
+                    // divergence is a request-smuggling primitive when a stricter
+                    // intermediary (nginx/envoy) frames the same body differently
+                    // (br-asupersync-usvn1p / -8dl9j7).
+                    let chunk_size = parse_chunk_size_line(line)?;
 
                     let _ = self.buffer.split_to(line_end + 2);
 
@@ -488,6 +488,15 @@ impl IncomingBodyWriter {
                     let name = line_str[..colon].trim();
                     let value = line_str[colon + 1..].trim();
                     validate_header_field(name, value)?;
+                    // br-asupersync-135g0e: RFC 9110 §6.5.1 forbids trailers that
+                    // affect framing, routing, request modifiers, auth, payload
+                    // processing, or cache control. The codec request path rejects
+                    // these; mirror it here so the streaming body path can't be used
+                    // to smuggle a Content-Length / Transfer-Encoding override past
+                    // an intermediary that merges trailers into the header set.
+                    if is_forbidden_trailer(name) {
+                        return Err(HttpError::BadHeader);
+                    }
                     self.trailers.append(
                         HeaderName::from_string(name),
                         HeaderValue::from_bytes(value.as_bytes()),

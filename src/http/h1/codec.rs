@@ -507,7 +507,7 @@ fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), 
 /// processing, and cache-control fields that an intermediary might rely on
 /// when forwarding the message. Comparison is case-insensitive per RFC 9110
 /// §5.1 ("field names are case-insensitive").
-fn is_forbidden_trailer(name: &str) -> bool {
+pub(super) fn is_forbidden_trailer(name: &str) -> bool {
     // Sorted alphabetically for review. Keep in sync with RFC 9110 §6.5.2's
     // restricted-fields table and the related security guidance in §17.13.
     const FORBIDDEN: &[&str] = &[

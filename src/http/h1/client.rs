@@ -6,9 +6,9 @@ use crate::bytes::{Buf, BytesCursor, BytesMut};
 use crate::codec::Encoder;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal, parse_chunk_size_line,
-    parse_header_line, require_transfer_encoding_chunked, unique_header_value,
-    validate_header_field,
+    ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal, is_forbidden_trailer,
+    parse_chunk_size_line, parse_header_line, require_transfer_encoding_chunked,
+    unique_header_value, validate_header_field,
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -1084,6 +1084,14 @@ impl<T> ClientIncomingBody<T> {
                     let name = line_str[..colon].trim();
                     let value = line_str[colon + 1..].trim();
                     validate_header_field(name, value)?;
+                    // br-asupersync-135g0e: RFC 9110 §6.5.1 forbids framing /
+                    // routing / auth / payload / cache-control trailers in either
+                    // direction. Mirror the codec path so a response trailer can't
+                    // smuggle a Content-Length / Transfer-Encoding override into an
+                    // intermediary that merges trailers into the header set.
+                    if is_forbidden_trailer(name) {
+                        return Err(HttpError::BadHeader);
+                    }
                     trailers.append(
                         HeaderName::from_string(name),
                         HeaderValue::from_bytes(value.as_bytes()),
