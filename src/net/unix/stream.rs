@@ -844,6 +844,22 @@ fn recv_with_ancillary_impl(
                 }
             }
             Err(Errno::ENOBUFS) => {
+                // nix 0.31.3 `RecvMsg::cmsgs()` returns `Err(ENOBUFS)` whenever
+                // MSG_CTRUNC is set (src/sys/socket/mod.rs:706-708) — for ANY
+                // truncation, partial or total. So this branch is taken even on
+                // PARTIAL truncation, where the kernel has already installed the
+                // SCM_RIGHTS fds that fit into our fd table (and dropped the
+                // rest). Because the iterator never runs, those installed fds
+                // are not surfaced and never closed.
+                //
+                // KNOWN BUG (br-asupersync-unix-scm-rights-ctrunc-fd-leak): on
+                // partial truncation we leak the installed fds — a peer that
+                // repeatedly oversends fds can exhaust our fd table (DoS).
+                // Recovering them requires walking the raw control buffer
+                // (bounded by the kernel's msg_controllen, which nix's RecvMsg
+                // does not expose) via a raw libc::recvmsg + unsafe CMSG_*
+                // parsing; tracked separately so it lands with a proper unsafe
+                // boundary ledger entry rather than as an ad-hoc fd-juggle.
                 truncated = true;
             }
             Err(errno) => {
@@ -851,13 +867,11 @@ fn recv_with_ancillary_impl(
             }
         }
 
-        // The kernel reports control-message truncation via MSG_CTRUNC. When
-        // more SCM_RIGHTS fds are sent than fit in the control buffer, the fds
-        // that fit are still parsed by cmsgs() (the Ok branch above) while the
-        // kernel drops/closes the rest and sets MSG_CTRUNC — so the ENOBUFS
-        // branch only catches the buffer-too-small-for-any-cmsg case, not
-        // partial truncation. Without this check a caller would see
-        // is_truncated() == false and silently assume it received every fd.
+        // Defense in depth: also flag truncation directly from MSG_CTRUNC so a
+        // caller always observes is_truncated() == true rather than silently
+        // assuming it received every fd. (With nix 0.31.3 the ENOBUFS branch
+        // above already covers the truncated cases; this stays correct if a
+        // future nix relaxes cmsgs() to iterate the fds-that-fit.)
         if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
             truncated = true;
         }
