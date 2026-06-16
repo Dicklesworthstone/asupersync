@@ -580,6 +580,17 @@ impl DecodingPipeline {
         })
     }
 
+    /// Takes a decoded block out of the pipeline without clearing completion
+    /// state.
+    ///
+    /// Streaming receivers use this immediately after a
+    /// [`SymbolAcceptResult::BlockComplete`] event to persist the block to a
+    /// staging file and release the retained in-memory copy. Callers that need a
+    /// final contiguous object should use [`Self::into_data`] instead.
+    pub(crate) fn take_decoded_block(&mut self, sbn: u8) -> Option<Vec<u8>> {
+        self.blocks.get_mut(&sbn)?.decoded.take()
+    }
+
     /// Consumes the pipeline and returns decoded data if complete.
     pub fn into_data(self) -> Result<Vec<u8>, DecodingError> {
         let Some(plans) = &self.block_plans else {

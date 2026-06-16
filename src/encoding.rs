@@ -224,6 +224,53 @@ impl EncodingPipeline {
         }
     }
 
+    /// Encodes one source block with its already-assigned source block number.
+    ///
+    /// This is used by bounded-memory transports that read one block from disk
+    /// at a time but must preserve the same object/SBN layout as
+    /// [`Self::encode_with_repair`] would have produced for the whole object.
+    pub(crate) fn encode_single_block_with_repair<'a>(
+        &'a mut self,
+        object_id: ObjectId,
+        sbn: u8,
+        data: &'a [u8],
+        repair_count: usize,
+    ) -> EncodingIterator<'a> {
+        self.encode_single_block_internal(object_id, sbn, data, Some(repair_count))
+    }
+
+    /// Encodes only repair symbols for one source block.
+    pub(crate) fn encode_single_block_repair_range<'a>(
+        &'a mut self,
+        object_id: ObjectId,
+        sbn: u8,
+        data: &'a [u8],
+        first_repair: usize,
+        repair_count: usize,
+    ) -> RepairEncodingIterator<'a> {
+        let (blocks, symbol_size, plan_error) = match self.plan_single_block(sbn, data) {
+            Ok((blocks, symbol_size)) => (blocks, symbol_size, None),
+            Err(err) => (Vec::new(), 0, Some(err)),
+        };
+
+        self.stats.reset_for(data.len(), blocks.len());
+
+        RepairEncodingIterator {
+            pipeline: self,
+            object_id,
+            data,
+            blocks,
+            block_index: 0,
+            repair_index: 0,
+            first_repair,
+            repair_count,
+            symbol_size,
+            plan_error,
+            systematic_encoder: None,
+            systematic_block_index: None,
+        }
+    }
+
     fn encode_internal<'a>(
         &'a mut self,
         object_id: ObjectId,
@@ -231,6 +278,35 @@ impl EncodingPipeline {
         repair_override: Option<usize>,
     ) -> EncodingIterator<'a> {
         let (blocks, symbol_size, plan_error) = match self.plan_blocks(data) {
+            Ok((blocks, symbol_size)) => (blocks, symbol_size, None),
+            Err(err) => (Vec::new(), 0, Some(err)),
+        };
+
+        self.stats.reset_for(data.len(), blocks.len());
+
+        EncodingIterator {
+            pipeline: self,
+            object_id,
+            data,
+            blocks,
+            block_index: 0,
+            esi: 0,
+            symbol_size,
+            repair_override,
+            plan_error,
+            systematic_encoder: None,
+            systematic_block_index: None,
+        }
+    }
+
+    fn encode_single_block_internal<'a>(
+        &'a mut self,
+        object_id: ObjectId,
+        sbn: u8,
+        data: &'a [u8],
+        repair_override: Option<usize>,
+    ) -> EncodingIterator<'a> {
+        let (blocks, symbol_size, plan_error) = match self.plan_single_block(sbn, data) {
             Ok((blocks, symbol_size)) => (blocks, symbol_size, None),
             Err(err) => (Vec::new(), 0, Some(err)),
         };
@@ -286,6 +362,36 @@ impl EncodingPipeline {
         }
 
         Ok((blocks, symbol_size))
+    }
+
+    fn plan_single_block(
+        &self,
+        sbn: u8,
+        data: &[u8],
+    ) -> Result<(Vec<BlockPlan>, usize), EncodingError> {
+        let symbol_size = self.validate_config()?;
+
+        if data.is_empty() {
+            return Ok((Vec::new(), symbol_size));
+        }
+        if data.len() > self.config.max_block_size {
+            return Err(EncodingError::DataTooLarge {
+                size: data.len(),
+                limit: self.config.max_block_size,
+            });
+        }
+
+        let k = data.len().div_ceil(symbol_size);
+        validate_source_block_k(data.len(), symbol_size, k)?;
+        Ok((
+            vec![BlockPlan {
+                sbn,
+                start: 0,
+                len: data.len(),
+                k,
+            }],
+            symbol_size,
+        ))
     }
 
     fn validate_config(&self) -> Result<usize, EncodingError> {
