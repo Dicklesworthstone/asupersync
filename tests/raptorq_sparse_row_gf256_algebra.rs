@@ -14,7 +14,7 @@
 //! Repro: `cargo test -p asupersync --test raptorq_sparse_row_gf256_algebra`
 
 use asupersync::raptorq::gf256::Gf256;
-use asupersync::raptorq::linalg::{row_scale_add, DenseRow, SparseRow};
+use asupersync::raptorq::linalg::{DenseRow, row_scale_add};
 
 /// Deterministic LCG (Knuth MMIX constants) for reproducible row generation.
 fn lcg(state: &mut u64) -> u64 {
@@ -267,7 +267,11 @@ fn add_is_commutative_and_self_inverse() {
             let a = random_dense(len, seed, 144).to_sparse();
             let b = random_dense(len, seed ^ 0xABCD, 144).to_sparse();
 
-            assert_eq!(a.add(&b), b.add(&a), "add not commutative len={len} seed={seed}");
+            assert_eq!(
+                a.add(&b),
+                b.add(&a),
+                "add not commutative len={len} seed={seed}"
+            );
 
             let self_sum = a.add(&a);
             assert!(

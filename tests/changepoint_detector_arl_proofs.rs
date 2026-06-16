@@ -190,6 +190,7 @@ fn changepoint_receipt_resets_adaptive_cancel_streak_controller() {
     };
     let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
     scheduler.set_adaptive_cancel_streak(true, 1);
+    let mut worker = scheduler.take_workers().into_iter().next().expect("worker");
 
     for index in 0..8u32 {
         let task_id = {
@@ -204,10 +205,9 @@ fn changepoint_receipt_resets_adaptive_cancel_streak_controller() {
                 .0
         };
         scheduler.inject_ready(task_id, 50);
-        assert!(scheduler.run_once(), "ready task {index} should execute");
+        assert!(worker.run_once(), "ready task {index} should execute");
     }
 
-    let mut worker = scheduler.take_workers().into_iter().next().expect("worker");
     let trained = worker.preemption_metrics().clone();
     assert!(
         trained.adaptive_epochs > 0,

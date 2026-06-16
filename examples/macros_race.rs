@@ -15,14 +15,14 @@ mod demo {
     struct RaceCx;
 
     impl RaceCx {
-        async fn race<T>(&self, mut futures: Vec<BoxFuture<T>>) -> T
+        async fn race_drained<T>(&self, mut futures: Vec<BoxFuture<T>>) -> T
         where
             T: Send + 'static,
         {
             futures.remove(0).await
         }
 
-        async fn race_named<T>(&self, mut futures: Vec<NamedFuture<T>>) -> T
+        async fn race_drained_named<T>(&self, mut futures: Vec<NamedFuture<T>>) -> T
         where
             T: Send + 'static,
         {
@@ -30,18 +30,22 @@ mod demo {
             fut.await
         }
 
-        async fn race_timeout<T>(&self, _timeout: Duration, futures: Vec<BoxFuture<T>>) -> T
+        async fn race_drained_timeout<T>(&self, _timeout: Duration, futures: Vec<BoxFuture<T>>) -> T
         where
             T: Send + 'static,
         {
-            self.race(futures).await
+            self.race_drained(futures).await
         }
 
-        async fn race_timeout_named<T>(&self, _timeout: Duration, futures: Vec<NamedFuture<T>>) -> T
+        async fn race_drained_timeout_named<T>(
+            &self,
+            _timeout: Duration,
+            futures: Vec<NamedFuture<T>>,
+        ) -> T
         where
             T: Send + 'static,
         {
-            self.race_named(futures).await
+            self.race_drained_named(futures).await
         }
     }
 
