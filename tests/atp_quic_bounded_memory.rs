@@ -24,11 +24,10 @@ use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::SecurityContext;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 
-/// Match the TCP bounded-memory proof size: large enough that whole-object
-/// buffering would be obvious, while the ceiling leaves room for fixed QUIC/TLS
-/// setup cost in this single-process harness.
-const TRANSFER_BYTES: usize = 64 * 1024 * 1024;
-const PEAK_RSS_GROWTH_CEILING: u64 = 24 * 1024 * 1024;
+/// Stay below the package transfer guard while remaining large enough that
+/// whole-object buffering would exceed the RSS ceiling.
+const TRANSFER_BYTES: usize = 24 * 1024 * 1024;
+const PEAK_RSS_GROWTH_CEILING: u64 = 20 * 1024 * 1024;
 const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 const HARNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
@@ -161,7 +160,7 @@ fn config_pair(seed: u64) -> (QuicConfig, QuicConfig) {
     send.client_tls = Some(client_tls());
     send.chunk_size = 64 * 1024;
     send.symbol_size = 15 * 1024;
-    send.max_block_size = 256 * 1024;
+    send.max_block_size = 120 * 1024;
     send.max_datagram_size = 16 * 1024;
     send.max_transfer_bytes = TRANSFER_BYTES as u64;
     send.repair_overhead = 1.0;
