@@ -1,15 +1,20 @@
-use asupersync::{cx::Cx, runtime::RuntimeBuilder};
+use asupersync::{main, prelude::*};
 
-fn main() {
-    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
-    let total = runtime.block_on(runtime.handle().spawn(async {
-        let cx = Cx::current().expect("runtime task Cx");
-        let mut sum = 0;
-        for i in 0..10 {
-            let mut handle = cx.spawn(move |_cx| async move { i }).expect("spawn");
-            sum += handle.join(&cx).await.expect("join");
-        }
-        sum
-    }));
+#[main]
+async fn main(cx: &Cx) {
+    let scope = cx.scope();
+    let mut set = JoinSet::new(&scope);
+    for i in 0..10_u32 {
+        set.spawn(cx, move |_| async move { Ok::<_, ()>(i) })
+            .expect("spawn");
+    }
+    let total: u32 = set.join_all(cx).await.into_iter().map(expect_ok).sum();
     assert_eq!(total, 45);
+}
+
+fn expect_ok(outcome: Outcome<u32, ()>) -> u32 {
+    match outcome {
+        Outcome::Ok(value) => value,
+        other => panic!("unexpected outcome: {other:?}"),
+    }
 }
