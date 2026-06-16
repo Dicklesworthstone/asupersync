@@ -248,14 +248,19 @@ fn receipt_json_roundtrips_committed_and_rejected() {
 fn send_path_rejects_missing_source_before_native_connect() {
     let cx = Cx::for_testing();
     let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let missing = temp.path().join("definitely-missing-payload.bin");
     let result: Result<SendReport, QuicTransportError> = block_on(send_path(
         &cx,
         addr,
-        Path::new("/nonexistent"),
+        &missing,
         trusted_quic_config(),
         "sender",
     ));
-    assert!(matches!(result, Err(QuicTransportError::Source(_))));
+    assert!(
+        matches!(result, Err(QuicTransportError::Source(_))),
+        "missing source should fail before native connect, got {result:?}"
+    );
 }
 
 #[test]
