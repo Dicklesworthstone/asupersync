@@ -405,7 +405,18 @@ fn histogram_quantile(snapshot: &HistogramSnapshot, quantile: f64) -> Option<f64
     for (index, bucket_count) in snapshot.bucket_counts.iter().enumerate() {
         cumulative = cumulative.saturating_add(*bucket_count);
         if cumulative >= rank {
-            return snapshot.bucket_boundaries.get(index).copied();
+            // `bucket_counts` has one more entry than `bucket_boundaries`: the
+            // final slot is the implicit `+Inf` overflow bucket. When the rank
+            // is satisfied there (`index == bucket_boundaries.len()`, i.e. every
+            // observation exceeds the top configured bucket — precisely the
+            // worst-latency case), clamp to the top finite boundary instead of
+            // returning `None` and silently dropping the percentile (Prometheus
+            // `histogram_quantile` clamp-to-top semantics).
+            return snapshot
+                .bucket_boundaries
+                .get(index)
+                .copied()
+                .or_else(|| snapshot.bucket_boundaries.last().copied());
         }
     }
 
@@ -440,6 +451,36 @@ mod tests {
         assert!(report.summary.health_score >= 0.0);
         assert!(report.summary.health_score <= 1.0);
         assert_eq!(report.summary.active_paths, 0);
+    }
+
+    #[test]
+    fn histogram_quantile_clamps_to_top_bucket_for_overflow_observations() {
+        use crate::observability::metrics::HistogramSnapshot;
+
+        // boundaries [1,5,10] + implicit +Inf; all 4 observations exceed 10 so
+        // they land in the +Inf overflow bucket → counts [0,0,0,4]. Percentiles
+        // must clamp to the top finite boundary (10), not vanish to None (which
+        // is the worst-latency case where percentiles matter most).
+        let overflow = HistogramSnapshot {
+            name: "rtt".to_string(),
+            bucket_boundaries: vec![1.0, 5.0, 10.0],
+            bucket_counts: vec![0, 0, 0, 4],
+            count: 4,
+            sum: 1000.0,
+        };
+        assert_eq!(histogram_quantile(&overflow, 0.50), Some(10.0));
+        assert_eq!(histogram_quantile(&overflow, 0.95), Some(10.0));
+        assert_eq!(histogram_quantile(&overflow, 0.99), Some(10.0));
+
+        // Normal case (observation in a finite bucket) is unchanged.
+        let normal = HistogramSnapshot {
+            name: "rtt".to_string(),
+            bucket_boundaries: vec![1.0, 5.0, 10.0],
+            bucket_counts: vec![0, 3, 0, 0],
+            count: 3,
+            sum: 9.0,
+        };
+        assert_eq!(histogram_quantile(&normal, 0.50), Some(5.0));
     }
 
     #[test]

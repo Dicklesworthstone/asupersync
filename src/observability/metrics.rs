@@ -142,6 +142,12 @@ impl Histogram {
 
     /// Observes a value.
     pub fn observe(&self, value: f64) {
+        // Reject non-finite observations up front. Counting a NaN/Inf while the
+        // sum-update below freezes the sum (its old `is_finite` guard) would
+        // permanently desync `sum` from `count` and corrupt the derived mean.
+        if !value.is_finite() {
+            return;
+        }
         // Find bucket index
         let idx = self
             .buckets
@@ -157,12 +163,11 @@ impl Histogram {
         loop {
             let current_f64 = f64::from_bits(current);
             let new_f64 = current_f64 + value;
-            // Check for non-finite results to prevent NaN/infinity propagation
-            let new_bits = if new_f64.is_finite() {
-                new_f64.to_bits()
-            } else {
-                current // Keep current value if addition would produce non-finite result
-            };
+            // `value` is finite (guarded at fn entry), so `new_f64` is finite
+            // or a saturated ±inf on overflow — never NaN. Record it rather
+            // than freezing the sum, which would break the sum<->count
+            // invariant (count already incremented above).
+            let new_bits = new_f64.to_bits();
             match self.sum.compare_exchange_weak(
                 current,
                 new_bits,
@@ -297,6 +302,11 @@ impl Summary {
 
     /// Observes a value.
     pub fn observe(&self, value: f64) {
+        // Reject non-finite observations (see `Histogram::observe`): counting
+        // them while the sum freezes would desync `sum` from `count`.
+        if !value.is_finite() {
+            return;
+        }
         self.values
             .lock()
             .expect("summary values mutex poisoned")
@@ -307,12 +317,11 @@ impl Summary {
         loop {
             let current_f64 = f64::from_bits(current);
             let new_f64 = current_f64 + value;
-            // Check for non-finite results to prevent NaN/infinity propagation
-            let new_bits = if new_f64.is_finite() {
-                new_f64.to_bits()
-            } else {
-                current // Keep current value if addition would produce non-finite result
-            };
+            // `value` is finite (guarded at fn entry), so `new_f64` is finite
+            // or a saturated ±inf on overflow — never NaN. Record it rather
+            // than freezing the sum, which would break the sum<->count
+            // invariant (count already incremented above).
+            let new_bits = new_f64.to_bits();
             match self.sum.compare_exchange_weak(
                 current,
                 new_bits,

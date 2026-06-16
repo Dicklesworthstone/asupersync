@@ -256,13 +256,17 @@ impl ProcessingStats {
         }
     }
 
-    fn record_processing(&mut self, count: usize, now: SystemTime) {
+    fn record_processing(&mut self, count: usize, now: SystemTime, window: Duration) {
         self.items_processed.push_back((now, count));
         self.total_processed
             .fetch_add(count as u64, Ordering::Relaxed);
 
-        // Keep only samples within the window
-        let cutoff = saturating_system_time_sub(now, Duration::from_secs(60)); // 1 minute window
+        // Keep only samples within the rate window. This MUST match the window
+        // `calculate_rate` divides by: a hardcoded 60s prune here understated
+        // the rate by up to (window/60)x whenever rate_sampling_window > 60s
+        // (the numerator held <=60s of samples while the denominator was the
+        // full window), which could spuriously escalate debt alert levels.
+        let cutoff = saturating_system_time_sub(now, window);
         while let Some(&(time, _)) = self.items_processed.front() {
             if time < cutoff {
                 self.items_processed.pop_front();
@@ -509,7 +513,7 @@ impl CancellationDebtMonitor {
                 stats
                     .entry(work_type)
                     .or_insert_with(ProcessingStats::new)
-                    .record_processing(1, now);
+                    .record_processing(1, now, self.config.rate_sampling_window);
             }
 
             true
@@ -553,7 +557,7 @@ impl CancellationDebtMonitor {
                 stats
                     .entry(work_type)
                     .or_insert_with(ProcessingStats::new)
-                    .record_processing(count, now);
+                    .record_processing(count, now, self.config.rate_sampling_window);
             }
         }
 
@@ -1235,7 +1239,7 @@ mod tests {
             last_rate_time: SystemTime::UNIX_EPOCH,
         };
 
-        stats.record_processing(1, SystemTime::UNIX_EPOCH);
+        stats.record_processing(1, SystemTime::UNIX_EPOCH, Duration::MAX);
         let rate = stats.calculate_rate(
             Duration::MAX,
             SystemTime::UNIX_EPOCH + Duration::from_secs(6),
