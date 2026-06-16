@@ -1653,7 +1653,14 @@ impl NativeQuicConnection {
 }
 
 fn frame_is_ack_eliciting(frame: &QuicFrame) -> bool {
-    !matches!(frame, QuicFrame::Padding { .. } | QuicFrame::Ack { .. })
+    // RFC 9000 §13.2.1: all frames other than ACK, PADDING, and CONNECTION_CLOSE
+    // are ack-eliciting. CONNECTION_CLOSE must not be treated as ack-eliciting,
+    // otherwise a packet carrying only CONNECTION_CLOSE would queue an ACK while
+    // the connection transitions to draining/closing.
+    !matches!(
+        frame,
+        QuicFrame::Padding { .. } | QuicFrame::Ack { .. } | QuicFrame::ConnectionClose { .. }
+    )
 }
 
 fn ack_frame_ranges(
