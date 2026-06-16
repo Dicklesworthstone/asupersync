@@ -76,7 +76,10 @@ use crate::decoding::{DecodingConfig, DecodingPipeline, MissingSourceSymbol, Sym
 use crate::encoding::EncodingPipeline;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
-use crate::net::atp::transport_common::{StreamingError, flat_merkle_root_from_slices, hex_encode};
+use crate::net::atp::transport_common::{
+    EntryDigest, SourceEntry, StreamingError, collect_entries, flat_merkle_root_from_digests,
+    flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
+};
 use crate::net::quic_native::{
     ManagedQuicEndpoint, NativeQuicConnection, QuicConnection, StreamDirection, StreamId,
     StreamRole,
@@ -550,6 +553,24 @@ struct QuicEntryEncoder {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct QuicSourceEntry {
+    index: u32,
+    rel_path: String,
+    abs_path: PathBuf,
+    size: u64,
+    object_id: ObjectId,
+    sha256_hex: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct QuicPreparedSource {
+    manifest: TransferManifest,
+    entries: Vec<QuicSourceEntry>,
+}
+
+#[allow(dead_code)]
 struct QuicEntryDecoder {
     index: u32,
     object_id: ObjectId,
@@ -582,6 +603,125 @@ fn encoders_from_entries(
             bytes: bytes.clone(),
         })
         .collect()
+}
+
+#[allow(dead_code)]
+async fn prepare_source_manifest(
+    cx: &Cx,
+    source: &Path,
+    config: &QuicConfig,
+) -> Result<QuicPreparedSource, QuicTransportError> {
+    config.validate()?;
+    let (root_name, is_directory, source_entries) = collect_entries(source).await?;
+    let _ = quic_safe_base_for_root_name(Path::new("base"), &root_name)?;
+    if is_directory && source_entries.is_empty() {
+        return Err(QuicTransportError::Source(format!(
+            "transport_quic does not yet encode empty directory root {root_name}"
+        )));
+    }
+    let mut read_buf = vec![0_u8; config.chunk_size];
+    let mut digests = Vec::with_capacity(source_entries.len());
+    let mut total_bytes = 0u64;
+
+    for source_entry in &source_entries {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        quic_join_relative(Path::new("base"), &source_entry.rel_path)?;
+        reject_unencoded_source_entry(source_entry).await?;
+
+        let (size, content_id, content_sha256) =
+            hash_file_streaming(&source_entry.abs_path, &mut read_buf).await?;
+        total_bytes = total_bytes
+            .checked_add(size)
+            .ok_or(QuicTransportError::TooLarge {
+                size: u64::MAX,
+                max: config.max_transfer_bytes,
+            })?;
+        if total_bytes > config.max_transfer_bytes {
+            return Err(QuicTransportError::TooLarge {
+                size: total_bytes,
+                max: config.max_transfer_bytes,
+            });
+        }
+        digests.push(EntryDigest {
+            rel_path: source_entry.rel_path.clone(),
+            size,
+            content_id,
+            content_sha256,
+        });
+    }
+
+    let merkle_root_hex = flat_merkle_root_from_digests(&digests);
+    let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, digests.len());
+    let manifest_entries = digests
+        .iter()
+        .enumerate()
+        .map(|(i, digest)| ManifestEntry {
+            index: u32::try_from(i).unwrap_or(u32::MAX),
+            rel_path: digest.rel_path.clone(),
+            size: digest.size,
+            sha256_hex: hex_encode(&digest.content_sha256),
+            metadata: None,
+        })
+        .collect::<Vec<_>>();
+    let manifest = TransferManifest {
+        transfer_id,
+        root_name,
+        is_directory,
+        total_bytes,
+        merkle_root_hex,
+        metadata_root_hex: None,
+        entries: manifest_entries,
+    };
+    validate_quic_manifest(&manifest, config)?;
+
+    let entries = source_entries
+        .into_iter()
+        .zip(digests)
+        .map(|(source_entry, digest)| {
+            let entry = &manifest.entries[digest_index(&manifest, &digest.rel_path)?];
+            Ok(QuicSourceEntry {
+                index: entry.index,
+                rel_path: entry.rel_path.clone(),
+                abs_path: source_entry.abs_path,
+                size: entry.size,
+                object_id: entry_object_id(&manifest.transfer_id, entry.index),
+                sha256_hex: entry.sha256_hex.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, QuicTransportError>>()?;
+
+    Ok(QuicPreparedSource { manifest, entries })
+}
+
+fn digest_index(manifest: &TransferManifest, rel_path: &str) -> Result<usize, QuicTransportError> {
+    manifest
+        .entries
+        .iter()
+        .position(|entry| entry.rel_path == rel_path)
+        .ok_or_else(|| {
+            QuicTransportError::Source(format!(
+                "prepared source entry {rel_path} missing from manifest"
+            ))
+        })
+}
+
+async fn reject_unencoded_source_entry(entry: &SourceEntry) -> Result<(), QuicTransportError> {
+    let meta = crate::fs::metadata(&entry.abs_path)
+        .await
+        .map_err(|err| StreamingError::new(format!("{}: {err}", entry.abs_path.display())))?;
+    if meta.is_file() {
+        return Ok(());
+    }
+    if meta.is_dir() {
+        return Err(QuicTransportError::Source(format!(
+            "transport_quic does not yet encode explicit directory entry {}",
+            entry.rel_path
+        )));
+    }
+    Err(QuicTransportError::Source(format!(
+        "{}: not a regular file",
+        entry.abs_path.display()
+    )))
 }
 
 #[allow(dead_code)]
@@ -2578,6 +2718,115 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn quic_prepare_source_manifest_hashes_files_with_streaming_digests() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(root.join("nested")).expect("create nested dir");
+        let alpha = varied_bytes(257, 31);
+        let beta = varied_bytes(513, 37);
+        std::fs::write(root.join("alpha.bin"), &alpha).expect("write alpha");
+        std::fs::write(root.join("nested/beta.bin"), &beta).expect("write beta");
+
+        let config = QuicConfig {
+            chunk_size: 17,
+            max_transfer_bytes: 2_048,
+            ..QuicConfig::default()
+        };
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("source manifest prepares");
+
+        assert_eq!(prepared.manifest.root_name, "payload");
+        assert!(prepared.manifest.is_directory);
+        assert_eq!(prepared.manifest.total_bytes, 770);
+        assert_eq!(prepared.manifest.entries.len(), 2);
+        assert_eq!(prepared.manifest.entries[0].rel_path, "alpha.bin");
+        assert_eq!(prepared.manifest.entries[1].rel_path, "nested/beta.bin");
+        assert_eq!(
+            prepared.manifest.merkle_root_hex,
+            flat_merkle_root_from_slices([
+                ("alpha.bin", alpha.as_slice()),
+                ("nested/beta.bin", beta.as_slice()),
+            ])
+        );
+        assert_eq!(prepared.manifest.entries[0].sha256_hex, sha256_hex(&alpha));
+        assert_eq!(prepared.manifest.entries[1].sha256_hex, sha256_hex(&beta));
+
+        assert_eq!(prepared.entries.len(), 2);
+        assert_eq!(prepared.entries[0].index, 0);
+        assert_eq!(prepared.entries[0].rel_path, "alpha.bin");
+        assert_eq!(prepared.entries[0].abs_path, root.join("alpha.bin"));
+        assert_eq!(
+            prepared.entries[0].size,
+            u64::try_from(alpha.len()).expect("alpha length fits u64")
+        );
+        assert_eq!(
+            prepared.entries[0].object_id,
+            entry_object_id(&prepared.manifest.transfer_id, 0)
+        );
+        assert_eq!(
+            prepared.entries[1].object_id,
+            entry_object_id(&prepared.manifest.transfer_id, 1)
+        );
+        assert_eq!(
+            prepared.entries[1].sha256_hex,
+            prepared.manifest.entries[1].sha256_hex
+        );
+    }
+
+    #[test]
+    fn quic_prepare_source_manifest_rejects_explicit_directory_entry() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(root.join("empty")).expect("create empty dir");
+
+        let err = block_on(prepare_source_manifest(&cx, &root, &QuicConfig::default()))
+            .expect_err("empty directory marker is not encoded yet");
+        assert!(matches!(
+            err,
+            QuicTransportError::Source(message)
+                if message.contains("explicit directory entry empty")
+        ));
+    }
+
+    #[test]
+    fn quic_prepare_source_manifest_rejects_empty_directory_root() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(&root).expect("create empty root");
+
+        let err = block_on(prepare_source_manifest(&cx, &root, &QuicConfig::default()))
+            .expect_err("empty directory root is not encoded yet");
+        assert!(matches!(
+            err,
+            QuicTransportError::Source(message)
+                if message.contains("empty directory root payload")
+        ));
+    }
+
+    #[test]
+    fn quic_prepare_source_manifest_enforces_transfer_size_ceiling() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file = temp.path().join("payload.bin");
+        std::fs::write(&file, b"12345").expect("write file");
+        let config = QuicConfig {
+            chunk_size: 2,
+            max_transfer_bytes: 4,
+            ..QuicConfig::default()
+        };
+
+        let err = block_on(prepare_source_manifest(&cx, &file, &config))
+            .expect_err("oversize source must fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::TooLarge { size: 5, max: 4 }
+        ));
     }
 
     #[test]
