@@ -40,6 +40,7 @@ use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD, DEFAULT_ROUND_TAIL_DRAIN_MS,
     DEFAULT_SYMBOL_SIZE, DEFAULT_UDP_FANOUT, RqConfig,
 };
+use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_tcp::{
     self, DEFAULT_MAX_TRANSFER_BYTES, ReceiveReport, SendReport, TransferConfig, TransportError,
 };
@@ -161,6 +162,10 @@ struct SendArgs {
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
+    /// Compute and print the transfer plan (file list, sizes, total bytes, merkle
+    /// root) as JSON without connecting or sending anything (rsync `--dry-run`).
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Parser)]
@@ -350,6 +355,11 @@ fn resolve(target: &str) -> Result<SocketAddr, String> {
 }
 
 fn run_send(args: SendArgs) -> Result<(), String> {
+    // `--dry-run` computes the transfer plan from the source and prints it
+    // without resolving the target or opening any socket (rsync `--dry-run`).
+    if args.dry_run {
+        return run_send_dry_run(&args);
+    }
     match resolve(&args.target) {
         Ok(addr) => run_send_to_addr(args, addr),
         Err(resolve_error) => {
@@ -362,6 +372,23 @@ fn run_send(args: SendArgs) -> Result<(), String> {
     }
 }
 
+/// Print the transfer plan (file list, sizes, total bytes, merkle root) the
+/// transport *would* send, computed via a bounded-memory streaming hash pass
+/// with no network I/O. Transport-agnostic: the plan is identical for `tcp`/`rq`.
+fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
+    let runtime = build_runtime(args.workers)?;
+    let source = args.source.clone();
+    let chunk_size = tcp_config(args.max_bytes).chunk_size;
+    let plan = runtime
+        .block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("dry-run cx");
+            plan_transfer(&cx, &source, chunk_size).await
+        }))
+        .map_err(|e| e.to_string())?;
+    print_json(&plan);
+    Ok(())
+}
+
 fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
     let runtime = build_runtime(args.workers)?;
     let source = args.source.clone();
@@ -369,10 +396,34 @@ fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
     match args.transport {
         Transport::Tcp => {
             let cfg = tcp_config(args.max_bytes);
+            // Monotonic progress + ETA on stderr (stdout stays the JSON report).
+            let start = std::time::Instant::now();
             let report: SendReport = runtime
                 .block_on(runtime.handle().spawn(async move {
                     let cx = Cx::current().expect("sender cx");
-                    transport_tcp::send_path(&cx, addr, &source, cfg, &peer_id).await
+                    let filter = FilterSet::new();
+                    transport_tcp::send_path_filtered(
+                        &cx,
+                        addr,
+                        &source,
+                        cfg,
+                        &peer_id,
+                        &filter,
+                        move |done, total| {
+                            let mut progress = TransferProgress::new(total, 0);
+                            progress.record_bytes(done);
+                            let snap = progress.snapshot(start.elapsed());
+                            let eta = snap
+                                .eta
+                                .map_or_else(String::new, |e| format!("  eta {e:.1?}"));
+                            eprintln!(
+                                "[atp] {:>3.0}%  {done} / {total} bytes  {:.0} B/s{eta}",
+                                snap.fraction * 100.0,
+                                snap.rate_bytes_per_sec,
+                            );
+                        },
+                    )
+                    .await
                 }))
                 .map_err(|e: TransportError| e.to_string())?;
             print_json(&tcp_send_json(&report));

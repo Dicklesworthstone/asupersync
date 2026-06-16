@@ -66,7 +66,16 @@ fn run_sender_filtered(
     let runtime = RuntimeBuilder::multi_thread().build().expect("send runtime");
     runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("send cx");
-        send_path_filtered(&cx, addr, &source, TransferConfig::default(), "sender", &filter).await
+        send_path_filtered(
+            &cx,
+            addr,
+            &source,
+            TransferConfig::default(),
+            "sender",
+            &filter,
+            |_, _| {},
+        )
+        .await
     }))
 }
 

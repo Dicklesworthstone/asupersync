@@ -27,7 +27,7 @@ use super::streaming::{
 };
 
 /// One file in a [`TransferPlan`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PlanEntry {
     /// Path relative to the transfer root.
     pub rel_path: String,
@@ -38,7 +38,7 @@ pub struct PlanEntry {
 }
 
 /// The plan a transfer would execute, computed without touching the network.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TransferPlan {
     /// Name of the transfer root (file or directory name).
     pub root_name: String,

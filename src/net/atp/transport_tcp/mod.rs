@@ -768,17 +768,24 @@ pub async fn send_path(
     config: TransferConfig,
     peer_id: &str,
 ) -> Result<SendReport, TransportError> {
-    send_path_filtered(cx, addr, source, config, peer_id, &FilterSet::new()).await
+    send_path_filtered(cx, addr, source, config, peer_id, &FilterSet::new(), |_, _| {}).await
 }
 
 /// Like [`send_path`], but applies an include/exclude [`FilterSet`] to the source
-/// walk (rsync `--filter` / `--exclude` / `--include`).
+/// walk (rsync `--filter` / `--exclude` / `--include`) and reports byte progress.
 ///
 /// Excluded files — and files beneath an excluded directory — are dropped before
 /// any hashing or transfer, so the manifest and the bytes on the wire commit to
 /// only the selected set. An empty filter behaves exactly like [`send_path`].
 /// Rescuing a file under an excluded directory requires including its ancestor
 /// directories first (rsync semantics; see [`FilterSet::is_path_included`]).
+///
+/// `on_progress(bytes_sent, total_bytes)` is invoked after each content entry is
+/// streamed, then once more at completion with `bytes_sent == total_bytes`, so a
+/// caller can render a monotonic progress bar / ETA (see
+/// [`transport_common::TransferProgress`]). Pass `|_, _| {}` to ignore it.
+///
+/// [`transport_common::TransferProgress`]: crate::net::atp::transport_common::TransferProgress
 pub async fn send_path_filtered(
     cx: &Cx,
     addr: SocketAddr,
@@ -786,6 +793,7 @@ pub async fn send_path_filtered(
     config: TransferConfig,
     peer_id: &str,
     filter: &FilterSet,
+    mut on_progress: impl FnMut(u64, u64) + Send,
 ) -> Result<SendReport, TransportError> {
     cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
 
@@ -937,6 +945,7 @@ pub async fn send_path_filtered(
     // Bulk data, entry by entry — second streaming pass. Each file is re-read
     // off disk in `read_buf`-sized chunks and framed directly onto the wire, so
     // the sender never holds a whole file (or the whole transfer) in memory.
+    let mut sent_bytes: u64 = 0;
     for (i, entry) in entries.iter().enumerate() {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
         // Non-regular entries (symlinks, empty dirs, special files) and
@@ -958,7 +967,11 @@ pub async fn send_path_filtered(
             &mut read_buf,
         )
         .await?;
+        sent_bytes = sent_bytes.saturating_add(digests[i].size);
+        on_progress(sent_bytes, total_bytes);
     }
+    // Final tick so a progress consumer always observes completion at 100%.
+    on_progress(total_bytes, total_bytes);
 
     // Completion + receipt.
     let complete = Frame::empty(FrameType::ObjectComplete)
