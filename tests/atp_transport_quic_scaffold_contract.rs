@@ -3,9 +3,11 @@
 //! Pins B1's acceptance from OUTSIDE the crate (robust to internal `cfg(test)`
 //! churn): the ATP-over-QUIC transport exposes a public API that mirrors
 //! `transport_tcp`'s shapes EXACTLY, reuses the manifest/report/receipt wire
-//! types, validates its `QuicConfig`, and — until B2/B3 wire the data plane —
-//! makes every transfer entry point FAIL CLOSED with a typed
-//! `QuicTransportError::NotImplemented`, never a fake success.
+//! types, validates its `QuicConfig`, and makes unwired transfer entry points
+//! FAIL CLOSED with a typed `QuicTransportError::NotImplemented`, never a fake
+//! success. B3 has since wired `receive_connection`; this contract now also
+//! pins that it fails closed on invalid connection state instead of regressing
+//! to the old scaffold.
 //!
 //! These tests drive the real public functions (no mocks). The async entry
 //! points are exercised with a runtime-free `block_on`, and `Cx::for_testing`
@@ -265,7 +267,7 @@ fn send_path_rejects_invalid_config_before_touching_network() {
 }
 
 #[test]
-fn receive_connection_fails_closed_not_fake_success() {
+fn receive_connection_rejects_missing_control_stream_without_fake_success() {
     let cx = Cx::for_testing();
     let conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
     let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
@@ -277,11 +279,12 @@ fn receive_connection_fails_closed_not_fake_success() {
         QuicConfig::default(),
         "receiver",
     ));
-    assert!(matches!(
-        result,
+    match result {
+        Ok(report) => panic!("missing control stream must not fake success: {report:?}"),
         Err(QuicTransportError::NotImplemented {
             operation: "receive_connection",
             ..
-        })
-    ));
+        }) => panic!("receive_connection should stay wired past the B1 scaffold"),
+        Err(_) => {}
+    }
 }
