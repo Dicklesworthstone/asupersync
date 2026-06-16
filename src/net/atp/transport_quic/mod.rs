@@ -2496,11 +2496,6 @@ async fn commit_decoded_entries(
     Ok((receipt, committed_paths))
 }
 
-enum NativeReceiveRound {
-    Complete,
-    NeedMore(QuicNeedMore),
-}
-
 fn receive_native_symbol_round(
     cx: &Cx,
     connection: &mut NativeQuicConnection,
@@ -2510,7 +2505,7 @@ fn receive_native_symbol_round(
     config: &QuicConfig,
     symbols_accepted: &mut u64,
     feedback_rounds: &mut u32,
-) -> Result<NativeReceiveRound, QuicTransportError> {
+) -> Result<Option<QuicNeedMore>, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     *symbols_accepted = (*symbols_accepted).saturating_add(drain_native_symbol_datagrams(
         connection, manifest, decoders, config,
@@ -2520,7 +2515,7 @@ fn receive_native_symbol_round(
 
     let pending = pending_entries(decoders);
     if pending.is_empty() {
-        return Ok(NativeReceiveRound::Complete);
+        return Ok(None);
     }
     if *feedback_rounds >= config.max_feedback_rounds {
         return Err(QuicTransportError::NoConvergence {
@@ -2548,7 +2543,7 @@ fn receive_native_symbol_round(
     );
     send_native_need_more(cx, connection, control, &need)?;
     *feedback_rounds = round;
-    Ok(NativeReceiveRound::NeedMore(need))
+    Ok(Some(need))
 }
 
 async fn receive_established_native_connection(
@@ -2578,7 +2573,7 @@ async fn receive_established_native_connection(
     let mut feedback_rounds = 0u32;
 
     loop {
-        match receive_native_symbol_round(
+        if receive_native_symbol_round(
             cx,
             &mut connection,
             &mut control,
@@ -2587,11 +2582,10 @@ async fn receive_established_native_connection(
             &config,
             &mut symbols_accepted,
             &mut feedback_rounds,
-        )? {
-            NativeReceiveRound::Complete => break,
-            NativeReceiveRound::NeedMore(need) => {
-                let _ = need.pending.len();
-            }
+        )?
+        .is_none()
+        {
+            break;
         }
     }
 
@@ -4355,8 +4349,8 @@ mod tests {
         )
         .expect("initial native receive round asks for repair")
         {
-            NativeReceiveRound::NeedMore(need) => need,
-            NativeReceiveRound::Complete => panic!("dropped source symbol should require repair"),
+            Some(need) => need,
+            None => panic!("dropped source symbol should require repair"),
         };
         assert_eq!(symbols_accepted, 2);
         assert_eq!(feedback_rounds, 1);
@@ -4404,7 +4398,7 @@ mod tests {
                 &mut feedback_rounds,
             )
             .expect("repair native receive round converges"),
-            NativeReceiveRound::Complete
+            None
         ));
         assert_eq!(symbols_accepted, 3);
         assert_eq!(feedback_rounds, 1);
