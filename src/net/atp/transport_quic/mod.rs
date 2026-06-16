@@ -78,7 +78,9 @@ use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
 use crate::config::EncodingConfig;
 use crate::cx::Cx;
-use crate::decoding::{DecodingConfig, DecodingPipeline, MissingSourceSymbol, SymbolAcceptResult};
+use crate::decoding::{
+    DecodingConfig, DecodingPipeline, MissingSourceSymbol, RejectReason, SymbolAcceptResult,
+};
 use crate::encoding::EncodingPipeline;
 use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
@@ -91,7 +93,7 @@ use crate::net::quic_native::{
     ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, QuicConnection,
     StreamDirection, StreamId, StreamRole,
 };
-use crate::security::AuthenticatedSymbol;
+use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 
@@ -180,7 +182,7 @@ pub const DEFAULT_DATAGRAM_FANOUT: usize = 1;
 /// budget, feedback rounds) that the B2/B3 coroutines will consume.
 ///
 /// [`transport_tcp::TransferConfig`]: crate::net::atp::transport_tcp::TransferConfig
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct QuicConfig {
     /// Streaming hash/read buffer size in bytes.
     pub chunk_size: usize,
@@ -212,6 +214,25 @@ pub struct QuicConfig {
     /// intentionally records the selected C1 arm now; Phase D consumes it for
     /// multi-connection fan-out.
     pub datagram_fanout: usize,
+    /// Optional per-symbol authentication context for QUIC DATAGRAM symbols.
+    ///
+    /// When present, senders append an HMAC tag to every symbol envelope and
+    /// receivers verify every symbol before decoding.
+    pub symbol_auth_context: Option<SecurityContext>,
+    /// Explicit escape hatch for trusted loopback/lab links that intentionally
+    /// accept integrity-vs-manifest only.
+    pub allow_unauthenticated_symbols: bool,
+}
+
+/// Public per-symbol authentication posture for ATP-over-QUIC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicSymbolAuthMode {
+    /// Symbols are signed and verified with a configured [`SecurityContext`].
+    Authenticated,
+    /// Symbols are deliberately unauthenticated on a trusted loopback/lab link.
+    TrustedUnauthenticated,
+    /// No auth context was configured and no explicit trusted opt-out was set.
+    MissingAuthenticationContext,
 }
 
 impl Default for QuicConfig {
@@ -229,11 +250,60 @@ impl Default for QuicConfig {
             max_active_connections: DEFAULT_MAX_ACTIVE_CONNECTIONS,
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
             datagram_fanout: DEFAULT_DATAGRAM_FANOUT,
+            symbol_auth_context: None,
+            allow_unauthenticated_symbols: false,
         }
     }
 }
 
 impl QuicConfig {
+    /// Require per-symbol authentication with this context.
+    #[must_use]
+    pub fn with_symbol_auth(mut self, context: SecurityContext) -> Self {
+        self.symbol_auth_context = Some(context);
+        self.allow_unauthenticated_symbols = false;
+        self
+    }
+
+    /// Explicitly allow unauthenticated symbols for trusted loopback/lab links.
+    #[must_use]
+    pub fn allow_unauthenticated_for_trusted_transport(mut self) -> Self {
+        self.symbol_auth_context = None;
+        self.allow_unauthenticated_symbols = true;
+        self
+    }
+
+    /// Return the configured per-symbol authentication posture.
+    #[must_use]
+    pub fn symbol_auth_mode(&self) -> QuicSymbolAuthMode {
+        if self.symbol_auth_context.is_some() {
+            return QuicSymbolAuthMode::Authenticated;
+        }
+        if self.allow_unauthenticated_symbols {
+            return QuicSymbolAuthMode::TrustedUnauthenticated;
+        }
+        QuicSymbolAuthMode::MissingAuthenticationContext
+    }
+
+    /// Validate that the symbol-auth posture is deliberate.
+    pub fn validate_symbol_auth_mode(&self) -> Result<(), QuicTransportError> {
+        self.symbol_auth_context().map(|_| ())
+    }
+
+    fn symbol_auth_context(&self) -> Result<Option<SecurityContext>, QuicTransportError> {
+        if let Some(context) = &self.symbol_auth_context {
+            return Ok(Some(context.clone()));
+        }
+        if self.allow_unauthenticated_symbols {
+            return Ok(None);
+        }
+        Err(QuicTransportError::Config(
+            "ATP-over-QUIC requires symbol_auth_context; call with_symbol_auth(...) or \
+             explicitly opt into allow_unauthenticated_for_trusted_transport() for loopback/lab use"
+                .to_string(),
+        ))
+    }
+
     /// Validate the configuration, failing closed on any nonsensical knob before
     /// the transport opens a socket or allocates a buffer. Attacker-irrelevant
     /// (this is the *local* operator's config) but it turns silent misbehavior
@@ -303,6 +373,7 @@ impl QuicConfig {
                 "datagram_fanout must be greater than 0".to_string(),
             ));
         }
+        self.validate_symbol_auth_mode()?;
         Ok(())
     }
 }
@@ -874,20 +945,27 @@ fn decoders_from_manifest(
     manifest: &TransferManifest,
     config: &QuicConfig,
 ) -> Result<Vec<QuicEntryDecoder>, QuicTransportError> {
+    let symbol_auth = config.symbol_auth_context()?;
+    let symbol_auth_enabled = symbol_auth.is_some();
     manifest
         .entries
         .iter()
         .map(|entry| {
             let object_id = entry_object_id(&manifest.transfer_id, entry.index);
-            let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            let dconfig = DecodingConfig {
                 symbol_size: config.symbol_size,
                 max_block_size: config.max_block_size,
                 repair_overhead: config.repair_overhead,
                 min_overhead: 0,
                 max_buffered_symbols: 0,
                 block_timeout: Duration::from_secs(0),
-                verify_auth: false,
-            });
+                verify_auth: symbol_auth_enabled,
+            };
+            let mut pipeline = if let Some(context) = &symbol_auth {
+                DecodingPipeline::with_auth(dconfig, context.clone())
+            } else {
+                DecodingPipeline::new(dconfig)
+            };
             let params = object_params_for(
                 object_id,
                 entry.size,
@@ -952,6 +1030,13 @@ fn repair_batch_per_block(config: &QuicConfig) -> usize {
     (block_k / 4).max(16)
 }
 
+fn auth_tag_for_symbol(
+    symbol_auth: Option<&SecurityContext>,
+    symbol: &Symbol,
+) -> Option<[u8; crate::security::tag::TAG_SIZE]> {
+    symbol_auth.map(|ctx| *ctx.sign_symbol(symbol).tag().as_bytes())
+}
+
 #[allow(dead_code)]
 fn spray_symbol_round(
     cx: &Cx,
@@ -960,6 +1045,7 @@ fn spray_symbol_round(
     encoders: &mut [QuicEntryEncoder],
     pending: &std::collections::BTreeSet<u32>,
     config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
     with_source: bool,
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
@@ -989,7 +1075,8 @@ fn spray_symbol_round(
                 let symbol = encoded
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
-                send_symbol(cx, conn, &symbol, tag, entry.index, None)?;
+                let auth_tag = auth_tag_for_symbol(symbol_auth, &symbol);
+                send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
             }
         } else {
@@ -999,7 +1086,8 @@ fn spray_symbol_round(
                 let symbol = encoded
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
                     .into_symbol();
-                send_symbol(cx, conn, &symbol, tag, entry.index, None)?;
+                let auth_tag = auth_tag_for_symbol(symbol_auth, &symbol);
+                send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
             }
         }
@@ -1068,6 +1156,7 @@ fn send_source_symbol_requests(
     encoders: &[QuicEntryEncoder],
     requests: &[QuicSourceSymbolRequest],
     config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
@@ -1083,7 +1172,8 @@ fn send_source_symbol_requests(
                 ))
             })?;
         let symbol = source_symbol_for_request(enc, *request, config)?;
-        send_symbol(cx, conn, &symbol, tag, request.entry, None)?;
+        let auth_tag = auth_tag_for_symbol(symbol_auth, &symbol);
+        send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
         sent = sent.saturating_add(1);
     }
     Ok(sent)
@@ -1096,12 +1186,22 @@ fn spray_initial_symbols(
     manifest: &TransferManifest,
     encoders: &mut [QuicEntryEncoder],
     config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
 ) -> Result<u64, QuicTransportError> {
     let pending = encoders
         .iter()
         .map(|entry| entry.index)
         .collect::<std::collections::BTreeSet<_>>();
-    spray_symbol_round(cx, conn, manifest, encoders, &pending, config, true)
+    spray_symbol_round(
+        cx,
+        conn,
+        manifest,
+        encoders,
+        &pending,
+        config,
+        symbol_auth,
+        true,
+    )
 }
 
 #[allow(dead_code)]
@@ -1113,6 +1213,7 @@ fn send_repair_round_and_object_complete(
     encoders: &mut [QuicEntryEncoder],
     need: &QuicNeedMore,
     config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
     if need.pending.is_empty() && need.source_symbols.is_empty() {
@@ -1144,9 +1245,26 @@ fn send_repair_round_and_object_complete(
         }
     }
     let sent = if need.source_symbols.is_empty() {
-        spray_symbol_round(cx, conn, manifest, encoders, &pending, config, false)?
+        spray_symbol_round(
+            cx,
+            conn,
+            manifest,
+            encoders,
+            &pending,
+            config,
+            symbol_auth,
+            false,
+        )?
     } else {
-        send_source_symbol_requests(cx, conn, manifest, encoders, &need.source_symbols, config)?
+        send_source_symbol_requests(
+            cx,
+            conn,
+            manifest,
+            encoders,
+            &need.source_symbols,
+            config,
+            symbol_auth,
+        )?
     };
     send_object_complete(cx, conn, control)?;
     Ok(sent)
@@ -1240,8 +1358,10 @@ fn send_manifest_symbols_complete(
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
+    let symbol_auth = config.symbol_auth_context()?;
     send_manifest(cx, conn, control, manifest)?;
-    let symbols_sent = spray_initial_symbols(cx, conn, manifest, encoders, config)?;
+    let symbols_sent =
+        spray_initial_symbols(cx, conn, manifest, encoders, config, symbol_auth.as_ref())?;
     send_object_complete(cx, conn, control)?;
     Ok(symbols_sent)
 }
@@ -1298,9 +1418,9 @@ fn receive_proof_close_and_report(
 }
 
 #[allow(dead_code)]
-fn feed_decoded_symbol(
+fn feed_authenticated_symbol(
     decoder: &mut QuicEntryDecoder,
-    symbol: Symbol,
+    auth_symbol: AuthenticatedSymbol,
 ) -> Result<bool, QuicTransportError> {
     if decoder.complete {
         return Ok(false);
@@ -1308,17 +1428,38 @@ fn feed_decoded_symbol(
     let Some(pipeline) = decoder.pipeline.as_mut() else {
         return Ok(false);
     };
-    match pipeline.feed(AuthenticatedSymbol::new_unauthenticated(symbol)) {
+    match pipeline.feed(auth_symbol) {
         Ok(
             SymbolAcceptResult::Accepted { .. }
             | SymbolAcceptResult::DecodingStarted { .. }
             | SymbolAcceptResult::BlockComplete { .. },
         ) => Ok(true),
+        Ok(SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed)) => Err(
+            QuicTransportError::Integrity("symbol authentication failed".to_string()),
+        ),
         Ok(SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_)) => Ok(false),
         Err(err) => Err(QuicTransportError::Control(format!(
             "RaptorQ decoder rejected symbol: {err}"
         ))),
     }
+}
+
+fn authenticated_symbol_from_envelope(
+    envelope: &QuicSymbolEnvelope,
+    object_id: ObjectId,
+    auth_required: bool,
+) -> Result<AuthenticatedSymbol, QuicTransportError> {
+    let symbol = envelope_to_symbol(envelope, object_id);
+    if auth_required {
+        let tag = envelope.auth_tag.ok_or_else(|| {
+            QuicTransportError::Integrity("authenticated symbol envelope missing tag".to_string())
+        })?;
+        return Ok(AuthenticatedSymbol::from_parts(
+            symbol,
+            AuthenticationTag::from_bytes(tag),
+        ));
+    }
+    Ok(AuthenticatedSymbol::new_unauthenticated(symbol))
 }
 
 #[allow(dead_code)]
@@ -1328,9 +1469,11 @@ fn drain_symbol_datagrams(
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
+    let symbol_auth = config.symbol_auth_context()?;
+    let auth_required = symbol_auth.is_some();
     let tag = transfer_tag(&manifest.transfer_id);
     let mut accepted = 0u64;
-    while let Some(envelope) = recv_symbol_envelope(conn, false)? {
+    while let Some(envelope) = recv_symbol_envelope(conn, auth_required)? {
         if envelope.transfer_tag != tag {
             return Err(QuicTransportError::Integrity(format!(
                 "symbol transfer tag mismatch: got {}, expected {tag}",
@@ -1353,8 +1496,9 @@ fn drain_symbol_datagrams(
                     envelope.entry
                 ))
             })?;
-        let symbol = envelope_to_symbol(&envelope, decoder.object_id);
-        if feed_decoded_symbol(decoder, symbol)? {
+        let auth_symbol =
+            authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
+        if feed_authenticated_symbol(decoder, auth_symbol)? {
             accepted = accepted.saturating_add(1);
         }
     }
@@ -2054,9 +2198,11 @@ fn drain_native_symbol_datagrams(
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
+    let symbol_auth = config.symbol_auth_context()?;
+    let auth_required = symbol_auth.is_some();
     let tag = transfer_tag(&manifest.transfer_id);
     let mut accepted = 0u64;
-    while let Some(envelope) = recv_native_symbol_envelope(conn, false)? {
+    while let Some(envelope) = recv_native_symbol_envelope(conn, auth_required)? {
         if envelope.transfer_tag != tag {
             return Err(QuicTransportError::Integrity(format!(
                 "symbol transfer tag mismatch: got {}, expected {tag}",
@@ -2079,8 +2225,9 @@ fn drain_native_symbol_datagrams(
                     envelope.entry
                 ))
             })?;
-        let symbol = envelope_to_symbol(&envelope, decoder.object_id);
-        if feed_decoded_symbol(decoder, symbol)? {
+        let auth_symbol =
+            authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
+        if feed_authenticated_symbol(decoder, auth_symbol)? {
             accepted = accepted.saturating_add(1);
         }
     }
@@ -2275,6 +2422,8 @@ async fn receive_established_native_connection(
     peer_id: &str,
 ) -> Result<ReceiveReport, QuicTransportError> {
     let mut control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
+    let symbol_auth = config.symbol_auth_context()?;
+    let symbol_auth_enabled = symbol_auth.is_some();
 
     receive_native_sender_hello_and_ack(
         cx,
@@ -2282,7 +2431,7 @@ async fn receive_established_native_connection(
         &mut control,
         &config,
         peer_id,
-        false,
+        symbol_auth_enabled,
     )?;
     let manifest = receive_native_manifest(cx, &mut connection, &mut control)?;
     validate_quic_manifest(&manifest, &config)?;
@@ -2524,6 +2673,14 @@ mod tests {
         futures_lite::future::block_on(fut)
     }
 
+    fn trusted_quic_config() -> QuicConfig {
+        QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+    }
+
+    fn auth_quic_config(seed: u64) -> QuicConfig {
+        QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(seed))
+    }
+
     fn established_pair() -> (Cx<crate::cx::cap::All>, QuicConnection, QuicConnection) {
         let cx = Cx::for_testing();
         let mut client = QuicConnection::client(NativeQuicConnectionConfig::default());
@@ -2584,6 +2741,8 @@ mod tests {
         config: QuicConfig,
     ) -> Result<QuicConnectionTransferOutcome, QuicTransportError> {
         config.validate()?;
+        let symbol_auth = config.symbol_auth_context()?;
+        let symbol_auth_enabled = symbol_auth.is_some();
         let manifest = manifest_from_entries("payload", true, entries);
         let mut sender_control = QuicFrameTransport::open(cx, sender)?;
         let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
@@ -2594,7 +2753,7 @@ mod tests {
             &mut sender_control,
             &config,
             "sender-peer",
-            false,
+            symbol_auth_enabled,
         )?;
         pump_until_idle(cx, sender, receiver, DEFAULT_MAX_PACKET_BYTES, 5_000)
             .expect("deliver sender hello");
@@ -2604,7 +2763,7 @@ mod tests {
             &mut receiver_control,
             &config,
             "receiver-peer",
-            false,
+            symbol_auth_enabled,
         )?;
         pump_until_idle(cx, receiver, sender, DEFAULT_MAX_PACKET_BYTES, 5_001)
             .expect("deliver sender hello ack");
@@ -2677,8 +2836,16 @@ mod tests {
     }
 
     #[test]
-    fn default_config_validates() {
-        assert!(QuicConfig::default().validate().is_ok());
+    fn default_config_requires_symbol_auth_or_trusted_mode() {
+        let err = QuicConfig::default()
+            .validate()
+            .expect_err("default config must fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Config(m) if m.contains("symbol_auth_context")
+        ));
+        assert!(trusted_quic_config().validate().is_ok());
+        assert!(auth_quic_config(7).validate().is_ok());
     }
 
     #[test]
@@ -2695,13 +2862,17 @@ mod tests {
         assert_eq!(c.max_active_connections, DEFAULT_MAX_ACTIVE_CONNECTIONS);
         assert_eq!(c.max_feedback_rounds, DEFAULT_MAX_FEEDBACK_ROUNDS);
         assert_eq!(c.datagram_fanout, DEFAULT_DATAGRAM_FANOUT);
+        assert_eq!(
+            c.symbol_auth_mode(),
+            QuicSymbolAuthMode::MissingAuthenticationContext
+        );
     }
 
     #[test]
     fn validate_rejects_zero_symbol_size() {
         let c = QuicConfig {
             symbol_size: 0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         assert!(matches!(
             c.validate(),
@@ -2714,7 +2885,7 @@ mod tests {
         let c = QuicConfig {
             symbol_size: 2000,
             max_datagram_size: 1200,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         assert!(matches!(
             c.validate(),
@@ -2730,7 +2901,7 @@ mod tests {
         let c = QuicConfig {
             symbol_size: 1199,
             max_datagram_size: 1200,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         assert!(usize::from(c.symbol_size) < c.max_datagram_size);
         assert!(usize::from(c.symbol_size) + AUTH_ENVELOPE_HEADER_LEN > c.max_datagram_size);
@@ -2744,7 +2915,7 @@ mod tests {
     fn validate_rejects_repair_overhead_below_one_and_nan() {
         let low = QuicConfig {
             repair_overhead: 0.5,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         assert!(matches!(
             low.validate(),
@@ -2752,7 +2923,7 @@ mod tests {
         ));
         let nan = QuicConfig {
             repair_overhead: f64::NAN,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         assert!(matches!(
             nan.validate(),
@@ -2764,7 +2935,7 @@ mod tests {
     fn validate_rejects_zero_datagram_fanout() {
         let c = QuicConfig {
             datagram_fanout: 0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         assert!(matches!(
             c.validate(),
@@ -2855,7 +3026,7 @@ mod tests {
         let config = apply_quic_adaptive_block_plan(
             QuicConfig {
                 symbol_size: 128,
-                ..QuicConfig::default()
+                ..trusted_quic_config()
             },
             plan,
         )
@@ -2885,15 +3056,15 @@ mod tests {
         for c in [
             QuicConfig {
                 idle_timeout: Duration::ZERO,
-                ..QuicConfig::default()
+                ..trusted_quic_config()
             },
             QuicConfig {
                 handshake_timeout: Duration::ZERO,
-                ..QuicConfig::default()
+                ..trusted_quic_config()
             },
             QuicConfig {
                 accept_timeout: Duration::ZERO,
-                ..QuicConfig::default()
+                ..trusted_quic_config()
             },
         ] {
             assert!(matches!(c.validate(), Err(QuicTransportError::Config(_))));
@@ -3322,7 +3493,7 @@ mod tests {
         let config = QuicConfig {
             chunk_size: 17,
             max_transfer_bytes: 2_048,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
             .expect("source manifest prepares");
@@ -3372,7 +3543,7 @@ mod tests {
         let root = temp.path().join("payload");
         std::fs::create_dir_all(root.join("empty")).expect("create empty dir");
 
-        let err = block_on(prepare_source_manifest(&cx, &root, &QuicConfig::default()))
+        let err = block_on(prepare_source_manifest(&cx, &root, &trusted_quic_config()))
             .expect_err("empty directory marker is not encoded yet");
         assert!(matches!(
             err,
@@ -3388,7 +3559,7 @@ mod tests {
         let root = temp.path().join("payload");
         std::fs::create_dir_all(&root).expect("create empty root");
 
-        let err = block_on(prepare_source_manifest(&cx, &root, &QuicConfig::default()))
+        let err = block_on(prepare_source_manifest(&cx, &root, &trusted_quic_config()))
             .expect_err("empty directory root is not encoded yet");
         assert!(matches!(
             err,
@@ -3406,7 +3577,7 @@ mod tests {
         let config = QuicConfig {
             chunk_size: 2,
             max_transfer_bytes: 4,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
 
         let err = block_on(prepare_source_manifest(&cx, &file, &config))
@@ -3424,7 +3595,7 @@ mod tests {
             symbol_size: 128,
             max_block_size: 512,
             repair_overhead: 1.25,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         let entries = vec![
             ("alpha.bin".to_string(), varied_bytes(384, 3)),
@@ -3472,6 +3643,56 @@ mod tests {
     }
 
     #[test]
+    fn quic_connection_level_transfer_verifies_symbol_auth_tags() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.25,
+            ..auth_quic_config(0xA7_51)
+        };
+        let entries = vec![
+            ("alpha.bin".to_string(), varied_bytes(384, 53)),
+            ("nested/beta.bin".to_string(), varied_bytes(640, 59)),
+        ];
+
+        let outcome =
+            drive_in_memory_loopback_transfer(&cx, &mut client, &mut server, &entries, config)
+                .expect("authenticated QUIC loopback transfer reaches proof");
+
+        assert!(outcome.receipt.committed);
+        assert_eq!(outcome.send_report.bytes_sent, 1_024);
+        assert_eq!(outcome.symbols_accepted, outcome.symbols_sent);
+    }
+
+    #[test]
+    fn quic_symbol_auth_rejects_bad_tag_before_decode() {
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.0,
+            ..auth_quic_config(0xBAD7_A6)
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 61))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let symbol = Symbol::from_slice(
+            SymbolId::new(decoders[0].object_id, 0, 0),
+            &entries[0].1,
+            SymbolKind::Source,
+        );
+        let bad = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
+
+        let err = feed_authenticated_symbol(&mut decoders[0], bad)
+            .expect_err("bad auth tag must fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message)
+                if message.contains("authentication failed")
+        ));
+    }
+
+    #[test]
     fn quic_prepared_source_loopback_transfer_reaches_proof_from_disk_files() {
         let (cx, mut client, mut server) = established_pair();
         let temp = tempfile::tempdir().expect("temp dir");
@@ -3486,7 +3707,7 @@ mod tests {
             symbol_size: 128,
             max_block_size: 512,
             repair_overhead: 1.25,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
             .expect("source manifest prepares from disk");
@@ -3600,7 +3821,7 @@ mod tests {
             symbol_size: 128,
             max_block_size: 512,
             repair_overhead: 1.0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         let entries = vec![("alpha.bin".to_string(), varied_bytes(384, 47))];
         let manifest = manifest_from_entries("payload", true, &entries);
@@ -3720,6 +3941,7 @@ mod tests {
             &mut encoders,
             &got_need,
             &config,
+            None,
         )
         .expect("send repair feedback round");
         assert_eq!(feedback_sent, 1);
@@ -3739,9 +3961,11 @@ mod tests {
         assert_eq!(source_envelope.entry, 0);
         assert_eq!(source_envelope.sbn, 0);
         assert_eq!(source_envelope.esi, 0);
-        let source_symbol = envelope_to_symbol(&source_envelope, decoders[0].object_id);
-        assert!(source_symbol.kind().is_source());
-        assert!(feed_decoded_symbol(&mut decoders[0], source_symbol).expect("feed source"));
+        let source_symbol =
+            authenticated_symbol_from_envelope(&source_envelope, decoders[0].object_id, false)
+                .expect("source symbol");
+        assert!(source_symbol.symbol().kind().is_source());
+        assert!(feed_authenticated_symbol(&mut decoders[0], source_symbol).expect("feed source"));
         let accepted_extra =
             drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
                 .expect("receiver drains any extra feedback symbols");
@@ -3783,7 +4007,7 @@ mod tests {
             symbol_size: 128,
             max_block_size: 512,
             repair_overhead: 1.25,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         let entries = vec![
             ("alpha.bin".to_string(), varied_bytes(384, 23)),
@@ -3804,8 +4028,16 @@ mod tests {
         .expect("send hello");
         send_manifest(&cx, &mut client, &mut sender_control, &manifest).expect("send manifest");
         let mut encoders = encoders_from_entries(&manifest, &entries);
-        let sent = spray_initial_symbols(&cx, &mut client, &manifest, &mut encoders, &config)
-            .expect("spray");
+        let symbol_auth = config.symbol_auth_context().expect("auth posture");
+        let sent = spray_initial_symbols(
+            &cx,
+            &mut client,
+            &manifest,
+            &mut encoders,
+            &config,
+            symbol_auth.as_ref(),
+        )
+        .expect("spray");
         assert!(sent > 0);
         send_object_complete(&cx, &mut client, &mut sender_control).expect("send complete");
         pump_until_idle(
@@ -3850,7 +4082,7 @@ mod tests {
             symbol_size: 128,
             max_block_size: 512,
             repair_overhead: 1.0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         let entries = vec![("alpha.bin".to_string(), varied_bytes(384, 13))];
         let manifest = manifest_from_entries("payload", true, &entries);
@@ -3890,7 +4122,7 @@ mod tests {
         let config = QuicConfig {
             symbol_size: 512,
             max_block_size: 1024,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         let bytes: Vec<u8> = (0..1500).map(|i| (i % 251) as u8).collect();
         let enc = QuicEntryEncoder {
@@ -3932,7 +4164,7 @@ mod tests {
     #[test]
     fn quic_control_handshake_accepts_matching_sender() {
         let (cx, mut client, mut server) = established_pair();
-        let config = QuicConfig::default();
+        let config = trusted_quic_config();
         let mut sender_control =
             QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
         let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
@@ -3990,7 +4222,7 @@ mod tests {
     #[test]
     fn quic_control_handshake_rejects_wrong_protocol_and_reports_reason() {
         let (cx, mut client, mut server) = established_pair();
-        let config = QuicConfig::default();
+        let config = trusted_quic_config();
         let mut sender_control =
             QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
         let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
@@ -4109,7 +4341,7 @@ mod tests {
             &cx,
             addr,
             Path::new("/nonexistent/source"),
-            QuicConfig::default(),
+            trusted_quic_config(),
             "sender",
         ));
         assert!(matches!(result, Err(QuicTransportError::Source(_))));
@@ -4126,7 +4358,7 @@ mod tests {
             &cx,
             addr,
             &source,
-            QuicConfig::default(),
+            trusted_quic_config(),
             "sender",
         ));
         assert!(matches!(
@@ -4144,7 +4376,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
         let cfg = QuicConfig {
             idle_timeout: Duration::ZERO,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         };
         let result = block_on(send_path(&cx, addr, Path::new("/x"), cfg, "sender"));
         assert!(matches!(result, Err(QuicTransportError::Config(_))));
@@ -4161,7 +4393,7 @@ mod tests {
             conn,
             peer,
             Path::new("/tmp"),
-            QuicConfig::default(),
+            trusted_quic_config(),
             "receiver",
         ));
         match result {

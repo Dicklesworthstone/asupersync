@@ -32,6 +32,10 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     futures_lite::future::block_on(fut)
 }
 
+fn trusted_quic_config() -> QuicConfig {
+    QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+}
+
 // ─── Public API surface mirrors transport_tcp ────────────────────────────────
 
 /// All four transfer entry points are public items at the mirrored paths.
@@ -80,8 +84,12 @@ fn manifest_and_receipt_types_are_reused_from_transport_tcp() {
 // ─── QuicConfig validation ───────────────────────────────────────────────────
 
 #[test]
-fn default_config_is_valid() {
-    assert!(QuicConfig::default().validate().is_ok());
+fn default_config_requires_symbol_auth_or_trusted_mode() {
+    assert!(matches!(
+        QuicConfig::default().validate(),
+        Err(QuicTransportError::Config(message)) if message.contains("symbol_auth_context")
+    ));
+    assert!(trusted_quic_config().validate().is_ok());
 }
 
 #[test]
@@ -89,50 +97,50 @@ fn config_validation_rejects_nonsense_knobs() {
     let bad = [
         QuicConfig {
             chunk_size: 0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             symbol_size: 0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             max_block_size: 0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             symbol_size: 4000,
             max_datagram_size: 1200,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             // raw symbol fits the datagram, but symbol + envelope header does not
             symbol_size: 1199,
             max_datagram_size: 1200,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             repair_overhead: 0.0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             max_transfer_bytes: 0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             idle_timeout: Duration::ZERO,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             handshake_timeout: Duration::ZERO,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             accept_timeout: Duration::ZERO,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
         QuicConfig {
             max_feedback_rounds: 0,
-            ..QuicConfig::default()
+            ..trusted_quic_config()
         },
     ];
     for cfg in bad {
@@ -244,7 +252,7 @@ fn send_path_rejects_missing_source_before_native_connect() {
         &cx,
         addr,
         Path::new("/nonexistent"),
-        QuicConfig::default(),
+        trusted_quic_config(),
         "sender",
     ));
     assert!(matches!(result, Err(QuicTransportError::Source(_))));
@@ -261,7 +269,7 @@ fn send_path_valid_source_fails_closed_at_native_connect_boundary() {
         &cx,
         addr,
         &source,
-        QuicConfig::default(),
+        trusted_quic_config(),
         "sender",
     ));
     assert!(matches!(
@@ -279,7 +287,7 @@ fn send_path_rejects_invalid_config_before_touching_network() {
     let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
     let cfg = QuicConfig {
         accept_timeout: Duration::ZERO,
-        ..QuicConfig::default()
+        ..trusted_quic_config()
     };
     let result = block_on(send_path(&cx, addr, Path::new("/x"), cfg, "sender"));
     assert!(matches!(result, Err(QuicTransportError::Config(_))));
@@ -295,7 +303,7 @@ fn receive_connection_rejects_missing_control_stream_without_fake_success() {
         conn,
         peer,
         Path::new("/tmp"),
-        QuicConfig::default(),
+        trusted_quic_config(),
         "receiver",
     ));
     match result {
@@ -325,7 +333,7 @@ fn receive_once_rejects_empty_endpoint_without_fake_success() {
         &cx,
         &mut endpoint,
         Path::new("/tmp"),
-        QuicConfig::default(),
+        trusted_quic_config(),
         "receiver",
     ));
     match result {
