@@ -78,6 +78,11 @@ enum Transport {
     Tcp,
     /// RaptorQ fountain symbols over multiple UDP sockets (+ TCP control).
     Rq,
+    /// RaptorQ fountain symbols over a real QUIC/TLS-1.3 connection: symbols ride
+    /// QUIC DATAGRAMs and the ATP control protocol rides one bidirectional
+    /// stream, all under a single authenticated, encrypted UDP flow. Requires
+    /// building `atp` with `--features tls`.
+    Quic,
 }
 
 impl Transport {
@@ -85,6 +90,7 @@ impl Transport {
         match self {
             Self::Tcp => "tcp",
             Self::Rq => "rq",
+            Self::Quic => "quic",
         }
     }
 }
@@ -159,9 +165,28 @@ struct SendArgs {
     /// no key is supplied.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
-    /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
+    /// Explicitly disable RQ/QUIC symbol authentication for loopback/lab-only
+    /// runs. Applies to both `--transport rq` and `--transport quic`.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
+    // ─── QUIC (`--transport quic`) TLS material ───
+    /// PEM file of CA certificate(s) the sender trusts to verify the receiver's
+    /// QUIC server certificate (quic only). Required unless the receiver's
+    /// certificate chains to a system root; there is no insecure skip-verify.
+    #[arg(long, value_name = "PATH")]
+    ca: Option<PathBuf>,
+    /// Server name to verify against the receiver's certificate SAN (quic only).
+    /// Defaults to the target host.
+    #[arg(long, value_name = "NAME")]
+    server_name: Option<String>,
+    /// For SSH bootstrap with `--transport quic`: path *on the remote host* to the
+    /// PEM certificate chain the spawned receiver should present.
+    #[arg(long, value_name = "REMOTE_PATH")]
+    server_cert: Option<PathBuf>,
+    /// For SSH bootstrap with `--transport quic`: path *on the remote host* to the
+    /// PEM private key for the spawned receiver's certificate.
+    #[arg(long, value_name = "REMOTE_PATH")]
+    server_key: Option<PathBuf>,
     /// Compute and print the transfer plan (file list, sizes, total bytes, merkle
     /// root) as JSON without connecting or sending anything (rsync `--dry-run`).
     #[arg(long)]
@@ -205,6 +230,12 @@ struct RecvArgs {
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
+    /// PEM certificate chain the QUIC receiver presents to senders (quic only).
+    #[arg(long, value_name = "PATH")]
+    server_cert: Option<PathBuf>,
+    /// PEM private key for the QUIC receiver's certificate (quic only).
+    #[arg(long, value_name = "PATH")]
+    server_key: Option<PathBuf>,
 }
 
 fn tcp_config(max_bytes: u64) -> TransferConfig {
@@ -234,6 +265,140 @@ fn rq_config(
     };
     let auth = resolve_rq_auth_choice(rq_auth_key_hex, rq_allow_unauthenticated_lab, false)?;
     config_with_rq_auth(config, &auth)
+}
+
+// ─── QUIC (`--transport quic`) TLS material + config ─────────────────────────
+
+/// Load a PEM certificate chain (one or more certificates) from `path`.
+#[cfg(feature = "tls")]
+fn load_cert_chain(
+    path: &std::path::Path,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("read cert {}: {e}", path.display()))?;
+    let mut reader = std::io::BufReader::new(pem.as_slice());
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse certs in {}: {e}", path.display()))?;
+    if certs.is_empty() {
+        return Err(format!("no certificates found in {}", path.display()));
+    }
+    Ok(certs)
+}
+
+/// Load a single PEM private key from `path`.
+#[cfg(feature = "tls")]
+fn load_private_key(
+    path: &std::path::Path,
+) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("read key {}: {e}", path.display()))?;
+    let mut reader = std::io::BufReader::new(pem.as_slice());
+    rustls_pemfile::private_key(&mut reader)
+        .map_err(|e| format!("parse key in {}: {e}", path.display()))?
+        .ok_or_else(|| format!("no private key found in {}", path.display()))
+}
+
+/// Best-effort default SNI: the host portion of a `host:port` target.
+#[cfg(feature = "tls")]
+fn default_server_name(target: &str) -> String {
+    let host = match target.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => target,
+    };
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string()
+}
+
+/// Apply the shared RQ/QUIC per-symbol auth posture to a base QUIC config.
+#[cfg(feature = "tls")]
+fn quic_with_symbol_auth(
+    base: asupersync::net::atp::transport_quic::QuicConfig,
+    rq_auth_key_hex: Option<&str>,
+    rq_allow_unauthenticated_lab: bool,
+) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
+    match resolve_rq_auth_choice(rq_auth_key_hex, rq_allow_unauthenticated_lab, false)? {
+        RqAuthChoice::KeyHex(key_hex) => {
+            let key = auth_key_from_hex(&key_hex)?;
+            Ok(base.with_symbol_auth(SecurityContext::new(key)))
+        }
+        RqAuthChoice::UnauthenticatedLab => Ok(base.allow_unauthenticated_for_trusted_transport()),
+    }
+}
+
+/// Build the sending QUIC config: client TLS trust + per-symbol auth + tuning.
+#[cfg(feature = "tls")]
+fn quic_config_send(
+    args: &SendArgs,
+) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
+    use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicClientTls};
+    use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config};
+    use rustls::pki_types::ServerName;
+
+    let roots = match args.ca.as_deref() {
+        Some(path) => load_cert_chain(path)?,
+        None => Vec::new(),
+    };
+    let name = args
+        .server_name
+        .clone()
+        .unwrap_or_else(|| default_server_name(&args.target));
+    let server_name =
+        ServerName::try_from(name.clone()).map_err(|e| format!("invalid --server-name {name:?}: {e}"))?;
+    let config = client_config(roots, vec![ATP_QUIC_ALPN.to_vec()])
+        .map_err(|e| format!("build QUIC client TLS config: {e:?}"))?;
+
+    let base = QuicConfig {
+        symbol_size: args.symbol_size,
+        repair_overhead: args.repair_overhead.max(1.0),
+        max_transfer_bytes: args.max_bytes,
+        ..QuicConfig::default()
+    };
+    let mut cfg = quic_with_symbol_auth(
+        base,
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )?;
+    cfg.client_tls = Some(QuicClientTls {
+        server_name,
+        config,
+    });
+    Ok(cfg)
+}
+
+/// Build the receiving QUIC config: server cert/key + per-symbol auth + tuning.
+#[cfg(feature = "tls")]
+fn quic_config_recv(
+    args: &RecvArgs,
+) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
+    use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicServerTls};
+    use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, server_config};
+
+    let cert_path = args
+        .server_cert
+        .as_deref()
+        .ok_or_else(|| "atp recv --transport quic requires --server-cert <PEM chain>".to_string())?;
+    let key_path = args
+        .server_key
+        .as_deref()
+        .ok_or_else(|| "atp recv --transport quic requires --server-key <PEM key>".to_string())?;
+    let cert_chain = load_cert_chain(cert_path)?;
+    let key = load_private_key(key_path)?;
+    let config = server_config(cert_chain, key, vec![ATP_QUIC_ALPN.to_vec()])
+        .map_err(|e| format!("build QUIC server TLS config: {e:?}"))?;
+
+    let base = QuicConfig {
+        symbol_size: args.symbol_size,
+        repair_overhead: args.repair_overhead.max(1.0),
+        max_transfer_bytes: args.max_bytes,
+        ..QuicConfig::default()
+    };
+    let mut cfg = quic_with_symbol_auth(
+        base,
+        args.rq_auth_key_hex.as_deref(),
+        args.rq_allow_unauthenticated_lab,
+    )?;
+    cfg.server_tls = Some(QuicServerTls { config });
+    Ok(cfg)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +621,31 @@ fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             print_json(&rq_send_json(&report));
         }
+        Transport::Quic => {
+            #[cfg(feature = "tls")]
+            {
+                let cfg = quic_config_send(&args)?;
+                let report = runtime
+                    .block_on(runtime.handle().spawn(async move {
+                        let cx = Cx::current().expect("sender cx");
+                        asupersync::net::atp::transport_quic::send_path(
+                            &cx, addr, &source, cfg, &peer_id,
+                        )
+                        .await
+                    }))
+                    .map_err(
+                        |e: asupersync::net::atp::transport_quic::QuicTransportError| e.to_string(),
+                    )?;
+                print_json(&quic_send_json(&report));
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                let _ = (&addr, &source, &peer_id);
+                return Err(
+                    "atp --transport quic requires building atp with --features tls".to_string(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -505,7 +695,10 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
         return Err("--no-tailscale conflicts with --prefer tailscale".to_string());
     }
 
-    let rq_auth = if args.transport == Transport::Rq {
+    // Both the RQ and QUIC transports carry per-symbol HMAC auth; SSH bootstrap
+    // generates a fresh per-transfer key when none was supplied and feeds it to
+    // both ends. (TCP has no symbol auth.)
+    let rq_auth = if args.transport != Transport::Tcp {
         let auth = resolve_rq_auth_choice(
             args.rq_auth_key_hex.as_deref(),
             args.rq_allow_unauthenticated_lab,
@@ -518,6 +711,14 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
     } else {
         None
     };
+    if args.transport == Transport::Quic
+        && (args.server_cert.is_none() || args.server_key.is_none())
+    {
+        return Err("SSH bootstrap with --transport quic requires --server-cert and \
+                    --server-key (paths on the remote host to the receiver's PEM \
+                    certificate chain and private key)"
+            .to_string());
+    }
 
     let data_host = choose_data_host(&args, remote);
     let data_target = socket_target(&data_host, args.remote_listen.port());
@@ -606,6 +807,17 @@ fn spawn_remote_receiver(
     ];
     if matches!(rq_auth, Some(RqAuthChoice::UnauthenticatedLab)) {
         argv.push("--rq-allow-unauthenticated-lab".to_string());
+    }
+    if args.transport == Transport::Quic {
+        // Validated in `run_send_via_ssh`; these are paths on the remote host.
+        if let Some(cert) = &args.server_cert {
+            argv.push("--server-cert".to_string());
+            argv.push(cert.display().to_string());
+        }
+        if let Some(key) = &args.server_key {
+            argv.push("--server-key".to_string());
+            argv.push(key.display().to_string());
+        }
     }
 
     let remote_command = match rq_auth {
@@ -862,6 +1074,55 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 }
             }))
         }
+        Transport::Quic => {
+            #[cfg(feature = "tls")]
+            {
+                let cfg = quic_config_recv(&args)?;
+                runtime.block_on(runtime.handle().spawn(async move {
+                    use asupersync::net::atp::transport_quic::native_link::{
+                        bind_server_endpoint, receive_on_endpoint,
+                    };
+                    let cx = Cx::current().expect("receiver cx");
+                    asupersync::fs::create_dir_all(&dest)
+                        .await
+                        .map_err(|e| format!("create dest {}: {e}", dest.display()))?;
+                    if one_shot {
+                        let endpoint = bind_server_endpoint(&cx, listen)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        eprintln!(
+                            "atp: quic listening on {}, dest {}",
+                            endpoint.local_addr(),
+                            dest.display()
+                        );
+                        let report = receive_on_endpoint(&cx, endpoint, &dest, &cfg, &peer_id)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        print_json(&quic_recv_json(&report));
+                        Ok::<(), String>(())
+                    } else {
+                        eprintln!("atp: quic listening on {listen}, dest {}", dest.display());
+                        // Each accepted transfer consumes the endpoint; rebind the
+                        // same address for the next one. `--listen` must use a fixed
+                        // port for persistent serving (port 0 would drift).
+                        loop {
+                            let endpoint = bind_server_endpoint(&cx, listen)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            match receive_on_endpoint(&cx, endpoint, &dest, &cfg, &peer_id).await {
+                                Ok(r) => print_json(&quic_recv_json(&r)),
+                                Err(e) => eprintln!("atp: transfer failed: {e}"),
+                            }
+                        }
+                    }
+                }))
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                let _ = (&dest, &listen, &peer_id, one_shot, &udp_bind_ip);
+                Err("atp --transport quic requires building atp with --features tls".to_string())
+            }
+        }
     }
 }
 
@@ -914,6 +1175,36 @@ fn rq_send_json(report: &transport_rq::SendReport) -> serde_json::Value {
         "files": report.files,
         "symbols_sent": report.symbols_sent,
         "feedback_rounds": report.feedback_rounds,
+        "merkle_root": report.merkle_root_hex,
+        "sha_ok": report.receipt.sha_ok,
+        "merkle_ok": report.receipt.merkle_ok,
+        "peer": report.peer.to_string(),
+    })
+}
+
+#[cfg(feature = "tls")]
+fn quic_recv_json(
+    report: &asupersync::net::atp::transport_quic::ReceiveReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": "atp_receive", "transport": "quic",
+        "transfer_id": report.transfer_id,
+        "committed": report.committed,
+        "bytes_received": report.bytes_received,
+        "files": report.files,
+        "committed_paths": report.committed_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "peer": report.peer.to_string(),
+    })
+}
+
+#[cfg(feature = "tls")]
+fn quic_send_json(report: &asupersync::net::atp::transport_quic::SendReport) -> serde_json::Value {
+    serde_json::json!({
+        "event": "atp_send", "transport": "quic",
+        "transfer_id": report.transfer_id,
+        "committed": report.receipt.committed,
+        "bytes_sent": report.bytes_sent,
+        "files": report.files,
         "merkle_root": report.merkle_root_hex,
         "sha_ok": report.receipt.sha_ok,
         "merkle_ok": report.receipt.merkle_ok,
