@@ -407,9 +407,19 @@ impl ConstraintMatrix {
     /// `ConstraintMatrix::zeros` into line.
     #[must_use]
     pub fn zeros(rows: usize, cols: usize) -> Self {
-        // Prevent arithmetic overflow by checking for unreasonably large matrices
-        const MAX_MATRIX_SIZE: usize = 1024 * 1024 * 1024; // 1GB max
-        let n = rows.saturating_mul(cols).min(MAX_MATRIX_SIZE);
+        // Allocate exactly `rows * cols` cells. A previous version capped the
+        // allocation at `min(rows*cols, 1GiB)` while still storing the full
+        // `rows`/`cols`, so any matrix above 1 GiB was backed by a buffer
+        // SHORTER than its declared dimensions — `get`/`set`/`add_assign`
+        // (`data[row*cols+col]`) would then index out of bounds at a confusing
+        // downstream site. `saturating_mul` was also the wrong shape for an
+        // alloc (see the same reasoning at `decoder.rs` `snapshot_dense_rhs`):
+        // on real overflow it would silently produce a wrong-size buffer. Use
+        // `checked_mul` so an overflowing (malformed/impossible) request fails
+        // closed at the allocation site with a clear message instead.
+        let n = rows
+            .checked_mul(cols)
+            .expect("constraint matrix dimensions (rows * cols) overflow usize");
         Self {
             data: vec![Gf256::ZERO; n],
             rows,
