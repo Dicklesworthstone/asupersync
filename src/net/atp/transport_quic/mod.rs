@@ -2496,6 +2496,61 @@ async fn commit_decoded_entries(
     Ok((receipt, committed_paths))
 }
 
+enum NativeReceiveRound {
+    Complete,
+    NeedMore(QuicNeedMore),
+}
+
+fn receive_native_symbol_round(
+    cx: &Cx,
+    connection: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    symbols_accepted: &mut u64,
+    feedback_rounds: &mut u32,
+) -> Result<NativeReceiveRound, QuicTransportError> {
+    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    *symbols_accepted = (*symbols_accepted).saturating_add(drain_native_symbol_datagrams(
+        connection, manifest, decoders, config,
+    )?);
+    receive_native_object_complete(cx, connection, control)?;
+    assemble_completed_entries(decoders);
+
+    let pending = pending_entries(decoders);
+    if pending.is_empty() {
+        return Ok(NativeReceiveRound::Complete);
+    }
+    if *feedback_rounds >= config.max_feedback_rounds {
+        return Err(QuicTransportError::NoConvergence {
+            rounds: *feedback_rounds,
+            pending: pending.len(),
+        });
+    }
+    let need = QuicNeedMore {
+        pending,
+        source_symbols: source_symbol_requests(decoders, 2048),
+    };
+    let round = (*feedback_rounds).saturating_add(1);
+    let pending_count = need.pending.len().to_string();
+    let source_request_count = need.source_symbols.len().to_string();
+    let accepted_count = symbols_accepted.to_string();
+    let round_text = round.to_string();
+    cx.trace_with_fields(
+        "atp_quic.receive.need_more",
+        &[
+            ("round", round_text.as_str()),
+            ("pending", pending_count.as_str()),
+            ("source_requests", source_request_count.as_str()),
+            ("symbols_accepted", accepted_count.as_str()),
+        ],
+    );
+    send_native_need_more(cx, connection, control, &need)?;
+    *feedback_rounds = round;
+    Ok(NativeReceiveRound::NeedMore(need))
+}
+
 async fn receive_established_native_connection(
     cx: &Cx,
     mut connection: NativeQuicConnection,
@@ -2519,21 +2574,25 @@ async fn receive_established_native_connection(
     let manifest = receive_native_manifest(cx, &mut connection, &mut control)?;
     validate_quic_manifest(&manifest, &config)?;
     let mut decoders = decoders_from_manifest(&manifest, &config)?;
-    let symbols_accepted =
-        drain_native_symbol_datagrams(&mut connection, &manifest, &mut decoders, &config)?;
-    receive_native_object_complete(cx, &mut connection, &mut control)?;
-    assemble_completed_entries(&mut decoders);
+    let mut symbols_accepted = 0u64;
+    let mut feedback_rounds = 0u32;
 
-    let pending = pending_entries(&decoders);
-    if !pending.is_empty() {
-        let need = QuicNeedMore {
-            pending,
-            source_symbols: source_symbol_requests(&decoders, 2048),
-        };
-        send_native_need_more(cx, &mut connection, &mut control, &need)?;
-        return Err(QuicTransportError::Integrity(format!(
-            "receiver still needs more symbols after accepting {symbols_accepted} DATAGRAM symbols"
-        )));
+    loop {
+        match receive_native_symbol_round(
+            cx,
+            &mut connection,
+            &mut control,
+            &manifest,
+            &mut decoders,
+            &config,
+            &mut symbols_accepted,
+            &mut feedback_rounds,
+        )? {
+            NativeReceiveRound::Complete => break,
+            NativeReceiveRound::NeedMore(need) => {
+                let _ = need.pending.len();
+            }
+        }
     }
 
     let (receipt, committed_paths) =
@@ -2771,8 +2830,8 @@ mod tests {
     use super::*;
     use crate::net::atp::protocol::frames::{Frame, ProtocolVersion};
     use crate::net::quic_native::{
-        DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, QuicConnection, StreamDirection,
-        StreamRole, establish_loopback, pump_app_data, pump_until_idle,
+        DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, PacketNumberSpace, QuicConnection,
+        StreamDirection, StreamRole, establish_loopback, pump_app_data, pump_until_idle,
     };
 
     fn block_on<F: std::future::Future>(fut: F) -> F::Output {
@@ -2794,6 +2853,39 @@ mod tests {
         client.record_verified_server_identity();
         establish_loopback(&cx, &mut client, &mut server).expect("loopback establishes");
         (cx, client, server)
+    }
+
+    fn pump_native_until_idle(
+        cx: &Cx,
+        from: &mut NativeQuicConnection,
+        to: &mut NativeQuicConnection,
+        next_packet_number: &mut u64,
+        max_packet_bytes: usize,
+        now_micros: u64,
+    ) -> Result<usize, QuicTransportError> {
+        let mut total = 0usize;
+        for _ in 0..32 {
+            let frames =
+                from.generate_frames(cx, PacketNumberSpace::ApplicationData, max_packet_bytes)?;
+            if frames.is_empty() {
+                return Ok(total);
+            }
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload)?;
+            let packet_number = *next_packet_number;
+            *next_packet_number = (*next_packet_number).saturating_add(1);
+            to.process_packet_payload(
+                cx,
+                PacketNumberSpace::ApplicationData,
+                packet_number,
+                &payload,
+                now_micros,
+            )?;
+            total = total.saturating_add(frames.len());
+        }
+        Err(QuicTransportError::Quic(
+            "native pump did not drain within iteration cap".to_string(),
+        ))
     }
 
     fn sample_manifest() -> TransferManifest {
@@ -4183,6 +4275,234 @@ mod tests {
             std::fs::read(temp.path().join("payload/nested/beta.bin")).expect("read beta"),
             entries[1].1
         );
+    }
+
+    #[test]
+    fn native_receive_rounds_commit_after_source_symbol_retransmit() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.0,
+            max_feedback_rounds: 2,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(384, 47))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+
+        send_sender_hello(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )
+        .expect("send hello");
+        let mut encoders = encoders_from_entries(&manifest, &entries);
+        let initial_sent = send_manifest_symbols_complete(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &manifest,
+            &mut encoders,
+            &config,
+        )
+        .expect("send source-only round");
+        assert_eq!(initial_sent, 3);
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            6_200,
+        )
+        .expect("deliver initial transfer payload");
+
+        let mut native_server = server.inner().clone();
+        let dropped = native_server
+            .recv_datagram()
+            .expect("drop one source datagram");
+        assert!(!dropped.is_empty());
+        let mut receiver_control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
+        receive_native_sender_hello_and_ack(
+            &cx,
+            &mut native_server,
+            &mut receiver_control,
+            &config,
+            "receiver-peer",
+            false,
+        )
+        .expect("native receiver accepts hello");
+        let received_manifest =
+            receive_native_manifest(&cx, &mut native_server, &mut receiver_control)
+                .expect("native receiver decodes manifest");
+        assert_eq!(received_manifest, manifest);
+        let mut decoders = decoders_from_manifest(&received_manifest, &config).expect("decoders");
+        let mut symbols_accepted = 0u64;
+        let mut feedback_rounds = 0u32;
+        let need = match receive_native_symbol_round(
+            &cx,
+            &mut native_server,
+            &mut receiver_control,
+            &received_manifest,
+            &mut decoders,
+            &config,
+            &mut symbols_accepted,
+            &mut feedback_rounds,
+        )
+        .expect("initial native receive round asks for repair")
+        {
+            NativeReceiveRound::NeedMore(need) => need,
+            NativeReceiveRound::Complete => panic!("dropped source symbol should require repair"),
+        };
+        assert_eq!(symbols_accepted, 2);
+        assert_eq!(feedback_rounds, 1);
+        assert_eq!(need.pending, vec![0]);
+        assert!(
+            !need.source_symbols.is_empty(),
+            "receiver should ask for the missing source symbol"
+        );
+
+        let symbol_auth = config.symbol_auth_context().expect("auth posture");
+        let repair_sent = send_repair_round_and_object_complete(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &received_manifest,
+            &mut encoders,
+            &need,
+            &config,
+            symbol_auth.as_ref(),
+        )
+        .expect("sender retransmits requested source symbol");
+        assert_eq!(repair_sent, 1);
+        let mut native_client = client.inner().clone();
+        let mut client_packet_number = 0u64;
+        let moved = pump_native_until_idle(
+            &cx,
+            &mut native_client,
+            &mut native_server,
+            &mut client_packet_number,
+            DEFAULT_MAX_PACKET_BYTES,
+            6_201,
+        )
+        .expect("deliver repair payload to receiver-owned native connection");
+        assert!(moved > 0);
+
+        assert!(matches!(
+            receive_native_symbol_round(
+                &cx,
+                &mut native_server,
+                &mut receiver_control,
+                &received_manifest,
+                &mut decoders,
+                &config,
+                &mut symbols_accepted,
+                &mut feedback_rounds,
+            )
+            .expect("repair native receive round converges"),
+            NativeReceiveRound::Complete
+        ));
+        assert_eq!(symbols_accepted, 3);
+        assert_eq!(feedback_rounds, 1);
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (receipt, committed_paths) = block_on(commit_decoded_entries(
+            &cx,
+            temp.path(),
+            &received_manifest,
+            &decoders,
+        ))
+        .expect("commit decoded repair result");
+        assert!(receipt.committed);
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+        assert_eq!(receipt.bytes_received, 384);
+        assert_eq!(committed_paths.len(), 1);
+        assert_eq!(
+            std::fs::read(temp.path().join("payload/alpha.bin")).expect("read alpha"),
+            entries[0].1
+        );
+    }
+
+    #[test]
+    fn receive_connection_exhausts_native_repair_round_budget() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.0,
+            max_feedback_rounds: 1,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(384, 47))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+
+        send_sender_hello(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )
+        .expect("send hello");
+        let mut encoders = encoders_from_entries(&manifest, &entries);
+        send_manifest_symbols_complete(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &manifest,
+            &mut encoders,
+            &config,
+        )
+        .expect("send source-only round");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            6_100,
+        )
+        .expect("deliver initial transfer payload");
+
+        let dropped = server.recv_datagram().expect("drop one source datagram");
+        assert!(!dropped.is_empty());
+        send_object_complete(&cx, &mut client, &mut sender_control)
+            .expect("send empty second round marker");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            6_101,
+        )
+        .expect("deliver second object-complete marker");
+
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let err = block_on(receive_connection(
+            &cx,
+            server.inner().clone(),
+            peer,
+            temp.path(),
+            config,
+            "receiver-peer",
+        ))
+        .expect_err("receiver should exhaust repair feedback budget");
+
+        assert!(matches!(
+            err,
+            QuicTransportError::NoConvergence {
+                rounds: 1,
+                pending: 1,
+            }
+        ));
     }
 
     #[test]
