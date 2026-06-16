@@ -12,7 +12,7 @@
 #![cfg(unix)]
 
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -304,5 +304,51 @@ fn non_preserved_symlink_is_followed_to_target_content() {
         std::fs::read(&out_alias).unwrap(),
         b"real payload\n",
         "followed symlink must carry the target's content"
+    );
+}
+
+#[test]
+fn fifo_is_skipped_without_hanging_the_sender() {
+    // J2 (b0k8qo.11.2) slice (b): a FIFO in the source must NOT block the sender
+    // (it is zero-content, never opened) and is skipped+logged on the receiver
+    // (not materialized in this slice), while ordinary files alongside it still
+    // transfer. If the sender ever opened the FIFO, this test would hang.
+    let root = unique_tmp("fifo");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    std::fs::write(tree.join("keep.txt"), b"kept\n").unwrap();
+    // Create the FIFO via the coreutils `mkfifo` (avoids a libc/nix dev-dep).
+    let fifo = tree.join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("spawn mkfifo");
+    assert!(status.success(), "mkfifo must create the source FIFO");
+    assert!(
+        std::fs::symlink_metadata(&fifo)
+            .unwrap()
+            .file_type()
+            .is_fifo(),
+        "source pipe must be a FIFO"
+    );
+
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), MetadataPolicy::full_preservation());
+    let send = run_sender(addr, tree.clone(), MetadataPolicy::full_preservation()).expect("send");
+    let recv = recv_handle.join().expect("recv thread").expect("recv");
+    assert!(send.receipt.committed && recv.committed);
+
+    // The FIFO is skipped (not recreated) in this slice; the regular file arrives.
+    assert!(
+        !dst_dir.join("project").join("pipe").exists(),
+        "FIFO must be skipped+logged, not materialized"
+    );
+    assert_eq!(
+        std::fs::read(dst_dir.join("project").join("keep.txt")).unwrap(),
+        b"kept\n",
+        "regular file alongside the FIFO still round-trips"
     );
 }
