@@ -1,3 +1,5 @@
+#![cfg(feature = "tls")]
+
 use std::time::Duration;
 
 use asupersync::cx::Cx;

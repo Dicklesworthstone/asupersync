@@ -224,6 +224,26 @@ fn summarize_event_data(data: &TraceData) -> String {
         TraceData::Cancel { task, region, .. } => {
             format!("T{}/R{}/cancel", task.as_u64(), region.as_u64())
         }
+        TraceData::Budget {
+            task,
+            region,
+            protocol,
+            source,
+            outcome,
+            ..
+        } => {
+            let token = source
+                .as_deref()
+                .or(outcome.as_deref())
+                .unwrap_or("unknown");
+            format!(
+                "T{}/R{}/budget/{}/{}",
+                task.as_u64(),
+                region.as_u64(),
+                protocol,
+                token
+            )
+        }
         TraceData::Worker { task, region, .. } => {
             format!("T{}/R{}/worker", task.as_u64(), region.as_u64())
         }
