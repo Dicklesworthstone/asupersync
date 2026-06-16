@@ -5,6 +5,7 @@
 
 pub mod metadata;
 pub mod mirror;
+pub mod progress;
 pub mod streaming;
 
 pub use metadata::{
@@ -13,6 +14,9 @@ pub use metadata::{
 };
 pub use mirror::{
     MirrorEntryKind, MirrorError, MirrorExtra, MirrorPolicy, MirrorReport, mirror_dest,
+};
+pub use progress::{
+    PlanEntry, PlanError, ProgressSnapshot, TransferPlan, TransferProgress, plan_transfer,
 };
 pub use streaming::{
     EntryDigest, SourceEntry, StagedEntryReceive, StreamingError, collect_entries,
