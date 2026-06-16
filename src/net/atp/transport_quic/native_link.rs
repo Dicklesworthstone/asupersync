@@ -1297,7 +1297,7 @@ async fn run_receiver_session(
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
 
-    loop {
+    'rounds: loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         // Drain symbols and wait for this round's ObjectComplete marker, pumping
         // the socket and draining the bounded inbound DATAGRAM queue each step so
@@ -1333,6 +1333,11 @@ async fn run_receiver_session(
                 staged_entry
                     .write_block(entry, block.sbn, &block.data, config)
                     .await?;
+            }
+            if super::pending_entries(&decoders).is_empty() {
+                // Once all entries decode, Proof can complete the transfer even
+                // if the best-effort ObjectComplete control packet was dropped.
+                break 'rounds;
             }
             if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
                 if frame.frame_type() != FrameType::ObjectComplete {
