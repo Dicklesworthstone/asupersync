@@ -7457,7 +7457,11 @@ fn decode_binary_numeric_to_text(data: &[u8]) -> Result<String, PgError> {
     }
 
     let digit_at_exponent = |exp: i16| -> u16 {
-        let idx = weight - exp;
+        // Widen to i32: `weight` is attacker-controlled and unvalidated, and in
+        // the fractional path `exp` is negative, so `weight - exp` can exceed
+        // i16::MAX (e.g. weight=0x7FFF) and overflow — a debug-build panic /
+        // release wrong-digit on hostile wire input.
+        let idx = i32::from(weight) - i32::from(exp);
         if idx < 0 {
             0
         } else {

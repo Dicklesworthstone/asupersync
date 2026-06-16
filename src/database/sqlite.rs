@@ -1974,6 +1974,16 @@ impl SqliteConnection {
                 Outcome::Err(e)
             }
             Outcome::Cancelled(r) => {
+                // The cancel path interrupts BEGIN, but `sqlite3_interrupt`
+                // races a near-instant BEGIN: it may have already opened a
+                // transaction on the real connection while this mirror still
+                // reads Autocommit. Mark NeedsRollback so the next operation's
+                // `drain_orphaned_transaction` rolls back any leaked txn — a
+                // harmless no-op (gated on `is_autocommit()`) if BEGIN never
+                // actually opened one — preventing state desync / pool
+                // poisoning. The connection mutex serializes an abandoned BEGIN
+                // job ahead of that drain, so the rollback sees the final state.
+                *self.transaction_state.lock() = TransactionState::NeedsRollback;
                 trace_database_transaction(cx, "sqlite", "begin", "cancelled");
                 Outcome::Cancelled(r)
             }
@@ -2006,6 +2016,9 @@ impl SqliteConnection {
                 Outcome::Err(e)
             }
             Outcome::Cancelled(r) => {
+                // See `begin`: interrupt races the BEGIN; mark NeedsRollback so
+                // the next op's drain cleans up any leaked txn (no-op if none).
+                *self.transaction_state.lock() = TransactionState::NeedsRollback;
                 trace_database_transaction(cx, "sqlite", "begin_immediate", "cancelled");
                 Outcome::Cancelled(r)
             }
@@ -2038,6 +2051,9 @@ impl SqliteConnection {
                 Outcome::Err(e)
             }
             Outcome::Cancelled(r) => {
+                // See `begin`: interrupt races the BEGIN; mark NeedsRollback so
+                // the next op's drain cleans up any leaked txn (no-op if none).
+                *self.transaction_state.lock() = TransactionState::NeedsRollback;
                 trace_database_transaction(cx, "sqlite", "begin_exclusive", "cancelled");
                 Outcome::Cancelled(r)
             }

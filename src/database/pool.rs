@@ -1447,12 +1447,6 @@ impl<M: ConnectionManager> DbPool<M> {
         }
     }
 
-    /// Discard a connection (don't return to pool).
-    fn discard_connection(&self, conn: M::Connection) {
-        // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks
-        self.safe_discard_connection(conn, None);
-    }
-
     /// Close the pool, preventing new acquisitions.
     ///
     /// Existing checked-out connections will be discarded when returned.
@@ -1708,11 +1702,15 @@ impl<M: ConnectionManager> PooledConnection<'_, M> {
     }
 
     /// Explicitly return the connection to the pool.
-    pub fn return_to_pool(mut self) {
-        if let Some(conn) = self.conn.take() {
-            self.pool
-                .return_connection(conn, self.created_at, self.client_id.clone());
-        }
+    pub fn return_to_pool(self) {
+        // Returning is exactly what `Drop` does: decrement the per-client quota
+        // (br-asupersync-qydi3j) AND run the manager's release-time health gate
+        // (br-asupersync-5bv5sr), returning the connection only if healthy and
+        // discarding it otherwise. Let the guard drop to run that single path —
+        // taking `conn` and calling `return_connection` directly here bypassed
+        // both, leaking the client quota slot and re-pooling poisoned
+        // connections.
+        drop(self);
     }
 
     /// Discard this connection instead of returning it.
@@ -1720,7 +1718,13 @@ impl<M: ConnectionManager> PooledConnection<'_, M> {
     /// Use when the connection is broken or in an invalid state.
     pub fn discard(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.discard_connection(conn);
+            // Pass the client id and use the safe discard helper so the
+            // per-client quota slot is released (it decrements
+            // `client_connections`). The prior `discard_connection(conn)`
+            // hardcoded `client_id = None` and leaked the quota slot.
+            let _ = self
+                .pool
+                .safe_discard_connection(conn, self.client_id.clone());
         }
     }
 }
@@ -1761,7 +1765,7 @@ impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
             // poisoned protocol state, an open transaction, or any other
             // condition that would corrupt the next caller's view should
             // override `release_check` to return `false`; we then route
-            // the connection through `discard_connection` so it's closed
+            // the connection through `safe_discard_connection` so it's closed
             // rather than handed back to a fresh caller.
             if self.pool.manager.release_check(&mut conn) {
                 self.pool
@@ -3040,16 +3044,22 @@ impl<M: AsyncConnectionManager> AsyncPooledConnection<'_, M> {
     }
 
     /// Explicitly return the connection to the pool.
-    pub fn return_to_pool(mut self) {
-        if let Some(conn) = self.conn.take() {
-            self.pool
-                .return_connection(conn, self.created_at, self.client_id.clone());
-        }
+    pub fn return_to_pool(self) {
+        // Returning is exactly what `Drop` does: decrement the per-client quota
+        // (br-asupersync-80525g) AND run the manager's release-time health gate
+        // (br-asupersync-5bv5sr). Let the guard drop to run that single path —
+        // taking `conn` and calling `return_connection` directly here bypassed
+        // both, leaking the client quota slot and re-pooling poisoned
+        // connections.
+        drop(self);
     }
 
     /// Discard this connection instead of returning it.
     pub fn discard(mut self) {
         if let Some(conn) = self.conn.take() {
+            // `discard_connection_with_client` releases the per-client quota
+            // slot (decrements `client_connections`); the client id must be
+            // passed so the slot is actually freed.
             self.pool
                 .discard_connection_with_client(conn, self.client_id.clone());
         }
@@ -3456,6 +3466,42 @@ mod tests {
             result.err()
         );
         crate::test_complete!("get_for_client_clear_auth_failure_does_not_leak_capacity_slot");
+    }
+
+    #[test]
+    fn explicit_return_to_pool_and_discard_release_client_quota_slot() {
+        init_test("explicit_return_to_pool_and_discard_release_client_quota_slot");
+        let pool = DbPool::new(
+            TestManager::new(),
+            DbPoolConfig::with_max_size(4)
+                .max_connections_per_client(Some(1))
+                .enforce_client_quotas(true),
+        );
+
+        // Acquire under client "c1" and explicitly return it. The per-client
+        // quota slot must be released. The prior code took the connection out
+        // of the guard and called `return_connection` directly, so the guard's
+        // Drop (which owns the quota decrement) saw `None` and the slot leaked —
+        // the second acquire then failed with ClientQuotaExceeded forever.
+        {
+            let conn = pool.get_for_client("c1").expect("first acquire");
+            conn.return_to_pool();
+        }
+        pool.get_for_client("c1")
+            .expect("return_to_pool must free the client quota slot")
+            .return_to_pool();
+
+        // Same for discard(): the sync path previously called
+        // `discard_connection` with no client id, so the per-client slot leaked.
+        {
+            let conn = pool.get_for_client("c1").expect("acquire before discard");
+            conn.discard();
+        }
+        pool.get_for_client("c1")
+            .expect("discard must free the client quota slot")
+            .return_to_pool();
+
+        crate::test_complete!("explicit_return_to_pool_and_discard_release_client_quota_slot");
     }
 
     struct AsyncTestManager {
