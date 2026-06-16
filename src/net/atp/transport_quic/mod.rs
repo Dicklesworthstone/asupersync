@@ -3309,6 +3309,14 @@ mod tests {
         (cx, client, server)
     }
 
+    fn cancelled_test_cx() -> Cx<crate::cx::cap::All> {
+        let cx = Cx::for_testing();
+        cx.set_cancel_reason(crate::types::CancelReason::user(
+            "transport_quic cancellation test",
+        ));
+        cx
+    }
+
     fn pump_native_until_idle(
         cx: &Cx,
         from: &mut NativeQuicConnection,
@@ -4895,6 +4903,66 @@ mod tests {
             std::fs::read(temp.path().join("payload/nested/beta.bin")).expect("read beta"),
             entries[1].1
         );
+    }
+
+    #[test]
+    fn receive_connection_observes_cancel_before_native_body() {
+        let (_setup_cx, _client, server) = established_pair();
+        let cx = cancelled_test_cx();
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        let err = block_on(receive_connection(
+            &cx,
+            server.inner().clone(),
+            peer,
+            temp.path(),
+            trusted_quic_config(),
+            "receiver-peer",
+        ))
+        .expect_err("cancelled receive must fail closed");
+
+        assert!(matches!(err, QuicTransportError::Cancelled));
+        assert!(
+            std::fs::read_dir(temp.path())
+                .expect("dest dir still readable")
+                .next()
+                .is_none(),
+            "cancelled receive must not commit files"
+        );
+    }
+
+    #[test]
+    fn native_sender_body_observes_cancel_before_driving_peer() {
+        let (setup_cx, client, _server) = established_pair();
+        let mut native_client = client.inner().clone();
+        let config = trusted_quic_config();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(&root).expect("create payload root");
+        std::fs::write(root.join("alpha.bin"), varied_bytes(256, 83)).expect("write alpha");
+        let prepared = block_on(prepare_source_manifest(&setup_cx, &root, &config))
+            .expect("source manifest prepares from disk");
+        let cx = cancelled_test_cx();
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let mut driver_called = false;
+
+        let err = block_on(send_prepared_source_over_established_native_connection(
+            &cx,
+            &mut native_client,
+            peer,
+            &prepared,
+            &config,
+            "sender-peer",
+            |_point, _conn| {
+                driver_called = true;
+                Ok(())
+            },
+        ))
+        .expect_err("cancelled sender must fail closed");
+
+        assert!(matches!(err, QuicTransportError::Cancelled));
+        assert!(!driver_called, "cancelled sender must not drive peer I/O");
     }
 
     #[test]
