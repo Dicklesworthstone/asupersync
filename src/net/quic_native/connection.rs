@@ -1671,9 +1671,32 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    #[cfg(feature = "tls")]
+    use crate::tls::{Certificate, CertificateChain, RootCertStore};
+    #[cfg(feature = "tls")]
+    use std::time::Duration;
 
     fn test_cx() -> Cx<crate::cx::cap::All> {
         Cx::for_testing()
+    }
+
+    #[cfg(feature = "tls")]
+    const TEST_CERT_PEM: &[u8] = include_bytes!("../../../tests/fixtures/tls/server.crt");
+
+    #[cfg(feature = "tls")]
+    fn fixed_cert_validity_time() -> rustls_pki_types::UnixTime {
+        rustls_pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1_780_000_000))
+    }
+
+    #[cfg(feature = "tls")]
+    fn trusted_identity_material() -> (QuicServerIdentityVerifier, CertificateChain) {
+        let certs = Certificate::from_pem(TEST_CERT_PEM).expect("fixture cert parses");
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(&certs[0])
+            .expect("fixture cert can be a test trust anchor");
+        let verifier = QuicServerIdentityVerifier::from_root_store(roots).expect("build verifier");
+        (verifier, CertificateChain::from(certs))
     }
 
     fn established_conn() -> NativeQuicConnection {
@@ -1736,6 +1759,67 @@ mod tests {
         conn.record_verified_server_identity();
         conn.on_handshake_confirmed(&cx)
             .expect("client confirms once a verifying handshake has recorded server identity");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn client_verifies_server_identity_before_confirming_handshake() {
+        let cx = test_cx();
+        let (verifier, chain) = trusted_identity_material();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx).expect("hs keys");
+        conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+
+        let receipt = conn
+            .verify_server_identity_and_confirm_handshake(
+                &cx,
+                &verifier,
+                "localhost",
+                chain,
+                fixed_cert_validity_time(),
+            )
+            .expect("valid server identity confirms handshake");
+
+        assert_eq!(receipt.chain_len, 1);
+        assert_eq!(receipt.root_count, 1);
+        assert_eq!(conn.state(), QuicConnectionState::Established);
+        assert!(conn.can_send_1rtt());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn client_rejects_bad_server_identity_without_confirming_handshake() {
+        let cx = test_cx();
+        let (verifier, chain) = trusted_identity_material();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        conn.on_handshake_keys_available(&cx).expect("hs keys");
+        conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+
+        let err = conn
+            .verify_server_identity_and_confirm_handshake(
+                &cx,
+                &verifier,
+                "not-localhost.example",
+                chain,
+                fixed_cert_validity_time(),
+            )
+            .expect_err("bad hostname must fail closed");
+
+        assert!(matches!(
+            err,
+            NativeQuicConnectionError::Tls(QuicTlsError::CryptoProviderFailure { .. })
+        ));
+        assert_eq!(conn.state(), QuicConnectionState::Handshaking);
+        assert!(!conn.can_send_1rtt());
+        let confirm_err = conn
+            .on_handshake_confirmed(&cx)
+            .expect_err("failed verification must not set identity gate");
+        assert!(matches!(
+            confirm_err,
+            NativeQuicConnectionError::Tls(QuicTlsError::ServerCertificateUnverified)
+        ));
     }
 
     #[test]
