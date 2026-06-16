@@ -12,7 +12,7 @@
 #![cfg(unix)]
 
 use std::net::SocketAddr;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -413,4 +413,59 @@ fn fifo_recreated_when_allow_special_files_set() {
         "FIFO must be recreated when allow_special_files is set"
     );
     assert_eq!(mode_of(&out_fifo), 0o640, "recreated FIFO mode preserved");
+}
+
+#[test]
+fn sparse_file_round_trips_and_stays_sparse() {
+    // J2 (b0k8qo.11.2) slice (c): with the opt-in sparse_files flag, a sparse
+    // source (a small data island in a large hole, plus a trailing hole) must
+    // round-trip byte-identical AND stay sparse on disk (allocation << logical).
+    const TOTAL: u64 = 2 * 1024 * 1024;
+    const ISLAND_OFFSET: u64 = 1024 * 1024;
+    const ISLAND: usize = 4096;
+
+    let root = unique_tmp("sparse");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let sparse = tree.join("disk.img");
+    {
+        use std::io::{Seek, Write};
+        let mut f = std::fs::File::create(&sparse).unwrap();
+        f.seek(std::io::SeekFrom::Start(ISLAND_OFFSET)).unwrap();
+        f.write_all(&[0xABu8; ISLAND]).unwrap();
+        f.set_len(TOTAL).unwrap(); // trailing hole
+    }
+    let src_meta = std::fs::metadata(&sparse).unwrap();
+    assert_eq!(src_meta.len(), TOTAL);
+    assert!(
+        src_meta.blocks() * 512 < TOTAL / 2,
+        "source must actually be sparse on this fs"
+    );
+
+    let recv_config = TransferConfig {
+        sparse_files: true,
+        ..TransferConfig::default()
+    };
+    let (addr, recv_handle) = spawn_receiver_with_config(dst_dir.clone(), recv_config);
+    let send = run_sender(addr, tree.clone(), MetadataPolicy::portable()).expect("send");
+    let recv = recv_handle.join().expect("recv thread").expect("recv");
+    assert!(send.receipt.committed && recv.committed);
+
+    let out = dst_dir.join("project").join("disk.img");
+    let out_meta = std::fs::metadata(&out).expect("sparse file present");
+    assert_eq!(out_meta.len(), TOTAL, "logical size preserved");
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        std::fs::read(&sparse).unwrap(),
+        "content must be byte-identical (holes read back as zeros)"
+    );
+    assert!(
+        out_meta.blocks() * 512 < TOTAL / 2,
+        "receiver file must stay sparse (allocated {} of {TOTAL} bytes)",
+        out_meta.blocks() * 512
+    );
 }

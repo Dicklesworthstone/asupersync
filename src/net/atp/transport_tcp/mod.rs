@@ -134,6 +134,12 @@ pub struct TransferConfig {
     /// recreated via `mkfifo`; sockets and device nodes are still skipped
     /// (sockets are runtime objects; device nodes need privilege).
     pub allow_special_files: bool,
+    /// Opt-in sparse-file reconstruction (rsync `-S`). When `true`, the receiver
+    /// punches holes for long zero runs (seeking past them instead of writing),
+    /// so a sparse source (e.g. a VM image) stays sparse on disk. Content is
+    /// unchanged — the per-entry SHA-256 / merkle still covers the full logical
+    /// bytes (holes read back as zeros), so a hole-punching error fails closed.
+    pub sparse_files: bool,
 }
 
 impl Default for TransferConfig {
@@ -146,6 +152,7 @@ impl Default for TransferConfig {
             max_active_connections: DEFAULT_MAX_ACTIVE_CONNECTIONS,
             metadata_policy: MetadataPolicy::default(),
             allow_special_files: false,
+            sparse_files: false,
         }
     }
 }
@@ -617,6 +624,41 @@ fn data_frame(index: u32, offset: u64, chunk: &[u8]) -> Result<Frame, TransportE
         .map_err(|e| TransportError::Frame(e.to_string()))
 }
 
+/// Write `chunk` to `file`, punching holes for long zero runs by seeking past
+/// them instead of writing, so a sparse source stays sparse on disk. The caller
+/// must have `set_len` the file to its full length up front, so any trailing
+/// hole is preserved. Content is unchanged — holes read back as zeros — so the
+/// per-entry digest (computed over the full received stream) is unaffected.
+async fn write_chunk_sparse(
+    file: &mut crate::fs::File,
+    chunk: &[u8],
+) -> Result<(), TransportError> {
+    // Zero runs at least this long (one filesystem block) are punched as holes;
+    // shorter runs are written, since a sub-block hole saves no allocation.
+    const HOLE_THRESHOLD: usize = 4096;
+    let mut pos = 0;
+    while pos < chunk.len() {
+        let start = pos;
+        if chunk[pos] == 0 {
+            while pos < chunk.len() && chunk[pos] == 0 {
+                pos += 1;
+            }
+            let run = pos - start;
+            if run >= HOLE_THRESHOLD {
+                file.seek(std::io::SeekFrom::Current(run as i64)).await?;
+            } else {
+                file.write_all(&chunk[start..pos]).await?;
+            }
+        } else {
+            while pos < chunk.len() && chunk[pos] != 0 {
+                pos += 1;
+            }
+            file.write_all(&chunk[start..pos]).await?;
+        }
+    }
+    Ok(())
+}
+
 fn parse_data_frame(frame: &Frame) -> Result<(u32, u64, &[u8]), TransportError> {
     let p = frame.payload();
     if p.len() < 12 {
@@ -1081,6 +1123,12 @@ pub async fn receive_connection(
                             )));
                         }
                         let file = crate::fs::File::create(&st.staging_path).await?;
+                        // Pre-size a sparse file to the full length so holes
+                        // (seeked-over zero runs) and a trailing hole are
+                        // preserved without growing allocation.
+                        if config.sparse_files {
+                            file.set_len(entry.size).await?;
+                        }
                         st.mark_created();
                         active = Some((idx, file));
                     }
@@ -1113,7 +1161,11 @@ pub async fn receive_connection(
                             "internal: no active staging file for entry {index}"
                         )));
                     };
-                    file.write_all(chunk).await?;
+                    if config.sparse_files {
+                        write_chunk_sparse(file, chunk).await?;
+                    } else {
+                        file.write_all(chunk).await?;
+                    }
                     let st = &mut states[idx];
                     st.update_with_chunk(chunk);
                 }
