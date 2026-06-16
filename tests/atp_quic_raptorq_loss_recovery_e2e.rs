@@ -9,10 +9,10 @@
 //! fail to decode (fountain threshold, fail closed).
 //!
 //! It composes real RaptorQ (`EncodingPipeline` / `DecodingPipeline`) + the A6
-//! deterministic loopback + the `Symbol`↔datagram bridge. Scope: a single source
-//! block (the multi-block / directory-tree / SHA-256 verify / atomic commit
-//! pipeline is B4 proper, driven by the B2/B3 sender/receiver coroutines). Public
-//! API only.
+//! deterministic loopback + the `Symbol`↔datagram bridge. Scope: public
+//! data-plane proof, including single- and multi-source-block objects. The full
+//! directory-tree / SHA-256 verify / atomic commit pipeline is B4 proper, driven
+//! by the B2/B3 sender/receiver coroutines. Public API only.
 
 #![allow(clippy::cast_possible_truncation)]
 
@@ -94,6 +94,24 @@ fn encode_symbols(object_id: ObjectId, data: &[u8], repair_count: usize) -> Vec<
         .collect()
 }
 
+fn object_params(object_id: ObjectId, data_len: usize) -> ObjectParams {
+    let symbol_size = usize::from(SYMBOL_SIZE);
+    let source_blocks = data_len.div_ceil(MAX_BLOCK_SIZE);
+    let mut max_symbols_per_block = 0usize;
+    for block in 0..source_blocks {
+        let start = block * MAX_BLOCK_SIZE;
+        let block_len = (data_len - start).min(MAX_BLOCK_SIZE);
+        max_symbols_per_block = max_symbols_per_block.max(block_len.div_ceil(symbol_size));
+    }
+    ObjectParams::new(
+        object_id,
+        u64::try_from(data_len).expect("test payload length fits u64"),
+        SYMBOL_SIZE,
+        u16::try_from(source_blocks).expect("test source block count fits u16"),
+        u16::try_from(max_symbols_per_block).expect("test K fits u16"),
+    )
+}
+
 /// Spray `symbols` over the QUIC datagram plane (client → server) and collect the
 /// symbols the server reassembles. `object_id` reconstructs each `SymbolId` — in
 /// the real receiver the manifest resolves it from the envelope's
@@ -116,21 +134,10 @@ fn spray_and_collect(
     received
 }
 
-/// Feed `symbols` into a fresh RaptorQ decoder for the single-block object and
-/// attempt to recover the original bytes.
-fn decode(
-    object_id: ObjectId,
-    data_len: usize,
-    block_k: usize,
-    symbols: &[Symbol],
-) -> Result<Vec<u8>, ()> {
-    let params = ObjectParams::new(
-        object_id,
-        data_len as u64,
-        SYMBOL_SIZE,
-        1,
-        u16::try_from(block_k).expect("k fits u16"),
-    );
+/// Feed `symbols` into a fresh RaptorQ decoder for the object and attempt to
+/// recover the original bytes.
+fn decode(object_id: ObjectId, data_len: usize, symbols: &[Symbol]) -> Result<Vec<u8>, ()> {
+    let params = object_params(object_id, data_len);
     let mut pipeline = DecodingPipeline::new(decoding_config());
     pipeline.set_object_params(params).expect("set params");
     for s in symbols {
@@ -173,9 +180,55 @@ fn raptorq_symbols_recover_over_quic_datagrams_with_source_loss() {
     );
     assert_eq!(server.datagrams_received(), sent.len() as u64);
 
-    let decoded = decode(object_id, DATA_LEN, block_k, &received)
+    let decoded = decode(object_id, DATA_LEN, &received)
         .expect("K-of-N survivors recover the object despite the lost source symbols");
     assert_eq!(decoded, data, "recovered bytes match the original exactly");
+}
+
+#[test]
+fn multi_block_object_recovers_over_quic_datagrams_with_cross_block_source_loss() {
+    let cx = test_cx();
+    let (mut client, mut server) = established_pair(&cx);
+    let object_id = ObjectId::from_u128(0xC9);
+    let data_len = MAX_BLOCK_SIZE + usize::from(SYMBOL_SIZE) * 4;
+    let data = make_data(data_len);
+
+    let symbols = encode_symbols(object_id, &data, 4);
+    assert!(
+        symbols.iter().any(|s| s.sbn() == 1),
+        "payload must span at least two source blocks"
+    );
+
+    let mut dropped_block0 = 0usize;
+    let mut dropped_block1 = 0usize;
+    let mut sent = Vec::new();
+    for s in &symbols {
+        if matches!(s.kind(), SymbolKind::Source) && s.sbn() == 0 && dropped_block0 < 2 {
+            dropped_block0 += 1;
+            continue;
+        }
+        if matches!(s.kind(), SymbolKind::Source) && s.sbn() == 1 && dropped_block1 < 1 {
+            dropped_block1 += 1;
+            continue;
+        }
+        sent.push(s.clone());
+    }
+    assert_eq!(dropped_block0, 2, "dropped two first-block source symbols");
+    assert_eq!(dropped_block1, 1, "dropped one second-block source symbol");
+
+    let received = spray_and_collect(&cx, &mut client, &mut server, &sent, object_id);
+    assert_eq!(received.len(), sent.len());
+    assert!(
+        received.iter().any(|s| s.sbn() == 0) && received.iter().any(|s| s.sbn() == 1),
+        "bridge must deliver symbols from both source blocks"
+    );
+
+    let decoded = decode(object_id, data.len(), &received)
+        .expect("multi-block K-of-N survivors recover after cross-block source loss");
+    assert_eq!(
+        decoded, data,
+        "multi-block recovered bytes match the original exactly"
+    );
 }
 
 #[test]
@@ -193,7 +246,7 @@ fn below_threshold_symbol_count_fails_to_decode() {
     assert_eq!(received.len(), block_k - 1);
 
     assert!(
-        decode(object_id, DATA_LEN, block_k, &received).is_err(),
+        decode(object_id, DATA_LEN, &received).is_err(),
         "fewer than K symbols must not decode (fountain threshold, fail closed)"
     );
 }
