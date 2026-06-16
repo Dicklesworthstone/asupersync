@@ -1192,6 +1192,13 @@ pub(super) fn parse_content_length(value: &str) -> Result<usize, ExtractionError
             return Err(invalid_content_length());
         }
 
+        // RFC 9110 §8.6: Content-Length = 1*DIGIT. Rust's `usize` parser also
+        // accepts a leading '+' (e.g. "+5" -> 5); reject any non-digit byte so
+        // a fronting proxy cannot frame such a value differently than we do
+        // (the classic request-smuggling / framing-desync precondition).
+        if !part.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid_content_length());
+        }
         let declared = part
             .parse::<usize>()
             .map_err(|_| invalid_content_length())?;
@@ -1688,7 +1695,21 @@ mod tests {
 
     #[test]
     fn content_length_parser_rejects_invalid_or_conflicting_values() {
-        for value in ["", "5, ", "5, 6", "not-a-number", "-1"] {
+        // "+5"/"+42": Rust's usize parser accepts a leading '+', but RFC 9110
+        // §8.6 forbids it — a fronting proxy may frame it differently
+        // (smuggling/desync), so it must be rejected.
+        for value in [
+            "",
+            "5, ",
+            "5, 6",
+            "not-a-number",
+            "-1",
+            "+5",
+            "+42",
+            "5, +5",
+            "0x10",
+            "1 2",
+        ] {
             let err = parse_content_length(value).unwrap_err();
             assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
         }
