@@ -345,6 +345,12 @@ impl Connection {
         let initial_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
         decoder.set_max_header_list_size(max_header_list_size as usize);
+        // The decoder rejects any peer dynamic-table-size update above
+        // `allowed_table_size`, which MUST equal the SETTINGS_HEADER_TABLE_SIZE
+        // we advertise to the peer (RFC 7541 §6.3). Without this it stays at the
+        // 4096 default, so advertising a larger table would make us kill a
+        // spec-conforming peer with a COMPRESSION_ERROR.
+        decoder.set_allowed_table_size(settings.header_table_size as usize);
         Self {
             state: ConnectionState::Handshaking,
             is_client: true,
@@ -386,6 +392,12 @@ impl Connection {
         let initial_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
         decoder.set_max_header_list_size(max_header_list_size as usize);
+        // The decoder rejects any peer dynamic-table-size update above
+        // `allowed_table_size`, which MUST equal the SETTINGS_HEADER_TABLE_SIZE
+        // we advertise to the peer (RFC 7541 §6.3). Without this it stays at the
+        // 4096 default, so advertising a larger table would make us kill a
+        // spec-conforming peer with a COMPRESSION_ERROR.
+        decoder.set_allowed_table_size(settings.header_table_size as usize);
         Self {
             state: ConnectionState::Handshaking,
             is_client: false,
@@ -5501,6 +5513,23 @@ mod tests {
         let mut conn = Connection::server(Settings::default());
         let err = conn.send_connection_window_update(0).unwrap_err();
         assert_eq!(err.code, ErrorCode::FlowControlError);
+    }
+
+    #[test]
+    fn decoder_allowed_table_size_follows_local_settings() {
+        // Regression: the HPACK decoder's allowed dynamic-table size must track
+        // the SETTINGS_HEADER_TABLE_SIZE we advertise (RFC 7541 §6.3), not stay
+        // pinned at the 4096 default. Otherwise a peer that honors a larger
+        // advertised table and sends a matching dynamic-table-size update is
+        // killed with a COMPRESSION_ERROR.
+        let settings = Settings {
+            header_table_size: 8192,
+            ..Settings::default()
+        };
+        let server = Connection::server(settings.clone());
+        assert_eq!(server.hpack_decoder.allowed_table_size(), 8192);
+        let client = Connection::client(settings);
+        assert_eq!(client.hpack_decoder.allowed_table_size(), 8192);
     }
 
     #[test]

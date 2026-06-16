@@ -122,8 +122,16 @@ impl AtpFrameCodec {
         Ok(total_size)
     }
 
-    /// Decode frame header from buffer (zero-copy optimization)
-    fn decode_header(buf: &mut BytesMut) -> Result<Option<FrameHeader>, FrameError> {
+    /// Decode frame header from buffer (zero-copy optimization).
+    ///
+    /// `max_frame_size` is the codec's configured frame-size limit; the payload
+    /// length is bounded against it (not a hardcoded constant) so a codec built
+    /// with a non-default `with_max_frame_size` accepts exactly the frames it is
+    /// willing to encode, with no encode/decode asymmetry.
+    fn decode_header(
+        buf: &mut BytesMut,
+        max_frame_size: u64,
+    ) -> Result<Option<FrameHeader>, FrameError> {
         // First pass: check if we have enough bytes for complete header without consuming
         let _original_len = buf.len();
         let mut cursor = 0;
@@ -168,10 +176,10 @@ impl AtpFrameCodec {
         let Some(payload_length) = try_parse_varint(buf, &mut cursor)? else {
             return Ok(None); // Need more data
         };
-        if payload_length.value() > MAX_FRAME_SIZE {
+        if payload_length.value() > max_frame_size {
             return Err(FrameError::FrameTooLarge {
                 size: payload_length.value(),
-                max: MAX_FRAME_SIZE,
+                max: max_frame_size,
             });
         }
 
@@ -259,11 +267,12 @@ impl Decoder for AtpFrameCodec {
     type Error = FrameError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let max_frame_size = self.max_frame_size;
         loop {
             match &mut self.decode_state {
                 DecodeState::Header => {
                     // Try to decode header
-                    match Self::decode_header(src)? {
+                    match Self::decode_header(src, max_frame_size)? {
                         Some(header) => {
                             let payload_len = header.payload_length.value();
                             let total_size = Self::checked_frame_size(&header, payload_len)?;
@@ -499,6 +508,34 @@ mod tests {
         let result = decoder.decode(&mut encoded);
 
         assert!(matches!(result, Err(FrameError::FrameTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_decode_accepts_frames_above_default_when_limit_raised() {
+        // Regression: `decode_header` previously bounded the payload length
+        // against the hardcoded `MAX_FRAME_SIZE` (1 MiB) constant instead of
+        // the codec's configured `max_frame_size`. A codec configured ABOVE
+        // the default could therefore encode frames it then refused to decode
+        // (an encode/decode asymmetry). A frame whose payload exceeds the 1 MiB
+        // const but stays within the raised limit must round-trip.
+        let payload_len = usize::try_from(MAX_FRAME_SIZE).unwrap() + 4096;
+        let limit = MAX_FRAME_SIZE + 1024 * 1024; // 2 MiB configured limit
+        let frame = Frame::new(
+            ProtocolVersion::V0,
+            FrameType::ObjectData,
+            vec![0xABu8; payload_len],
+        )
+        .unwrap();
+
+        let mut codec = AtpFrameCodec::with_max_frame_size(limit);
+        let mut buf = BytesMut::new();
+        codec.encode(frame, &mut buf).unwrap();
+
+        let decoded = codec
+            .decode(&mut buf)
+            .unwrap()
+            .expect("frame within the configured limit must decode");
+        assert_eq!(decoded.payload().len(), payload_len);
     }
 
     #[test]
