@@ -53,6 +53,8 @@
 //! peak-memory bound (stream to/from disk; never hold a whole entry, let alone
 //! the whole transfer, in memory).
 
+pub mod symbol_envelope;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -67,6 +69,13 @@ use crate::net::quic_native::{ManagedQuicEndpoint, NativeQuicConnection};
 // half of the B1 acceptance.
 pub use crate::net::atp::transport_tcp::{
     ManifestEntry, ReceiveReceipt, ReceiveReport, SendReport, TransferManifest,
+};
+
+// The RaptorQ symbol-envelope codec (the framing of a symbol inside a QUIC
+// DATAGRAM) — the foundational piece B2/B3 build the sender/receiver on.
+pub use symbol_envelope::{
+    ATP_QUIC_SYMBOL_MAGIC, AUTH_ENVELOPE_HEADER_LEN, ENVELOPE_HEADER_LEN, QuicSymbolEnvelope,
+    QuicSymbolEnvelopeError,
 };
 
 /// Protocol identifier carried in the QUIC handshake; bump on wire-incompatible
