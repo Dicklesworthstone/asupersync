@@ -98,6 +98,30 @@ fn spawn_receiver(
     (addr, handle)
 }
 
+fn spawn_receiver_with_config(
+    dest_dir: PathBuf,
+    config: TransferConfig,
+) -> (
+    SocketAddr,
+    thread::JoinHandle<Result<ReceiveReport, TransportError>>,
+) {
+    let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
+    let handle = thread::spawn(move || {
+        let runtime = RuntimeBuilder::multi_thread()
+            .build()
+            .expect("receiver runtime");
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("receiver cx");
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            addr_tx.send(addr).expect("send addr");
+            receive_once(&cx, &listener, &dest_dir, config, "receiver").await
+        }))
+    });
+    let addr = addr_rx.recv().expect("receiver bound address");
+    (addr, handle)
+}
+
 fn run_sender(addr: SocketAddr, source: PathBuf, policy: MetadataPolicy) -> Result<SendReport, TransportError> {
     let runtime = RuntimeBuilder::multi_thread()
         .build()
@@ -351,4 +375,42 @@ fn fifo_is_skipped_without_hanging_the_sender() {
         b"kept\n",
         "regular file alongside the FIFO still round-trips"
     );
+}
+
+#[test]
+fn fifo_recreated_when_allow_special_files_set() {
+    // With the opt-in TransferConfig.allow_special_files, a source FIFO is
+    // recreated on the receiver (via mkfifo) with its mode, rather than skipped.
+    let root = unique_tmp("fiforecreate");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let fifo = tree.join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("spawn mkfifo");
+    assert!(status.success(), "mkfifo must create the source FIFO");
+    set_mode(&fifo, 0o640);
+
+    let recv_config = TransferConfig {
+        metadata_policy: MetadataPolicy::full_preservation(),
+        allow_special_files: true,
+        ..TransferConfig::default()
+    };
+    let (addr, recv_handle) = spawn_receiver_with_config(dst_dir.clone(), recv_config);
+    let send = run_sender(addr, tree.clone(), MetadataPolicy::full_preservation()).expect("send");
+    let recv = recv_handle.join().expect("recv thread").expect("recv");
+    assert!(send.receipt.committed && recv.committed);
+
+    let out_fifo = dst_dir.join("project").join("pipe");
+    let meta = std::fs::symlink_metadata(&out_fifo).expect("fifo present on receiver");
+    assert!(
+        meta.file_type().is_fifo(),
+        "FIFO must be recreated when allow_special_files is set"
+    );
+    assert_eq!(mode_of(&out_fifo), 0o640, "recreated FIFO mode preserved");
 }
