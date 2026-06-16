@@ -9,6 +9,7 @@
 //! It represents the deployable QUIC endpoint that ATP can use for object transfer.
 
 use crate::cx::Cx;
+use crate::net::quic_native::connection_manager::AcceptedNativeQuicConnection;
 use crate::net::quic_native::{
     ConnectionRouter, ConnectionRouterError, ConnectionRouterStats, NativeQuicConnectionConfig,
     OutgoingPacket, QuicTimerScheduler, QuicUdpEndpoint, QuicUdpEndpointConfig,
@@ -177,6 +178,43 @@ impl ManagedQuicEndpoint {
     /// Get connection router statistics.
     pub fn connection_stats(&self) -> ConnectionRouterStats {
         self.connection_router.connection_stats()
+    }
+
+    /// Remove a routed native connection and hand ownership to the caller.
+    pub fn take_connection(
+        &mut self,
+        cx: &Cx,
+        connection_id: crate::net::quic_core::ConnectionId,
+    ) -> Result<AcceptedNativeQuicConnection, ManagedEndpointError> {
+        if cx.checkpoint().is_err() {
+            return Err(ManagedEndpointError::Cancelled);
+        }
+
+        if self.shutting_down {
+            return Err(ManagedEndpointError::ShuttingDown);
+        }
+
+        self.connection_router
+            .take_connection(cx, connection_id)
+            .map_err(Into::into)
+    }
+
+    /// Remove the next routed native connection using deterministic router order.
+    pub fn take_next_connection(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<AcceptedNativeQuicConnection>, ManagedEndpointError> {
+        if cx.checkpoint().is_err() {
+            return Err(ManagedEndpointError::Cancelled);
+        }
+
+        if self.shutting_down {
+            return Err(ManagedEndpointError::ShuttingDown);
+        }
+
+        self.connection_router
+            .take_next_connection(cx)
+            .map_err(Into::into)
     }
 
     /// Run the main endpoint event loop.
@@ -387,6 +425,7 @@ impl ManagedQuicEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::quic_core::ConnectionId;
     use crate::test_utils::run_test_with_cx;
 
     #[test]
@@ -447,6 +486,84 @@ mod tests {
                 .await
                 .expect("shutdown should succeed");
             assert!(endpoint.shutting_down);
+        });
+    }
+
+    #[test]
+    fn test_managed_endpoint_take_connection_handoff() {
+        run_test_with_cx(|cx| async move {
+            let config = ManagedEndpointConfig::default();
+            let mut endpoint =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config)
+                    .await
+                    .expect("bind should succeed");
+            let connection_id = ConnectionId::new(&[0x24, 0x00, 0x00, 0x01]).expect("cid");
+            let peer_addr: SocketAddr = "127.0.0.1:5666".parse().unwrap();
+            endpoint
+                .connection_router
+                .create_connection(&cx, connection_id, peer_addr, true)
+                .await
+                .expect("connection creation should succeed");
+
+            let accepted = endpoint
+                .take_connection(&cx, connection_id)
+                .expect("endpoint should hand off connection");
+            assert_eq!(accepted.connection_id, connection_id);
+            assert_eq!(accepted.peer_addr, peer_addr);
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+
+            let err = endpoint
+                .take_connection(&cx, connection_id)
+                .expect_err("missing connection must fail closed");
+            assert!(matches!(
+                err,
+                ManagedEndpointError::ConnectionRouter(
+                    ConnectionRouterError::ConnectionNotFound(id)
+                ) if id == connection_id
+            ));
+        });
+    }
+
+    #[test]
+    fn test_managed_endpoint_take_next_connection_handoff_order() {
+        run_test_with_cx(|cx| async move {
+            let config = ManagedEndpointConfig::default();
+            let mut endpoint =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config)
+                    .await
+                    .expect("bind should succeed");
+            let first = ConnectionId::new(&[0x01, 0x22, 0x00, 0x00]).expect("first cid");
+            let second = ConnectionId::new(&[0x02, 0x22, 0x00, 0x00]).expect("second cid");
+            let peer_addr: SocketAddr = "127.0.0.1:5667".parse().unwrap();
+
+            for connection_id in [second, first] {
+                endpoint
+                    .connection_router
+                    .create_connection(&cx, connection_id, peer_addr, true)
+                    .await
+                    .expect("connection creation should succeed");
+            }
+
+            let accepted = endpoint
+                .take_next_connection(&cx)
+                .expect("take should succeed")
+                .expect("connection should exist");
+            assert_eq!(accepted.connection_id, first);
+            assert_eq!(endpoint.connection_stats().active_connections, 1);
+
+            let accepted = endpoint
+                .take_next_connection(&cx)
+                .expect("take should succeed")
+                .expect("connection should exist");
+            assert_eq!(accepted.connection_id, second);
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+
+            assert!(
+                endpoint
+                    .take_next_connection(&cx)
+                    .expect("empty take should succeed")
+                    .is_none()
+            );
         });
     }
 }

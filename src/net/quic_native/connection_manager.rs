@@ -55,6 +55,17 @@ pub struct ConnectionHandle {
     next_timer_deadline: Option<Instant>,
 }
 
+/// Native QUIC connection removed from the router for application-level handoff.
+#[derive(Debug)]
+pub struct AcceptedNativeQuicConnection {
+    /// Connection ID that owned the routed connection.
+    pub connection_id: ConnectionId,
+    /// The native QUIC connection state machine.
+    pub connection: NativeQuicConnection,
+    /// Remote peer address associated with the accepted connection.
+    pub peer_addr: SocketAddr,
+}
+
 struct ConnectionPacketProtection {
     protection: AtpPacketProtection,
 }
@@ -440,6 +451,52 @@ impl ConnectionRouter {
         } else {
             Err(ConnectionRouterError::ConnectionNotFound(connection_id))
         }
+    }
+
+    /// Remove a connection from the router and hand ownership to the caller.
+    pub fn take_connection(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+    ) -> Result<AcceptedNativeQuicConnection, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let handle = self
+            .connections
+            .remove(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+
+        cx.trace(&format!(
+            "Accepted native QUIC connection {connection_id:?}"
+        ));
+        Ok(AcceptedNativeQuicConnection {
+            connection_id,
+            connection: handle.connection,
+            peer_addr: handle.peer_addr,
+        })
+    }
+
+    /// Remove the next routed connection using deterministic connection-ID order.
+    pub fn take_next_connection(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<AcceptedNativeQuicConnection>, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let Some(connection_id) = self
+            .connections
+            .keys()
+            .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
+            .copied()
+        else {
+            return Ok(None);
+        };
+
+        self.take_connection(cx, connection_id).map(Some)
     }
 
     /// Close and remove every active connection.
@@ -1091,6 +1148,81 @@ mod tests {
 
             assert_eq!(router.connections.len(), 1);
             assert!(router.connections.contains_key(&connection_id));
+        });
+    }
+
+    #[test]
+    fn test_take_connection_removes_handle_and_preserves_peer() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = ConnectionId::new(&[0x10, 0x00, 0x00, 0x01]).expect("cid");
+            let peer_addr: SocketAddr = "127.0.0.1:5544".parse().unwrap();
+            router
+                .create_connection(&cx, connection_id, peer_addr, true)
+                .await
+                .expect("connection creation should succeed");
+
+            let accepted = router
+                .take_connection(&cx, connection_id)
+                .expect("connection should be handed off");
+            assert_eq!(accepted.connection_id, connection_id);
+            assert_eq!(accepted.peer_addr, peer_addr);
+            assert_eq!(accepted.connection.pending_outbound_datagram_count(), 0);
+            assert!(!router.connections.contains_key(&connection_id));
+            assert_eq!(router.connection_stats().active_connections, 0);
+
+            let err = router
+                .take_connection(&cx, connection_id)
+                .expect_err("missing connection must fail closed");
+            assert!(matches!(
+                err,
+                ConnectionRouterError::ConnectionNotFound(id) if id == connection_id
+            ));
+        });
+    }
+
+    #[test]
+    fn test_take_next_connection_uses_deterministic_connection_id_order() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let low = ConnectionId::new(&[0x01, 0x00, 0x00, 0x00]).expect("low cid");
+            let mid = ConnectionId::new(&[0x10, 0x00, 0x00, 0x00]).expect("mid cid");
+            let high = ConnectionId::new(&[0xff, 0x00, 0x00, 0x00]).expect("high cid");
+            let peer_addr: SocketAddr = "127.0.0.1:5545".parse().unwrap();
+
+            for connection_id in [high, low, mid] {
+                router
+                    .create_connection(&cx, connection_id, peer_addr, true)
+                    .await
+                    .expect("connection creation should succeed");
+            }
+
+            let first = router
+                .take_next_connection(&cx)
+                .expect("take should succeed")
+                .expect("connection should exist");
+            assert_eq!(first.connection_id, low);
+
+            let second = router
+                .take_next_connection(&cx)
+                .expect("take should succeed")
+                .expect("connection should exist");
+            assert_eq!(second.connection_id, mid);
+
+            let third = router
+                .take_next_connection(&cx)
+                .expect("take should succeed")
+                .expect("connection should exist");
+            assert_eq!(third.connection_id, high);
+
+            assert!(
+                router
+                    .take_next_connection(&cx)
+                    .expect("empty take should succeed")
+                    .is_none()
+            );
         });
     }
 

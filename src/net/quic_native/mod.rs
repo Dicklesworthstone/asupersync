@@ -26,8 +26,8 @@ pub mod tls_conformance_harness;
 
 pub use connection::{NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError};
 pub use connection_manager::{
-    ConnectionRouter, ConnectionRouterError, ConnectionRouterStats, ConnectionTimerEvent,
-    QuicTimerScheduler, RoutingResult, TimerType,
+    AcceptedNativeQuicConnection, ConnectionRouter, ConnectionRouterError, ConnectionRouterStats,
+    ConnectionTimerEvent, QuicTimerScheduler, RoutingResult, TimerType,
 };
 pub use endpoint::{
     BatchResult, EndpointMetrics, OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig,
