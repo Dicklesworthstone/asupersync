@@ -10,6 +10,8 @@ pub mod connection_manager;
 pub mod endpoint;
 pub mod endpoint_api;
 pub mod forensic_log;
+#[cfg(feature = "tls")]
+pub mod handshake_driver;
 pub mod managed_endpoint;
 pub mod streams;
 pub mod tls;
