@@ -18,10 +18,10 @@
 //!   [`ManagedQuicEndpoint`] and delegates to the wired accepted-connection
 //!   receiver body. Live endpoint pumping and persistent serving remain B3
 //!   follow-up work.
-//! - [`serve`] →
-//!   `asupersync-arq-quic-epic-b0k8qo.2.3` (B3: persistent QUIC receiver
-//!   coroutine — accept loop, manifest, feed the decoder from DATAGRAMs,
-//!   verify, commit).
+//! - [`serve`] drains connections already routed into a
+//!   [`ManagedQuicEndpoint`] and delegates each one to the same accepted-
+//!   connection receiver body. Live endpoint pumping and indefinite listener
+//!   ownership remain native endpoint follow-up work.
 //!
 //! Until a given transfer entry point is wired, it **fails closed**: it
 //! validates its configuration, emits a structured config summary, and returns
@@ -31,9 +31,10 @@
 //! [`receive_connection`] is the first wired B3 receiver surface: it consumes an
 //! already-established native QUIC connection, verifies decoded entries, commits
 //! them under the destination root, and returns a real report. [`receive_once`]
-//! now removes a routed endpoint connection and drives that same body. Live
-//! endpoint event-loop pumping, persistent [`serve`], and sender-side
-//! [`send_path`] wiring remain fail-closed until their B2/B3 slices land.
+//! now removes a routed endpoint connection and drives that same body. [`serve`]
+//! drains the currently routed queue with per-connection callbacks. Live
+//! endpoint event-loop pumping and sender-side [`send_path`] native
+//! connect/identity wiring remain fail-closed until their B2/B3 slices land.
 //!
 //! # Why a scaffold can land ahead of the Phase A data plane
 //!
@@ -56,13 +57,16 @@
 //! `transport_common`; the re-export keeps the QUIC public surface stable
 //! across that move.
 //!
-//! # Integrity & bounded memory (inherited contract)
+//! # Integrity & current memory boundary
 //!
-//! When wired, this transport keeps `transport_tcp`'s fail-closed integrity
-//! guarantee (per-entry SHA-256 + rebuilt flat-object-graph merkle root vs. the
-//! manifest, atomic commit only on a full match) and its `O(symbol/chunk size)`
-//! peak-memory bound (stream to/from disk; never hold a whole entry, let alone
-//! the whole transfer, in memory).
+//! The accepted-connection receiver keeps `transport_tcp`'s fail-closed
+//! integrity guarantee (per-entry SHA-256 + rebuilt flat-object-graph merkle
+//! root vs. the manifest, atomic commit only on a full match). The Phase B QUIC
+//! bridge is not yet B5 bounded-memory evidence: the sender still materializes
+//! entry bytes for the current [`EncodingPipeline`] API and the receiver stores
+//! decoded entry bytes before `write_atomic`. B5 must replace those transitional
+//! `Vec<u8>` bridges with streaming/staging equivalents before claiming
+//! `O(symbol/chunk size)` RSS.
 
 pub mod symbol_datagram;
 pub mod symbol_envelope;
@@ -2773,8 +2777,8 @@ pub async fn receive_connection(
 ///
 /// [`transport_tcp::serve`]: crate::net::atp::transport_tcp::serve
 // Owned `endpoint` / `dest_dir` / `peer_id` / `on_result` mirror
-// `transport_tcp::serve`'s by-value signature exactly; B3 consumes them when it
-// drives the accept loop and spawns per-connection receive tasks.
+// `transport_tcp::serve`'s by-value signature exactly; this queued-connection
+// B3 slice consumes them while draining already-routed connections.
 #[allow(clippy::needless_pass_by_value)]
 pub async fn serve<F>(
     cx: &Cx,
