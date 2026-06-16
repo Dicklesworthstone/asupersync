@@ -340,7 +340,13 @@ fn send_path_observes_cancel_before_source_preflight() {
 }
 
 #[test]
-fn send_path_valid_source_fails_closed_at_native_connect_boundary() {
+fn send_path_valid_source_fails_closed_without_client_tls() {
+    // A valid source preflights fine, but `send_path` now opens a *real* native
+    // QUIC connection, which requires client TLS trust (server name + roots).
+    // `trusted_quic_config()` configures the symbol-auth posture but no client
+    // TLS, so the transfer fails closed with a typed Config error before any
+    // network I/O — never a fabricated success. (On a build without the `tls`
+    // feature the same call fails closed with Config for lack of a handshake.)
     let cx = Cx::for_testing();
     let temp = tempfile::tempdir().expect("temp dir");
     let source = temp.path().join("payload.bin");
@@ -353,13 +359,10 @@ fn send_path_valid_source_fails_closed_at_native_connect_boundary() {
         trusted_quic_config(),
         "sender",
     ));
-    assert!(matches!(
-        result,
-        Err(QuicTransportError::NotImplemented {
-            operation: "send_path",
-            ..
-        })
-    ));
+    assert!(
+        matches!(result, Err(QuicTransportError::Config(_))),
+        "valid-source send_path must fail closed (Config) without client TLS, got {result:?}"
+    );
 }
 
 #[test]

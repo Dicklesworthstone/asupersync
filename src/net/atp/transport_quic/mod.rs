@@ -68,6 +68,8 @@
 //! `Vec<u8>` bridges with streaming/staging equivalents before claiming
 //! `O(symbol/chunk size)` RSS.
 
+#[cfg(feature = "tls")]
+pub mod native_link;
 pub mod symbol_datagram;
 pub mod symbol_envelope;
 
@@ -226,6 +228,21 @@ pub struct QuicConfig {
     /// Explicit escape hatch for trusted loopback/lab links that intentionally
     /// accept integrity-vs-manifest only.
     pub allow_unauthenticated_symbols: bool,
+    /// Deterministic test/diagnostic symbol-loss injection. When nonzero, the
+    /// sender skips every Nth symbol on the *initial* spray only (never on a
+    /// repair round), so the fountain feedback loop must recover them. Zero
+    /// disables injection. Mirrors `transport_rq`'s `debug_drop_one_in`.
+    pub debug_drop_one_in: u32,
+    /// Client-side TLS trust for [`send_path`]: the server name to verify and the
+    /// root certificates that gate the handshake (no insecure skip-verify path).
+    /// Required to open a real native QUIC connection; absent fails closed.
+    #[cfg(feature = "tls")]
+    pub client_tls: Option<native_link::QuicClientTls>,
+    /// Server-side TLS material for the native receive path: the presented
+    /// certificate chain and private key. Required to accept a real native QUIC
+    /// connection; absent fails closed.
+    #[cfg(feature = "tls")]
+    pub server_tls: Option<native_link::QuicServerTls>,
 }
 
 /// Public per-symbol authentication posture for ATP-over-QUIC.
@@ -256,6 +273,11 @@ impl Default for QuicConfig {
             datagram_fanout: DEFAULT_DATAGRAM_FANOUT,
             symbol_auth_context: None,
             allow_unauthenticated_symbols: false,
+            debug_drop_one_in: 0,
+            #[cfg(feature = "tls")]
+            client_tls: None,
+            #[cfg(feature = "tls")]
+            server_tls: None,
         }
     }
 }
@@ -762,7 +784,7 @@ struct QuicSourceEntry {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-struct QuicPreparedSource {
+pub(crate) struct QuicPreparedSource {
     manifest: TransferManifest,
     entries: Vec<QuicSourceEntry>,
 }
@@ -3117,12 +3139,19 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
 
 // ─── Public API: send ────────────────────────────────────────────────────────
 
-/// Transfer the file or directory at `source` to `addr` over a QUIC connection.
+/// Transfer the file or directory at `source` to `addr` over a real QUIC
+/// connection.
 ///
-/// Mirrors [`transport_tcp::send_path`]. The B2 sender now performs the
-/// streaming source walk/hash/manifest preflight, then fails closed at the
-/// still-unwired native QUIC connect/identity boundary. Wired by B2
-/// (`asupersync-arq-quic-epic-b0k8qo.2.2`).
+/// Mirrors [`transport_tcp::send_path`]. The B2 sender performs the streaming
+/// source walk/hash/manifest preflight, then (with the `tls` feature) opens a
+/// real native QUIC connection to `addr`: it runs the genuine `rustls::quic`
+/// TLS-1.3 handshake over a UDP socket — verifying the server identity against
+/// the configured roots (no insecure skip-verify) — and drives the full sender
+/// coroutine (Hello, manifest, RaptorQ symbol spray over QUIC DATAGRAMs, and the
+/// fountain feedback loop) until the receiver returns a committed Proof.
+///
+/// Requires [`QuicConfig::client_tls`] to be set; without it (or without the
+/// `tls` feature) it fails closed — there is no insecure transport path.
 ///
 /// [`transport_tcp::send_path`]: crate::net::atp::transport_tcp::send_path
 pub async fn send_path(
@@ -3136,11 +3165,44 @@ pub async fn send_path(
     config.validate()?;
     trace_config_summary(cx, "send_path", &config, peer_id);
     let prepared = prepare_source_manifest(cx, source, &config).await?;
-    let _ = (addr, prepared);
-    Err(QuicTransportError::NotImplemented {
-        operation: "send_path",
-        wired_by: "asupersync-arq-quic-epic-b0k8qo.2.2 (B2: native QUIC connect + identity)",
-    })
+    #[cfg(feature = "tls")]
+    {
+        native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id).await
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        let _ = (addr, prepared);
+        Err(QuicTransportError::Config(
+            "ATP-over-QUIC send requires the `tls` feature for the native QUIC/TLS-1.3 \
+             handshake; there is no insecure transport path"
+                .to_string(),
+        ))
+    }
+}
+
+/// Bind a server UDP socket on `listen`, accept exactly one transfer over a real
+/// QUIC connection, write it under `dest_dir`, verify it, and return a report.
+///
+/// The native-UDP server counterpart to [`send_path`] (parallel to
+/// [`transport_tcp::receive_once`], but it owns the UDP endpoint and runs the
+/// real `rustls::quic` accept-side handshake presenting the configured server
+/// certificate). Requires [`QuicConfig::server_tls`]; only available with the
+/// `tls` feature.
+///
+/// [`transport_tcp::receive_once`]: crate::net::atp::transport_tcp::receive_once
+#[cfg(feature = "tls")]
+pub async fn receive_path(
+    cx: &Cx,
+    listen: SocketAddr,
+    dest_dir: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+) -> Result<ReceiveReport, QuicTransportError> {
+    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    config.validate()?;
+    trace_config_summary(cx, "receive_path", &config, peer_id);
+    let endpoint = native_link::bind_server_endpoint(cx, listen).await?;
+    native_link::receive_on_endpoint(cx, endpoint, dest_dir, &config, peer_id).await
 }
 
 // ─── Public API: receive ─────────────────────────────────────────────────────
@@ -5637,7 +5699,12 @@ mod tests {
     }
 
     #[test]
-    fn send_path_valid_source_fails_closed_at_native_connect_boundary() {
+    fn send_path_valid_source_fails_closed_without_client_tls() {
+        // A valid source preflights fine, but a real QUIC connection cannot be
+        // opened without client TLS trust (server name + roots) — or, on a build
+        // without the `tls` feature, without any native handshake at all. Either
+        // way send_path must fail closed with a typed Config error rather than
+        // fabricate a transfer.
         let cx = Cx::for_testing();
         let temp = tempfile::tempdir().expect("temp dir");
         let source = temp.path().join("payload.bin");
@@ -5650,13 +5717,10 @@ mod tests {
             trusted_quic_config(),
             "sender",
         ));
-        assert!(matches!(
-            result,
-            Err(QuicTransportError::NotImplemented {
-                operation: "send_path",
-                ..
-            })
-        ));
+        assert!(
+            matches!(result, Err(QuicTransportError::Config(_))),
+            "expected a fail-closed Config error, got {result:?}"
+        );
     }
 
     #[test]
