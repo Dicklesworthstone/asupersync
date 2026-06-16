@@ -157,3 +157,28 @@ fn oversize_symbol_rejected_by_connection() {
         SymbolDatagramError::Connection(NativeQuicConnectionError::DatagramTooLarge { .. })
     ));
 }
+
+#[test]
+fn auth_posture_mismatch_fails_closed() {
+    let cx = test_cx();
+    let (mut client, mut server) = established_pair(&cx);
+
+    // Sender does NOT authenticate; a receiver that REQUIRES per-symbol auth must
+    // reject the datagram (fail closed) rather than misparse it. A >= 32-byte
+    // payload makes the posture mismatch surface as a length mismatch (the auth
+    // header is 32 bytes longer than the unauthenticated one).
+    let s = sym(5, 2, 3, false, &[0u8; 40]);
+    send_symbol(&cx, &mut client, &s, 0, 0, None).expect("send unauthenticated symbol");
+    pump_until_idle(
+        &cx,
+        &mut client,
+        &mut server,
+        DEFAULT_MAX_PACKET_BYTES,
+        4_000,
+    )
+    .expect("pump");
+
+    let err = recv_symbol_envelope(&mut server, true)
+        .expect_err("an auth-required receiver must reject an unauthenticated symbol");
+    assert!(matches!(err, SymbolDatagramError::Envelope(_)));
+}
