@@ -62,7 +62,7 @@ pub mod symbol_datagram;
 pub mod symbol_envelope;
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -1587,14 +1587,29 @@ fn quic_safe_base_for_root_name(
             "manifest root_name is empty".to_string(),
         ));
     }
-    let component = Path::new(root_name).file_name().ok_or_else(|| {
-        QuicTransportError::Source(format!("unsafe manifest root_name: {root_name}"))
-    })?;
+    let root = Path::new(root_name);
+    if root.is_absolute() {
+        return Err(QuicTransportError::Source(format!(
+            "unsafe manifest root_name: {root_name}"
+        )));
+    }
+    let mut components = root.components();
+    let Some(Component::Normal(component)) = components.next() else {
+        return Err(QuicTransportError::Source(format!(
+            "unsafe manifest root_name: {root_name}"
+        )));
+    };
+    if components.next().is_some() {
+        return Err(QuicTransportError::Source(format!(
+            "unsafe manifest root_name: {root_name}"
+        )));
+    }
     let component_str = component.to_string_lossy();
     if component_str == "."
         || component_str == ".."
         || component_str.contains('/')
         || component_str.contains('\\')
+        || component_str.contains(':')
     {
         return Err(QuicTransportError::Source(format!(
             "unsafe manifest root_name: {root_name}"
@@ -1604,12 +1619,19 @@ fn quic_safe_base_for_root_name(
 }
 
 fn quic_join_relative(base: &Path, rel: &str) -> Result<PathBuf, QuicTransportError> {
+    if rel.is_empty() || Path::new(rel).is_absolute() {
+        return Err(QuicTransportError::Source(format!(
+            "unsafe path component in entry: {rel}"
+        )));
+    }
     let mut out = base.to_path_buf();
     for component in rel.split('/') {
-        if component.is_empty() || component == "." {
-            continue;
-        }
-        if component == ".." || component.contains('\\') || component.contains(':') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.contains('\\')
+            || component.contains(':')
+        {
             return Err(QuicTransportError::Source(format!(
                 "unsafe path component in entry: {rel}"
             )));
@@ -2932,6 +2954,66 @@ mod tests {
                 ..
             }) => panic!("receive_connection should be wired past the B1 scaffold"),
             Err(_) => {}
+        }
+    }
+
+    #[test]
+    fn quic_receiver_rejects_unsafe_manifest_root_names() {
+        let dest = Path::new("dest");
+        assert_eq!(
+            quic_safe_base_for_root_name(dest, "payload").expect("safe root"),
+            dest.join("payload")
+        );
+
+        for root_name in [
+            ".",
+            "..",
+            "../payload",
+            "nested/payload",
+            "/tmp/payload",
+            "payload\\evil",
+            "C:payload",
+        ] {
+            match quic_safe_base_for_root_name(dest, root_name) {
+                Err(QuicTransportError::Source(message)) => {
+                    assert!(
+                        message.contains("root_name"),
+                        "source error should name root_name for {root_name:?}: {message}"
+                    );
+                }
+                other => panic!("unsafe root_name {root_name:?} must fail closed, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn quic_receiver_rejects_unsafe_manifest_relative_paths() {
+        let base = Path::new("base");
+        assert_eq!(
+            quic_join_relative(base, "nested/file.bin").expect("safe relative path"),
+            base.join("nested").join("file.bin")
+        );
+
+        for rel_path in [
+            "",
+            ".",
+            "../file.bin",
+            "/abs/file.bin",
+            "nested/../file.bin",
+            "nested/./file.bin",
+            "nested//file.bin",
+            "nested\\file.bin",
+            "C:file.bin",
+        ] {
+            match quic_join_relative(base, rel_path) {
+                Err(QuicTransportError::Source(message)) => {
+                    assert!(
+                        message.contains("unsafe path"),
+                        "source error should name unsafe path for {rel_path:?}: {message}"
+                    );
+                }
+                other => panic!("unsafe rel_path {rel_path:?} must fail closed, got {other:?}"),
+            }
         }
     }
 
