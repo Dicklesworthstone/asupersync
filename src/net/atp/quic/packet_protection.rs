@@ -563,6 +563,25 @@ impl AtpPacketProtection {
         };
         Self::new(config)
     }
+
+    /// Build packet protection around an already-established provider — e.g. the
+    /// `RustlsQuicCryptoProvider` produced by a completed handshake, holding the
+    /// derived Handshake/1-RTT keys. This hands the handshake-derived keys to the
+    /// data plane without re-deriving them, which is how a real (wire-driven)
+    /// handshake's keys reach `ConnectionRouter::install_packet_protection`.
+    #[must_use]
+    pub fn from_provider(
+        provider: Box<dyn QuicPacketProtectionProvider + Send + Sync>,
+        config: AtpPacketProtectionConfig,
+    ) -> Self {
+        let provider_kind = provider.provider_kind();
+        Self {
+            provider,
+            config,
+            provider_kind,
+            accepted_packets: BTreeMap::new(),
+        }
+    }
 }
 
 #[cfg(test)]

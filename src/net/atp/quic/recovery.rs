@@ -35,8 +35,12 @@ pub struct AtpRecoveryManager {
     pto_count: u32,
     /// Connection identifier for logging.
     connection_id: String,
-    /// Last update timestamp.
-    last_update: Instant,
+    /// Stable connection-start epoch. All transport-axis micros values
+    /// (`time_sent_micros`, ack `now_micros`, PTO deadlines) are measured as
+    /// "microseconds since connection start" (see `RecoveryEvent`), so this is
+    /// the single reference point that maps that axis to wall-clock `Instant`s.
+    /// It is set once at construction and never reassigned.
+    connection_start: Instant,
 }
 
 /// Structured recovery event logging.
@@ -231,7 +235,7 @@ impl AtpRecoveryManager {
             telemetry: RecoveryTelemetry::new(),
             pto_count: 0,
             connection_id,
-            last_update: Instant::now(),
+            connection_start: Instant::now(),
         }
     }
 
@@ -425,8 +429,12 @@ impl AtpRecoveryManager {
             return self.handle_cancellation(reason);
         }
 
-        // Poll transport machine
-        let now_micros = now.duration_since(self.last_update).as_micros() as u64;
+        // Poll transport machine. The transport's time axis is "micros since
+        // connection start" (it compares against each packet's
+        // `time_sent_micros`), so measure `now` from the stable epoch — not as
+        // a delta since the previous poll, which would feed the loss/PTO logic
+        // a tiny bogus "now" and defeat time-threshold detection.
+        let now_micros = now.duration_since(self.connection_start).as_micros() as u64;
         self.transport.poll(now_micros);
 
         // Check PTO timers
@@ -448,7 +456,6 @@ impl AtpRecoveryManager {
             self.timers.remove(&timer_id);
         }
 
-        self.last_update = now;
         AtpOutcome::ok(actions)
     }
 
@@ -494,7 +501,7 @@ impl AtpRecoveryManager {
     ) {
         let event = RecoveryEvent {
             sequence: self.logger.sequence,
-            timestamp_micros: self.last_update.elapsed().as_micros() as u64,
+            timestamp_micros: self.connection_start.elapsed().as_micros() as u64,
             event_type,
             connection_id: self.connection_id.clone(),
             space,
@@ -537,7 +544,13 @@ impl AtpRecoveryManager {
         let timer_id = format!("pto_{}_{:?}", self.connection_id, space);
 
         if let Some(deadline_micros) = self.transport.pto_deadline_micros(0) {
-            let deadline = Instant::now() + Duration::from_micros(deadline_micros);
+            // `pto_deadline_micros` returns an ABSOLUTE deadline on the
+            // connection-start micros axis (`oldest_sent + timeout*backoff`),
+            // not a relative offset. Map it to wall-clock through the stable
+            // epoch; adding it to `Instant::now()` would schedule the PTO
+            // millions of micros in the future so it would effectively never
+            // fire.
+            let deadline = self.connection_start + Duration::from_micros(deadline_micros);
 
             let timer = RecoveryTimer {
                 deadline,
@@ -985,6 +998,46 @@ mod tests {
 
         // Should have created a PTO timer
         assert!(!manager.timers.is_empty());
+    }
+
+    #[test]
+    fn pto_timer_deadline_is_anchored_to_connection_start() {
+        // Regression: `pto_deadline_micros` returns an ABSOLUTE deadline on the
+        // connection-start micros axis. It must be mapped to wall-clock through
+        // the stable `connection_start` epoch, not added to `Instant::now()`
+        // (which would push the PTO far into the future so it never fires).
+        // The exact-offset invariant below fails on the old `Instant::now()`
+        // anchoring (off by the construction->schedule delta) and holds on the
+        // fixed `connection_start` anchoring.
+        let mut manager = AtpRecoveryManager::new("test_conn".to_string());
+        manager.anti_amplification.address_validated = true;
+
+        let packet = SentPacketMeta {
+            space: PacketNumberSpace::Initial,
+            packet_number: 1,
+            bytes: 1200,
+            ack_eliciting: true,
+            in_flight: true,
+            // A packet "sent" well into the connection: this is the term that
+            // makes the deadline absolute rather than a small relative offset.
+            time_sent_micros: 30_000_000,
+        };
+        assert!(manager.on_packet_sent(packet).is_ok());
+
+        let expected_micros = manager
+            .transport
+            .pto_deadline_micros(0)
+            .expect("pto deadline must exist while a packet is in flight");
+        let timer = manager
+            .timers
+            .values()
+            .next()
+            .expect("on_packet_sent must arm a PTO timer");
+        assert_eq!(
+            timer.deadline.duration_since(manager.connection_start),
+            Duration::from_micros(expected_micros),
+            "PTO deadline must be exactly connection_start + deadline_micros"
+        );
     }
 
     #[test]
