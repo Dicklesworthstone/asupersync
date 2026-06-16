@@ -897,13 +897,28 @@ impl AtpProofBundle {
 
     /// Validate the proof bundle against its metadata policies.
     pub fn validate(&self) -> Result<(), AtpProofBundleError> {
+        self.validate_with_proof_strength(self.calculate_proof_strength())
+    }
+
+    /// Validate the proof bundle with trusted key material for cryptographic signatures.
+    pub fn validate_with_keys(
+        &self,
+        trusted_keys: &BTreeMap<String, AuthKey>,
+    ) -> Result<(), AtpProofBundleError> {
+        self.validate_with_proof_strength(self.calculate_proof_strength_with_keys(trusted_keys))
+    }
+
+    fn validate_with_proof_strength(
+        &self,
+        proof_strength: ProofStrength,
+    ) -> Result<(), AtpProofBundleError> {
         // Check version support
         if !self.version.is_supported() {
             return Err(AtpProofBundleError::UnsupportedVersion(self.version));
         }
 
         // Validate proof strength requirements
-        self.validate_proof_strength()?;
+        self.validate_proof_strength(proof_strength)?;
 
         // Validate verification evidence
         self.validate_verification_evidence()?;
@@ -1133,71 +1148,81 @@ impl AtpProofBundle {
         artifacts
     }
 
-    /// Verify cryptographic signatures in the proof bundle.
-    fn verify_cryptographic_signatures(&self) -> Result<bool, Box<dyn std::error::Error>> {
+    fn load_cryptographic_signatures(
+        &self,
+    ) -> Result<Option<CryptographicSignatures>, Box<dyn std::error::Error>> {
         let signatures_ext = match self.extensions.get("cryptographic_signatures") {
-            Some(ext) => ext,
-            None => return Ok(false), // No signatures extension
+            Some(ext) => ext.clone(),
+            None => return Ok(None),
         };
 
-        // Parse the signatures extension
-        let signatures: CryptographicSignatures = serde_json::from_value(signatures_ext.clone())
+        let signatures: CryptographicSignatures = serde_json::from_value(signatures_ext)
             .map_err(|_| "Invalid cryptographic_signatures extension format")?;
+        Ok(Some(signatures))
+    }
 
-        // Verify we have at least one valid signature
+    fn signature_claims_bind_current_bundle(
+        signatures: &CryptographicSignatures,
+        canonical_hash: &[u8],
+    ) -> bool {
+        if !signatures.hash_algorithm.eq_ignore_ascii_case("SHA-256") {
+            return false;
+        }
+        subtle::ConstantTimeEq::ct_eq(&signatures.bundle_hash[..], canonical_hash).into()
+    }
+
+    /// Verify cryptographic signatures in the proof bundle with trusted key material.
+    pub fn verify_cryptographic_signatures_with_keys(
+        &self,
+        trusted_keys: &BTreeMap<String, AuthKey>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let Some(signatures) = self.load_cryptographic_signatures()? else {
+            return Ok(false);
+        };
         if signatures.signatures.is_empty() {
             return Ok(false);
         }
 
-        // Compute canonical bundle hash
         let canonical_hash = self.compute_canonical_bundle_hash();
-
-        // Verify the bundle hash matches what was signed
-        let hashes_match: bool =
-            subtle::ConstantTimeEq::ct_eq(&signatures.bundle_hash[..], &canonical_hash[..]).into();
-        if !hashes_match {
-            return Ok(false); // Bundle tampered with after signing
+        if !Self::signature_claims_bind_current_bundle(&signatures, &canonical_hash) {
+            return Ok(false);
         }
 
-        // Verify at least one signature from a valid peer
         let valid_peer_ids = [
             &self.peer_identity.source_peer_id,
             &self.peer_identity.destination_peer_id,
         ];
 
-        let mut valid_signature_count = 0;
-
         for signature in &signatures.signatures {
-            // Check if signer is a valid participant
             if !valid_peer_ids.contains(&&signature.signer_id) {
-                continue; // Skip signatures from unknown peers
+                continue;
             }
-
-            // Verify key fingerprint is in peer identity
             if !self
                 .peer_identity
                 .key_fingerprints
                 .contains(&signature.key_fingerprint)
             {
-                continue; // Skip signatures from unrecognized keys
+                continue;
             }
-
-            // Validate signature structure
             if signature.signature.len() != 32 || signature.signed_at_micros == 0 {
-                continue; // Invalid signature format
+                continue;
             }
 
-            // Note: In a complete implementation, we would retrieve the actual
-            // AuthKey from a key store using the key_fingerprint and verify
-            // the signature. For security compliance, we require:
-            // 1. Valid signature structure (32-byte HMAC-SHA256)
-            // 2. Signature from authenticated peer
-            // 3. Bundle hash integrity
-            valid_signature_count += 1;
+            let Some(auth_key) = trusted_keys.get(&signature.key_fingerprint) else {
+                continue;
+            };
+            let mut mac = Hmac::<Sha256>::new_from_slice(auth_key.as_bytes())
+                .map_err(|_| "Invalid auth key")?;
+            mac.update(&canonical_hash);
+            let expected = mac.finalize().into_bytes();
+            let verified: bool =
+                subtle::ConstantTimeEq::ct_eq(&expected[..], &signature.signature[..]).into();
+            if verified {
+                return Ok(true);
+            }
         }
 
-        // Require at least one valid signature
-        Ok(valid_signature_count > 0)
+        Ok(false)
     }
 
     /// Calculate the effective proof strength based on available evidence.
@@ -1212,13 +1237,21 @@ impl AtpProofBundle {
             }
         }
 
-        // Cryptographic strength requires valid signatures
-        if let Ok(valid_signatures) = self.verify_cryptographic_signatures() {
-            if valid_signatures {
-                strength = ProofStrength::Cryptographic;
-            }
-        }
+        strength
+    }
 
+    /// Calculate proof strength with trusted keys available for signature verification.
+    pub fn calculate_proof_strength_with_keys(
+        &self,
+        trusted_keys: &BTreeMap<String, AuthKey>,
+    ) -> ProofStrength {
+        let mut strength = self.calculate_proof_strength();
+        if matches!(
+            self.verify_cryptographic_signatures_with_keys(trusted_keys),
+            Ok(true)
+        ) {
+            strength = ProofStrength::Cryptographic;
+        }
         strength
     }
 
@@ -1301,7 +1334,21 @@ impl AtpProofBundle {
     /// Check if the bundle meets all mandatory policy requirements.
     #[must_use]
     pub fn meets_policy_requirements(&self) -> bool {
-        let actual_strength = self.calculate_proof_strength();
+        self.meets_policy_requirements_for_strength(self.calculate_proof_strength())
+    }
+
+    /// Check mandatory policies with trusted key material for cryptographic signatures.
+    #[must_use]
+    pub fn meets_policy_requirements_with_keys(
+        &self,
+        trusted_keys: &BTreeMap<String, AuthKey>,
+    ) -> bool {
+        self.meets_policy_requirements_for_strength(
+            self.calculate_proof_strength_with_keys(trusted_keys),
+        )
+    }
+
+    fn meets_policy_requirements_for_strength(&self, actual_strength: ProofStrength) -> bool {
         if actual_strength < self.metadata.required_proof_strength {
             return false;
         }
@@ -1323,8 +1370,7 @@ impl AtpProofBundle {
         true
     }
 
-    fn validate_proof_strength(&self) -> Result<(), AtpProofBundleError> {
-        let actual = self.calculate_proof_strength();
+    fn validate_proof_strength(&self, actual: ProofStrength) -> Result<(), AtpProofBundleError> {
         if actual < self.metadata.required_proof_strength {
             return Err(AtpProofBundleError::InsufficientProofStrength {
                 required: self.metadata.required_proof_strength,
@@ -1633,6 +1679,13 @@ pub struct RaptorQTelemetry {
 mod tests {
     use super::*;
     use crate::atp::verifier::{VerificationEvidence, VerificationStage};
+
+    fn trusted_key_map(
+        fingerprint: &str,
+        auth_key: AuthKey,
+    ) -> std::collections::BTreeMap<String, AuthKey> {
+        std::collections::BTreeMap::from([(fingerprint.to_string(), auth_key)])
+    }
 
     #[test]
     fn proof_timestamp_rejects_clock_before_unix_epoch() {
@@ -2026,12 +2079,16 @@ mod tests {
 
         assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Enhanced);
 
-        // Add cryptographic evidence
+        // Add cryptographic evidence. The no-key proof-strength path stays
+        // fail-closed; only the trusted-key path may elevate to Cryptographic.
+        let auth_key = AuthKey::from_seed(12_345);
         bundle
-            .sign_bundle("source", "key1", &AuthKey::from_seed(12_345))
-            .expect("source signature should satisfy cryptographic proof strength");
+            .sign_bundle("source", "key1", &auth_key)
+            .expect("source signature should be recorded");
+        assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Enhanced);
+        let trusted_keys = trusted_key_map("key1", auth_key);
         assert_eq!(
-            bundle.calculate_proof_strength(),
+            bundle.calculate_proof_strength_with_keys(&trusted_keys),
             ProofStrength::Cryptographic
         );
     }
@@ -2177,9 +2234,27 @@ mod tests {
             .sign_bundle("peer1", "test-key-fp", &auth_key)
             .expect("signing should succeed");
 
-        // Should now be Cryptographic strength
+        // Signature-shaped evidence alone must not satisfy cryptographic
+        // strength; the verifier needs trusted key material.
+        assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Basic);
+        let wrong_keys = trusted_key_map("test-key-fp", AuthKey::from_seed(54321));
+        assert!(
+            !bundle
+                .verify_cryptographic_signatures_with_keys(&wrong_keys)
+                .expect("wrong trusted key verification should not error")
+        );
         assert_eq!(
-            bundle.calculate_proof_strength(),
+            bundle.calculate_proof_strength_with_keys(&wrong_keys),
+            ProofStrength::Basic
+        );
+        let trusted_keys = trusted_key_map("test-key-fp", auth_key);
+        assert!(
+            bundle
+                .verify_cryptographic_signatures_with_keys(&trusted_keys)
+                .expect("trusted key verification should not error")
+        );
+        assert_eq!(
+            bundle.calculate_proof_strength_with_keys(&trusted_keys),
             ProofStrength::Cryptographic
         );
     }
@@ -2259,8 +2334,18 @@ mod tests {
             serde_json::to_value(tampered_signatures).unwrap(),
         );
 
-        // Should reject tampering (wrong bundle hash)
+        // Should reject tampering (wrong bundle hash), even with the trusted key.
+        let trusted_keys = trusted_key_map("test-key-fp", AuthKey::from_seed(12345));
+        assert!(
+            !bundle
+                .verify_cryptographic_signatures_with_keys(&trusted_keys)
+                .expect("tampered signature verification should not error")
+        );
         assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Enhanced);
+        assert_eq!(
+            bundle.calculate_proof_strength_with_keys(&trusted_keys),
+            ProofStrength::Enhanced
+        );
     }
 
     #[test]
