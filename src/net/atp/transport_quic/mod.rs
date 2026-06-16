@@ -53,6 +53,7 @@
 //! peak-memory bound (stream to/from disk; never hold a whole entry, let alone
 //! the whole transfer, in memory).
 
+pub mod symbol_datagram;
 pub mod symbol_envelope;
 
 use std::net::SocketAddr;
@@ -76,6 +77,13 @@ pub use crate::net::atp::transport_tcp::{
 pub use symbol_envelope::{
     ATP_QUIC_SYMBOL_MAGIC, AUTH_ENVELOPE_HEADER_LEN, ENVELOPE_HEADER_LEN, QuicSymbolEnvelope,
     QuicSymbolEnvelopeError,
+};
+
+// The Symbol <-> QUIC-datagram bridge: maps types::symbol::Symbol to/from the
+// envelope and moves it over the A6 QuicConnection datagram plane. The reusable
+// data-path core for the B2 sender and B3 receiver coroutines.
+pub use symbol_datagram::{
+    SymbolDatagramError, envelope_to_symbol, recv_symbol_envelope, send_symbol, symbol_to_envelope,
 };
 
 /// Protocol identifier carried in the QUIC handshake; bump on wire-incompatible
@@ -552,9 +560,7 @@ mod tests {
             ..QuicConfig::default()
         };
         assert!(usize::from(c.symbol_size) < c.max_datagram_size);
-        assert!(
-            usize::from(c.symbol_size) + AUTH_ENVELOPE_HEADER_LEN > c.max_datagram_size
-        );
+        assert!(usize::from(c.symbol_size) + AUTH_ENVELOPE_HEADER_LEN > c.max_datagram_size);
         assert!(matches!(
             c.validate(),
             Err(QuicTransportError::Config(m)) if m.contains("envelope header")
