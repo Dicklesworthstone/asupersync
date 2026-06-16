@@ -101,6 +101,12 @@ fn config_validation_rejects_nonsense_knobs() {
             ..QuicConfig::default()
         },
         QuicConfig {
+            // raw symbol fits the datagram, but symbol + envelope header does not
+            symbol_size: 1199,
+            max_datagram_size: 1200,
+            ..QuicConfig::default()
+        },
+        QuicConfig {
             repair_overhead: 0.0,
             ..QuicConfig::default()
         },

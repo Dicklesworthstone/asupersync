@@ -197,9 +197,15 @@ impl QuicConfig {
                 "max_block_size must be greater than 0".to_string(),
             ));
         }
-        if self.max_datagram_size < usize::from(self.symbol_size) {
+        // A symbol payload (symbol_size) plus its worst-case (authenticated)
+        // envelope header must fit one QUIC DATAGRAM. Use the authenticated
+        // header so the bound holds regardless of the per-transfer auth posture.
+        let min_datagram = usize::from(self.symbol_size) + AUTH_ENVELOPE_HEADER_LEN;
+        if self.max_datagram_size < min_datagram {
             return Err(QuicTransportError::Config(format!(
-                "max_datagram_size ({}) must be at least symbol_size ({}) so a symbol fits one DATAGRAM",
+                "max_datagram_size ({}) must be at least symbol_size ({}) + the \
+                 {AUTH_ENVELOPE_HEADER_LEN}-byte authenticated envelope header = {min_datagram} \
+                 so a symbol fits one DATAGRAM",
                 self.max_datagram_size, self.symbol_size
             )));
         }
@@ -326,6 +332,7 @@ impl From<StreamingError> for QuicTransportError {
 /// `ATP_QUIC_TRACE` hook (see `quic_native`) remains the per-frame diagnostic
 /// channel for the B2/B3 wire paths.
 fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: &str) {
+    let protocol = ATP_QUIC_PROTOCOL.to_string();
     let symbol_size = config.symbol_size.to_string();
     let max_block_size = config.max_block_size.to_string();
     let max_datagram_size = config.max_datagram_size.to_string();
@@ -341,7 +348,7 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
         "atp_quic.transport.start",
         &[
             ("operation", operation),
-            ("protocol", "3"),
+            ("protocol", &protocol),
             ("peer_id", peer_id),
             ("chunk_size", &chunk_size),
             ("symbol_size", &symbol_size),
@@ -531,6 +538,26 @@ mod tests {
         assert!(matches!(
             c.validate(),
             Err(QuicTransportError::Config(m)) if m.contains("max_datagram_size")
+        ));
+    }
+
+    #[test]
+    fn validate_requires_room_for_envelope_header() {
+        // The raw symbol fits the datagram, but symbol + the (authenticated)
+        // envelope header does not -> must still fail closed; the header is not
+        // free, so checking only symbol_size <= max_datagram_size is too lax.
+        let c = QuicConfig {
+            symbol_size: 1199,
+            max_datagram_size: 1200,
+            ..QuicConfig::default()
+        };
+        assert!(usize::from(c.symbol_size) < c.max_datagram_size);
+        assert!(
+            usize::from(c.symbol_size) + AUTH_ENVELOPE_HEADER_LEN > c.max_datagram_size
+        );
+        assert!(matches!(
+            c.validate(),
+            Err(QuicTransportError::Config(m)) if m.contains("envelope header")
         ));
     }
 
