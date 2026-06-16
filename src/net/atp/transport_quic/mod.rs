@@ -7,34 +7,39 @@
 //! `atpd` daemon, fleet/loopback E2E harnesses) can target QUIC by swapping the
 //! transport module and config type, with no other call-site changes.
 //!
-//! # Status: scaffold (`asupersync-arq-quic-epic-b0k8qo.2.1`, "B1")
+//! # Status: partially wired (`asupersync-arq-quic-epic-b0k8qo.2`)
 //!
-//! The wire-level send/receive coroutines are **not yet wired** — they land in:
+//! The endpoint-level send/receive coroutines still land in:
 //!
 //! - [`send_path`] → `asupersync-arq-quic-epic-b0k8qo.2.2` (B2: QUIC sender
 //!   coroutine — connect, verify identity, manifest, encode + spray RaptorQ
 //!   symbols across QUIC DATAGRAMs, fountain feedback).
-//! - [`receive_once`] / [`receive_connection`] / [`serve`] →
+//! - [`receive_once`] / [`serve`] →
 //!   `asupersync-arq-quic-epic-b0k8qo.2.3` (B3: QUIC receiver coroutine —
 //!   accept, manifest, feed the decoder from DATAGRAMs, verify, commit).
 //!
-//! Until then every transfer entry point **fails closed**: it validates its
-//! configuration, emits a structured config summary, and returns
+//! Until a given transfer entry point is wired, it **fails closed**: it
+//! validates its configuration, emits a structured config summary, and returns
 //! [`QuicTransportError::NotImplemented`]. There is no code path that reports a
 //! fake success or moves zero bytes silently — the epic's non-negotiable
 //! "every unwired op fails closed (typed error, never fake success)" rule.
+//! [`receive_connection`] is the first wired B3 receiver surface: it consumes an
+//! already-established native QUIC connection, verifies decoded entries, commits
+//! them under the destination root, and returns a real report. Endpoint
+//! accept/connect wiring remains fail-closed until [`receive_once`], [`serve`],
+//! and [`send_path`] are wired.
 //!
 //! # Why a scaffold can land ahead of the Phase A data plane
 //!
 //! The tracker gates Phase B on Phase A (`...b0k8qo.1`, the QUIC application
 //! data plane). That ordering is real for the *implementation* in B2/B3, which
 //! consumes the Phase A DATAGRAM/STREAM/packet-protection surfaces. The
-//! *scaffold*, however, only depends on already-landed pieces: the shared
+//! first scaffolds, however, only depended on already-landed pieces: the shared
 //! bounded-memory helpers in [`crate::net::atp::transport_common`] (F0) and the
-//! `transport_tcp` template it mirrors. Because every op fails closed, the
-//! scaffold never touches the (still in-flight) Phase A data plane, so it is
-//! safe — and useful — to land now: B2/B3 fill in bodies against a frozen public
-//! API, and downstream Phase B/G/H beads can reference real types.
+//! `transport_tcp` template it mirrors. The accepted-connection
+//! [`receive_connection`] body now consumes the landed Phase A native STREAM and
+//! DATAGRAM surfaces, while the still-unwired endpoint operations continue to
+//! fail closed.
 //!
 //! # Reused wire / report types
 //!
@@ -73,7 +78,8 @@ use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::transport_common::{StreamingError, flat_merkle_root_from_slices, hex_encode};
 use crate::net::quic_native::{
-    ManagedQuicEndpoint, NativeQuicConnection, QuicConnection, StreamId,
+    ManagedQuicEndpoint, NativeQuicConnection, QuicConnection, StreamDirection, StreamId,
+    StreamRole,
 };
 use crate::security::AuthenticatedSymbol;
 use crate::types::resource::{PoolConfig, SymbolPool};
@@ -1024,11 +1030,96 @@ impl QuicFrameTransport {
     }
 }
 
+/// ATP frame transport over an accepted native QUIC control stream.
+///
+/// This mirrors [`QuicFrameTransport`] for the B3 public receive path, whose
+/// API accepts a [`NativeQuicConnection`] by value. The lower native connection
+/// already owns reassembled stream bytes and buffered DATAGRAM payloads for an
+/// accepted peer, but it is not wrapped in the high-level [`QuicConnection`]
+/// handle. Keep this adapter small and receiver-scoped until the managed
+/// endpoint exposes a first-class accepted-connection handle.
+#[allow(dead_code)]
+struct NativeQuicFrameTransport {
+    stream: StreamId,
+    codec: AtpFrameCodec,
+    rbuf: BytesMut,
+}
+
+#[allow(dead_code)]
+impl NativeQuicFrameTransport {
+    fn for_stream(stream: StreamId) -> Self {
+        Self {
+            stream,
+            codec: AtpFrameCodec::new(),
+            rbuf: BytesMut::new(),
+        }
+    }
+
+    fn send(
+        &mut self,
+        cx: &Cx,
+        conn: &mut NativeQuicConnection,
+        frame: &Frame,
+    ) -> Result<(), QuicTransportError> {
+        let wire = frame
+            .to_wire_bytes()
+            .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+        conn.write_stream_bytes(cx, self.stream, Bytes::from(wire), false)?;
+        Ok(())
+    }
+
+    fn send_json<T: Serialize>(
+        &mut self,
+        cx: &Cx,
+        conn: &mut NativeQuicConnection,
+        ty: FrameType,
+        value: &T,
+    ) -> Result<(), QuicTransportError> {
+        let frame = json_frame(ty, value)?;
+        self.send(cx, conn, &frame)
+    }
+
+    fn try_recv(
+        &mut self,
+        cx: &Cx,
+        conn: &mut NativeQuicConnection,
+    ) -> Result<Option<Frame>, QuicTransportError> {
+        if let Some(frame) = self
+            .codec
+            .decode(&mut self.rbuf)
+            .map_err(|err| QuicTransportError::Frame(err.to_string()))?
+        {
+            return Ok(Some(frame));
+        }
+
+        let chunk = conn.read_stream_bytes(cx, self.stream, CONTROL_READ_CHUNK)?;
+        if chunk.is_empty() {
+            return Ok(None);
+        }
+        self.rbuf.extend_from_slice(&chunk);
+        self.codec
+            .decode(&mut self.rbuf)
+            .map_err(|err| QuicTransportError::Frame(err.to_string()))
+    }
+}
+
 #[allow(dead_code)]
 fn next_control_frame(
     cx: &Cx,
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
+    operation: &'static str,
+) -> Result<Frame, QuicTransportError> {
+    control
+        .try_recv(cx, conn)?
+        .ok_or_else(|| QuicTransportError::Frame(format!("{operation}: no complete frame ready")))
+}
+
+#[allow(dead_code)]
+fn next_native_control_frame(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
     operation: &'static str,
 ) -> Result<Frame, QuicTransportError> {
     control
@@ -1141,6 +1232,38 @@ fn receive_sender_hello_and_ack(
 }
 
 #[allow(dead_code)]
+fn receive_native_sender_hello_and_ack(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    config: &QuicConfig,
+    peer_id: &str,
+    expected_symbol_auth: bool,
+) -> Result<QuicHello, QuicTransportError> {
+    let frame = next_native_control_frame(cx, conn, control, "receive sender handshake")?;
+    if frame.frame_type() != FrameType::Handshake {
+        return Err(QuicTransportError::Unexpected {
+            got: frame.frame_type(),
+            expected: "Handshake",
+        });
+    }
+    let hello: QuicHello = parse_json(&frame)?;
+    let reason = reject_hello_reason(&hello, config, expected_symbol_auth);
+    let accepted = reason.is_none();
+    let ack = QuicHelloAck {
+        accepted,
+        peer_id: peer_id.to_string(),
+        reason: reason.clone(),
+    };
+    let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
+    control.send(cx, conn, &ack_frame)?;
+    if let Some(reason) = reason {
+        return Err(QuicTransportError::HandshakeRejected(reason));
+    }
+    Ok(hello)
+}
+
+#[allow(dead_code)]
 fn receive_sender_hello_ack(
     cx: &Cx,
     conn: &mut QuicConnection,
@@ -1185,6 +1308,16 @@ fn receive_manifest(
 }
 
 #[allow(dead_code)]
+fn receive_native_manifest(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<TransferManifest, QuicTransportError> {
+    let frame = next_native_control_frame(cx, conn, control, "receive transfer manifest")?;
+    parse_json_frame(&frame, FrameType::ObjectManifest, "ObjectManifest")
+}
+
+#[allow(dead_code)]
 fn send_empty_control_frame(
     cx: &Cx,
     conn: &mut QuicConnection,
@@ -1222,6 +1355,22 @@ fn receive_object_complete(
 }
 
 #[allow(dead_code)]
+fn receive_native_object_complete(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<(), QuicTransportError> {
+    let frame = next_native_control_frame(cx, conn, control, "receive object-complete marker")?;
+    if frame.frame_type() != FrameType::ObjectComplete {
+        return Err(QuicTransportError::Unexpected {
+            got: frame.frame_type(),
+            expected: "ObjectComplete",
+        });
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 fn send_need_more(
     cx: &Cx,
     conn: &mut QuicConnection,
@@ -1236,6 +1385,26 @@ fn send_proof(
     cx: &Cx,
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
+    receipt: &ReceiveReceipt,
+) -> Result<(), QuicTransportError> {
+    control.send_json(cx, conn, FrameType::Proof, receipt)
+}
+
+#[allow(dead_code)]
+fn send_native_need_more(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    need: &QuicNeedMore,
+) -> Result<(), QuicTransportError> {
+    control.send_json(cx, conn, FrameType::ObjectRequest, need)
+}
+
+#[allow(dead_code)]
+fn send_native_proof(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
     receipt: &ReceiveReceipt,
 ) -> Result<(), QuicTransportError> {
     control.send_json(cx, conn, FrameType::Proof, receipt)
@@ -1267,6 +1436,292 @@ fn send_close(
     control: &mut QuicFrameTransport,
 ) -> Result<(), QuicTransportError> {
     send_empty_control_frame(cx, conn, control, FrameType::Close)
+}
+
+#[allow(dead_code)]
+fn send_native_close(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<(), QuicTransportError> {
+    let frame =
+        Frame::empty(FrameType::Close).map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+    control.send(cx, conn, &frame)
+}
+
+fn first_client_bidi_stream() -> StreamId {
+    StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0)
+}
+
+fn recv_native_symbol_envelope(
+    conn: &mut NativeQuicConnection,
+    auth_required: bool,
+) -> Result<Option<QuicSymbolEnvelope>, QuicTransportError> {
+    match conn.recv_datagram() {
+        Some(bytes) => QuicSymbolEnvelope::decode(&bytes, auth_required)
+            .map(Some)
+            .map_err(SymbolDatagramError::from)
+            .map_err(QuicTransportError::from),
+        None => Ok(None),
+    }
+}
+
+fn drain_native_symbol_datagrams(
+    conn: &mut NativeQuicConnection,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut accepted = 0u64;
+    while let Some(envelope) = recv_native_symbol_envelope(conn, false)? {
+        if envelope.transfer_tag != tag {
+            return Err(QuicTransportError::Integrity(format!(
+                "symbol transfer tag mismatch: got {}, expected {tag}",
+                envelope.transfer_tag
+            )));
+        }
+        if envelope.payload.len() != usize::from(config.symbol_size) {
+            return Err(QuicTransportError::Integrity(format!(
+                "symbol payload has {} bytes, expected {}",
+                envelope.payload.len(),
+                config.symbol_size
+            )));
+        }
+        let decoder = decoders
+            .iter_mut()
+            .find(|decoder| decoder.index == envelope.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "symbol for unknown manifest entry {}",
+                    envelope.entry
+                ))
+            })?;
+        let symbol = envelope_to_symbol(&envelope, decoder.object_id);
+        if feed_decoded_symbol(decoder, symbol)? {
+            accepted = accepted.saturating_add(1);
+        }
+    }
+    Ok(accepted)
+}
+
+fn validate_quic_manifest(
+    manifest: &TransferManifest,
+    config: &QuicConfig,
+) -> Result<(), QuicTransportError> {
+    if manifest.total_bytes > config.max_transfer_bytes {
+        return Err(QuicTransportError::TooLarge {
+            size: manifest.total_bytes,
+            max: config.max_transfer_bytes,
+        });
+    }
+    if !manifest.is_directory && manifest.entries.len() != 1 {
+        return Err(QuicTransportError::Source(
+            "single-file transfer manifest must contain exactly one entry".to_string(),
+        ));
+    }
+    if manifest.metadata_root_hex.is_some()
+        || manifest
+            .entries
+            .iter()
+            .any(|entry| entry.metadata.is_some())
+    {
+        return Err(QuicTransportError::Source(
+            "transport_quic receive_connection does not yet commit metadata-bearing manifests"
+                .to_string(),
+        ));
+    }
+
+    let mut seen_paths = std::collections::BTreeSet::new();
+    let mut total = 0u64;
+    for (expected, entry) in manifest.entries.iter().enumerate() {
+        let expected = u32::try_from(expected).unwrap_or(u32::MAX);
+        if entry.index != expected {
+            return Err(QuicTransportError::Source(format!(
+                "manifest entry index {} is not sequential (expected {expected})",
+                entry.index
+            )));
+        }
+        if entry.rel_path.is_empty() {
+            return Err(QuicTransportError::Source(
+                "manifest entry rel_path is empty".to_string(),
+            ));
+        }
+        quic_join_relative(Path::new("base"), &entry.rel_path)?;
+        if !seen_paths.insert(entry.rel_path.clone()) {
+            return Err(QuicTransportError::Source(format!(
+                "duplicate manifest entry path {}",
+                entry.rel_path
+            )));
+        }
+        if entry.sha256_hex.len() != 64 || !entry.sha256_hex.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(QuicTransportError::Source(format!(
+                "manifest entry {} has invalid sha256_hex",
+                entry.index
+            )));
+        }
+        total = total.saturating_add(entry.size);
+        if total > config.max_transfer_bytes {
+            return Err(QuicTransportError::TooLarge {
+                size: total,
+                max: config.max_transfer_bytes,
+            });
+        }
+    }
+    if total != manifest.total_bytes {
+        return Err(QuicTransportError::Source(format!(
+            "manifest total_bytes {} does not match entry sum {total}",
+            manifest.total_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn quic_safe_base_for_root_name(
+    dest_dir: &Path,
+    root_name: &str,
+) -> Result<PathBuf, QuicTransportError> {
+    if root_name.is_empty() {
+        return Err(QuicTransportError::Source(
+            "manifest root_name is empty".to_string(),
+        ));
+    }
+    let component = Path::new(root_name).file_name().ok_or_else(|| {
+        QuicTransportError::Source(format!("unsafe manifest root_name: {root_name}"))
+    })?;
+    let component_str = component.to_string_lossy();
+    if component_str == "."
+        || component_str == ".."
+        || component_str.contains('/')
+        || component_str.contains('\\')
+    {
+        return Err(QuicTransportError::Source(format!(
+            "unsafe manifest root_name: {root_name}"
+        )));
+    }
+    Ok(dest_dir.join(component))
+}
+
+fn quic_join_relative(base: &Path, rel: &str) -> Result<PathBuf, QuicTransportError> {
+    let mut out = base.to_path_buf();
+    for component in rel.split('/') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." || component.contains('\\') || component.contains(':') {
+            return Err(QuicTransportError::Source(format!(
+                "unsafe path component in entry: {rel}"
+            )));
+        }
+        out.push(component);
+    }
+    Ok(out)
+}
+
+async fn commit_decoded_entries(
+    cx: &Cx,
+    dest_dir: &Path,
+    manifest: &TransferManifest,
+    decoders: &[QuicEntryDecoder],
+) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
+    let mut receipt = verify_in_memory_receipt(manifest, decoders);
+    if !receipt.committed {
+        return Ok((receipt, Vec::new()));
+    }
+
+    let base = quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+    let mut committed_paths = Vec::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let decoder = decoders
+            .iter()
+            .find(|decoder| decoder.index == entry.index)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "decoded entry {} missing during commit",
+                    entry.index
+                ))
+            })?;
+        let out_path = if manifest.is_directory {
+            quic_join_relative(&base, &entry.rel_path)?
+        } else {
+            base.clone()
+        };
+        if let Some(parent) = out_path.parent() {
+            crate::fs::create_dir_all(parent).await?;
+        }
+        crate::fs::write_atomic(&out_path, &decoder.data).await?;
+        committed_paths.push(out_path);
+    }
+
+    receipt.committed_paths = committed_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    Ok((receipt, committed_paths))
+}
+
+async fn receive_established_native_connection(
+    cx: &Cx,
+    mut connection: NativeQuicConnection,
+    peer: SocketAddr,
+    dest_dir: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+) -> Result<ReceiveReport, QuicTransportError> {
+    let mut control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
+
+    receive_native_sender_hello_and_ack(
+        cx,
+        &mut connection,
+        &mut control,
+        &config,
+        peer_id,
+        false,
+    )?;
+    let manifest = receive_native_manifest(cx, &mut connection, &mut control)?;
+    validate_quic_manifest(&manifest, &config)?;
+    let mut decoders = decoders_from_manifest(&manifest, &config)?;
+    let symbols_accepted =
+        drain_native_symbol_datagrams(&mut connection, &manifest, &mut decoders, &config)?;
+    receive_native_object_complete(cx, &mut connection, &mut control)?;
+    assemble_completed_entries(&mut decoders);
+
+    let pending = pending_entries(&decoders);
+    if !pending.is_empty() {
+        let need = QuicNeedMore {
+            pending,
+            source_symbols: source_symbol_requests(&decoders, 2048),
+        };
+        send_native_need_more(cx, &mut connection, &mut control, &need)?;
+        return Err(QuicTransportError::Integrity(format!(
+            "receiver still needs more symbols after accepting {symbols_accepted} DATAGRAM symbols"
+        )));
+    }
+
+    let (receipt, committed_paths) =
+        commit_decoded_entries(cx, dest_dir, &manifest, &decoders).await?;
+    send_native_proof(cx, &mut connection, &mut control, &receipt)?;
+    let _ = send_native_close(cx, &mut connection, &mut control);
+
+    if !receipt.committed {
+        return Err(QuicTransportError::Integrity(
+            receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "receiver did not commit".to_string()),
+        ));
+    }
+
+    Ok(ReceiveReport {
+        transfer_id: manifest.transfer_id,
+        bytes_received: receipt.bytes_received,
+        files: receipt.files,
+        committed: true,
+        committed_paths,
+        peer,
+    })
 }
 
 /// Emit a deterministic, structured config summary at the start of a transport
@@ -1369,15 +1824,16 @@ pub async fn receive_once(
 /// Drive a single accepted QUIC connection through the receive protocol.
 ///
 /// Mirrors [`transport_tcp::receive_connection`] (with a
-/// [`NativeQuicConnection`] in place of a `TcpStream`). **Scaffold:** validates
-/// the config, emits a config summary, then fails closed with
-/// [`QuicTransportError::NotImplemented`]. Wired by B3
-/// (`asupersync-arq-quic-epic-b0k8qo.2.3`).
+/// [`NativeQuicConnection`] in place of a `TcpStream`). The caller supplies an
+/// already-established native QUIC connection whose first client-initiated
+/// bidirectional stream carries ATP control frames and whose DATAGRAM queue
+/// carries RaptorQ symbols. Endpoint accept/connect and continuous event-loop
+/// pumping remain separate B2/B3 work; this function is the accepted-connection
+/// receiver body.
 ///
 /// [`transport_tcp::receive_connection`]: crate::net::atp::transport_tcp::receive_connection
 // `connection` is owned by value to mirror `transport_tcp::receive_connection`'s
 // `stream: TcpStream` exactly; B3 consumes it to drive the receive protocol.
-#[allow(clippy::needless_pass_by_value)]
 pub async fn receive_connection(
     cx: &Cx,
     connection: NativeQuicConnection,
@@ -1389,14 +1845,7 @@ pub async fn receive_connection(
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
     trace_config_summary(cx, "receive_connection", &config, peer_id);
-    // `connection` is taken by value (it owns the accepted QUIC connection, as
-    // `receive_connection` owns its `TcpStream`); borrow it so it drops normally
-    // at scope end without an unused-variable warning.
-    let _ = (&connection, &peer, dest_dir);
-    Err(QuicTransportError::NotImplemented {
-        operation: "receive_connection",
-        wired_by: "asupersync-arq-quic-epic-b0k8qo.2.3 (B3: QUIC receiver coroutine)",
-    })
+    receive_established_native_connection(cx, connection, peer, dest_dir, config, peer_id).await
 }
 
 /// Run a persistent accept loop, handling each accepted connection as a receive.
@@ -2150,6 +2599,74 @@ mod tests {
     }
 
     #[test]
+    fn receive_connection_commits_established_native_quic_transfer() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.25,
+            ..QuicConfig::default()
+        };
+        let entries = vec![
+            ("alpha.bin".to_string(), varied_bytes(384, 23)),
+            ("nested/beta.bin".to_string(), varied_bytes(640, 29)),
+        ];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+
+        send_sender_hello(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )
+        .expect("send hello");
+        send_manifest(&cx, &mut client, &mut sender_control, &manifest).expect("send manifest");
+        let encoders = encoders_from_entries(&manifest, &entries);
+        let sent =
+            spray_initial_symbols(&cx, &mut client, &manifest, &encoders, &config).expect("spray");
+        assert!(sent > 0);
+        send_object_complete(&cx, &mut client, &mut sender_control).expect("send complete");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            6_000,
+        )
+        .expect("deliver accepted connection payload");
+
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let report = block_on(receive_connection(
+            &cx,
+            server.inner().clone(),
+            peer,
+            temp.path(),
+            config,
+            "receiver-peer",
+        ))
+        .expect("receive connection commits");
+
+        assert!(report.committed);
+        assert_eq!(report.transfer_id, manifest.transfer_id);
+        assert_eq!(report.bytes_received, 1_024);
+        assert_eq!(report.files, 2);
+        assert_eq!(report.peer, peer);
+        assert_eq!(
+            std::fs::read(temp.path().join("payload/alpha.bin")).expect("read alpha"),
+            entries[0].1
+        );
+        assert_eq!(
+            std::fs::read(temp.path().join("payload/nested/beta.bin")).expect("read beta"),
+            entries[1].1
+        );
+    }
+
+    #[test]
     fn quic_receiver_feedback_synthesizes_missing_source_symbol_requests() {
         let config = QuicConfig {
             symbol_size: 128,
@@ -2395,7 +2912,7 @@ mod tests {
     }
 
     #[test]
-    fn receive_connection_fails_closed_with_not_implemented() {
+    fn receive_connection_rejects_missing_control_stream_without_scaffold_success() {
         use crate::net::quic_native::NativeQuicConnectionConfig;
         let cx = Cx::for_testing();
         let conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
@@ -2408,13 +2925,14 @@ mod tests {
             QuicConfig::default(),
             "receiver",
         ));
-        assert!(matches!(
-            result,
+        match result {
+            Ok(report) => panic!("missing control stream must not fake success: {report:?}"),
             Err(QuicTransportError::NotImplemented {
                 operation: "receive_connection",
                 ..
-            })
-        ));
+            }) => panic!("receive_connection should be wired past the B1 scaffold"),
+            Err(_) => {}
+        }
     }
 
     #[test]
