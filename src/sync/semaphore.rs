@@ -821,11 +821,17 @@ impl Drop for OwnedSemaphorePermit {
         }
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
-        }
 
-        // Record lock release for ordering tracking
-        if let Some(rank) = self.semaphore.rank {
-            lock_ordering::record_release(self.semaphore.name, rank);
+            // Record lock release for ordering tracking. Gated on count > 0
+            // because count==0 permits never call `record_acquire` (every
+            // count==0 construction path — async/sync fast paths — skips it),
+            // so emitting a release for them would be unmatched and could
+            // erase the tracking entry of a real live permit on this thread,
+            // corrupting deadlock-detection state. Mirrors the borrowed
+            // `SemaphorePermit`'s `release_lock_order_on_drop` gate.
+            if let Some(rank) = self.semaphore.rank {
+                lock_ordering::record_release(self.semaphore.name, rank);
+            }
         }
     }
 }
@@ -986,18 +992,19 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                 // br-asupersync-13jmt3: static description (see paired
                 // comment in try_acquire); count is exposed via
                 // OwnedSemaphorePermit.count.
-                obligation: Some({
-                    let region = this.cx.as_ref().map_or_else(
-                        || {
-                            panic!(
-                                "Cannot acquire owned semaphore permit without context: \
-                                 obligation tokens require region scoping to prevent leaks."
-                            )
-                        },
-                        |cx| cx.region_id(),
-                    );
-                    ObligationToken::reserve("semaphore-permit", region)
-                }),
+                //
+                // When this future has no task-local `Cx` (the documented
+                // `new_uncancelable` host-boundary path, e.g. Service
+                // middleware polled outside a runtime task), there is no
+                // region to scope an obligation to. Skip the obligation
+                // rather than panicking — this mirrors the count==0 fast
+                // path (`obligation: None`). The permit still releases its
+                // count on drop, and an obligation that is never reserved
+                // cannot leak, so the no-leak invariant is preserved.
+                obligation: this
+                    .cx
+                    .as_ref()
+                    .map(|cx| ObligationToken::reserve("semaphore-permit", cx.region_id())),
                 semaphore: this.semaphore.clone(),
                 count: this.count,
             }));
@@ -1303,6 +1310,43 @@ mod tests {
 
         crate::assert_with_log!(permit.count() == 1, "permit count", 1usize, permit.count());
         crate::test_complete!("owned_acquire_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn owned_uncancelable_acquire_succeeds_without_context() {
+        // Regression: the `new_uncancelable` host-boundary path (Service
+        // middleware polled with no task-local Cx) registers a real waiter and
+        // must be able to complete when a permit is later released. The success
+        // branch previously panicked because it required a Cx to scope the
+        // obligation; it must instead complete with no obligation and still
+        // return the permit count, then release the permit cleanly on drop.
+        init_test("owned_uncancelable_acquire_succeeds_without_context");
+        let sem = Arc::new(Semaphore::new(0));
+        let mut fut = OwnedAcquireFuture::new_uncancelable(Arc::clone(&sem), 1);
+
+        // No permit yet: the future parks and registers a real waiter.
+        let parked = poll_once(&mut fut).is_none();
+        crate::assert_with_log!(
+            parked,
+            "uncancelable acquire parks without permits",
+            true,
+            parked
+        );
+
+        // Release a permit and re-poll: must succeed (previously panicked).
+        sem.add_permits(1);
+        let permit = poll_until_ready(&mut fut).expect("uncancelable owned acquire must succeed");
+        crate::assert_with_log!(permit.count() == 1, "permit count", 1usize, permit.count());
+
+        // Dropping the permit returns the count to the semaphore.
+        drop(permit);
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "available permits after drop",
+            1usize,
+            sem.available_permits()
+        );
+        crate::test_complete!("owned_uncancelable_acquire_succeeds_without_context");
     }
 
     #[test]
