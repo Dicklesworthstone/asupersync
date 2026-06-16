@@ -275,7 +275,14 @@ impl LossRecovery {
             return AckEvent::empty();
         }
         let loss_delay = self.loss_delay_micros();
-        let time_threshold = now_micros.saturating_sub(loss_delay);
+        // RFC 9002 §6.1.2: a packet is only time-threshold lost once
+        // `now - time_sent >= loss_delay`. A saturating subtraction would floor
+        // the boundary to 0 when `now < loss_delay` (true early in a connection,
+        // where the default loss delay is ~375ms with no RTT samples), causing
+        // packets sent at t=0 to be falsely declared lost. Use checked_sub and
+        // skip the time test until the boundary is reachable (mirrors the fix in
+        // `net/atp/loss/detector.rs` and `net/atp/quic/recovery.rs`).
+        let time_threshold = now_micros.checked_sub(loss_delay);
         let mut event = AckEvent::empty();
         let mut newest_lost_packet_sent_micros: Option<u64> = None;
         // RFC 9002 B.5: Only grow cwnd for packets sent AFTER the recovery
@@ -349,7 +356,7 @@ impl LossRecovery {
                 pkt.space == space && pkt.packet_number.saturating_add(3) <= global_largest_acked;
             let time_threshold_lost = pkt.space == space
                 && pkt.packet_number <= global_largest_acked
-                && pkt.time_sent_micros <= time_threshold;
+                && time_threshold.is_some_and(|boundary| pkt.time_sent_micros <= boundary);
             let lost = packet_threshold_lost || time_threshold_lost;
             if lost {
                 event.lost_packets += 1;
