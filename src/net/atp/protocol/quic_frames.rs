@@ -939,7 +939,14 @@ impl VarIntBufExt for VarInt {
 
     fn decode_from_buf<B: Buf>(buf: &mut B) -> Result<Option<VarInt>, QuicFrameError> {
         let mut temp = BytesMut::new();
-        temp.put_slice(&buf.chunk()[..buf.remaining().min(8)]); // VarInt is at most 8 bytes
+        // VarInt is at most 8 bytes. Bound the copy by the *current contiguous
+        // chunk* length, not `remaining()` (the total across all chunks): for a
+        // non-contiguous `Buf` (e.g. a `Chain`), `remaining()` can exceed
+        // `chunk().len()`, so `&chunk[..remaining().min(8)]` would slice out of
+        // bounds and panic. For contiguous buffers this is identical behavior.
+        let chunk = buf.chunk();
+        let take = chunk.len().min(8);
+        temp.put_slice(&chunk[..take]);
 
         let original_len = temp.len();
         match VarInt::decode(&mut temp) {
