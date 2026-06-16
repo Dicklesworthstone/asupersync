@@ -8,6 +8,7 @@
 pub mod connection;
 pub mod connection_manager;
 pub mod endpoint;
+pub mod endpoint_api;
 pub mod forensic_log;
 pub mod managed_endpoint;
 pub mod streams;
@@ -31,6 +32,10 @@ pub use connection_manager::{
 pub use endpoint::{
     BatchResult, EndpointMetrics, OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig,
     QuicUdpEndpointError, ReceivedPacket,
+};
+pub use endpoint_api::{
+    DEFAULT_MAX_PACKET_BYTES, QuicConnection, QuicPathStats, establish_loopback, pump_app_data,
+    pump_until_idle,
 };
 pub use managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
 pub use streams::{
