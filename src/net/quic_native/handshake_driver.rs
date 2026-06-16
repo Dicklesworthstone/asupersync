@@ -38,9 +38,30 @@ use rustls::quic::{ClientConnection, Connection, KeyChange, ServerConnection, Ve
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
 use super::tls::{
-    PacketProtectionSpace, QuicHandshakeTranscript, QuicPacketProtectionProvider, QuicTlsError,
-    RustlsQuicCryptoProvider, RustlsQuicProviderSide,
+    PacketProtectionRequest, PacketProtectionSpace, ProtectedPacket, ProtectionProof,
+    QuicHandshakeTranscript, QuicPacketProtectionProvider, QuicTlsError, RustlsQuicCryptoProvider,
+    RustlsQuicProviderSide, TranscriptHash,
 };
+use crate::bytes::{Bytes, BytesMut};
+use crate::cx::Cx;
+use crate::net::atp::protocol::quic_frames::QuicFrame;
+use crate::net::atp::protocol::varint::VarInt;
+use crate::net::quic_core::{ConnectionId, LongHeader, LongPacketType, PacketHeader};
+use crate::net::quic_native::endpoint::{OutgoingPacket, QuicUdpEndpoint};
+use std::net::SocketAddr;
+use std::time::Duration;
+
+/// Per-receive timeout while driving a handshake over UDP. Generous for loopback
+/// and a slow real-internet RTT; a timeout aborts the handshake (fail-closed).
+const HANDSHAKE_RECV_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound on handshake round trips before giving up (defends against a peer that
+/// never converges).
+const HANDSHAKE_MAX_FLIGHTS: usize = 64;
+
+/// AEAD authentication tag length for the QUIC AES-128-GCM suite.
+const QUIC_AEAD_TAG_LEN: usize = 16;
+/// Fixed packet-number length used for handshake packets (4 bytes).
+const HANDSHAKE_PACKET_NUMBER_LEN: u8 = 4;
 
 /// ALPN protocol identifier for the ATP-over-QUIC transport. QUIC mandates ALPN,
 /// and both peers must advertise a common protocol or the handshake fails closed.
@@ -83,6 +104,32 @@ pub struct QuicHandshakeDriver {
     write_level: HandshakeLevel,
     handshake_keys_installed: bool,
     one_rtt_keys_installed: bool,
+    /// Per-level cumulative CRYPTO send offset (indexed Initial=0/Handshake=1/OneRtt=2).
+    crypto_send_offset: [u64; 3],
+}
+
+fn level_index(level: HandshakeLevel) -> usize {
+    match level {
+        HandshakeLevel::Initial => 0,
+        HandshakeLevel::Handshake => 1,
+        HandshakeLevel::OneRtt => 2,
+    }
+}
+
+fn level_protection_space(level: HandshakeLevel) -> PacketProtectionSpace {
+    match level {
+        HandshakeLevel::Initial => PacketProtectionSpace::Initial,
+        HandshakeLevel::Handshake => PacketProtectionSpace::Handshake,
+        HandshakeLevel::OneRtt => PacketProtectionSpace::OneRtt,
+    }
+}
+
+fn long_packet_type_space(packet_type: LongPacketType) -> Option<PacketProtectionSpace> {
+    match packet_type {
+        LongPacketType::Initial => Some(PacketProtectionSpace::Initial),
+        LongPacketType::Handshake => Some(PacketProtectionSpace::Handshake),
+        _ => None,
+    }
 }
 
 impl QuicHandshakeDriver {
@@ -117,7 +164,144 @@ impl QuicHandshakeDriver {
             write_level: HandshakeLevel::Initial,
             handshake_keys_installed: false,
             one_rtt_keys_installed: false,
+            crypto_send_offset: [0; 3],
         }
+    }
+
+    /// Mutable access to the packet-protection provider holding the installed
+    /// keys (used to protect/unprotect handshake packets, and to hand off the
+    /// established keys to the connection's data-plane protection).
+    pub fn provider_mut(&mut self) -> &mut RustlsQuicCryptoProvider {
+        &mut self.provider
+    }
+
+    /// Assemble a protected long-header (Initial/Handshake) QUIC packet carrying
+    /// `segment`'s CRYPTO bytes. Mirrors the data-plane 1-RTT assembly pattern:
+    /// the long header is sent in the clear and authenticated as AEAD associated
+    /// data; this implementation does not apply QUIC header protection (both ends
+    /// are asupersync), so a packet is `header || ciphertext || tag`.
+    pub fn assemble_handshake_packet(
+        &mut self,
+        segment: &HandshakeSegment,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+    ) -> Result<Vec<u8>, QuicTlsError> {
+        let packet_type = match segment.level {
+            HandshakeLevel::Initial => LongPacketType::Initial,
+            HandshakeLevel::Handshake => LongPacketType::Handshake,
+            HandshakeLevel::OneRtt => return Err(handshake_failure("onertt_is_not_long_header")),
+        };
+        let space = level_protection_space(segment.level);
+        let offset = self.crypto_send_offset[level_index(segment.level)];
+
+        let mut payload = BytesMut::new();
+        QuicFrame::Crypto {
+            offset: VarInt::from_u64_unchecked(offset),
+            data: Bytes::copy_from_slice(&segment.data),
+        }
+        .encode(&mut payload)
+        .map_err(|_| handshake_failure("crypto_frame_encode"))?;
+        let plaintext = payload.to_vec();
+
+        // payload_length covers the packet number + AEAD ciphertext + tag.
+        let payload_length = u64::from(HANDSHAKE_PACKET_NUMBER_LEN)
+            + plaintext.len() as u64
+            + QUIC_AEAD_TAG_LEN as u64;
+        let header = PacketHeader::Long(LongHeader {
+            packet_type,
+            version: 1,
+            dst_cid,
+            src_cid,
+            token: Vec::new(),
+            payload_length,
+            packet_number,
+            packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
+        });
+        let mut header_bytes = Vec::new();
+        header
+            .encode(&mut header_bytes)
+            .map_err(|_| handshake_failure("long_header_encode"))?;
+
+        let protected = self.provider.protect_packet(PacketProtectionRequest {
+            space,
+            key_phase: false,
+            packet_number,
+            associated_data: &header_bytes,
+            payload: &plaintext,
+        })?;
+
+        let mut packet = Vec::with_capacity(
+            header_bytes.len() + protected.ciphertext.len() + protected.tag.len(),
+        );
+        packet.extend_from_slice(&header_bytes);
+        packet.extend_from_slice(&protected.ciphertext);
+        packet.extend_from_slice(&protected.tag);
+
+        self.crypto_send_offset[level_index(segment.level)] += segment.data.len() as u64;
+        Ok(packet)
+    }
+
+    /// Parse a received protected long-header (Initial/Handshake) packet, unprotect
+    /// it with the installed keys for its space, and feed its CRYPTO bytes to the
+    /// TLS state machine. Returns the peer's source connection ID (so a server can
+    /// address its replies to the client's chosen CID). Assumes in-order,
+    /// contiguous CRYPTO delivery (true over a reliable loopback); offset-based
+    /// reassembly for lossy paths is a follow-up.
+    pub fn recv_handshake_packet(&mut self, packet: &[u8]) -> Result<ConnectionId, QuicTlsError> {
+        let (header, consumed) = PacketHeader::decode(packet, 0)
+            .map_err(|_| handshake_failure("packet_header_decode"))?;
+        let PacketHeader::Long(long_header) = header else {
+            return Err(handshake_failure("expected_long_header"));
+        };
+        let peer_src_cid = long_header.src_cid;
+        let Some(space) = long_packet_type_space(long_header.packet_type) else {
+            return Err(handshake_failure("unexpected_long_packet_type"));
+        };
+        if consumed > packet.len() {
+            return Err(handshake_failure("packet_header_overrun"));
+        }
+        let header_bytes = &packet[..consumed];
+        let body = &packet[consumed..];
+        if body.len() < QUIC_AEAD_TAG_LEN {
+            return Err(handshake_failure("packet_body_too_short"));
+        }
+        let tag_offset = body.len() - QUIC_AEAD_TAG_LEN;
+        let mut tag = [0u8; QUIC_AEAD_TAG_LEN];
+        tag.copy_from_slice(&body[tag_offset..]);
+        let protected = ProtectedPacket {
+            space,
+            key_phase: false,
+            packet_number: long_header.packet_number,
+            ciphertext: body[..tag_offset].to_vec(),
+            tag,
+            proof: ProtectionProof {
+                provider_kind: self.provider.provider_kind(),
+                space,
+                key_phase: false,
+                generation: 0,
+                transcript_hash: TranscriptHash::from_bytes([0; 32]),
+                failure_code: None,
+            },
+        };
+        let unprotected = self
+            .provider
+            .unprotect_packet(&protected, header_bytes)
+            .map_err(|_| handshake_failure("packet_unprotect"))?;
+
+        // asupersync's frame codec decodes over a `&[u8]` (which implements the
+        // crate `Buf`), advancing the slice; mirror `NativeQuicConnection::decode_frames`.
+        let mut buf: &[u8] = &unprotected.plaintext;
+        while !buf.is_empty() {
+            match QuicFrame::decode(&mut buf).map_err(|_| handshake_failure("frame_decode"))? {
+                Some(QuicFrame::Crypto { data, .. }) => self.read_handshake(data.as_ref())?,
+                // ACK/PADDING/PING and any other handshake-coalesced frames carry
+                // no TLS data; ignore them here (loss recovery handled elsewhere).
+                Some(_) => {}
+                None => break,
+            }
+        }
+        Ok(peer_src_cid)
     }
 
     /// Install Initial-space packet-protection keys derived from the client's
@@ -221,6 +405,173 @@ impl QuicHandshakeDriver {
     #[must_use]
     pub fn into_provider(self) -> RustlsQuicCryptoProvider {
         self.provider
+    }
+
+    /// Pump pending outbound handshake segments, assemble + protect each as a
+    /// long-header packet to `peer`, and send them over `endpoint`. OneRtt-level
+    /// segments (post-handshake tickets) belong to the 1-RTT data plane and are
+    /// skipped. Returns the number of packets sent.
+    async fn send_pending_flight(
+        &mut self,
+        cx: &Cx,
+        endpoint: &mut QuicUdpEndpoint,
+        peer: SocketAddr,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: &mut u64,
+    ) -> Result<usize, QuicTlsError> {
+        let segments = self.pump_outbound()?;
+        let mut packets = Vec::new();
+        for segment in segments {
+            if segment.level == HandshakeLevel::OneRtt {
+                continue;
+            }
+            let data =
+                self.assemble_handshake_packet(&segment, dst_cid, src_cid, *packet_number)?;
+            *packet_number += 1;
+            packets.push(OutgoingPacket {
+                dst_addr: peer,
+                data,
+                send_time: None,
+            });
+        }
+        let sent = packets.len();
+        if !packets.is_empty() {
+            endpoint
+                .send_batch(cx, &packets)
+                .await
+                .map_err(|_| handshake_failure("udp_send"))?;
+        }
+        Ok(sent)
+    }
+}
+
+/// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`, talking to
+/// `server_addr`. This is the connect-side handshake: it derives Initial keys from
+/// the client's original `dcid`, sends the ClientHello, and exchanges flights until
+/// the handshake completes. On success the driver holds 1-RTT keys ready to be
+/// handed to the data plane.
+pub async fn client_handshake_over_udp(
+    cx: &Cx,
+    endpoint: &mut QuicUdpEndpoint,
+    server_addr: SocketAddr,
+    driver: &mut QuicHandshakeDriver,
+    dcid: ConnectionId,
+    client_scid: ConnectionId,
+) -> Result<(), QuicTlsError> {
+    driver.install_initial_keys(dcid.as_bytes())?;
+    let mut packet_number = 0u64;
+    driver
+        .send_pending_flight(
+            cx,
+            endpoint,
+            server_addr,
+            dcid,
+            client_scid,
+            &mut packet_number,
+        )
+        .await?;
+
+    for _ in 0..HANDSHAKE_MAX_FLIGHTS {
+        if driver.is_complete() {
+            return Ok(());
+        }
+        let received = match crate::time::timeout(
+            cx.now(),
+            HANDSHAKE_RECV_TIMEOUT,
+            endpoint.receive_batch(cx, 16),
+        )
+        .await
+        {
+            Ok(Ok(packets)) => packets,
+            Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
+            Err(_) => return Err(handshake_failure("client_handshake_recv_timeout")),
+        };
+        // Pump after EACH packet: e.g. after the server's Initial (ServerHello)
+        // the client must pump to install Handshake keys BEFORE it can unprotect
+        // the server's Handshake-level flight that may arrive in the same batch.
+        for packet in &received {
+            driver.recv_handshake_packet(&packet.data)?;
+            driver
+                .send_pending_flight(
+                    cx,
+                    endpoint,
+                    server_addr,
+                    dcid,
+                    client_scid,
+                    &mut packet_number,
+                )
+                .await?;
+        }
+    }
+
+    if driver.is_complete() {
+        Ok(())
+    } else {
+        Err(handshake_failure("client_handshake_incomplete"))
+    }
+}
+
+/// Drive a server QUIC/TLS-1.3 handshake to completion over `endpoint`. This is the
+/// accept-side handshake: it derives Initial keys from the client's original `dcid`
+/// (read from the first Initial packet by the caller), learns the client's address
+/// and source CID from the first received packet, and exchanges flights until the
+/// handshake completes. Returns the validated client peer address.
+pub async fn server_handshake_over_udp(
+    cx: &Cx,
+    endpoint: &mut QuicUdpEndpoint,
+    driver: &mut QuicHandshakeDriver,
+    dcid: ConnectionId,
+    server_scid: ConnectionId,
+) -> Result<SocketAddr, QuicTlsError> {
+    driver.install_initial_keys(dcid.as_bytes())?;
+    let mut packet_number = 0u64;
+    let mut peer: Option<(SocketAddr, ConnectionId)> = None;
+
+    for _ in 0..HANDSHAKE_MAX_FLIGHTS {
+        if driver.is_complete() {
+            return peer
+                .map(|(addr, _)| addr)
+                .ok_or_else(|| handshake_failure("server_handshake_no_peer"));
+        }
+        let received = match crate::time::timeout(
+            cx.now(),
+            HANDSHAKE_RECV_TIMEOUT,
+            endpoint.receive_batch(cx, 16),
+        )
+        .await
+        {
+            Ok(Ok(packets)) => packets,
+            Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
+            Err(_) => return Err(handshake_failure("server_handshake_recv_timeout")),
+        };
+        // Pump after EACH packet so newly-derived keys are installed before the
+        // next packet is processed (symmetry with the client side).
+        for packet in &received {
+            let peer_scid = driver.recv_handshake_packet(&packet.data)?;
+            if peer.is_none() {
+                peer = Some((packet.src_addr, peer_scid));
+            }
+            if let Some((addr, client_cid)) = peer {
+                driver
+                    .send_pending_flight(
+                        cx,
+                        endpoint,
+                        addr,
+                        client_cid,
+                        server_scid,
+                        &mut packet_number,
+                    )
+                    .await?;
+            }
+        }
+    }
+
+    if driver.is_complete() {
+        peer.map(|(addr, _)| addr)
+            .ok_or_else(|| handshake_failure("server_handshake_no_peer"))
+    } else {
+        Err(handshake_failure("server_handshake_incomplete"))
     }
 }
 
@@ -340,6 +691,116 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             }
         }
         panic!("handshake did not converge within bound");
+    }
+
+    // Client's original Destination CID; both sides derive Initial keys from it.
+    const DCID_BYTES: &[u8] = &[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
+
+    #[test]
+    fn real_tls13_handshake_completes_over_protected_packets() {
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let server_cfg =
+            server_config(vec![leaf_cert()], leaf_key(), alpn.clone()).expect("server config");
+        let client_cfg = client_config(vec![ca_cert()], alpn).expect("client config");
+
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server = QuicHandshakeDriver::server(server_cfg, b"server-params".to_vec())
+            .expect("server driver");
+
+        // RFC 9001 §5.2: Initial keys are derived from the client's original DCID
+        // on BOTH sides (the server reads the DCID from the first Initial packet).
+        client
+            .install_initial_keys(DCID_BYTES)
+            .expect("client initial keys");
+        server
+            .install_initial_keys(DCID_BYTES)
+            .expect("server initial keys");
+
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x44]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).expect("server scid");
+
+        // Per-sender packet-number counter (unique-within-space suffices).
+        let mut client_pn = 0u64;
+        let mut server_pn = 0u64;
+
+        // Pump-after-each-recv is REQUIRED: e.g. the client must process the
+        // server's Initial (ServerHello) and pump to install Handshake keys
+        // BEFORE it can unprotect the server's Handshake-level flight. Batch
+        // recv-then-pump would fail on the second packet.
+        // OneRtt-level segments (e.g. post-handshake NewSessionTicket) belong to
+        // the 1-RTT short-header data plane, not the handshake; they are optional
+        // and not needed to prove the handshake completes, so skip them here.
+        let assemble_client =
+            |c: &mut QuicHandshakeDriver, pn: &mut u64, out: &mut Vec<Vec<u8>>| {
+                for seg in c.pump_outbound().expect("client pump") {
+                    if seg.level == HandshakeLevel::OneRtt {
+                        continue;
+                    }
+                    out.push(
+                        c.assemble_handshake_packet(&seg, dcid, client_scid, *pn)
+                            .expect("client assemble"),
+                    );
+                    *pn += 1;
+                }
+            };
+        let assemble_server =
+            |s: &mut QuicHandshakeDriver, pn: &mut u64, out: &mut Vec<Vec<u8>>| {
+                for seg in s.pump_outbound().expect("server pump") {
+                    if seg.level == HandshakeLevel::OneRtt {
+                        continue;
+                    }
+                    out.push(
+                        s.assemble_handshake_packet(&seg, client_scid, server_scid, *pn)
+                            .expect("server assemble"),
+                    );
+                    *pn += 1;
+                }
+            };
+
+        // Seed: the client's first flight (ClientHello over Initial).
+        let mut client_to_server: Vec<Vec<u8>> = Vec::new();
+        assemble_client(&mut client, &mut client_pn, &mut client_to_server);
+
+        for _ in 0..16 {
+            let mut server_to_client: Vec<Vec<u8>> = Vec::new();
+            for packet in client_to_server.drain(..) {
+                server.recv_handshake_packet(&packet).expect("server recv");
+                assemble_server(&mut server, &mut server_pn, &mut server_to_client);
+            }
+
+            let mut next_client_to_server: Vec<Vec<u8>> = Vec::new();
+            for packet in server_to_client.drain(..) {
+                client.recv_handshake_packet(&packet).expect("client recv");
+                assemble_client(&mut client, &mut client_pn, &mut next_client_to_server);
+            }
+            client_to_server = next_client_to_server;
+
+            if client.is_complete() && server.is_complete() {
+                break;
+            }
+        }
+
+        assert!(
+            client.is_complete() && server.is_complete(),
+            "handshake over real protected packets did not complete"
+        );
+        assert!(
+            client.one_rtt_keys_installed() && server.one_rtt_keys_installed(),
+            "1-RTT keys not installed after packet handshake"
+        );
+        // Real AEAD keys agreed over the wire: the client decrypted the server's
+        // Handshake-level Certificate flight (protected with Handshake keys), which
+        // only succeeds if both sides derived matching keys from the transcript.
+        assert_eq!(
+            client.peer_transport_parameters(),
+            Some(b"server-params".as_slice())
+        );
     }
 
     #[test]
