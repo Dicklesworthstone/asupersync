@@ -3,12 +3,17 @@
 //! `transport_common` owns transport-agnostic bounded-memory primitives that
 //! TCP, RaptorQ, and native QUIC can reuse without copying private helpers.
 
+pub mod compression;
 pub mod filter;
 pub mod metadata;
 pub mod mirror;
 pub mod progress;
 pub mod streaming;
 
+pub use compression::{
+    CompressionAlgorithm, CompressionDescriptor, CompressionError, CompressionPolicy,
+    CompressionSkipReason, PreEncodeCompression, decompress_pre_encoded, maybe_compress_pre_encode,
+};
 pub use filter::{FilterAction, FilterDecision, FilterError, FilterRule, FilterSet};
 pub use metadata::{
     EntryMetadata, FileKind, MetadataApplyReport, apply_entry_metadata, metadata_commitment,
