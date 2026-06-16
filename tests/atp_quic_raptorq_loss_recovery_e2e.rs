@@ -259,17 +259,27 @@ fn tree_fixture() -> Vec<TreeFixtureEntry> {
 }
 
 fn tree_root_hash(entries: &[TreeFixtureEntry]) -> ObjectHash {
+    let manifest_entries: Vec<ManifestEntry> = entries
+        .iter()
+        .map(|entry| ManifestEntry {
+            hash: entry.hash.clone(),
+            path: entry.path.to_string(),
+            size_bytes: u64::try_from(entry.data.len()).expect("fixture length fits u64"),
+            content_type: entry.content_type.to_string(),
+            metadata: ObjectMetadata::with_filename(entry.path),
+        })
+        .collect();
+    manifest_root_hash(&manifest_entries)
+}
+
+fn manifest_root_hash(entries: &[ManifestEntry]) -> ObjectHash {
     let mut hasher = Sha256::new();
     hasher.update(b"asupersync.tests.atp_quic_tree_manifest.v1");
     for entry in entries {
         hasher.update(entry.path.as_bytes());
         hasher.update([0]);
         hasher.update(entry.hash.as_bytes());
-        hasher.update(
-            u64::try_from(entry.data.len())
-                .expect("fixture length fits u64")
-                .to_le_bytes(),
-        );
+        hasher.update(entry.size_bytes.to_le_bytes());
     }
     ObjectHash::new(hasher.finalize().into())
 }
@@ -287,6 +297,13 @@ fn tree_manifest(entries: &[TreeFixtureEntry]) -> ObjectManifest {
     }
     builder.add_metadata("shape".to_string(), "directory-tree".to_string());
     builder.build(tree_root_hash(entries))
+}
+
+fn verify_manifest_root(manifest: &ObjectManifest) -> Result<(), String> {
+    if manifest.root_hash != manifest_root_hash(&manifest.objects) {
+        return Err("manifest root hash mismatch".to_string());
+    }
+    Ok(())
 }
 
 fn drop_one_source_symbol_per_block(symbols: &[Symbol]) -> Vec<Symbol> {
@@ -353,6 +370,14 @@ fn verify_and_commit_entry(
         return Err(format!("size mismatch for {}", manifest_entry.path));
     }
 
+    commit_entry(root, manifest_entry, decoded)
+}
+
+fn commit_entry(
+    root: &Path,
+    manifest_entry: &ManifestEntry,
+    decoded: &[u8],
+) -> Result<PathBuf, String> {
     let final_path = destination_path(root, &manifest_entry.path);
     if let Some(parent) = final_path.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
@@ -361,6 +386,34 @@ fn verify_and_commit_entry(
     fs::write(&tmp_path, decoded).map_err(|err| err.to_string())?;
     fs::rename(&tmp_path, &final_path).map_err(|err| err.to_string())?;
     Ok(final_path)
+}
+
+fn verify_and_commit_tree(
+    root: &Path,
+    manifest: &ObjectManifest,
+    decoded_by_path: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<PathBuf>, String> {
+    verify_manifest_root(manifest)?;
+
+    let mut verified = Vec::new();
+    for manifest_entry in &manifest.objects {
+        let decoded = decoded_by_path
+            .get(&manifest_entry.path)
+            .ok_or_else(|| format!("missing decoded entry {}", manifest_entry.path))?;
+        if ObjectHash::from_data(decoded) != manifest_entry.hash {
+            return Err(format!("hash mismatch for {}", manifest_entry.path));
+        }
+        if decoded.len() as u64 != manifest_entry.size_bytes {
+            return Err(format!("size mismatch for {}", manifest_entry.path));
+        }
+        verified.push((manifest_entry, decoded.as_slice()));
+    }
+
+    let mut committed = Vec::with_capacity(verified.len());
+    for (manifest_entry, decoded) in verified {
+        committed.push(commit_entry(root, manifest_entry, decoded)?);
+    }
+    Ok(committed)
 }
 
 #[test]
@@ -497,17 +550,23 @@ fn directory_tree_recovers_verifies_and_commits_atomically_after_datagram_loss()
     assert_eq!(manifest.root_hash, tree_root_hash(&entries));
     assert_eq!(manifest.metadata.get("shape"), Some("directory-tree"));
 
+    let mut decoded_by_path = BTreeMap::new();
     for (entry, manifest_entry) in entries.iter().zip(&manifest.objects) {
         assert_eq!(manifest_entry.hash, entry.hash);
         assert_eq!(manifest_entry.path, entry.path);
 
         let decoded = recover_tree_entry_over_quic(&cx, &mut client, &mut server, entry);
         assert_eq!(decoded, entry.data);
+        decoded_by_path.insert(manifest_entry.path.clone(), decoded);
+    }
 
-        let committed =
-            verify_and_commit_entry(destination.path(), manifest_entry, &decoded).expect("commit");
+    let committed = verify_and_commit_tree(destination.path(), &manifest, &decoded_by_path)
+        .expect("tree commit");
+    assert_eq!(committed.len(), entries.len());
+    for entry in &entries {
+        let committed_path = destination_path(destination.path(), entry.path);
         assert_eq!(
-            fs::read(&committed).expect("read committed entry"),
+            fs::read(&committed_path).expect("read committed entry"),
             entry.data,
             "committed bytes match the recovered tree entry"
         );
@@ -525,6 +584,54 @@ fn directory_tree_recovers_verifies_and_commits_atomically_after_datagram_loss()
         !corrupt_path.exists(),
         "failed verification must leave the final destination absent"
     );
+}
+
+#[test]
+fn manifest_root_mismatch_fails_before_tree_commit() {
+    let entries = tree_fixture();
+    let mut manifest = tree_manifest(&entries);
+    manifest.root_hash = ObjectHash::from_data(b"wrong tree root");
+    let decoded_by_path: BTreeMap<String, Vec<u8>> = entries
+        .iter()
+        .map(|entry| (entry.path.to_string(), entry.data.clone()))
+        .collect();
+    let destination = tempfile::tempdir().expect("temp destination");
+
+    let err = verify_and_commit_tree(destination.path(), &manifest, &decoded_by_path)
+        .expect_err("bad root must fail before commit");
+    assert!(err.contains("manifest root hash mismatch"));
+
+    for entry in &entries {
+        assert!(
+            !destination_path(destination.path(), entry.path).exists(),
+            "manifest root mismatch must not commit {}",
+            entry.path
+        );
+    }
+}
+
+#[test]
+fn manifest_object_list_mismatch_fails_before_tree_commit() {
+    let entries = tree_fixture();
+    let mut manifest = tree_manifest(&entries);
+    manifest.objects[0] = manifest.objects[1].clone();
+    let decoded_by_path: BTreeMap<String, Vec<u8>> = entries
+        .iter()
+        .map(|entry| (entry.path.to_string(), entry.data.clone()))
+        .collect();
+    let destination = tempfile::tempdir().expect("temp destination");
+
+    let err = verify_and_commit_tree(destination.path(), &manifest, &decoded_by_path)
+        .expect_err("stale root must fail when object list is tampered");
+    assert!(err.contains("manifest root hash mismatch"));
+
+    for entry in &entries {
+        assert!(
+            !destination_path(destination.path(), entry.path).exists(),
+            "manifest object-list mismatch must not commit {}",
+            entry.path
+        );
+    }
 }
 
 #[test]
