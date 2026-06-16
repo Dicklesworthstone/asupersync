@@ -89,12 +89,44 @@ The decoder is total over arbitrary bytes: it never panics and always either
 makes forward progress or returns an error (see
 [`tests/quic_frame_decode_robustness.rs`](../tests/quic_frame_decode_robustness.rs)).
 
-## RaptorQ-over-QUIC symbol envelope (TBD — Phase B)
+## RaptorQ-over-QUIC symbol envelope
 
-The application-level framing of a RaptorQ symbol *inside* a DATAGRAM payload —
-the symbol header (block id, ESI, manifest correlation, auth tag) — is owned by
-the `transport_quic` adapter (Phase B, `asupersync-arq-quic-epic-b0k8qo.2`),
-which does not exist yet. It will mirror the `transport_rq` symbol envelope. When
-it lands, its schema and a conformance harness for it belong in this document and
-alongside the frame harness. Until then this file specifies only the RFC 9000
-transport-frame layer that carries those payloads.
+A single RaptorQ symbol is carried inside one QUIC DATAGRAM frame (RFC 9221). The
+`transport_quic` adapter (`asupersync-arq-quic-epic-b0k8qo.2`) frames it with the
+header below — implemented by
+[`src/net/atp/transport_quic/symbol_envelope.rs`](../src/net/atp/transport_quic/symbol_envelope.rs)
+(`QuicSymbolEnvelope`) and pinned by
+[`tests/atp_quic_symbol_envelope_conformance.rs`](../tests/atp_quic_symbol_envelope_conformance.rs).
+The schema mirrors the proven `transport_rq` UDP symbol datagram so the
+RaptorQ-over-QUIC and RaptorQ-over-UDP planes share the same symbol-routing
+fields; only the magic differs (`"ATQS"` vs `transport_rq`'s `"ATRQ"`) so a
+datagram misdelivered from the wrong transport fails closed instead of being
+misparsed.
+
+| Offset | Size | Field | Notes |
+|--------|------|-------|-------|
+| 0  | 4  | magic         | `0x41545153` (`"ATQS"`) |
+| 4  | 8  | transfer_tag  | `u64`; demuxes transfers multiplexed on a reused connection |
+| 12 | 4  | entry         | `u32`; manifest entry index |
+| 16 | 1  | sbn           | `u8`; RaptorQ source block number |
+| 17 | 4  | esi           | `u32`; RaptorQ encoding symbol id |
+| 21 | 1  | repair        | `u8` ∈ {0, 1}; 0 = source symbol, 1 = repair symbol |
+| 22 | 2  | payload_len   | `u16`; symbol payload length |
+| 24 | 32 | auth_tag      | optional; present iff the receiver requires per-symbol auth |
+| .. | N  | payload       | exactly `payload_len` bytes |
+
+The header is 24 bytes (`ENVELOPE_HEADER_LEN`), or 56 bytes
+(`AUTH_ENVELOPE_HEADER_LEN`) with the authentication tag. `decode` is total and
+**fails closed**: a wrong magic (`BadMagic`), a short buffer (`TooShort`), a
+declared length that does not match the datagram (`LengthMismatch` — the contract
+is exact-length, so trailing bytes are rejected), an out-of-range repair flag
+(`InvalidRepairFlag`), or an auth-posture mismatch (the 32 tag bytes are counted
+as payload, so the length check rejects it) all return a typed error and never
+panic; `encode` fails closed (`PayloadTooLarge`) on a payload larger than the
+`u16` length field.
+
+The B2/B3 sender/receiver coroutines (`asupersync-arq-quic-epic-b0k8qo.2.2` /
+`.2.3`) map a `crate::types::symbol::Symbol` to/from these fields and call
+`encode` / `decode`. The conformance harness pins the golden header layout,
+round-trip across source/repair and ±auth, the empty and `u16::MAX` payload
+boundaries, every fail-closed negative, and metamorphic field-sensitivity.
