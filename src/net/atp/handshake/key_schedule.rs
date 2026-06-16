@@ -716,7 +716,10 @@ mod tests {
         assert!(debug.contains("iv"));
         assert!(debug.contains("hp_key"));
         assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains(&raw_key_debug), "packet key leaked: {debug}");
+        assert!(
+            !debug.contains(&raw_key_debug),
+            "packet key leaked: {debug}"
+        );
         assert!(!debug.contains(&raw_iv_debug), "packet IV leaked: {debug}");
         assert!(
             !debug.contains(&raw_hp_key_debug),
