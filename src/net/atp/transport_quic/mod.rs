@@ -1829,9 +1829,8 @@ fn feed_authenticated_symbol_take_block(
     let Some(pipeline) = decoder.pipeline.as_mut() else {
         return Ok((false, None));
     };
-    match pipeline.feed(auth_symbol) {
+    match pipeline.feed_streaming_block(auth_symbol) {
         Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
-            let _ = pipeline.take_decoded_block(block_sbn);
             decoder.complete = pipeline.is_complete();
             Ok((
                 true,
@@ -3137,7 +3136,7 @@ fn recv_native_symbol_envelope(
     auth_required: bool,
 ) -> Result<Option<QuicSymbolEnvelope>, QuicTransportError> {
     match conn.recv_datagram() {
-        Some(bytes) => QuicSymbolEnvelope::decode(&bytes, auth_required)
+        Some(bytes) => QuicSymbolEnvelope::decode_bytes(bytes, auth_required)
             .map(Some)
             .map_err(SymbolDatagramError::from)
             .map_err(QuicTransportError::from),

@@ -162,6 +162,12 @@ impl QuicSymbolEnvelope {
     /// so an authenticated/unauthenticated mismatch fails closed rather than
     /// silently misparsing the payload.
     pub fn decode(buf: &[u8], auth_required: bool) -> Result<Self, QuicSymbolEnvelopeError> {
+        Self::decode_bytes(Bytes::copy_from_slice(buf), auth_required)
+    }
+
+    /// Decode an envelope from an owned DATAGRAM buffer, slicing the payload
+    /// without allocating a second payload copy.
+    pub fn decode_bytes(buf: Bytes, auth_required: bool) -> Result<Self, QuicSymbolEnvelopeError> {
         let header_len = if auth_required {
             AUTH_ENVELOPE_HEADER_LEN
         } else {
@@ -208,7 +214,7 @@ impl QuicSymbolEnvelope {
             None
         };
 
-        let payload = Bytes::copy_from_slice(&buf[header_len..]);
+        let payload = buf.slice(header_len..);
 
         Ok(Self {
             transfer_tag,

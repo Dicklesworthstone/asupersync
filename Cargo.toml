@@ -30,6 +30,7 @@ include = [
     "assets/dashboard.html",
     "examples/channel_mpsc_select_e2e.rs",
     "src/**",
+    "tests/atp_quic_bounded_memory.rs",
     "scripts/generate_rfc6330_vectors.rs",
     "!src/observability/otel_conformance_tests.rs",
     "!src/subsystem_mutation_testing.rs",

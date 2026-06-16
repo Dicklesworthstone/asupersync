@@ -149,7 +149,10 @@ pub fn recv_symbol_envelope(
     auth_required: bool,
 ) -> Result<Option<QuicSymbolEnvelope>, SymbolDatagramError> {
     match conn.recv_datagram() {
-        Some(bytes) => Ok(Some(QuicSymbolEnvelope::decode(&bytes, auth_required)?)),
+        Some(bytes) => Ok(Some(QuicSymbolEnvelope::decode_bytes(
+            bytes,
+            auth_required,
+        )?)),
         None => Ok(None),
     }
 }

@@ -382,7 +382,25 @@ impl DecodingPipeline {
     /// Feeds a received authenticated symbol into the pipeline.
     pub fn feed(
         &mut self,
+        auth_symbol: AuthenticatedSymbol,
+    ) -> Result<SymbolAcceptResult, DecodingError> {
+        self.feed_with_retention(auth_symbol, true)
+    }
+
+    /// Feeds a symbol for streaming receivers that immediately persist decoded
+    /// blocks and do not need `into_data()` to retain a second in-memory copy.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
+    pub(crate) fn feed_streaming_block(
+        &mut self,
+        auth_symbol: AuthenticatedSymbol,
+    ) -> Result<SymbolAcceptResult, DecodingError> {
+        self.feed_with_retention(auth_symbol, false)
+    }
+
+    fn feed_with_retention(
+        &mut self,
         mut auth_symbol: AuthenticatedSymbol,
+        retain_decoded_block: bool,
     ) -> Result<SymbolAcceptResult, DecodingError> {
         if self.config.verify_auth {
             match &self.auth_context {
@@ -501,7 +519,7 @@ impl DecodingPipeline {
                     if let Some(block) = self.blocks.get_mut(&sbn) {
                         block.state = BlockDecodingState::Decoding;
                     }
-                    if let Some(result) = self.try_decode_block(sbn) {
+                    if let Some(result) = self.try_decode_block(sbn, retain_decoded_block) {
                         return Ok(result);
                     }
                 }
@@ -580,18 +598,6 @@ impl DecodingPipeline {
         })
     }
 
-    /// Takes a decoded block out of the pipeline without clearing completion
-    /// state.
-    ///
-    /// Streaming receivers use this immediately after a
-    /// [`SymbolAcceptResult::BlockComplete`] event to persist the block to a
-    /// staging file and release the retained in-memory copy. Callers that need a
-    /// final contiguous object should use [`Self::into_data`] instead.
-    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
-    pub(crate) fn take_decoded_block(&mut self, sbn: u8) -> Option<Vec<u8>> {
-        self.blocks.get_mut(&sbn)?.decoded.take()
-    }
-
     /// Consumes the pipeline and returns decoded data if complete.
     pub fn into_data(self) -> Result<Vec<u8>, DecodingError> {
         let Some(plans) = &self.block_plans else {
@@ -637,11 +643,23 @@ impl DecodingPipeline {
         }
     }
 
-    fn try_decode_block(&mut self, sbn: u8) -> Option<SymbolAcceptResult> {
-        let block_plan = self.block_plan(sbn)?;
+    fn try_decode_block(
+        &mut self,
+        sbn: u8,
+        retain_decoded_block: bool,
+    ) -> Option<SymbolAcceptResult> {
+        let block_plan = self.block_plan(sbn)?.clone();
         let k = block_plan.k;
         if k == 0 {
             return None;
+        }
+
+        if let Some(block_data) = self.try_complete_from_source_symbols(&block_plan) {
+            self.mark_block_complete(sbn, retain_decoded_block.then(|| block_data.clone()));
+            return Some(SymbolAcceptResult::BlockComplete {
+                block_sbn: sbn,
+                data: block_data,
+            });
         }
 
         let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
@@ -650,7 +668,7 @@ impl DecodingPipeline {
         }
 
         let decoded_symbols = match decode_block(
-            block_plan,
+            &block_plan,
             &symbols,
             usize::from(self.config.symbol_size),
         ) {
@@ -700,19 +718,42 @@ impl DecodingPipeline {
         }
         block_data.truncate(block_plan.len);
 
-        if let Some(block) = self.blocks.get_mut(&sbn) {
-            block.state = BlockDecodingState::Decoded;
-            block.decoded = Some(block_data.clone());
-        }
-
-        self.completed_blocks.insert(sbn);
-        self.symbols.clear_block(sbn);
-        self.block_symbol_counts.remove(&sbn);
+        self.mark_block_complete(sbn, retain_decoded_block.then(|| block_data.clone()));
 
         Some(SymbolAcceptResult::BlockComplete {
             block_sbn: sbn,
             data: block_data,
         })
+    }
+
+    fn try_complete_from_source_symbols(&self, block_plan: &BlockPlan) -> Option<Vec<u8>> {
+        let object_id = self.object_id?;
+        let mut block_data = Vec::with_capacity(block_plan.len);
+        for esi in 0..block_plan.k {
+            let esi = u32::try_from(esi).ok()?;
+            let id = SymbolId::new(object_id, block_plan.sbn, esi);
+            let symbol = self.symbols.get(&id)?;
+            if symbol.kind() != SymbolKind::Source {
+                return None;
+            }
+            let remaining = block_plan.len.saturating_sub(block_data.len());
+            if remaining == 0 {
+                break;
+            }
+            let take = remaining.min(symbol.data().len());
+            block_data.extend_from_slice(&symbol.data()[..take]);
+        }
+        (block_data.len() == block_plan.len).then_some(block_data)
+    }
+
+    fn mark_block_complete(&mut self, sbn: u8, retained_block: Option<Vec<u8>>) {
+        if let Some(block) = self.blocks.get_mut(&sbn) {
+            block.state = BlockDecodingState::Decoded;
+            block.decoded = retained_block;
+        }
+        self.completed_blocks.insert(sbn);
+        self.symbols.clear_block(sbn);
+        self.block_symbol_counts.remove(&sbn);
     }
 
     fn block_plan(&self, sbn: u8) -> Option<&BlockPlan> {
@@ -2281,6 +2322,52 @@ mod tests {
         let ok = result == expected;
         crate::assert_with_log!(ok, "block already decoded", expected, result);
         crate::test_complete!("block_status_decoded_after_complete");
+    }
+
+    #[test]
+    fn streaming_source_complete_block_returns_data_without_retaining_copy() {
+        init_test("streaming_source_complete_block_returns_data_without_retaining_copy");
+        let config = encoding_config();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id = ObjectId::new_for_test(205);
+        let data = (0..700).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let symbols = encoder
+            .encode_with_repair(object_id, &data, 0)
+            .map(|res| res.expect("source symbol").into_symbol())
+            .collect::<Vec<_>>();
+
+        let mut decoder = decoder_with_params(&config, object_id, data.len(), 1.0, 0);
+        let mut completed = None;
+        for symbol in symbols {
+            let auth = AuthenticatedSymbol::from_parts(
+                symbol,
+                crate::security::tag::AuthenticationTag::zero(),
+            );
+            if let SymbolAcceptResult::BlockComplete { data, .. } = decoder
+                .feed_streaming_block(auth)
+                .expect("feed streaming source")
+            {
+                completed = Some(data);
+            }
+        }
+
+        let decoded = completed.expect("source-complete block");
+        crate::assert_with_log!(decoded == data, "decoded source block", data, decoded);
+        let complete = decoder.is_complete();
+        crate::assert_with_log!(complete, "decoder complete", true, complete);
+        let retained = decoder
+            .blocks
+            .get(&0)
+            .and_then(|block| block.decoded.as_ref());
+        crate::assert_with_log!(
+            retained.is_none(),
+            "streaming decode should not retain block copy",
+            true,
+            retained.is_none()
+        );
+        crate::test_complete!(
+            "streaming_source_complete_block_returns_data_without_retaining_copy"
+        );
     }
 
     #[test]

@@ -24,8 +24,11 @@ use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::SecurityContext;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 
-const TRANSFER_BYTES: usize = 8 * 1024 * 1024;
-const PEAK_RSS_GROWTH_CEILING: u64 = 5 * 1024 * 1024;
+/// Match the TCP bounded-memory proof size: large enough that whole-object
+/// buffering would be obvious, while the ceiling leaves room for fixed QUIC/TLS
+/// setup cost in this single-process harness.
+const TRANSFER_BYTES: usize = 64 * 1024 * 1024;
+const PEAK_RSS_GROWTH_CEILING: u64 = 24 * 1024 * 1024;
 const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 const HARNESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
@@ -156,9 +159,11 @@ fn files_are_identical(a: &Path, b: &Path) -> bool {
 fn config_pair(seed: u64) -> (QuicConfig, QuicConfig) {
     let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(seed));
     send.client_tls = Some(client_tls());
+    send.chunk_size = 64 * 1024;
     send.symbol_size = 15 * 1024;
-    send.max_block_size = 960 * 1024;
+    send.max_block_size = 256 * 1024;
     send.max_datagram_size = 16 * 1024;
+    send.max_transfer_bytes = TRANSFER_BYTES as u64;
     send.repair_overhead = 1.0;
     send.idle_timeout = TEST_TIMEOUT;
     send.handshake_timeout = TEST_TIMEOUT;
@@ -166,9 +171,11 @@ fn config_pair(seed: u64) -> (QuicConfig, QuicConfig) {
 
     let mut recv = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(seed));
     recv.server_tls = Some(server_tls());
+    recv.chunk_size = send.chunk_size;
     recv.symbol_size = send.symbol_size;
     recv.max_block_size = send.max_block_size;
     recv.max_datagram_size = send.max_datagram_size;
+    recv.max_transfer_bytes = send.max_transfer_bytes;
     recv.repair_overhead = send.repair_overhead;
     recv.idle_timeout = TEST_TIMEOUT;
     recv.handshake_timeout = TEST_TIMEOUT;
@@ -187,7 +194,7 @@ fn spawn_receiver(
     let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
     let (result_tx, result_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
-        let runtime = RuntimeBuilder::multi_thread()
+        let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("receiver runtime");
         let result = runtime.block_on(runtime.handle().spawn(async move {
@@ -223,7 +230,7 @@ fn spawn_sender(
 ) {
     let (result_tx, result_rx) = mpsc::channel();
     let handle = thread::spawn(move || {
-        let runtime = RuntimeBuilder::multi_thread()
+        let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("sender runtime");
         let result = runtime.block_on(runtime.handle().spawn(async move {
