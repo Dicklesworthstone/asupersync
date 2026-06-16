@@ -421,6 +421,46 @@ pub async fn apply_entry_metadata(
     Ok(report)
 }
 
+/// Recreate a FIFO (named pipe) at `out_path` with permission `mode`.
+///
+/// Uses `mkfifo` then `chmod` for the exact mode — neither opens the FIFO, so
+/// this never blocks waiting for a peer (unlike `File::open` on a FIFO). Only
+/// FIFOs are recreated; sockets and device nodes are the caller's skip-and-log
+/// responsibility (sockets are runtime objects, device nodes need privilege).
+///
+/// # Errors
+///
+/// Returns [`StreamingError`] if `mkfifo` or the mode application fails.
+#[cfg(unix)]
+pub async fn recreate_fifo(out_path: &Path, mode: u32) -> Result<(), StreamingError> {
+    let perm_bits = mode & 0o7777;
+    let path_buf = out_path.to_path_buf();
+    crate::runtime::spawn_blocking(move || {
+        use nix::sys::stat::Mode;
+        // `mkfifo` honors the umask; the exact mode is set by `chmod` below.
+        nix::unistd::mkfifo(&path_buf, Mode::from_bits_truncate(perm_bits as libc::mode_t))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| StreamingError::new(format!("{}: mkfifo: {e}", out_path.display())))?;
+    crate::fs::set_permissions(out_path, crate::fs::Permissions::from_mode(perm_bits))
+        .await
+        .map_err(|e| StreamingError::new(format!("{}: {e}", out_path.display())))?;
+    Ok(())
+}
+
+/// Non-unix FIFO recreation is unsupported and fails closed.
+///
+/// # Errors
+///
+/// Always returns [`StreamingError`] on non-unix targets.
+#[cfg(not(unix))]
+pub async fn recreate_fifo(_out_path: &Path, _mode: u32) -> Result<(), StreamingError> {
+    Err(StreamingError::new(
+        "FIFO recreation unsupported on this platform",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -129,6 +129,11 @@ pub struct TransferConfig {
     /// captures gated metadata into the manifest and the receiver applies it on
     /// commit.
     pub metadata_policy: MetadataPolicy,
+    /// Opt-in recreation of special files. When `false` (default, rsync-like),
+    /// FIFOs/sockets/devices are skipped and logged. When `true`, FIFOs are
+    /// recreated via `mkfifo`; sockets and device nodes are still skipped
+    /// (sockets are runtime objects; device nodes need privilege).
+    pub allow_special_files: bool,
 }
 
 impl Default for TransferConfig {
@@ -140,6 +145,7 @@ impl Default for TransferConfig {
             accept_timeout: DEFAULT_ACCEPT_TIMEOUT,
             max_active_connections: DEFAULT_MAX_ACTIVE_CONNECTIONS,
             metadata_policy: MetadataPolicy::default(),
+            allow_special_files: false,
         }
     }
 }
@@ -1189,12 +1195,25 @@ pub async fn receive_connection(
                     base.clone()
                 };
 
-                // Special files (FIFO/socket/device) are represented in the
-                // manifest but not materialized in this slice: skip and log
-                // (no path committed), before creating any parent for them.
-                // Opt-in FIFO recreation (`mkfifo`) is a J2 follow-up.
+                // Special files (FIFO/socket/device). A FIFO is recreated via
+                // `mkfifo` only when `allow_special_files` is set; everything else
+                // (sockets, device nodes, or FIFOs without the opt-in) is skipped
+                // and logged with no path committed, before any parent is made.
                 if let Some(meta) = &entry.metadata {
                     if meta.file_kind.is_special() {
+                        if matches!(meta.file_kind, FileKind::Fifo) && config.allow_special_files {
+                            if let Some(parent) = out_path.parent() {
+                                crate::fs::create_dir_all(parent).await?;
+                            }
+                            let mode = meta.unix_mode.unwrap_or(0o644);
+                            let _ = crate::fs::remove_file(&out_path).await;
+                            crate::net::atp::transport_common::metadata::recreate_fifo(
+                                &out_path, mode,
+                            )
+                            .await?;
+                            committed_paths.push(out_path);
+                            continue;
+                        }
                         if cx.trace_buffer().is_some() {
                             let path_str = out_path.display().to_string();
                             let kind = format!("{:?}", meta.file_kind);
