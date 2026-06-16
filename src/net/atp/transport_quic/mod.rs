@@ -375,7 +375,27 @@ struct QuicHelloAck {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct QuicNeedMore {
+    /// Entry indices that have not yet decoded.
     pending: Vec<u32>,
+    /// Sparse systematic source symbols missing from incomplete blocks.
+    #[serde(default)]
+    source_symbols: Vec<QuicSourceSymbolRequest>,
+}
+
+/// Request for retransmission of one systematic source symbol.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct QuicSourceSymbolRequest {
+    entry: u32,
+    sbn: u8,
+    esi: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QuicControlReply {
+    Proof(ReceiveReceipt),
+    NeedMore(QuicNeedMore),
 }
 
 #[allow(dead_code)]
@@ -706,6 +726,111 @@ fn receive_sender_hello_ack(
     Ok(ack)
 }
 
+#[allow(dead_code)]
+fn send_manifest(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    manifest: &TransferManifest,
+) -> Result<(), QuicTransportError> {
+    control.send_json(cx, conn, FrameType::ObjectManifest, manifest)
+}
+
+#[allow(dead_code)]
+fn receive_manifest(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+) -> Result<TransferManifest, QuicTransportError> {
+    let frame = next_control_frame(cx, conn, control, "receive transfer manifest")?;
+    parse_json_frame(&frame, FrameType::ObjectManifest, "ObjectManifest")
+}
+
+#[allow(dead_code)]
+fn send_empty_control_frame(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    frame_type: FrameType,
+) -> Result<(), QuicTransportError> {
+    let frame =
+        Frame::empty(frame_type).map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+    control.send(cx, conn, &frame)
+}
+
+#[allow(dead_code)]
+fn send_object_complete(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+) -> Result<(), QuicTransportError> {
+    send_empty_control_frame(cx, conn, control, FrameType::ObjectComplete)
+}
+
+#[allow(dead_code)]
+fn receive_object_complete(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+) -> Result<(), QuicTransportError> {
+    let frame = next_control_frame(cx, conn, control, "receive object-complete marker")?;
+    if frame.frame_type() != FrameType::ObjectComplete {
+        return Err(QuicTransportError::Unexpected {
+            got: frame.frame_type(),
+            expected: "ObjectComplete",
+        });
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn send_need_more(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    need: &QuicNeedMore,
+) -> Result<(), QuicTransportError> {
+    control.send_json(cx, conn, FrameType::ObjectRequest, need)
+}
+
+#[allow(dead_code)]
+fn send_proof(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    receipt: &ReceiveReceipt,
+) -> Result<(), QuicTransportError> {
+    control.send_json(cx, conn, FrameType::Proof, receipt)
+}
+
+#[allow(dead_code)]
+fn receive_proof_or_need_more(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+) -> Result<QuicControlReply, QuicTransportError> {
+    let frame = next_control_frame(cx, conn, control, "receive proof or fountain feedback")?;
+    match frame.frame_type() {
+        FrameType::Proof => parse_json::<ReceiveReceipt>(&frame).map(QuicControlReply::Proof),
+        FrameType::ObjectRequest => {
+            parse_json::<QuicNeedMore>(&frame).map(QuicControlReply::NeedMore)
+        }
+        got => Err(QuicTransportError::Unexpected {
+            got,
+            expected: "Proof | ObjectRequest",
+        }),
+    }
+}
+
+#[allow(dead_code)]
+fn send_close(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+) -> Result<(), QuicTransportError> {
+    send_empty_control_frame(cx, conn, control, FrameType::Close)
+}
+
 /// Emit a deterministic, structured config summary at the start of a transport
 /// operation (the "config summary on start" logging requirement). Routes
 /// through [`Cx::trace_with_fields`] so production stays silent unless a trace
@@ -889,6 +1014,36 @@ mod tests {
         client.record_verified_server_identity();
         establish_loopback(&cx, &mut client, &mut server).expect("loopback establishes");
         (cx, client, server)
+    }
+
+    fn sample_manifest() -> TransferManifest {
+        TransferManifest {
+            transfer_id: "transfer42".to_string(),
+            root_name: "data".to_string(),
+            is_directory: true,
+            total_bytes: 9,
+            merkle_root_hex: "00".repeat(32),
+            metadata_root_hex: None,
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: "a/b.txt".to_string(),
+                size: 9,
+                sha256_hex: "ff".repeat(32),
+                metadata: None,
+            }],
+        }
+    }
+
+    fn sample_receipt() -> ReceiveReceipt {
+        ReceiveReceipt {
+            committed: true,
+            bytes_received: 9,
+            files: 1,
+            sha_ok: true,
+            merkle_ok: true,
+            reason: None,
+            committed_paths: vec!["/dest/a/b.txt".to_string()],
+        }
     }
 
     #[test]
@@ -1109,21 +1264,7 @@ mod tests {
         let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
         let stream = tx.stream();
         let mut rx = QuicFrameTransport::for_stream(stream);
-        let manifest = TransferManifest {
-            transfer_id: "transfer42".to_string(),
-            root_name: "data".to_string(),
-            is_directory: true,
-            total_bytes: 9,
-            merkle_root_hex: "00".repeat(32),
-            metadata_root_hex: None,
-            entries: vec![ManifestEntry {
-                index: 0,
-                rel_path: "a/b.txt".to_string(),
-                size: 9,
-                sha256_hex: "ff".repeat(32),
-                metadata: None,
-            }],
-        };
+        let manifest = sample_manifest();
 
         tx.send_json(&cx, &mut client, FrameType::ObjectManifest, &manifest)
             .expect("send manifest JSON frame");
@@ -1164,15 +1305,7 @@ mod tests {
         let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
         let stream = tx.stream();
         let mut rx = QuicFrameTransport::for_stream(stream);
-        let receipt = ReceiveReceipt {
-            committed: true,
-            bytes_received: 9,
-            files: 1,
-            sha_ok: true,
-            merkle_ok: true,
-            reason: None,
-            committed_paths: vec!["/dest/a/b.txt".to_string()],
-        };
+        let receipt = sample_receipt();
 
         tx.send_json(&cx, &mut client, FrameType::Proof, &receipt)
             .expect("send proof JSON frame");
@@ -1269,6 +1402,11 @@ mod tests {
 
         let need_more = QuicNeedMore {
             pending: vec![0, 2, 7],
+            source_symbols: vec![QuicSourceSymbolRequest {
+                entry: 2,
+                sbn: 1,
+                esi: 15,
+            }],
         };
         let feedback_frame =
             json_frame(FrameType::ObjectRequest, &need_more).expect("feedback frame");
@@ -1277,6 +1415,146 @@ mod tests {
             parse_json::<QuicNeedMore>(&feedback_frame).expect("parse feedback"),
             need_more
         );
+    }
+
+    #[test]
+    fn quic_control_need_more_defaults_missing_source_symbols() {
+        let frame = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectRequest,
+            br#"{"pending":[3,5]}"#.to_vec(),
+        )
+        .expect("need-more frame");
+
+        let need = parse_json::<QuicNeedMore>(&frame).expect("parse legacy need-more shape");
+        assert_eq!(need.pending, vec![3, 5]);
+        assert!(need.source_symbols.is_empty());
+    }
+
+    #[test]
+    fn quic_control_manifest_helper_round_trips() {
+        let (cx, mut client, mut server) = established_pair();
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+        let manifest = sample_manifest();
+
+        send_manifest(&cx, &mut client, &mut sender_control, &manifest).expect("send manifest");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_100,
+        )
+        .expect("deliver manifest");
+
+        let got = receive_manifest(&cx, &mut server, &mut receiver_control)
+            .expect("receive manifest helper");
+        assert_eq!(got, manifest);
+    }
+
+    #[test]
+    fn quic_control_round_marker_feedback_proof_and_close_helpers_round_trip() {
+        let (cx, mut client, mut server) = established_pair();
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+
+        send_object_complete(&cx, &mut client, &mut sender_control).expect("send object-complete");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_200,
+        )
+        .expect("deliver object-complete");
+        receive_object_complete(&cx, &mut server, &mut receiver_control)
+            .expect("receive object-complete");
+
+        let need = QuicNeedMore {
+            pending: vec![1, 3],
+            source_symbols: vec![QuicSourceSymbolRequest {
+                entry: 3,
+                sbn: 2,
+                esi: 99,
+            }],
+        };
+        send_need_more(&cx, &mut server, &mut receiver_control, &need).expect("send need-more");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_201,
+        )
+        .expect("deliver need-more");
+        match receive_proof_or_need_more(&cx, &mut client, &mut sender_control)
+            .expect("receive need-more")
+        {
+            QuicControlReply::NeedMore(got) => assert_eq!(got, need),
+            QuicControlReply::Proof(other) => panic!("unexpected proof: {other:?}"),
+        }
+
+        let receipt = sample_receipt();
+        send_proof(&cx, &mut server, &mut receiver_control, &receipt).expect("send proof");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_202,
+        )
+        .expect("deliver proof");
+        match receive_proof_or_need_more(&cx, &mut client, &mut sender_control)
+            .expect("receive proof")
+        {
+            QuicControlReply::Proof(got) => assert_eq!(got, receipt),
+            QuicControlReply::NeedMore(other) => panic!("unexpected need-more: {other:?}"),
+        }
+
+        send_close(&cx, &mut client, &mut sender_control).expect("send close");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_203,
+        )
+        .expect("deliver close");
+        let close = next_control_frame(&cx, &mut server, &mut receiver_control, "receive close")
+            .expect("receive close");
+        assert_eq!(close.frame_type(), FrameType::Close);
+    }
+
+    #[test]
+    fn quic_control_reply_helper_rejects_unexpected_frame() {
+        let (cx, mut client, mut server) = established_pair();
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+        let manifest = sample_manifest();
+
+        send_manifest(&cx, &mut client, &mut sender_control, &manifest).expect("send manifest");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_300,
+        )
+        .expect("deliver manifest");
+
+        let err = receive_proof_or_need_more(&cx, &mut server, &mut receiver_control)
+            .expect_err("manifest is not a sender feedback reply");
+        match err {
+            QuicTransportError::Unexpected { got, expected } => {
+                assert_eq!(got, FrameType::ObjectManifest);
+                assert_eq!(expected, "Proof | ObjectRequest");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
