@@ -721,13 +721,19 @@ impl AtpTransferBrain {
         let min_cwnd = path_ids
             .iter()
             .filter_map(|path_id| self.paths.get(path_id))
-            .map(|state| state.metrics.congestion_window_bytes as u32)
+            // `congestion_window_bytes` is a u64 from the live recovery layer and
+            // can exceed u32::MAX on a high-BDP path; saturate rather than
+            // silently truncate (`as u32` would wrap a multi-GB cwnd to a tiny
+            // value).
+            .map(|state| u32::try_from(state.metrics.congestion_window_bytes).unwrap_or(u32::MAX))
             .min()
             .unwrap_or(12_000);
 
         CongestionParams {
             initial_cwnd: (min_cwnd / 2).max(1200),
-            max_cwnd: min_cwnd * 4,
+            // saturating_mul: `min_cwnd * 4` overflows u32 once min_cwnd exceeds
+            // ~1 GB (panic under overflow-checks, wrap in release).
+            max_cwnd: min_cwnd.saturating_mul(4),
             algorithm: CongestionAlgorithm::AtpAdaptive,
             pacing_rate: None,
         }
