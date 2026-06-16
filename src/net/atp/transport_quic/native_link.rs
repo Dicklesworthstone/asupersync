@@ -130,24 +130,29 @@ const ATP_QUIC_UDP_MAX_PACKET: usize = 16 * 1024;
 /// receive-buffer drops during one-round RaptorQ sprays.
 const ATP_QUIC_UDP_SOCKET_BUFFER: usize = 16 * 1024 * 1024;
 
-/// Packets pulled from the socket per inbound pump. The receiver session drains
-/// the connection's bounded (`MAX_INBOUND_DATAGRAMS` = 256) inbound DATAGRAM
-/// queue to empty at the top of every loop iteration *before* pumping again, so a
-/// pump may safely ingest up to the full queue depth without drop-oldest losses.
-/// Sized to the queue depth (not a small constant like 32) so a real cross-machine
-/// sender spraying thousands of symbols per round is drained fast enough to keep
-/// up with the wire instead of overflowing the kernel receive buffer — on a real
-/// link an 8–32-packet drain falls hopelessly behind and decodes nothing.
-const INBOUND_PUMP_BATCH: usize = 256;
+/// Packets pulled from the socket per inbound pump. Each received UDP packet is
+/// copied through packet protection, frame decode, and the application DATAGRAM
+/// queue before the symbol decoder can consume it, so the batch width is part of
+/// the native link's memory envelope. Sender-side one-symbol pacing keeps this
+/// small drain width caught up without allocating a full 256-packet receive
+/// burst.
+const INBOUND_PUMP_BATCH: usize = 16;
 
-/// Flush the outbound 1-RTT packets before a full endpoint batch accumulates.
-/// Large sprays otherwise run far ahead of the receiver and bury the control
-/// marker behind hundreds of DATAGRAM packets on loopback UDP.
-const SPRAY_FLUSH_THRESHOLD: usize = 8;
+/// Flush each outbound symbol before queueing the next one. Large 15 KiB
+/// DATAGRAMs can overrun the receiver's real kernel socket buffer in a single
+/// scheduler slice even though the in-process connection queues are bounded;
+/// one-symbol pacing keeps the native link's memory envelope stable.
+const SPRAY_FLUSH_THRESHOLD: usize = 1;
 /// Wall-clock pause after each spray flush. A cooperative yield is not enough on
 /// all RCH workers because the receiver runs in a separate runtime thread and
 /// the sender can still refill the UDP socket faster than loopback drains it.
 const SPRAY_FLUSH_PAUSE: Duration = Duration::from_millis(1);
+
+/// Quiet window that ends a receiver symbol round after at least one symbol was
+/// accepted. This must be much shorter than the sender's Proof/NeedMore timeout
+/// so feedback reaches the sender before it gives up, while still giving the UDP
+/// pump room to drain a burst between paced sender flushes.
+const ROUND_PROGRESS_IDLE_GRACE: Duration = Duration::from_millis(250);
 
 /// Monotonic data-plane clock step (microseconds) fed to the connection per pump
 /// operation. The transfer's correctness does not depend on real time; this only
@@ -276,6 +281,10 @@ pub struct QuicLink {
     /// Max application payload that fits one 1-RTT packet under the endpoint MTU.
     max_app_payload: usize,
     idle_timeout: Duration,
+    udp_packets_received: u64,
+    one_rtt_packets_ingested: u64,
+    non_one_rtt_packets_dropped: u64,
+    unprotect_packets_dropped: u64,
 }
 
 impl QuicLink {
@@ -374,6 +383,7 @@ impl QuicLink {
         let Some((key_phase, packet_number, header, ciphertext, tag)) =
             decode_one_rtt_packet(&packet.data)
         else {
+            self.non_one_rtt_packets_dropped = self.non_one_rtt_packets_dropped.saturating_add(1);
             return Ok(false);
         };
         let protected = ProtectedPacket {
@@ -398,7 +408,10 @@ impl QuicLink {
         {
             Outcome::Ok(value) => value,
             // Undecryptable / replayed / stray packet: drop it (QUIC semantics).
-            Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => return Ok(false),
+            Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                self.unprotect_packets_dropped = self.unprotect_packets_dropped.saturating_add(1);
+                return Ok(false);
+            }
         };
         self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
         self.conn.process_packet_payload(
@@ -408,6 +421,7 @@ impl QuicLink {
             &unprotected.plaintext,
             self.clock,
         )?;
+        self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
         Ok(true)
     }
 
@@ -431,10 +445,14 @@ impl QuicLink {
     /// 1-RTT frames into the connection. Waits at most `idle_timeout` for the
     /// first packet. Returns the number of packets successfully processed
     /// (undecryptable / non-1-RTT packets are silently dropped, per QUIC).
-    async fn pump_inbound(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
+    async fn pump_inbound_for(
+        &mut self,
+        cx: &Cx,
+        timeout: Duration,
+    ) -> Result<usize, QuicTransportError> {
         let received = match crate::time::timeout(
             cx.now(),
-            self.idle_timeout,
+            timeout,
             self.endpoint.receive_batch(cx, INBOUND_PUMP_BATCH),
         )
         .await
@@ -443,7 +461,31 @@ impl QuicLink {
             Ok(Err(err)) => return Err(map_udp_error(err)),
             Err(_elapsed) => return Ok(0),
         };
+        self.udp_packets_received = self
+            .udp_packets_received
+            .saturating_add(u64::try_from(received.len()).unwrap_or(u64::MAX));
         self.ingest_packets(cx, &received).await
+    }
+
+    async fn pump_inbound(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
+        self.pump_inbound_for(cx, self.idle_timeout).await
+    }
+
+    fn symbol_round_timeout(&self, timeout: Duration, symbols_accepted: u64) -> QuicTransportError {
+        QuicTransportError::Quic(format!(
+            "transport timeout during receive symbol round after {timeout:?}; \
+             udp_packets_received={} one_rtt_packets_ingested={} \
+             non_one_rtt_packets_dropped={} unprotect_packets_dropped={} \
+             datagrams_received={} datagrams_dropped_on_receive={} \
+             pending_datagrams={} symbols_accepted={symbols_accepted}",
+            self.udp_packets_received,
+            self.one_rtt_packets_ingested,
+            self.non_one_rtt_packets_dropped,
+            self.unprotect_packets_dropped,
+            self.conn.datagrams_received(),
+            self.conn.datagrams_dropped_on_receive(),
+            self.conn.pending_datagram_count(),
+        ))
     }
 
     /// Spray one symbol, flushing first if the bounded outbound queue is full.
@@ -581,6 +623,10 @@ fn link_from_handshake(
         clock: 0,
         max_app_payload,
         idle_timeout: config.idle_timeout,
+        udp_packets_received: 0,
+        one_rtt_packets_ingested: 0,
+        non_one_rtt_packets_dropped: 0,
+        unprotect_packets_dropped: 0,
     })
 }
 
@@ -1287,6 +1333,7 @@ async fn run_receiver_session(
         manifest.transfer_id,
         std::process::id()
     ));
+    let _ = crate::fs::remove_dir_all(&staging_dir).await;
     crate::fs::create_dir_all(&staging_dir).await?;
     let mut staged = manifest
         .entries
@@ -1297,119 +1344,135 @@ async fn run_receiver_session(
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
 
-    'rounds: loop {
-        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        // Drain symbols and wait for this round's ObjectComplete marker, pumping
-        // the socket and draining the bounded inbound DATAGRAM queue each step so
-        // no symbol is dropped while we wait. `pump_inbound` returns 0 only after a
-        // full idle window with no traffic, which means the sender went silent.
-        loop {
-            let (accepted, completed_blocks) = super::drain_native_symbol_datagrams_with_blocks(
-                &mut link.conn,
-                &manifest,
-                &mut decoders,
-                config,
-            )?;
-            symbols_accepted = symbols_accepted.saturating_add(accepted);
-            for block in completed_blocks {
-                let entry = manifest
-                    .entries
-                    .iter()
-                    .find(|entry| entry.index == block.entry)
-                    .ok_or_else(|| {
-                        QuicTransportError::Integrity(format!(
-                            "decoded block for unknown entry {}",
-                            block.entry
-                        ))
-                    })?;
-                let staged_entry = staged
-                    .get_mut(usize::try_from(block.entry).unwrap_or(usize::MAX))
-                    .ok_or_else(|| {
-                        QuicTransportError::Integrity(format!(
-                            "decoded block for out-of-range entry {}",
-                            block.entry
-                        ))
-                    })?;
-                staged_entry
-                    .write_block(entry, block.sbn, &block.data, config)
-                    .await?;
-            }
-            if super::pending_entries(&decoders).is_empty() {
-                // Once all entries decode, Proof can complete the transfer even
-                // if the best-effort ObjectComplete control packet was dropped.
-                break 'rounds;
-            }
-            if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
-                if frame.frame_type() != FrameType::ObjectComplete {
-                    return Err(QuicTransportError::Unexpected {
-                        got: frame.frame_type(),
-                        expected: "ObjectComplete",
-                    });
+    let receive_result: Result<ReceiveReport, QuicTransportError> = async {
+        'rounds: loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let round_symbols_start = symbols_accepted;
+            // Drain symbols and wait for this round's ObjectComplete marker, pumping
+            // the socket and draining the bounded inbound DATAGRAM queue each step so
+            // no symbol is dropped while we wait. `pump_inbound` returns 0 only after a
+            // full idle window with no traffic, which means the sender went silent. If
+            // the round made progress, silence is enough to request repair for the
+            // remaining gaps even when the best-effort ObjectComplete marker was lost.
+            loop {
+                let (accepted, completed_blocks) =
+                    super::drain_native_symbol_datagrams_with_blocks(
+                        &mut link.conn,
+                        &manifest,
+                        &mut decoders,
+                        config,
+                    )?;
+                symbols_accepted = symbols_accepted.saturating_add(accepted);
+                for block in completed_blocks {
+                    let entry = manifest
+                        .entries
+                        .iter()
+                        .find(|entry| entry.index == block.entry)
+                        .ok_or_else(|| {
+                            QuicTransportError::Integrity(format!(
+                                "decoded block for unknown entry {}",
+                                block.entry
+                            ))
+                        })?;
+                    let staged_entry = staged
+                        .get_mut(usize::try_from(block.entry).unwrap_or(usize::MAX))
+                        .ok_or_else(|| {
+                            QuicTransportError::Integrity(format!(
+                                "decoded block for out-of-range entry {}",
+                                block.entry
+                            ))
+                        })?;
+                    staged_entry
+                        .write_block(entry, block.sbn, &block.data, config)
+                        .await?;
                 }
+                if super::pending_entries(&decoders).is_empty() {
+                    // Once all entries decode, Proof can complete the transfer even
+                    // if the best-effort ObjectComplete control packet was dropped.
+                    break 'rounds;
+                }
+                if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
+                    if frame.frame_type() != FrameType::ObjectComplete {
+                        return Err(QuicTransportError::Unexpected {
+                            got: frame.frame_type(),
+                            expected: "ObjectComplete",
+                        });
+                    }
+                    break;
+                }
+                link.flush(cx).await?;
+                let round_made_progress = symbols_accepted > round_symbols_start;
+                let pump_timeout = if round_made_progress {
+                    ROUND_PROGRESS_IDLE_GRACE
+                } else {
+                    config.idle_timeout
+                };
+                if link.pump_inbound_for(cx, pump_timeout).await? == 0 {
+                    if round_made_progress {
+                        break;
+                    }
+                    return Err(link.symbol_round_timeout(config.idle_timeout, symbols_accepted));
+                }
+            }
+
+            let pending = super::pending_entries(&decoders);
+            if pending.is_empty() {
                 break;
             }
-            link.flush(cx).await?;
-            if link.pump_inbound(cx).await? == 0 {
-                return Err(QuicTransportError::Timeout {
-                    operation: "receive symbol round",
-                    timeout: config.idle_timeout,
+            if feedback_rounds >= config.max_feedback_rounds {
+                return Err(QuicTransportError::NoConvergence {
+                    rounds: feedback_rounds,
+                    pending: pending.len(),
                 });
             }
+            let need = QuicNeedMore {
+                pending,
+                source_symbols: super::source_symbol_requests(&decoders, 2048),
+            };
+            super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
+            link.flush(cx).await?;
+            feedback_rounds = feedback_rounds.saturating_add(1);
         }
 
-        let pending = super::pending_entries(&decoders);
-        if pending.is_empty() {
-            break;
-        }
-        if feedback_rounds >= config.max_feedback_rounds {
-            return Err(QuicTransportError::NoConvergence {
-                rounds: feedback_rounds,
-                pending: pending.len(),
-            });
-        }
-        let need = QuicNeedMore {
-            pending,
-            source_symbols: super::source_symbol_requests(&decoders, 2048),
-        };
-        super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
+        let symbols_accepted_text = symbols_accepted.to_string();
+        let feedback_rounds_text = feedback_rounds.to_string();
+        cx.trace_with_fields(
+            "atp_quic.receive.decoded",
+            &[
+                ("transfer_id", manifest.transfer_id.as_str()),
+                ("symbols_accepted", symbols_accepted_text.as_str()),
+                ("feedback_rounds", feedback_rounds_text.as_str()),
+            ],
+        );
+        let (receipt, committed_paths) =
+            commit_staged_entries(cx, dest_dir, &manifest, &mut staged, config).await?;
+        super::send_native_proof(cx, &mut link.conn, &mut control, &receipt)?;
         link.flush(cx).await?;
-        feedback_rounds = feedback_rounds.saturating_add(1);
+        let _ = super::send_native_close(cx, &mut link.conn, &mut control);
+        let _ = link.flush(cx).await;
+
+        if !receipt.committed {
+            return Err(QuicTransportError::Integrity(
+                receipt
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "receiver did not commit".to_string()),
+            ));
+        }
+
+        Ok(ReceiveReport {
+            transfer_id: manifest.transfer_id.clone(),
+            bytes_received: receipt.bytes_received,
+            files: receipt.files,
+            committed: true,
+            committed_paths,
+            peer: link.peer,
+        })
     }
+    .await;
 
-    let symbols_accepted_text = symbols_accepted.to_string();
-    let feedback_rounds_text = feedback_rounds.to_string();
-    cx.trace_with_fields(
-        "atp_quic.receive.decoded",
-        &[
-            ("transfer_id", manifest.transfer_id.as_str()),
-            ("symbols_accepted", symbols_accepted_text.as_str()),
-            ("feedback_rounds", feedback_rounds_text.as_str()),
-        ],
-    );
-    let (receipt, committed_paths) =
-        commit_staged_entries(cx, dest_dir, &manifest, &mut staged, config).await?;
-    super::send_native_proof(cx, &mut link.conn, &mut control, &receipt)?;
-    link.flush(cx).await?;
-    let _ = super::send_native_close(cx, &mut link.conn, &mut control);
-    let _ = link.flush(cx).await;
-
-    if !receipt.committed {
-        return Err(QuicTransportError::Integrity(
-            receipt
-                .reason
-                .clone()
-                .unwrap_or_else(|| "receiver did not commit".to_string()),
-        ));
-    }
-
-    Ok(ReceiveReport {
-        transfer_id: manifest.transfer_id,
-        bytes_received: receipt.bytes_received,
-        files: receipt.files,
-        committed: true,
-        committed_paths,
-        peer: link.peer,
-    })
+    let _ = crate::fs::remove_dir_all(&staging_dir).await;
+    receive_result
 }
 
 // ─── Public entry points (called by mod.rs) ─────────────────────────────────
