@@ -2710,12 +2710,13 @@ pub async fn receive_connection(
     receive_established_native_connection(cx, connection, peer, dest_dir, config, peer_id).await
 }
 
-/// Run a persistent accept loop, handling each accepted connection as a receive.
+/// Drain routed endpoint connections, handling each accepted connection as a
+/// receive.
 ///
 /// Mirrors [`transport_tcp::serve`] (with a [`ManagedQuicEndpoint`] in place of
-/// a `TcpListener`). **Scaffold:** validates the config, emits a config summary,
-/// then fails closed with [`QuicTransportError::NotImplemented`]. Wired by B3
-/// (`asupersync-arq-quic-epic-b0k8qo.2.3`).
+/// a `TcpListener`). This B3 slice handles connections already routed into the
+/// managed endpoint. Live endpoint packet pumping and indefinite listener
+/// ownership remain lower-level native endpoint work.
 ///
 /// [`transport_tcp::serve`]: crate::net::atp::transport_tcp::serve
 // Owned `endpoint` / `dest_dir` / `peer_id` / `on_result` mirror
@@ -2724,11 +2725,11 @@ pub async fn receive_connection(
 #[allow(clippy::needless_pass_by_value)]
 pub async fn serve<F>(
     cx: &Cx,
-    endpoint: ManagedQuicEndpoint,
+    mut endpoint: ManagedQuicEndpoint,
     dest_dir: PathBuf,
     config: QuicConfig,
     peer_id: String,
-    on_result: F,
+    mut on_result: F,
 ) -> Result<(), QuicTransportError>
 where
     F: FnMut(Result<ReceiveReport, QuicTransportError>),
@@ -2736,11 +2737,33 @@ where
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
     trace_config_summary(cx, "serve", &config, &peer_id);
-    let _ = (&endpoint, &dest_dir, &on_result);
-    Err(QuicTransportError::NotImplemented {
-        operation: "serve",
-        wired_by: "asupersync-arq-quic-epic-b0k8qo.2.3 (B3: QUIC receiver coroutine)",
-    })
+
+    loop {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let Some(accepted) = endpoint.take_next_connection(cx)? else {
+            return Ok(());
+        };
+        let connection_id = format!("{:?}", accepted.connection_id);
+        let peer = accepted.peer_addr.to_string();
+        cx.trace_with_fields(
+            "atp_quic.serve.accepted",
+            &[
+                ("connection_id", connection_id.as_str()),
+                ("peer", peer.as_str()),
+                ("peer_id", peer_id.as_str()),
+            ],
+        );
+        let result = receive_established_native_connection(
+            cx,
+            accepted.connection,
+            accepted.peer_addr,
+            &dest_dir,
+            config.clone(),
+            &peer_id,
+        )
+        .await;
+        on_result(result);
+    }
 }
 
 #[cfg(test)]

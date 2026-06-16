@@ -354,3 +354,37 @@ fn receive_once_rejects_empty_endpoint_without_fake_success() {
         Err(err) => panic!("empty endpoint should fail closed as accept timeout, got {err:?}"),
     }
 }
+
+#[test]
+fn serve_empty_endpoint_drains_without_fake_result() {
+    let cx = Cx::for_testing();
+    let endpoint = block_on(ManagedQuicEndpoint::bind(
+        &cx,
+        "127.0.0.1:0".parse().unwrap(),
+        ManagedEndpointConfig {
+            is_server: true,
+            ..ManagedEndpointConfig::default()
+        },
+    ))
+    .expect("managed endpoint should bind");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut callbacks = 0usize;
+
+    let result = block_on(transport_quic::serve(
+        &cx,
+        endpoint,
+        temp.path().to_path_buf(),
+        trusted_quic_config(),
+        "receiver".to_string(),
+        |result| {
+            callbacks += 1;
+            panic!("empty endpoint must not report a transfer result: {result:?}");
+        },
+    ));
+
+    assert!(
+        result.is_ok(),
+        "empty endpoint serve should drain: {result:?}"
+    );
+    assert_eq!(callbacks, 0);
+}
