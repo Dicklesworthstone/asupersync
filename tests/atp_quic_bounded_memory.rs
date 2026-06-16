@@ -156,8 +156,9 @@ fn files_are_identical(a: &Path, b: &Path) -> bool {
 fn config_pair(seed: u64) -> (QuicConfig, QuicConfig) {
     let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(seed));
     send.client_tls = Some(client_tls());
-    send.symbol_size = 32 * 1024;
-    send.max_block_size = 1024 * 1024;
+    send.symbol_size = 8 * 1024;
+    send.max_block_size = 256 * 1024;
+    send.max_datagram_size = 9 * 1024;
     send.repair_overhead = 1.0;
     send.idle_timeout = TEST_TIMEOUT;
     send.handshake_timeout = TEST_TIMEOUT;
@@ -167,6 +168,7 @@ fn config_pair(seed: u64) -> (QuicConfig, QuicConfig) {
     recv.server_tls = Some(server_tls());
     recv.symbol_size = send.symbol_size;
     recv.max_block_size = send.max_block_size;
+    recv.max_datagram_size = send.max_datagram_size;
     recv.repair_overhead = send.repair_overhead;
     recv.idle_timeout = TEST_TIMEOUT;
     recv.handshake_timeout = TEST_TIMEOUT;

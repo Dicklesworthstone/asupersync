@@ -496,6 +496,7 @@ fn link_from_handshake(
     }
     let conn_config = NativeQuicConnectionConfig {
         role,
+        max_datagram_frame_size: config.max_datagram_size,
         ..NativeQuicConnectionConfig::default()
     };
     let mut conn = NativeQuicConnection::new(conn_config);
