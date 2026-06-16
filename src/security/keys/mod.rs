@@ -580,7 +580,9 @@ fn persist_record(path: &Path, record: &KeyStoreRecord) -> Result<(), KeyStoreEr
 
 fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), KeyStoreError> {
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    // The pending path is security-sensitive. Exclusive creation prevents
+    // following an attacker-controlled stale symlink or truncating a real file.
+    options.create_new(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -734,6 +736,37 @@ mod tests {
         assert!(matches!(
             KeyFingerprint::from_public_key(&[]),
             Err(KeyStoreError::InvalidPublicKey(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_symlink_does_not_redirect_key_store_write() {
+        use std::io::ErrorKind;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("identity.json");
+        let pending = pending_path(&path).expect("pending path");
+        let sentinel = dir.path().join("sentinel");
+        fs::write(&sentinel, b"do-not-touch").expect("write sentinel");
+        symlink(&sentinel, &pending).expect("create pending symlink");
+
+        let err = IdentityKeyStore::create(&path, strong_seed(5), 100).unwrap_err();
+        match err {
+            KeyStoreError::Io {
+                path: failed_path,
+                source,
+            } => {
+                assert_eq!(failed_path, pending);
+                assert_eq!(source.kind(), ErrorKind::AlreadyExists);
+            }
+            other => panic!("unexpected key-store error: {other}"),
+        }
+        assert_eq!(fs::read(&sentinel).expect("read sentinel"), b"do-not-touch");
+        assert!(matches!(
+            fs::symlink_metadata(&path),
+            Err(error) if error.kind() == ErrorKind::NotFound
         ));
     }
 }

@@ -681,6 +681,39 @@ fn collect_dir<'a>(
     })
 }
 
+/// Reduce an attacker-controlled `root_name` to a single safe path component
+/// joined under `dest_dir`.
+///
+/// `manifest.root_name` arrives off the wire, and `Path::join` *replaces* the
+/// base when its argument is absolute, so `dest_dir.join(&root_name)` with an
+/// absolute (or separator-bearing) `root_name` would escape the destination
+/// directory entirely — `crate::fs::write_atomic` validates with
+/// `allow_absolute = true`, so it would not catch an absolute target. Senders
+/// already set `root_name` to a bare file name (see `collect_entries`), so
+/// collapsing to the final path component is loss-free for legitimate
+/// transfers while fully containing hostile ones (matches `transport_tcp`).
+fn safe_base_for_root_name(dest_dir: &Path, root_name: &str) -> Result<PathBuf, RqError> {
+    if root_name.is_empty() {
+        return Err(RqError::Source("manifest root_name is empty".to_string()));
+    }
+    let component = Path::new(root_name)
+        .file_name()
+        .ok_or_else(|| RqError::Source(format!("unsafe manifest root_name: {root_name}")))?;
+    // `file_name()` never yields `.`/`..`/separators, but guard defensively
+    // in case of platform-specific surprises.
+    let component_str = component.to_string_lossy();
+    if component_str == "."
+        || component_str == ".."
+        || component_str.contains('/')
+        || component_str.contains('\\')
+    {
+        return Err(RqError::Source(format!(
+            "unsafe manifest root_name: {root_name}"
+        )));
+    }
+    Ok(dest_dir.join(component))
+}
+
 /// Join `base` with a forward-slash relative path, rejecting any component that
 /// would escape `base`.
 fn join_relative(base: &Path, rel: &str) -> Result<PathBuf, RqError> {
@@ -2100,7 +2133,10 @@ async fn verify_and_commit(
     let committed = sha_ok && merkle_ok;
     let mut committed_paths: Vec<String> = Vec::new();
     if committed {
-        let base = dest_dir.join(&manifest.root_name);
+        // `root_name` is attacker-controlled off the wire; collapse it to a
+        // single safe component so a hostile (absolute / separator-bearing)
+        // value cannot escape `dest_dir`.
+        let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
         for e in &manifest.entries {
             let bytes = by_index.get(&e.index).cloned().unwrap_or_default();
             let out_path = if manifest.is_directory {
@@ -2460,6 +2496,31 @@ mod tests {
         assert_eq!(params.symbols_per_block, 1024);
         dec.set_object_params(params)
             .expect("default-ish multi-block params must match decoder plan");
+    }
+
+    #[test]
+    fn safe_base_for_root_name_contains_hostile_inputs() {
+        // Regression guard: a malicious sender controls `root_name` off the
+        // wire. It must never escape `dest_dir`, even when absolute or
+        // separator-bearing (Path::join replaces the base for absolute args).
+        let dest = Path::new("/dst");
+        assert_eq!(
+            safe_base_for_root_name(dest, "payload").unwrap(),
+            dest.join("payload")
+        );
+        // Absolute root_name would otherwise replace the base via Path::join;
+        // collapse to the final component instead.
+        assert_eq!(
+            safe_base_for_root_name(dest, "/etc/cron.d/evil").unwrap(),
+            dest.join("evil")
+        );
+        assert_eq!(
+            safe_base_for_root_name(dest, "../../etc/passwd").unwrap(),
+            dest.join("passwd")
+        );
+        assert!(safe_base_for_root_name(dest, "").is_err());
+        assert!(safe_base_for_root_name(dest, "/").is_err());
+        assert!(safe_base_for_root_name(dest, "..").is_err());
     }
 
     #[test]
