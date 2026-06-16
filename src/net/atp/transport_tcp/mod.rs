@@ -670,11 +670,12 @@ pub async fn send_path(
     for entry in &entries {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
         let metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
-        let (size, content_id, content_sha256) = if matches!(metadata.file_kind, FileKind::Symlink)
-        {
-            // A symlink carries no content bytes — its target rides in `metadata`.
-            // Emit the canonical empty-content digest so the receiver (which sees
-            // zero ObjectData frames for this entry) reconstructs the same digest.
+        let zero_content = matches!(metadata.file_kind, FileKind::Symlink | FileKind::Directory);
+        let (size, content_id, content_sha256) = if zero_content {
+            // Symlinks (target in `metadata`) and empty directories carry no
+            // content bytes. Emit the canonical empty-content digest so the
+            // receiver — which sees zero ObjectData frames for this entry —
+            // reconstructs the same digest.
             let empty_sha: [u8; 32] = Sha256::digest(b"").into();
             (0u64, ObjectId::content(ContentId::from_bytes(b"")), empty_sha)
         } else {
@@ -783,9 +784,10 @@ pub async fn send_path(
     // the sender never holds a whole file (or the whole transfer) in memory.
     for (i, entry) in entries.iter().enumerate() {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        // Symlinks carry no content bytes; the receiver creates the link from the
-        // manifest metadata at commit, so emit no ObjectData frames for them.
-        if matches!(metadatas[i].file_kind, FileKind::Symlink) {
+        // Symlinks and empty directories carry no content bytes; the receiver
+        // creates them from the manifest metadata at commit, so emit no
+        // ObjectData frames for them.
+        if matches!(metadatas[i].file_kind, FileKind::Symlink | FileKind::Directory) {
             continue;
         }
         let index = u32::try_from(i).unwrap_or(u32::MAX);
@@ -1125,6 +1127,30 @@ pub async fn receive_connection(
                 };
                 if let Some(parent) = out_path.parent() {
                     crate::fs::create_dir_all(parent).await?;
+                }
+
+                // An empty directory commits by creating the directory (with its
+                // recorded mode) rather than renaming the (empty) staged file.
+                if let Some(meta) = &entry.metadata {
+                    if matches!(meta.file_kind, FileKind::Directory) {
+                        crate::fs::create_dir_all(&out_path).await?;
+                        let report = apply_entry_metadata(&out_path, meta).await?;
+                        if cx.trace_buffer().is_some() {
+                            let path_str = out_path.display().to_string();
+                            for (field, reason) in &report.skipped {
+                                cx.trace_with_fields(
+                                    "atp_tcp_metadata_skipped",
+                                    &[
+                                        ("path", path_str.as_str()),
+                                        ("field", *field),
+                                        ("reason", reason.as_str()),
+                                    ],
+                                );
+                            }
+                        }
+                        committed_paths.push(out_path);
+                        continue;
+                    }
                 }
 
                 // A symlink commits by creating the link from its recorded target

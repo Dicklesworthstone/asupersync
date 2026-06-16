@@ -294,6 +294,21 @@ fn collect_dir<'a>(
         }
         children.sort_by(|a, b| a.0.cmp(&b.0));
 
+        // An empty subdirectory is otherwise lost — the walk emits only regular
+        // files, so a structural/empty dir would vanish on the receiver. Emit an
+        // explicit entry for it (J2, `b0k8qo.11.2`); the receiver recreates it
+        // from the dir-kind manifest metadata. A non-empty dir stays implicit
+        // (reconstructed when its descendant files commit), so existing transfers
+        // and their merkle roots are unchanged. The transfer root's own emptiness
+        // is the caller's concern (`is_directory` with no entries).
+        if children.is_empty() && !prefix.is_empty() {
+            out.push(SourceEntry {
+                rel_path: prefix,
+                abs_path: dir.to_path_buf(),
+            });
+            return Ok(());
+        }
+
         for (name, path, is_dir) in children {
             let rel = if prefix.is_empty() {
                 name.clone()

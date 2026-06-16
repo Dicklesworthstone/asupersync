@@ -238,3 +238,36 @@ fn symlink_only_transfer_commits_with_zero_content() {
     );
     assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("target.txt"));
 }
+
+#[test]
+fn empty_directory_round_trips_and_preserves_mode() {
+    // J2 (b0k8qo.11.2) slice (a): an empty/structural directory is otherwise
+    // lost (the walk emits only regular files). It must arrive as a directory
+    // with its mode preserved, alongside ordinary files.
+    let root = unique_tmp("emptydir");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    std::fs::write(tree.join("keep.txt"), b"content\n").unwrap();
+    let empty = tree.join("empty_subdir");
+    std::fs::create_dir(&empty).unwrap();
+    set_mode(&empty, 0o750);
+
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), MetadataPolicy::full_preservation());
+    let send = run_sender(addr, tree.clone(), MetadataPolicy::full_preservation()).expect("send");
+    let recv = recv_handle.join().expect("recv thread").expect("recv");
+    assert!(send.receipt.committed && recv.committed);
+
+    let out_empty = dst_dir.join("project").join("empty_subdir");
+    let meta = std::fs::symlink_metadata(&out_empty).expect("empty dir present on receiver");
+    assert!(meta.file_type().is_dir(), "empty_subdir must arrive as a directory");
+    assert_eq!(mode_of(&out_empty), 0o750, "empty dir mode preserved");
+    assert_eq!(
+        std::fs::read(dst_dir.join("project").join("keep.txt")).unwrap(),
+        b"content\n",
+        "regular file alongside the empty dir still round-trips"
+    );
+}
