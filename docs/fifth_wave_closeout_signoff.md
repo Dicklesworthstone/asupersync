@@ -6,8 +6,10 @@
 for `asupersync-idea-wizard-fifth-wave-3gaiun.16`.
 
 This packet is an overlap audit and handoff artifact for the fifth-wave
-idea-wizard epic. It is intentionally not a success certificate: the parent epic
-still has an open AppSpec child owner bead.
+idea-wizard epic. It records scoped evidence for each top-five and next-ten
+owner bead, and it fails closed while any owner bead is still non-closed in
+tracker state. It is intentionally not a release certificate or a broad
+workspace-health certificate.
 
 <!-- FIFTH-WAVE-CLOSEOUT:INVENTORY -->
 
@@ -35,7 +37,7 @@ Top-five owner decisions:
 | idea | owner | status | decision |
 |---|---|---|---|
 | doctor/operator CLI | `asupersync-idea-wizard-fifth-wave-3gaiun.1` | closed | implemented |
-| AppSpec service topology | `asupersync-idea-wizard-fifth-wave-3gaiun.2` | open | still open |
+| AppSpec service topology | `asupersync-idea-wizard-fifth-wave-3gaiun.2` | in_progress | still open |
 | semantic lint suite | `asupersync-idea-wizard-fifth-wave-3gaiun.3` | closed | implemented |
 | Browser Edition GA | `asupersync-idea-wizard-fifth-wave-3gaiun.4` | closed | implemented |
 | lab/live differential evidence | `asupersync-idea-wizard-fifth-wave-3gaiun.5` | closed | implemented |
@@ -63,13 +65,16 @@ the JSON artifact.
 ## Blockers
 
 The closeout verdict is blocked. The parent epic cannot close while these owner
-beads remain open or proof-blocked:
+beads remain non-closed or proof-blocked:
 
 - `asupersync-idea-wizard-fifth-wave-3gaiun.2`
 
 The backlog proof-blocked rows have been closed after focused remote RCH proofs.
-AppSpec remains open because the A2 compiler bridge has source and lib-check
-evidence, but its exact focused unit proof is blocked and A3/A4 remain open.
+AppSpec now has closed A1 schema/capability modeling, A2 compiler/lowering, A3
+deterministic lab replay and artifact contracts, and A4 reference journey
+children. The AppSpec parent owner bead still remains `in_progress` in tracker
+state, so this closeout packet continues to fail closed until that parent is
+explicitly closed and the closeout contract is rerun remotely.
 
 <!-- FIFTH-WAVE-CLOSEOUT:VALIDATION -->
 
@@ -89,6 +94,8 @@ proof row.
 ## No-Claim Boundaries
 
 This packet does not prove release readiness, broad workspace health, runtime
-correctness, performance improvement, child owner proof success, live RCH fleet
-availability, tracker closure, or local Cargo fallback approval. It also does
-not authorize file deletion or duplicate feature beads.
+correctness, performance improvement, live RCH fleet availability, or local
+Cargo fallback approval. It independently maps and validates child-owner
+evidence, but it does not re-prove every child contract. It also does not
+close the fifth-wave epic, authorize file deletion, or authorize duplicate
+feature beads.

@@ -2,7 +2,7 @@
   "schema_version": "fifth-wave-closeout-signoff-v1",
   "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.16",
   "parent_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun",
-  "purpose": "Deterministic closeout packet for the fifth-wave idea-wizard top-five and next-ten owner beads. The packet fails closed while child owner beads remain open or proof-blocked.",
+  "purpose": "Deterministic closeout packet for the fifth-wave idea-wizard top-five and next-ten owner beads. The packet fails closed while child owner beads remain non-closed or proof-blocked.",
   "artifact_path": "artifacts/fifth_wave_closeout_signoff_v1.json",
   "docs_path": "docs/fifth_wave_closeout_signoff.md",
   "contract_test": "tests/fifth_wave_closeout_signoff_contract.rs",
@@ -117,23 +117,36 @@
       "idea_id": "top-02-appspec-service-topology",
       "title": "Declarative service topology compiler with generated lab proofs",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
-      "tracker_status": "open",
+      "tracker_status": "in_progress",
       "decision": "still-open",
-      "current_blocker": "AppSpec A1/A2 source is landed, including the A2 compiler bridge in src/app.rs, but the exact A2 focused RCH unit test exited 130 before a result and A3/A4 remain open; no closeout-ready proof chain exists.",
-      "next_step": "Get the A2 exact unit proof green remotely, then complete the A3 generated fixtures/proof manifest rows and A4 production reference journey before closing the AppSpec parent.",
+      "current_blocker": "AppSpec A1-A4 child beads are closed with scoped evidence, but the AppSpec parent tracker row remains in_progress, so fifth-wave closeout must fail closed until that parent is explicitly closed.",
+      "next_step": "Close the AppSpec parent tracker row from the A1-A4 closure evidence, then rerun the focused fifth-wave closeout contract remotely before closing the fifth-wave closeout bead.",
       "proof_refs": [
         "artifacts/appspec_v1_schema.json",
-        "docs/appspec_v1.md"
+        "docs/appspec_v1.md",
+        "docs/appspec_v1_compiler.md",
+        "artifacts/appspec_generated_lab_fixtures_v1.json",
+        "tests/appspec_v1_compiler.rs",
+        "tests/appspec_v1_lab_replay.rs",
+        "examples/appspec_reference_journey.rs",
+        "scripts/run_appspec_reference_journey_e2e.sh"
       ],
       "evidence_refs": [
         "artifacts/appspec_v1_schema.json",
         "docs/appspec_v1.md",
-        "src/app.rs"
+        "docs/appspec_v1_compiler.md",
+        "docs/appspec_generated_lab_fixtures.md",
+        "src/app.rs",
+        "tests/appspec_v1_compiler.rs",
+        "tests/appspec_v1_lab_replay.rs",
+        "examples/appspec_reference_journey.rs",
+        "scripts/run_appspec_reference_journey_e2e.sh"
       ],
       "no_claims": [
-        "does not prove AppSpec production readiness",
-        "does not prove generated lab fixtures",
-        "does not close the fifth-wave epic"
+        "does not prove broad AppSpec production readiness",
+        "does not auto-resolve handler symbols or hide Cx",
+        "does not remove the explicit single-group lowering boundary",
+        "does not close the AppSpec parent tracker row"
       ]
     },
     {
@@ -428,19 +441,19 @@
   "blocking_children": [
     {
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
-      "tracker_status": "open",
-      "reason": "AppSpec parent remains open: A2 bridge source landed with lib-check evidence, but exact focused unit proof is blocked and A3/A4 remain open."
+      "tracker_status": "in_progress",
+      "reason": "AppSpec A1-A4 child beads are closed, but the parent AppSpec owner bead remains in_progress in tracker state."
     }
   ],
   "closeout_verdict": {
     "status": "blocked",
     "cannot_close_epic": true,
-    "summary": "The fifth-wave epic cannot close because the AppSpec owner bead remains open. This packet is a deterministic handoff and fail-closed overlap audit, not a release or epic-completion signoff.",
+    "summary": "The fifth-wave epic cannot close while the AppSpec parent owner bead remains in_progress. This packet is a deterministic overlap audit and handoff, not a release or broad workspace-health certificate.",
     "required_before_close": [
-      "all blocking child owner beads closed or explicitly deferred with reviewer acceptance",
-      "focused RCH proofs completed remotely or documented as accepted equivalent RCH evidence",
-      "final tracker comment records remaining blockers or closure basis",
-      "Agent Mail handoff records remaining blockers or closure basis"
+      "focused closeout contract proof completed remotely",
+      "AppSpec parent tracker row closed from the A1-A4 closure evidence",
+      "final tracker comment records closure basis and remaining blockers",
+      "Agent Mail handoff records closure basis and remaining blockers"
     ]
   },
   "handoff_record": {
@@ -470,7 +483,7 @@
     "does not prove broad workspace health",
     "does not prove runtime correctness",
     "does not prove performance improvement",
-    "does not prove child owner beads passed their focused contracts",
+    "does not independently re-prove every child owner contract",
     "does not prove live RCH fleet availability",
     "does not approve local Cargo fallback",
     "does not close the fifth-wave epic",

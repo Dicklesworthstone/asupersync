@@ -305,22 +305,21 @@ fn closeout_verdict_names_current_blockers() {
 }
 
 #[test]
-fn appspec_status_reflects_a2_bridge_landing_without_closing_parent() {
+fn appspec_status_reflects_closed_a1_to_a4_chain_and_open_parent() {
     let artifact = artifact();
     let appspec = decision_by_idea_id(&artifact, "top-02-appspec-service-topology");
     assert_eq!(
         string(appspec, "owner_bead_id"),
         "asupersync-idea-wizard-fifth-wave-3gaiun.2"
     );
-    assert_eq!(string(appspec, "tracker_status"), "open");
+    assert_eq!(string(appspec, "tracker_status"), "in_progress");
     assert_eq!(string(appspec, "decision"), "still-open");
 
     let blocker = string(appspec, "current_blocker");
     for required in [
-        "A1/A2 source is landed",
-        "A2 compiler bridge",
-        "exited 130",
-        "A3/A4 remain open",
+        "A1-A4 child beads are closed",
+        "parent tracker row remains in_progress",
+        "fail closed",
     ] {
         assert!(
             blocker.contains(required),
@@ -330,9 +329,9 @@ fn appspec_status_reflects_a2_bridge_landing_without_closing_parent() {
 
     let next_step = string(appspec, "next_step");
     for required in [
-        "A2 exact unit proof",
-        "A3 generated fixtures",
-        "A4 production reference journey",
+        "Close the AppSpec parent tracker row",
+        "A1-A4 closure evidence",
+        "focused fifth-wave closeout contract",
     ] {
         assert!(
             next_step.contains(required),
@@ -340,11 +339,33 @@ fn appspec_status_reflects_a2_bridge_landing_without_closing_parent() {
         );
     }
 
+    let proof_refs = string_set(appspec, "proof_refs");
+    for required in [
+        "artifacts/appspec_v1_schema.json",
+        "docs/appspec_v1_compiler.md",
+        "artifacts/appspec_generated_lab_fixtures_v1.json",
+        "tests/appspec_v1_compiler.rs",
+        "tests/appspec_v1_lab_replay.rs",
+        "examples/appspec_reference_journey.rs",
+        "scripts/run_appspec_reference_journey_e2e.sh",
+    ] {
+        assert!(
+            proof_refs.contains(required),
+            "AppSpec proof refs must include {required}"
+        );
+    }
+
     let evidence_refs = string_set(appspec, "evidence_refs");
-    assert!(
-        evidence_refs.contains("src/app.rs"),
-        "AppSpec A2 source evidence must cite src/app.rs"
-    );
+    for required in [
+        "src/app.rs",
+        "docs/appspec_generated_lab_fixtures.md",
+        "examples/appspec_reference_journey.rs",
+    ] {
+        assert!(
+            evidence_refs.contains(required),
+            "AppSpec evidence refs must include {required}"
+        );
+    }
 }
 
 #[test]
@@ -377,7 +398,7 @@ fn handoff_requirements_and_no_claims_are_explicit() {
         "does not prove release readiness",
         "does not prove broad workspace health",
         "does not prove runtime correctness",
-        "does not prove child owner beads passed their focused contracts",
+        "does not independently re-prove every child owner contract",
         "does not prove live RCH fleet availability",
         "does not approve local Cargo fallback",
         "does not close the fifth-wave epic",
