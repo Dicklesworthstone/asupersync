@@ -951,8 +951,12 @@ impl Connection {
             self.track_stream_id(frame.stream_id);
         }
 
-        let payload_len =
-            u32::try_from(frame.data.len()).map_err(|_| H2Error::frame_size("data too large"))?;
+        // RFC 9113 §6.9.1: the entire DATA frame payload is flow-controlled,
+        // including the Pad Length octet and Padding. Charge the windows by the
+        // on-the-wire payload length, NOT the (smaller) unpadded application
+        // data length — otherwise padded frames under-debit the windows, the
+        // peer's send window is never replenished, and the connection deadlocks.
+        let payload_len = frame.flow_controlled_len;
         let window_delta = i32::try_from(payload_len)
             .map_err(|_| H2Error::flow_control("data too large for window"))?;
         if window_delta > self.recv_window {

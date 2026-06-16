@@ -310,20 +310,31 @@ impl Frame {
 pub struct DataFrame {
     /// Stream identifier.
     pub stream_id: u32,
-    /// Payload data.
+    /// Application payload data (padding already stripped).
     pub data: Bytes,
     /// True if this is the last frame for this stream.
     pub end_stream: bool,
+    /// RFC 9113 §6.9.1 flow-controlled length: the size of the *entire* DATA
+    /// frame payload as it appeared on the wire, including the Pad Length octet
+    /// and Padding when present. This is what must be charged against the
+    /// connection- and stream-level flow-control windows, and it can be larger
+    /// than `data.len()` for padded frames. For frames constructed locally
+    /// (no padding) it equals `data.len()`.
+    pub flow_controlled_len: u32,
 }
 
 impl DataFrame {
     /// Create a new DATA frame.
     #[must_use]
     pub fn new(stream_id: u32, data: Bytes, end_stream: bool) -> Self {
+        // Locally constructed frames are never padded, so the flow-controlled
+        // length equals the application data length.
+        let flow_controlled_len = u32::try_from(data.len()).unwrap_or(u32::MAX);
         Self {
             stream_id,
             data,
             end_stream,
+            flow_controlled_len,
         }
     }
 
@@ -332,6 +343,10 @@ impl DataFrame {
         if header.stream_id == 0 {
             return Err(H2Error::protocol("DATA frame with stream ID 0"));
         }
+
+        // The whole on-the-wire payload (Pad Length + data + Padding) is
+        // flow-controlled, regardless of how much is application data.
+        let flow_controlled_len = header.length;
 
         let mut data = payload;
         let end_stream = header.has_flag(data_flags::END_STREAM);
@@ -356,6 +371,7 @@ impl DataFrame {
             stream_id: header.stream_id,
             data,
             end_stream,
+            flow_controlled_len,
         })
     }
 
