@@ -999,6 +999,7 @@ mod tests {
     use super::*;
     use crate::bytes::{Bytes, BytesMut};
     use crate::net::atp::protocol::quic_frames::QuicFrame;
+    use crate::net::atp::quic::AtpPacketProtection;
     use crate::net::quic_core::{LongHeader, LongPacketType, PacketHeader};
     use crate::net::quic_native::QuicHandshakeTranscript;
     use crate::test_utils::run_test_with_cx;
