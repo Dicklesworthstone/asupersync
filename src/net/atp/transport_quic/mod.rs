@@ -1860,6 +1860,11 @@ struct NativeQuicFrameTransport {
 
 #[allow(dead_code)]
 impl NativeQuicFrameTransport {
+    fn open(cx: &Cx, conn: &mut NativeQuicConnection) -> Result<Self, QuicTransportError> {
+        let stream = conn.open_local_bidi(cx)?;
+        Ok(Self::for_stream(stream))
+    }
+
     fn for_stream(stream: StreamId) -> Self {
         Self {
             stream,
@@ -2077,6 +2082,22 @@ fn receive_native_sender_hello_and_ack(
 }
 
 #[allow(dead_code)]
+fn send_native_sender_hello(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    config: &QuicConfig,
+    peer_id: &str,
+    symbol_auth: bool,
+) -> Result<(), QuicTransportError> {
+    let frame = json_frame(
+        FrameType::Handshake,
+        &sender_hello(peer_id, config, symbol_auth),
+    )?;
+    control.send(cx, conn, &frame)
+}
+
+#[allow(dead_code)]
 fn receive_sender_hello_ack(
     cx: &Cx,
     conn: &mut QuicConnection,
@@ -2101,10 +2122,44 @@ fn receive_sender_hello_ack(
 }
 
 #[allow(dead_code)]
+fn receive_native_sender_hello_ack(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<QuicHelloAck, QuicTransportError> {
+    let frame = next_native_control_frame(cx, conn, control, "receive sender handshake ack")?;
+    if frame.frame_type() != FrameType::HandshakeAck {
+        return Err(QuicTransportError::Unexpected {
+            got: frame.frame_type(),
+            expected: "HandshakeAck",
+        });
+    }
+    let ack: QuicHelloAck = parse_json(&frame)?;
+    if !ack.accepted {
+        return Err(QuicTransportError::HandshakeRejected(
+            ack.reason
+                .clone()
+                .unwrap_or_else(|| "no reason given".to_string()),
+        ));
+    }
+    Ok(ack)
+}
+
+#[allow(dead_code)]
 fn send_manifest(
     cx: &Cx,
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
+    manifest: &TransferManifest,
+) -> Result<(), QuicTransportError> {
+    control.send_json(cx, conn, FrameType::ObjectManifest, manifest)
+}
+
+#[allow(dead_code)]
+fn send_native_manifest(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
     manifest: &TransferManifest,
 ) -> Result<(), QuicTransportError> {
     control.send_json(cx, conn, FrameType::ObjectManifest, manifest)
@@ -2181,6 +2236,17 @@ fn receive_native_object_complete(
         });
     }
     Ok(())
+}
+
+#[allow(dead_code)]
+fn send_native_object_complete(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<(), QuicTransportError> {
+    let frame = Frame::empty(FrameType::ObjectComplete)
+        .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+    control.send(cx, conn, &frame)
 }
 
 #[allow(dead_code)]
@@ -2262,8 +2328,398 @@ fn send_native_close(
     control.send(cx, conn, &frame)
 }
 
+#[allow(dead_code)]
+fn receive_native_proof_or_need_more(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<QuicControlReply, QuicTransportError> {
+    let frame = next_native_control_frame(cx, conn, control, "receive proof or fountain feedback")?;
+    match frame.frame_type() {
+        FrameType::Proof => parse_json::<ReceiveReceipt>(&frame).map(QuicControlReply::Proof),
+        FrameType::ObjectRequest => {
+            parse_json::<QuicNeedMore>(&frame).map(QuicControlReply::NeedMore)
+        }
+        got => Err(QuicTransportError::Unexpected {
+            got,
+            expected: "Proof | ObjectRequest",
+        }),
+    }
+}
+
 fn first_client_bidi_stream() -> StreamId {
     StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0)
+}
+
+#[allow(dead_code)]
+fn send_native_symbol(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    symbol: &Symbol,
+    transfer_tag: u64,
+    entry: u32,
+    auth_tag: Option<[u8; crate::security::tag::TAG_SIZE]>,
+) -> Result<(), QuicTransportError> {
+    if !conn.can_send_1rtt() {
+        return Err(QuicTransportError::Quic(
+            "send_native_symbol requires an established 1-RTT connection".to_string(),
+        ));
+    }
+    let envelope = symbol_to_envelope(symbol, transfer_tag, entry, auth_tag);
+    let bytes = envelope
+        .encode()
+        .map_err(SymbolDatagramError::from)
+        .map_err(QuicTransportError::from)?;
+    conn.send_datagram(cx, bytes)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn spray_native_symbol_round(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    pending: &std::collections::BTreeSet<u32>,
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+    with_source: bool,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut sent = 0u64;
+    let repair_batch = repair_batch_per_block(config);
+    for entry in encoders
+        .iter_mut()
+        .filter(|entry| pending.contains(&entry.index))
+    {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let already = entry.repair_cursor;
+        let target_repair = if with_source {
+            initial_repair_per_block(entry.bytes.len(), config)
+        } else {
+            already.saturating_add(repair_batch)
+        };
+        let repair_count = target_repair.saturating_sub(already);
+        if !with_source && repair_count == 0 {
+            entry.repair_cursor = target_repair;
+            continue;
+        }
+
+        let mut pipeline = encoding_pipeline(config);
+        if with_source {
+            for encoded in pipeline.encode_with_repair(entry.object_id, &entry.bytes, target_repair)
+            {
+                let symbol = encoded
+                    .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                    .into_symbol();
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                send_native_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
+                sent = sent.saturating_add(1);
+            }
+        } else {
+            for encoded in
+                pipeline.encode_repair_range(entry.object_id, &entry.bytes, already, repair_count)
+            {
+                let symbol = encoded
+                    .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                    .into_symbol();
+                let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+                send_native_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
+                sent = sent.saturating_add(1);
+            }
+        }
+        entry.repair_cursor = target_repair;
+    }
+    Ok(sent)
+}
+
+#[allow(dead_code)]
+fn spray_native_initial_symbols(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<u64, QuicTransportError> {
+    let pending = encoders
+        .iter()
+        .map(|entry| entry.index)
+        .collect::<std::collections::BTreeSet<_>>();
+    spray_native_symbol_round(
+        cx,
+        conn,
+        manifest,
+        encoders,
+        &pending,
+        config,
+        symbol_auth,
+        true,
+    )
+}
+
+#[allow(dead_code)]
+fn send_native_source_symbol_requests(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    manifest: &TransferManifest,
+    encoders: &[QuicEntryEncoder],
+    requests: &[QuicSourceSymbolRequest],
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut sent = 0u64;
+    for request in requests {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let enc = encoders
+            .iter()
+            .find(|entry| entry.index == request.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "receiver requested source symbol for unknown entry {}",
+                    request.entry
+                ))
+            })?;
+        let symbol = source_symbol_for_request(enc, *request, config)?;
+        let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+        send_native_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
+        sent = sent.saturating_add(1);
+    }
+    Ok(sent)
+}
+
+#[allow(dead_code)]
+fn send_native_repair_round_and_object_complete(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    need: &QuicNeedMore,
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<u64, QuicTransportError> {
+    validate_quic_manifest(manifest, config)?;
+    if need.pending.is_empty() && need.source_symbols.is_empty() {
+        send_native_object_complete(cx, conn, control)?;
+        return Ok(0);
+    }
+    for entry in &need.pending {
+        if !manifest
+            .entries
+            .iter()
+            .any(|manifest| manifest.index == *entry)
+        {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested repair for unknown entry {entry}"
+            )));
+        }
+    }
+    let pending = need
+        .pending
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    for request in &need.source_symbols {
+        if !pending.contains(&request.entry) {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested source symbol for non-pending entry {}",
+                request.entry
+            )));
+        }
+    }
+    let sent = if need.source_symbols.is_empty() {
+        spray_native_symbol_round(
+            cx,
+            conn,
+            manifest,
+            encoders,
+            &pending,
+            config,
+            symbol_auth,
+            false,
+        )?
+    } else {
+        send_native_source_symbol_requests(
+            cx,
+            conn,
+            manifest,
+            encoders,
+            &need.source_symbols,
+            config,
+            symbol_auth,
+        )?
+    };
+    send_native_object_complete(cx, conn, control)?;
+    Ok(sent)
+}
+
+#[allow(dead_code)]
+fn send_native_manifest_symbols_complete(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    validate_quic_manifest(manifest, config)?;
+    let symbol_auth = config.symbol_auth_context()?;
+    send_native_manifest(cx, conn, control, manifest)?;
+    let symbols_sent =
+        spray_native_initial_symbols(cx, conn, manifest, encoders, config, symbol_auth.as_ref())?;
+    send_native_object_complete(cx, conn, control)?;
+    Ok(symbols_sent)
+}
+
+#[allow(dead_code)]
+async fn send_native_prepared_source_manifest_symbols_complete(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    prepared: &QuicPreparedSource,
+    config: &QuicConfig,
+) -> Result<(Vec<QuicEntryEncoder>, u64), QuicTransportError> {
+    validate_quic_manifest(&prepared.manifest, config)?;
+    let mut encoders = encoders_from_prepared_source(cx, prepared, config).await?;
+    let symbols_sent = send_native_manifest_symbols_complete(
+        cx,
+        conn,
+        control,
+        &prepared.manifest,
+        &mut encoders,
+        config,
+    )?;
+    Ok((encoders, symbols_sent))
+}
+
+#[allow(dead_code)]
+fn finish_native_sender_transfer(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+    peer: SocketAddr,
+    receipt: ReceiveReceipt,
+) -> Result<SendReport, QuicTransportError> {
+    send_native_close(cx, conn, control)?;
+    if !receipt.committed {
+        return Err(QuicTransportError::Integrity(
+            receipt
+                .reason
+                .clone()
+                .unwrap_or_else(|| "receiver did not commit".to_string()),
+        ));
+    }
+
+    Ok(SendReport {
+        transfer_id: manifest.transfer_id.clone(),
+        bytes_sent: manifest.total_bytes,
+        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        merkle_root_hex: manifest.merkle_root_hex.clone(),
+        receipt,
+        peer,
+    })
+}
+
+#[allow(dead_code)]
+fn handle_native_sender_feedback_or_proof(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+    state: &mut QuicSenderFeedbackState<'_>,
+) -> Result<Option<SendReport>, QuicTransportError> {
+    match receive_native_proof_or_need_more(cx, conn, control)? {
+        QuicControlReply::Proof(receipt) => {
+            finish_native_sender_transfer(cx, conn, control, state.manifest, state.peer, receipt)
+                .map(Some)
+        }
+        QuicControlReply::NeedMore(need) => {
+            state.feedback_rounds = state.feedback_rounds.saturating_add(1);
+            if state.feedback_rounds > state.config.max_feedback_rounds {
+                return Err(QuicTransportError::NoConvergence {
+                    rounds: state.feedback_rounds,
+                    pending: need.pending.len(),
+                });
+            }
+            if need.pending.is_empty() && need.source_symbols.is_empty() {
+                return Ok(None);
+            }
+            let symbol_auth = state.config.symbol_auth_context()?;
+            let sent = send_native_repair_round_and_object_complete(
+                cx,
+                conn,
+                control,
+                state.manifest,
+                state.encoders,
+                &need,
+                state.config,
+                symbol_auth.as_ref(),
+            )?;
+            state.symbols_sent = state.symbols_sent.saturating_add(sent);
+            Ok(None)
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSenderDrivePoint {
+    HelloSent,
+    ObjectCompleteSent,
+}
+
+#[allow(dead_code)]
+async fn send_prepared_source_over_established_native_connection<F>(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    peer: SocketAddr,
+    prepared: &QuicPreparedSource,
+    config: &QuicConfig,
+    peer_id: &str,
+    mut drive_peer: F,
+) -> Result<SendReport, QuicTransportError>
+where
+    F: FnMut(NativeSenderDrivePoint, &mut NativeQuicConnection) -> Result<(), QuicTransportError>,
+{
+    cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+    config.validate()?;
+    validate_quic_manifest(&prepared.manifest, config)?;
+    let symbol_auth = config.symbol_auth_context()?;
+    let symbol_auth_enabled = symbol_auth.is_some();
+    let mut control = NativeQuicFrameTransport::open(cx, conn)?;
+
+    send_native_sender_hello(cx, conn, &mut control, config, peer_id, symbol_auth_enabled)?;
+    drive_peer(NativeSenderDrivePoint::HelloSent, conn)?;
+    receive_native_sender_hello_ack(cx, conn, &mut control)?;
+
+    let (mut encoders, symbols_sent) = send_native_prepared_source_manifest_symbols_complete(
+        cx,
+        conn,
+        &mut control,
+        prepared,
+        config,
+    )
+    .await?;
+    drive_peer(NativeSenderDrivePoint::ObjectCompleteSent, conn)?;
+
+    let mut state = QuicSenderFeedbackState::new(
+        &prepared.manifest,
+        &mut encoders,
+        config,
+        peer,
+        symbols_sent,
+    );
+    loop {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        if let Some(report) =
+            handle_native_sender_feedback_or_proof(cx, conn, &mut control, &mut state)?
+        {
+            return Ok(report);
+        }
+        drive_peer(NativeSenderDrivePoint::ObjectCompleteSent, conn)?;
+    }
 }
 
 fn recv_native_symbol_envelope(
@@ -4030,6 +4486,172 @@ mod tests {
     }
 
     #[test]
+    fn native_sender_body_transfers_prepared_source_and_receives_proof() {
+        let (cx, client, server) = established_pair();
+        let mut native_client = client.inner().clone();
+        let mut native_server = server.inner().clone();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(root.join("nested")).expect("create nested dir");
+        let alpha = varied_bytes(384, 67);
+        let beta = varied_bytes(640, 71);
+        std::fs::write(root.join("alpha.bin"), &alpha).expect("write alpha");
+        std::fs::write(root.join("nested/beta.bin"), &beta).expect("write beta");
+        let config = QuicConfig {
+            chunk_size: 29,
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.25,
+            ..trusted_quic_config()
+        };
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("source manifest prepares from disk");
+        let mut receiver_control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
+        let mut client_to_server_pn = 0u64;
+        let mut server_to_client_pn = 0u64;
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let dest = tempfile::tempdir().expect("dest dir");
+        let mut receiver_committed = false;
+
+        let report = block_on(send_prepared_source_over_established_native_connection(
+            &cx,
+            &mut native_client,
+            peer,
+            &prepared,
+            &config,
+            "sender-peer",
+            |drive_point, sender| {
+                match drive_point {
+                    NativeSenderDrivePoint::HelloSent => {
+                        pump_native_until_idle(
+                            &cx,
+                            sender,
+                            &mut native_server,
+                            &mut client_to_server_pn,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            8_000,
+                        )?;
+                        let hello = receive_native_sender_hello_and_ack(
+                            &cx,
+                            &mut native_server,
+                            &mut receiver_control,
+                            &config,
+                            "receiver-peer",
+                            false,
+                        )?;
+                        assert_eq!(hello.peer_id, "sender-peer");
+                        pump_native_until_idle(
+                            &cx,
+                            &mut native_server,
+                            sender,
+                            &mut server_to_client_pn,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            8_001,
+                        )?;
+                    }
+                    NativeSenderDrivePoint::ObjectCompleteSent => {
+                        assert!(!receiver_committed, "receiver should commit only once");
+                        pump_native_until_idle(
+                            &cx,
+                            sender,
+                            &mut native_server,
+                            &mut client_to_server_pn,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            8_002,
+                        )?;
+
+                        let received_manifest = receive_native_manifest(
+                            &cx,
+                            &mut native_server,
+                            &mut receiver_control,
+                        )?;
+                        assert_eq!(received_manifest, prepared.manifest);
+                        let mut decoders = decoders_from_manifest(&received_manifest, &config)?;
+                        let symbols_accepted = drain_native_symbol_datagrams(
+                            &mut native_server,
+                            &received_manifest,
+                            &mut decoders,
+                            &config,
+                        )?;
+                        receive_native_object_complete(
+                            &cx,
+                            &mut native_server,
+                            &mut receiver_control,
+                        )?;
+                        assemble_completed_entries(&mut decoders);
+                        assert!(
+                            pending_entries(&decoders).is_empty(),
+                            "prepared native source symbols should decode without repair feedback"
+                        );
+
+                        let (receipt, committed_paths) = block_on(commit_decoded_entries(
+                            &cx,
+                            dest.path(),
+                            &received_manifest,
+                            &decoders,
+                        ))?;
+                        assert!(receipt.committed);
+                        assert_eq!(committed_paths.len(), 2);
+                        assert_eq!(
+                            std::fs::read(dest.path().join("payload/alpha.bin"))
+                                .expect("read alpha"),
+                            alpha
+                        );
+                        assert_eq!(
+                            std::fs::read(dest.path().join("payload/nested/beta.bin"))
+                                .expect("read beta"),
+                            beta
+                        );
+                        assert!(symbols_accepted > 0);
+
+                        send_native_proof(
+                            &cx,
+                            &mut native_server,
+                            &mut receiver_control,
+                            &receipt,
+                        )?;
+                        pump_native_until_idle(
+                            &cx,
+                            &mut native_server,
+                            sender,
+                            &mut server_to_client_pn,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            8_003,
+                        )?;
+                        receiver_committed = true;
+                    }
+                }
+                Ok(())
+            },
+        ))
+        .expect("native established sender body returns proof report");
+
+        assert!(receiver_committed);
+        assert_eq!(report.transfer_id, prepared.manifest.transfer_id);
+        assert_eq!(report.bytes_sent, 1_024);
+        assert_eq!(report.files, 2);
+        assert!(report.receipt.committed);
+
+        pump_native_until_idle(
+            &cx,
+            &mut native_client,
+            &mut native_server,
+            &mut client_to_server_pn,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_004,
+        )
+        .expect("deliver native close");
+        let close = next_native_control_frame(
+            &cx,
+            &mut native_server,
+            &mut receiver_control,
+            "receive native close",
+        )
+        .expect("native receiver sees close");
+        assert_eq!(close.frame_type(), FrameType::Close);
+    }
+
+    #[test]
     fn quic_sender_repair_feedback_round_recovers_after_source_loss() {
         let (cx, mut client, mut server) = established_pair();
         let config = QuicConfig {
@@ -4273,6 +4895,178 @@ mod tests {
             std::fs::read(temp.path().join("payload/nested/beta.bin")).expect("read beta"),
             entries[1].1
         );
+    }
+
+    #[test]
+    fn native_established_sender_body_returns_report_after_receiver_proof() {
+        let (cx, client, server) = established_pair();
+        let mut native_client = client.inner().clone();
+        let mut native_server = server.inner().clone();
+        let config = QuicConfig {
+            chunk_size: 17,
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.25,
+            ..trusted_quic_config()
+        };
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("payload");
+        std::fs::create_dir_all(root.join("nested")).expect("create nested dir");
+        let alpha = varied_bytes(384, 67);
+        let beta = varied_bytes(640, 71);
+        std::fs::write(root.join("alpha.bin"), &alpha).expect("write alpha");
+        std::fs::write(root.join("nested/beta.bin"), &beta).expect("write beta");
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("source manifest prepares from disk");
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let mut client_packet_number = 0u64;
+        let mut server_packet_number = 0u64;
+        let mut receiver_control: Option<NativeQuicFrameTransport> = None;
+        let mut receiver_manifest: Option<TransferManifest> = None;
+        let mut receiver_decoders: Option<Vec<QuicEntryDecoder>> = None;
+        let mut symbols_accepted = 0u64;
+        let mut feedback_rounds = 0u32;
+        let mut proof_sent = false;
+
+        let report = block_on(send_prepared_source_over_established_native_connection(
+            &cx,
+            &mut native_client,
+            peer,
+            &prepared,
+            &config,
+            "sender-peer",
+            |point, sender_conn| {
+                match point {
+                    NativeSenderDrivePoint::HelloSent => {
+                        let moved = pump_native_until_idle(
+                            &cx,
+                            sender_conn,
+                            &mut native_server,
+                            &mut client_packet_number,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            6_300,
+                        )?;
+                        assert!(moved > 0);
+                        let control = receiver_control.get_or_insert_with(|| {
+                            NativeQuicFrameTransport::for_stream(first_client_bidi_stream())
+                        });
+                        receive_native_sender_hello_and_ack(
+                            &cx,
+                            &mut native_server,
+                            control,
+                            &config,
+                            "receiver-peer",
+                            false,
+                        )?;
+                        let moved = pump_native_until_idle(
+                            &cx,
+                            &mut native_server,
+                            sender_conn,
+                            &mut server_packet_number,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            6_301,
+                        )?;
+                        assert!(moved > 0);
+                    }
+                    NativeSenderDrivePoint::ObjectCompleteSent => {
+                        let moved = pump_native_until_idle(
+                            &cx,
+                            sender_conn,
+                            &mut native_server,
+                            &mut client_packet_number,
+                            DEFAULT_MAX_PACKET_BYTES,
+                            6_302 + u64::from(feedback_rounds),
+                        )?;
+                        assert!(moved > 0);
+                        let control = receiver_control
+                            .as_mut()
+                            .expect("receiver control opened after hello");
+                        if receiver_manifest.is_none() {
+                            let manifest =
+                                receive_native_manifest(&cx, &mut native_server, control)?;
+                            assert_eq!(manifest, prepared.manifest);
+                            receiver_decoders = Some(decoders_from_manifest(&manifest, &config)?);
+                            receiver_manifest = Some(manifest);
+                        }
+                        let manifest = receiver_manifest
+                            .as_ref()
+                            .expect("receiver manifest initialized");
+                        let decoders = receiver_decoders
+                            .as_mut()
+                            .expect("receiver decoders initialized");
+                        match receive_native_symbol_round(
+                            &cx,
+                            &mut native_server,
+                            control,
+                            manifest,
+                            decoders,
+                            &config,
+                            &mut symbols_accepted,
+                            &mut feedback_rounds,
+                        )? {
+                            Some(_) => {
+                                let moved = pump_native_until_idle(
+                                    &cx,
+                                    &mut native_server,
+                                    sender_conn,
+                                    &mut server_packet_number,
+                                    DEFAULT_MAX_PACKET_BYTES,
+                                    6_400 + u64::from(feedback_rounds),
+                                )?;
+                                assert!(moved > 0);
+                            }
+                            None => {
+                                assert!(!proof_sent, "proof should be sent exactly once");
+                                let receipt = verify_in_memory_receipt(manifest, decoders);
+                                assert!(receipt.committed);
+                                assert!(receipt.sha_ok);
+                                assert!(receipt.merkle_ok);
+                                send_native_proof(&cx, &mut native_server, control, &receipt)?;
+                                let moved = pump_native_until_idle(
+                                    &cx,
+                                    &mut native_server,
+                                    sender_conn,
+                                    &mut server_packet_number,
+                                    DEFAULT_MAX_PACKET_BYTES,
+                                    6_500,
+                                )?;
+                                assert!(moved > 0);
+                                proof_sent = true;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ))
+        .expect("native established sender reaches proof");
+
+        assert_eq!(report.transfer_id, prepared.manifest.transfer_id);
+        assert_eq!(report.bytes_sent, 1_024);
+        assert_eq!(report.files, 2);
+        assert_eq!(report.peer, peer);
+        assert!(report.receipt.committed);
+        assert_eq!(report.receipt.bytes_received, 1_024);
+        assert!(symbols_accepted > 0);
+
+        let moved = pump_native_until_idle(
+            &cx,
+            &mut native_client,
+            &mut native_server,
+            &mut client_packet_number,
+            DEFAULT_MAX_PACKET_BYTES,
+            6_600,
+        )
+        .expect("deliver sender close");
+        assert!(moved > 0);
+        let close = next_native_control_frame(
+            &cx,
+            &mut native_server,
+            receiver_control.as_mut().expect("receiver control"),
+            "receive sender close",
+        )
+        .expect("receiver sees sender close");
+        assert_eq!(close.frame_type(), FrameType::Close);
     }
 
     #[test]
