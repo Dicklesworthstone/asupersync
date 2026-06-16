@@ -53,16 +53,43 @@ pub enum FileKind {
     Symlink,
     /// A directory entry (structural; reserved for explicit empty-dir support).
     Directory,
+    /// A named pipe (FIFO). Carries no content; recreated via `mkfifo` under an
+    /// opt-in policy, otherwise skipped and logged.
+    Fifo,
+    /// A unix-domain socket file. Represented in the manifest but not recreated
+    /// (sockets are runtime objects) — skipped and logged.
+    Socket,
+    /// A block device node. Represented in the manifest; recreating it needs
+    /// privilege (`mknod`) so it is skipped and logged by default.
+    BlockDevice,
+    /// A character device node. Represented in the manifest; recreating it needs
+    /// privilege (`mknod`) so it is skipped and logged by default.
+    CharDevice,
 }
 
 impl FileKind {
-    /// Stable byte tag for the metadata commitment encoding.
+    /// Stable byte tag for the metadata commitment encoding. Tags are append-only
+    /// — never renumber an existing variant or the commitment would shift.
     const fn tag(self) -> u8 {
         match self {
             Self::Regular => 0,
             Self::Symlink => 1,
             Self::Directory => 2,
+            Self::Fifo => 3,
+            Self::Socket => 4,
+            Self::BlockDevice => 5,
+            Self::CharDevice => 6,
         }
+    }
+
+    /// Whether this kind is a "special" filesystem object (FIFO / socket / device
+    /// node) — carries no content and is recreated only under an opt-in policy.
+    #[must_use]
+    pub const fn is_special(self) -> bool {
+        matches!(
+            self,
+            Self::Fifo | Self::Socket | Self::BlockDevice | Self::CharDevice
+        )
     }
 }
 
@@ -248,6 +275,20 @@ pub async fn read_entry_metadata(
 
     if effective.is_dir() {
         meta.file_kind = FileKind::Directory;
+    } else if !effective.is_file() {
+        use std::os::unix::fs::FileTypeExt;
+        let ft = effective.inner.file_type();
+        meta.file_kind = if ft.is_fifo() {
+            FileKind::Fifo
+        } else if ft.is_socket() {
+            FileKind::Socket
+        } else if ft.is_block_device() {
+            FileKind::BlockDevice
+        } else if ft.is_char_device() {
+            FileKind::CharDevice
+        } else {
+            FileKind::Regular
+        };
     }
 
     let inner = &effective.inner;

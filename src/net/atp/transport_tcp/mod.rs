@@ -472,6 +472,27 @@ fn validate_manifest(
     manifest: &TransferManifest,
     config: &TransferConfig,
 ) -> Result<(), TransportError> {
+    // The transfer_id is an off-wire string that is interpolated directly into
+    // the on-disk staging-directory path (`.atp-staging-{transfer_id}-{seq}`).
+    // A legitimate sender always emits a 32-char lowercase hex token
+    // (`transfer_id_hex`), so constrain it to a bounded alphanumeric token here.
+    // Without this, a hostile peer could set `transfer_id` to e.g.
+    // `x/../../../../tmp/pwn` and steer `remove_dir_all` / file writes outside
+    // the destination directory (directory traversal). Every other off-wire path
+    // field (`root_name`, per-entry `rel_path`) is already sanitized; this closes
+    // the last gap.
+    if manifest.transfer_id.is_empty()
+        || manifest.transfer_id.len() > 64
+        || !manifest
+            .transfer_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric())
+    {
+        return Err(TransportError::Frame(format!(
+            "unsafe manifest transfer_id: {}",
+            manifest.transfer_id
+        )));
+    }
     if manifest.total_bytes > config.max_transfer_bytes {
         return Err(TransportError::TooLarge {
             size: manifest.total_bytes,
@@ -706,12 +727,15 @@ pub async fn send_path(
     for entry in &entries {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
         let metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
-        let zero_content = matches!(metadata.file_kind, FileKind::Symlink | FileKind::Directory);
+        // Only regular files carry content bytes. Symlinks (target in
+        // `metadata`), empty directories, and special files (FIFO/socket/device)
+        // are zero-content — crucially this avoids `hash_file_streaming` opening a
+        // FIFO, which would block the sender waiting for a writer.
+        let zero_content = !matches!(metadata.file_kind, FileKind::Regular);
         let (size, content_id, content_sha256) = if zero_content {
-            // Symlinks (target in `metadata`) and empty directories carry no
-            // content bytes. Emit the canonical empty-content digest so the
-            // receiver — which sees zero ObjectData frames for this entry —
-            // reconstructs the same digest.
+            // Emit the canonical empty-content digest so the receiver — which
+            // sees zero ObjectData frames for this entry — reconstructs the same
+            // digest.
             let empty_sha: [u8; 32] = Sha256::digest(b"").into();
             (0u64, ObjectId::content(ContentId::from_bytes(b"")), empty_sha)
         } else {
@@ -820,10 +844,10 @@ pub async fn send_path(
     // the sender never holds a whole file (or the whole transfer) in memory.
     for (i, entry) in entries.iter().enumerate() {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        // Symlinks and empty directories carry no content bytes; the receiver
-        // creates them from the manifest metadata at commit, so emit no
-        // ObjectData frames for them.
-        if matches!(metadatas[i].file_kind, FileKind::Symlink | FileKind::Directory) {
+        // Non-regular entries (symlinks, empty dirs, special files) carry no
+        // content bytes; the receiver materializes them (or skips+logs them)
+        // from the manifest metadata at commit, so emit no ObjectData frames.
+        if !matches!(metadatas[i].file_kind, FileKind::Regular) {
             continue;
         }
         let index = u32::try_from(i).unwrap_or(u32::MAX);
@@ -1164,6 +1188,25 @@ pub async fn receive_connection(
                 } else {
                     base.clone()
                 };
+
+                // Special files (FIFO/socket/device) are represented in the
+                // manifest but not materialized in this slice: skip and log
+                // (no path committed), before creating any parent for them.
+                // Opt-in FIFO recreation (`mkfifo`) is a J2 follow-up.
+                if let Some(meta) = &entry.metadata {
+                    if meta.file_kind.is_special() {
+                        if cx.trace_buffer().is_some() {
+                            let path_str = out_path.display().to_string();
+                            let kind = format!("{:?}", meta.file_kind);
+                            cx.trace_with_fields(
+                                "atp_tcp_special_file_skipped",
+                                &[("path", path_str.as_str()), ("kind", kind.as_str())],
+                            );
+                        }
+                        continue;
+                    }
+                }
+
                 if let Some(parent) = out_path.parent() {
                     crate::fs::create_dir_all(parent).await?;
                 }
