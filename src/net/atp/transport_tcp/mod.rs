@@ -41,9 +41,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::net::atp::transport_common::{
-    EntryDigest, EntryMetadata, FileKind, StagedEntryReceive, StreamingError, apply_entry_metadata,
-    collect_entries, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
-    metadata_commitment, read_entry_metadata,
+    EntryDigest, EntryMetadata, FileKind, FilterSet, StagedEntryReceive, StreamingError,
+    apply_entry_metadata, collect_entries, flat_merkle_root_from_digests, hash_file_streaming,
+    hex_encode, metadata_commitment, read_entry_metadata,
 };
 use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
@@ -768,9 +768,31 @@ pub async fn send_path(
     config: TransferConfig,
     peer_id: &str,
 ) -> Result<SendReport, TransportError> {
+    send_path_filtered(cx, addr, source, config, peer_id, &FilterSet::new()).await
+}
+
+/// Like [`send_path`], but applies an include/exclude [`FilterSet`] to the source
+/// walk (rsync `--filter` / `--exclude` / `--include`).
+///
+/// Excluded files — and files beneath an excluded directory — are dropped before
+/// any hashing or transfer, so the manifest and the bytes on the wire commit to
+/// only the selected set. An empty filter behaves exactly like [`send_path`].
+/// Rescuing a file under an excluded directory requires including its ancestor
+/// directories first (rsync semantics; see [`FilterSet::is_path_included`]).
+pub async fn send_path_filtered(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: TransferConfig,
+    peer_id: &str,
+    filter: &FilterSet,
+) -> Result<SendReport, TransportError> {
     cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
 
-    let (root_name, is_directory, entries) = collect_entries(source).await?;
+    let (root_name, is_directory, mut entries) = collect_entries(source).await?;
+    if !filter.is_empty() {
+        entries.retain(|entry| filter.is_path_included(&entry.rel_path));
+    }
 
     // First pass: stream each file off disk to compute its size, content id, and
     // SHA-256 incrementally. `read_buf` is the only data-sized allocation and is

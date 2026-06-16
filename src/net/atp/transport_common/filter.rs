@@ -197,6 +197,32 @@ impl FilterSet {
         matches!(self.decision(rel_path, is_dir), FilterDecision::Include)
     }
 
+    /// Whether a *file* at `rel_path` survives filtering, accounting for
+    /// directory pruning: the file is excluded if it, or any of its ancestor
+    /// directories, is excluded.
+    ///
+    /// Use this to filter a file-only source walk (where directories are not
+    /// separate entries) — it yields the same result as walking with [`select`]
+    /// without needing directory entries. Rescuing a file under an excluded tree
+    /// still requires including its ancestor directories first (rsync semantics).
+    #[must_use]
+    pub fn is_path_included(&self, rel_path: &str) -> bool {
+        let segments: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut prefix = String::new();
+        for (i, seg) in segments.iter().enumerate() {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(seg);
+            // Ancestor components are directories; the final component is the file.
+            let is_dir = i + 1 < segments.len();
+            if matches!(self.decision(&prefix, is_dir), FilterDecision::Exclude) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Apply the filter to a set of entries with directory pruning, returning the
     /// transferred rel-paths in input order.
     ///
@@ -422,5 +448,33 @@ mod tests {
         assert!(is_under("target/a/b", "target"));
         assert!(!is_under("targetx", "target"));
         assert!(!is_under("other/target", "target"));
+    }
+
+    #[test]
+    fn is_path_included_prunes_files_under_excluded_dirs() {
+        let fs = FilterSet::with_rules(vec![
+            FilterRule::exclude("target/"),
+            FilterRule::exclude("*.tmp"),
+        ]);
+        assert!(fs.is_path_included("src/main.rs"));
+        assert!(fs.is_path_included("a/b/c.rs"));
+        // A file under the excluded `target/` directory is pruned even though its
+        // own basename matches nothing.
+        assert!(!fs.is_path_included("target/debug/app"));
+        // A *.tmp file anywhere is excluded.
+        assert!(!fs.is_path_included("a/b/c.tmp"));
+    }
+
+    #[test]
+    fn is_path_included_rescue_needs_ancestor_includes() {
+        let fs = FilterSet::with_rules(vec![
+            FilterRule::include("logs/"),
+            FilterRule::include("logs/keep.tmp"),
+            FilterRule::exclude("*.tmp"),
+        ]);
+        // The ancestor `logs/` include keeps the dir, then the explicit include
+        // rescues the file from the broad `*.tmp` exclude.
+        assert!(fs.is_path_included("logs/keep.tmp"));
+        assert!(!fs.is_path_included("other/x.tmp"));
     }
 }
