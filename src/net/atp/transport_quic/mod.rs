@@ -60,10 +60,15 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::bytes::{Bytes, BytesMut};
+use crate::codec::Decoder;
 use crate::cx::Cx;
+use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::FrameType;
 use crate::net::atp::transport_common::StreamingError;
-use crate::net::quic_native::{ManagedQuicEndpoint, NativeQuicConnection};
+use crate::net::quic_native::{
+    ManagedQuicEndpoint, NativeQuicConnection, QuicConnection, StreamId,
+};
 
 // Reuse the manifest / receipt / report wire+value types so QUIC and TCP share
 // one schema (see module docs). These are the "reuse manifest/report/receipt"
@@ -333,6 +338,100 @@ impl From<StreamingError> for QuicTransportError {
     }
 }
 
+impl From<crate::net::quic_native::NativeQuicConnectionError> for QuicTransportError {
+    fn from(err: crate::net::quic_native::NativeQuicConnectionError) -> Self {
+        Self::Quic(err.to_string())
+    }
+}
+
+/// Maximum control-stream chunk read per decode attempt.
+#[allow(dead_code)]
+const CONTROL_READ_CHUNK: usize = 64 * 1024;
+
+/// ATP frame transport over one QUIC bidirectional control stream.
+///
+/// This is the reliable control-plane half B2/B3 need: canonical ATP
+/// [`Frame`](crate::net::atp::protocol::frames::Frame) wire bytes are queued
+/// through the A6 control-stream API, and inbound bytes are incrementally
+/// decoded with the same [`AtpFrameCodec`] TCP uses. It is deliberately
+/// non-blocking: `try_recv` returns `Ok(None)` when the stream has only a
+/// partial frame or no bytes yet; the caller decides how to pump/wait.
+///
+/// The B2/B3 adapter is covered by inline tests here before the higher-level
+/// send/receive coroutines call it; keep the dead-code allowance pinned to this
+/// interim helper until those call sites land.
+#[allow(dead_code)]
+pub struct QuicFrameTransport {
+    stream: StreamId,
+    codec: AtpFrameCodec,
+    rbuf: BytesMut,
+}
+
+#[allow(dead_code)]
+impl QuicFrameTransport {
+    /// Open a local bidirectional control stream.
+    pub fn open(cx: &Cx, conn: &mut QuicConnection) -> Result<Self, QuicTransportError> {
+        let stream = conn.open_control_stream(cx)?;
+        Ok(Self::for_stream(stream))
+    }
+
+    /// Bind to an already-known control stream id.
+    ///
+    /// B3 uses this for the first client-initiated stream until the high-level
+    /// QUIC API exposes an accept-next-remote-control-stream helper.
+    pub fn for_stream(stream: StreamId) -> Self {
+        Self {
+            stream,
+            codec: AtpFrameCodec::new(),
+            rbuf: BytesMut::new(),
+        }
+    }
+
+    /// Underlying QUIC stream id.
+    #[must_use]
+    pub fn stream(&self) -> StreamId {
+        self.stream
+    }
+
+    /// Encode and queue a canonical ATP frame on the control stream.
+    pub fn send(
+        &mut self,
+        cx: &Cx,
+        conn: &mut QuicConnection,
+        frame: &crate::net::atp::protocol::frames::Frame,
+    ) -> Result<(), QuicTransportError> {
+        let wire = frame
+            .to_wire_bytes()
+            .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+        conn.write_control(cx, self.stream, Bytes::from(wire), false)?;
+        Ok(())
+    }
+
+    /// Try to decode the next complete ATP frame from the control stream.
+    pub fn try_recv(
+        &mut self,
+        cx: &Cx,
+        conn: &mut QuicConnection,
+    ) -> Result<Option<crate::net::atp::protocol::frames::Frame>, QuicTransportError> {
+        if let Some(frame) = self
+            .codec
+            .decode(&mut self.rbuf)
+            .map_err(|err| QuicTransportError::Frame(err.to_string()))?
+        {
+            return Ok(Some(frame));
+        }
+
+        let chunk = conn.read_control(cx, self.stream, CONTROL_READ_CHUNK)?;
+        if chunk.is_empty() {
+            return Ok(None);
+        }
+        self.rbuf.extend_from_slice(&chunk);
+        self.codec
+            .decode(&mut self.rbuf)
+            .map_err(|err| QuicTransportError::Frame(err.to_string()))
+    }
+}
+
 /// Emit a deterministic, structured config summary at the start of a transport
 /// operation (the "config summary on start" logging requirement). Routes
 /// through [`Cx::trace_with_fields`] so production stays silent unless a trace
@@ -499,9 +598,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::atp::protocol::frames::{Frame, ProtocolVersion};
+    use crate::net::quic_native::{
+        DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, QuicConnection, StreamDirection,
+        StreamRole, establish_loopback, pump_app_data, pump_until_idle,
+    };
 
     fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         futures_lite::future::block_on(fut)
+    }
+
+    fn established_pair() -> (Cx<crate::cx::cap::All>, QuicConnection, QuicConnection) {
+        let cx = Cx::for_testing();
+        let mut client = QuicConnection::client(NativeQuicConnectionConfig::default());
+        let mut server = QuicConnection::server(NativeQuicConnectionConfig::default());
+        client.record_verified_server_identity();
+        establish_loopback(&cx, &mut client, &mut server).expect("loopback establishes");
+        (cx, client, server)
     }
 
     #[test]
@@ -617,6 +730,103 @@ mod tests {
         assert!(rendered.contains("send_path"));
         assert!(rendered.contains("b0k8qo.2.2"));
         assert!(rendered.contains("failing closed"));
+    }
+
+    #[test]
+    fn quic_frame_transport_round_trips_canonical_atp_frames() {
+        let (cx, mut client, mut server) = established_pair();
+        let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let stream = tx.stream();
+        let mut rx = QuicFrameTransport::for_stream(stream);
+
+        let hello = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::Handshake,
+            b"hello".to_vec(),
+        )
+        .expect("handshake frame");
+        let manifest = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectManifest,
+            b"manifest-json".to_vec(),
+        )
+        .expect("manifest frame");
+
+        tx.send(&cx, &mut client, &hello).expect("send hello");
+        tx.send(&cx, &mut client, &manifest).expect("send manifest");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_000,
+        )
+        .expect("pump control bytes");
+
+        let got_hello = rx
+            .try_recv(&cx, &mut server)
+            .expect("decode hello")
+            .expect("hello frame available");
+        assert_eq!(got_hello.frame_type(), FrameType::Handshake);
+        assert_eq!(got_hello.payload(), b"hello");
+
+        let got_manifest = rx
+            .try_recv(&cx, &mut server)
+            .expect("decode manifest")
+            .expect("manifest frame available");
+        assert_eq!(got_manifest.frame_type(), FrameType::ObjectManifest);
+        assert_eq!(got_manifest.payload(), b"manifest-json");
+        assert!(
+            rx.try_recv(&cx, &mut server)
+                .expect("empty control stream")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn quic_frame_transport_buffers_partial_frame_until_complete() {
+        let (cx, mut client, mut server) = established_pair();
+        let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let first_client_bidi = crate::net::quic_native::StreamId::local(
+            StreamRole::Client,
+            StreamDirection::Bidirectional,
+            0,
+        );
+        assert_eq!(tx.stream(), first_client_bidi);
+        let mut rx = QuicFrameTransport::for_stream(first_client_bidi);
+
+        let frame = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectManifest,
+            vec![0xA5; 4096],
+        )
+        .expect("large manifest frame");
+        tx.send(&cx, &mut client, &frame).expect("send large frame");
+
+        let moved = pump_app_data(&cx, &mut client, &mut server, 256, 2_000)
+            .expect("pump one partial packet");
+        assert!(moved > 0);
+        assert!(
+            rx.try_recv(&cx, &mut server)
+                .expect("partial frame is buffered")
+                .is_none(),
+            "partial control-frame bytes must not decode early"
+        );
+
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_001,
+        )
+        .expect("pump remaining frame bytes");
+        let got = rx
+            .try_recv(&cx, &mut server)
+            .expect("decode complete frame")
+            .expect("complete frame available");
+        assert_eq!(got.frame_type(), FrameType::ObjectManifest);
+        assert_eq!(got.payload(), &[0xA5; 4096]);
     }
 
     #[test]

@@ -63,7 +63,9 @@ pub enum QuicSymbolEnvelopeError {
         need: usize,
     },
     /// The magic prefix did not match [`ATP_QUIC_SYMBOL_MAGIC`].
-    #[error("symbol envelope bad magic: found {found:#010x}, expected {ATP_QUIC_SYMBOL_MAGIC:#010x}")]
+    #[error(
+        "symbol envelope bad magic: found {found:#010x}, expected {ATP_QUIC_SYMBOL_MAGIC:#010x}"
+    )]
     BadMagic {
         /// The magic actually read.
         found: u32,
@@ -132,10 +134,11 @@ impl QuicSymbolEnvelope {
     /// Fails closed if the payload is larger than the `u16` length field allows
     /// (RaptorQ symbols are bounded well under this by `QuicConfig::symbol_size`).
     pub fn encode(&self) -> Result<Bytes, QuicSymbolEnvelopeError> {
-        let payload_len = u16::try_from(self.payload.len())
-            .map_err(|_| QuicSymbolEnvelopeError::PayloadTooLarge {
+        let payload_len = u16::try_from(self.payload.len()).map_err(|_| {
+            QuicSymbolEnvelopeError::PayloadTooLarge {
                 len: self.payload.len(),
-            })?;
+            }
+        })?;
 
         let mut out = Vec::with_capacity(self.encoded_len());
         out.extend_from_slice(&ATP_QUIC_SYMBOL_MAGIC.to_be_bytes());
@@ -176,8 +179,9 @@ impl QuicSymbolEnvelope {
             return Err(QuicSymbolEnvelopeError::BadMagic { found: magic });
         }
 
-        let transfer_tag =
-            u64::from_be_bytes([buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11]]);
+        let transfer_tag = u64::from_be_bytes([
+            buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11],
+        ]);
         let entry = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
         let sbn = buf[16];
         let esi = u32::from_be_bytes([buf[17], buf[18], buf[19], buf[20]]);
@@ -279,7 +283,9 @@ mod tests {
     #[test]
     fn decode_rejects_short_buffer() {
         let err = QuicSymbolEnvelope::decode(&[0u8; 10], false).unwrap_err();
-        assert!(matches!(err, QuicSymbolEnvelopeError::TooShort { need, .. } if need == ENVELOPE_HEADER_LEN));
+        assert!(
+            matches!(err, QuicSymbolEnvelopeError::TooShort { need, .. } if need == ENVELOPE_HEADER_LEN)
+        );
     }
 
     #[test]
