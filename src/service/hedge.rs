@@ -15,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 fn wall_clock_now() -> Time {
@@ -168,6 +168,12 @@ struct HedgeStats {
     hedge_wins: AtomicU64,
     /// Number of hedge requests currently occupying a pending slot.
     pending: AtomicU64,
+    /// Wakers of hedge futures parked waiting for a pending slot to free up.
+    /// `pending` is shared across all hedge futures cloned from one `Hedge`, so a
+    /// future that loses the slot race must be re-woken when another future
+    /// releases its slot — otherwise it parks only on its (slow) primary and its
+    /// hedge is silently never dispatched even while a slot is available.
+    slot_waiters: parking_lot::Mutex<Vec<Waker>>,
 }
 
 impl HedgeStats {
@@ -196,12 +202,33 @@ impl HedgeStats {
         }
     }
 
+    /// Register a waker to be notified when a pending slot frees up. Deduped via
+    /// `Waker::will_wake` so repeated polls of the same future don't accumulate
+    /// duplicate entries.
+    fn register_slot_waiter(&self, waker: &Waker) {
+        let mut waiters = self.slot_waiters.lock();
+        if waiters.iter().any(|existing| existing.will_wake(waker)) {
+            return;
+        }
+        waiters.push(waker.clone());
+    }
+
     fn release_pending_slot(&self) {
-        let _ = self
+        let released = self
             .pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 current.checked_sub(1)
-            });
+            })
+            .is_ok();
+        // Wake one parked acquirer so the freed slot is actually re-contended.
+        // Waking exactly one (not all) avoids a thundering herd; a woken future
+        // that loses the slot to a racer re-registers and is woken by the next
+        // release. The decrement happens-before this pop, and a parked future's
+        // waker is pushed-before its failed acquire which observes the
+        // pre-decrement value, so the pop always sees that waker — no lost wakeup.
+        if released && let Some(waker) = self.slot_waiters.lock().pop() {
+            waker.wake();
+        }
     }
 
     fn finish_started_hedge(&self, hedge_won: bool) {
@@ -224,6 +251,7 @@ impl<S> Hedge<S> {
                 hedged: AtomicU64::new(0),
                 hedge_wins: AtomicU64::new(0),
                 pending: AtomicU64::new(0),
+                slot_waiters: parking_lot::Mutex::new(Vec::new()),
             }),
             ready_observed: false,
         }
@@ -600,7 +628,20 @@ where
                                     *slot_held = true;
                                     progressed = true;
                                 } else if primary.is_some() {
-                                    return Poll::Pending;
+                                    // Park for a freed slot. Register BEFORE the
+                                    // final re-check so a concurrent release
+                                    // can't be missed (register-then-recheck
+                                    // closes the lost-wakeup race). Without this
+                                    // the future parks only on its slow primary
+                                    // and its hedge never fires even once a slot
+                                    // is freed by another hedge future.
+                                    stats.register_slot_waiter(cx.waker());
+                                    if stats.try_acquire_pending_slot(*max_pending) {
+                                        *slot_held = true;
+                                        progressed = true;
+                                    } else {
+                                        return Poll::Pending;
+                                    }
                                 }
                             }
 
@@ -1359,6 +1400,7 @@ mod tests {
             hedged: AtomicU64::new(0),
             hedge_wins: AtomicU64::new(0),
             pending: AtomicU64::new(0),
+            slot_waiters: parking_lot::Mutex::new(Vec::new()),
         });
 
         // Primary future that never completes (stays Pending).
@@ -1413,6 +1455,7 @@ mod tests {
                 hedged: AtomicU64::new(0),
                 hedge_wins: AtomicU64::new(0),
                 pending: AtomicU64::new(0),
+                slot_waiters: parking_lot::Mutex::new(Vec::new()),
             }),
         );
 
