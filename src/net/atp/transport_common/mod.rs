@@ -4,11 +4,15 @@
 //! TCP, RaptorQ, and native QUIC can reuse without copying private helpers.
 
 pub mod metadata;
+pub mod mirror;
 pub mod streaming;
 
 pub use metadata::{
     EntryMetadata, FileKind, MetadataApplyReport, apply_entry_metadata, metadata_commitment,
     read_entry_metadata,
+};
+pub use mirror::{
+    MirrorEntryKind, MirrorError, MirrorExtra, MirrorPolicy, MirrorReport, mirror_dest,
 };
 pub use streaming::{
     EntryDigest, SourceEntry, StagedEntryReceive, StreamingError, collect_entries,
