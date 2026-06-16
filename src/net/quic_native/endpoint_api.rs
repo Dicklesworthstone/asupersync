@@ -213,7 +213,8 @@ impl QuicConnection {
     /// **client** connection. On the production path it must be called only
     /// after a genuine certificate verification (chain + hostname + signature)
     /// has succeeded; there is deliberately no insecure skip-verify toggle
-    /// (`asupersync-7pwwwe`). It is a no-op for a server connection.
+    /// (`asupersync-7pwwwe`). On a server connection it has no effect on the
+    /// handshake — the identity gate is only consulted on the client path.
     pub fn record_verified_server_identity(&mut self) {
         apitrace!("event=server_identity_recorded role={:?}", self.role);
         self.inner.record_verified_server_identity();
@@ -458,6 +459,11 @@ pub fn establish_loopback(
 /// bytes themselves really flow through
 /// [`NativeQuicConnection::generate_frames`] →
 /// [`NativeQuicConnection::process_packet_payload`].
+///
+/// It deliberately does not record sent packets through the loss-recovery
+/// machine (`on_packet_sent` / `on_ack_received`), so RTT and bytes-in-flight
+/// reported by [`QuicConnection::path_stats`] stay at their initial defaults
+/// under the loopback; the production event-loop path populates those signals.
 ///
 /// # Errors
 /// Returns a [`NativeQuicConnectionError`] if frame generation, encoding, or

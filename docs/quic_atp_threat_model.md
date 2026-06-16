@@ -74,9 +74,12 @@ The native QUIC connection advances handshake/1-RTT keys via **explicit transiti
 calls** (`begin_handshake` → `on_handshake_keys_available` →
 `on_1rtt_keys_available` → `on_handshake_confirmed`); receiving a `CRYPTO` frame
 only nudges `Idle → Handshaking`. There is no TLS-over-CRYPTO state machine that
-completes a handshake from **exchanged bytes**. Consequently a real two-endpoint
-connection cannot complete a handshake over the wire yet, and the production
-connect path fails closed. `asupersync-arq-quic-epic-b0k8qo.1.5` ("A5") delivered
+completes a handshake from **exchanged bytes**. Consequently there is no
+production wire-handshake path two endpoints can use to establish over the
+network yet; what holds the line is the connection's fail-closed identity gate,
+which rejects any attempt to confirm a client handshake without a recorded
+verified identity rather than silently accepting one.
+`asupersync-arq-quic-epic-b0k8qo.1.5` ("A5") delivered
 the X.509 *verification* half but not this *driver* half; it is the prerequisite
 for the A7 real-UDP loopback proof. **Until it lands, "secure over the open
 internet" is unproven, not merely unfinished.**
