@@ -60,15 +60,19 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
-use crate::net::atp::protocol::frames::FrameType;
+use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::transport_common::StreamingError;
 use crate::net::quic_native::{
     ManagedQuicEndpoint, NativeQuicConnection, QuicConnection, StreamId,
 };
+use crate::types::symbol::ObjectId;
 
 // Reuse the manifest / receipt / report wire+value types so QUIC and TCP share
 // one schema (see module docs). These are the "reuse manifest/report/receipt"
@@ -344,6 +348,108 @@ impl From<crate::net::quic_native::NativeQuicConnectionError> for QuicTransportE
     }
 }
 
+// ─── Control-plane payloads (JSON over one QUIC stream) ─────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct QuicHello {
+    protocol: u32,
+    role: String,
+    peer_id: String,
+    symbol_size: u16,
+    max_block_size: u64,
+    #[serde(default)]
+    symbol_auth: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct QuicHelloAck {
+    accepted: bool,
+    peer_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// Receiver → sender fountain feedback: entries still needing more symbols.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct QuicNeedMore {
+    pending: Vec<u32>,
+}
+
+#[allow(dead_code)]
+fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, QuicTransportError> {
+    let payload =
+        serde_json::to_vec(value).map_err(|err| QuicTransportError::Control(err.to_string()))?;
+    let frame = Frame::new(ProtocolVersion::CURRENT, ty, payload)
+        .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+    let encoded_len = frame.encoded_len() as u64;
+    if encoded_len > MAX_FRAME_SIZE {
+        return Err(QuicTransportError::Frame(format!(
+            "{ty:?} JSON frame encodes to {encoded_len} bytes (max {MAX_FRAME_SIZE}); \
+             split or chunk the manifest/control payload"
+        )));
+    }
+    Ok(frame)
+}
+
+#[allow(dead_code)]
+fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, QuicTransportError> {
+    serde_json::from_slice(frame.payload())
+        .map_err(|err| QuicTransportError::Control(err.to_string()))
+}
+
+#[allow(dead_code)]
+fn parse_json_frame<T: for<'de> Deserialize<'de>>(
+    frame: &Frame,
+    expected: FrameType,
+    expected_name: &'static str,
+) -> Result<T, QuicTransportError> {
+    if frame.frame_type() != expected {
+        return Err(QuicTransportError::Unexpected {
+            got: frame.frame_type(),
+            expected: expected_name,
+        });
+    }
+    parse_json(frame)
+}
+
+/// Derive the per-entry RaptorQ [`ObjectId`] deterministically from the
+/// transfer id and entry index, matching `transport_rq` so the symbol bridge can
+/// resolve envelope routing without carrying object ids on the wire.
+#[allow(dead_code)]
+fn entry_object_id(transfer_id: &str, index: u32) -> ObjectId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.atp.rq.entry-object-id.v1\0");
+    hasher.update(transfer_id.as_bytes());
+    hasher.update(index.to_be_bytes());
+    let digest = hasher.finalize();
+    let high = u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ]);
+    let low = u64::from_be_bytes([
+        digest[8], digest[9], digest[10], digest[11], digest[12], digest[13], digest[14],
+        digest[15],
+    ]);
+    ObjectId::new(high, low)
+}
+
+/// First 8 bytes of a transfer-id digest as the QUIC DATAGRAM routing tag.
+///
+/// This is a cheap stray-packet filter and routing key, not a security
+/// boundary; per-symbol auth lives in the symbol envelope/auth context.
+#[allow(dead_code)]
+fn transfer_tag(transfer_id: &str) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.atp.rq.tag.v1\0");
+    hasher.update(transfer_id.as_bytes());
+    let digest = hasher.finalize();
+    u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ])
+}
+
 /// Maximum control-stream chunk read per decode attempt.
 #[allow(dead_code)]
 const CONTROL_READ_CHUNK: usize = 64 * 1024;
@@ -407,6 +513,19 @@ impl QuicFrameTransport {
         Ok(())
     }
 
+    /// Serialize a typed JSON control payload, wrap it in the requested ATP frame
+    /// type, and queue it on the control stream.
+    pub fn send_json<T: Serialize>(
+        &mut self,
+        cx: &Cx,
+        conn: &mut QuicConnection,
+        ty: FrameType,
+        value: &T,
+    ) -> Result<(), QuicTransportError> {
+        let frame = json_frame(ty, value)?;
+        self.send(cx, conn, &frame)
+    }
+
     /// Try to decode the next complete ATP frame from the control stream.
     pub fn try_recv(
         &mut self,
@@ -430,6 +549,161 @@ impl QuicFrameTransport {
             .decode(&mut self.rbuf)
             .map_err(|err| QuicTransportError::Frame(err.to_string()))
     }
+
+    /// Try to receive a typed JSON control payload, rejecting unexpected frame
+    /// types before deserializing attacker-controlled JSON bytes.
+    pub fn try_recv_json<T: for<'de> Deserialize<'de>>(
+        &mut self,
+        cx: &Cx,
+        conn: &mut QuicConnection,
+        expected: FrameType,
+        expected_name: &'static str,
+    ) -> Result<Option<T>, QuicTransportError> {
+        let Some(frame) = self.try_recv(cx, conn)? else {
+            return Ok(None);
+        };
+        parse_json_frame(&frame, expected, expected_name).map(Some)
+    }
+}
+
+#[allow(dead_code)]
+fn next_control_frame(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    operation: &'static str,
+) -> Result<Frame, QuicTransportError> {
+    control
+        .try_recv(cx, conn)?
+        .ok_or_else(|| QuicTransportError::Frame(format!("{operation}: no complete frame ready")))
+}
+
+#[allow(dead_code)]
+fn sender_hello(peer_id: &str, config: &QuicConfig, symbol_auth: bool) -> QuicHello {
+    QuicHello {
+        protocol: ATP_QUIC_PROTOCOL,
+        role: "sender".to_string(),
+        peer_id: peer_id.to_string(),
+        symbol_size: config.symbol_size,
+        max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
+        symbol_auth,
+    }
+}
+
+#[allow(dead_code)]
+fn reject_hello_reason(
+    hello: &QuicHello,
+    config: &QuicConfig,
+    expected_symbol_auth: bool,
+) -> Option<String> {
+    if hello.protocol != ATP_QUIC_PROTOCOL {
+        return Some(format!(
+            "unsupported protocol {} (this peer speaks {ATP_QUIC_PROTOCOL})",
+            hello.protocol
+        ));
+    }
+    if hello.symbol_size == 0 {
+        return Some("symbol_size must be greater than 0".to_string());
+    }
+    if hello.max_block_size == 0 {
+        return Some("max_block_size must be greater than 0".to_string());
+    }
+    let min_datagram = usize::from(hello.symbol_size) + AUTH_ENVELOPE_HEADER_LEN;
+    if min_datagram > config.max_datagram_size {
+        return Some(format!(
+            "sender symbol_size ({}) plus {AUTH_ENVELOPE_HEADER_LEN}-byte authenticated envelope \
+             header exceeds receiver max_datagram_size ({})",
+            hello.symbol_size, config.max_datagram_size
+        ));
+    }
+    let max_block_size = u64::try_from(config.max_block_size).unwrap_or(u64::MAX);
+    if hello.max_block_size > max_block_size {
+        return Some(format!(
+            "sender max_block_size ({}) exceeds receiver max_block_size ({max_block_size})",
+            hello.max_block_size
+        ));
+    }
+    if hello.symbol_auth != expected_symbol_auth {
+        return Some(format!(
+            "symbol authentication mismatch: sender={}, receiver={expected_symbol_auth}",
+            hello.symbol_auth
+        ));
+    }
+    None
+}
+
+// B2/B3 coroutine helpers are exercised by deterministic loopback tests before
+// the public transfer entry points call them.
+#[allow(dead_code)]
+fn send_sender_hello(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    config: &QuicConfig,
+    peer_id: &str,
+    symbol_auth: bool,
+) -> Result<(), QuicTransportError> {
+    let frame = json_frame(
+        FrameType::Handshake,
+        &sender_hello(peer_id, config, symbol_auth),
+    )?;
+    control.send(cx, conn, &frame)
+}
+
+#[allow(dead_code)]
+fn receive_sender_hello_and_ack(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    config: &QuicConfig,
+    peer_id: &str,
+    expected_symbol_auth: bool,
+) -> Result<QuicHello, QuicTransportError> {
+    let frame = next_control_frame(cx, conn, control, "receive sender handshake")?;
+    if frame.frame_type() != FrameType::Handshake {
+        return Err(QuicTransportError::Unexpected {
+            got: frame.frame_type(),
+            expected: "Handshake",
+        });
+    }
+    let hello: QuicHello = parse_json(&frame)?;
+    let reason = reject_hello_reason(&hello, config, expected_symbol_auth);
+    let accepted = reason.is_none();
+    let ack = QuicHelloAck {
+        accepted,
+        peer_id: peer_id.to_string(),
+        reason: reason.clone(),
+    };
+    let ack_frame = json_frame(FrameType::HandshakeAck, &ack)?;
+    control.send(cx, conn, &ack_frame)?;
+    if let Some(reason) = reason {
+        return Err(QuicTransportError::HandshakeRejected(reason));
+    }
+    Ok(hello)
+}
+
+#[allow(dead_code)]
+fn receive_sender_hello_ack(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+) -> Result<QuicHelloAck, QuicTransportError> {
+    let frame = next_control_frame(cx, conn, control, "receive sender handshake ack")?;
+    if frame.frame_type() != FrameType::HandshakeAck {
+        return Err(QuicTransportError::Unexpected {
+            got: frame.frame_type(),
+            expected: "HandshakeAck",
+        });
+    }
+    let ack: QuicHelloAck = parse_json(&frame)?;
+    if !ack.accepted {
+        return Err(QuicTransportError::HandshakeRejected(
+            ack.reason
+                .clone()
+                .unwrap_or_else(|| "no reason given".to_string()),
+        ));
+    }
+    Ok(ack)
 }
 
 /// Emit a deterministic, structured config summary at the start of a transport
@@ -827,6 +1101,329 @@ mod tests {
             .expect("complete frame available");
         assert_eq!(got.frame_type(), FrameType::ObjectManifest);
         assert_eq!(got.payload(), &[0xA5; 4096]);
+    }
+
+    #[test]
+    fn quic_frame_transport_round_trips_typed_json_control_payloads() {
+        let (cx, mut client, mut server) = established_pair();
+        let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let stream = tx.stream();
+        let mut rx = QuicFrameTransport::for_stream(stream);
+        let manifest = TransferManifest {
+            transfer_id: "transfer42".to_string(),
+            root_name: "data".to_string(),
+            is_directory: true,
+            total_bytes: 9,
+            merkle_root_hex: "00".repeat(32),
+            metadata_root_hex: None,
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: "a/b.txt".to_string(),
+                size: 9,
+                sha256_hex: "ff".repeat(32),
+                metadata: None,
+            }],
+        };
+
+        tx.send_json(&cx, &mut client, FrameType::ObjectManifest, &manifest)
+            .expect("send manifest JSON frame");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_000,
+        )
+        .expect("pump control bytes");
+
+        let got = rx
+            .try_recv_json::<TransferManifest>(
+                &cx,
+                &mut server,
+                FrameType::ObjectManifest,
+                "ObjectManifest",
+            )
+            .expect("receive manifest JSON frame")
+            .expect("manifest available");
+        assert_eq!(got, manifest);
+        assert!(
+            rx.try_recv_json::<TransferManifest>(
+                &cx,
+                &mut server,
+                FrameType::ObjectManifest,
+                "ObjectManifest",
+            )
+            .expect("empty control stream")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn quic_frame_transport_rejects_unexpected_json_control_frame_type() {
+        let (cx, mut client, mut server) = established_pair();
+        let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let stream = tx.stream();
+        let mut rx = QuicFrameTransport::for_stream(stream);
+        let receipt = ReceiveReceipt {
+            committed: true,
+            bytes_received: 9,
+            files: 1,
+            sha_ok: true,
+            merkle_ok: true,
+            reason: None,
+            committed_paths: vec!["/dest/a/b.txt".to_string()],
+        };
+
+        tx.send_json(&cx, &mut client, FrameType::Proof, &receipt)
+            .expect("send proof JSON frame");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_000,
+        )
+        .expect("pump control bytes");
+
+        let err = rx
+            .try_recv_json::<TransferManifest>(
+                &cx,
+                &mut server,
+                FrameType::ObjectManifest,
+                "ObjectManifest",
+            )
+            .expect_err("wrong frame type must fail closed");
+        match err {
+            QuicTransportError::Unexpected { got, expected } => {
+                assert_eq!(got, FrameType::Proof);
+                assert_eq!(expected, "ObjectManifest");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quic_frame_transport_rejects_malformed_json_control_payload() {
+        let (cx, mut client, mut server) = established_pair();
+        let mut tx = QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let stream = tx.stream();
+        let mut rx = QuicFrameTransport::for_stream(stream);
+        let bad = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectManifest,
+            b"not-json".to_vec(),
+        )
+        .expect("malformed JSON frame");
+
+        tx.send(&cx, &mut client, &bad)
+            .expect("send malformed JSON frame");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            2_000,
+        )
+        .expect("pump control bytes");
+
+        let err = rx
+            .try_recv_json::<TransferManifest>(
+                &cx,
+                &mut server,
+                FrameType::ObjectManifest,
+                "ObjectManifest",
+            )
+            .expect_err("malformed JSON must fail closed");
+        assert!(matches!(err, QuicTransportError::Control(message) if !message.is_empty()));
+    }
+
+    #[test]
+    fn quic_control_payloads_round_trip_as_json_frames() {
+        let hello = QuicHello {
+            protocol: ATP_QUIC_PROTOCOL,
+            role: "sender".to_string(),
+            peer_id: "peer-a".to_string(),
+            symbol_size: DEFAULT_SYMBOL_SIZE,
+            max_block_size: u64::try_from(DEFAULT_MAX_BLOCK_SIZE).unwrap_or(u64::MAX),
+            symbol_auth: true,
+        };
+        let hello_frame = json_frame(FrameType::Handshake, &hello).expect("hello frame");
+        assert_eq!(hello_frame.version(), ProtocolVersion::CURRENT);
+        assert_eq!(hello_frame.frame_type(), FrameType::Handshake);
+        assert_eq!(
+            parse_json::<QuicHello>(&hello_frame).expect("parse hello"),
+            hello
+        );
+
+        let ack = QuicHelloAck {
+            accepted: false,
+            peer_id: "peer-b".to_string(),
+            reason: Some("unsupported protocol".to_string()),
+        };
+        let ack_frame = json_frame(FrameType::HandshakeAck, &ack).expect("ack frame");
+        assert_eq!(ack_frame.frame_type(), FrameType::HandshakeAck);
+        assert_eq!(
+            parse_json::<QuicHelloAck>(&ack_frame).expect("parse ack"),
+            ack
+        );
+
+        let need_more = QuicNeedMore {
+            pending: vec![0, 2, 7],
+        };
+        let feedback_frame =
+            json_frame(FrameType::ObjectRequest, &need_more).expect("feedback frame");
+        assert_eq!(feedback_frame.frame_type(), FrameType::ObjectRequest);
+        assert_eq!(
+            parse_json::<QuicNeedMore>(&feedback_frame).expect("parse feedback"),
+            need_more
+        );
+    }
+
+    #[test]
+    fn quic_control_handshake_accepts_matching_sender() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig::default();
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+
+        send_sender_hello(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )
+        .expect("send hello");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            3_000,
+        )
+        .expect("deliver hello");
+
+        let hello = receive_sender_hello_and_ack(
+            &cx,
+            &mut server,
+            &mut receiver_control,
+            &config,
+            "receiver-peer",
+            false,
+        )
+        .expect("receiver accepts hello");
+        assert_eq!(hello.protocol, ATP_QUIC_PROTOCOL);
+        assert_eq!(hello.peer_id, "sender-peer");
+        assert_eq!(hello.symbol_size, DEFAULT_SYMBOL_SIZE);
+        assert_eq!(
+            hello.max_block_size,
+            u64::try_from(DEFAULT_MAX_BLOCK_SIZE).unwrap_or(u64::MAX)
+        );
+
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            3_001,
+        )
+        .expect("deliver ack");
+        let ack = receive_sender_hello_ack(&cx, &mut client, &mut sender_control)
+            .expect("sender receives accepted ack");
+        assert!(ack.accepted);
+        assert_eq!(ack.peer_id, "receiver-peer");
+        assert_eq!(ack.reason, None);
+    }
+
+    #[test]
+    fn quic_control_handshake_rejects_wrong_protocol_and_reports_reason() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig::default();
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+
+        let bad_hello = QuicHello {
+            protocol: ATP_QUIC_PROTOCOL + 99,
+            role: "sender".to_string(),
+            peer_id: "sender-peer".to_string(),
+            symbol_size: config.symbol_size,
+            max_block_size: u64::try_from(config.max_block_size).unwrap_or(u64::MAX),
+            symbol_auth: false,
+        };
+        let frame = json_frame(FrameType::Handshake, &bad_hello).expect("bad hello frame");
+        sender_control
+            .send(&cx, &mut client, &frame)
+            .expect("send bad hello");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            4_000,
+        )
+        .expect("deliver bad hello");
+
+        let err = receive_sender_hello_and_ack(
+            &cx,
+            &mut server,
+            &mut receiver_control,
+            &config,
+            "receiver-peer",
+            false,
+        )
+        .expect_err("receiver rejects wrong protocol");
+        assert!(matches!(
+            err,
+            QuicTransportError::HandshakeRejected(reason)
+                if reason.contains("unsupported protocol")
+        ));
+
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            4_001,
+        )
+        .expect("deliver rejected ack");
+        let err = receive_sender_hello_ack(&cx, &mut client, &mut sender_control)
+            .expect_err("sender sees rejected ack");
+        assert!(matches!(
+            err,
+            QuicTransportError::HandshakeRejected(reason)
+                if reason.contains("unsupported protocol")
+        ));
+    }
+
+    #[test]
+    fn parse_json_rejects_wrong_payload_shape() {
+        let frame = Frame::new(
+            ProtocolVersion::CURRENT,
+            FrameType::ObjectRequest,
+            b"not-json".to_vec(),
+        )
+        .expect("malformed json frame");
+
+        assert!(matches!(
+            parse_json::<QuicNeedMore>(&frame),
+            Err(QuicTransportError::Control(message)) if !message.is_empty()
+        ));
+    }
+
+    #[test]
+    fn quic_entry_object_id_and_transfer_tag_are_deterministic() {
+        let first_object = entry_object_id("transfer-1", 0);
+        assert_eq!(first_object, entry_object_id("transfer-1", 0));
+        assert_ne!(first_object, entry_object_id("transfer-1", 1));
+        assert_ne!(first_object, entry_object_id("transfer-2", 0));
+
+        let first_tag = transfer_tag("transfer-1");
+        assert_eq!(first_tag, transfer_tag("transfer-1"));
+        assert_ne!(first_tag, transfer_tag("transfer-2"));
+        assert_ne!(first_tag, 0);
     }
 
     #[test]
