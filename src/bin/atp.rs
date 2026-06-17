@@ -519,9 +519,17 @@ fn generate_rq_auth_key_hex() -> Result<String, String> {
 fn build_runtime(workers: usize) -> Result<asupersync::runtime::Runtime, String> {
     // The RQ transport needs a real platform reactor for efficient UDP I/O; the
     // TCP transport benefits from it too. Enable it for both.
+    // A blocking pool is required for CPU-bound fan-out (parallel RaptorQ per-block encode/decode,
+    // F3/F6.3): without it `Cx::spawn_blocking` silently runs inline on a worker, capping parallelism
+    // at `worker_threads`. Size it from the host parallelism so the encode/decode can use the cores.
+    let max_blocking = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(8)
+        .clamp(workers.max(2), 64);
     RuntimeBuilder::multi_thread()
         .worker_threads(workers.max(1))
         .enable_platform_reactor(true)
+        .blocking_threads(workers.max(2), max_blocking)
         .build()
         .map_err(|e| format!("build runtime: {e}"))
 }
