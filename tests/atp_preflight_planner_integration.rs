@@ -456,14 +456,8 @@ async fn test_resume_scenario() {
             .as_deref()
             .is_some_and(|token| token.starts_with("journal://atp-resume/v1/"))
     );
-    assert_eq!(
-        plan.resume_state.bytes_completed,
-        partial_bytes.len() as u64
-    );
-    assert_eq!(
-        plan.resume_state.bytes_remaining,
-        (source_bytes.len() - partial_bytes.len()) as u64
-    );
+    assert_eq!(plan.resume_state.bytes_completed, 0);
+    assert_eq!(plan.resume_state.bytes_remaining, source_bytes.len() as u64);
     assert_eq!(plan.resume_state.chunks_completed, 0);
     assert_eq!(plan.resume_state.next_chunk_index, 0);
 }
@@ -561,7 +555,8 @@ async fn test_resume_chunk_accounting_keeps_partial_chunk_unverified() {
         .unwrap();
 
     assert_eq!(plan.chunking_profile.chunk_size, 64 * 1024);
-    assert_eq!(plan.resume_state.bytes_completed, 64 * 1024 + 1);
+    assert_eq!(plan.resume_state.bytes_completed, 64 * 1024);
+    assert_eq!(plan.resume_state.bytes_remaining, 536 * 1024);
     assert_eq!(plan.resume_state.chunks_completed, 1);
     assert_eq!(plan.resume_state.next_chunk_index, 1);
 }

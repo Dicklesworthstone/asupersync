@@ -772,17 +772,21 @@ impl AtpTransferPlanner {
         let resume_available = options.allow_resume && destination_path.exists();
 
         let (bytes_completed, chunks_completed) = if resume_available {
-            let completed = completed_bytes_for_path(destination_path)?;
-            if completed > object_graph.total_bytes {
+            let observed_bytes = completed_bytes_for_path(destination_path)?;
+            if observed_bytes > object_graph.total_bytes {
                 return Err(PlannerError::InvalidInput(format!(
                     "Resume checkpoint for {} has {} completed bytes, which exceeds source object graph size {}",
                     destination_path.display(),
-                    completed,
+                    observed_bytes,
                     object_graph.total_bytes
                 )));
             }
-            let chunks = completed / u64::from(chunk_size.max(1));
-            (completed, chunks)
+            let chunk_size_bytes = u64::from(chunk_size.max(1));
+            let chunks = observed_bytes / chunk_size_bytes;
+            let durable_prefix_bytes = chunks
+                .saturating_mul(chunk_size_bytes)
+                .min(object_graph.total_bytes);
+            (durable_prefix_bytes, chunks)
         } else {
             (0, 0)
         };
