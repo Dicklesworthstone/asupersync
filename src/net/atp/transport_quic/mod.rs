@@ -93,9 +93,10 @@ use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::transport_common::{
-    EntryDigest, EntryMetadata, FileKind, StreamingError, collect_entries,
-    flat_merkle_root_from_digests, flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
-    metadata_commitment, read_entry_metadata,
+    EntryDigest, EntryMetadata, FileKind, MetadataApplyReport, StreamingError,
+    apply_entry_metadata, collect_entries, flat_merkle_root_from_digests,
+    flat_merkle_root_from_slices, hash_file_streaming, hex_encode, metadata_commitment,
+    read_entry_metadata,
 };
 use crate::net::atp::transport_rq::{
     RqConfig, RqError, effective_max_block_size_for_largest_entry as rq_effective_max_block_size,
@@ -2367,7 +2368,8 @@ fn verify_in_memory_receipt(
             .iter()
             .map(|(rel_path, bytes)| (rel_path.as_str(), bytes.as_slice())),
     ) == manifest.merkle_root_hex;
-    let committed = sha_ok && merkle_ok && pending_entries(decoders).is_empty();
+    let metadata_ok = manifest_metadata_commitment(manifest) == manifest.metadata_root_hex;
+    let committed = sha_ok && merkle_ok && metadata_ok && pending_entries(decoders).is_empty();
     let committed_paths = if committed {
         manifest
             .entries
@@ -2391,6 +2393,8 @@ fn verify_in_memory_receipt(
             Some("per-entry SHA-256 mismatch".to_string())
         } else if !merkle_ok {
             Some("merkle-root mismatch".to_string())
+        } else if !metadata_ok {
+            Some("metadata commitment mismatch".to_string())
         } else {
             Some("entries still pending".to_string())
         },
@@ -3634,20 +3638,19 @@ fn validate_quic_manifest(
             "single-file transfer manifest must contain exactly one entry".to_string(),
         ));
     }
-    if manifest.metadata_root_hex.is_some()
-        || manifest
-            .entries
-            .iter()
-            .any(|entry| entry.metadata.is_some())
+    if manifest
+        .metadata_root_hex
+        .as_ref()
+        .is_some_and(|root| root.len() != 64 || !root.bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
         return Err(QuicTransportError::Source(
-            "transport_quic receive_connection does not yet commit metadata-bearing manifests"
-                .to_string(),
+            "manifest metadata_root_hex is not a 64-byte hex digest".to_string(),
         ));
     }
 
     let mut seen_paths = std::collections::BTreeSet::new();
     let mut total = 0u64;
+    let empty_sha_hex = hex_encode(&Sha256::digest(b""));
     for (expected, entry) in manifest.entries.iter().enumerate() {
         let expected = u32::try_from(expected).unwrap_or(u32::MAX);
         if entry.index != expected {
@@ -3662,6 +3665,38 @@ fn validate_quic_manifest(
             ));
         }
         quic_join_relative(Path::new("base"), &entry.rel_path)?;
+        let metadata = entry.metadata.clone().unwrap_or_default();
+        if metadata.hardlink_target.is_some() && !matches!(metadata.file_kind, FileKind::Regular) {
+            return Err(QuicTransportError::Source(format!(
+                "manifest entry {} declares hardlink metadata on non-regular kind {:?}",
+                entry.rel_path, metadata.file_kind
+            )));
+        }
+        if matches!(metadata.file_kind, FileKind::Symlink)
+            && metadata.symlink_target.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(QuicTransportError::Source(format!(
+                "manifest symlink entry {} is missing symlink_target",
+                entry.rel_path
+            )));
+        }
+        if let Some(primary_rel) = &metadata.hardlink_target {
+            quic_join_relative(Path::new("base"), primary_rel)?;
+            if primary_rel == &entry.rel_path || !seen_paths.contains(primary_rel.as_str()) {
+                return Err(QuicTransportError::Source(format!(
+                    "manifest hardlink entry {} targets missing or later primary {}",
+                    entry.rel_path, primary_rel
+                )));
+            }
+        }
+        if (!matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some())
+            && (entry.size != 0 || entry.sha256_hex.as_str() != empty_sha_hex.as_str())
+        {
+            return Err(QuicTransportError::Source(format!(
+                "manifest metadata-only entry {} must carry zero content",
+                entry.rel_path
+            )));
+        }
         if !seen_paths.insert(entry.rel_path.clone()) {
             return Err(QuicTransportError::Source(format!(
                 "duplicate manifest entry path {}",
@@ -3689,6 +3724,12 @@ fn validate_quic_manifest(
             manifest.total_bytes
         )));
     }
+    if manifest_metadata_commitment(manifest) != manifest.metadata_root_hex {
+        return Err(QuicTransportError::Source(
+            "manifest metadata commitment mismatch".to_string(),
+        ));
+    }
+    reject_quic_symlink_traversal(manifest)?;
     Ok(())
 }
 
@@ -3755,6 +3796,162 @@ fn quic_join_relative(base: &Path, rel: &str) -> Result<PathBuf, QuicTransportEr
     Ok(out)
 }
 
+fn manifest_metadata_commitment(manifest: &TransferManifest) -> Option<String> {
+    let metadata_pairs: Vec<(String, EntryMetadata)> = manifest
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.rel_path.clone(),
+                entry.metadata.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let metadata_refs: Vec<(&str, &EntryMetadata)> = metadata_pairs
+        .iter()
+        .map(|(path, metadata)| (path.as_str(), metadata))
+        .collect();
+    metadata_commitment(&metadata_refs)
+}
+
+/// Reject a manifest where a later entry is nested under an earlier symlink
+/// entry. Lexical path sanitization blocks `..`, but without this check the
+/// receiver could create `link -> /tmp/outside` and then write `link/file`.
+fn reject_quic_symlink_traversal(manifest: &TransferManifest) -> Result<(), QuicTransportError> {
+    let symlink_paths: Vec<&str> = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| matches!(metadata.file_kind, FileKind::Symlink))
+        })
+        .map(|entry| entry.rel_path.as_str())
+        .collect();
+    if symlink_paths.is_empty() {
+        return Ok(());
+    }
+    for entry in &manifest.entries {
+        let path = entry.rel_path.as_str();
+        for symlink in &symlink_paths {
+            if path.len() > symlink.len()
+                && path.as_bytes()[symlink.len()] == b'/'
+                && path.starts_with(symlink)
+            {
+                return Err(QuicTransportError::Source(format!(
+                    "manifest entry {path} is nested under symlink entry {symlink}; refusing to \
+                     write through a link"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn trace_quic_metadata_skips(cx: &Cx, out_path: &Path, report: &MetadataApplyReport) {
+    if cx.trace_buffer().is_none() {
+        return;
+    }
+    let path = out_path.display().to_string();
+    for (field, reason) in &report.skipped {
+        cx.trace_with_fields(
+            "atp_quic_metadata_skipped",
+            &[
+                ("path", path.as_str()),
+                ("field", *field),
+                ("reason", reason.as_str()),
+            ],
+        );
+    }
+}
+
+async fn apply_quic_entry_metadata(
+    cx: &Cx,
+    out_path: &Path,
+    entry: &ManifestEntry,
+) -> Result<(), QuicTransportError> {
+    if let Some(metadata) = &entry.metadata {
+        let report = apply_entry_metadata(out_path, metadata).await?;
+        trace_quic_metadata_skips(cx, out_path, &report);
+    }
+    Ok(())
+}
+
+fn trace_quic_special_file_skipped(cx: &Cx, out_path: &Path, kind: FileKind) {
+    if cx.trace_buffer().is_none() {
+        return;
+    }
+    let path = out_path.display().to_string();
+    let kind = format!("{kind:?}");
+    cx.trace_with_fields(
+        "atp_quic_special_file_skipped",
+        &[("path", path.as_str()), ("kind", kind.as_str())],
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuicMetadataCommit {
+    Regular,
+    Committed,
+    Skipped,
+}
+
+async fn commit_quic_metadata_entry(
+    cx: &Cx,
+    base: &Path,
+    out_path: &Path,
+    entry: &ManifestEntry,
+    config: &QuicConfig,
+) -> Result<QuicMetadataCommit, QuicTransportError> {
+    let Some(metadata) = &entry.metadata else {
+        return Ok(QuicMetadataCommit::Regular);
+    };
+
+    if metadata.file_kind.is_special() {
+        if matches!(metadata.file_kind, FileKind::Fifo) && config.allow_special_files {
+            if let Some(parent) = out_path.parent() {
+                crate::fs::create_dir_all(parent).await?;
+            }
+            let mode = metadata.unix_mode.unwrap_or(0o644);
+            let _ = crate::fs::remove_file(out_path).await;
+            crate::net::atp::transport_common::metadata::recreate_fifo(out_path, mode).await?;
+            return Ok(QuicMetadataCommit::Committed);
+        }
+        trace_quic_special_file_skipped(cx, out_path, metadata.file_kind);
+        return Ok(QuicMetadataCommit::Skipped);
+    }
+
+    if let Some(parent) = out_path.parent() {
+        crate::fs::create_dir_all(parent).await?;
+    }
+
+    if matches!(metadata.file_kind, FileKind::Directory) {
+        crate::fs::create_dir_all(out_path).await?;
+        apply_quic_entry_metadata(cx, out_path, entry).await?;
+        return Ok(QuicMetadataCommit::Committed);
+    }
+
+    if let Some(target) = metadata
+        .symlink_target
+        .as_ref()
+        .filter(|_| matches!(metadata.file_kind, FileKind::Symlink))
+    {
+        let _ = crate::fs::remove_file(out_path).await;
+        crate::fs::symlink(target, out_path).await?;
+        return Ok(QuicMetadataCommit::Committed);
+    }
+
+    if let Some(primary_rel) = &metadata.hardlink_target {
+        let primary_path = quic_join_relative(base, primary_rel)?;
+        let _ = crate::fs::remove_file(out_path).await;
+        crate::fs::hard_link(&primary_path, out_path).await?;
+        return Ok(QuicMetadataCommit::Committed);
+    }
+
+    Ok(QuicMetadataCommit::Regular)
+}
+
 async fn commit_decoded_entries(
     cx: &Cx,
     dest_dir: &Path,
@@ -3762,6 +3959,7 @@ async fn commit_decoded_entries(
     decoders: &[QuicEntryDecoder],
     symbols_accepted: u64,
     feedback_rounds: u32,
+    config: &QuicConfig,
 ) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
     let mut receipt = verify_in_memory_receipt(manifest, decoders);
     receipt.symbols_accepted = symbols_accepted;
@@ -3771,7 +3969,11 @@ async fn commit_decoded_entries(
     }
 
     let base = quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
-    let mut committed_paths = Vec::with_capacity(manifest.entries.len());
+    let mut committed_paths = Vec::with_capacity(manifest.entries.len().saturating_add(1));
+    if manifest.is_directory && manifest.entries.is_empty() {
+        crate::fs::create_dir_all(&base).await?;
+        committed_paths.push(base.clone());
+    }
     for entry in &manifest.entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let decoder = decoders
@@ -3788,10 +3990,19 @@ async fn commit_decoded_entries(
         } else {
             base.clone()
         };
+        match commit_quic_metadata_entry(cx, &base, &out_path, entry, config).await? {
+            QuicMetadataCommit::Committed => {
+                committed_paths.push(out_path);
+                continue;
+            }
+            QuicMetadataCommit::Skipped => continue,
+            QuicMetadataCommit::Regular => {}
+        }
         if let Some(parent) = out_path.parent() {
             crate::fs::create_dir_all(parent).await?;
         }
         crate::fs::write_atomic(&out_path, &decoder.data).await?;
+        apply_quic_entry_metadata(cx, &out_path, entry).await?;
         committed_paths.push(out_path);
     }
 
@@ -3914,6 +4125,7 @@ async fn receive_established_native_connection(
         &decoders,
         symbols_accepted,
         feedback_rounds,
+        &config,
     )
     .await?;
     send_native_proof(cx, &mut connection, &mut control, &receipt)?;
@@ -3960,6 +4172,9 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
     let max_active_connections = config.max_active_connections.to_string();
     let max_feedback_rounds = config.max_feedback_rounds.to_string();
     let datagram_fanout = config.datagram_fanout.to_string();
+    let metadata_policy = format!("{:?}", config.metadata_policy);
+    let allow_special_files = config.allow_special_files.to_string();
+    let preserve_hardlinks = config.preserve_hardlinks.to_string();
     cx.trace_with_fields(
         "atp_quic.transport.start",
         &[
@@ -3978,6 +4193,9 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
             ("max_active_connections", &max_active_connections),
             ("max_feedback_rounds", &max_feedback_rounds),
             ("datagram_fanout", &datagram_fanout),
+            ("metadata_policy", &metadata_policy),
+            ("allow_special_files", &allow_special_files),
+            ("preserve_hardlinks", &preserve_hardlinks),
         ],
     );
 }
@@ -5248,35 +5466,77 @@ mod tests {
     }
 
     #[test]
-    fn quic_prepare_source_manifest_rejects_explicit_directory_entry() {
+    fn quic_prepare_source_manifest_preserves_explicit_empty_directory_entry() {
         let cx = Cx::for_testing();
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("payload");
         std::fs::create_dir_all(root.join("empty")).expect("create empty dir");
+        let dest = tempfile::tempdir().expect("dest dir");
 
-        let err = block_on(prepare_source_manifest(&cx, &root, &trusted_quic_config()))
-            .expect_err("empty directory marker is not encoded yet");
-        assert!(matches!(
-            err,
-            QuicTransportError::Source(message)
-                if message.contains("explicit directory entry empty")
-        ));
+        let config = trusted_quic_config();
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("empty directory marker prepares");
+        assert_eq!(prepared.manifest.root_name, "payload");
+        assert!(prepared.manifest.is_directory);
+        assert_eq!(prepared.manifest.total_bytes, 0);
+        assert_eq!(prepared.manifest.entries.len(), 1);
+        let entry = &prepared.manifest.entries[0];
+        assert_eq!(entry.rel_path, "empty");
+        assert_eq!(entry.size, 0);
+        assert_eq!(entry.sha256_hex, sha256_hex(b""));
+        let metadata = entry.metadata.as_ref().expect("directory metadata");
+        assert!(matches!(metadata.file_kind, FileKind::Directory));
+        assert!(prepared.manifest.metadata_root_hex.is_some());
+
+        let decoders =
+            decoders_from_manifest(&prepared.manifest, &config).expect("decoders from manifest");
+        let (receipt, committed_paths) = block_on(commit_decoded_entries(
+            &cx,
+            dest.path(),
+            &prepared.manifest,
+            &decoders,
+            0,
+            0,
+            &config,
+        ))
+        .expect("commit empty directory entry");
+        assert!(receipt.committed);
+        assert_eq!(committed_paths.len(), 1);
+        assert!(dest.path().join("payload/empty").is_dir());
     }
 
     #[test]
-    fn quic_prepare_source_manifest_rejects_empty_directory_root() {
+    fn quic_prepare_source_manifest_preserves_empty_directory_root() {
         let cx = Cx::for_testing();
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path().join("payload");
         std::fs::create_dir_all(&root).expect("create empty root");
+        let dest = tempfile::tempdir().expect("dest dir");
 
-        let err = block_on(prepare_source_manifest(&cx, &root, &trusted_quic_config()))
-            .expect_err("empty directory root is not encoded yet");
-        assert!(matches!(
-            err,
-            QuicTransportError::Source(message)
-                if message.contains("empty directory root payload")
-        ));
+        let config = trusted_quic_config();
+        let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
+            .expect("empty directory root prepares");
+        assert_eq!(prepared.manifest.root_name, "payload");
+        assert!(prepared.manifest.is_directory);
+        assert_eq!(prepared.manifest.total_bytes, 0);
+        assert!(prepared.manifest.entries.is_empty());
+        assert!(prepared.manifest.metadata_root_hex.is_none());
+
+        let decoders =
+            decoders_from_manifest(&prepared.manifest, &config).expect("decoders from manifest");
+        let (receipt, committed_paths) = block_on(commit_decoded_entries(
+            &cx,
+            dest.path(),
+            &prepared.manifest,
+            &decoders,
+            0,
+            0,
+            &config,
+        ))
+        .expect("commit empty directory root");
+        assert!(receipt.committed);
+        assert_eq!(committed_paths.len(), 1);
+        assert!(dest.path().join("payload").is_dir());
     }
 
     #[test]
@@ -5821,6 +6081,7 @@ mod tests {
                             &decoders,
                             symbols_accepted,
                             0,
+                            &config,
                         ))?;
                         assert!(receipt.committed);
                         assert_eq!(committed_paths.len(), 2);
@@ -6518,6 +6779,7 @@ mod tests {
             &decoders,
             symbols_accepted,
             feedback_rounds,
+            &config,
         ))
         .expect("commit decoded repair result");
         assert!(receipt.committed);
