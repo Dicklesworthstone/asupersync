@@ -413,9 +413,17 @@ impl QuicFrame {
                 if offset.is_some() {
                     frame_type |= 0x04; // OFF bit
                 }
-                if !data.is_empty() {
-                    frame_type |= 0x02; // LEN bit
-                }
+                // Always set the LEN bit so the frame is self-delimiting. Per
+                // RFC 9000 §19.8 a STREAM frame WITHOUT the LEN bit runs to the
+                // end of the packet, which is only valid as the LAST frame. This
+                // encoder does not control frame ordering, and `connection.rs`
+                // emits STREAM frames before DATAGRAM frames in the same packet,
+                // so a no-LEN (e.g. empty / FIN-only) STREAM frame would swallow
+                // every trailing frame's bytes as stream data — silently
+                // corrupting the sprayed DATAGRAM symbols. Always emitting the
+                // explicit length keeps STREAM frames self-delimiting, exactly
+                // like the DATAGRAM encoder (which always uses 0x31).
+                frame_type |= 0x02; // LEN bit (always: self-delimiting)
                 if *fin {
                     frame_type |= 0x01; // FIN bit
                 }
@@ -434,14 +442,12 @@ impl QuicFrame {
                     offset_val.encode_to_buf(buf)?;
                 }
 
-                if !data.is_empty() {
-                    match VarInt::new(data.len() as u64) {
-                        Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
-                        _ => {
-                            return Err(QuicFrameError::InvalidFormat(
-                                "Invalid data length".to_string(),
-                            ));
-                        }
+                match VarInt::new(data.len() as u64) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid data length".to_string(),
+                        ));
                     }
                 }
 
