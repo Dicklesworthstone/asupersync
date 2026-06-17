@@ -286,6 +286,71 @@ impl CongestionController {
         self.state.cleanup_old_data(Duration::from_secs(10));
     }
 
+    /// Reconfigure the controller as a token bucket for raw datagram senders.
+    ///
+    /// ATP transports that already own their wire framing (for example RQ UDP
+    /// symbols) can use the same pacing engine without enqueueing synthetic
+    /// [`DatagramFrame`] values. Existing queue users are unaffected.
+    pub fn configure_token_bucket(
+        &mut self,
+        max_rate_per_sec: u32,
+        max_burst_size: u32,
+        min_send_interval: Duration,
+    ) {
+        self.config.algorithm = CongestionAlgorithm::TokenBucket;
+        self.config.max_rate_per_sec = max_rate_per_sec.max(1);
+        self.config.max_burst_size = max_burst_size.max(1);
+        self.config.min_send_interval = min_send_interval;
+        self.state.tokens = self.state.tokens.min(f64::from(self.config.max_burst_size));
+    }
+
+    /// Try to consume one raw-datagram send budget unit.
+    ///
+    /// Returns `true` when the caller may emit one datagram immediately. Returns
+    /// `false` when the configured congestion algorithm is currently pacing the
+    /// sender. This method shares the same budget accounting as
+    /// [`Self::try_send_next`] but does not touch the priority queues.
+    pub fn try_consume_send_budget(&mut self, now: Instant) -> bool {
+        self.update_congestion_state(now);
+        if !self.can_send_now(now) {
+            return false;
+        }
+        self.consume_send_budget();
+        self.stats.sent_count = self.stats.sent_count.saturating_add(1);
+        self.state.last_send = now;
+        true
+    }
+
+    /// Return the deterministic wait until one raw datagram budget unit is likely
+    /// to be available.
+    ///
+    /// The caller still rechecks [`Self::try_consume_send_budget`] after sleeping;
+    /// this is a pacing hint, not a reservation.
+    pub fn time_until_send_budget(&mut self, now: Instant) -> Duration {
+        self.update_congestion_state(now);
+        if self.can_send_now(now) {
+            return Duration::ZERO;
+        }
+
+        match self.config.algorithm {
+            CongestionAlgorithm::TokenBucket => {
+                let deficit = (1.0 - self.state.tokens).max(0.0);
+                if deficit <= f64::EPSILON {
+                    Duration::ZERO
+                } else {
+                    let seconds = deficit / f64::from(self.config.max_rate_per_sec.max(1));
+                    Duration::from_secs_f64(seconds.max(0.000_001))
+                }
+            }
+            CongestionAlgorithm::RateLimited
+            | CongestionAlgorithm::Aimd
+            | CongestionAlgorithm::Adaptive => self
+                .config
+                .min_send_interval
+                .saturating_sub(now.duration_since(self.state.last_send)),
+        }
+    }
+
     /// Handle congestion event (loss, timeout, etc.)
     fn handle_congestion_event(&mut self) {
         match self.config.algorithm {
@@ -625,6 +690,20 @@ mod tests {
 
         // Should eventually run out of tokens
         assert!(controller.available_tokens() < 1.0);
+    }
+
+    #[test]
+    fn token_bucket_raw_budget_consumes_without_queue_frames() {
+        let mut controller = CongestionController::new(CongestionConfig::default());
+        controller.configure_token_bucket(10, 2, Duration::ZERO);
+        let now = Instant::now();
+
+        assert!(controller.try_consume_send_budget(now));
+        assert!(controller.try_consume_send_budget(now));
+        assert!(!controller.try_consume_send_budget(now));
+        assert!(controller.time_until_send_budget(now) > Duration::ZERO);
+        assert_eq!(controller.total_queue_depth(), 0);
+        assert_eq!(controller.get_stats().sent_count, 2);
     }
 
     #[test]

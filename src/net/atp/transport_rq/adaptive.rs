@@ -511,32 +511,48 @@ impl AdaptiveController {
     }
 
     /// Pick the next block plan, or `None` if evidence is too thin (caller falls
-    /// back to the fixed config). Warm-started at the closed-form `optimal_block`.
-    pub fn next_block_plan(&mut self, _symbol_size: u16) -> Option<BlockPlan> {
+    /// back to the fixed config). The first active epoch is the closed-form
+    /// `optimal_block`; later epochs use deterministic EXP3 exploration.
+    pub fn next_block_plan(&mut self, symbol_size: u16) -> Option<BlockPlan> {
         if self.est.samples < self.policy.min_samples_to_activate || self.est.bw_median_bps <= 0.0 {
             return None;
         }
-        // EXP3 sample: uniform [0,1) from the deterministic RNG (53-bit mantissa).
-        let r = (self.rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
-        let mut cum = 0.0;
-        let mut chosen = 0usize;
-        for i in 0..self.arms.len() {
-            cum += self.arm_prob(i);
-            if r <= cum {
-                chosen = i;
-                break;
+
+        let mut model_plan = None;
+        let chosen = if self.epoch == 0 {
+            let plan = self.model_plan(symbol_size);
+            model_plan = Some(plan);
+            self.closest_arm_to_plan(plan)
+        } else {
+            // EXP3 sample: uniform [0,1) from the deterministic RNG (53-bit mantissa).
+            let r = (self.rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+            let mut cum = 0.0;
+            let mut sampled = 0usize;
+            for i in 0..self.arms.len() {
+                cum += self.arm_prob(i);
+                if r <= cum {
+                    sampled = i;
+                    break;
+                }
             }
-        }
+            sampled
+        };
+
         self.epoch = self.epoch.saturating_add(1);
         self.last_arm = Some(chosen);
         let (ki, ni) = self.arms[chosen];
         let k = self.policy.arm_grid_k[ki];
         let fanout = self.policy.arm_grid_fanout[ni];
-        let overhead = overhead_for_target(
-            k,
-            self.est.loss_p_bar,
-            self.policy.target_decode_alpha,
-            self.policy.max_overhead,
+        let overhead = model_plan.map_or_else(
+            || {
+                overhead_for_target(
+                    k,
+                    self.est.loss_p_bar,
+                    self.policy.target_decode_alpha,
+                    self.policy.max_overhead,
+                )
+            },
+            |plan| plan.overhead,
         );
         self.last_overhead = overhead;
         Some(BlockPlan {
@@ -544,6 +560,23 @@ impl AdaptiveController {
             overhead,
             fanout,
         })
+    }
+
+    fn closest_arm_to_plan(&self, plan: BlockPlan) -> usize {
+        let mut best = 0usize;
+        let mut best_score = u64::MAX;
+        for (idx, &(ki, ni)) in self.arms.iter().enumerate() {
+            let k = self.policy.arm_grid_k[ki];
+            let fanout = self.policy.arm_grid_fanout[ni];
+            let k_delta = u64::from(k.abs_diff(plan.k));
+            let fanout_delta = u64::try_from(fanout.abs_diff(plan.fanout)).unwrap_or(u64::MAX / 2);
+            let score = k_delta.saturating_mul(16).saturating_add(fanout_delta);
+            if score < best_score {
+                best_score = score;
+                best = idx;
+            }
+        }
+        best
     }
 
     /// Feed back a measured block outcome: updates the EXP3 weight of the arm
@@ -693,8 +726,7 @@ impl AdaptiveController {
         let epoch = snapshot.epoch.to_string();
         let selected_arm_index = snapshot
             .selected_arm_index
-            .map(|idx| idx.to_string())
-            .unwrap_or_else(|| "none".to_string());
+            .map_or_else(|| "none".to_string(), |idx| idx.to_string());
         let weight_count = snapshot.weights.len().to_string();
         let weights = format_weights(&snapshot.weights);
         let loss_scale = format!("{:.12}", self.loss_scale);
@@ -895,6 +927,22 @@ mod tests {
         // Enough evidence ⇒ activates.
         c.update_estimate(est(0.02, 10_000_000.0));
         assert!(c.next_block_plan(1024).is_some());
+    }
+
+    #[test]
+    fn first_active_epoch_uses_closed_form_model_plan() {
+        let mut c = AdaptiveController::new(AdaptivePolicy::default(), 42);
+        c.update_estimate(est(0.02, 10_000_000.0));
+        let expected = c.model_plan(1024);
+
+        let actual = c
+            .next_block_plan(1024)
+            .expect("enough evidence activates controller");
+
+        assert_eq!(actual, expected);
+        let snapshot = c.diagnostic_snapshot();
+        assert_eq!(snapshot.epoch, 1);
+        assert_eq!(snapshot.selected_plan, Some(expected));
     }
 
     #[test]

@@ -364,7 +364,66 @@ transfer timescale. It must not own per-packet sleeps or per-round repair math.
 - **Expected signal:** receiver RSS bounded (flat vs file size), target < 100 MB for 1G.
 - **Cross-cutting:** every experiment reports peak RSS (both ends); a "faster" change that blows
   memory is not a keep.
-- **Result:** _pending_
+- **Result (2026-06-17, BluePike, E-7/WIRE-1/2/4 send-side + E-8 clean-link memory):**
+  - Code under test: `transport_rq` send path now uses the dormant
+    `datagram/congestion.rs` `CongestionController` TokenBucket as the raw datagram pacer, feeds
+    aggregate `NeedMore` loss/RTT/throughput into `transport_rq/adaptive.rs`
+    `AdaptiveController`, and feeds the same aggregate loss samples into `loss/detector.rs` as
+    advisory input. Wire schema is unchanged: symbol datagrams are still emitted through the same
+    encoder/datagram serializer and receiver SHA-256 + Merkle verification stayed green.
+  - Negative clean-loopback A/B, 100 MiB random payload, `--streams 8 --workers 16`,
+    unauth lab mode, baseline `/tmp/rch_target_atp_lossbench/release/atp` vs first E-7 binary
+    `/tmp/rch_target_bluepike_rq_e7_release_atp_cli/release/atp`:
+    F3 baseline wall **160.240 s**, `feedback_rounds=5`, `symbols_sent=230600`,
+    `symbols_accepted=102566`, peak RSS sender **235340 KiB**, receiver **1738756 KiB**.
+    First E-7 pacing/adaptive binary wall **294.534 s**, `feedback_rounds=5`,
+    `symbols_sent=219800`, `symbols_accepted=102531`, peak RSS sender **233732 KiB**,
+    receiver **1748168 KiB**. **Negative:** TokenBucket pacing alone reduced symbol inflation only
+    slightly and made wall worse; it did not make the receiver source-complete.
+    Retry condition: do not spend cross-machine slots on pacing-only builds; retry only after the
+    default path uses source-first sparse source-symbol retransmit or block-level repair feedback,
+    and keep only if `feedback_rounds <= 1`, sha/merkle ok, and receiver RSS falls below 100 MiB.
+  - Negative FEC-only calibration: explicit `--repair-overhead 1.03` on the first E-7 binary made
+    20 MiB loopback converge with `feedback_rounds=0` in **3.814 s**, but the full 100 MiB run
+    still took **292.145 s**, `feedback_rounds=5`, `symbols_sent=219800`,
+    `symbols_accepted=104448`, peak RSS sender **269968 KiB**, receiver **1738212 KiB**.
+    **Negative:** more round-0 FEC does not fix a large single pending entry because each feedback
+    round still re-sprays repair for every block of that entry. Retry condition: FEC overhead is a
+    secondary knob; retry FEC sweeps only with source-first streaming active or with true block-level
+    pending feedback.
+  - Positive source-first default, 100 MiB loopback, rebuilt binary
+    `/tmp/rch_target_bluepike_rq_e7_sourcefirst_release/release/atp`: changed the conservative
+    fallback to `DEFAULT_REPAIR_OVERHEAD=1.0`, `DEFAULT_SOURCE_RETRANSMIT_ROUNDS=2`, and
+    `DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS=8192`. Three clean-loopback reps were
+    **7.116/7.116/7.116 s**, mean **7.116 s**, **cv_pct=0.00**, sha/merkle ok,
+    `feedback_rounds=0`, `symbols_sent=102400`, `symbols_accepted=102400`; peak RSS sender
+    **61888 KiB**, receiver **7428 KiB**. This is the first confirmed E-7/E-8 win: vs the same
+    session F3 baseline, wall improves **22.5x**, receiver peak RSS drops **~99.6%**, and symbol
+    inflation disappears.
+  - Positive MTU-safe symbol default, 100 MiB loopback, rebuilt binary
+    `/tmp/rch_target_bluepike_rq_e7_s1400_release/release/atp`: changed
+    `DEFAULT_SYMBOL_SIZE` from 1024 to **1400** so a symbol plus authenticated RQ datagram header
+    and IPv4/UDP framing remains below 1500-byte MTU while cutting packet count. Default run wall
+    **7.016 s**, sha/merkle ok, `feedback_rounds=0`, `symbols_sent=74899`,
+    `symbols_accepted=74899`, peak RSS sender **76336 KiB**, receiver **7424 KiB**.
+  - Positive clean cross-machine 100 MiB, OVH `fmd` → Contabo `212.90.121.76`, unique artifacts
+    `/tmp/atp_bench/e7_bluepike_20260617193910`, binary sha prefix `90e35ca5b9d3105a`,
+    `--streams 8 --workers 16 --rq-allow-unauthenticated-lab`: sender wall **7.11 s**,
+    sender CPU **52%**, sender peak RSS **51000 KiB**; receiver JSON `feedback_rounds=0`,
+    `symbols_accepted=74899`, receiver peak RSS **9344 KiB**, sha matched
+    `1171155444c169b566440f9b4ce8ea8affb4ccc54c3e70ffdba149b08ca998ed`. This beats the tuned
+    rsync 100 MiB target (**8.44 s**) by ~**15.8%** on the clean path and beats the prior RQ F3
+    cross-machine wall (**113.85 s**) by ~**16.0x**. Receiver `/usr/bin/time` wall was **28.73 s**
+    because it includes pre-send listen wait; sender wall is the transfer comparator.
+  - Caveat/retry condition for security and lossy/spotty claims: the source-streaming fast path is
+    currently gated to unauthenticated lab RQ symbols (`parsed.auth_tag.is_none()`), so the clean
+    cross-machine win is SHA/Merkle verified but not per-symbol authenticated. To claim the same
+    result under `--rq-auth-key-hex`, extend the source-streaming path to verify auth tags before
+    `persist_source_symbol` or accept that authenticated runs use the slower decoder/FEC path.
+    Netem lossy/spotty sweeps were not run from `/tmp/loss_bench_contabo.sh` because that harness
+    contains `rm -rf`; retry with a no-delete unique-workdir harness, then sweep loss
+    `{0,1%,5%}` and spotty mid-transfer changes. Keep the E-7 default only if clean remains
+    `feedback_rounds=0`, lossy/spotty remain sha/merkle ok, and receiver RSS stays below 100 MiB.
 
 ### E-6 · Batched UDP syscalls + GSO (deepest runtime-leverage lever)
 - **Hypothesis (two tiers):**

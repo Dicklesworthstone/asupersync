@@ -51,11 +51,10 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// Adaptive block-size / overhead / fan-out optimizer (opt-in; see
-/// `docs/atp_rq_adaptive_design.md`). The default transport path does not
-/// consult it — it is a pure, deterministic side-module today.
+/// Adaptive block-size / overhead / fan-out optimizer; see
+/// `docs/atp_rq_adaptive_design.md`.
 pub mod adaptive;
 
 use serde::{Deserialize, Serialize};
@@ -67,6 +66,9 @@ use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline, MissingSourceSymbol, SymbolAcceptResult};
 use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
+use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
+use crate::net::atp::datagram::congestion::{CongestionConfig, CongestionController};
+use crate::net::atp::loss::detector::{AtpLossDetector, LossRecommendation};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::atp::transport_common::{
@@ -78,6 +80,7 @@ use crate::security::tag::TAG_SIZE;
 use crate::security::{AuthenticationTag, SecurityContext};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
+use adaptive::{AdaptiveController, AdaptivePolicy, BlockPlan, PathEstimate, PathSignalSample};
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
 /// changes.
@@ -88,10 +91,10 @@ const SYMBOL_MAGIC: u32 = 0x4154_5251;
 
 /// Default RaptorQ symbol payload size.
 ///
-/// Kept small enough that one symbol plus the datagram header stays well under a
-/// 1500-byte Ethernet MTU, avoiding IP fragmentation (the worst enemy of a UDP
-/// bulk transport).
-pub const DEFAULT_SYMBOL_SIZE: u16 = 1024;
+/// Kept small enough that one symbol plus the authenticated datagram header and
+/// IPv4/UDP framing stays under a 1500-byte Ethernet MTU, while avoiding the
+/// packet-rate tax of 1 KiB symbols on 100 Mbit links.
+pub const DEFAULT_SYMBOL_SIZE: u16 = 1400;
 
 /// Default source-block ceiling.
 ///
@@ -114,12 +117,11 @@ const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
 /// Default round-0 repair multiplier.
 ///
-/// The default keeps the fast source-first shape while adding a tiny proactive
-/// RaptorQ tail (K512 => one repair symbol per block). Fully source-first mode
-/// remains available with `repair_overhead <= 1.0`; sparse systematic-symbol
-/// retransmit is a separate opt-in knob because it can amplify WAN feedback
-/// latency when loss is not genuinely sparse.
-pub const DEFAULT_REPAIR_OVERHEAD: f64 = 1.001;
+/// The default keeps the fast source-first shape so trusted/lab RQ receivers can
+/// repair sparse source-symbol holes directly before falling back to fountain
+/// repair. Adaptive per-round FEC can still raise the sprayed repair overhead
+/// without changing this receiver-side source-streaming gate.
+pub const DEFAULT_REPAIR_OVERHEAD: f64 = 1.0;
 
 /// Default number of UDP sockets the sender sprays across.
 pub const DEFAULT_UDP_FANOUT: usize = 4;
@@ -140,18 +142,51 @@ pub const DEFAULT_ROUND_TAIL_DRAIN_MS: u64 = 2;
 
 /// Default source-retransmit feedback rounds.
 ///
-/// Disabled by default on the WAN path. Source retransmit is useful only when
-/// a receiver is missing a very small sparse set of systematic symbols; otherwise
-/// it behaves like ARQ and adds extra RTTs before the fountain repair path.
-pub const DEFAULT_SOURCE_RETRANSMIT_ROUNDS: u32 = 0;
+/// Bounded sparse retransmit is default-on for the source-first path because
+/// entry-level repair feedback otherwise re-sprays every block of a large file
+/// when only a few systematic symbols are missing. After these early rounds the
+/// transport falls back to fountain repair for bursty or non-sparse loss.
+pub const DEFAULT_SOURCE_RETRANSMIT_ROUNDS: u32 = 2;
 
 /// Hard cap on source-symbol retransmit requests in one feedback frame. Larger
 /// loss bursts fall back to fountain repair rather than creating huge JSON
 /// control messages.
-pub const DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS: usize = 2048;
+pub const DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS: usize = 8192;
 
 /// Default receiver-side quiet drain after each round-complete marker.
 pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROUND_TAIL_DRAIN_MS);
+
+/// Cold-start aggregate sender pace before feedback evidence exists.
+///
+/// This is deliberately below a typical LAN burst and above the 100 Mbps rsync
+/// baseline target. The pacer uses short symbol bursts with sleeps, so the
+/// receiver can drain UDP continuously instead of absorbing a full parallel
+/// encode burst in the kernel receive buffer.
+const RQ_COLD_START_PACING_BPS: u64 = 16 * 1024 * 1024;
+const RQ_MIN_PACING_BPS: u64 = 512 * 1024;
+const RQ_MAX_PACING_BPS: u64 = 64 * 1024 * 1024;
+const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
+const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
+const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
+const RQ_PACING_MAX_PAUSE: Duration = Duration::from_millis(250);
+const RQ_ADAPTIVE_MIN_SAMPLES: u32 = 1;
+const RQ_ASSUMED_DECODE_SYMBOLS_PER_S: f64 = 250_000.0;
+const RQ_CODING_GAMMA: f64 = 1.5;
+const RQ_LOSS_EMA_ALPHA: f64 = 0.35;
+const RQ_BW_EMA_ALPHA: f64 = 0.35;
+const RQ_LOSS_BAR_MULTIPLIER: f64 = 1.75;
+const RQ_PENDING_PRESSURE_LOSS_FLOOR: f64 = 0.05;
+const RQ_REGIME_SHIFT_LOSS_DELTA: f64 = 0.20;
+
+/// Packets pulled from the UDP socket per receive-pump turn.
+///
+/// Mirrors the native QUIC inbound pump batch width so RQ drains bursty symbol
+/// sprays after one readiness wait instead of waking once per datagram.
+const RQ_INBOUND_PUMP_BATCH: usize = 512;
+/// Maximum full batches drained after the first ready batch in one pump turn.
+const RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
+/// Tiny quiet window used only after a full batch, matching the native QUIC pump.
+const RQ_INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
 
 /// Process-unique suffix for RQ receive staging directories.
 static RQ_STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -303,6 +338,447 @@ impl RqConfig {
                 .to_string(),
         ))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RqRoundTuning {
+    repair_overhead: f64,
+    pacing: RqSprayPacing,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RqSprayPacing {
+    max_rate_per_sec: u32,
+    max_burst_size: u32,
+    min_send_interval: Duration,
+    rtt: Option<Duration>,
+    loss_detected: bool,
+}
+
+impl RqSprayPacing {
+    fn cold_start(symbol_size: u16) -> Self {
+        Self::from_rate(
+            RQ_COLD_START_PACING_BPS,
+            symbol_size,
+            RQ_COLD_START_BURST_SYMBOLS,
+            None,
+            false,
+        )
+    }
+
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn from_rate(
+        rate_bps: u64,
+        symbol_size: u16,
+        burst_symbols: usize,
+        rtt: Option<Duration>,
+        loss_detected: bool,
+    ) -> Self {
+        let pacing_rate_bps = rate_bps.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
+        let symbol_bytes = u64::from(symbol_size.max(1))
+            .saturating_add(u64::try_from(AUTH_DGRAM_HEADER).unwrap_or(u64::MAX));
+        let max_rate_per_sec = pacing_rate_bps
+            .div_ceil(symbol_bytes.max(1))
+            .clamp(1, u64::from(u32::MAX)) as u32;
+        let max_burst_size = u32::try_from(burst_symbols.max(1))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        Self {
+            max_rate_per_sec,
+            max_burst_size,
+            min_send_interval: Duration::ZERO,
+            rtt,
+            loss_detected,
+        }
+    }
+}
+
+struct RqSprayPacer {
+    controller: CongestionController,
+}
+
+impl RqSprayPacer {
+    fn new(pacing: RqSprayPacing) -> Self {
+        let mut controller = CongestionController::new(CongestionConfig::default());
+        controller.configure_token_bucket(
+            pacing.max_rate_per_sec,
+            pacing.max_burst_size,
+            pacing.min_send_interval,
+        );
+        controller.update_congestion_feedback(pacing.rtt, pacing.loss_detected);
+        Self { controller }
+    }
+
+    async fn before_send(&mut self, cx: &Cx) -> Result<(), RqError> {
+        loop {
+            let now = Instant::now();
+            if self.controller.try_consume_send_budget(now) {
+                return Ok(());
+            }
+            let wait = self
+                .controller
+                .time_until_send_budget(now)
+                .clamp(RQ_PACING_MIN_PAUSE, RQ_PACING_MAX_PAUSE);
+            crate::time::sleep(cx.now(), wait).await;
+            cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        }
+    }
+}
+
+struct RqAdaptiveSendState {
+    controller: AdaptiveController,
+    loss_detector: AtpLossDetector,
+    beacons: BeaconScheduler,
+    est: PathEstimate,
+    symbol_size: u16,
+    loss_ema: f64,
+    loss_bar: f64,
+    bw_ema_bps: f64,
+    bw_trough_bps: f64,
+    loss_pacing_cap_bps: Option<u64>,
+    loss_fec_floor: f64,
+    regime_shift: bool,
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+impl RqAdaptiveSendState {
+    fn new(seed: u64, config: &RqConfig, fanout: usize) -> Self {
+        let fixed_k = fixed_block_k(config);
+        let cores = std::thread::available_parallelism().map_or(4.0, |n| {
+            f64::from(u32::try_from(n.get()).unwrap_or(u32::MAX))
+        });
+        let policy = AdaptivePolicy {
+            cores,
+            min_samples_to_activate: RQ_ADAPTIVE_MIN_SAMPLES,
+            arm_grid_k: vec![fixed_k],
+            arm_grid_fanout: vec![fanout.max(1)],
+            ..AdaptivePolicy::default()
+        };
+        let est = PathEstimate {
+            coding_ref_k: fixed_k,
+            dec_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
+            enc_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
+            coding_gamma: RQ_CODING_GAMMA,
+            ..PathEstimate::unknown()
+        };
+        let mut controller = AdaptiveController::new(policy, seed);
+        controller.update_estimate(est);
+        Self {
+            controller,
+            loss_detector: AtpLossDetector::new(),
+            beacons: BeaconScheduler::new(seed, Instant::now()),
+            est,
+            symbol_size: config.symbol_size,
+            loss_ema: 0.0,
+            loss_bar: 0.0,
+            bw_ema_bps: 0.0,
+            bw_trough_bps: 0.0,
+            loss_pacing_cap_bps: None,
+            loss_fec_floor: 0.0,
+            regime_shift: false,
+        }
+    }
+
+    fn record_beacon_exchange(&mut self, control_wait: Duration) {
+        let now = Instant::now();
+        let measurement = BeaconMeasurement::with_rtt(duration_micros_u32(control_wait), 0);
+        let _action = self.beacons.next_action(now, measurement);
+        self.beacons.observe_probe_result(now, control_wait);
+    }
+
+    fn round_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
+        let fixed = RqRoundTuning {
+            repair_overhead: config.repair_overhead.max(1.0),
+            pacing: RqSprayPacing::cold_start(config.symbol_size),
+        };
+        let Some(plan) = self.controller.next_block_plan(self.symbol_size) else {
+            return fixed;
+        };
+
+        let mut repair_overhead = config
+            .repair_overhead
+            .max(1.0 + plan.overhead)
+            .max(1.0 + self.loss_fec_floor);
+        let mut rate = self.pacing_rate_for(plan);
+        if let Some(cap) = self.loss_pacing_cap_bps {
+            rate = rate.min(cap);
+        }
+        if self.regime_shift || self.loss_bar >= RQ_REGIME_SHIFT_LOSS_DELTA {
+            repair_overhead = repair_overhead.max(1.03);
+            rate = rate.min(RQ_COLD_START_PACING_BPS / 2);
+        }
+
+        RqRoundTuning {
+            repair_overhead,
+            pacing: RqSprayPacing::from_rate(
+                rate,
+                config.symbol_size,
+                RQ_ADAPTIVE_BURST_SYMBOLS,
+                Some(duration_from_secs(self.est.rtt_s)),
+                self.loss_ema > 0.0,
+            ),
+        }
+    }
+
+    fn observe_need_more(
+        &mut self,
+        config: &RqConfig,
+        digests: &[EntryDigest],
+        pending: &BTreeSet<u32>,
+        sent_this_round: u64,
+        round_wall: Duration,
+        control_wait: Duration,
+        total_bytes: u64,
+    ) {
+        self.record_beacon_exchange(control_wait);
+
+        let round_wall_s = finite_duration_s(round_wall);
+        let rtt_s = finite_duration_s(control_wait);
+        let pending_bytes = pending_bytes(digests, pending);
+        let sent_symbols = sent_this_round.max(1);
+        let pending_units = u64::try_from(pending.len()).unwrap_or(u64::MAX).max(1);
+        let pending_loss = (pending_units as f64 / sent_symbols as f64).clamp(0.0, 1.0);
+        let byte_pressure = if total_bytes == 0 {
+            0.0
+        } else {
+            (pending_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0)
+        };
+        let pressure_loss = byte_pressure * RQ_PENDING_PRESSURE_LOSS_FLOOR;
+        let loss_hat = pending_loss.max(pressure_loss).clamp(0.0, 0.90);
+
+        self.regime_shift =
+            self.loss_ema > 0.0 && loss_hat > (self.loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
+        self.loss_ema = ema(self.loss_ema, loss_hat, RQ_LOSS_EMA_ALPHA);
+        let raw_loss_bar = loss_hat.max(self.loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
+        self.loss_bar = if self.loss_bar <= 0.0 {
+            raw_loss_bar
+        } else {
+            ema(self.loss_bar, raw_loss_bar, RQ_LOSS_EMA_ALPHA).max(loss_hat)
+        }
+        .clamp(0.0, 0.90);
+
+        let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
+        let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
+        let offered_bps = (sent_payload_bytes as f64 / round_wall_s).max(1.0);
+        let useful_factor = (1.0 - byte_pressure * 0.5).clamp(0.25, 1.0);
+        let bw_sample = offered_bps * useful_factor;
+        self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
+            bw_sample
+        } else {
+            ema(self.bw_ema_bps, bw_sample, RQ_BW_EMA_ALPHA)
+        };
+        self.bw_trough_bps = if self.bw_trough_bps <= 0.0 {
+            bw_sample
+        } else {
+            self.bw_trough_bps.min(bw_sample)
+        };
+
+        self.est = PathEstimate {
+            rtt_s,
+            loss_p_hat: self.loss_ema,
+            loss_p_bar: self.loss_bar,
+            bw_median_bps: self.bw_ema_bps,
+            bw_trough_bps: self.bw_trough_bps.max(self.bw_ema_bps * 0.5),
+            enc_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
+            dec_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
+            coding_ref_k: fixed_block_k(config),
+            coding_gamma: RQ_CODING_GAMMA,
+            samples: self.est.samples.saturating_add(1),
+        };
+        self.controller.update_estimate(self.est);
+
+        let received = ((sent_symbols as f64) * (1.0 - loss_hat)).max(0.0) as u64;
+        let useful_bytes = ((sent_payload_bytes as f64) * (1.0 - loss_hat)).max(0.0) as u64;
+        let cwnd_bytes = (self.bw_ema_bps * rtt_s)
+            .max(f64::from(config.symbol_size.max(1)))
+            .ceil() as u64;
+        self.loss_pacing_cap_bps = None;
+        self.loss_fec_floor = 0.0;
+        let lost_symbols = ((sent_symbols as f64) * loss_hat).ceil() as u64;
+        let loss_result = self.loss_detector.observe_datagram_loss_sample(
+            sent_symbols,
+            lost_symbols,
+            Some(control_wait),
+            sent_payload_bytes,
+            cwnd_bytes,
+        );
+        self.apply_loss_recommendations(&loss_result.recommendations);
+        self.controller.observe_path_signals(
+            sent_symbols,
+            received,
+            round_wall_s,
+            useful_bytes,
+            config.symbol_size,
+            PathSignalSample {
+                smoothed_rtt_s: rtt_s,
+                congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
+                loss_rate: loss_hat,
+            },
+        );
+    }
+
+    fn apply_loss_recommendations(&mut self, recommendations: &[LossRecommendation]) {
+        for recommendation in recommendations {
+            match recommendation {
+                LossRecommendation::ReduceCongestionWindow { factor } => {
+                    let cap = (self.bw_ema_bps * (*factor).clamp(0.1, 1.0)).ceil() as u64;
+                    self.lower_pacing_cap(cap);
+                }
+                LossRecommendation::EnablePacing { rate } => {
+                    let ema_cap = if self.bw_ema_bps > 0.0 {
+                        (self.bw_ema_bps * 0.75).ceil() as u64
+                    } else {
+                        RQ_COLD_START_PACING_BPS / 2
+                    };
+                    self.lower_pacing_cap((*rate).max(ema_cap));
+                }
+                LossRecommendation::EnableFec { rate } => {
+                    self.loss_fec_floor = self.loss_fec_floor.max((*rate).clamp(0.0, 0.50));
+                }
+                LossRecommendation::SwitchCongestionControl { .. } => {
+                    self.regime_shift = true;
+                    let cap = if self.bw_ema_bps > 0.0 {
+                        (self.bw_ema_bps * 0.5).ceil() as u64
+                    } else {
+                        RQ_COLD_START_PACING_BPS / 2
+                    };
+                    self.lower_pacing_cap(cap);
+                    self.loss_fec_floor = self.loss_fec_floor.max(0.03);
+                }
+                LossRecommendation::IncreaseReorderingThreshold { .. } => {}
+            }
+        }
+    }
+
+    fn lower_pacing_cap(&mut self, cap_bps: u64) {
+        let cap = cap_bps.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
+        self.loss_pacing_cap_bps = Some(
+            self.loss_pacing_cap_bps
+                .map_or(cap, |previous| previous.min(cap)),
+        );
+    }
+
+    fn observe_probe_success(
+        &mut self,
+        config: &RqConfig,
+        sent_this_round: u64,
+        round_wall: Duration,
+        control_wait: Duration,
+    ) {
+        self.record_beacon_exchange(control_wait);
+
+        if sent_this_round == 0 {
+            self.est = PathEstimate {
+                rtt_s: finite_duration_s(control_wait),
+                samples: self.est.samples.saturating_add(1),
+                ..self.est
+            };
+            self.controller.update_estimate(self.est);
+            return;
+        }
+
+        let round_wall_s = finite_duration_s(round_wall);
+        let rtt_s = finite_duration_s(control_wait);
+        let sent_payload_bytes =
+            sent_this_round.saturating_mul(u64::from(config.symbol_size.max(1)));
+        let bw_sample = (sent_payload_bytes as f64 / round_wall_s).max(1.0);
+        self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
+            bw_sample
+        } else {
+            ema(self.bw_ema_bps, bw_sample, RQ_BW_EMA_ALPHA)
+        };
+        self.bw_trough_bps = if self.bw_trough_bps <= 0.0 {
+            bw_sample
+        } else {
+            self.bw_trough_bps.min(bw_sample)
+        };
+        self.loss_ema = ema(self.loss_ema, 0.0, RQ_LOSS_EMA_ALPHA);
+        self.loss_bar = ema(self.loss_bar, 0.0, RQ_LOSS_EMA_ALPHA);
+        self.loss_pacing_cap_bps = None;
+        self.loss_fec_floor = 0.0;
+
+        self.est = PathEstimate {
+            rtt_s,
+            loss_p_hat: self.loss_ema,
+            loss_p_bar: self.loss_bar,
+            bw_median_bps: self.bw_ema_bps,
+            bw_trough_bps: self.bw_trough_bps.max(self.bw_ema_bps * 0.5),
+            enc_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
+            dec_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
+            coding_ref_k: fixed_block_k(config),
+            coding_gamma: RQ_CODING_GAMMA,
+            samples: self.est.samples.saturating_add(1),
+        };
+        self.controller.update_estimate(self.est);
+
+        let cwnd_bytes = (self.bw_ema_bps * rtt_s)
+            .max(f64::from(config.symbol_size.max(1)))
+            .ceil() as u64;
+        self.controller.observe_path_signals(
+            sent_this_round,
+            sent_this_round,
+            round_wall_s,
+            sent_payload_bytes,
+            config.symbol_size,
+            PathSignalSample {
+                smoothed_rtt_s: rtt_s,
+                congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
+                loss_rate: 0.0,
+            },
+        );
+    }
+
+    fn pacing_rate_for(&self, plan: BlockPlan) -> u64 {
+        let network_bps = if self.est.bw_median_bps > 0.0 {
+            self.est.bw_median_bps.min(self.est.bw_trough_bps.max(1.0))
+        } else {
+            RQ_COLD_START_PACING_BPS as f64
+        };
+        let decode_bps =
+            self.est.decode_symbols_per_s_at(plan.k) * f64::from(self.symbol_size.max(1));
+        let base = network_bps.min(decode_bps.max(1.0));
+        let rate = base / (1.0 + plan.overhead.max(0.0));
+        rate.ceil()
+            .clamp(RQ_MIN_PACING_BPS as f64, RQ_MAX_PACING_BPS as f64) as u64
+    }
+}
+
+fn fixed_block_k(config: &RqConfig) -> u32 {
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let k = config.max_block_size.div_ceil(symbol_size).max(1);
+    u32::try_from(k).unwrap_or(u32::MAX)
+}
+
+fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
+    pending.iter().fold(0u64, |acc, index| {
+        let Some(entry) = usize::try_from(*index)
+            .ok()
+            .and_then(|idx| digests.get(idx))
+        else {
+            return acc;
+        };
+        acc.saturating_add(entry.size)
+    })
+}
+
+fn finite_duration_s(duration: Duration) -> f64 {
+    duration.as_secs_f64().max(0.000_001)
+}
+
+fn duration_from_secs(seconds: f64) -> Duration {
+    if seconds.is_finite() {
+        Duration::from_secs_f64(seconds.clamp(0.000_001, 60.0))
+    } else {
+        Duration::from_micros(1)
+    }
+}
+
+fn duration_micros_u32(duration: Duration) -> u32 {
+    u32::try_from(duration.as_micros()).unwrap_or(u32::MAX)
+}
+
+fn ema(prev: f64, sample: f64, alpha: f64) -> f64 {
+    prev.mul_add(1.0 - alpha, sample * alpha)
 }
 
 /// Errors from the ATP-over-RaptorQ transport.
@@ -1392,6 +1868,7 @@ pub async fn send_path(
     // Data plane: open UDP sockets connected to the receiver's UDP endpoint.
     let udp_addr = SocketAddr::new(peer.ip(), ack.udp_port);
     let fanout = config.udp_fanout.max(1);
+    let mut adaptive = RqAdaptiveSendState::new(tag, &config, fanout);
     let local_unspec = if peer.ip().is_ipv4() {
         std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
     } else {
@@ -1445,6 +1922,9 @@ pub async fn send_path(
 
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
+    let mut round_tuning = adaptive.round_tuning(&config);
+    let mut round_started = Instant::now();
+    let mut round_symbols_start = symbols_sent;
     spray_round(
         cx,
         &mut sockets,
@@ -1455,6 +1935,7 @@ pub async fn send_path(
         &mut encoders,
         &pending,
         &config,
+        &round_tuning,
         symbol_auth.as_ref(),
         /* with_source */ true,
         parallel_encode,
@@ -1464,6 +1945,7 @@ pub async fn send_path(
 
     // Feedback loop.
     loop {
+        let control_wait_started = Instant::now();
         control
             .send(
                 &Frame::empty(FrameType::ObjectComplete)
@@ -1472,9 +1954,13 @@ pub async fn send_path(
             .await?;
         rqtrace!("sender: sent ObjectComplete, awaiting reply");
         let reply = control.recv().await?;
+        let control_wait = control_wait_started.elapsed();
+        let round_wall = round_started.elapsed();
+        let sent_this_round = symbols_sent.saturating_sub(round_symbols_start);
         rqtrace!("sender: got reply {:?}", reply.frame_type());
         match reply.frame_type() {
             FrameType::Proof => {
+                adaptive.observe_probe_success(&config, sent_this_round, round_wall, control_wait);
                 let receipt: ReceiveReceipt = parse_json(&reply)?;
                 let _ = control
                     .send(
@@ -1517,7 +2003,19 @@ pub async fn send_path(
                     // loop again to fetch the Proof.
                     continue;
                 }
+                adaptive.observe_need_more(
+                    &config,
+                    &digests,
+                    &pending,
+                    sent_this_round,
+                    round_wall,
+                    control_wait,
+                    total_bytes,
+                );
+                round_tuning = adaptive.round_tuning(&config);
                 if source_symbols.is_empty() {
+                    round_started = Instant::now();
+                    round_symbols_start = symbols_sent;
                     // Fresh repair symbols (true encoder ESIs, via the
                     // cumulative cursor in each EntryEncoder) for the
                     // still-pending entries.
@@ -1531,12 +2029,15 @@ pub async fn send_path(
                         &mut encoders,
                         &pending,
                         &config,
+                        &round_tuning,
                         symbol_auth.as_ref(),
                         /* with_source */ false,
                         parallel_encode,
                     )
                     .await?;
                 } else {
+                    round_started = Instant::now();
+                    round_symbols_start = symbols_sent;
                     spray_source_requests(
                         cx,
                         &mut sockets,
@@ -1547,6 +2048,7 @@ pub async fn send_path(
                         &encoders,
                         &source_symbols,
                         &config,
+                        &round_tuning,
                         symbol_auth.as_ref(),
                     )
                     .await?;
@@ -1577,6 +2079,20 @@ fn initial_repair_target_per_block(block_source_n: usize, repair_overhead: f64) 
         0
     } else {
         ((block_source_n as f64) * (repair_overhead - 1.0)).ceil() as usize
+    }
+}
+
+fn repair_target_for_feedback_round(
+    block_source_n: usize,
+    already: usize,
+    fallback_batch: usize,
+    repair_overhead: f64,
+) -> usize {
+    let calibrated_total = initial_repair_target_per_block(block_source_n, repair_overhead);
+    if calibrated_total > already {
+        calibrated_total
+    } else {
+        already + fallback_batch.max(1)
     }
 }
 
@@ -1659,11 +2175,13 @@ async fn spray_round(
     encoders: &mut [EntryEncoder],
     pending: &BTreeSet<u32>,
     config: &RqConfig,
+    round_tuning: &RqRoundTuning,
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
     parallel_encode: bool,
 ) -> Result<(), RqError> {
     let batch = repair_batch_per_block(config);
+    let mut pacer = RqSprayPacer::new(round_tuning.pacing);
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let mut ring = EncodeAheadRing::default();
@@ -1677,9 +2195,14 @@ async fn spray_round(
         // rounds) and emit the rest at their TRUE ESIs.
         let already = enc.repair_cursor;
         let target_repair = if with_source {
-            initial_repair_target_per_block(block_source_n, config.repair_overhead)
+            initial_repair_target_per_block(block_source_n, round_tuning.repair_overhead)
         } else {
-            already + batch
+            repair_target_for_feedback_round(
+                block_source_n,
+                already,
+                batch,
+                round_tuning.repair_overhead,
+            )
         };
 
         let repair_count = target_repair.saturating_sub(already);
@@ -1701,7 +2224,7 @@ async fn spray_round(
             // peak symbol RAM at ~`par_batch` blocks; each batch is joined before the next
             // checkpoint so a cancelled region drains every encode task (no strands).
             let enc_cfg = crate::config::EncodingConfig {
-                repair_overhead: config.repair_overhead,
+                repair_overhead: round_tuning.repair_overhead,
                 max_block_size: config.max_block_size,
                 symbol_size: config.symbol_size,
                 encoding_parallelism: 1,
@@ -1750,6 +2273,7 @@ async fn spray_round(
                             enc.index,
                             sym,
                             config,
+                            &mut pacer,
                             symbol_auth,
                         )
                         .await?;
@@ -1765,7 +2289,7 @@ async fn spray_round(
                 let pool = SymbolPool::new(PoolConfig::default());
                 let mut pipeline = EncodingPipeline::new(
                     crate::config::EncodingConfig {
-                        repair_overhead: config.repair_overhead,
+                        repair_overhead: round_tuning.repair_overhead,
                         max_block_size: config.max_block_size,
                         symbol_size: config.symbol_size,
                         encoding_parallelism: 1,
@@ -1795,6 +2319,7 @@ async fn spray_round(
                             produced.entry,
                             &produced.symbol,
                             config,
+                            &mut pacer,
                             symbol_auth,
                         )
                         .await?;
@@ -1821,6 +2346,7 @@ async fn spray_round(
                             produced.entry,
                             &produced.symbol,
                             config,
+                            &mut pacer,
                             symbol_auth,
                         )
                         .await?;
@@ -1868,8 +2394,10 @@ async fn spray_source_requests(
     encoders: &[EntryEncoder],
     requests: &[SourceSymbolRequest],
     config: &RqConfig,
+    round_tuning: &RqRoundTuning,
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<(), RqError> {
+    let mut pacer = RqSprayPacer::new(round_tuning.pacing);
     for request in requests {
         let enc = encoders
             .iter()
@@ -1892,6 +2420,7 @@ async fn spray_source_requests(
             enc.index,
             &sym,
             config,
+            &mut pacer,
             symbol_auth,
         )
         .await?;
@@ -1914,6 +2443,7 @@ async fn send_symbol_datagram(
     entry: u32,
     sym: &Symbol,
     config: &RqConfig,
+    pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<(), RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
@@ -1924,6 +2454,7 @@ async fn send_symbol_datagram(
         }
     }
 
+    pacer.before_send(cx).await?;
     let auth = symbol_auth.map(|ctx| ctx.sign_symbol(sym));
     let dgram =
         encode_symbol_datagram(tag, entry, sym, auth.as_ref().map(AuthenticatedSymbol::tag));
@@ -2900,12 +3431,38 @@ async fn feed_datagram_to_decoders(
     feed_symbol(&mut decoders[pos], &parsed, payload, symbol_size).await
 }
 
+async fn feed_datagram_batch_to_decoders(
+    batch: &crate::net::UdpRecvBatch,
+    tag: u64,
+    auth_required: bool,
+    decoders: &mut [EntryDecoder],
+    symbol_size: u16,
+) -> Result<u64, RqError> {
+    let mut accepted = 0u64;
+    for packet in &batch.packets {
+        if feed_datagram_to_decoders(
+            &packet.payload,
+            packet.payload.len(),
+            tag,
+            auth_required,
+            decoders,
+            symbol_size,
+        )
+        .await?
+        {
+            accepted = accepted.saturating_add(1);
+        }
+    }
+    Ok(accepted)
+}
+
 /// Pump UDP symbol datagrams into the decoders until a control frame arrives.
 ///
 /// The sender finishes a spray round and *then* sends `ObjectComplete` on TCP,
 /// so by interleaving `udp.recv` with `control.recv` we absorb the bulk symbols
-/// and return as soon as the round's control marker lands. We use the runtime's
-/// `poll_fn`-style readiness on both fds via a manual 2-way poll.
+/// and return as soon as the round's control marker lands. The UDP branch mirrors
+/// native QUIC's `recv_batch_from` pump: one readiness-driven receive drains all
+/// immediately-ready packets, then full batches get a bounded quiet-drain pass.
 async fn pump_until_control<S>(
     cx: &Cx,
     control: &mut FrameTransport<S>,
@@ -2920,15 +3477,16 @@ async fn pump_until_control<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    use std::future::poll_fn;
+    use std::future::{Future, poll_fn};
     use std::pin::Pin;
     use std::task::Poll;
 
     enum Ready {
         Control(usize),
-        Udp(usize),
+        Udp(crate::net::UdpRecvBatch),
     }
 
+    let packet_size = rbuf.len();
     let mut cbuf = vec![0u8; 65536];
     let mut pumped: u64 = 0;
     loop {
@@ -2948,35 +3506,80 @@ where
             return Ok(frame);
         }
 
-        // 2) Poll both the control stream and the UDP socket once. Whichever is
-        //    ready makes progress; if only UDP is ready we keep pumping symbols.
-        //    Both register their waker via task_cx, so the task parks until
-        //    EITHER fd is ready — a biased two-way select.
-        let ready = poll_fn(|task_cx| {
-            // UDP first so bulk data drains promptly under load.
-            match udp.poll_recv(task_cx, rbuf) {
-                Poll::Ready(Ok(n)) => {
-                    return Poll::Ready(Ok::<Ready, std::io::Error>(Ready::Udp(n)));
+        // 2) Poll both the control stream and a readiness-driven UDP batch.
+        //    Whichever is ready makes progress; if only UDP is ready we keep
+        //    pumping symbols. Both register their waker via task_cx, so the task
+        //    parks until EITHER fd is ready — a biased two-way select.
+        let ready = {
+            let mut udp_batch = Box::pin(udp.recv_batch_from(RQ_INBOUND_PUMP_BATCH, packet_size));
+            poll_fn(|task_cx| {
+                // UDP first so bulk data drains promptly under load.
+                match Future::poll(udp_batch.as_mut(), task_cx) {
+                    Poll::Ready(Ok(batch)) => {
+                        return Poll::Ready(Ok::<Ready, std::io::Error>(Ready::Udp(batch)));
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => {}
                 }
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => {}
-            }
-            let mut read_buf = ReadBuf::new(&mut cbuf);
-            match Pin::new(&mut control.stream).poll_read(task_cx, &mut read_buf) {
-                Poll::Ready(Ok(())) => Poll::Ready(Ok(Ready::Control(read_buf.filled().len()))),
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-                Poll::Pending => Poll::Pending,
-            }
-        })
-        .await?;
+                let mut read_buf = ReadBuf::new(&mut cbuf);
+                match Pin::new(&mut control.stream).poll_read(task_cx, &mut read_buf) {
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(Ready::Control(read_buf.filled().len()))),
+                    Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?
+        };
 
         match ready {
-            Ready::Udp(n) => {
-                if feed_datagram_to_decoders(rbuf, n, tag, auth_required, decoders, symbol_size)
-                    .await?
-                {
-                    pumped += 1;
-                    *symbols_accepted = (*symbols_accepted).saturating_add(1);
+            Ready::Udp(batch) => {
+                let mut received_len = batch.packets.len();
+                let mut batches = 1usize;
+                let accepted = feed_datagram_batch_to_decoders(
+                    &batch,
+                    tag,
+                    auth_required,
+                    decoders,
+                    symbol_size,
+                )
+                .await?;
+                pumped = pumped.saturating_add(accepted);
+                *symbols_accepted = (*symbols_accepted).saturating_add(accepted);
+
+                while received_len == RQ_INBOUND_PUMP_BATCH {
+                    if batches >= RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES {
+                        rqtrace!(
+                            "pump: udp batch drain budget exhausted after {batches} batches and {pumped} accepted datagrams"
+                        );
+                        break;
+                    }
+
+                    let tail = match crate::time::timeout(
+                        cx.now(),
+                        RQ_INBOUND_PUMP_DRAIN_GRACE,
+                        udp.recv_batch_from(RQ_INBOUND_PUMP_BATCH, packet_size),
+                    )
+                    .await
+                    {
+                        Ok(Ok(batch)) => batch,
+                        Ok(Err(e)) => return Err(RqError::Io(e)),
+                        Err(_elapsed) => break,
+                    };
+                    received_len = tail.packets.len();
+                    if received_len == 0 {
+                        break;
+                    }
+                    let accepted = feed_datagram_batch_to_decoders(
+                        &tail,
+                        tag,
+                        auth_required,
+                        decoders,
+                        symbol_size,
+                    )
+                    .await?;
+                    pumped = pumped.saturating_add(accepted);
+                    *symbols_accepted = (*symbols_accepted).saturating_add(accepted);
+                    batches = batches.saturating_add(1);
                 }
             }
             Ready::Control(n) => {
@@ -3106,6 +3709,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rq_pacing_converts_byte_rate_to_token_bucket_datagrams() {
+        let pacing = RqSprayPacing::from_rate(
+            RQ_COLD_START_PACING_BPS,
+            1024,
+            RQ_COLD_START_BURST_SYMBOLS,
+            None,
+            false,
+        );
+        let symbol_bytes =
+            1024_u64.saturating_add(u64::try_from(AUTH_DGRAM_HEADER).unwrap_or(u64::MAX));
+
+        assert_eq!(
+            pacing.max_rate_per_sec,
+            u32::try_from(RQ_COLD_START_PACING_BPS.div_ceil(symbol_bytes)).unwrap()
+        );
+        assert_eq!(
+            pacing.max_burst_size,
+            u32::try_from(RQ_COLD_START_BURST_SYMBOLS).unwrap()
+        );
+        assert_eq!(pacing.min_send_interval, Duration::ZERO);
+    }
+
+    #[test]
+    fn rq_loss_recommendations_apply_advisory_caps_and_fec_floor() {
+        let config = RqConfig::default();
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.bw_ema_bps = 10_000_000.0;
+
+        state.apply_loss_recommendations(&[
+            LossRecommendation::ReduceCongestionWindow { factor: 0.5 },
+            LossRecommendation::EnableFec { rate: 0.10 },
+            LossRecommendation::SwitchCongestionControl {
+                algorithm: "bbr".to_string(),
+            },
+        ]);
+
+        assert_eq!(state.loss_pacing_cap_bps, Some(5_000_000));
+        assert!(state.loss_fec_floor >= 0.10);
+        assert!(state.regime_shift);
+    }
 
     /// In-process encode→feed→decode roundtrip at a chosen `(bytes, max_block)`,
     /// mirroring exactly how `spray_round` encodes and `feed_symbol` decodes —
@@ -3672,10 +4317,10 @@ mod tests {
     }
 
     #[test]
-    fn default_repair_overhead_is_minimal_proactive_tail() {
+    fn default_repair_overhead_is_source_first() {
         assert_eq!(
             initial_repair_target_per_block(512, DEFAULT_REPAIR_OVERHEAD),
-            1
+            0
         );
     }
 
@@ -3685,13 +4330,24 @@ mod tests {
     }
 
     #[test]
-    fn source_retransmit_is_disabled_by_default_even_in_source_first_mode() {
+    fn source_retransmit_is_bounded_by_default_in_source_first_mode() {
         let config = RqConfig {
             repair_overhead: 1.0,
             ..RqConfig::default()
         };
 
-        assert_eq!(source_retransmit_request_limit(&config, 1), None);
+        assert_eq!(
+            source_retransmit_request_limit(&config, 1),
+            Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
+        );
+        assert_eq!(
+            source_retransmit_request_limit(&config, DEFAULT_SOURCE_RETRANSMIT_ROUNDS),
+            Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
+        );
+        assert_eq!(
+            source_retransmit_request_limit(&config, DEFAULT_SOURCE_RETRANSMIT_ROUNDS + 1),
+            None
+        );
     }
 
     #[test]
@@ -3711,7 +4367,7 @@ mod tests {
     #[test]
     fn source_retransmit_does_not_override_proactive_repair_mode() {
         let config = RqConfig {
-            repair_overhead: DEFAULT_REPAIR_OVERHEAD,
+            repair_overhead: 1.001,
             source_retransmit_rounds: 2,
             max_source_retransmit_requests: 17,
             ..RqConfig::default()
@@ -3968,6 +4624,56 @@ mod tests {
                     k: 1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn read_source_range_reassembles_original_bytes_on_demand() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("payload.bin");
+        let bytes: Vec<u8> = (0..257).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).expect("write payload");
+
+        let mut reassembled = Vec::new();
+        for (offset, len) in [(0, 17), (17, 64), (81, 128), (209, 48)] {
+            let chunk = futures_lite::future::block_on(read_source_range(&path, offset, len))
+                .expect("read source chunk");
+            reassembled.extend_from_slice(&chunk);
+        }
+
+        assert_eq!(reassembled, bytes);
+    }
+
+    #[test]
+    fn read_source_range_fails_closed_on_truncated_source() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("payload.bin");
+        std::fs::write(&path, b"short").expect("write payload");
+
+        let err = futures_lite::future::block_on(read_source_range(&path, 2, 8))
+            .expect_err("range past EOF must fail");
+        assert!(
+            matches!(&err, RqError::Source(message) if message.contains("payload.bin")),
+            "expected source-path error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn source_block_progress_covers_complete_entries_or_disables_streaming() {
+        let progress = source_block_progress_for(5, 2, 2).expect("complete block table");
+        assert_eq!(progress.len(), 3);
+        assert_eq!(
+            progress
+                .iter()
+                .map(|block| (block.start, block.len, block.k, block.received.len()))
+                .collect::<Vec<_>>(),
+            vec![(0, 2, 1, 1), (2, 2, 1, 1), (4, 1, 1, 1)]
+        );
+
+        let too_many_blocks = u64::try_from(MAX_SOURCE_BLOCKS + 1).unwrap_or(u64::MAX);
+        assert!(
+            source_block_progress_for(too_many_blocks, 1, 1).is_none(),
+            "source streaming must fall back to the decoder when the SBN envelope is incomplete"
         );
     }
 

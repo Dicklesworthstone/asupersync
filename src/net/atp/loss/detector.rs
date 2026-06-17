@@ -11,7 +11,7 @@ use crate::net::quic_native::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Helper macro to extract success value from AtpOutcome or early return with error.
 macro_rules! try_outcome {
@@ -395,6 +395,91 @@ impl AtpLossDetector {
         self.update_reordering_tracking(space_idx, &newly_acked, ack_ranges, &loss_result);
 
         AtpOutcome::ok(loss_result)
+    }
+
+    /// Feed aggregate datagram-round loss evidence into the ATP loss analyzer.
+    ///
+    /// RaptorQ-style transports receive per-round `NeedMore` pressure instead of
+    /// QUIC ACK ranges. This bridge lets them reuse the same pattern analyzer and
+    /// recommendation logic without synthesizing full packet histories or changing
+    /// their wire protocol.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn observe_datagram_loss_sample(
+        &mut self,
+        sent_datagrams: u64,
+        lost_datagrams: u64,
+        rtt: Option<Duration>,
+        bytes_in_flight: u64,
+        congestion_window: u64,
+    ) -> LossDetectionResult {
+        if sent_datagrams == 0 {
+            return LossDetectionResult::empty();
+        }
+
+        let lost_datagrams = lost_datagrams.min(sent_datagrams);
+        if lost_datagrams == 0 {
+            if let Some(rtt) = rtt {
+                self.metrics.avg_time_threshold_micros = rtt.as_micros() as f64;
+            }
+            return LossDetectionResult::empty();
+        }
+
+        let sample_cap = lost_datagrams.min(128);
+        let rtt_micros = rtt.and_then(|duration| u64::try_from(duration.as_micros()).ok());
+        let detected_time_micros = rtt_micros.unwrap_or(1);
+        let lost_packets: Vec<LostPacketInfo> = (0..sample_cap)
+            .map(|packet_number| LostPacketInfo {
+                packet_number,
+                bytes: bytes_in_flight
+                    .checked_div(sent_datagrams)
+                    .unwrap_or(0)
+                    .max(1),
+                sent_time_micros: 0,
+                detected_time_micros,
+                reason: LossReason::PacketThreshold {
+                    threshold: self.config.packet_threshold,
+                },
+            })
+            .collect();
+
+        self.metrics.total_lost_packets = self
+            .metrics
+            .total_lost_packets
+            .saturating_add(lost_datagrams);
+        self.metrics.packet_threshold_losses = self
+            .metrics
+            .packet_threshold_losses
+            .saturating_add(lost_datagrams);
+        if let Some(rtt) = rtt {
+            self.metrics.avg_time_threshold_micros = rtt.as_micros() as f64;
+        }
+
+        let detection_method = LossDetectionMethod::PacketThreshold;
+        let confidence = self.calculate_detection_confidence(&lost_packets, detection_method);
+        let recommendations = self.generate_recommendations(&lost_packets, detection_method);
+        let result = LossDetectionResult {
+            lost_packets,
+            lost_bytes: bytes_in_flight.min(
+                bytes_in_flight
+                    .checked_mul(lost_datagrams)
+                    .and_then(|bytes| bytes.checked_div(sent_datagrams))
+                    .unwrap_or(bytes_in_flight),
+            ),
+            detection_method,
+            confidence,
+            recommendations,
+        };
+        self.update_pattern_analysis(
+            &result,
+            &LossTransportState {
+                latest_rtt_micros: rtt_micros,
+                smoothed_rtt_micros: rtt_micros,
+                rttvar_micros: None,
+                bytes_in_flight,
+                congestion_window,
+            },
+        );
+        result
     }
 
     /// Detect losses in a packet number space.
@@ -1071,6 +1156,28 @@ mod tests {
             enable_early_retransmit: false,
             ..LossDetectionConfig::default()
         })
+    }
+
+    #[test]
+    fn datagram_loss_sample_emits_advisory_recommendations() {
+        let mut detector = AtpLossDetector::new();
+
+        let result = detector.observe_datagram_loss_sample(
+            100,
+            10,
+            Some(Duration::from_millis(25)),
+            120_000,
+            240_000,
+        );
+
+        assert_eq!(result.lost_packets.len(), 10);
+        assert_eq!(result.lost_bytes, 12_000);
+        assert!(result.recommendations.iter().any(|recommendation| {
+            matches!(
+                recommendation,
+                LossRecommendation::ReduceCongestionWindow { .. }
+            )
+        }));
     }
 
     #[test]
