@@ -152,7 +152,7 @@ fn wait_for_atpd_quic_and_diagnostics_addrs(
         }
         let now = Instant::now();
         if now >= deadline {
-            panic!("atpd did not report QUIC and diagnostics readiness; stderr lines: {seen:?}");
+            panic!("atpd did not report QUIC and diagnostics readiness; output lines: {seen:?}");
         }
         let wait = (deadline - now).min(Duration::from_millis(250));
         match rx.recv_timeout(wait) {
@@ -171,7 +171,7 @@ fn wait_for_atpd_quic_and_diagnostics_addrs(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("atpd exited before readiness; stderr lines: {seen:?}");
+                panic!("atpd exited before readiness; output lines: {seen:?}");
             }
         }
     }
