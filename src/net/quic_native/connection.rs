@@ -229,6 +229,18 @@ pub struct NativeQuicConnection {
     max_datagram_frame_size: usize,
 }
 
+/// Default cap on remotely-initiated streams (per direction) accepted from the
+/// wire, mirroring the `max_local_*` default. Bounds memory against a peer that
+/// opens unbounded streams (RFC 9000 §4.6 `MAX_STREAMS`): a well-behaved peer
+/// respecting its own ≤128 local limit produces sequence indices `0..=127`
+/// (all below the cap), so only a misbehaving peer is rejected. Override
+/// per-connection with [`NativeQuicConnection::set_remote_stream_limits`].
+///
+/// NOTE: this is a static initial cap; dynamic credit extension via emitted
+/// `MAX_STREAMS` frames (so long-lived connections can open more streams as old
+/// ones close) is a separate enhancement.
+const DEFAULT_MAX_REMOTE_STREAMS: u64 = 128;
+
 /// Maximum number of decoded inbound DATAGRAM payloads buffered before the
 /// oldest is dropped to bound memory under a fast producer / slow consumer.
 const MAX_INBOUND_DATAGRAMS: usize = 256;
@@ -256,19 +268,23 @@ impl NativeQuicConnection {
     /// Construct a new connection machine.
     #[must_use]
     pub fn new(config: NativeQuicConnectionConfig) -> Self {
+        let mut streams = StreamTable::new_with_connection_limits(
+            config.role,
+            config.max_local_bidi,
+            config.max_local_uni,
+            config.send_window,
+            config.recv_window,
+            config.connection_send_limit,
+            config.connection_recv_limit,
+        );
+        // Bound remotely-initiated streams so a peer cannot force unbounded
+        // stream allocations from the wire (RFC 9000 §4.6 MAX_STREAMS).
+        streams.set_remote_stream_limits(DEFAULT_MAX_REMOTE_STREAMS, DEFAULT_MAX_REMOTE_STREAMS);
         Self {
             role: config.role,
             tls: QuicTlsMachine::new(),
             transport: QuicTransportMachine::new(),
-            streams: StreamTable::new_with_connection_limits(
-                config.role,
-                config.max_local_bidi,
-                config.max_local_uni,
-                config.send_window,
-                config.recv_window,
-                config.connection_send_limit,
-                config.connection_recv_limit,
-            ),
+            streams,
             next_packet_numbers: [0, 0, 0],
             migration_disabled: false,
             active_path_id: 0,
@@ -488,6 +504,15 @@ impl NativeQuicConnection {
         self.ensure_stream_open_state()?;
         self.streams.accept_remote_stream(id)?;
         Ok(())
+    }
+
+    /// Configure the maximum number of remotely-initiated streams (per
+    /// direction) this connection will accept from the wire (RFC 9000 §4.6
+    /// `MAX_STREAMS`). Bounds memory against a peer that opens unbounded
+    /// streams; defaults to [`DEFAULT_MAX_REMOTE_STREAMS`] per direction.
+    pub fn set_remote_stream_limits(&mut self, max_remote_bidi: u64, max_remote_uni: u64) {
+        self.streams
+            .set_remote_stream_limits(max_remote_bidi, max_remote_uni);
     }
 
     /// Account bytes written to a stream.
@@ -2737,6 +2762,69 @@ mod tests {
                 "new application streams require established state"
             )
         );
+    }
+
+    #[test]
+    fn accept_remote_stream_enforces_default_remote_limit() {
+        // `NativeQuicConnection::new` must install a finite cap on
+        // remotely-initiated streams (RFC 9000 §4.6 MAX_STREAMS) so a peer
+        // cannot force unbounded stream allocations from the wire. The default
+        // client connection accepts server-initiated (remote) streams; sequence
+        // `DEFAULT_MAX_REMOTE_STREAMS - 1` is the highest within-limit index and
+        // `DEFAULT_MAX_REMOTE_STREAMS` is the first index that must be rejected.
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let within = StreamId::local(
+            StreamRole::Server,
+            crate::net::quic_native::streams::StreamDirection::Bidirectional,
+            DEFAULT_MAX_REMOTE_STREAMS - 1,
+        );
+        conn.accept_remote_stream(&cx, within)
+            .expect("highest within-limit remote stream accepted");
+        let over = StreamId::local(
+            StreamRole::Server,
+            crate::net::quic_native::streams::StreamDirection::Bidirectional,
+            DEFAULT_MAX_REMOTE_STREAMS,
+        );
+        let err = conn
+            .accept_remote_stream(&cx, over)
+            .expect_err("remote stream at the limit must be rejected");
+        assert!(
+            matches!(
+                err,
+                NativeQuicConnectionError::StreamTable(StreamTableError::StreamLimitExceeded {
+                    ..
+                })
+            ),
+            "expected StreamLimitExceeded, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn set_remote_stream_limits_overrides_default() {
+        // The per-connection override tightens (or relaxes) the wire cap.
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.set_remote_stream_limits(1, 1);
+        let first = StreamId::local(
+            StreamRole::Server,
+            crate::net::quic_native::streams::StreamDirection::Bidirectional,
+            0,
+        );
+        conn.accept_remote_stream(&cx, first)
+            .expect("first remote stream within tightened limit");
+        let second = StreamId::local(
+            StreamRole::Server,
+            crate::net::quic_native::streams::StreamDirection::Bidirectional,
+            1,
+        );
+        let err = conn
+            .accept_remote_stream(&cx, second)
+            .expect_err("second remote stream exceeds tightened limit");
+        assert!(matches!(
+            err,
+            NativeQuicConnectionError::StreamTable(StreamTableError::StreamLimitExceeded { .. })
+        ));
     }
 
     // --- Gap 10: NativeQuicConnectionError Display/From impls ---

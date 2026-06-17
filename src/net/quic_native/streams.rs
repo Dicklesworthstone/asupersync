@@ -757,6 +757,14 @@ pub struct StreamTable {
     role: StreamRole,
     max_local_bidi: u64,
     max_local_uni: u64,
+    /// Maximum number of remotely-initiated bidirectional streams this endpoint
+    /// will accept (RFC 9000 §4.6 `MAX_STREAMS`). Defaults to `u64::MAX` so
+    /// callers that do not opt into a finite cap keep the prior unbounded
+    /// behavior; install a finite bound with [`Self::set_remote_stream_limits`].
+    max_remote_bidi: u64,
+    /// Maximum number of remotely-initiated unidirectional streams this endpoint
+    /// will accept (RFC 9000 §4.6 `MAX_STREAMS`). See [`Self::max_remote_bidi`].
+    max_remote_uni: u64,
     next_local_bidi_seq: u64,
     next_local_uni_seq: u64,
     streams: BTreeMap<StreamId, QuicStream>,
@@ -805,6 +813,11 @@ impl StreamTable {
             role,
             max_local_bidi,
             max_local_uni,
+            // Unbounded by default; the connection layer installs a finite cap so
+            // a peer cannot force unbounded remote-stream allocations from the
+            // wire (see `set_remote_stream_limits`).
+            max_remote_bidi: u64::MAX,
+            max_remote_uni: u64::MAX,
             next_local_bidi_seq: 0,
             next_local_uni_seq: 0,
             streams: BTreeMap::new(),
@@ -854,10 +867,38 @@ impl StreamTable {
         Ok(id)
     }
 
+    /// Set the maximum number of remotely-initiated streams (per direction) this
+    /// endpoint will accept from the wire (RFC 9000 §4.6 `MAX_STREAMS`).
+    ///
+    /// A remote stream whose sequence index meets or exceeds the limit for its
+    /// direction is rejected by [`Self::accept_remote_stream`] with
+    /// [`StreamTableError::StreamLimitExceeded`], bounding memory against a peer
+    /// that opens unbounded streams.
+    pub fn set_remote_stream_limits(&mut self, max_remote_bidi: u64, max_remote_uni: u64) {
+        self.max_remote_bidi = max_remote_bidi;
+        self.max_remote_uni = max_remote_uni;
+    }
+
     /// Accept a remotely initiated stream ID.
     pub fn accept_remote_stream(&mut self, id: StreamId) -> Result<(), StreamTableError> {
         if id.is_local_for(self.role) {
             return Err(StreamTableError::InvalidRemoteStream(id));
+        }
+        // RFC 9000 §4.6: a remote stream of sequence index N requires the peer
+        // to have been granted at least N+1 streams of that type. Reject any
+        // stream at or beyond the advertised limit so a hostile peer cannot
+        // force unbounded `QuicStream` allocations from the wire (one allocation
+        // per STREAM/RESET_STREAM frame carrying a fresh remote ID) — a
+        // memory-exhaustion DoS. The two low bits of the ID are the type, so the
+        // 62-bit sequence index is `id.0 >> 2`.
+        let sequence = id.0 >> 2;
+        let direction = id.direction();
+        let limit = match direction {
+            StreamDirection::Bidirectional => self.max_remote_bidi,
+            StreamDirection::Unidirectional => self.max_remote_uni,
+        };
+        if sequence >= limit {
+            return Err(StreamTableError::StreamLimitExceeded { direction, limit });
         }
         self.insert_new_stream(id)
     }
@@ -1692,6 +1733,55 @@ mod tests {
             .accept_remote_stream(local_id)
             .expect_err("locally initiated id must not be accepted as remote");
         assert_eq!(err, StreamTableError::InvalidRemoteStream(local_id));
+    }
+
+    #[test]
+    fn stream_table_rejects_remote_stream_over_limit() {
+        // Server endpoint accepting client-initiated (remote) streams, capped at
+        // 2 per direction. This is the RFC 9000 §4.6 MAX_STREAMS bound that
+        // prevents a peer from forcing unbounded remote-stream allocations.
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        tbl.set_remote_stream_limits(2, 2);
+
+        // Bidi sequences 0 and 1 are within the limit of 2.
+        for seq in 0..2 {
+            let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, seq);
+            tbl.accept_remote_stream(id)
+                .expect("within-limit remote bidi accepted");
+        }
+        // Sequence 2 (the third) is at the limit and must be rejected.
+        let over_bidi = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 2);
+        assert_eq!(
+            tbl.accept_remote_stream(over_bidi).unwrap_err(),
+            StreamTableError::StreamLimitExceeded {
+                direction: StreamDirection::Bidirectional,
+                limit: 2,
+            }
+        );
+
+        // The unidirectional limit is tracked independently of bidirectional.
+        let uni0 = StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 0);
+        tbl.accept_remote_stream(uni0)
+            .expect("within-limit remote uni accepted");
+        let over_uni = StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 2);
+        assert_eq!(
+            tbl.accept_remote_stream(over_uni).unwrap_err(),
+            StreamTableError::StreamLimitExceeded {
+                direction: StreamDirection::Unidirectional,
+                limit: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn stream_table_remote_limit_defaults_to_unbounded() {
+        // Without an explicit `set_remote_stream_limits`, acceptance stays
+        // unbounded so existing callers keep their prior behavior; only the
+        // connection layer opts into a finite cap.
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let high = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1_000_000);
+        tbl.accept_remote_stream(high)
+            .expect("default remote limit must be unbounded");
     }
 
     #[test]
