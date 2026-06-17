@@ -491,8 +491,11 @@ pub async fn recreate_fifo(out_path: &Path, mode: u32) -> Result<(), StreamingEr
     crate::runtime::spawn_blocking(move || {
         use nix::sys::stat::Mode;
         // `mkfifo` honors the umask; the exact mode is set by `chmod` below.
-        nix::unistd::mkfifo(&path_buf, Mode::from_bits_truncate(perm_bits as libc::mode_t))
-            .map_err(|e| e.to_string())
+        nix::unistd::mkfifo(
+            &path_buf,
+            Mode::from_bits_truncate(perm_bits as libc::mode_t),
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| StreamingError::new(format!("{}: mkfifo: {e}", out_path.display())))?;
@@ -608,6 +611,44 @@ mod tests {
         let js = serde_json::to_string(&m).expect("ser");
         let back: EntryMetadata = serde_json::from_str(&js).expect("de");
         assert_eq!(m, back);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_metadata_huge_mtime_nanos_carry_does_not_panic() {
+        let meta = EntryMetadata {
+            mtime_unix_secs: Some(i64::MAX),
+            mtime_nanos: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let path = Path::new("/asupersync-metadata-mtime-overflow-regression-missing-file");
+
+        let report = futures_lite::future::block_on(apply_entry_metadata(path, &meta))
+            .expect("out-of-range off-wire mtime must degrade into a metadata report");
+
+        assert!(report.applied.is_empty());
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].0, "mtime");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_metadata_pre_epoch_mtime_is_skipped() {
+        let meta = EntryMetadata {
+            mtime_unix_secs: Some(-1),
+            mtime_nanos: Some(999_999_999),
+            ..Default::default()
+        };
+        let path = Path::new("/asupersync-metadata-pre-epoch-regression-missing-file");
+
+        let report = futures_lite::future::block_on(apply_entry_metadata(path, &meta))
+            .expect("pre-epoch off-wire mtime must degrade into a metadata report");
+
+        assert!(report.applied.is_empty());
+        assert_eq!(
+            report.skipped,
+            vec![("mtime", "pre-epoch mtime not representable".to_string())]
+        );
     }
 
     #[test]
