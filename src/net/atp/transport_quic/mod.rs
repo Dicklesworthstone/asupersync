@@ -5630,16 +5630,16 @@ mod tests {
     }
 
     #[test]
-    fn quic_bounded_k512_repair_feedback_round_recovers_after_source_loss() {
+    fn quic_bounded_k256_repair_feedback_round_recovers_after_source_loss() {
         let (cx, mut client, mut server) = established_pair();
         let config = QuicConfig {
             symbol_size: 16,
-            max_block_size: 8 * 1024,
+            max_block_size: 4 * 1024,
             repair_overhead: 1.0,
             ..trusted_quic_config()
         };
-        assert_eq!(config.max_block_size / usize::from(config.symbol_size), 512);
-        let entries = vec![("alpha.bin".to_string(), varied_bytes(8 * 1024, 47))];
+        assert_eq!(config.max_block_size / usize::from(config.symbol_size), 256);
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(4 * 1024, 47))];
         let manifest = manifest_from_entries("payload", true, &entries);
         let mut sender_control =
             QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
@@ -5692,7 +5692,7 @@ mod tests {
             &config,
         )
         .expect("send source-only round");
-        assert_eq!(initial_sent, 512);
+        assert_eq!(initial_sent, 256);
         pump_until_idle(
             &cx,
             &mut client,
@@ -5710,7 +5710,7 @@ mod tests {
         let accepted_before =
             drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
                 .expect("receiver drains surviving source symbols");
-        assert_eq!(accepted_before, 511);
+        assert_eq!(accepted_before, 255);
         receive_object_complete(&cx, &mut server, &mut receiver_control)
             .expect("receiver sees initial object complete");
         assemble_completed_entries(&mut decoders);
@@ -5749,7 +5749,7 @@ mod tests {
         .expect("sender handles need-more");
         assert!(report.is_none());
         assert_eq!(feedback.feedback_rounds, 1);
-        assert_eq!(feedback.symbols_sent, 513);
+        assert_eq!(feedback.symbols_sent, 257);
         pump_until_idle(
             &cx,
             &mut client,
@@ -5805,10 +5805,10 @@ mod tests {
         .expect("sender receives proof report")
         .expect("proof completes transfer");
         assert_eq!(report.transfer_id, manifest.transfer_id);
-        assert_eq!(report.receipt.bytes_received, 8 * 1024);
+        assert_eq!(report.receipt.bytes_received, 4 * 1024);
         assert_eq!(report.files, 1);
         assert_eq!(feedback.feedback_rounds, 1);
-        assert_eq!(feedback.symbols_sent, 513);
+        assert_eq!(feedback.symbols_sent, 257);
     }
 
     #[test]
