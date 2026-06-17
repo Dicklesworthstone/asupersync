@@ -86,8 +86,9 @@ use crate::types::symbol::Symbol;
 
 use super::{
     NativeQuicFrameTransport, QuicConfig, QuicControlReply, QuicEntryEncoder, QuicHello,
-    QuicHelloAck, QuicNeedMore, QuicPreparedSource, QuicSourceSymbolRequest, QuicTransportError,
-    ReceiveReceipt, ReceiveReport, SendReport, TransferManifest,
+    QuicHelloAck, QuicNeedMore, QuicPreparedSource, QuicSourceSymbolRequest,
+    QuicSprayPacingDecision, QuicTransportError, ReceiveReceipt, ReceiveReport, SendReport,
+    TransferManifest,
 };
 
 /// Shared QUIC Initial Destination Connection ID for ATP-over-QUIC.
@@ -137,16 +138,6 @@ const ATP_QUIC_UDP_SOCKET_BUFFER: usize = 16 * 1024 * 1024;
 /// small drain width caught up without allocating a full 256-packet receive
 /// burst.
 const INBOUND_PUMP_BATCH: usize = 512;
-
-/// Flush each outbound symbol before queueing the next one. Large 15 KiB
-/// DATAGRAMs can overrun the receiver's real kernel socket buffer in a single
-/// scheduler slice even though the in-process connection queues are bounded;
-/// one-symbol pacing keeps the native link's memory envelope stable.
-const SPRAY_FLUSH_THRESHOLD: usize = 1;
-/// Wall-clock pause after each spray flush. A cooperative yield is not enough on
-/// all RCH workers because the receiver runs in a separate runtime thread and
-/// the sender can still refill the UDP socket faster than loopback drains it.
-const SPRAY_FLUSH_PAUSE: Duration = Duration::from_millis(1);
 
 /// Quiet window that ends a receiver symbol round after at least one symbol was
 /// accepted. This must be much shorter than the sender's Proof/NeedMore timeout
@@ -498,7 +489,11 @@ impl QuicLink {
         ))
     }
 
-    /// Spray one symbol, flushing first if the bounded outbound queue is full.
+    fn spray_pacing_decision(&self, config: &QuicConfig) -> QuicSprayPacingDecision {
+        super::quic_spray_pacing_decision_from_transport(config, self.conn.transport())
+    }
+
+    /// Spray one symbol, flushing first if the paced outbound queue is full.
     async fn spray_symbol(
         &mut self,
         cx: &Cx,
@@ -506,10 +501,11 @@ impl QuicLink {
         tag: u64,
         entry: u32,
         auth_tag: Option<[u8; TAG_SIZE]>,
+        pacing: &QuicSprayPacingDecision,
     ) -> Result<(), QuicTransportError> {
-        if self.conn.pending_outbound_datagram_count() >= SPRAY_FLUSH_THRESHOLD {
+        if self.conn.pending_outbound_datagram_count() >= pacing.max_burst_symbols {
             self.flush(cx).await?;
-            crate::time::sleep(cx.now(), SPRAY_FLUSH_PAUSE).await;
+            crate::time::sleep(cx.now(), pacing.pause_after_burst).await;
         }
         super::send_native_symbol(cx, &mut self.conn, symbol, tag, entry, auth_tag)
     }
@@ -550,11 +546,11 @@ async fn bind_endpoint(cx: &Cx, local: SocketAddr) -> Result<QuicUdpEndpoint, Qu
         socket_recv_buffer_size: Some(ATP_QUIC_UDP_SOCKET_BUFFER),
         socket_send_buffer_size: Some(ATP_QUIC_UDP_SOCKET_BUFFER),
         // The endpoint batch ceiling governs how many packets a single
-        // `receive_batch` may drain. It must be the *receiver* drain width
-        // (`INBOUND_PUMP_BATCH`), NOT the send-pacing `SPRAY_FLUSH_THRESHOLD`:
-        // capping the receiver at 8 packets/pump starves it on a real link where
-        // the sender sprays thousands of symbols per round. `send_batch` only
-        // chunks by this value, so a larger ceiling is strictly better for sends.
+        // `receive_batch` may drain. It must be the *receiver* drain width, not
+        // the sender's current paced spray burst: capping the receiver at a tiny
+        // send threshold starves it on a real link where repairs may arrive in
+        // bursts. `send_batch` only chunks by this value, so a larger ceiling is
+        // strictly better for sends.
         max_batch_size: INBOUND_PUMP_BATCH,
         ..QuicUdpEndpointConfig::default()
     };
@@ -838,6 +834,8 @@ async fn spray_round(
     let tag = super::transfer_tag(&manifest.transfer_id);
     let repair_batch = super::repair_batch_per_block(config);
     let drop_one_in = config.debug_drop_one_in;
+    let pacing = link.spray_pacing_decision(config);
+    pacing.trace_epoch(cx, if with_source { 0 } else { 1 });
     let mut sent = 0u64;
     let mut sprayed = 0u64;
     for index in pending {
@@ -892,7 +890,7 @@ async fn spray_round(
                     continue;
                 }
                 let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
-                link.spray_symbol(cx, &symbol, tag, entry_index, auth_tag)
+                link.spray_symbol(cx, &symbol, tag, entry_index, auth_tag, &pacing)
                     .await?;
                 sent = sent.saturating_add(1);
             }
@@ -913,6 +911,8 @@ async fn spray_source_requests(
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
+    let pacing = link.spray_pacing_decision(config);
+    pacing.trace_epoch(cx, 2);
     let mut sent = 0u64;
     for request in requests {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -949,7 +949,7 @@ async fn spray_source_requests(
             crate::types::symbol::SymbolKind::Source,
         );
         let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
-        link.spray_symbol(cx, &symbol, tag, request.entry, auth_tag)
+        link.spray_symbol(cx, &symbol, tag, request.entry, auth_tag, &pacing)
             .await?;
         sent = sent.saturating_add(1);
     }

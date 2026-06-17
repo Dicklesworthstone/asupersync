@@ -205,6 +205,18 @@ const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 /// B2/B3 data path.
 pub const DEFAULT_DATAGRAM_FANOUT: usize = 1;
 
+/// Default upper bound for one paced QUIC DATAGRAM spray burst.
+///
+/// C3 still lets the congestion window choose a smaller burst. This cap prevents
+/// a very large cwnd estimate from turning one scheduler slice into an unbounded
+/// outbound queue.
+pub const DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH: usize = 32;
+
+const QUIC_SPRAY_BURST_RTT_FRACTION: f64 = 0.125;
+const QUIC_SPRAY_MIN_PAUSE: Duration = Duration::from_millis(1);
+const QUIC_SPRAY_MAX_PAUSE: Duration = Duration::from_secs(1);
+const QUIC_SPRAY_MIN_BACKOFF: f64 = 0.10;
+
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
 /// Mirrors the role of [`transport_tcp::TransferConfig`] while adding the
@@ -244,6 +256,22 @@ pub struct QuicConfig {
     /// intentionally records the selected C1 arm now; Phase D consumes it for
     /// multi-connection fan-out.
     pub datagram_fanout: usize,
+    /// Optional sender bandwidth cap in bytes per second.
+    ///
+    /// This is the internal transport knob that future CLI `--bwlimit` plumbing
+    /// will set. `None` lets QUIC path signals select the pacing rate.
+    pub bwlimit_bps: Option<u64>,
+    /// Maximum DATAGRAM symbols queued before a paced flush.
+    ///
+    /// The live decision is the minimum of this cap, the cwnd-derived burst, and
+    /// any bwlimit/responsiveness backoff.
+    pub max_spray_symbols_per_flush: usize,
+    /// Normalized host pressure used by the pacing policy.
+    ///
+    /// `0.0` means no local responsiveness pressure; `1.0` means saturated. The
+    /// caller owns sampling CPU/loadavg/cgroup pressure and passes the snapshot
+    /// here, keeping this library path deterministic and ambient-free.
+    pub responsiveness_pressure: f64,
     /// Optional per-symbol authentication context for QUIC DATAGRAM symbols.
     ///
     /// When present, senders append an HMAC tag to every symbol envelope and
@@ -301,6 +329,9 @@ impl Default for QuicConfig {
             max_active_connections: DEFAULT_MAX_ACTIVE_CONNECTIONS,
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
             datagram_fanout: DEFAULT_DATAGRAM_FANOUT,
+            bwlimit_bps: None,
+            max_spray_symbols_per_flush: DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH,
+            responsiveness_pressure: 0.0,
             symbol_auth_context: None,
             allow_unauthenticated_symbols: false,
             metadata_policy: MetadataPolicy::default(),
@@ -432,6 +463,23 @@ impl QuicConfig {
                 "datagram_fanout must be greater than 0".to_string(),
             ));
         }
+        if matches!(self.bwlimit_bps, Some(0)) {
+            return Err(QuicTransportError::Config(
+                "bwlimit_bps must be greater than 0 when set".to_string(),
+            ));
+        }
+        if self.max_spray_symbols_per_flush == 0 {
+            return Err(QuicTransportError::Config(
+                "max_spray_symbols_per_flush must be greater than 0".to_string(),
+            ));
+        }
+        if !self.responsiveness_pressure.is_finite()
+            || !(0.0..=1.0).contains(&self.responsiveness_pressure)
+        {
+            return Err(QuicTransportError::Config(
+                "responsiveness_pressure must be finite and in [0.0, 1.0]".to_string(),
+            ));
+        }
         self.validate_symbol_auth_mode()?;
         Ok(())
     }
@@ -505,6 +553,280 @@ pub fn apply_quic_adaptive_block_plan(
     plan: QuicAdaptiveBlockPlan,
 ) -> Result<QuicConfig, QuicTransportError> {
     QuicAdaptiveArm::from_block_plan(plan)?.apply_to_config(config)
+}
+
+const MIN_QUIC_SPRAY_PACING_RTT_S: f64 = 0.001;
+const MAX_QUIC_SPRAY_PACING_RTT_S: f64 = 60.0;
+const MIN_QUIC_SPRAY_RATE_BPS: u64 = 1;
+
+/// Deterministic machine-responsiveness pressure sampled by the caller.
+///
+/// The transport does not read load average or CPU state itself; that would be
+/// ambient authority and would make lab replay depend on the host. Operators or
+/// future CLI wiring can feed normalized values in `[0, 1]`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct QuicMachinePressure {
+    /// CPU saturation pressure, where `0.0` is idle and `1.0` is saturated.
+    pub cpu_pressure: f64,
+    /// Load/backlog pressure, where `0.0` is healthy and `1.0` is saturated.
+    pub load_pressure: f64,
+}
+
+impl QuicMachinePressure {
+    #[must_use]
+    fn clamped(self) -> Self {
+        Self {
+            cpu_pressure: clamp_unit_pressure(self.cpu_pressure),
+            load_pressure: clamp_unit_pressure(self.load_pressure),
+        }
+    }
+
+    #[must_use]
+    fn max_pressure(self) -> f64 {
+        self.cpu_pressure.max(self.load_pressure)
+    }
+}
+
+/// Inputs for one QUIC symbol-spray pacing epoch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuicSprayPacingInput {
+    /// Latest QUIC recovery/congestion-control signals.
+    pub path: QuicPathSignalSample,
+    /// RaptorQ symbol payload bytes.
+    pub symbol_size: u16,
+    /// Maximum application DATAGRAM payload bytes.
+    pub max_datagram_size: usize,
+    /// Future Phase-D fan-out hint. Until multi-connection fan-out lands, this
+    /// divides the per-connection budget so an N-way sender cannot multiply the
+    /// aggregate offered load by N.
+    pub datagram_fanout: usize,
+    /// Optional user/operator bandwidth cap in bytes per second. J6 wires this
+    /// from `--bwlimit`; C3 keeps it as a pure input.
+    pub bandwidth_limit_bps: Option<u64>,
+    /// Caller-sampled host responsiveness pressure.
+    pub machine_pressure: QuicMachinePressure,
+    /// Hard burst ceiling before a flush/yield, independent of path cwnd.
+    pub burst_cap_symbols: usize,
+}
+
+/// The limiting factor chosen for a QUIC spray pacing epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicSprayPacingLimiter {
+    /// Congestion window / RTT derived pacing is the active limiter.
+    CongestionWindow,
+    /// The fixed burst ceiling capped a larger cwnd/rate budget.
+    BurstCap,
+    /// Recent loss reduced the pacing rate.
+    LossBackoff,
+    /// Machine responsiveness pressure reduced the pacing rate.
+    ResponsivenessBackoff,
+    /// The optional bandwidth cap reduced the pacing rate.
+    BandwidthLimit,
+}
+
+impl QuicSprayPacingLimiter {
+    #[must_use]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CongestionWindow => "cwnd",
+            Self::BurstCap => "burst_cap",
+            Self::LossBackoff => "loss",
+            Self::ResponsivenessBackoff => "responsiveness",
+            Self::BandwidthLimit => "bandwidth_limit",
+        }
+    }
+}
+
+/// Deterministic QUIC symbol-spray pacing decision for one epoch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuicSprayPacingDecision {
+    /// Maximum symbols queued before flushing the native QUIC data plane.
+    pub max_burst_symbols: usize,
+    /// Pause after each burst so the receiver and kernel socket drain.
+    pub pause_after_burst: Duration,
+    /// Effective pacing rate in bytes per second after all caps/backoffs.
+    pub pacing_rate_bps: u64,
+    /// Raw cwnd converted to symbol slots.
+    pub cwnd_symbols: usize,
+    /// Per-fan-out share of the cwnd symbol budget.
+    pub cwnd_share_symbols: usize,
+    /// Loss multiplier applied to the cwnd/RTT rate.
+    pub loss_backoff: f64,
+    /// Machine responsiveness multiplier applied to the rate.
+    pub responsiveness_backoff: f64,
+    /// Clamped RTT used for the rate calculation.
+    pub path_rtt_s: f64,
+    /// Clamped path cwnd bytes used for the rate calculation.
+    pub path_cwnd_bytes: u64,
+    /// Clamped recent loss rate used for the rate calculation.
+    pub path_loss_rate: f64,
+    /// Active limiting factor.
+    pub limiter: QuicSprayPacingLimiter,
+}
+
+impl QuicSprayPacingDecision {
+    /// Emit this pacing epoch as structured trace fields. This is intended to
+    /// run once per symbol round, never per symbol.
+    pub fn trace_epoch(&self, cx: &Cx, epoch: u64) {
+        let epoch = epoch.to_string();
+        let max_burst_symbols = self.max_burst_symbols.to_string();
+        let pause_after_burst_micros = self.pause_after_burst.as_micros().to_string();
+        let pacing_rate_bps = self.pacing_rate_bps.to_string();
+        let cwnd_symbols = self.cwnd_symbols.to_string();
+        let cwnd_share_symbols = self.cwnd_share_symbols.to_string();
+        let loss_backoff = format!("{:.6}", self.loss_backoff);
+        let responsiveness_backoff = format!("{:.6}", self.responsiveness_backoff);
+        let path_rtt_s = format!("{:.6}", self.path_rtt_s);
+        let path_cwnd_bytes = self.path_cwnd_bytes.to_string();
+        let path_loss_rate = format!("{:.6}", self.path_loss_rate);
+
+        cx.trace_with_fields(
+            "atp_quic.spray.pacing_epoch",
+            &[
+                ("transport", "quic"),
+                ("epoch", &epoch),
+                ("max_burst_symbols", &max_burst_symbols),
+                ("pause_after_burst_micros", &pause_after_burst_micros),
+                ("pacing_rate_bps", &pacing_rate_bps),
+                ("cwnd_symbols", &cwnd_symbols),
+                ("cwnd_share_symbols", &cwnd_share_symbols),
+                ("loss_backoff", &loss_backoff),
+                ("responsiveness_backoff", &responsiveness_backoff),
+                ("path_rtt_s", &path_rtt_s),
+                ("path_cwnd_bytes", &path_cwnd_bytes),
+                ("path_loss_rate", &path_loss_rate),
+                ("limiter", self.limiter.as_str()),
+            ],
+        );
+    }
+}
+
+/// Convert QUIC path signals and caller-supplied caps into one bounded spray
+/// pacing decision.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+pub fn quic_spray_pacing_decision(input: QuicSprayPacingInput) -> QuicSprayPacingDecision {
+    let path = input.path.clamped();
+    let machine_pressure = input.machine_pressure.clamped();
+    let symbol_payload = usize::from(input.symbol_size.max(1))
+        .saturating_add(AUTH_ENVELOPE_HEADER_LEN)
+        .min(input.max_datagram_size.max(1));
+    let fanout = input.datagram_fanout.max(1);
+    let burst_cap = input.burst_cap_symbols.max(1);
+    let rtt_s = path
+        .smoothed_rtt_s
+        .clamp(MIN_QUIC_SPRAY_PACING_RTT_S, MAX_QUIC_SPRAY_PACING_RTT_S);
+
+    let cwnd_symbols_u64 = path
+        .congestion_window_bytes
+        .checked_div(u64::try_from(symbol_payload).unwrap_or(u64::MAX).max(1))
+        .unwrap_or(0)
+        .max(1);
+    let cwnd_symbols = usize::try_from(cwnd_symbols_u64).unwrap_or(usize::MAX);
+    let cwnd_share_symbols = (cwnd_symbols / fanout).max(1);
+
+    let base_rate = path.congestion_window_bytes as f64 / rtt_s;
+    let loss_backoff = (1.0 - (2.0 * path.loss_rate)).clamp(QUIC_SPRAY_MIN_BACKOFF, 1.0);
+    let pressure = machine_pressure.max_pressure();
+    let responsiveness_backoff = (1.0 - (0.75 * pressure)).clamp(QUIC_SPRAY_MIN_BACKOFF, 1.0);
+    let mut rate = (base_rate / fanout as f64) * loss_backoff * responsiveness_backoff;
+
+    let cap_applied = if let Some(cap) = input.bandwidth_limit_bps {
+        let cap = cap.max(MIN_QUIC_SPRAY_RATE_BPS);
+        if rate > cap as f64 {
+            rate = cap as f64;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let rate = if rate.is_finite() && rate > 0.0 {
+        rate
+    } else {
+        MIN_QUIC_SPRAY_RATE_BPS as f64
+    };
+    let pacing_rate_bps = rate.ceil().max(MIN_QUIC_SPRAY_RATE_BPS as f64) as u64;
+    let burst_by_rate = ((rate * rtt_s * QUIC_SPRAY_BURST_RTT_FRACTION) / symbol_payload as f64)
+        .ceil()
+        .max(1.0) as usize;
+    let max_burst_symbols = burst_by_rate.min(cwnd_share_symbols).min(burst_cap).max(1);
+    let burst_bytes = u64::try_from(max_burst_symbols)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(symbol_payload).unwrap_or(u64::MAX).max(1));
+    let pause_after_burst = pacing_pause_for_bytes(burst_bytes, pacing_rate_bps);
+
+    let limiter = if cap_applied {
+        QuicSprayPacingLimiter::BandwidthLimit
+    } else if pressure > 0.0 {
+        QuicSprayPacingLimiter::ResponsivenessBackoff
+    } else if path.loss_rate > 0.0 {
+        QuicSprayPacingLimiter::LossBackoff
+    } else if burst_cap < burst_by_rate.min(cwnd_share_symbols) {
+        QuicSprayPacingLimiter::BurstCap
+    } else {
+        QuicSprayPacingLimiter::CongestionWindow
+    };
+
+    QuicSprayPacingDecision {
+        max_burst_symbols,
+        pause_after_burst,
+        pacing_rate_bps,
+        cwnd_symbols,
+        cwnd_share_symbols,
+        loss_backoff,
+        responsiveness_backoff,
+        path_rtt_s: rtt_s,
+        path_cwnd_bytes: path.congestion_window_bytes,
+        path_loss_rate: path.loss_rate,
+        limiter,
+    }
+}
+
+/// Build a C3 pacing decision from a transfer config and C2 path signal.
+#[must_use]
+pub fn quic_spray_pacing_decision_from_config(
+    config: &QuicConfig,
+    path: QuicPathSignalSample,
+) -> QuicSprayPacingDecision {
+    quic_spray_pacing_decision(QuicSprayPacingInput {
+        path,
+        symbol_size: config.symbol_size,
+        max_datagram_size: config.max_datagram_size,
+        datagram_fanout: config.datagram_fanout,
+        bandwidth_limit_bps: config.bwlimit_bps,
+        machine_pressure: QuicMachinePressure {
+            cpu_pressure: config.responsiveness_pressure,
+            load_pressure: 0.0,
+        },
+        burst_cap_symbols: config.max_spray_symbols_per_flush,
+    })
+}
+
+#[cfg(feature = "tls")]
+pub(crate) fn quic_spray_pacing_decision_from_transport(
+    config: &QuicConfig,
+    transport: &QuicTransportMachine,
+) -> QuicSprayPacingDecision {
+    quic_spray_pacing_decision_from_config(config, quic_path_signal_from_transport(transport))
+}
+
+fn clamp_unit_pressure(value: f64) -> f64 {
+    if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, 1.0)
+    }
+}
+
+fn pacing_pause_for_bytes(bytes: u64, rate_bps: u64) -> Duration {
+    duration_from_secs_clamped(bytes.max(1) as f64 / rate_bps.max(1) as f64)
 }
 
 /// Convert A6 connection path stats into the shared adaptive reward signal.
@@ -583,6 +905,23 @@ pub fn observe_quic_adaptive_path_stats(
         symbol_size,
         quic_path_signal_from_stats(stats),
     );
+}
+
+fn finite_positive_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback.max(1.0)
+    }
+}
+
+fn duration_from_secs_clamped(seconds: f64) -> Duration {
+    Duration::from_secs_f64(
+        finite_positive_or(seconds, QUIC_SPRAY_MIN_PAUSE.as_secs_f64()).clamp(
+            QUIC_SPRAY_MIN_PAUSE.as_secs_f64(),
+            QUIC_SPRAY_MAX_PAUSE.as_secs_f64(),
+        ),
+    )
 }
 
 fn rtt_micros_to_seconds(rtt_micros: Option<u64>) -> f64 {
@@ -4336,6 +4675,11 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
     let max_active_connections = config.max_active_connections.to_string();
     let max_feedback_rounds = config.max_feedback_rounds.to_string();
     let datagram_fanout = config.datagram_fanout.to_string();
+    let bwlimit_bps = config
+        .bwlimit_bps
+        .map_or_else(|| "none".to_string(), |limit| limit.to_string());
+    let max_spray_symbols_per_flush = config.max_spray_symbols_per_flush.to_string();
+    let responsiveness_pressure = format!("{:.6}", config.responsiveness_pressure);
     let metadata_policy = format!("{:?}", config.metadata_policy);
     let allow_special_files = config.allow_special_files.to_string();
     let preserve_hardlinks = config.preserve_hardlinks.to_string();
@@ -4357,6 +4701,9 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
             ("max_active_connections", &max_active_connections),
             ("max_feedback_rounds", &max_feedback_rounds),
             ("datagram_fanout", &datagram_fanout),
+            ("bwlimit_bps", &bwlimit_bps),
+            ("max_spray_symbols_per_flush", &max_spray_symbols_per_flush),
+            ("responsiveness_pressure", &responsiveness_pressure),
             ("metadata_policy", &metadata_policy),
             ("allow_special_files", &allow_special_files),
             ("preserve_hardlinks", &preserve_hardlinks),
@@ -4988,6 +5335,34 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn validate_rejects_invalid_spray_pacing_knobs() {
+        for c in [
+            QuicConfig {
+                bwlimit_bps: Some(0),
+                ..trusted_quic_config()
+            },
+            QuicConfig {
+                max_spray_symbols_per_flush: 0,
+                ..trusted_quic_config()
+            },
+            QuicConfig {
+                responsiveness_pressure: f64::NAN,
+                ..trusted_quic_config()
+            },
+            QuicConfig {
+                responsiveness_pressure: -0.1,
+                ..trusted_quic_config()
+            },
+            QuicConfig {
+                responsiveness_pressure: 1.1,
+                ..trusted_quic_config()
+            },
+        ] {
+            assert!(matches!(c.validate(), Err(QuicTransportError::Config(_))));
+        }
+    }
+
     fn quic_path_estimate(loss: f64, bw: f64) -> QuicPathEstimate {
         QuicPathEstimate {
             rtt_s: 0.075,
@@ -5218,6 +5593,128 @@ mod tests {
             lossy_large < 80,
             "lossy/small-cwnd A6 stats should shift away from the large arm, got {lossy_large}/200"
         );
+    }
+
+    fn pacing_signal(rtt_s: f64, cwnd_bytes: u64, loss_rate: f64) -> QuicPathSignalSample {
+        QuicPathSignalSample {
+            smoothed_rtt_s: rtt_s,
+            congestion_window_bytes: cwnd_bytes,
+            loss_rate,
+        }
+    }
+
+    #[test]
+    fn quic_spray_pacing_tracks_cwnd_loss_bwlimit_and_pressure() {
+        let config = QuicConfig {
+            symbol_size: 1024,
+            max_spray_symbols_per_flush: 64,
+            ..trusted_quic_config()
+        };
+
+        let small_cwnd =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 16_000, 0.0));
+        let large_cwnd =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.0));
+        assert!(
+            large_cwnd.max_burst_symbols > small_cwnd.max_burst_symbols,
+            "larger cwnd should permit a larger paced burst: small={small_cwnd:?} large={large_cwnd:?}"
+        );
+        assert_eq!(large_cwnd.max_burst_symbols, 64);
+
+        let lossy =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.40));
+        assert_eq!(lossy.limiter, QuicSprayPacingLimiter::LossBackoff);
+        assert!(lossy.pacing_rate_bps < large_cwnd.pacing_rate_bps);
+        assert!(lossy.max_burst_symbols < large_cwnd.max_burst_symbols);
+
+        let bwlimited = quic_spray_pacing_decision_from_config(
+            &QuicConfig {
+                bwlimit_bps: Some(128 * 1024),
+                max_spray_symbols_per_flush: 64,
+                ..config.clone()
+            },
+            pacing_signal(0.050, 1_048_576, 0.0),
+        );
+        assert_eq!(bwlimited.limiter, QuicSprayPacingLimiter::BandwidthLimit);
+        assert!(bwlimited.pacing_rate_bps <= 128 * 1024);
+        assert_eq!(bwlimited.max_burst_symbols, 1);
+        assert!(
+            bwlimited.pause_after_burst >= Duration::from_millis(8),
+            "128 KiB/s cap should force a real post-flush pause: {bwlimited:?}"
+        );
+
+        let pressured = quic_spray_pacing_decision_from_config(
+            &QuicConfig {
+                responsiveness_pressure: 0.90,
+                max_spray_symbols_per_flush: 64,
+                ..config
+            },
+            pacing_signal(0.050, 1_048_576, 0.0),
+        );
+        assert_eq!(
+            pressured.limiter,
+            QuicSprayPacingLimiter::ResponsivenessBackoff
+        );
+        assert!(pressured.pacing_rate_bps < large_cwnd.pacing_rate_bps);
+        assert!(pressured.max_burst_symbols < large_cwnd.max_burst_symbols);
+    }
+
+    #[test]
+    fn quic_spray_pacing_counts_authenticated_envelope_bytes() {
+        let symbol_size = 1024usize;
+        let datagram_bytes = symbol_size + AUTH_ENVELOPE_HEADER_LEN;
+        let config = QuicConfig {
+            symbol_size: u16::try_from(symbol_size).expect("test symbol size fits"),
+            max_datagram_size: datagram_bytes,
+            max_spray_symbols_per_flush: 64,
+            ..trusted_quic_config()
+        };
+
+        let decision = quic_spray_pacing_decision_from_config(
+            &config,
+            pacing_signal(0.050, u64::try_from((datagram_bytes * 2) - 1).unwrap(), 0.0),
+        );
+
+        assert_eq!(
+            decision.cwnd_symbols, 1,
+            "cwnd symbol accounting must use the QUIC symbol envelope size, not raw RaptorQ payload bytes"
+        );
+    }
+
+    #[test]
+    fn quic_spray_pacing_trace_emits_stable_epoch_fields() {
+        let cx = Cx::for_testing();
+        let collector = crate::observability::LogCollector::new(8)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_diagnostic_context(crate::observability::DiagnosticContext::new());
+        cx.set_log_collector(collector.clone());
+
+        let signal = pacing_signal(0.025, 512 * 1024, 0.125);
+        let decision = quic_spray_pacing_decision_from_config(
+            &QuicConfig {
+                bwlimit_bps: Some(2 * 1024 * 1024),
+                max_spray_symbols_per_flush: 16,
+                responsiveness_pressure: 0.25,
+                ..trusted_quic_config()
+            },
+            signal,
+        );
+        decision.trace_epoch(&cx, 7);
+
+        let entries = collector.peek();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.message() == "atp_quic.spray.pacing_epoch")
+            .expect("spray pacing trace entry");
+        assert_eq!(entry.get_field("epoch"), Some("7"));
+        let expected_burst = decision.max_burst_symbols.to_string();
+        assert_eq!(
+            entry.get_field("max_burst_symbols"),
+            Some(expected_burst.as_str())
+        );
+        assert_eq!(entry.get_field("limiter"), Some("bandwidth_limit"));
+        assert!(entry.get_field("pause_after_burst_micros").is_some());
+        assert!(entry.get_field("pacing_rate_bps").is_some());
     }
 
     #[test]

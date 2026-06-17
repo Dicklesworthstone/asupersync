@@ -23,9 +23,10 @@ use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::net::atp::transport_quic::{
     self, ManifestEntry, QuicAdaptiveArm, QuicAdaptiveBlockPlan, QuicAdaptiveController,
-    QuicAdaptivePolicy, QuicConfig, QuicPathEstimate, QuicTransportError, ReceiveReceipt,
-    ReceiveReport, SendReport, TransferManifest, apply_quic_adaptive_block_plan,
-    receive_connection, receive_once, send_path,
+    QuicAdaptivePolicy, QuicConfig, QuicPathEstimate, QuicPathSignalSample, QuicSprayPacingLimiter,
+    QuicTransportError, ReceiveReceipt, ReceiveReport, SendReport, TransferManifest,
+    apply_quic_adaptive_block_plan, quic_spray_pacing_decision_from_config, receive_connection,
+    receive_once, send_path,
 };
 use asupersync::net::quic_native::{
     ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionConfig,
@@ -65,6 +66,14 @@ fn quic_path_estimate(loss: f64, bw_median_bps: f64) -> QuicPathEstimate {
         coding_ref_k: 1024,
         coding_gamma: 1.5,
         samples: 8,
+    }
+}
+
+fn quic_pacing_signal(rtt_s: f64, cwnd_bytes: u64, loss_rate: f64) -> QuicPathSignalSample {
+    QuicPathSignalSample {
+        smoothed_rtt_s: rtt_s,
+        congestion_window_bytes: cwnd_bytes,
+        loss_rate,
     }
 }
 
@@ -335,6 +344,39 @@ fn adaptive_arm_is_visible_on_public_send_path_trace() {
     assert_eq!(start.get_field("max_block_size"), Some("256"));
     assert_eq!(start.get_field("repair_overhead"), Some("1.2500"));
     assert_eq!(start.get_field("datagram_fanout"), Some("3"));
+}
+
+#[test]
+fn spray_pacing_policy_is_public_and_bounded_by_path_signals() {
+    let config = QuicConfig {
+        symbol_size: 1024,
+        max_spray_symbols_per_flush: 32,
+        ..trusted_quic_config()
+    };
+
+    let low_cwnd =
+        quic_spray_pacing_decision_from_config(&config, quic_pacing_signal(0.040, 12_000, 0.0));
+    let high_cwnd =
+        quic_spray_pacing_decision_from_config(&config, quic_pacing_signal(0.040, 768 * 1024, 0.0));
+    assert!(high_cwnd.max_burst_symbols > low_cwnd.max_burst_symbols);
+    assert!(high_cwnd.max_burst_symbols <= config.max_spray_symbols_per_flush);
+
+    let lossy = quic_spray_pacing_decision_from_config(
+        &config,
+        quic_pacing_signal(0.040, 768 * 1024, 0.35),
+    );
+    assert_eq!(lossy.limiter, QuicSprayPacingLimiter::LossBackoff);
+    assert!(lossy.pacing_rate_bps < high_cwnd.pacing_rate_bps);
+
+    let bwlimited = quic_spray_pacing_decision_from_config(
+        &QuicConfig {
+            bwlimit_bps: Some(256 * 1024),
+            ..config
+        },
+        quic_pacing_signal(0.040, 768 * 1024, 0.0),
+    );
+    assert_eq!(bwlimited.limiter, QuicSprayPacingLimiter::BandwidthLimit);
+    assert!(bwlimited.pacing_rate_bps <= 256 * 1024);
 }
 
 fn adaptive_epoch_trace_fields_under_lab(seed: u64) -> Vec<(String, String)> {
