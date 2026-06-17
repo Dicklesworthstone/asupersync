@@ -39,6 +39,32 @@ Target: ≤ rsync on clean; FASTER under loss/high-BDP.
   **Retry-condition:** N/A — F3 is kept (helps the WAN encode-bound case); this entry records that
   encode-parallelism is NOT sufficient on its own. Must be paired with pacing (E-1).
 
+## ★★ WIRING INVENTORY — dormant accretive intelligence to make DEFAULT (user mandate)
+
+An entire adaptive-transport intelligence stack is BUILT but UNWIRED (pub-exported, ~zero live
+callers). User directive: wire ALL of it into the default path. Discipline: wire each incrementally,
+prove byte-identical + faster/robust + correct (sha), keep wins, ledger losses with retry-conditions;
+compose controllers only with an interference check (alien-artifact composition matrix).
+
+| Module | What it provides | Wired? | Default-on plan |
+|---|---|---|---|
+| `transport_rq/adaptive.rs` `AdaptiveController` | EXP3 bandit (block-size/fanout) + Gaussian-tail FEC overhead ε* + CVaR goodput | NO (opt-in) | **WIRE-1** (=E-7) |
+| `datagram/congestion.rs` `CongestionControl` | TokenBucket/AIMD/Adaptive pacing + rate limit + backoff (THE pacing primitive) | NO (dead_code) | **WIRE-2** (=E-7.3 pacing) |
+| `quic/transfer_brain.rs` `AtpTransferBrain` | path selection + congestion adaptation + repair/FEC enable + relay-vs-direct decisions | NO (pub use only) | **WIRE-3** (meta-layer; compose last) |
+| `loss/detector.rs` `LossDetector` | loss detection → SwitchCongestionControl / FEC recommendations | partial | **WIRE-4** (feed the controllers) |
+| `datagram/beacons.rs` `BeaconScheduler` | Keepalive (idle/NAT), Probe (path RTT), Migration — robustness for spotty links | partial (Migration off) | **WIRE-5** (peer-liveness, spotty-link) |
+| `loss/persistent_congestion` | persistent-congestion event detection | ? | assess under WIRE-4 |
+
+**Composition (alien-artifact §25 interference check required):** layer = `LossDetector` (sense) →
+`AdaptiveController` (FEC params: overhead/k/fanout) + `CongestionControl` (pacing/rate) →
+`AtpTransferBrain` (meta: path/relay/enable). Timescale separation: pacing reacts per-RTT, FEC per
+feedback-round, brain per-transfer. Each layer needs a deterministic conservative fallback.
+**Priority:** WIRE-2 (pacing) + WIRE-1 (adaptive FEC) FIRST — they directly fix the E-0
+feedback-round bug — then WIRE-4 (loss→params), WIRE-5 (beacons, spotty robustness), WIRE-3 (brain).
+Stays opt-in items (do NOT default-on): mirror.rs delete (safety), metadata specials/hardlink/sparse
+(rsync-parity flags), rq_trace (library-silent). transport_quic NotImplemented ops = stubs, not code
+to wire.
+
 ## OPEN HYPOTHESES (experiment queue — profile-first)
 
 ### E-0 · PROFILE: where does the 113.85s actually go? (BLOCKS all others)
