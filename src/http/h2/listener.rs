@@ -1291,6 +1291,7 @@ async fn serve_h2_connection<F, Fut, R>(
     request_drain_grace: Duration,
     max_requests_per_connection: Option<u64>,
     idle_timeout: Option<Duration>,
+    time_getter: fn() -> Time,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
@@ -1306,7 +1307,11 @@ where
         return Err(io::Error::other("invalid HTTP/2 client preface"));
     }
 
-    let mut conn = Connection::server(settings);
+    // Drive the connection's timeout/rate-limit bookkeeping from the same clock
+    // the listener uses, so a virtual-time driver makes h2 deadlines (idle,
+    // CONTINUATION, RST-window) deterministic in the lab runtime instead of the
+    // connection silently reading the wall clock (br-asupersync-faekxk).
+    let mut conn = Connection::server_with_time_getter(settings, time_getter);
     conn.queue_initial_settings();
     let mut framed = Framed::new(stream, FrameCodec::new());
 
@@ -1985,6 +1990,7 @@ where
             let request_drain_grace = self.config.request_drain_grace;
             let max_requests_per_connection = self.config.max_requests_per_connection;
             let idle_timeout = self.config.idle_timeout;
+            let conn_time_getter = self.config.time_getter;
             let spawn_result = runtime.try_spawn(async move {
                 let peer_addr = Some(addr);
                 if let Err(err) = serve_h2_connection(
@@ -2002,6 +2008,7 @@ where
                     request_drain_grace,
                     max_requests_per_connection,
                     idle_timeout,
+                    conn_time_getter,
                 )
                 .await
                 {
@@ -2470,6 +2477,14 @@ mod tests {
         );
         assert!(outcomes.is_empty());
 
+        // Drain the SETTINGS ACK the connection queues in response to the peer
+        // SETTINGS processed above before inspecting the response frames (same
+        // ordering the push tests account for).
+        match conn.next_frame().expect("settings ack") {
+            Frame::Settings(settings) => assert!(settings.ack, "expected SETTINGS ACK first"),
+            other => panic!("expected SETTINGS ACK, got {other:?}"),
+        }
+
         let frame = conn.next_frame().expect("fallback response headers");
         let Frame::Headers(headers) = frame else {
             panic!("expected fallback response HEADERS, got {frame:?}");
@@ -2485,6 +2500,10 @@ mod tests {
             "invalid handler header must not reach HPACK output: {decoded:?}"
         );
         assert!(conn.next_frame().is_none());
+        // queue_h2_response retains the in-flight guard until the stream's frames
+        // flush (retain-until-flush model); release it now that the stream has no
+        // pending frames, mirroring the serve loop, then confirm no guard leaked.
+        release_flushed_response_guards(&conn, &mut response_guards);
         assert!(response_guards.is_empty());
     }
 
@@ -2525,6 +2544,13 @@ mod tests {
             &mut response_guards,
         );
         assert!(outcomes.is_empty());
+
+        // Drain the SETTINGS ACK queued for the peer SETTINGS before inspecting
+        // the response frames.
+        match conn.next_frame().expect("settings ack") {
+            Frame::Settings(settings) => assert!(settings.ack, "expected SETTINGS ACK first"),
+            other => panic!("expected SETTINGS ACK, got {other:?}"),
+        }
 
         let mut decoder = crate::http::h2::HpackDecoder::new();
         match conn.next_frame().expect("response headers") {

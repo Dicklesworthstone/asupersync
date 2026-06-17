@@ -3,7 +3,8 @@
 //! Manages HTTP/2 connection state, settings negotiation, and frame processing.
 
 use std::collections::VecDeque;
-use std::time::Instant;
+
+use crate::types::Time;
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
@@ -71,8 +72,8 @@ impl Default for RstStreamRateLimit {
     }
 }
 
-fn wall_clock_now() -> Instant {
-    Instant::now()
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
 }
 
 /// Connection state.
@@ -312,15 +313,17 @@ pub struct Connection {
     graceful_shutdown_pending: bool,
     /// Pending operations to process.
     pending_ops: VecDeque<PendingOp>,
-    /// Clock source used by timeout and rate-limit bookkeeping.
-    time_getter: fn() -> Instant,
+    /// Clock source used by timeout and rate-limit bookkeeping. Carries the
+    /// runtime [`Time`] so a virtual-time driver (lab runtime) drives h2
+    /// deadlines deterministically instead of always reading the wall clock.
+    time_getter: fn() -> Time,
     /// Stream ID being continued (for CONTINUATION frames).
     continuation_stream_id: Option<u32>,
     /// When the current continuation sequence started.
     ///
     /// Set when a HEADERS or PUSH_PROMISE frame is received without END_HEADERS.
     /// Used to enforce timeout on incomplete CONTINUATION sequences.
-    continuation_started_at: Option<Instant>,
+    continuation_started_at: Option<Time>,
     /// Pending PUSH_PROMISE header block, if any.
     pending_push_promise: Option<PushPromiseAccumulator>,
     /// RST_STREAM rate limit configuration.
@@ -328,7 +331,7 @@ pub struct Connection {
     /// RST_STREAM frames received in the current rate-limit window.
     rst_stream_count: u32,
     /// Start of the current RST_STREAM rate-limit window.
-    rst_stream_window_start: Instant,
+    rst_stream_window_start: Time,
 }
 
 impl Connection {
@@ -340,7 +343,7 @@ impl Connection {
 
     /// Create a new client connection with a custom time source.
     #[must_use]
-    pub fn client_with_time_getter(settings: Settings, time_getter: fn() -> Instant) -> Self {
+    pub fn client_with_time_getter(settings: Settings, time_getter: fn() -> Time) -> Self {
         let max_header_list_size = settings.max_header_list_size;
         let initial_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
@@ -387,7 +390,7 @@ impl Connection {
 
     /// Create a new server connection with a custom time source.
     #[must_use]
-    pub fn server_with_time_getter(settings: Settings, time_getter: fn() -> Instant) -> Self {
+    pub fn server_with_time_getter(settings: Settings, time_getter: fn() -> Time) -> Self {
         let max_header_list_size = settings.max_header_list_size;
         let initial_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
@@ -568,7 +571,8 @@ impl Connection {
     pub fn check_continuation_timeout(&mut self) -> Result<(), H2Error> {
         if let Some(started_at) = self.continuation_started_at {
             let timeout_ms = self.local_settings.continuation_timeout_ms;
-            let elapsed = (self.time_getter)().saturating_duration_since(started_at);
+            let elapsed =
+                std::time::Duration::from_nanos((self.time_getter)().duration_since(started_at));
 
             if elapsed.as_millis() >= u128::from(timeout_ms) {
                 // Clear continuation state
@@ -597,7 +601,8 @@ impl Connection {
     pub fn continuation_timeout_remaining(&self) -> Option<std::time::Duration> {
         let started_at = self.continuation_started_at?;
         let budget = std::time::Duration::from_millis(self.local_settings.continuation_timeout_ms);
-        let elapsed = (self.time_getter)().saturating_duration_since(started_at);
+        let elapsed =
+            std::time::Duration::from_nanos((self.time_getter)().duration_since(started_at));
         Some(budget.saturating_sub(elapsed))
     }
 
@@ -1365,9 +1370,10 @@ impl Connection {
         self.track_stream_id(frame.stream_id);
 
         // Rate-limit RST_STREAM frames (CVE-2023-44487 mitigation).
-        let elapsed = (self.time_getter)()
-            .saturating_duration_since(self.rst_stream_window_start)
-            .as_millis();
+        let elapsed = std::time::Duration::from_nanos(
+            (self.time_getter)().duration_since(self.rst_stream_window_start),
+        )
+        .as_millis();
         if elapsed >= self.rst_rate_limit.rst_window_ms {
             // Reset the window.
             self.rst_stream_count = 0;
@@ -2286,7 +2292,7 @@ mod tests {
     use std::time::Duration;
 
     static TEST_TIME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    static TEST_NOW_BASE: OnceLock<Instant> = OnceLock::new();
+    static TEST_NOW_BASE: OnceLock<Time> = OnceLock::new();
     static TEST_NOW_OFFSET_MS: AtomicU64 = AtomicU64::new(0);
 
     fn lock_test_clock() -> std::sync::MutexGuard<'static, ()> {
@@ -2307,13 +2313,11 @@ mod tests {
         TEST_NOW_OFFSET_MS.fetch_add(millis, Ordering::Relaxed);
     }
 
-    fn test_now() -> Instant {
-        TEST_NOW_BASE
-            .get_or_init(Instant::now)
-            .checked_add(Duration::from_millis(
-                TEST_NOW_OFFSET_MS.load(Ordering::Relaxed),
-            ))
-            .expect("test instant overflow")
+    fn test_now() -> Time {
+        // Fixed deterministic base so virtual-time offsets are fully reproducible
+        // (no dependency on the wall clock).
+        *TEST_NOW_BASE.get_or_init(|| Time::from_secs(1_000_000))
+            + Duration::from_millis(TEST_NOW_OFFSET_MS.load(Ordering::Relaxed))
     }
 
     fn encode_test_headers(headers: &[(&str, &str)]) -> Bytes {
