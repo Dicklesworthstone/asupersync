@@ -65,7 +65,7 @@ use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::decoding::{DecodingConfig, DecodingPipeline, MissingSourceSymbol, SymbolAcceptResult};
-use crate::encoding::{EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
+use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
@@ -1074,6 +1074,7 @@ fn source_symbol_count(size: u64, symbol_size: u16) -> usize {
     usize::try_from(size.div_ceil(s).max(1)).unwrap_or(usize::MAX)
 }
 
+#[cfg(test)]
 fn max_block_source_symbol_count(size: u64, symbol_size: u16, max_block_size: usize) -> usize {
     if size == 0 {
         return 1;
@@ -1083,6 +1084,113 @@ fn max_block_source_symbol_count(size: u64, symbol_size: u16, max_block_size: us
         .unwrap_or(usize::MAX)
         .min(max_block_size.max(1));
     capped_block.div_ceil(s).max(1)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EncodeAheadBlock {
+    sbn: u8,
+    start: usize,
+    len: usize,
+    k: usize,
+}
+
+impl EncodeAheadBlock {
+    fn end(self) -> usize {
+        self.start + self.len
+    }
+}
+
+#[derive(Debug)]
+struct EncodeAheadSymbol {
+    entry: u32,
+    symbol: Symbol,
+}
+
+impl EncodeAheadSymbol {
+    fn from_encoded(entry: u32, encoded: EncodedSymbol) -> Self {
+        Self {
+            entry,
+            symbol: encoded.into_symbol(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct EncodeAheadRing {
+    slot: Option<EncodeAheadSymbol>,
+}
+
+impl EncodeAheadRing {
+    const CAPACITY: usize = 1;
+
+    fn push(&mut self, symbol: EncodeAheadSymbol) -> Result<(), RqError> {
+        if self.slot.is_some() {
+            return Err(RqError::Coding(format!(
+                "M={} encode-ahead ring is full",
+                Self::CAPACITY
+            )));
+        }
+        self.slot = Some(symbol);
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<EncodeAheadSymbol> {
+        self.slot.take()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.slot.is_none()
+    }
+}
+
+fn encode_ahead_blocks(
+    bytes_len: usize,
+    config: &RqConfig,
+) -> Result<Vec<EncodeAheadBlock>, RqError> {
+    let symbol_size = usize::from(config.symbol_size);
+    if symbol_size == 0 {
+        return Err(RqError::Coding(
+            "invalid configuration: symbol_size must be non-zero".to_string(),
+        ));
+    }
+    let max_block_size = config.max_block_size;
+    if max_block_size == 0 {
+        return Err(RqError::Coding(
+            "invalid configuration: max_block_size must be non-zero".to_string(),
+        ));
+    }
+
+    if bytes_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let max_total = max_object_size(max_block_size);
+    if bytes_len > max_total {
+        return Err(RqError::TooLarge {
+            size: u64::try_from(bytes_len).unwrap_or(u64::MAX),
+            max: u64::try_from(max_total).unwrap_or(u64::MAX),
+        });
+    }
+
+    let mut blocks = Vec::new();
+    let mut start = 0usize;
+    while start < bytes_len {
+        if blocks.len() >= MAX_SOURCE_BLOCKS {
+            return Err(RqError::TooLarge {
+                size: u64::try_from(bytes_len).unwrap_or(u64::MAX),
+                max: u64::try_from(max_total).unwrap_or(u64::MAX),
+            });
+        }
+        let sbn = u8::try_from(blocks.len()).map_err(|_| {
+            RqError::Coding("encode-ahead source block number overflow".to_string())
+        })?;
+        let len = (bytes_len - start).min(max_block_size);
+        let k = len.div_ceil(symbol_size);
+        blocks.push(EncodeAheadBlock { sbn, start, len, k });
+        start += len;
+    }
+
+    Ok(blocks)
 }
 
 fn effective_transfer_max_block_size(
@@ -1448,11 +1556,9 @@ async fn spray_round(
     let batch = repair_batch_per_block(config);
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        let block_source_n = max_block_source_symbol_count(
-            enc.bytes.len() as u64,
-            config.symbol_size,
-            config.max_block_size,
-        );
+        let mut ring = EncodeAheadRing::default();
+        let blocks = encode_ahead_blocks(enc.bytes.len(), config)?;
+        let block_source_n = blocks.iter().map(|block| block.k).max().unwrap_or(1);
 
         // Cumulative repair count requested from the encoder this round. The
         // encoder always yields repair symbols at deterministic ESIs starting at
@@ -1472,60 +1578,75 @@ async fn spray_round(
             continue;
         }
 
-        // The encoder's `Symbol` output owns its payload buffer, so buffers
-        // allocated from `SymbolPool` are consumed rather than returned to the
-        // pool. A bounded pool therefore becomes an artificial cap on the number
-        // of symbols emitted in a round. Use the encoder's unpooled path here;
-        // round sizing, UDP pacing, and receiver-side limits own memory pressure.
-        let pool = SymbolPool::new(PoolConfig::default());
-        let mut pipeline = EncodingPipeline::new(
-            crate::config::EncodingConfig {
-                repair_overhead: config.repair_overhead,
-                max_block_size: config.max_block_size,
-                symbol_size: config.symbol_size,
-                encoding_parallelism: 1,
-                decoding_parallelism: 1,
-            },
-            pool,
-        );
+        for block in blocks {
+            // The encoder's `Symbol` output owns its payload buffer, so buffers
+            // allocated from `SymbolPool` are consumed rather than returned to
+            // the pool. Keep the M=1 encode-ahead path unpooled; round sizing,
+            // UDP pacing, and receiver-side limits own memory pressure.
+            let pool = SymbolPool::new(PoolConfig::default());
+            let mut pipeline = EncodingPipeline::new(
+                crate::config::EncodingConfig {
+                    repair_overhead: config.repair_overhead,
+                    max_block_size: config.max_block_size,
+                    symbol_size: config.symbol_size,
+                    encoding_parallelism: 1,
+                    decoding_parallelism: 1,
+                },
+                pool,
+            );
+            let block_bytes = &enc.bytes[block.start..block.end()];
 
-        if with_source {
-            for encoded in pipeline.encode_with_repair(enc.object_id, &enc.bytes, target_repair) {
-                let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
-                let sym = encoded.symbol();
-                send_symbol_datagram(
-                    cx,
-                    sockets,
-                    rr,
-                    symbols_sent,
-                    dropper,
-                    tag,
-                    enc.index,
-                    sym,
-                    config,
-                    symbol_auth,
-                )
-                .await?;
-            }
-        } else {
-            for encoded in
-                pipeline.encode_repair_range(enc.object_id, &enc.bytes, already, repair_count)
-            {
-                let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
-                let sym = encoded.symbol();
-                send_symbol_datagram(
-                    cx,
-                    sockets,
-                    rr,
-                    symbols_sent,
-                    dropper,
-                    tag,
-                    enc.index,
-                    sym,
-                    config,
-                    symbol_auth,
-                )
-                .await?;
+            if with_source {
+                for encoded in pipeline.encode_single_block_with_repair(
+                    enc.object_id,
+                    block.sbn,
+                    block_bytes,
+                    target_repair,
+                ) {
+                    let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
+                    ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
+                    let produced = ring.pop().expect("M=1 ring drains immediately");
+                    send_symbol_datagram(
+                        cx,
+                        sockets,
+                        rr,
+                        symbols_sent,
+                        dropper,
+                        tag,
+                        produced.entry,
+                        &produced.symbol,
+                        config,
+                        symbol_auth,
+                    )
+                    .await?;
+                    debug_assert!(ring.is_empty());
+                }
+            } else {
+                for encoded in pipeline.encode_single_block_repair_range(
+                    enc.object_id,
+                    block.sbn,
+                    block_bytes,
+                    already,
+                    repair_count,
+                ) {
+                    let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
+                    ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
+                    let produced = ring.pop().expect("M=1 ring drains immediately");
+                    send_symbol_datagram(
+                        cx,
+                        sockets,
+                        rr,
+                        symbols_sent,
+                        dropper,
+                        tag,
+                        produced.entry,
+                        &produced.symbol,
+                        config,
+                        symbol_auth,
+                    )
+                    .await?;
+                    debug_assert!(ring.is_empty());
+                }
             }
         }
         enc.repair_cursor = target_repair;
@@ -3055,6 +3176,252 @@ mod tests {
         assert_eq!(
             max_block_source_symbol_count(10 * 1024 * 1024, 1024, 8 * 1024 * 1024),
             8192
+        );
+    }
+
+    fn m1_test_encoding_config(config: &RqConfig) -> crate::config::EncodingConfig {
+        crate::config::EncodingConfig {
+            repair_overhead: config.repair_overhead,
+            max_block_size: config.max_block_size,
+            symbol_size: config.symbol_size,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        }
+    }
+
+    fn symbol_fingerprint(symbol: &Symbol) -> (u8, u32, SymbolKind, Vec<u8>) {
+        (
+            symbol.id().sbn(),
+            symbol.id().esi(),
+            symbol.kind(),
+            symbol.data().to_vec(),
+        )
+    }
+
+    fn collect_monolithic_symbols(
+        object_id: ObjectId,
+        bytes: &[u8],
+        config: &RqConfig,
+        repair_count: usize,
+    ) -> Vec<(u8, u32, SymbolKind, Vec<u8>)> {
+        let mut pipeline = EncodingPipeline::new(
+            m1_test_encoding_config(config),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        pipeline
+            .encode_with_repair(object_id, bytes, repair_count)
+            .map(|encoded| {
+                let encoded = encoded.expect("monolithic encode succeeds");
+                symbol_fingerprint(encoded.symbol())
+            })
+            .collect()
+    }
+
+    fn collect_m1_source_symbols(
+        object_id: ObjectId,
+        bytes: &[u8],
+        config: &RqConfig,
+        repair_count: usize,
+    ) -> Vec<(u8, u32, SymbolKind, Vec<u8>)> {
+        let mut symbols = Vec::new();
+        for block in encode_ahead_blocks(bytes.len(), config).expect("block plan") {
+            let mut pipeline = EncodingPipeline::new(
+                m1_test_encoding_config(config),
+                SymbolPool::new(PoolConfig::default()),
+            );
+            for encoded in pipeline.encode_single_block_with_repair(
+                object_id,
+                block.sbn,
+                &bytes[block.start..block.end()],
+                repair_count,
+            ) {
+                let encoded = encoded.expect("M=1 source encode succeeds");
+                symbols.push(symbol_fingerprint(encoded.symbol()));
+            }
+        }
+        symbols
+    }
+
+    fn collect_monolithic_repair_symbols(
+        object_id: ObjectId,
+        bytes: &[u8],
+        config: &RqConfig,
+        first_repair: usize,
+        repair_count: usize,
+    ) -> Vec<(u8, u32, SymbolKind, Vec<u8>)> {
+        let mut pipeline = EncodingPipeline::new(
+            m1_test_encoding_config(config),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        pipeline
+            .encode_repair_range(object_id, bytes, first_repair, repair_count)
+            .map(|encoded| {
+                let encoded = encoded.expect("monolithic repair encode succeeds");
+                symbol_fingerprint(encoded.symbol())
+            })
+            .collect()
+    }
+
+    fn collect_m1_repair_symbols(
+        object_id: ObjectId,
+        bytes: &[u8],
+        config: &RqConfig,
+        first_repair: usize,
+        repair_count: usize,
+    ) -> Vec<(u8, u32, SymbolKind, Vec<u8>)> {
+        let mut symbols = Vec::new();
+        for block in encode_ahead_blocks(bytes.len(), config).expect("block plan") {
+            let mut pipeline = EncodingPipeline::new(
+                m1_test_encoding_config(config),
+                SymbolPool::new(PoolConfig::default()),
+            );
+            for encoded in pipeline.encode_single_block_repair_range(
+                object_id,
+                block.sbn,
+                &bytes[block.start..block.end()],
+                first_repair,
+                repair_count,
+            ) {
+                let encoded = encoded.expect("M=1 repair encode succeeds");
+                symbols.push(symbol_fingerprint(encoded.symbol()));
+            }
+        }
+        symbols
+    }
+
+    #[test]
+    fn encode_ahead_ring_is_single_slot_fifo() {
+        let mut ring = EncodeAheadRing::default();
+        assert_eq!(EncodeAheadRing::CAPACITY, 1);
+
+        let object_id = ObjectId::new_for_test(0xF204);
+        let first = EncodeAheadSymbol {
+            entry: 7,
+            symbol: Symbol::new(
+                SymbolId::new(object_id, 0, 0),
+                vec![1, 2, 3],
+                SymbolKind::Source,
+            ),
+        };
+        let second = EncodeAheadSymbol {
+            entry: 8,
+            symbol: Symbol::new(
+                SymbolId::new(object_id, 0, 1),
+                vec![4, 5, 6],
+                SymbolKind::Source,
+            ),
+        };
+
+        ring.push(first).expect("first symbol fits");
+        assert!(matches!(
+            ring.push(second),
+            Err(RqError::Coding(message)) if message.contains("ring is full")
+        ));
+
+        let popped = ring.pop().expect("first symbol queued");
+        assert_eq!(popped.entry, 7);
+        assert_eq!(popped.symbol.id().esi(), 0);
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn encode_ahead_blocks_match_monolithic_block_geometry() {
+        let config = RqConfig {
+            symbol_size: 4,
+            max_block_size: 6,
+            ..RqConfig::default()
+        };
+
+        assert_eq!(
+            encode_ahead_blocks(13, &config).expect("block plan"),
+            vec![
+                EncodeAheadBlock {
+                    sbn: 0,
+                    start: 0,
+                    len: 6,
+                    k: 2,
+                },
+                EncodeAheadBlock {
+                    sbn: 1,
+                    start: 6,
+                    len: 6,
+                    k: 2,
+                },
+                EncodeAheadBlock {
+                    sbn: 2,
+                    start: 12,
+                    len: 1,
+                    k: 1,
+                },
+            ]
+        );
+        assert!(
+            encode_ahead_blocks(0, &config)
+                .expect("empty plan")
+                .is_empty()
+        );
+
+        let small_blocks = RqConfig {
+            symbol_size: 8,
+            max_block_size: 3,
+            ..RqConfig::default()
+        };
+        assert_eq!(
+            encode_ahead_blocks(7, &small_blocks).expect("small block plan"),
+            vec![
+                EncodeAheadBlock {
+                    sbn: 0,
+                    start: 0,
+                    len: 3,
+                    k: 1,
+                },
+                EncodeAheadBlock {
+                    sbn: 1,
+                    start: 3,
+                    len: 3,
+                    k: 1,
+                },
+                EncodeAheadBlock {
+                    sbn: 2,
+                    start: 6,
+                    len: 1,
+                    k: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn m1_encode_ahead_source_and_initial_repair_is_byte_identical() {
+        let config = RqConfig {
+            symbol_size: 4,
+            max_block_size: 6,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let object_id = ObjectId::new_for_test(0xF202);
+        let bytes = b"abcdefghijklmnopq";
+
+        assert_eq!(
+            collect_m1_source_symbols(object_id, bytes, &config, 2),
+            collect_monolithic_symbols(object_id, bytes, &config, 2)
+        );
+    }
+
+    #[test]
+    fn m1_encode_ahead_repair_range_is_byte_identical() {
+        let config = RqConfig {
+            symbol_size: 4,
+            max_block_size: 6,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let object_id = ObjectId::new_for_test(0xF203);
+        let bytes = b"repair-rounds-span-blocks";
+
+        assert_eq!(
+            collect_m1_repair_symbols(object_id, bytes, &config, 1, 3),
+            collect_monolithic_repair_symbols(object_id, bytes, &config, 1, 3)
         );
     }
 
