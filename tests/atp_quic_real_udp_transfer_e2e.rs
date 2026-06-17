@@ -24,7 +24,9 @@ use asupersync::cx::Cx;
 use asupersync::net::atp::transport_quic::native_link::{
     QuicClientTls, QuicServerTls, bind_server_endpoint, receive_on_endpoint,
 };
-use asupersync::net::atp::transport_quic::{QuicConfig, QuicTransportError, send_path};
+use asupersync::net::atp::transport_quic::{
+    QuicConfig, QuicTransportError, ReceiveReport, SendReport, send_path,
+};
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
 use asupersync::security::SecurityContext;
 use futures_lite::future::{block_on, zip};
@@ -175,14 +177,8 @@ fn run_transfer(
     source: &Path,
     dest_dir: &Path,
 ) -> (
-    Result<
-        asupersync::net::atp::transport_quic::SendReport,
-        asupersync::net::atp::transport_quic::QuicTransportError,
-    >,
-    Result<
-        asupersync::net::atp::transport_quic::ReceiveReport,
-        asupersync::net::atp::transport_quic::QuicTransportError,
-    >,
+    Result<SendReport, QuicTransportError>,
+    Result<ReceiveReport, QuicTransportError>,
 ) {
     block_on(async {
         let cx = Cx::for_testing();
@@ -198,6 +194,33 @@ fn run_transfer(
         )
         .await
     })
+}
+
+fn assert_receive_report_counters(
+    send: &SendReport,
+    recv: &ReceiveReport,
+    expected_bytes: u64,
+    expected_files: u32,
+) {
+    assert!(recv.committed, "receiver must commit");
+    assert_eq!(recv.bytes_received, expected_bytes);
+    assert_eq!(recv.files, expected_files);
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.receipt.symbols_accepted, recv.symbols_accepted);
+    assert_eq!(send.receipt.feedback_rounds, recv.feedback_rounds);
+    assert_eq!(send.receipt.decode_count, recv.decode_count);
+    assert!(
+        recv.symbols_accepted > 0,
+        "receiver report must expose accepted-symbol progress"
+    );
+    assert!(
+        recv.decode_count > 0,
+        "receiver report must expose at least one decoded block"
+    );
+    assert!(
+        recv.committed_paths.len() >= usize::try_from(expected_files).expect("file count fits"),
+        "receiver report must expose committed-path evidence"
+    );
 }
 
 /// Assert the receiver left no `.atp-quic-staging-*` residue in the destination
@@ -243,10 +266,13 @@ fn real_udp_quic_transfer_single_file_authenticated() {
 
     let send = send.expect("send_path completes over real UDP");
     let recv = recv.expect("receiver commits");
-    assert!(recv.committed, "receiver must commit");
+    assert_receive_report_counters(&send, &recv, payload.len() as u64, 1);
+    assert_eq!(
+        recv.feedback_rounds, 0,
+        "lossless loopback should not need repair feedback rounds"
+    );
     assert_eq!(send.files, 1);
     assert_eq!(send.bytes_sent, payload.len() as u64);
-    assert_eq!(send.transfer_id, recv.transfer_id);
     assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
 
     let committed = dst.path().join("payload.bin");
@@ -278,7 +304,12 @@ fn real_udp_quic_transfer_directory_tree_authenticated() {
 
     let send = send.expect("send_path completes over real UDP");
     let recv = recv.expect("receiver commits");
-    assert!(recv.committed);
+    let expected_bytes = u64::try_from(a.len() + b.len() + c.len()).expect("test size fits");
+    assert_receive_report_counters(&send, &recv, expected_bytes, 3);
+    assert_eq!(
+        recv.feedback_rounds, 0,
+        "lossless directory loopback should not need repair feedback rounds"
+    );
     assert_eq!(send.files, 3);
 
     let base = dst.path().join("tree");
@@ -329,7 +360,15 @@ fn real_udp_quic_transfer_many_entry_tree_reports_sender_success() {
         )
     });
     let recv = recv_result.expect("receiver commits the 35-entry tree");
-    assert!(recv.committed, "receiver must commit every entry");
+    let expected_bytes = expected
+        .iter()
+        .map(|(_, payload)| u64::try_from(payload.len()).expect("test payload fits"))
+        .sum();
+    assert_receive_report_counters(&send, &recv, expected_bytes, expected.len() as u32);
+    assert_eq!(
+        recv.feedback_rounds, 0,
+        "lossless many-entry loopback should not need repair feedback rounds"
+    );
     assert!(send.receipt.committed, "sender receipt must report commit");
     assert!(
         send.receipt.sha_ok,
@@ -387,7 +426,11 @@ fn real_udp_quic_transfer_multiblock_authenticated() {
     let (send_res, recv_res) = run_transfer(send, recv, &source, dst.path());
     let send_res = send_res.expect("multi-block send_path completes over real UDP");
     let recv_res = recv_res.expect("receiver commits multi-block object");
-    assert!(recv_res.committed);
+    assert_receive_report_counters(&send_res, &recv_res, payload.len() as u64, 1);
+    assert_eq!(
+        recv_res.feedback_rounds, 0,
+        "lossless multi-block loopback should not need repair feedback rounds"
+    );
     assert_eq!(send_res.bytes_sent, payload.len() as u64);
     assert_eq!(
         std::fs::read(dst.path().join("multiblock.bin")).expect("read committed"),
@@ -427,7 +470,11 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
     let (send_res, recv_res) = run_transfer(send, recv, &source, dst.path());
     let send_res = send_res.expect("send_path recovers from simulated symbol loss");
     let recv_res = recv_res.expect("receiver commits after K-of-N recovery");
-    assert!(recv_res.committed);
+    assert_receive_report_counters(&send_res, &recv_res, payload.len() as u64, 1);
+    assert!(
+        recv_res.feedback_rounds <= 1,
+        "generous initial repair plus exact-deficit feedback should converge without repeated symbol-rounds"
+    );
     assert_eq!(send_res.bytes_sent, payload.len() as u64);
     assert_eq!(
         std::fs::read(dst.path().join("lossy.bin")).expect("read committed"),

@@ -270,3 +270,64 @@ fn inbound_queue_refuses_overflow_without_evicting_buffered_datagrams() {
         "retained indices must be a gap-free prefix"
     );
 }
+
+#[test]
+fn inbound_queue_accepts_after_receiver_drains_capacity_without_dropping() {
+    let cx = Cx::for_testing();
+    let mut conn = fresh_connection();
+    let fill_count = conn.inbound_datagram_capacity();
+    let frames: Vec<QuicFrame> = (0..fill_count)
+        .map(|i| QuicFrame::Datagram {
+            data: Bytes::copy_from_slice(
+                &u32::try_from(i).expect("test index fits u32").to_be_bytes(),
+            ),
+        })
+        .collect();
+
+    conn.process_packet_payload(
+        &cx,
+        PacketNumberSpace::ApplicationData,
+        10,
+        &encode_packet(&frames),
+        0,
+    )
+    .expect("fill receive queue");
+    assert_eq!(conn.pending_datagram_count(), fill_count);
+    assert_eq!(conn.datagrams_dropped_on_receive(), 0);
+
+    let drained = conn.recv_datagram().expect("receiver drains one slot");
+    let drained_index = u32::from_be_bytes(drained.as_ref().try_into().expect("4-byte index"));
+    assert_eq!(drained_index, 0);
+    assert_eq!(conn.pending_datagram_count(), fill_count - 1);
+
+    let refill_index = u32::try_from(fill_count).expect("refill index fits u32");
+    let refill = encode_packet(&[QuicFrame::Datagram {
+        data: Bytes::copy_from_slice(&refill_index.to_be_bytes()),
+    }]);
+    conn.process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 11, &refill, 0)
+        .expect("available capacity accepts a new datagram after drain");
+
+    assert_eq!(
+        conn.datagrams_received(),
+        u64::try_from(fill_count + 1).expect("count fits u64")
+    );
+    assert_eq!(conn.pending_datagram_count(), fill_count);
+    assert_eq!(
+        conn.datagrams_dropped_on_receive(),
+        0,
+        "draining capacity must never be recorded as silent receive loss"
+    );
+
+    let mut drained_after_refill = Vec::new();
+    while let Some(d) = conn.recv_datagram() {
+        drained_after_refill.push(u32::from_be_bytes(
+            d.as_ref().try_into().expect("4-byte index"),
+        ));
+    }
+    assert_eq!(drained_after_refill.len(), fill_count);
+    assert_eq!(drained_after_refill[0], 1);
+    assert_eq!(
+        *drained_after_refill.last().expect("non-empty"),
+        refill_index
+    );
+}
