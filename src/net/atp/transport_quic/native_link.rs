@@ -136,7 +136,7 @@ const ATP_QUIC_UDP_SOCKET_BUFFER: usize = 16 * 1024 * 1024;
 /// the native link's memory envelope. Sender-side one-symbol pacing keeps this
 /// small drain width caught up without allocating a full 256-packet receive
 /// burst.
-const INBOUND_PUMP_BATCH: usize = 16;
+const INBOUND_PUMP_BATCH: usize = 512;
 
 /// Flush each outbound symbol before queueing the next one. Large 15 KiB
 /// DATAGRAMs can overrun the receiver's real kernel socket buffer in a single
@@ -1451,9 +1451,19 @@ async fn run_receiver_session(
                     pending: pending.len(),
                 });
             }
+            // Request fountain-robust FRESH repair (not fragile specific-source re-send). RaptorQ is
+            // a fountain code: any K independent symbols decode a block, so fresh repair symbols
+            // (new ESIs, generated via the sender's per-block repair cursor) fill a block's deficit
+            // regardless of WHICH specific source symbols were lost — and they are always valid.
+            // The old specific-source path (`source_symbols`) over-reported missing symbols (it
+            // recomputes the deficit before the paced datagrams the reliable ObjectComplete raced
+            // ahead of have settled) AND could request `esi >= block_k` for the last partial block,
+            // which made the sender's `native_source_symbol_for_request` error out and die, so the
+            // receiver idled to a timeout. Empty `source_symbols` routes the sender to its fresh-repair
+            // round (`spray_native_symbol_round`), which converges under loss.
             let need = QuicNeedMore {
                 pending,
-                source_symbols: super::source_symbol_requests(&decoders, 2048),
+                source_symbols: Vec::new(),
             };
             super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
             link.flush(cx).await?;
