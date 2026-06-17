@@ -174,6 +174,10 @@ struct StartArgs {
     /// Explicitly disable per-symbol auth for trusted loopback/lab QUIC runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
+
+    /// Diagnostics HTTP bind address. Use 127.0.0.1:0 for an ephemeral local port.
+    #[arg(long, value_name = "ADDR")]
+    diagnostics_bind: Option<SocketAddr>,
 }
 
 #[derive(Args, Clone)]
@@ -1338,6 +1342,10 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     }
     if args.rq_allow_unauthenticated_lab {
         config.network.quic.allow_unauthenticated_lab = true;
+    }
+    if let Some(addr) = args.diagnostics_bind {
+        config.diagnostics.enable_metrics = true;
+        config.diagnostics.metrics_bind = Some(addr);
     }
 
     prepare_daemon_directories(&config)?;

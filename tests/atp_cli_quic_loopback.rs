@@ -7,10 +7,10 @@
 #![cfg(all(feature = "atp-cli", feature = "tls"))]
 #![allow(missing_docs)]
 
-use std::io::{BufRead, BufReader};
-use std::net::SocketAddr;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -72,14 +72,30 @@ fn write_file(path: &Path, contents: &[u8]) {
 fn spawn_stderr_reader(child: &mut Child) -> mpsc::Receiver<String> {
     let stderr = child.stderr.take().expect("receiver stderr is piped");
     let (tx, rx) = mpsc::channel();
+    spawn_line_reader(stderr, tx);
+    rx
+}
+
+fn spawn_line_reader<R>(stream: R, tx: mpsc::Sender<String>)
+where
+    R: Read + Send + 'static,
+{
     thread::spawn(move || {
-        let reader = BufReader::new(stderr);
+        let reader = BufReader::new(stream);
         for line in reader.lines().map_while(Result::ok) {
             if tx.send(line).is_err() {
                 break;
             }
         }
     });
+}
+
+fn spawn_atpd_output_reader(child: &mut Child) -> mpsc::Receiver<String> {
+    let stdout: ChildStdout = child.stdout.take().expect("daemon stdout is piped");
+    let stderr: ChildStderr = child.stderr.take().expect("daemon stderr is piped");
+    let (tx, rx) = mpsc::channel();
+    spawn_line_reader(stdout, tx.clone());
+    spawn_line_reader(stderr, tx);
     rx
 }
 
@@ -89,8 +105,18 @@ fn parse_quic_listen_line(line: &str) -> Option<SocketAddr> {
     addr.parse().ok()
 }
 
+fn parse_tracing_bind_addr(line: &str, marker: &str) -> Option<SocketAddr> {
+    if !line.contains(marker) {
+        return None;
+    }
+    line.split_whitespace().find_map(|part| {
+        let value = part.strip_prefix("bind_addr=")?;
+        value.trim_end_matches(',').parse().ok()
+    })
+}
+
 fn wait_for_quic_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
     loop {
         let now = Instant::now();
@@ -108,6 +134,44 @@ fn wait_for_quic_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("receiver exited before QUIC readiness; stderr lines: {seen:?}");
+            }
+        }
+    }
+}
+
+fn wait_for_atpd_quic_and_diagnostics_addrs(
+    rx: &mpsc::Receiver<String>,
+) -> (SocketAddr, SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    let mut quic_addr = None;
+    let mut diagnostics_addr = None;
+    loop {
+        if let (Some(quic), Some(diagnostics)) = (quic_addr, diagnostics_addr) {
+            return (quic, diagnostics);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            panic!("atpd did not report QUIC and diagnostics readiness; stderr lines: {seen:?}");
+        }
+        let wait = (deadline - now).min(Duration::from_millis(250));
+        match rx.recv_timeout(wait) {
+            Ok(line) => {
+                if quic_addr.is_none() {
+                    quic_addr = parse_tracing_bind_addr(
+                        &line,
+                        "ATP QUIC transfer listener bound and accepting",
+                    );
+                }
+                if diagnostics_addr.is_none() {
+                    diagnostics_addr =
+                        parse_tracing_bind_addr(&line, "ATP daemon diagnostics endpoint started");
+                }
+                seen.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("atpd exited before readiness; stderr lines: {seen:?}");
             }
         }
     }
@@ -132,6 +196,34 @@ fn wait_with_timeout(mut child: Child, label: &str) -> Output {
             }
         }
     }
+}
+
+fn wait_for_file(path: &Path, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if path.is_file() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("{label} did not appear at {}", path.display());
+}
+
+fn fetch_diagnostics_json(addr: SocketAddr) -> serde_json::Value {
+    let mut stream = TcpStream::connect(addr).expect("connect diagnostics endpoint");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
+        .expect("write diagnostics request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("read diagnostics response");
+    let (_, body) = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|idx| response.split_at(idx + 4))
+        .expect("diagnostics response has headers");
+    serde_json::from_slice(body).expect("diagnostics body is json")
 }
 
 #[test]
@@ -229,5 +321,128 @@ fn atp_send_recv_quic_loopback_moves_file_bytes() {
     assert_eq!(
         std::fs::read(dest_dir.join("payload.bin")).expect("read received payload"),
         payload
+    );
+}
+
+#[test]
+fn atpd_quic_listener_accepts_atp_send_and_reports_diagnostics() {
+    let root = unique_tmp("atpd-loopback");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let ca = root.join("tls/ca.pem");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+    write_file(&ca, CA_CERT_PEM.as_bytes());
+
+    let daemon_dir = root.join("daemon");
+    let init = Command::new(env!("CARGO_BIN_EXE_atpd"))
+        .args([
+            "init",
+            "--data-dir",
+            daemon_dir.to_str().unwrap(),
+            "--new-identity",
+        ])
+        .output()
+        .expect("run atpd init");
+    assert!(
+        init.status.success(),
+        "atpd init failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let source_dir = root.join("source");
+    let payload_path = source_dir.join("payload.bin");
+    let payload = (0..8192u32)
+        .map(|i| (i.wrapping_mul(17) % 251) as u8)
+        .collect::<Vec<_>>();
+    write_file(&payload_path, &payload);
+
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_atpd"))
+        .args([
+            "--config",
+            root.join("missing-config.toml").to_str().unwrap(),
+            "--pid-file",
+            root.join("atpd.pid").to_str().unwrap(),
+            "--log-level",
+            "info",
+            "--foreground",
+            "start",
+            "--bind",
+            "127.0.0.1:0",
+            "--data-dir",
+            daemon_dir.to_str().unwrap(),
+            "--enable-quic",
+            "--quic-server-cert",
+            cert.to_str().unwrap(),
+            "--quic-server-key",
+            key.to_str().unwrap(),
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+            "--diagnostics-bind",
+            "127.0.0.1:0",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn atpd");
+    let daemon_output = spawn_atpd_output_reader(&mut daemon);
+    let (quic_addr, diagnostics_addr) = wait_for_atpd_quic_and_diagnostics_addrs(&daemon_output);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "send",
+            payload_path.to_str().unwrap(),
+            &quic_addr.to_string(),
+            "--transport",
+            "quic",
+            "--ca",
+            ca.to_str().unwrap(),
+            "--server-name",
+            "localhost",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .output()
+        .expect("run atp quic sender to atpd");
+    if !sender.status.success() {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        panic!(
+            "atp quic sender to atpd failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+
+    let received = daemon_dir.join("inbox/payload.bin");
+    wait_for_file(&received, "atpd received payload");
+    assert_eq!(
+        std::fs::read(&received).expect("read atpd payload"),
+        payload
+    );
+
+    let diagnostics = fetch_diagnostics_json(diagnostics_addr);
+    assert_eq!(diagnostics["quic_enabled"], serde_json::json!(true));
+    assert_eq!(
+        diagnostics["quic_transfer_listener_addr"],
+        serde_json::json!(quic_addr.to_string())
+    );
+    assert_eq!(
+        diagnostics["transfers"]["transfers_committed"],
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        diagnostics["transfers"]["bytes_received_total"],
+        serde_json::json!(8192)
+    );
+
+    let _ = daemon.kill();
+    let daemon = wait_with_timeout(daemon, "atpd quic daemon");
+    assert!(
+        !daemon.status.success(),
+        "test terminates atpd after diagnostics; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&daemon.stdout),
+        String::from_utf8_lossy(&daemon.stderr)
     );
 }
