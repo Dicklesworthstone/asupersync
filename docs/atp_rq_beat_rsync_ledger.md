@@ -8,8 +8,29 @@
 > attribute to a frame ≥0.1% self-time, isomorphism proof per change.
 
 Reference benchmark (cross-machine OVH 16c → Contabo 10c, 100M, sha-verified):
-rsync(tuned)=8.44s · baseline atp-rq(scalar,serial)=164.75s · F3(parallel encode)=113.85s.
-Target: ≤ rsync on clean; FASTER under loss/high-BDP.
+rsync(tuned)=8.44s. Target: ≤ rsync on clean; FASTER under loss/high-BDP.
+(Prior atp numbers — baseline 164.75s, F3 113.85s — are INTERNAL lever-attribution ONLY, never a claim.)
+
+## ★★★ BENCHMARK INTEGRITY STANDARD (non-negotiable — comparisons must be BEYOND REPROACH)
+
+1. **Only ever compare atp vs rsync.** NEVER headline "X× faster than old atp / F3 / baseline".
+   Prior-atp numbers are INTERNAL lever-attribution only, never a claim.
+2. **rsync gets its BEST foot forward.** Optimal flags for the workload: `--whole-file --inplace
+   --no-compress` (delta is pure overhead to an empty dest; `-z` HURTS on incompressible random
+   data), fastest transport. If a different workload (pre-existing similar files) lets rsync's
+   delta/`-z` shine, test THAT too — never cripple rsync.
+3. **Apples-to-apples or it does not count:** identical payload, identical link (same netem qdisc,
+   both endpoints crossing it), identical SHA-256 verification, same session/host/minute.
+4. **Crypto symmetry is MANDATORY.** atp-lab (no auth) vs rsync-over-ssh (encrypted) is INVALID —
+   it handicaps rsync with crypto atp skips. Valid pairs: (a) **authenticated**: atp-rq
+   `--rq-auth-key-hex` (HMAC; authenticates but does NOT encrypt payload) OR atp-quic (TLS-1.3,
+   full encryption) vs rsync-over-ssh (aes128-gcm). (b) **no-crypto**: atp-lab vs rsync-daemon
+   (rsync://, no ssh) — rsync-daemon is rsync's FASTEST so this still gives rsync its best.
+5. **Report cv_pct + peak RSS (both ends) + feedback_rounds.** Faster-but-higher-memory ≠ a win.
+
+⚠ The clean 7.11s result (E-7) was atp-LAB vs rsync-over-ssh → **crypto-asymmetric, PRELIMINARY
+ONLY, NOT a beyond-reproach win.** Definitive comparison PENDING: authenticated atp (AUTH-1) vs
+optimally-tuned rsync-over-ssh on the same netem link, and/or atp-lab vs rsync-daemon.
 
 ---
 
