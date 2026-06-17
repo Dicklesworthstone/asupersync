@@ -515,10 +515,16 @@ impl QuicLink {
         let mut next_timeout = timeout;
 
         loop {
+            let pending_datagrams = self.conn.pending_datagram_count();
+            let datagram_capacity = self.conn.inbound_datagram_capacity();
+            if pending_datagrams >= datagram_capacity {
+                return Ok(total_processed);
+            }
+            let receive_limit = INBOUND_PUMP_BATCH.min(datagram_capacity - pending_datagrams);
             let received = match crate::time::timeout(
                 cx.now(),
                 next_timeout,
-                self.endpoint.receive_batch(cx, INBOUND_PUMP_BATCH),
+                self.endpoint.receive_batch(cx, receive_limit),
             )
             .await
             {
@@ -537,7 +543,7 @@ impl QuicLink {
                 total_processed.saturating_add(self.ingest_packets(cx, &received).await?);
 
             batches = batches.saturating_add(1);
-            if received_len < INBOUND_PUMP_BATCH {
+            if received_len < receive_limit {
                 return Ok(total_processed);
             }
             if batches >= INBOUND_PUMP_MAX_DRAIN_BATCHES {

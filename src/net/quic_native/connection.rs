@@ -72,6 +72,12 @@ pub enum NativeQuicConnectionError {
         /// Current maximum DATAGRAM frame size.
         max_frame_size: usize,
     },
+    /// Receive-side DATAGRAM queue is full; caller must drain before accepting
+    /// more unreliable symbol payloads.
+    DatagramReceiveQueueFull {
+        /// Maximum buffered inbound DATAGRAM payloads.
+        capacity: usize,
+    },
     /// Invalid operation for current connection state.
     InvalidState(&'static str),
 }
@@ -109,6 +115,10 @@ impl fmt::Display for NativeQuicConnectionError {
             } => write!(
                 f,
                 "datagram frame too large: payload_len={payload_len}, encoded_len={encoded_len}, max_frame_size={max_frame_size}"
+            ),
+            Self::DatagramReceiveQueueFull { capacity } => write!(
+                f,
+                "inbound datagram receive queue full: capacity={capacity}; drain buffered payloads before processing more"
             ),
             Self::InvalidState(msg) => write!(f, "invalid native quic connection state: {msg}"),
         }
@@ -208,13 +218,14 @@ pub struct NativeQuicConnection {
     anti_amplification_bytes_sent: u64,
     pending_control_frames: VecDeque<QuicFrame>,
     /// Bounded inbound queue of decoded DATAGRAM payloads awaiting the
-    /// application's `recv_datagram` (RFC 9221). Drop-oldest on overflow keeps
-    /// the queue fountain-tolerant: a stale unreliable symbol is expendable.
+    /// application's `recv_datagram` (RFC 9221). The receive side never evicts
+    /// buffered payloads: once full, packet processing returns backpressure so
+    /// survivors already accepted by the queue remain available to the decoder.
     inbound_datagrams: VecDeque<Bytes>,
-    /// Total DATAGRAM frames accepted on receive (anti-amplification + metrics),
-    /// counted before any drop-oldest eviction so the figure reflects the wire.
+    /// Total DATAGRAM frames accepted into the receive queue.
     datagrams_received: u64,
-    /// Total inbound DATAGRAM payloads evicted by the bounded drop-oldest queue.
+    /// Total inbound DATAGRAM payloads evicted by the receive queue. Kept as a
+    /// stable metric surface; the no-evict receive policy keeps it at zero.
     datagrams_dropped_on_receive: u64,
     /// Task waiting for the next inbound DATAGRAM payload.
     inbound_datagram_waker: Option<Waker>,
@@ -241,9 +252,13 @@ pub struct NativeQuicConnection {
 /// ones close) is a separate enhancement.
 const DEFAULT_MAX_REMOTE_STREAMS: u64 = 128;
 
-/// Maximum number of decoded inbound DATAGRAM payloads buffered before the
-/// oldest is dropped to bound memory under a fast producer / slow consumer.
-const MAX_INBOUND_DATAGRAMS: usize = 256;
+/// Maximum number of decoded inbound DATAGRAM payloads buffered before packet
+/// processing applies backpressure. The receiver never evicts buffered symbols.
+///
+/// Keep this at least two full native ATP receive-drain batches: one batch may
+/// arrive before the higher-level decoder drains the queue, and the next batch
+/// must be able to backpressure cleanly without displacing accepted survivors.
+const MAX_INBOUND_DATAGRAMS: usize = 1024;
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.
@@ -1247,26 +1262,32 @@ impl NativeQuicConnection {
             }
             QuicFrame::Datagram { data } => {
                 // Surface the unreliable datagram payload to the application via
-                // the bounded inbound queue. Count every accepted frame first,
-                // then drop the oldest payload if the queue is full so a slow
-                // consumer can never make the connection unbounded (RFC 9221).
+                // the bounded inbound queue. Unlike the outbound unreliable
+                // queue, the receiver side must not evict buffered symbols: ATP
+                // convergence depends on preserving already-accepted survivors.
+                if self.inbound_datagrams.len() >= MAX_INBOUND_DATAGRAMS {
+                    quictrace!(
+                        "event=datagram_recv_backpressure size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} capacity={} total_received={} total_dropped={}",
+                        data.len(),
+                        self.active_path_id,
+                        space,
+                        self.inbound_datagrams.len(),
+                        MAX_INBOUND_DATAGRAMS,
+                        self.datagrams_received,
+                        self.datagrams_dropped_on_receive
+                    );
+                    return Err(NativeQuicConnectionError::DatagramReceiveQueueFull {
+                        capacity: MAX_INBOUND_DATAGRAMS,
+                    });
+                }
                 self.datagrams_received = self.datagrams_received.saturating_add(1);
-                let dropped_oldest = if self.inbound_datagrams.len() >= MAX_INBOUND_DATAGRAMS {
-                    self.inbound_datagrams.pop_front();
-                    self.datagrams_dropped_on_receive =
-                        self.datagrams_dropped_on_receive.saturating_add(1);
-                    true
-                } else {
-                    false
-                };
                 self.inbound_datagrams.push_back(data.clone());
                 quictrace!(
-                    "event=datagram_recv size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} dropped_oldest={} total_received={} total_dropped={}",
+                    "event=datagram_recv size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} receive_backpressure=false total_received={} total_dropped={}",
                     data.len(),
                     self.active_path_id,
                     space,
                     self.inbound_datagrams.len(),
-                    dropped_oldest,
                     self.datagrams_received,
                     self.datagrams_dropped_on_receive
                 );
@@ -1286,7 +1307,7 @@ impl NativeQuicConnection {
     ///
     /// This is the application-facing receive surface for RFC 9221 datagrams:
     /// frames decoded by [`Self::process_packet_payload`] are enqueued in a
-    /// bounded, fountain-tolerant queue and handed out here in arrival order.
+    /// bounded, no-evict queue and handed out here in arrival order.
     /// Returns `None` when no datagram is currently available; it does not
     /// block, so a higher-level `poll_recv_datagram` can layer a waker on top.
     pub fn recv_datagram(&mut self) -> Option<Bytes> {
@@ -1329,14 +1350,23 @@ impl NativeQuicConnection {
         self.inbound_datagrams.len()
     }
 
-    /// Total DATAGRAM frames accepted on receive, counted at the wire before any
-    /// drop-oldest eviction (anti-amplification accounting + metrics).
+    /// Maximum inbound DATAGRAM payloads buffered before receive-side
+    /// backpressure is reported.
+    #[must_use]
+    pub fn inbound_datagram_capacity(&self) -> usize {
+        MAX_INBOUND_DATAGRAMS
+    }
+
+    /// Total DATAGRAM frames accepted into the receive queue.
     #[must_use]
     pub fn datagrams_received(&self) -> u64 {
         self.datagrams_received
     }
 
     /// Total inbound DATAGRAM payloads dropped by the bounded receive queue.
+    ///
+    /// The current receive policy never evicts buffered payloads, so this remains
+    /// zero unless a future explicit lossy receive policy is introduced.
     #[must_use]
     pub fn datagrams_dropped_on_receive(&self) -> u64 {
         self.datagrams_dropped_on_receive
@@ -2792,9 +2822,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                NativeQuicConnectionError::StreamTable(StreamTableError::StreamLimitExceeded {
-                    ..
-                })
+                NativeQuicConnectionError::StreamTable(
+                    StreamTableError::StreamLimitExceeded { .. }
+                )
             ),
             "expected StreamLimitExceeded, got: {err:?}"
         );
@@ -2867,6 +2897,15 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "datagram frame too large: payload_len=4096, encoded_len=4099, max_frame_size=1200"
+        );
+    }
+
+    #[test]
+    fn display_datagram_receive_queue_full() {
+        let err = NativeQuicConnectionError::DatagramReceiveQueueFull { capacity: 256 };
+        assert_eq!(
+            format!("{err}"),
+            "inbound datagram receive queue full: capacity=256; drain buffered payloads before processing more"
         );
     }
 

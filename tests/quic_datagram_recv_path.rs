@@ -10,9 +10,9 @@
 //!   once and the receive counter reflects the wire;
 //! - multiple datagrams in one packet are delivered in arrival (FIFO) order;
 //! - an empty datagram payload still round-trips through the recv API;
-//! - the bounded inbound queue is fountain-tolerant — it drops the *oldest*
-//!   payloads on overflow while still counting every frame seen on the wire, and
-//!   the retained set is exactly the most-recent contiguous suffix.
+//! - the bounded inbound queue never evicts already-buffered payloads: once full,
+//!   processing fails with typed backpressure and the retained set is exactly the
+//!   original accepted prefix.
 //!
 //! Scope: node-local receive path on committed `HEAD` plus this slice's new
 //! codec + handler + Cx-aware `poll_recv_datagram` waker layer. The A1 send
@@ -24,8 +24,7 @@ use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::cx::Cx;
 use asupersync::net::atp::protocol::quic_frames::QuicFrame;
 use asupersync::net::quic_native::{
-    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
-    PacketNumberSpace,
+    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, PacketNumberSpace,
 };
 use std::sync::{
     Arc,
@@ -187,43 +186,68 @@ fn empty_datagram_payload_is_delivered() {
         .expect("processing an empty DATAGRAM succeeds");
 
     assert_eq!(conn.datagrams_received(), 1);
-    let got = conn.recv_datagram().expect("empty datagram still delivered");
+    let got = conn
+        .recv_datagram()
+        .expect("empty datagram still delivered");
     assert!(got.is_empty());
     assert!(conn.recv_datagram().is_none());
 }
 
 #[test]
-fn inbound_queue_drops_oldest_on_overflow_but_counts_every_frame() {
+fn inbound_queue_refuses_overflow_without_evicting_buffered_datagrams() {
     let cx = Cx::for_testing();
     let mut conn = fresh_connection();
 
-    // Feed far more datagrams than the bounded queue can hold. Each payload is a
-    // big-endian index so we can reconstruct exactly which ones were retained
-    // without depending on the (private) queue capacity constant.
-    let total: u32 = 300;
-    let frames: Vec<QuicFrame> = (0..total)
+    // Fill the receive queue to its advertised capacity. Each payload is a
+    // big-endian index so we can reconstruct exactly which symbols survived.
+    let fill_count = conn.inbound_datagram_capacity();
+    assert!(
+        fill_count >= 512,
+        "receive queue must cover a full native QUIC pump batch"
+    );
+    let frames: Vec<QuicFrame> = (0..fill_count)
         .map(|i| QuicFrame::Datagram {
-            data: Bytes::copy_from_slice(&i.to_be_bytes()),
+            data: Bytes::copy_from_slice(
+                &u32::try_from(i).expect("test index fits u32").to_be_bytes(),
+            ),
         })
         .collect();
     let packet = encode_packet(&frames);
 
     conn.process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 3, &packet, 0)
-        .expect("processing an overflowing datagram burst succeeds");
+        .expect("processing a full-capacity datagram burst succeeds");
 
-    // The counter reflects every frame seen on the wire, not the queue depth.
-    assert_eq!(conn.datagrams_received(), u64::from(total));
-
-    let pending = conn.pending_datagram_count();
-    assert!(pending > 0, "some datagrams must remain buffered");
-    assert!(
-        u32::try_from(pending).expect("pending fits u32") < total,
-        "overflow must have dropped some datagrams"
+    assert_eq!(
+        conn.datagrams_received(),
+        u64::try_from(fill_count).expect("fill count fits u64")
     );
+    assert_eq!(conn.pending_datagram_count(), fill_count);
     assert_eq!(
         conn.datagrams_dropped_on_receive(),
-        u64::from(total) - u64::try_from(pending).expect("pending fits u64")
+        0,
+        "receive-side buffering must never evict accepted survivors"
     );
+
+    let overflow = encode_packet(&[QuicFrame::Datagram {
+        data: Bytes::copy_from_slice(
+            &u32::try_from(fill_count)
+                .expect("overflow index fits u32")
+                .to_be_bytes(),
+        ),
+    }]);
+    let err = conn
+        .process_packet_payload(&cx, PacketNumberSpace::ApplicationData, 4, &overflow, 0)
+        .expect_err("full receive queue must apply backpressure instead of evicting");
+    assert!(matches!(
+        err,
+        NativeQuicConnectionError::DatagramReceiveQueueFull { capacity } if capacity == fill_count
+    ));
+    assert_eq!(
+        conn.datagrams_received(),
+        u64::try_from(fill_count).expect("fill count fits u64")
+    );
+    assert_eq!(conn.pending_datagram_count(), fill_count);
+    assert_eq!(conn.datagrams_dropped_on_receive(), 0);
 
     // Drain and decode the retained indices in delivery order.
     let mut drained = Vec::new();
@@ -231,15 +255,18 @@ fn inbound_queue_drops_oldest_on_overflow_but_counts_every_frame() {
         let arr: [u8; 4] = d.as_ref().try_into().expect("4-byte index payload");
         drained.push(u32::from_be_bytes(arr));
     }
-    assert_eq!(drained.len(), pending);
+    assert_eq!(drained.len(), fill_count);
 
-    // Drop-oldest: the retained set is exactly the most-recent contiguous suffix
-    // [total - pending, total). The newest is always retained; the oldest go.
-    let pending_u32 = u32::try_from(pending).expect("pending fits u32");
-    assert_eq!(*drained.last().expect("non-empty"), total - 1);
-    assert_eq!(drained[0], total - pending_u32);
+    // No-evict backpressure: the retained set is exactly the accepted prefix
+    // [0, fill_count). The overflow payload is not inserted and no survivor is
+    // displaced.
+    assert_eq!(drained[0], 0);
+    assert_eq!(
+        *drained.last().expect("non-empty"),
+        u32::try_from(fill_count - 1).expect("last index fits u32")
+    );
     assert!(
         drained.windows(2).all(|w| w[1] == w[0] + 1),
-        "retained indices must be a gap-free suffix"
+        "retained indices must be a gap-free prefix"
     );
 }
