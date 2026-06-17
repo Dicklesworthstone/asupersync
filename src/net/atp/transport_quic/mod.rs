@@ -195,6 +195,11 @@ pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 /// Maximum sparse source-symbol retransmit requests accepted in one feedback round.
 const MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
 
+/// Maximum native QUIC DATAGRAM symbols decoded before returning to the async
+/// receiver loop. This keeps large real-UDP queues from monopolizing the
+/// receiver long enough for the sender's control-plane idle timer to expire.
+const NATIVE_SYMBOL_DRAIN_BATCH: usize = 32;
+
 const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 
 /// Default adaptive datagram fan-out hint.
@@ -4016,6 +4021,7 @@ fn drain_native_symbol_datagrams_with_blocks(
     let tag = transfer_tag(&manifest.transfer_id);
     let mut accepted = 0u64;
     let mut completed = Vec::new();
+    let mut drained = 0usize;
     while let Some(envelope) = recv_native_symbol_envelope(conn, auth_required)? {
         if envelope.transfer_tag != tag {
             return Err(QuicTransportError::Integrity(format!(
@@ -4048,6 +4054,10 @@ fn drain_native_symbol_datagrams_with_blocks(
         }
         if let Some(block) = block {
             completed.push(block);
+        }
+        drained = drained.saturating_add(1);
+        if drained >= NATIVE_SYMBOL_DRAIN_BATCH {
+            break;
         }
     }
     Ok((accepted, completed))

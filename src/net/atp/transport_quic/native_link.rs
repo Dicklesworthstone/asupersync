@@ -109,6 +109,55 @@ const ATP_QUIC_SERVER_SCID: &[u8] = &[0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 
 /// Process-unique counter for QUIC receive staging directories.
 static QUIC_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
+fn send_native_keep_alive(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<(), QuicTransportError> {
+    let frame = Frame::empty(FrameType::KeepAlive)
+        .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
+    control.send(cx, conn, &frame)
+}
+
+async fn send_and_flush_native_keep_alive(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<(), QuicTransportError> {
+    send_native_keep_alive(cx, &mut link.conn, control)?;
+    link.flush(cx).await?;
+    Ok(())
+}
+
+/// RAII backstop for the native QUIC receiver staging directory.
+///
+/// Cooperative success and error paths remove the directory asynchronously and
+/// disarm this guard. If the receive future is hard-dropped before it reaches
+/// those paths, this bounded synchronous cleanup prevents partial decoded blocks
+/// from leaking under the destination.
+struct QuicStagingDirGuard {
+    dir: PathBuf,
+    armed: bool,
+}
+
+impl QuicStagingDirGuard {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for QuicStagingDirGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
 /// Bytes of the simplified 1-RTT data-plane header (flags + 8-byte packet number).
 const ONE_RTT_HEADER_LEN: usize = 9;
 /// QUIC AES-128-GCM authentication tag length.
@@ -134,10 +183,18 @@ const ATP_QUIC_UDP_SOCKET_BUFFER: usize = 16 * 1024 * 1024;
 /// Packets pulled from the socket per inbound pump. Each received UDP packet is
 /// copied through packet protection, frame decode, and the application DATAGRAM
 /// queue before the symbol decoder can consume it, so the batch width is part of
-/// the native link's memory envelope. Sender-side one-symbol pacing keeps this
-/// small drain width caught up without allocating a full 256-packet receive
-/// burst.
+/// the native link's memory envelope. Full batches trigger a bounded quiet-drain
+/// loop below so large bursts are drained before the receiver waits on control.
 const INBOUND_PUMP_BATCH: usize = 512;
+/// Maximum full receive batches drained in one pump turn. This preserves the
+/// F1.1 drain-until-empty behavior for ordinary bursts while bounding a single
+/// turn under sustained peer flooding.
+const INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
+/// After the first full batch, wait only a tiny quiet window for the next batch.
+/// `UdpSocket::recv_batch_from` drains immediately-ready datagrams internally;
+/// this grace covers the full-batch case where the kernel may still have more
+/// packets queued without charging a full idle timeout to every drain attempt.
+const INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
 
 /// Quiet window that ends a receiver symbol round after at least one symbol was
 /// accepted. This must be much shorter than the sender's Proof/NeedMore timeout
@@ -444,28 +501,59 @@ impl QuicLink {
 
     /// Receive one batch of UDP packets, unprotect each, and feed the recovered
     /// 1-RTT frames into the connection. Waits at most `idle_timeout` for the
-    /// first packet. Returns the number of packets successfully processed
-    /// (undecryptable / non-1-RTT packets are silently dropped, per QUIC).
+    /// first packet, then keeps draining short-quiet full batches until the
+    /// socket appears empty or the per-turn drain budget is reached. Returns the
+    /// number of packets successfully processed (undecryptable / non-1-RTT
+    /// packets are silently dropped, per QUIC).
     async fn pump_inbound_for(
         &mut self,
         cx: &Cx,
         timeout: Duration,
     ) -> Result<usize, QuicTransportError> {
-        let received = match crate::time::timeout(
-            cx.now(),
-            timeout,
-            self.endpoint.receive_batch(cx, INBOUND_PUMP_BATCH),
-        )
-        .await
-        {
-            Ok(Ok(packets)) => packets,
-            Ok(Err(err)) => return Err(map_udp_error(err)),
-            Err(_elapsed) => return Ok(0),
-        };
-        self.udp_packets_received = self
-            .udp_packets_received
-            .saturating_add(u64::try_from(received.len()).unwrap_or(u64::MAX));
-        self.ingest_packets(cx, &received).await
+        let mut total_processed = 0usize;
+        let mut batches = 0usize;
+        let mut next_timeout = timeout;
+
+        loop {
+            let received = match crate::time::timeout(
+                cx.now(),
+                next_timeout,
+                self.endpoint.receive_batch(cx, INBOUND_PUMP_BATCH),
+            )
+            .await
+            {
+                Ok(Ok(packets)) => packets,
+                Ok(Err(err)) => return Err(map_udp_error(err)),
+                Err(_elapsed) => return Ok(total_processed),
+            };
+            let received_len = received.len();
+            if received_len == 0 {
+                return Ok(total_processed);
+            }
+            self.udp_packets_received = self
+                .udp_packets_received
+                .saturating_add(u64::try_from(received_len).unwrap_or(u64::MAX));
+            total_processed =
+                total_processed.saturating_add(self.ingest_packets(cx, &received).await?);
+
+            batches = batches.saturating_add(1);
+            if received_len < INBOUND_PUMP_BATCH {
+                return Ok(total_processed);
+            }
+            if batches >= INBOUND_PUMP_MAX_DRAIN_BATCHES {
+                let batches_s = batches.to_string();
+                let total_processed_s = total_processed.to_string();
+                cx.trace_with_fields(
+                    "atp_quic.inbound_pump.drain_budget_exhausted",
+                    &[
+                        ("batches", batches_s.as_str()),
+                        ("packets_processed", total_processed_s.as_str()),
+                    ],
+                );
+                return Ok(total_processed);
+            }
+            next_timeout = INBOUND_PUMP_DRAIN_GRACE;
+        }
     }
 
     async fn pump_inbound(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
@@ -835,7 +923,7 @@ async fn spray_round(
     let repair_batch = super::repair_batch_per_block(config);
     let drop_one_in = config.debug_drop_one_in;
     let pacing = link.spray_pacing_decision(config);
-    pacing.trace_epoch(cx, if with_source { 0 } else { 1 });
+    pacing.trace_epoch(cx, u64::from(!with_source));
     let mut sent = 0u64;
     let mut sprayed = 0u64;
     for index in pending {
@@ -1048,10 +1136,11 @@ async fn run_sender_session(
             FrameType::ObjectRequest => {
                 QuicControlReply::NeedMore(super::parse_json::<QuicNeedMore>(&reply_frame)?)
             }
+            FrameType::KeepAlive => continue,
             got => {
                 return Err(QuicTransportError::Unexpected {
                     got,
-                    expected: "Proof | ObjectRequest",
+                    expected: "Proof | ObjectRequest | KeepAlive",
                 });
             }
         };
@@ -1091,23 +1180,7 @@ async fn run_sender_session(
                     link.flush(cx).await?;
                     continue;
                 }
-                for entry in &need.pending {
-                    if !manifest.entries.iter().any(|m| m.index == *entry) {
-                        return Err(QuicTransportError::Integrity(format!(
-                            "receiver requested repair for unknown entry {entry}"
-                        )));
-                    }
-                }
-                let pending: std::collections::BTreeSet<u32> =
-                    need.pending.iter().copied().collect();
-                for request in &need.source_symbols {
-                    if !pending.contains(&request.entry) {
-                        return Err(QuicTransportError::Integrity(format!(
-                            "receiver requested source symbol for non-pending entry {}",
-                            request.entry
-                        )));
-                    }
-                }
+                let pending = super::validate_need_more_feedback(manifest, &need)?;
                 let sent = if need.source_symbols.is_empty() {
                     spray_round(
                         cx,
@@ -1221,6 +1294,8 @@ impl QuicStagedEntryReceive {
 
 async fn commit_staged_entries(
     cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
     dest_dir: &Path,
     manifest: &TransferManifest,
     staged: &mut [QuicStagedEntryReceive],
@@ -1231,6 +1306,7 @@ async fn commit_staged_entries(
     let mut digests = Vec::with_capacity(manifest.entries.len());
     for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter_mut()) {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        send_and_flush_native_keep_alive(cx, link, control).await?;
         staged_entry.ensure_created(entry.size).await?;
         let (size, content_id, content_sha256) =
             hash_file_streaming(&staged_entry.staging_path, &mut read_buf).await?;
@@ -1243,6 +1319,7 @@ async fn commit_staged_entries(
             content_id,
             content_sha256,
         });
+        send_and_flush_native_keep_alive(cx, link, control).await?;
     }
 
     let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex;
@@ -1255,9 +1332,11 @@ async fn commit_staged_entries(
             super::reject_quic_destination_symlink_prefix(&base, &base).await?;
             crate::fs::create_dir_all(&base).await?;
             committed_paths.push(base.clone());
+            send_and_flush_native_keep_alive(cx, link, control).await?;
         }
         for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter()) {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            send_and_flush_native_keep_alive(cx, link, control).await?;
             let out_path = if manifest.is_directory {
                 super::quic_join_relative(&base, &entry.rel_path)?
             } else {
@@ -1266,6 +1345,7 @@ async fn commit_staged_entries(
             match super::commit_quic_metadata_entry(cx, &base, &out_path, entry, config).await? {
                 super::QuicMetadataCommit::Committed => {
                     committed_paths.push(out_path);
+                    send_and_flush_native_keep_alive(cx, link, control).await?;
                     continue;
                 }
                 super::QuicMetadataCommit::Skipped => continue,
@@ -1278,6 +1358,7 @@ async fn commit_staged_entries(
             crate::fs::rename(&staged_entry.staging_path, &out_path).await?;
             super::apply_quic_entry_metadata(cx, &out_path, entry).await?;
             committed_paths.push(out_path);
+            send_and_flush_native_keep_alive(cx, link, control).await?;
         }
     }
 
@@ -1368,7 +1449,12 @@ async fn run_receiver_session(
         manifest.transfer_id,
         std::process::id()
     ));
+    // Reclaim any stale scratch directory before use. This mirrors the TCP
+    // receiver and prevents stale entries or hostile symlinks under a reused
+    // staging name from being trusted by the decoded-block writer.
+    let _ = crate::fs::remove_dir_all(&staging_dir).await;
     crate::fs::create_dir_all(&staging_dir).await?;
+    let mut staging_guard = QuicStagingDirGuard::new(staging_dir.clone());
     let mut staged = manifest
         .entries
         .iter()
@@ -1406,8 +1492,10 @@ async fn run_receiver_session(
                 if accepted > 0 {
                     // Repair (or spray) is flowing again — reset the control-PTO budget.
                     needmore_pto_attempts = 0;
+                    send_and_flush_native_keep_alive(cx, link, &mut control).await?;
                 }
                 for block in completed_blocks {
+                    send_and_flush_native_keep_alive(cx, link, &mut control).await?;
                     let entry = manifest
                         .entries
                         .iter()
@@ -1429,11 +1517,15 @@ async fn run_receiver_session(
                     staged_entry
                         .write_block(entry, block.sbn, &block.data, config)
                         .await?;
+                    send_and_flush_native_keep_alive(cx, link, &mut control).await?;
                 }
                 if super::pending_entries(&decoders).is_empty() {
                     // Once all entries decode, Proof can complete the transfer even
                     // if the best-effort ObjectComplete control packet was dropped.
                     break 'rounds;
+                }
+                if link.conn.pending_datagram_count() > 0 {
+                    continue;
                 }
                 if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
                     if frame.frame_type() != FrameType::ObjectComplete {
@@ -1521,8 +1613,18 @@ async fn run_receiver_session(
                 ("decode_micros", decode_micros_text.as_str()),
             ],
         );
-        let (mut receipt, committed_paths) =
-            commit_staged_entries(cx, dest_dir, &manifest, &mut staged, config).await?;
+        send_native_keep_alive(cx, &mut link.conn, &mut control)?;
+        link.flush(cx).await?;
+        let (mut receipt, committed_paths) = commit_staged_entries(
+            cx,
+            link,
+            &mut control,
+            dest_dir,
+            &manifest,
+            &mut staged,
+            config,
+        )
+        .await?;
         receipt.symbols_accepted = symbols_accepted;
         receipt.feedback_rounds = feedback_rounds;
         receipt.decode_count = decode_stats.decode_count;
@@ -1563,6 +1665,7 @@ async fn run_receiver_session(
     // cleanup that 2a3400567 dropped, caught by
     // atp_quic_real_udp_transfer_e2e::assert_no_staging_residue.
     let _ = crate::fs::remove_dir_all(&staging_dir).await;
+    staging_guard.disarm();
     receive_result
 }
 
@@ -1658,5 +1761,30 @@ mod tests {
         let mut long = vec![0x80];
         long.extend_from_slice(&[0u8; ONE_RTT_HEADER_LEN + ONE_RTT_TAG_LEN]);
         assert!(decode_one_rtt_packet(&long).is_none());
+    }
+
+    #[test]
+    fn quic_staging_dir_guard_reclaims_on_hard_drop_unless_disarmed() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let armed = temp.path().join(".atp-quic-staging-guard-armed");
+        std::fs::create_dir_all(&armed).expect("create armed staging dir");
+        {
+            let _guard = QuicStagingDirGuard::new(armed.clone());
+        }
+        assert!(
+            !armed.exists(),
+            "armed QuicStagingDirGuard must reclaim staging dir on drop"
+        );
+
+        let disarmed = temp.path().join(".atp-quic-staging-guard-disarmed");
+        std::fs::create_dir_all(&disarmed).expect("create disarmed staging dir");
+        {
+            let mut guard = QuicStagingDirGuard::new(disarmed.clone());
+            guard.disarm();
+        }
+        assert!(
+            disarmed.exists(),
+            "disarmed QuicStagingDirGuard must leave cooperative cleanup to the caller"
+        );
     }
 }
