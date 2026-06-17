@@ -268,6 +268,41 @@ fn test_chunk_reuse_manager_cross_transfer() {
 }
 
 #[test]
+fn test_reusable_chunk_query_returns_unique_content_once() {
+    let mut manager = ChunkReuseManager::new();
+
+    let transfer1_id = "transfer-unique-source";
+    let transfer2_id = "transfer-unique-requester";
+    let shared_content = b"shared content should be counted once";
+    let shared_identity = manager
+        .store_chunk_for_reuse(shared_content, transfer1_id)
+        .unwrap();
+    let shared_hash = shared_identity.content_hash;
+
+    manager
+        .register_transfer_chunk(transfer2_id, &shared_identity)
+        .unwrap();
+
+    let reuse_criteria = ChunkReuseCriteria {
+        max_age_seconds: 3600,
+        min_proof_strength: ProofStrength::Basic,
+        require_same_algorithm: true,
+    };
+
+    let reusable = manager.find_reusable_chunks(
+        transfer2_id,
+        &[shared_hash, shared_hash, shared_hash],
+        &reuse_criteria,
+    );
+
+    assert_eq!(
+        reusable,
+        vec![shared_identity],
+        "duplicate requested content hashes must not inflate reusable chunk counts"
+    );
+}
+
+#[test]
 fn test_chunk_reuse_security_isolation() {
     let mut manager = ChunkReuseManager::new();
 

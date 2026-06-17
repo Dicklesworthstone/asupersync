@@ -643,19 +643,35 @@ impl ChunkReuseManager {
         content_hashes: &[[u8; 32]],
         criteria: &ChunkReuseCriteria,
     ) -> Vec<ChunkIdentity> {
-        let mut reusable = Vec::new();
+        let mut reusable: Vec<ChunkIdentity> = Vec::new();
+        let mut seen_requested_hashes = BTreeSet::new();
+        let mut reusable_content_indices: BTreeMap<([u8; 32], u64), usize> = BTreeMap::new();
 
         let requesting_scope = self
             .capability_scope_for_transfer(transfer_id)
             .unwrap_or_default();
 
         for &hash in content_hashes {
+            if !seen_requested_hashes.insert(hash) {
+                continue;
+            }
+
             let similar = self.cache.find_similar_chunks(hash);
             for chunk in similar {
                 if self.cache.can_reuse_chunk(chunk, &requesting_scope)
                     && self.cache.meets_reuse_criteria(chunk, criteria)
                 {
-                    reusable.push(chunk.clone());
+                    let content_key = (chunk.content_hash, chunk.size_bytes);
+                    if let Some(&index) = reusable_content_indices.get(&content_key) {
+                        if chunk.verification.proof_strength
+                            > reusable[index].verification.proof_strength
+                        {
+                            reusable[index] = chunk.clone();
+                        }
+                    } else {
+                        reusable_content_indices.insert(content_key, reusable.len());
+                        reusable.push(chunk.clone());
+                    }
                 }
             }
         }
@@ -889,5 +905,31 @@ mod active_tests {
             manager.find_reusable_chunks("transfer-a", &[identity.content_hash], &criteria());
 
         assert!(reusable.is_empty());
+    }
+
+    #[test]
+    fn same_content_in_multiple_authorized_scopes_returns_one_candidate() {
+        let mut manager = ChunkReuseManager::new();
+        let data = b"shared-content";
+        let scoped =
+            ChunkIdentity::from_data(data, "transfer-transfer-a", ProofStrength::Cryptographic);
+        let global = ChunkIdentity::from_data(data, "", ProofStrength::Basic);
+
+        manager.cache.store_chunk(&scoped, data).unwrap();
+        manager.cache.store_chunk(&global, data).unwrap();
+        manager
+            .register_transfer_chunk("transfer-a", &scoped)
+            .unwrap();
+
+        let reusable =
+            manager.find_reusable_chunks("transfer-a", &[scoped.content_hash], &criteria());
+
+        assert_eq!(reusable.len(), 1);
+        assert_eq!(reusable[0].content_hash, scoped.content_hash);
+        assert_eq!(reusable[0].size_bytes, scoped.size_bytes);
+        assert_eq!(
+            reusable[0].verification.proof_strength,
+            ProofStrength::Cryptographic
+        );
     }
 }
