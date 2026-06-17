@@ -21,8 +21,10 @@ use std::time::Duration;
 
 use asupersync::cx::Cx;
 use asupersync::net::atp::transport_quic::{
-    self, ManifestEntry, QuicConfig, QuicTransportError, ReceiveReceipt, ReceiveReport, SendReport,
-    TransferManifest, receive_connection, receive_once, send_path,
+    self, ManifestEntry, QuicAdaptiveArm, QuicAdaptiveBlockPlan, QuicAdaptiveController,
+    QuicAdaptivePolicy, QuicConfig, QuicPathEstimate, QuicTransportError, ReceiveReceipt,
+    ReceiveReport, SendReport, TransferManifest, apply_quic_adaptive_block_plan,
+    receive_connection, receive_once, send_path,
 };
 use asupersync::net::quic_native::{
     ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionConfig,
@@ -35,6 +37,21 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 
 fn trusted_quic_config() -> QuicConfig {
     QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+}
+
+fn quic_path_estimate(loss: f64, bw_median_bps: f64) -> QuicPathEstimate {
+    QuicPathEstimate {
+        rtt_s: 0.075,
+        loss_p_hat: loss,
+        loss_p_bar: loss,
+        bw_median_bps,
+        bw_trough_bps: bw_median_bps * 0.7,
+        enc_symbols_per_s: 2_000_000.0,
+        dec_symbols_per_s: 1_500_000.0,
+        coding_ref_k: 1024,
+        coding_gamma: 1.5,
+        samples: 8,
+    }
 }
 
 // ─── Public API surface mirrors transport_tcp ────────────────────────────────
@@ -155,6 +172,108 @@ fn config_validation_rejects_nonsense_knobs() {
             "config {cfg:?} should fail validation"
         );
     }
+}
+
+#[test]
+fn adaptive_controller_replays_same_quic_arm_trajectory() {
+    fn run() -> Vec<(u32, u64, usize)> {
+        let mut controller = QuicAdaptiveController::new(QuicAdaptivePolicy::default(), 0xA7A7);
+        controller.update_estimate(quic_path_estimate(0.02, 12_000_000.0));
+        let mut trajectory = Vec::new();
+
+        for _ in 0..24 {
+            let plan = controller
+                .next_block_plan(transport_quic::DEFAULT_SYMBOL_SIZE)
+                .expect("enough evidence activates the controller");
+            let arm = QuicAdaptiveArm::from_block_plan(plan).expect("valid controller arm");
+            trajectory.push((arm.k, arm.repair_overhead.to_bits(), arm.datagram_fanout));
+            controller.observe(
+                u64::from(plan.k),
+                u64::from(plan.k),
+                0.01,
+                u64::from(plan.k) * u64::from(transport_quic::DEFAULT_SYMBOL_SIZE),
+            );
+        }
+
+        trajectory
+    }
+
+    assert_eq!(run(), run(), "same seed and rewards must replay exactly");
+}
+
+#[test]
+fn adaptive_arm_rejects_invalid_controller_output() {
+    assert!(matches!(
+        QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
+            k: 0,
+            overhead: 0.1,
+            fanout: 1,
+        }),
+        Err(QuicTransportError::Config(message)) if message.contains("k")
+    ));
+    assert!(matches!(
+        QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
+            k: 128,
+            overhead: f64::NAN,
+            fanout: 1,
+        }),
+        Err(QuicTransportError::Config(message)) if message.contains("overhead")
+    ));
+    assert!(matches!(
+        QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
+            k: 128,
+            overhead: 0.1,
+            fanout: 0,
+        }),
+        Err(QuicTransportError::Config(message)) if message.contains("fanout")
+    ));
+}
+
+#[test]
+fn adaptive_arm_is_visible_on_public_send_path_trace() {
+    let config = apply_quic_adaptive_block_plan(
+        QuicConfig {
+            symbol_size: 128,
+            ..trusted_quic_config()
+        },
+        QuicAdaptiveBlockPlan {
+            k: 2,
+            overhead: 0.25,
+            fanout: 3,
+        },
+    )
+    .expect("adaptive block plan applies to QUIC config");
+
+    assert_eq!(config.max_block_size, 256);
+    assert_eq!(config.repair_overhead, 1.25);
+    assert_eq!(config.datagram_fanout, 3);
+
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let missing = temp.path().join("adaptive-before-connect.bin");
+    let result: Result<SendReport, QuicTransportError> =
+        block_on(send_path(&cx, addr, &missing, config, "adaptive-sender"));
+    assert!(
+        matches!(result, Err(QuicTransportError::Source(_))),
+        "missing source should fail after the adaptive config is traced, got {result:?}"
+    );
+
+    let entries = collector.peek();
+    let start = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.transport.start")
+        .expect("transport start trace entry");
+    assert_eq!(start.get_field("operation"), Some("send_path"));
+    assert_eq!(start.get_field("peer_id"), Some("adaptive-sender"));
+    assert_eq!(start.get_field("symbol_size"), Some("128"));
+    assert_eq!(start.get_field("max_block_size"), Some("256"));
+    assert_eq!(start.get_field("repair_overhead"), Some("1.2500"));
+    assert_eq!(start.get_field("datagram_fanout"), Some("3"));
 }
 
 // ─── Error taxonomy / Display ────────────────────────────────────────────────
