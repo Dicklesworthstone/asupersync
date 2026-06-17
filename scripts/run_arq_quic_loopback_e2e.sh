@@ -146,8 +146,12 @@ validate_output() {
       .receiver.committed == true and
       (.metrics.sender_max_rss_kb | type == "number") and
       .transport_counters.symbols_sent_available == true and
+      (.transport_counters.symbols_sent | type == "number" and . >= 0) and
       .transport_counters.symbols_accepted_available == true and
+      (.transport_counters.symbols_accepted | type == "number" and . >= 0) and
       .transport_counters.feedback_rounds_available == true and
+      (.transport_counters.feedback_rounds_sender | type == "number" and . >= 0) and
+      (.transport_counters.feedback_rounds_receiver | type == "number" and . >= 0) and
       (.transport_counters.decode_count_available | type == "boolean") and
       (.transport_counters.no_claim | type == "string") and
       (.artifacts.events_ndjson | type == "string")
@@ -316,9 +320,9 @@ jq -n \
         feedback_rounds_sender: ($sender[0].feedback_rounds // null),
         feedback_rounds_receiver: ($receiver[0].feedback_rounds // null),
         decode_count: null,
-        symbols_sent_available: (($sender[0] | has("symbols_sent")) and ($sender[0].symbols_sent != null)),
-        symbols_accepted_available: (($receiver[0] | has("symbols_accepted")) and ($receiver[0].symbols_accepted != null)),
-        feedback_rounds_available: ((($sender[0] | has("feedback_rounds")) and ($sender[0].feedback_rounds != null)) or (($receiver[0] | has("feedback_rounds")) and ($receiver[0].feedback_rounds != null))),
+        symbols_sent_available: (($sender[0].symbols_sent // null | type) == "number"),
+        symbols_accepted_available: (($receiver[0].symbols_accepted // null | type) == "number"),
+        feedback_rounds_available: ((($sender[0].feedback_rounds // null | type) == "number") and (($receiver[0].feedback_rounds // null | type) == "number")),
         decode_count_available: false,
         no_claim: "Current QUIC atp CLI JSON exposes transfer-level RaptorQ symbol and feedback-round counters but not per-block decode counters/timings. H2 owns the remaining per-block decode metrics."
       },

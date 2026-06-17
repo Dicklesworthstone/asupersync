@@ -144,6 +144,34 @@ fn loopback_from_output_rejects_corrupted_summary() {
 }
 
 #[test]
+fn loopback_from_output_rejects_missing_counter_values_even_when_flags_claim_available() {
+    let root = unique_tmp("missing_counter");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    write_file(
+        &summary_path,
+        &summary.replace(
+            r#""feedback_rounds_receiver": 0"#,
+            r#""feedback_rounds_receiver": null"#,
+        ),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted unavailable feedback counter hidden by availability flag; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn fleet_script_structure_validation_is_no_claim_and_deterministic() {
     let script_path = repo_root().join("scripts/run_arq_quic_fleet_e2e.sh");
     let script = std::fs::read_to_string(&script_path).expect("read fleet script");
