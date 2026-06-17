@@ -821,6 +821,149 @@ pub fn quic_spray_pacing_decision_from_config(
     })
 }
 
+/// Bound the configured QUIC DATAGRAM fan-out by connection and CPU capacity.
+///
+/// `QuicConfig::validate` rejects zero fan-out, but this helper is deliberately
+/// total so callers that have not validated yet still get one usable lane
+/// instead of a divide-by-zero hazard.
+#[must_use]
+pub fn quic_effective_datagram_fanout(config: &QuicConfig, cpu_parallelism: usize) -> usize {
+    config
+        .datagram_fanout
+        .max(1)
+        .min(config.max_active_connections.max(1))
+        .min(cpu_parallelism.max(1))
+}
+
+/// One RaptorQ source block that is ready for QUIC fan-out scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicFanoutBlock {
+    /// Manifest entry index.
+    pub entry: u32,
+    /// RaptorQ source block number within the entry.
+    pub sbn: u8,
+    /// Number of source or repair symbols to spray for this block.
+    pub symbols: usize,
+}
+
+/// One scheduled symbol slot on a bounded QUIC fan-out lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicFanoutSymbolSlot {
+    /// Zero-based fan-out lane / connection index.
+    pub connection: usize,
+    /// Manifest entry index.
+    pub entry: u32,
+    /// RaptorQ source block number within the entry.
+    pub sbn: u8,
+    /// Zero-based symbol ordinal within this block's scheduled run.
+    pub symbol_index_in_block: usize,
+}
+
+/// Deterministic block-interleaving scheduler for D1 QUIC fan-out.
+///
+/// The scheduler streams one symbol slot at a time. It round-robins across
+/// blocks first, then across connection lanes, so a large block cannot starve
+/// other pending blocks and each configured lane receives work when enough
+/// symbols exist.
+#[derive(Debug, Clone)]
+pub struct QuicBlockInterleavingScheduler {
+    blocks: Vec<QuicFanoutBlock>,
+    remaining: Vec<usize>,
+    emitted: Vec<usize>,
+    next_block: usize,
+    next_connection: usize,
+    connection_count: usize,
+}
+
+impl QuicBlockInterleavingScheduler {
+    /// Build a scheduler over the non-empty block work items.
+    #[must_use]
+    pub fn new(blocks: &[QuicFanoutBlock], connection_count: usize) -> Self {
+        let blocks = blocks
+            .iter()
+            .copied()
+            .filter(|block| block.symbols > 0)
+            .collect::<Vec<_>>();
+        let remaining = blocks.iter().map(|block| block.symbols).collect::<Vec<_>>();
+        let emitted = vec![0; blocks.len()];
+        Self {
+            blocks,
+            remaining,
+            emitted,
+            next_block: 0,
+            next_connection: 0,
+            connection_count: connection_count.max(1),
+        }
+    }
+
+    /// Number of fan-out lanes this scheduler can feed.
+    #[must_use]
+    pub fn connection_count(&self) -> usize {
+        self.connection_count
+    }
+
+    /// Whether no positive-symbol block work was supplied.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
+impl Iterator for QuicBlockInterleavingScheduler {
+    type Item = QuicFanoutSymbolSlot;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.blocks.is_empty() {
+            return None;
+        }
+
+        for _ in 0..self.blocks.len() {
+            let block_index = self.next_block;
+            self.next_block = (self.next_block + 1) % self.blocks.len();
+            if self.remaining[block_index] == 0 {
+                continue;
+            }
+
+            let block = self.blocks[block_index];
+            let symbol_index_in_block = self.emitted[block_index];
+            self.remaining[block_index] -= 1;
+            self.emitted[block_index] += 1;
+
+            let connection = self.next_connection;
+            self.next_connection = (self.next_connection + 1) % self.connection_count;
+
+            return Some(QuicFanoutSymbolSlot {
+                connection,
+                entry: block.entry,
+                sbn: block.sbn,
+                symbol_index_in_block,
+            });
+        }
+
+        None
+    }
+}
+
+/// Emit stable per-connection spray counts for D1 fan-out diagnostics.
+pub fn trace_quic_fanout_spray_counts(cx: &Cx, round: u64, counts: &[u64]) {
+    let round = round.to_string();
+    let connections = counts.len().to_string();
+    for (connection, symbols) in counts.iter().enumerate() {
+        let connection = connection.to_string();
+        let symbols = symbols.to_string();
+        cx.trace_with_fields(
+            "atp_quic.spray.fanout_connection",
+            &[
+                ("transport", "quic"),
+                ("round", &round),
+                ("connection", &connection),
+                ("connections", &connections),
+                ("symbols", &symbols),
+            ],
+        );
+    }
+}
+
 #[cfg(feature = "tls")]
 pub(crate) fn quic_spray_pacing_decision_from_transport(
     config: &QuicConfig,
@@ -6149,6 +6292,144 @@ mod tests {
         assert_eq!(entry.get_field("limiter"), Some("bandwidth_limit"));
         assert!(entry.get_field("pause_after_burst_micros").is_some());
         assert!(entry.get_field("pacing_rate_bps").is_some());
+    }
+
+    #[test]
+    fn d1_quic_effective_datagram_fanout_is_bounded_by_config_and_cpu() {
+        let config = QuicConfig {
+            datagram_fanout: 8,
+            max_active_connections: 4,
+            ..trusted_quic_config()
+        };
+
+        assert_eq!(quic_effective_datagram_fanout(&config, 64), 4);
+        assert_eq!(quic_effective_datagram_fanout(&config, 2), 2);
+        assert_eq!(quic_effective_datagram_fanout(&config, 0), 1);
+
+        let single_connection_config = QuicConfig {
+            datagram_fanout: 8,
+            max_active_connections: 0,
+            ..trusted_quic_config()
+        };
+        assert_eq!(
+            quic_effective_datagram_fanout(&single_connection_config, 64),
+            1,
+            "zero max_active_connections is normalized to the existing single-connection behavior"
+        );
+    }
+
+    #[test]
+    fn d1_quic_block_interleaving_scheduler_feeds_every_lane_and_block() {
+        let blocks = [
+            QuicFanoutBlock {
+                entry: 0,
+                sbn: 0,
+                symbols: 2,
+            },
+            QuicFanoutBlock {
+                entry: 0,
+                sbn: 1,
+                symbols: 2,
+            },
+            QuicFanoutBlock {
+                entry: 1,
+                sbn: 0,
+                symbols: 2,
+            },
+        ];
+
+        let slots = QuicBlockInterleavingScheduler::new(&blocks, 3).collect::<Vec<_>>();
+        assert_eq!(
+            slots
+                .iter()
+                .map(|slot| {
+                    (
+                        slot.connection,
+                        slot.entry,
+                        slot.sbn,
+                        slot.symbol_index_in_block,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 0, 0, 0),
+                (1, 0, 1, 0),
+                (2, 1, 0, 0),
+                (0, 0, 0, 1),
+                (1, 0, 1, 1),
+                (2, 1, 0, 1),
+            ],
+            "scheduler must interleave blocks before returning to the same block"
+        );
+
+        let mut per_connection = [0usize; 3];
+        let mut per_block = std::collections::BTreeMap::<(u32, u8), usize>::new();
+        for slot in slots {
+            per_connection[slot.connection] += 1;
+            *per_block.entry((slot.entry, slot.sbn)).or_default() += 1;
+        }
+        assert_eq!(per_connection, [2, 2, 2]);
+        assert_eq!(per_block.get(&(0, 0)), Some(&2));
+        assert_eq!(per_block.get(&(0, 1)), Some(&2));
+        assert_eq!(per_block.get(&(1, 0)), Some(&2));
+    }
+
+    #[test]
+    fn d1_quic_block_interleaving_scheduler_skips_empty_blocks_and_clamps_zero_lanes() {
+        let blocks = [
+            QuicFanoutBlock {
+                entry: 0,
+                sbn: 0,
+                symbols: 0,
+            },
+            QuicFanoutBlock {
+                entry: 7,
+                sbn: 2,
+                symbols: 1,
+            },
+        ];
+        let scheduler = QuicBlockInterleavingScheduler::new(&blocks, 0);
+        assert_eq!(scheduler.connection_count(), 1);
+        assert!(!scheduler.is_empty());
+
+        let slots = scheduler.collect::<Vec<_>>();
+        assert_eq!(
+            slots,
+            vec![QuicFanoutSymbolSlot {
+                connection: 0,
+                entry: 7,
+                sbn: 2,
+                symbol_index_in_block: 0,
+            }]
+        );
+
+        assert!(QuicBlockInterleavingScheduler::new(&[], 4).is_empty());
+    }
+
+    #[test]
+    fn d1_quic_fanout_spray_counts_trace_emits_per_connection_fields() {
+        let cx = Cx::for_testing();
+        let collector = crate::observability::LogCollector::new(8)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_diagnostic_context(crate::observability::DiagnosticContext::new());
+        cx.set_log_collector(collector.clone());
+
+        trace_quic_fanout_spray_counts(&cx, 11, &[3, 5, 8]);
+
+        let entries = collector
+            .peek()
+            .into_iter()
+            .filter(|entry| entry.message() == "atp_quic.spray.fanout_connection")
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].get_field("round"), Some("11"));
+        assert_eq!(entries[0].get_field("connection"), Some("0"));
+        assert_eq!(entries[0].get_field("connections"), Some("3"));
+        assert_eq!(entries[0].get_field("symbols"), Some("3"));
+        assert_eq!(entries[1].get_field("connection"), Some("1"));
+        assert_eq!(entries[1].get_field("symbols"), Some("5"));
+        assert_eq!(entries[2].get_field("connection"), Some("2"));
+        assert_eq!(entries[2].get_field("symbols"), Some("8"));
     }
 
     #[test]
