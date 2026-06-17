@@ -110,6 +110,12 @@ fn tighten_timeouts(cfg: &mut QuicConfig) {
     cfg.accept_timeout = TEST_TIMEOUT;
 }
 
+fn assert_default_bounded_k512(cfg: &QuicConfig) {
+    assert_eq!(cfg.symbol_size, 1024);
+    assert_eq!(cfg.max_block_size, 512 * 1024);
+    assert_eq!(cfg.max_block_size / usize::from(cfg.symbol_size), 512);
+}
+
 fn authenticated_configs(seed: u64) -> Configs {
     let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(seed));
     send.client_tls = Some(client_tls());
@@ -292,6 +298,7 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
     std::fs::write(&source, &payload).expect("write source");
 
     let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(0xC0FFEE));
+    assert_default_bounded_k512(&send);
     // 200% repair overhead so K-of-N recovery survives losing every 4th symbol.
     send.repair_overhead = 3.0;
     send.debug_drop_one_in = 4;
@@ -299,6 +306,7 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
     tighten_timeouts(&mut send);
 
     let mut recv = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(0xC0FFEE));
+    assert_default_bounded_k512(&recv);
     recv.repair_overhead = 3.0;
     recv.server_tls = Some(server_tls());
     tighten_timeouts(&mut recv);
