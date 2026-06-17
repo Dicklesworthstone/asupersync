@@ -70,20 +70,22 @@ These are the reasons ATP must **not** be treated as proven-safe against an acti
 MITM over the open internet until they close. Each currently keeps the path fail
 closed or explicitly opt-in rather than silently insecure.
 
-### 5.1 Wire-CRYPTO handshake driver exists; transfer integration remains open
+### 5.1 Wire-CRYPTO handshake driver exists; transfer integration remains partially open
 The native QUIC stack now has a real `rustls::quic` handshake driver. It pulls
 outbound TLS handshake bytes as QUIC `CRYPTO`, feeds received `CRYPTO` bytes back
 into rustls, installs Initial / Handshake / 1-RTT keys as they become available,
 and rejects untrusted server certificates before the client reaches completion.
 `tests/quic_native_handshake_udp_loopback.rs` pins the driver completing over real
 loopback UDP, and `handshake_driver` inline tests pin protected-packet and
-untrusted-root behavior.
+untrusted-root behavior. `tests/atp_quic_real_udp_transfer_e2e.rs` now pins the
+production `send_path` / `receive_on_endpoint` path failing closed before commit
+for untrusted-root and wrong-hostname server identity failures.
 
 That closes the old "no exchanged-byte handshake driver" gap, but it is not a
 full ATP file-transfer or open-internet safety proof. The remaining no-claim
 boundary is the public transport path: `send_path` / `receive_once` / `serve`
 must carry manifest/control and symbol traffic through the verified connection,
-pin the bad-cert cases on the production transfer path, and preserve the
+pin the expired-certificate production-transfer case, and preserve the
 fail-closed posture while B2/B3/B4 finish.
 
 ### 5.2 X.509 verification surfaces are explicit and fail closed
@@ -123,7 +125,8 @@ and be pinned by tests (G4 acceptance, part a — owned by the respective Phase 
 beads):
 
 - [x] Wire-CRYPTO handshake driver completing the handshake from exchanged bytes (§5.1; `tests/quic_native_handshake_udp_loopback.rs`, `handshake_driver` inline tests).
-- [ ] End-to-end bad-cert rejection over the production transfer path: expired / wrong-hostname / untrusted-root → fail closed (extends `quic_native_x509_verification` and `handshake_driver` evidence into the ATP coroutine path).
+- [x] End-to-end bad-cert rejection over the production transfer path: untrusted-root / wrong-hostname → fail closed before commit (`tests/atp_quic_real_udp_transfer_e2e.rs`).
+- [ ] End-to-end expired-certificate rejection over the production transfer path (extends `quic_native_x509_verification` and `handshake_driver` evidence into the ATP coroutine path).
 - [ ] Authenticated control channel + manifest, or manifest carried inside the verified TLS channel (§5.3).
 - [ ] Forged/auth-failing symbol rejected on the real UDP path (extends `atp_rq_symbol_auth_e2e_contract`).
 - [ ] Amplification + replay bounds asserted on the real transport (not just unit level).
