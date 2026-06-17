@@ -6550,6 +6550,100 @@ mod tests {
     }
 
     #[test]
+    fn quic_receiver_aggregator_releases_reordered_symbols_before_decoder() {
+        let config = QuicConfig {
+            symbol_size: 64,
+            max_block_size: 192,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(192, 33))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let object_id = decoders[0].object_id;
+        let symbols = entries[0]
+            .1
+            .chunks_exact(usize::from(config.symbol_size))
+            .enumerate()
+            .map(|(esi, payload)| {
+                Symbol::new(
+                    SymbolId::new(object_id, 0, u32::try_from(esi).expect("esi fits")),
+                    payload.to_vec(),
+                    SymbolKind::Source,
+                )
+            })
+            .collect::<Vec<_>>();
+        let aggregator = MultipathAggregator::new(AggregatorConfig {
+            reorder: ReordererConfig {
+                immediate_delivery: false,
+                max_buffer_per_object: 4,
+                max_sequence_gap: 4,
+                ..ReordererConfig::default()
+            },
+            ..AggregatorConfig::default()
+        });
+        let secondary_path = PathId::new(2);
+        aggregator.paths().register(TransportPath::new(
+            QUIC_PRIMARY_RECEIVE_PATH_ID,
+            "quic-primary",
+            "quic-path-a",
+        ));
+        aggregator.paths().register(TransportPath::new(
+            secondary_path,
+            "quic-secondary",
+            "quic-path-b",
+        ));
+
+        let seq0 = feed_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[0].clone()),
+            &aggregator,
+            QUIC_PRIMARY_RECEIVE_PATH_ID,
+            Time::ZERO,
+        )
+        .expect("first source symbol reaches decoder");
+        let seq2 = feed_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[2].clone()),
+            &aggregator,
+            secondary_path,
+            Time::from_millis(1),
+        )
+        .expect("out-of-order source symbol is buffered");
+        let seq1 = feed_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbols[1].clone()),
+            &aggregator,
+            QUIC_PRIMARY_RECEIVE_PATH_ID,
+            Time::from_millis(2),
+        )
+        .expect("gap-fill source symbol releases buffered symbol");
+
+        assert_eq!(seq0, 1, "in-order symbol reaches decoder immediately");
+        assert_eq!(seq2, 0, "gap symbol is held by the reorder window");
+        assert_eq!(seq1, 2, "gap fill releases itself and buffered seq2");
+        let stats = aggregator.stats();
+        assert_eq!(stats.paths.total_received, 3);
+        assert_eq!(stats.reorder.symbols_buffered, 0);
+        assert_eq!(stats.reorder.in_order_deliveries, 2);
+        assert_eq!(stats.reorder.reordered_deliveries, 1);
+
+        assemble_completed_entries(&mut decoders);
+        assert!(
+            decoders[0].complete,
+            "reordered source symbols should decode the object"
+        );
+        assert_eq!(decoders[0].data, entries[0].1);
+        let receipt = verify_in_memory_receipt(&manifest, &decoders);
+        assert!(receipt.committed);
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+    }
+
+    #[test]
     fn quic_receiver_feedback_synthesizes_missing_source_symbol_requests() {
         let config = QuicConfig {
             symbol_size: 128,
