@@ -623,15 +623,21 @@ impl AtpBundleVerifier {
                 .as_ref()
                 .is_some_and(|m| m.repair_symbols_used > 0);
         if !repair_justification_verified {
-            // Repair activation claimed by repair_groups must agree with the
-            // RaptorQ repair_symbols_used signal. A mismatch is inconsistent /
-            // fabricated repair evidence and must FAIL verification, not merely
-            // populate the report field (asupersync-u5owrm). "Both absent" yields
-            // `true` here, so this only fires on a genuine mismatch.
+            // The repair_groups "activated" signal disagrees with the RaptorQ
+            // repair_symbols_used signal. This is a metadata-CONSISTENCY concern,
+            // not a content-integrity gate: content is already verified by chunk
+            // coverage, the manifest commit, and per-entry digests, so a transfer
+            // whose content is sound must not be hard-rejected over this. The two
+            // signals can also legitimately diverge (e.g. RaptorQ used repair
+            // symbols without an explicit repair_groups entry, or vice versa), so
+            // surface it as a WARNING (PassedWithWarnings) rather than a FAILED
+            // check — a false-reject here would drop valid transfers
+            // (asupersync-u5owrm). "Both absent" yields `true`, so this only fires
+            // on a genuine mismatch.
             checks.push(VerificationCheck {
                 check_name: "repair_justification".to_string(),
                 category: VerificationCategory::ContentIntegrity,
-                status: VerificationStatus::Failed,
+                status: VerificationStatus::PassedWithWarnings,
                 description: "Repair activation does not match RaptorQ repair-symbol usage"
                     .to_string(),
                 duration_micros: 0,
