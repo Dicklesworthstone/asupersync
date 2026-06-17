@@ -365,11 +365,6 @@ struct Hello {
     max_block_size: u64,
     #[serde(default)]
     symbol_auth: bool,
-    /// Total payload bytes of the transfer. The receiver sizes its UDP recv buffer to absorb the
-    /// sender's (now parallel-encoded) symbol burst so the CPU-bound decode can drain it without
-    /// kernel drops. `serde(default)` keeps it tolerant of peers that do not send it.
-    #[serde(default)]
-    total_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1218,7 +1213,6 @@ pub async fn send_path(
                 symbol_size: config.symbol_size,
                 max_block_size: config.max_block_size as u64,
                 symbol_auth: symbol_auth_enabled,
-                total_bytes,
             },
         )?)
         .await?;
@@ -1283,11 +1277,6 @@ pub async fn send_path(
     let mut dropper = 0u32;
     let mut feedback_rounds = 0u32;
 
-    // Parallel per-block encode is on by default, but only while the transfer is small enough that
-    // the receiver's recv buffer can absorb the burst (see PARALLEL_ENCODE_MAX_BYTES); larger
-    // transfers fall back to the sequential encode-paced spray to avoid overrunning the decoder.
-    let parallel_encode = total_bytes <= PARALLEL_ENCODE_MAX_BYTES;
-
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
     spray_round(
@@ -1302,7 +1291,6 @@ pub async fn send_path(
         &config,
         symbol_auth.as_ref(),
         /* with_source */ true,
-        parallel_encode,
     )
     .await?;
     rqtrace!("sender: round 0 sprayed, symbols_sent={symbols_sent}");
@@ -1378,7 +1366,6 @@ pub async fn send_path(
                         &config,
                         symbol_auth.as_ref(),
                         /* with_source */ false,
-                        parallel_encode,
                     )
                     .await?;
                 } else {
@@ -1436,46 +1423,6 @@ fn source_retransmit_request_limit(config: &RqConfig, feedback_round: u32) -> Op
     }
 }
 
-/// Above this total transfer size the parallel per-block encode is disabled and the sequential
-/// (encode-paced) spray is used instead. The receiver sizes its UDP recv buffer to absorb the
-/// parallel sender's burst, but that buffer is clamped near `net.core.rmem_max`; once a transfer
-/// exceeds what the buffer can hold, an unpaced parallel burst would overrun the CPU-bound decoder
-/// and trigger a feedback-round explosion (a measured 5.4x regression). Below the cap the burst is
-/// absorbed and the encode parallelism is a pure win. Parallel decode + a rate-paced encode-ahead
-/// ring (F2/F6.3) are what lift this cap for very large objects.
-const PARALLEL_ENCODE_MAX_BYTES: u64 = 112 * 1024 * 1024;
-const MAX_RAPTORQ_SOURCE_BLOCKS: usize = 256;
-
-fn should_parallel_encode_source_blocks(block_count: usize, parallel_encode: bool) -> bool {
-    parallel_encode && block_count > 1 && block_count <= MAX_RAPTORQ_SOURCE_BLOCKS
-}
-
-/// Encode one RaptorQ source block (its `K` source symbols plus `repair_count` repair symbols) into
-/// an owned `Vec<Symbol>`.
-///
-/// This runs on the blocking pool for [`spray_round`]'s parallel per-block encode (F3 /
-/// `317hxr.4`). [`EncodingPipeline::encode_single_block_with_repair`] preserves the exact
-/// object/SBN/ESI layout the whole-object [`EncodingPipeline::encode_with_repair`] would have
-/// produced for `sbn`, so the emitted symbols are byte-identical regardless of which thread minted
-/// them — the speedup is a pure isomorphism (decode is order-independent and the receiver verifies
-/// sha256 + merkle). The error is stringified because the closure crosses the `spawn_blocking`
-/// boundary, where the return type need only be `Send`.
-fn encode_block_symbols(
-    cfg: &crate::config::EncodingConfig,
-    object_id: ObjectId,
-    sbn: u8,
-    data: &[u8],
-    repair_count: usize,
-) -> Result<Vec<Symbol>, String> {
-    let pool = SymbolPool::new(PoolConfig::default());
-    let mut pipeline = EncodingPipeline::new(cfg.clone(), pool);
-    let mut out = Vec::new();
-    for encoded in pipeline.encode_single_block_with_repair(object_id, sbn, data, repair_count) {
-        out.push(encoded.map_err(|e| e.to_string())?.symbol().clone());
-    }
-    Ok(out)
-}
-
 /// Spray one round of symbols for the `pending` entries across the UDP sockets.
 ///
 /// Round 0 (`with_source`) sends every block's source symbols plus optional
@@ -1497,7 +1444,6 @@ async fn spray_round(
     config: &RqConfig,
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
-    parallel_encode: bool,
 ) -> Result<(), RqError> {
     let batch = repair_batch_per_block(config);
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
@@ -1544,113 +1490,22 @@ async fn spray_round(
         );
 
         if with_source {
-            // Enumerate this object's source blocks (contiguous `max_block_size` chunks, mirroring
-            // `EncodingPipeline::plan_blocks`). Each block's RaptorQ solve is independent, so for
-            // multi-block objects we encode the blocks across cores on the runtime blocking pool
-            // (F3 / 317hxr.4) instead of solving them one-at-a-time on a single core (the measured
-            // large-file bottleneck: 98% of one core). Blocks are sprayed in SBN order so the wire
-            // output is identical to the sequential path — a pure throughput isomorphism.
-            let mut blocks: Vec<(u8, usize, usize)> = Vec::new();
-            let mut offset = 0usize;
-            let mut sbn = 0u8;
-            while offset < enc.bytes.len() {
-                let len = config.max_block_size.min(enc.bytes.len() - offset);
-                blocks.push((sbn, offset, len));
-                offset += len;
-                sbn = sbn.wrapping_add(1);
-            }
-
-            if !should_parallel_encode_source_blocks(blocks.len(), parallel_encode) {
-                // Sequential inline encode when: a single (or empty) block — spawning would only add
-                // pool-dispatch latency and erase the small-object latency win (F3.4 / 317hxr.4.4);
-                // or `parallel_encode` is off because the transfer is too large for the receiver to
-                // absorb the burst (PARALLEL_ENCODE_MAX_BYTES); or manual block enumeration would
-                // exceed the u8 SBN envelope and stop matching the canonical encoder's effective
-                // block-size planning. Sequential keeps the spray paced by encode time and preserves
-                // the exact byte-identity contract.
-                for encoded in pipeline.encode_with_repair(enc.object_id, &enc.bytes, target_repair)
-                {
-                    let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
-                    send_symbol_datagram(
-                        cx,
-                        sockets,
-                        rr,
-                        symbols_sent,
-                        dropper,
-                        tag,
-                        enc.index,
-                        encoded.symbol(),
-                        config,
-                        symbol_auth,
-                    )
-                    .await?;
-                }
-            } else {
-                // Parallel per-block encode, default-on (degree = host parallelism, no opt-in flag),
-                // processed in bounded BATCHES so peak symbol RAM stays ~`batch` blocks rather than
-                // the whole object. `spawn_blocking` is region-owned (cancel-correct: a cancelled
-                // region drains these tasks) and dispatches to the blocking pool, falling back to an
-                // inline deterministic run under the lab runtime. Each batch is fully joined before
-                // the next `checkpoint`, so the cancel path never leaves encode tasks outstanding.
-                let enc_cfg = crate::config::EncodingConfig {
-                    repair_overhead: config.repair_overhead,
-                    max_block_size: config.max_block_size,
-                    symbol_size: config.symbol_size,
-                    encoding_parallelism: 1,
-                    decoding_parallelism: 1,
-                };
-                let batch = std::thread::available_parallelism()
-                    .map(std::num::NonZeroUsize::get)
-                    .unwrap_or(4)
-                    .clamp(2, 64);
-                for chunk in blocks.chunks(batch) {
-                    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-                    let mut handles = Vec::with_capacity(chunk.len());
-                    for &(block_sbn, start, len) in chunk {
-                        let block_data = enc.bytes[start..start + len].to_vec();
-                        let object_id = enc.object_id;
-                        let repair = target_repair;
-                        let cfg = enc_cfg.clone();
-                        let handle = cx
-                            .spawn_blocking(move |_child| {
-                                encode_block_symbols(
-                                    &cfg,
-                                    object_id,
-                                    block_sbn,
-                                    &block_data,
-                                    repair,
-                                )
-                            })
-                            .map_err(|e| RqError::Coding(format!("encode spawn failed: {e:?}")))?;
-                        handles.push(handle);
-                    }
-                    for mut handle in handles {
-                        let syms = match handle.join(cx).await {
-                            Ok(Ok(syms)) => syms,
-                            Ok(Err(e)) => return Err(RqError::Coding(e)),
-                            Err(join_err) => {
-                                return Err(RqError::Coding(format!(
-                                    "encode task failed: {join_err:?}"
-                                )));
-                            }
-                        };
-                        for sym in &syms {
-                            send_symbol_datagram(
-                                cx,
-                                sockets,
-                                rr,
-                                symbols_sent,
-                                dropper,
-                                tag,
-                                enc.index,
-                                sym,
-                                config,
-                                symbol_auth,
-                            )
-                            .await?;
-                        }
-                    }
-                }
+            for encoded in pipeline.encode_with_repair(enc.object_id, &enc.bytes, target_repair) {
+                let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
+                let sym = encoded.symbol();
+                send_symbol_datagram(
+                    cx,
+                    sockets,
+                    rr,
+                    symbols_sent,
+                    dropper,
+                    tag,
+                    enc.index,
+                    sym,
+                    config,
+                    symbol_auth,
+                )
+                .await?;
             }
         } else {
             for encoded in
@@ -1856,22 +1711,10 @@ pub async fn receive_connection(
         .parse()
         .map_err(|e| RqError::Source(format!("invalid UDP bind ip '{udp_bind_ip}': {e}")))?;
     let mut udp = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
-    // Size the receive buffer to ABSORB the sender's symbol burst (the sender now encodes blocks in
-    // parallel, so it can spray far faster than the CPU-bound decode drains). Sized to the transfer
-    // plus headroom and clamped to a generous cap (the kernel further caps at net.core.rmem_max);
-    // for transfers that fit, the whole burst lands in the buffer with no kernel drops, and the
-    // decoder drains it at its own pace — turning the sender's encode parallelism into a real
-    // wall-clock win instead of a feedback-round explosion. `total_bytes == 0` (older peers) falls
-    // back to the previous fixed 16 MiB.
-    let recv_buf_bytes = if hello.total_bytes == 0 {
-        16 * 1024 * 1024
-    } else {
-        usize::try_from(hello.total_bytes.saturating_add(32 * 1024 * 1024))
-            .unwrap_or(usize::MAX)
-            .clamp(16 * 1024 * 1024, 120 * 1024 * 1024)
-    };
+    // Large receive buffer absorbs the sender's symbol burst while the (CPU-bound)
+    // RaptorQ decode catches up, so kernel-side drops stay rare.
     let _ = udp.tune_buffers(UdpBufferConfig {
-        recv_buffer_bytes: Some(recv_buf_bytes),
+        recv_buffer_bytes: Some(16 * 1024 * 1024),
         send_buffer_bytes: None,
     });
     let udp_port = udp.local_addr()?.port();
@@ -3201,24 +3044,6 @@ mod tests {
                 .expect("1GiB should fit default transfer geometry"),
             4 * 1024 * 1024
         );
-    }
-
-    #[test]
-    fn parallel_source_encode_falls_back_outside_sbn_envelope() {
-        assert!(!should_parallel_encode_source_blocks(0, true));
-        assert!(!should_parallel_encode_source_blocks(1, true));
-        assert!(!should_parallel_encode_source_blocks(
-            MAX_RAPTORQ_SOURCE_BLOCKS,
-            false
-        ));
-        assert!(should_parallel_encode_source_blocks(
-            MAX_RAPTORQ_SOURCE_BLOCKS,
-            true
-        ));
-        assert!(!should_parallel_encode_source_blocks(
-            MAX_RAPTORQ_SOURCE_BLOCKS + 1,
-            true
-        ));
     }
 
     #[test]
