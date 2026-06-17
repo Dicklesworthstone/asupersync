@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use asupersync::Cx;
-use asupersync::lab::{LabConfig, run_async_under_lab_with_config};
+use asupersync::lab::{LabConfig, LabRunReport, run_async_under_lab_with_config};
 use asupersync::net::atp::transport_quic::{
     QuicConfig, QuicTransportError, ReceiveReport, SendReport, receive_once, send_path, serve,
 };
@@ -38,6 +38,55 @@ fn lab_config(seed: u64) -> LabConfig {
 fn lab_contract_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn assert_transport_lab_report_clean(label: &str, report: &LabRunReport) {
+    assert!(
+        report.quiescent,
+        "{label} lab run must end quiescent: {report:?}"
+    );
+    assert!(
+        report.oracle_report.all_passed(),
+        "{label} lab oracles must pass: {:?}",
+        report.oracle_report.to_json()
+    );
+    assert!(
+        report.invariant_violations.is_empty(),
+        "{label} lab invariant violations: {:?}",
+        report.invariant_violations
+    );
+    assert!(
+        report.temporal_invariant_failures.is_empty(),
+        "{label} temporal invariant failures: {:?}",
+        report.temporal_invariant_failures
+    );
+    assert!(
+        report.temporal_counterexample_prefix_len.is_none(),
+        "{label} temporal counterexample prefix must be absent for clean H3 lab runs: {:?}",
+        report.temporal_counterexample_prefix_len
+    );
+    assert!(
+        report.refinement_firewall_rule_id.is_none(),
+        "{label} refinement firewall rule must be absent for clean H3 lab runs: {:?}",
+        report.refinement_firewall_rule_id
+    );
+    assert!(
+        report.refinement_counterexample_prefix_len.is_none(),
+        "{label} refinement counterexample prefix must be absent for clean H3 lab runs: {:?}",
+        report.refinement_counterexample_prefix_len
+    );
+    assert!(
+        !report.refinement_firewall_skipped_due_to_trace_truncation,
+        "{label} refinement firewall must not be skipped by trace truncation"
+    );
+    assert!(
+        report.trace_certificate.event_count == report.trace_len as u64,
+        "{label} trace certificate event count must match buffered trace length"
+    );
+    assert!(
+        report.lab_test_passed(),
+        "{label} lab test contract failed: {report:?}"
+    );
 }
 
 fn cancelled_send_path_lab_report(seed: u64) -> Value {
@@ -67,26 +116,7 @@ fn cancelled_send_path_lab_report(seed: u64) -> Value {
         );
     });
 
-    assert!(report.quiescent, "lab run must end quiescent: {report:?}");
-    assert!(
-        report.oracle_report.all_passed(),
-        "lab oracles must pass: {:?}",
-        report.oracle_report.to_json()
-    );
-    assert!(
-        report.invariant_violations.is_empty(),
-        "lab invariant violations: {:?}",
-        report.invariant_violations
-    );
-    assert!(
-        report.temporal_invariant_failures.is_empty(),
-        "temporal invariant failures: {:?}",
-        report.temporal_invariant_failures
-    );
-    assert!(
-        report.lab_test_passed(),
-        "lab test contract failed: {report:?}"
-    );
+    assert_transport_lab_report_clean("cancelled send_path", &report);
 
     report.to_json()
 }
@@ -128,26 +158,7 @@ fn empty_receive_once_lab_report(seed: u64) -> Value {
         }
     });
 
-    assert!(report.quiescent, "lab run must end quiescent: {report:?}");
-    assert!(
-        report.oracle_report.all_passed(),
-        "lab oracles must pass: {:?}",
-        report.oracle_report.to_json()
-    );
-    assert!(
-        report.invariant_violations.is_empty(),
-        "lab invariant violations: {:?}",
-        report.invariant_violations
-    );
-    assert!(
-        report.temporal_invariant_failures.is_empty(),
-        "temporal invariant failures: {:?}",
-        report.temporal_invariant_failures
-    );
-    assert!(
-        report.lab_test_passed(),
-        "lab test contract failed: {report:?}"
-    );
+    assert_transport_lab_report_clean("empty receive_once", &report);
 
     report.to_json()
 }
@@ -197,26 +208,7 @@ fn invalid_receive_once_config_lab_report(seed: u64) -> Value {
         }
     });
 
-    assert!(report.quiescent, "lab run must end quiescent: {report:?}");
-    assert!(
-        report.oracle_report.all_passed(),
-        "lab oracles must pass: {:?}",
-        report.oracle_report.to_json()
-    );
-    assert!(
-        report.invariant_violations.is_empty(),
-        "lab invariant violations: {:?}",
-        report.invariant_violations
-    );
-    assert!(
-        report.temporal_invariant_failures.is_empty(),
-        "temporal invariant failures: {:?}",
-        report.temporal_invariant_failures
-    );
-    assert!(
-        report.lab_test_passed(),
-        "lab test contract failed: {report:?}"
-    );
+    assert_transport_lab_report_clean("invalid receive_once config", &report);
 
     report.to_json()
 }
@@ -260,26 +252,7 @@ fn cancelled_receive_once_lab_report(seed: u64) -> Value {
         );
     });
 
-    assert!(report.quiescent, "lab run must end quiescent: {report:?}");
-    assert!(
-        report.oracle_report.all_passed(),
-        "lab oracles must pass: {:?}",
-        report.oracle_report.to_json()
-    );
-    assert!(
-        report.invariant_violations.is_empty(),
-        "lab invariant violations: {:?}",
-        report.invariant_violations
-    );
-    assert!(
-        report.temporal_invariant_failures.is_empty(),
-        "temporal invariant failures: {:?}",
-        report.temporal_invariant_failures
-    );
-    assert!(
-        report.lab_test_passed(),
-        "lab test contract failed: {report:?}"
-    );
+    assert_transport_lab_report_clean("cancelled receive_once", &report);
 
     report.to_json()
 }
@@ -332,26 +305,7 @@ fn cancelled_serve_lab_report(seed: u64) -> Value {
         );
     });
 
-    assert!(report.quiescent, "lab run must end quiescent: {report:?}");
-    assert!(
-        report.oracle_report.all_passed(),
-        "lab oracles must pass: {:?}",
-        report.oracle_report.to_json()
-    );
-    assert!(
-        report.invariant_violations.is_empty(),
-        "lab invariant violations: {:?}",
-        report.invariant_violations
-    );
-    assert!(
-        report.temporal_invariant_failures.is_empty(),
-        "temporal invariant failures: {:?}",
-        report.temporal_invariant_failures
-    );
-    assert!(
-        report.lab_test_passed(),
-        "lab test contract failed: {report:?}"
-    );
+    assert_transport_lab_report_clean("cancelled serve", &report);
 
     report.to_json()
 }
@@ -398,26 +352,7 @@ fn empty_serve_lab_report(seed: u64) -> Value {
         );
     });
 
-    assert!(report.quiescent, "lab run must end quiescent: {report:?}");
-    assert!(
-        report.oracle_report.all_passed(),
-        "lab oracles must pass: {:?}",
-        report.oracle_report.to_json()
-    );
-    assert!(
-        report.invariant_violations.is_empty(),
-        "lab invariant violations: {:?}",
-        report.invariant_violations
-    );
-    assert!(
-        report.temporal_invariant_failures.is_empty(),
-        "temporal invariant failures: {:?}",
-        report.temporal_invariant_failures
-    );
-    assert!(
-        report.lab_test_passed(),
-        "lab test contract failed: {report:?}"
-    );
+    assert_transport_lab_report_clean("empty serve", &report);
 
     report.to_json()
 }
