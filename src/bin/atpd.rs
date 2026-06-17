@@ -16,6 +16,8 @@ use asupersync::atp::identity::DurablePeerIdentity;
 use asupersync::atp::supervision::{AtpdChildRole, AtpdRegionId};
 use asupersync::net::atp::protocol::PeerId;
 use asupersync::runtime::RuntimeBuilder;
+#[cfg(feature = "tls")]
+use asupersync::security::{AUTH_KEY_SIZE, AuthKey, SecurityContext};
 use asupersync::security::{IdentityKeyStore, KeyStoreError};
 use asupersync::types::Time;
 use clap::{Args, Parser, Subcommand};
@@ -152,6 +154,26 @@ struct StartArgs {
     /// Enable mailbox mode
     #[arg(long)]
     enable_mailbox: bool,
+
+    /// Enable the ATP-over-QUIC transfer listener.
+    #[arg(long)]
+    enable_quic: bool,
+
+    /// PEM certificate chain presented by the QUIC listener.
+    #[arg(long, value_name = "PATH")]
+    quic_server_cert: Option<PathBuf>,
+
+    /// PEM private key for the QUIC listener certificate.
+    #[arg(long, value_name = "PATH")]
+    quic_server_key: Option<PathBuf>,
+
+    /// Hex-encoded 32-byte per-symbol auth key for RaptorQ-over-QUIC symbols.
+    #[arg(long, value_name = "HEX")]
+    rq_auth_key_hex: Option<String>,
+
+    /// Explicitly disable per-symbol auth for trusted loopback/lab QUIC runs.
+    #[arg(long)]
+    rq_allow_unauthenticated_lab: bool,
 }
 
 #[derive(Args, Clone)]
@@ -222,12 +244,27 @@ pub struct NetworkConfig {
     pub bind_addr: SocketAddr,
     /// Enable QUIC transport
     pub enable_quic: bool,
+    /// QUIC listener TLS/auth configuration.
+    #[serde(default)]
+    pub quic: QuicDaemonConfig,
     /// Enable relay functionality
     pub enable_relay: bool,
     /// Enable mailbox functionality
     pub enable_mailbox: bool,
     /// Discovery configuration
     pub discovery: DiscoveryConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QuicDaemonConfig {
+    /// PEM certificate chain presented by the QUIC listener.
+    pub server_cert_path: Option<PathBuf>,
+    /// PEM private key for the QUIC listener certificate.
+    pub server_key_path: Option<PathBuf>,
+    /// Hex-encoded 32-byte per-symbol auth key for RaptorQ-over-QUIC symbols.
+    pub rq_auth_key_hex: Option<String>,
+    /// Explicit loopback/lab-only unauthenticated symbol mode.
+    pub allow_unauthenticated_lab: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,7 +461,8 @@ impl Default for AtpdConfig {
             },
             network: NetworkConfig {
                 bind_addr: "0.0.0.0:8472".parse().unwrap(),
-                enable_quic: true,
+                enable_quic: false,
+                quic: QuicDaemonConfig::default(),
                 enable_relay: false,
                 enable_mailbox: false,
                 discovery: DiscoveryConfig {
@@ -500,6 +538,209 @@ fn load_daemon_config(config_path: &PathBuf) -> Result<AtpdConfig> {
     }
 }
 
+#[cfg(feature = "tls")]
+fn load_atpd_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let pem = std::fs::read(path)
+        .map_err(|err| cli_error(format!("read cert {}: {err}", path.display())))?;
+    let mut reader = std::io::BufReader::new(pem.as_slice());
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| cli_error(format!("parse certs in {}: {err}", path.display())))?;
+    if certs.is_empty() {
+        return Err(cli_error(format!(
+            "no certificates found in {}",
+            path.display()
+        )));
+    }
+    Ok(certs)
+}
+
+#[cfg(feature = "tls")]
+fn load_atpd_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let pem = std::fs::read(path)
+        .map_err(|err| cli_error(format!("read key {}: {err}", path.display())))?;
+    let mut reader = std::io::BufReader::new(pem.as_slice());
+    rustls_pemfile::private_key(&mut reader)
+        .map_err(|err| cli_error(format!("parse key in {}: {err}", path.display())))?
+        .ok_or_else(|| cli_error(format!("no private key found in {}", path.display())))
+}
+
+#[cfg(feature = "tls")]
+fn atpd_auth_key_from_hex(key_hex: &str) -> Result<AuthKey> {
+    let trimmed = key_hex.trim();
+    let key_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    if key_hex.len() != AUTH_KEY_SIZE * 2 {
+        return Err(cli_error(format!(
+            "RQ auth key must be exactly {} hex characters for a {AUTH_KEY_SIZE}-byte key",
+            AUTH_KEY_SIZE * 2
+        )));
+    }
+    if !key_hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(cli_error(
+            "RQ auth key must contain only hexadecimal characters",
+        ));
+    }
+
+    let mut bytes = [0u8; AUTH_KEY_SIZE];
+    hex::decode_to_slice(key_hex, &mut bytes)
+        .map_err(|err| cli_error(format!("decode RQ auth key hex: {err}")))?;
+    AuthKey::from_bytes(bytes).map_err(|err| cli_error(format!("RQ auth key rejected: {err}")))
+}
+
+#[cfg(feature = "tls")]
+fn atpd_quic_config(
+    config: &AtpdConfig,
+) -> Result<asupersync::net::atp::transport_quic::QuicConfig> {
+    use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicServerTls};
+    use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, server_config};
+
+    let quic = &config.network.quic;
+    let configured_auth_key = quic
+        .rq_auth_key_hex
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty());
+    if quic.allow_unauthenticated_lab && configured_auth_key.is_some() {
+        return Err(cli_error(
+            "network.quic.allow_unauthenticated_lab conflicts with network.quic.rq_auth_key_hex",
+        ));
+    }
+
+    let cert_path = quic.server_cert_path.as_deref().ok_or_else(|| {
+        cli_error(
+            "network.enable_quic requires network.quic.server_cert_path (PEM certificate chain)",
+        )
+    })?;
+    let key_path = quic.server_key_path.as_deref().ok_or_else(|| {
+        cli_error("network.enable_quic requires network.quic.server_key_path (PEM private key)")
+    })?;
+    let cert_chain = load_atpd_cert_chain(cert_path)?;
+    let key = load_atpd_private_key(key_path)?;
+    let tls_config = server_config(cert_chain, key, vec![ATP_QUIC_ALPN.to_vec()])
+        .map_err(|err| cli_error(format!("build QUIC server TLS config: {err:?}")))?;
+
+    let base = QuicConfig {
+        max_transfer_bytes: config.transfers.max_transfer_size,
+        ..QuicConfig::default()
+    };
+    let mut quic_config = if quic.allow_unauthenticated_lab {
+        base.allow_unauthenticated_for_trusted_transport()
+    } else if let Some(key_hex) = configured_auth_key {
+        base.with_symbol_auth(SecurityContext::new(atpd_auth_key_from_hex(key_hex)?))
+    } else {
+        return Err(cli_error(
+            "network.enable_quic requires network.quic.rq_auth_key_hex, or \
+             network.quic.allow_unauthenticated_lab=true for loopback/lab use",
+        ));
+    };
+    quic_config.server_tls = Some(QuicServerTls { config: tls_config });
+    quic_config
+        .validate()
+        .map_err(|err| cli_error(format!("invalid QUIC listener config: {err}")))?;
+    Ok(quic_config)
+}
+
+#[cfg(feature = "tls")]
+fn spawn_quic_transfer_listener(
+    runtime_handle: &asupersync::runtime::RuntimeHandle,
+    config: &AtpdConfig,
+    identity: &DurablePeerIdentity,
+    transfer_stats: Arc<TransferStats>,
+) -> Result<SocketAddr> {
+    use asupersync::net::atp::transport_quic::native_link::{
+        bind_server_endpoint, receive_on_endpoint,
+    };
+
+    let quic_config = atpd_quic_config(config).map_err(|err| {
+        cli_error(format!(
+            "[ASUP-E702] ATP QUIC transfer listener is enabled but misconfigured: {err}"
+        ))
+    })?;
+    let bind_addr = config.network.bind_addr;
+    let inbox_dir = config.storage.data_dir.join("inbox");
+    let peer_label = identity.peer_id_hex();
+    let (bind_tx, bind_rx) = mpsc::channel::<std::result::Result<SocketAddr, String>>();
+
+    // Detached for the daemon's lifetime; the process exits on shutdown.
+    let _quic_transfer_listener = runtime_handle.spawn(async move {
+        let Some(cx) = asupersync::cx::Cx::current() else {
+            let _ = bind_tx.send(Err(
+                "no capability context available for the QUIC transfer listener".to_string(),
+            ));
+            return;
+        };
+        let first_endpoint = match bind_server_endpoint(&cx, bind_addr).await {
+            Ok(endpoint) => endpoint,
+            Err(err) => {
+                let _ = bind_tx.send(Err(format!("bind QUIC UDP {bind_addr}: {err}")));
+                return;
+            }
+        };
+        let local_addr = first_endpoint.local_addr();
+        let _ = bind_tx.send(Ok(local_addr));
+        info!(bind_addr = %local_addr, "ATP QUIC transfer listener bound and accepting");
+
+        let rebind_addr = local_addr;
+        let mut next_endpoint = Some(first_endpoint);
+        loop {
+            let endpoint = if let Some(endpoint) = next_endpoint.take() {
+                endpoint
+            } else {
+                match bind_server_endpoint(&cx, rebind_addr).await {
+                    Ok(endpoint) => endpoint,
+                    Err(err) => {
+                        transfer_stats.record_failed();
+                        warn!("ATP QUIC transfer listener failed to rebind {rebind_addr}: {err}");
+                        break;
+                    }
+                }
+            };
+            match receive_on_endpoint(&cx, endpoint, &inbox_dir, &quic_config, &peer_label).await {
+                Ok(report) => {
+                    transfer_stats.record_committed(report.bytes_received);
+                    info!(
+                        transfer_id = %report.transfer_id,
+                        bytes = report.bytes_received,
+                        files = report.files,
+                        "ATP QUIC transfer committed to inbox"
+                    );
+                }
+                Err(err) => {
+                    transfer_stats.record_failed();
+                    warn!("ATP QUIC transfer failed: {err}");
+                }
+            }
+        }
+    });
+
+    bind_rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| {
+            cli_error(
+                "[ASUP-E702] ATP QUIC transfer listener did not report bind status within 10s",
+            )
+        })?
+        .map_err(|err| {
+            cli_error(format!(
+                "[ASUP-E702] ATP QUIC transfer listener failed to bind: {err}; refusing to \
+                 start a QUIC-enabled transfer daemon that cannot accept QUIC transfers"
+            ))
+        })
+}
+
+#[cfg(not(feature = "tls"))]
+fn spawn_quic_transfer_listener(
+    _runtime_handle: &asupersync::runtime::RuntimeHandle,
+    _config: &AtpdConfig,
+    _identity: &DurablePeerIdentity,
+    _transfer_stats: Arc<TransferStats>,
+) -> Result<SocketAddr> {
+    Err(cli_error(
+        "[ASUP-E702] ATP QUIC transfer listener requires the `tls` feature; refusing to \
+         start a QUIC-enabled transfer daemon without native QUIC/TLS support",
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonSignal {
     Interrupt,
@@ -572,6 +813,9 @@ struct DaemonHealthSnapshot {
     /// start if this socket cannot be bound, so a serving daemon always reports
     /// a real listening address here.
     transfer_listener_addr: SocketAddr,
+    /// Address the optional QUIC transfer listener is actually bound to.
+    quic_transfer_listener_addr: Option<SocketAddr>,
+    quic_enabled: bool,
     data_dir: PathBuf,
     cache_dir: PathBuf,
     max_concurrent_transfers: u32,
@@ -588,6 +832,7 @@ impl DaemonHealthSnapshot {
         identity: &DurablePeerIdentity,
         service_order: &[AtpdChildRole],
         transfer_listener_addr: SocketAddr,
+        quic_transfer_listener_addr: Option<SocketAddr>,
         started_at_micros: u64,
         reload_count: u64,
     ) -> Self {
@@ -596,6 +841,8 @@ impl DaemonHealthSnapshot {
             peer_id: identity.peer_id_hex(),
             bind_addr: state.config.network.bind_addr,
             transfer_listener_addr,
+            quic_transfer_listener_addr,
+            quic_enabled: state.config.network.enable_quic,
             data_dir: state.config.storage.data_dir.clone(),
             cache_dir: state.config.storage.cache_dir.clone(),
             max_concurrent_transfers: state.config.transfers.max_concurrent,
@@ -1077,6 +1324,21 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     config.transfers.max_concurrent = args.max_transfers;
     config.network.enable_relay = args.enable_relay;
     config.network.enable_mailbox = args.enable_mailbox;
+    if args.enable_quic {
+        config.network.enable_quic = true;
+    }
+    if let Some(path) = args.quic_server_cert {
+        config.network.quic.server_cert_path = Some(path);
+    }
+    if let Some(path) = args.quic_server_key {
+        config.network.quic.server_key_path = Some(path);
+    }
+    if let Some(key_hex) = args.rq_auth_key_hex {
+        config.network.quic.rq_auth_key_hex = Some(key_hex);
+    }
+    if args.rq_allow_unauthenticated_lab {
+        config.network.quic.allow_unauthenticated_lab = true;
+    }
 
     prepare_daemon_directories(&config)?;
 
@@ -1239,10 +1501,21 @@ async fn run_daemon_service(
                 ))
             })?
     };
+    let quic_transfer_listener_addr = if config.network.enable_quic {
+        Some(spawn_quic_transfer_listener(
+            &runtime_handle,
+            &config,
+            &identity,
+            Arc::clone(&transfer_stats),
+        )?)
+    } else {
+        None
+    };
 
     info!(
         peer_id = identity.peer_id_hex(),
         services = compiled_app.start_order.len(),
+        quic_listener = ?quic_transfer_listener_addr,
         "ATP daemon services started"
     );
     info!(
@@ -1261,6 +1534,7 @@ async fn run_daemon_service(
         &identity,
         &compiled_app.start_order,
         transfer_listener_addr,
+        quic_transfer_listener_addr,
         started_at_micros,
         reload_count,
     )));
@@ -1311,6 +1585,20 @@ async fn run_daemon_service(
                          its current socket — restart the daemon to rebind"
                     );
                 }
+                if reloaded.network.enable_quic != config.network.enable_quic
+                    || reloaded.network.quic.server_cert_path
+                        != config.network.quic.server_cert_path
+                    || reloaded.network.quic.server_key_path != config.network.quic.server_key_path
+                    || reloaded.network.quic.rq_auth_key_hex != config.network.quic.rq_auth_key_hex
+                    || reloaded.network.quic.allow_unauthenticated_lab
+                        != config.network.quic.allow_unauthenticated_lab
+                {
+                    warn!(
+                        listening = ?quic_transfer_listener_addr,
+                        "QUIC listener configuration changed in reloaded config; restart the \
+                         daemon to rebind or reconfigure the QUIC listener"
+                    );
+                }
                 config = reloaded;
                 daemon_state.config = config.clone();
                 reload_count = reload_count.saturating_add(1);
@@ -1322,6 +1610,7 @@ async fn run_daemon_service(
                         &reloaded_identity,
                         &compiled_app.start_order,
                         transfer_listener_addr,
+                        quic_transfer_listener_addr,
                         started_at_micros,
                         reload_count,
                     );
@@ -1857,4 +2146,105 @@ fn manage_identity(cli: AtpdCli, args: IdentityArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loopback(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[test]
+    fn quic_listener_is_an_explicit_daemon_capability() {
+        let config = AtpdConfig::default();
+
+        assert!(
+            !config.network.enable_quic,
+            "atpd must not claim a QUIC listener unless it was explicitly enabled"
+        );
+        assert!(config.network.quic.server_cert_path.is_none());
+        assert!(config.network.quic.server_key_path.is_none());
+        assert!(config.network.quic.rq_auth_key_hex.is_none());
+        assert!(!config.network.quic.allow_unauthenticated_lab);
+    }
+
+    #[test]
+    fn diagnostics_snapshot_reports_tcp_and_quic_bound_addrs() {
+        let snapshot = DaemonHealthSnapshot {
+            status: "running",
+            peer_id: "peer-test".to_string(),
+            bind_addr: loopback(8472),
+            transfer_listener_addr: loopback(8472),
+            quic_transfer_listener_addr: Some(loopback(8472)),
+            quic_enabled: true,
+            data_dir: PathBuf::from("/var/lib/atpd"),
+            cache_dir: PathBuf::from("/var/lib/atpd/cache"),
+            max_concurrent_transfers: 16,
+            relay_enabled: false,
+            mailbox_enabled: false,
+            service_order: vec!["transfer"],
+            started_at_micros: 42,
+            reload_count: 1,
+        };
+
+        let body = serde_json::to_value(snapshot).expect("snapshot serializes");
+        assert_eq!(
+            body["transfer_listener_addr"],
+            serde_json::Value::String("127.0.0.1:8472".to_string())
+        );
+        assert_eq!(
+            body["quic_transfer_listener_addr"],
+            serde_json::Value::String("127.0.0.1:8472".to_string())
+        );
+        assert_eq!(body["quic_enabled"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn transfer_stats_json_reports_live_shared_counters() {
+        let stats = TransferStats::default();
+        stats.record_committed(4096);
+        stats.record_failed();
+
+        let body = stats.as_json();
+        assert_eq!(body["transfers_committed"], serde_json::json!(1));
+        assert_eq!(body["transfers_failed"], serde_json::json!(1));
+        assert_eq!(body["bytes_received_total"], serde_json::json!(4096));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn enabled_quic_config_requires_tls_material() {
+        let mut config = AtpdConfig::default();
+        config.network.enable_quic = true;
+        config.network.quic.rq_auth_key_hex =
+            Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string());
+
+        let err = atpd_quic_config(&config).expect_err("missing TLS material must fail closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("server_cert_path"),
+            "missing cert path should be named, got {message}"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn enabled_quic_config_rejects_auth_key_and_lab_escape_hatch_together() {
+        let mut config = AtpdConfig::default();
+        config.network.enable_quic = true;
+        config.network.quic.server_cert_path = Some(PathBuf::from("server.pem"));
+        config.network.quic.server_key_path = Some(PathBuf::from("server.key"));
+        config.network.quic.rq_auth_key_hex =
+            Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string());
+        config.network.quic.allow_unauthenticated_lab = true;
+
+        let err = atpd_quic_config(&config).expect_err("conflicting auth modes must fail closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("allow_unauthenticated_lab") && message.contains("rq_auth_key_hex"),
+            "auth conflict should name both fields, got {message}"
+        );
+    }
 }
