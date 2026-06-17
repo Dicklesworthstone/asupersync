@@ -44,7 +44,7 @@ const CUSTOM_TIME_GETTER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// time source is constructed first (typically the driver's `WallClock` at
 /// runtime startup) claims the epoch; all later ones share it.
 #[must_use]
-pub(crate) fn process_epoch() -> Instant {
+pub fn process_epoch() -> Instant {
     *START_TIME.get_or_init(Instant::now)
 }
 

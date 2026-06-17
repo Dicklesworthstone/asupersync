@@ -1574,7 +1574,7 @@ pub mod process_group {
         mailboxes: &BTreeMap<GroupMemberId, mpsc::Sender<M>>,
     ) -> Outcome<GroupBroadcastReport, ProcessGroupError>
     where
-        M: Clone,
+        M: Clone + Send + Sync,
     {
         let blocked = plan.blocked_recipient_status();
         let mut recipients = Vec::with_capacity(plan.len());

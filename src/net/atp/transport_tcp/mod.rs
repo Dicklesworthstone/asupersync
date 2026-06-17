@@ -699,7 +699,13 @@ async fn write_chunk_sparse(
             }
             let run = pos - start;
             if run >= HOLE_THRESHOLD {
-                file.seek(std::io::SeekFrom::Current(run as i64)).await?;
+                let run = i64::try_from(run).map_err(|_| {
+                    TransportError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "sparse zero run length exceeds i64::MAX",
+                    ))
+                })?;
+                file.seek(std::io::SeekFrom::Current(run)).await?;
             } else {
                 file.write_all(&chunk[start..pos]).await?;
             }
