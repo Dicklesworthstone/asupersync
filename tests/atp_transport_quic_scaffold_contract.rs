@@ -28,6 +28,7 @@ use asupersync::net::atp::transport_quic::{
     apply_quic_adaptive_block_plan, quic_spray_pacing_decision_from_config, receive_connection,
     receive_once, send_path,
 };
+use asupersync::net::quic_core::ConnectionId;
 use asupersync::net::quic_native::{
     ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionConfig,
 };
@@ -693,6 +694,29 @@ fn assert_transport_start_trace(collector: &LogCollector, operation: &str, peer_
     }
 }
 
+fn assert_accepted_trace(
+    collector: &LogCollector,
+    message: &str,
+    connection_id: ConnectionId,
+    peer: SocketAddr,
+    peer_id: &str,
+) {
+    let entries = collector.peek();
+    let accepted = entries
+        .iter()
+        .find(|entry| entry.message() == message)
+        .expect("accepted connection trace entry");
+    let expected_connection_id = format!("{connection_id:?}");
+    let expected_peer = peer.to_string();
+    assert_eq!(accepted.level(), LogLevel::Trace);
+    assert_eq!(
+        accepted.get_field("connection_id"),
+        Some(expected_connection_id.as_str())
+    );
+    assert_eq!(accepted.get_field("peer"), Some(expected_peer.as_str()));
+    assert_eq!(accepted.get_field("peer_id"), Some(peer_id));
+}
+
 #[test]
 fn authenticated_start_trace_omits_key_material() {
     let cx = Cx::for_testing();
@@ -1040,6 +1064,51 @@ fn receive_once_start_trace_carries_stable_structured_fields() {
 }
 
 #[test]
+fn receive_once_accepted_trace_carries_stable_structured_fields() -> TestResult {
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(16).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let mut endpoint = bind_managed_server_endpoint(&cx);
+    let connection_id = ConnectionId::new(b"h1recv1").expect("valid connection id");
+    let peer = SocketAddr::from(([127, 0, 0, 1], 57_771));
+    block_on(endpoint.create_connection_for_testing(&cx, connection_id, peer))?;
+    let temp = tempfile::tempdir()?;
+
+    let result: Result<ReceiveReport, QuicTransportError> = block_on(receive_once(
+        &cx,
+        &mut endpoint,
+        temp.path(),
+        trusted_quic_config(),
+        "receiver",
+    ));
+
+    match result {
+        Ok(report) => panic!("unseeded accepted connection must not fake success: {report:?}"),
+        Err(QuicTransportError::Timeout {
+            operation: "receive_once accept",
+            ..
+        }) => panic!("routed accepted connection must not take the empty-endpoint timeout path"),
+        Err(QuicTransportError::NotImplemented {
+            operation: "receive_once",
+            ..
+        }) => panic!("receive_once should stay wired past the B1 scaffold"),
+        Err(_) => {}
+    }
+
+    assert_accepted_trace(
+        &collector,
+        "atp_quic.receive_once.accepted",
+        connection_id,
+        peer,
+        "receiver",
+    );
+
+    Ok(())
+}
+
+#[test]
 fn serve_empty_endpoint_drains_without_fake_result() {
     let cx = Cx::for_testing();
     let endpoint = block_on(ManagedQuicEndpoint::bind(
@@ -1172,4 +1241,55 @@ fn serve_start_trace_carries_stable_structured_fields() {
     );
     assert_eq!(callbacks, 0);
     assert_transport_start_trace(&collector, "serve", "receiver");
+}
+
+#[test]
+fn serve_accepted_trace_carries_stable_structured_fields() -> TestResult {
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(16).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let mut endpoint = bind_managed_server_endpoint(&cx);
+    let connection_id = ConnectionId::new(b"h1serve").expect("valid connection id");
+    let peer = SocketAddr::from(([127, 0, 0, 1], 57_772));
+    block_on(endpoint.create_connection_for_testing(&cx, connection_id, peer))?;
+    let temp = tempfile::tempdir()?;
+    let mut callbacks = 0usize;
+
+    let result = block_on(transport_quic::serve(
+        &cx,
+        endpoint,
+        temp.path().to_path_buf(),
+        trusted_quic_config(),
+        "receiver".to_string(),
+        |result| {
+            callbacks += 1;
+            match result {
+                Ok(report) => {
+                    panic!("unseeded accepted connection must not fake success: {report:?}")
+                }
+                Err(QuicTransportError::NotImplemented {
+                    operation: "receive_connection",
+                    ..
+                }) => panic!("serve should keep the accepted connection body wired"),
+                Err(_) => {}
+            }
+        },
+    ));
+
+    assert!(
+        result.is_ok(),
+        "serve should drain routed connection: {result:?}"
+    );
+    assert_eq!(callbacks, 1);
+    assert_accepted_trace(
+        &collector,
+        "atp_quic.serve.accepted",
+        connection_id,
+        peer,
+        "receiver",
+    );
+
+    Ok(())
 }

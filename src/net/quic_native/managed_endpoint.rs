@@ -180,6 +180,24 @@ impl ManagedQuicEndpoint {
         self.connection_router.connection_stats()
     }
 
+    /// Route a native connection into this endpoint for integration tests.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub async fn create_connection_for_testing(
+        &mut self,
+        cx: &Cx,
+        connection_id: crate::net::quic_core::ConnectionId,
+        peer_addr: SocketAddr,
+    ) -> Result<(), ManagedEndpointError> {
+        if self.shutting_down {
+            return Err(ManagedEndpointError::ShuttingDown);
+        }
+
+        self.connection_router
+            .create_connection(cx, connection_id, peer_addr, self.config.is_server)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Remove a routed native connection and hand ownership to the caller.
     pub fn take_connection(
         &mut self,
