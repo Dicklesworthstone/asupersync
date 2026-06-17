@@ -34,6 +34,8 @@ use asupersync::net::quic_native::{
 use asupersync::observability::{DiagnosticContext, LogCollector, LogLevel};
 use asupersync::types::Budget;
 
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     futures_lite::future::block_on(fut)
 }
@@ -769,6 +771,59 @@ fn receive_connection_rejects_missing_control_stream_without_fake_success() {
         }) => panic!("receive_connection should stay wired past the B1 scaffold"),
         Err(_) => {}
     }
+}
+
+#[test]
+fn receive_connection_observes_cancel_before_native_receive_body() -> TestResult {
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+    let conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+    let peer = SocketAddr::from(([127, 0, 0, 1], 9));
+    let temp = tempfile::tempdir()?;
+
+    let result: Result<ReceiveReport, QuicTransportError> = block_on(receive_connection(
+        &cx,
+        conn,
+        peer,
+        temp.path(),
+        trusted_quic_config(),
+        "receiver",
+    ));
+
+    assert!(
+        matches!(result, Err(QuicTransportError::Cancelled)),
+        "cancelled receive_connection must fail closed before native receive body, got {result:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn receive_connection_rejects_invalid_config_before_native_receive_body() -> TestResult {
+    let cx = Cx::for_testing();
+    let conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+    let peer = SocketAddr::from(([127, 0, 0, 1], 9));
+    let temp = tempfile::tempdir()?;
+    let cfg = QuicConfig {
+        accept_timeout: Duration::ZERO,
+        ..trusted_quic_config()
+    };
+
+    let result: Result<ReceiveReport, QuicTransportError> = block_on(receive_connection(
+        &cx,
+        conn,
+        peer,
+        temp.path(),
+        cfg,
+        "receiver",
+    ));
+
+    assert!(
+        matches!(result, Err(QuicTransportError::Config(_))),
+        "invalid receive_connection config must fail before native receive body, got {result:?}"
+    );
+
+    Ok(())
 }
 
 #[test]
