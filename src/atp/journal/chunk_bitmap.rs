@@ -231,10 +231,23 @@ impl ChunkBitmap {
 
     /// Initialize all chunks as wanted
     pub fn initialize_wanted_chunks(&mut self, timestamp: u64) {
-        let num_chunks = (self.total_size + self.chunk_size - 1) / self.chunk_size;
+        // A zero `chunk_size` is invalid geometry that can arrive from a crafted
+        // or corrupt deserialized bitmap. The old
+        // `(total_size + chunk_size - 1) / chunk_size` divided by zero (and
+        // underflowed when total_size == 0) — a remote crash/DoS on the recovery
+        // path. Treat it as "nothing to enumerate" and leave the bitmap empty.
+        if self.chunk_size == 0 {
+            self.updated_at = timestamp;
+            return;
+        }
+        let num_chunks = self.total_size.div_ceil(self.chunk_size);
 
         for i in 0..num_chunks {
-            let offset = i * self.chunk_size;
+            // `i * self.chunk_size` could overflow u64 for a crafted
+            // total_size/chunk_size pair; stop instead of panicking.
+            let Some(offset) = i.checked_mul(self.chunk_size) else {
+                break;
+            };
             self.chunks
                 .insert(offset, ChunkEntry::new(ChunkState::Wanted, timestamp));
         }
@@ -921,6 +934,21 @@ mod tests {
         bitmap.update_chunk_state(100, ChunkState::Committed, 1003, None);
 
         assert!(bitmap.is_complete());
+    }
+
+    #[test]
+    fn initialize_wanted_chunks_zero_chunk_size_does_not_panic() {
+        // A crafted/corrupt bitmap with chunk_size == 0 must not divide-by-zero
+        // or underflow in initialize_wanted_chunks (regression for the recovery
+        // crash/DoS; see asupersync-59ik3w). It enumerates nothing.
+        let mut bitmap = ChunkBitmap::new("zero".to_string(), 1_000_000, 0, 1000);
+        bitmap.initialize_wanted_chunks(1001); // must not panic
+        assert_eq!(
+            bitmap.get_chunk_state(0),
+            None,
+            "no chunks enumerated for zero chunk_size"
+        );
+        assert!(!bitmap.is_complete());
     }
 
     #[test]
