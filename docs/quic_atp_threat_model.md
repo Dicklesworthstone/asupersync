@@ -47,9 +47,9 @@ attacker who simply drops all packets (unpreventable at this layer).
 
 | Threat | Mitigation (implemented) | Pinning test | Residual gap |
 |--------|--------------------------|--------------|--------------|
-| **Server impersonation / MITM** | Client X.509 verification (chain + hostname + signature) against configured roots; **fail closed** — a client cannot reach `Established` unless a genuine verification recorded the identity (`record_verified_server_identity`); the native `rustls::quic` handshake driver exchanges CRYPTO bytes, installs 1-RTT keys, and has **no insecure skip-verify default** | `tests/quic_native_x509_verification.rs`, `tests/quic_legacy_no_accept_all_cert_verifier.rs`, `tests/quic_native_handshake_udp_loopback.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | The handshake driver and production bad-cert transfer path are pinned, but the public ATP file-transfer path is still not a closed open-internet safety claim (see §5.1): `send_path`/`receive_once`/`serve` manifest/control authentication remains to be proven |
-| **Symbol injection / forgery** | Per-symbol HMAC auth; `transport_rq` default posture is `MissingAuthenticationContext` → `send_path`/`receive_once` **refuse to run before any I/O** unless the caller chooses `with_symbol_auth(ctx)` (every UDP symbol signed+verified) or the explicit `allow_unauthenticated_for_trusted_transport()` opt-out; handshake rejects posture mismatch both directions | `tests/atp_rq_symbol_auth_e2e_contract.rs`, `tests/decoding_secure_default.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | Real UDP ATP-over-QUIC now pins auth-failing symbol rejection before commit; authenticated mode still protects the **UDP symbol plane only** — the control channel + manifest are unauthenticated (see §5.3) |
-| **Packet tampering** | 1-RTT AEAD (encrypt+authenticate) + header protection | `atp::quic::packet_protection` inline tests (round-trip / tamper / header-protection) | AEAD/header-protection is implemented and unit-tested, and the handshake proof uses protected handshake packets, but ATP file-transfer data-plane interposition is still part of the §5.1 integration — not yet an end-to-end transfer guarantee |
+| **Server impersonation / MITM** | Client X.509 verification (chain + hostname + signature) against configured roots; **fail closed** — a client cannot reach `Established` unless a genuine verification recorded the identity (`record_verified_server_identity`); the native `rustls::quic` handshake driver exchanges CRYPTO bytes, installs 1-RTT keys, and has **no insecure skip-verify default** | `tests/quic_native_x509_verification.rs`, `tests/quic_legacy_no_accept_all_cert_verifier.rs`, `tests/quic_native_handshake_udp_loopback.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | The handshake driver, production bad-cert transfer path, and verified 1-RTT control/manifest path are pinned. This is still not a fleet benchmark, release-readiness, or generic-QUIC-interoperability claim. |
+| **Symbol injection / forgery** | Per-symbol HMAC auth; default posture is `MissingAuthenticationContext` -> `send_path` / receiver entry points **refuse to run before data transfer** unless the caller chooses `with_symbol_auth(ctx)` (every UDP symbol signed+verified) or the explicit `allow_unauthenticated_for_trusted_transport()` opt-out; handshake rejects posture mismatch both directions | `tests/atp_rq_symbol_auth_e2e_contract.rs`, `tests/decoding_secure_default.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | Real UDP ATP-over-QUIC pins auth-failing symbol rejection before commit. The sibling `transport_tcp` path still has no per-symbol authentication (see §5.4). |
+| **Packet tampering** | 1-RTT AEAD (encrypt+authenticate) + header protection in the primitive packet-protection layer; the ATP-over-QUIC native link uses handshake-derived 1-RTT keys for control STREAM and symbol DATAGRAM packets | `atp::quic::packet_protection` inline tests (round-trip / tamper / header-protection), `tests/quic_application_data_udp_loopback.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | The native ATP link uses a simplified asupersync-only short-header format, so this is not wire-interoperability proof against a generic QUIC stack. |
 | **Replay** | Bounded per-PN-space replay window (`REPLAY_WINDOW_CAPACITY = 1024`, span 1023): duplicate or too-old packet numbers rejected | `packet_protection.rs` replay-window inline tests; `tests/quic_application_data_udp_loopback.rs` | Window capacity and stale-packet behavior are pinned at the crypto boundary; duplicate protected packets are now rejected through the native router over real loopback UDP without duplicate application delivery |
 | **Amplification / off-path DoS** | Server anti-amplification accounting (`anti_amplification_bytes_received/sent`, `AmplificationLimited` error) bounds bytes sent to an unvalidated peer address until validation; the real UDP path also keeps pre-validation Initial responses within the 3× envelope | `connection.rs` anti-amplification inline coverage; `tests/quic_application_data_udp_loopback.rs` | Standard QUIC 3× envelope pinned through real loopback UDP pre-validation Initial responses; not a defense against on-path floods |
 | **Resource exhaustion (memory)** | Bounded inbound/outbound DATAGRAM queues (256-deep: receive drops oldest, send applies backpressure — never unbounded growth) | `tests/quic_datagram_send_path.rs`, `tests/quic_datagram_recv_path.rs` | The fountain feedback-round cap (`DEFAULT_MAX_FEEDBACK_ROUNDS`) is a config default for the not-yet-wired B2/B3 coroutine, not an active mitigation today |
@@ -59,18 +59,20 @@ attacker who simply drops all packets (unpreventable at this layer).
 
 Implemented and pinned: fail-closed client identity gate (no silent-accept MITM),
 real QUIC/TLS-1.3 handshake driver evidence over protected packets and loopback
-UDP, 1-RTT AEAD + replay window with real-UDP replay rejection, fail-closed RaptorQ symbol authentication
-posture, anti-amplification accounting with real-UDP response-envelope coverage, bounded queues. The prior silent-accept
+UDP, handshake-derived 1-RTT protection for ATP control STREAM and symbol
+DATAGRAM packets, 1-RTT AEAD + replay window with real-UDP replay rejection,
+fail-closed RaptorQ symbol authentication posture, anti-amplification accounting
+with real-UDP response-envelope coverage, bounded queues. The prior silent-accept
 exposure (`asupersync-7pwwwe`) is removed: the client path returns
 `ServerCertificateUnverified` rather than accepting an unverified server.
 
-## 5. Open gaps and no-claim boundaries
+## 5. Scope limits and no-claim boundaries
 
-These are the reasons ATP must **not** be treated as proven-safe against an active
-MITM over the open internet until they close. Each currently keeps the path fail
-closed or explicitly opt-in rather than silently insecure.
+These are the boundaries around the G4 security claim. They keep the claim
+specific to the native ATP-over-QUIC transfer path instead of turning it into a
+release, fleet, benchmark, or generic QUIC interoperability claim.
 
-### 5.1 Wire-CRYPTO handshake driver exists; transfer integration remains partially open
+### 5.1 Wire-CRYPTO handshake driver and transfer integration
 The native QUIC stack now has a real `rustls::quic` handshake driver. It pulls
 outbound TLS handshake bytes as QUIC `CRYPTO`, feeds received `CRYPTO` bytes back
 into rustls, installs Initial / Handshake / 1-RTT keys as they become available,
@@ -82,11 +84,13 @@ production `send_path` / `receive_on_endpoint` path failing closed before commit
 for untrusted-root, wrong-hostname, and expired-certificate server identity
 failures.
 
-That closes the old "no exchanged-byte handshake driver" gap, but it is not a
-full ATP file-transfer or open-internet safety proof. The remaining no-claim
-boundary is the public transport path: `send_path` / `receive_once` / `serve`
-must carry manifest/control and symbol traffic through the verified connection
-and preserve the fail-closed posture while B2/B3/B4 finish.
+The public transfer path now carries ATP control frames, including the manifest,
+over the native QUIC STREAM path protected by those handshake-derived 1-RTT
+keys; RaptorQ symbols ride protected 1-RTT QUIC DATAGRAM packets and then pass
+the per-symbol authentication posture. This closes the G4 manifest/control
+authentication item for the native ATP-over-QUIC path. It does not prove
+generic QUIC wire interoperability, fleet performance, release readiness, or
+every future CLI/daemon integration surface.
 
 ### 5.2 X.509 verification surfaces are explicit and fail closed
 Two X.509 verification surfaces exist. The handshake driver uses the rustls
@@ -100,13 +104,13 @@ The remaining boundary is operational integration, not an insecure default:
 callers still need explicit roots and a server name for the verified handshake,
 and there is no "accept all" path to fall back to.
 
-### 5.3 Control channel and manifest are unauthenticated
-Authenticated symbol mode protects the **UDP symbol plane only**. The QUIC-stream
-control channel and the transfer **manifest** are not authenticated at the ATP
-layer. A full MITM who can substitute a matching forged manifest **and** forged
-symbols is therefore not prevented by symbol auth alone. Full Byzantine-injection
-resistance requires `with_symbol_auth` **and** an authenticated control
-channel / manifest (e.g. carried inside the verified production transfer path).
+### 5.3 Control channel and manifest authentication boundary
+Authenticated symbol mode protects the **RaptorQ symbol plane**. The QUIC-stream
+control channel and transfer **manifest** are authenticated by the verified
+native QUIC/TLS 1-RTT channel in the current ATP-over-QUIC `send_path` /
+`receive_on_endpoint` path, not by a separate ATP-layer manifest MAC. A caller
+that bypasses that verified native QUIC path must provide an equivalent
+authenticated channel before claiming the same MITM boundary.
 
 ### 5.4 transport_tcp has no per-symbol authentication
 The sibling `transport_tcp` transport provides integrity-vs-manifest only (no
@@ -115,10 +119,12 @@ do not assume QUIC's symbol-auth guarantees apply to it.
 
 ## 6. Fail-closed verdict and pre-open-internet checklist
 
-Verdict: the ATP-over-QUIC path is **fail-closed-by-construction** today —
-unverified server identity, missing symbol-auth context, posture mismatch, oversize
-datagrams, and amplification limits all refuse rather than proceed insecurely.
-It is **not yet proven safe against an active MITM over the open internet.**
+Verdict: the native ATP-over-QUIC security path is **fail-closed-by-construction**
+for G4 today — unverified server identity, missing symbol-auth context, posture
+mismatch, oversize datagrams, replayed packets, and amplification limits all
+refuse rather than proceed insecurely. This is still a scoped security claim,
+not release readiness, broad workspace health, fleet performance, or generic
+QUIC interoperability.
 
 Before claiming open-internet safety (epic success criterion #5), these must land
 and be pinned by tests (G4 acceptance, part a — owned by the respective Phase A
@@ -126,7 +132,7 @@ beads):
 
 - [x] Wire-CRYPTO handshake driver completing the handshake from exchanged bytes (§5.1; `tests/quic_native_handshake_udp_loopback.rs`, `handshake_driver` inline tests).
 - [x] End-to-end bad-cert rejection over the production transfer path: untrusted-root / wrong-hostname / expired-certificate → fail closed before commit (`tests/atp_quic_real_udp_transfer_e2e.rs`).
-- [ ] Authenticated control channel + manifest, or manifest carried inside the verified TLS channel (§5.3).
+- [x] Authenticated control channel + manifest: ATP control frames and manifest ride the verified native QUIC/TLS 1-RTT STREAM path (§5.3; `src/net/atp/transport_quic/native_link.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs`).
 - [x] Forged/auth-failing symbol rejected on the real UDP path (`tests/atp_quic_real_udp_transfer_e2e.rs` mismatched `SecurityContext` transfer).
 - [x] Replay rejection asserted on the real protected UDP transport (`tests/quic_application_data_udp_loopback.rs`).
 - [x] Amplification bounds asserted on the real transport (not just unit level; `tests/quic_application_data_udp_loopback.rs`).
