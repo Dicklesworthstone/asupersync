@@ -88,7 +88,7 @@ const PUMP_ITERATION_CAP: usize = 16_384;
 ///
 /// All values are read from the connection's loss-recovery / congestion-control
 /// state machine; they are advisory signals, not guarantees.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuicPathStats {
     /// Smoothed RTT estimate in microseconds, once at least one RTT sample has
     /// been observed.
@@ -103,6 +103,13 @@ pub struct QuicPathStats {
     pub bytes_in_flight: u64,
     /// Probe-timeout backoff count (a rough loss / tail-latency signal).
     pub pto_count: u32,
+    /// Cumulative packets acknowledged by the recovery state.
+    pub packets_acked: u64,
+    /// Cumulative packets declared lost by the recovery state.
+    pub packets_lost: u64,
+    /// Cumulative packet loss rate over packets that reached an acked/lost
+    /// recovery outcome.
+    pub loss_rate: f64,
 }
 
 /// A high-level, role-aware handle over a single native QUIC connection.
@@ -390,6 +397,9 @@ impl QuicConnection {
             congestion_window_bytes: transport.congestion_window_bytes(),
             bytes_in_flight: transport.bytes_in_flight(),
             pto_count: transport.pto_count(),
+            packets_acked: transport.packets_acked_total(),
+            packets_lost: transport.packets_lost_total(),
+            loss_rate: transport.packet_loss_rate(),
         }
     }
 
@@ -737,6 +747,9 @@ mod tests {
         assert!(stats.congestion_window_bytes > 0);
         assert_eq!(stats.bytes_in_flight, 0);
         assert_eq!(stats.pto_count, 0);
+        assert_eq!(stats.packets_acked, 0);
+        assert_eq!(stats.packets_lost, 0);
+        assert_eq!(stats.loss_rate, 0.0);
     }
 
     #[test]

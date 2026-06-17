@@ -195,6 +195,8 @@ struct LossRecovery {
     sent_packets: VecDeque<SentPacketMeta>,
     largest_acked: [Option<u64>; 3],
     bytes_in_flight: u64,
+    packets_acked_total: u64,
+    packets_lost_total: u64,
     pto_count: u32,
     max_ack_delay_micros: u64,
     rtt: RttEstimator,
@@ -212,6 +214,8 @@ impl Default for LossRecovery {
             sent_packets: VecDeque::new(),
             largest_acked: [None, None, None],
             bytes_in_flight: 0,
+            packets_acked_total: 0,
+            packets_lost_total: 0,
             pto_count: 0,
             max_ack_delay_micros: 25_000,
             rtt: RttEstimator::default(),
@@ -228,6 +232,8 @@ impl LossRecovery {
         self.sent_packets.clear();
         self.largest_acked = [None, None, None];
         self.bytes_in_flight = 0;
+        self.packets_acked_total = 0;
+        self.packets_lost_total = 0;
         self.pto_count = 0;
         self.congestion_recovery_start_time = None;
     }
@@ -383,6 +389,10 @@ impl LossRecovery {
         if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
             self.on_loss_congestion(lost_packet_sent_time, now_micros);
         }
+        let acked_packets = u64::try_from(event.acked_packets).unwrap_or(u64::MAX);
+        let lost_packets = u64::try_from(event.lost_packets).unwrap_or(u64::MAX);
+        self.packets_acked_total = self.packets_acked_total.saturating_add(acked_packets);
+        self.packets_lost_total = self.packets_lost_total.saturating_add(lost_packets);
         event
     }
 
@@ -538,6 +548,33 @@ impl QuicTransportMachine {
     #[must_use]
     pub fn pto_count(&self) -> u32 {
         self.recovery.pto_count
+    }
+
+    /// Cumulative packets acknowledged since the current recovery state began.
+    #[must_use]
+    pub fn packets_acked_total(&self) -> u64 {
+        self.recovery.packets_acked_total
+    }
+
+    /// Cumulative packets declared lost since the current recovery state began.
+    #[must_use]
+    pub fn packets_lost_total(&self) -> u64 {
+        self.recovery.packets_lost_total
+    }
+
+    /// Cumulative packet loss rate over packets that reached a terminal
+    /// recovery outcome (`acked` or `lost`).
+    #[must_use]
+    pub fn packet_loss_rate(&self) -> f64 {
+        let total = self
+            .recovery
+            .packets_acked_total
+            .saturating_add(self.recovery.packets_lost_total);
+        if total == 0 {
+            0.0
+        } else {
+            self.recovery.packets_lost_total as f64 / total as f64
+        }
     }
 
     /// Whether another in-flight packet can be sent under congestion limits.
@@ -753,6 +790,9 @@ mod tests {
         let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[4], 0, 20_000);
         assert_eq!(event.acked_packets, 1);
         assert_eq!(event.lost_packets, 1);
+        assert_eq!(t.packets_acked_total(), 1);
+        assert_eq!(t.packets_lost_total(), 1);
+        assert!((t.packet_loss_rate() - 0.5).abs() < f64::EPSILON);
         assert_eq!(t.bytes_in_flight(), 200);
     }
 

@@ -92,6 +92,7 @@ use crate::encoding::EncodingPipeline;
 use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
+use crate::net::atp::quic::AtpTransportMetrics;
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, FileKind, MetadataApplyReport, StreamingError,
     apply_entry_metadata, collect_entries, flat_merkle_root_from_digests,
@@ -103,7 +104,8 @@ use crate::net::atp::transport_rq::{
 };
 use crate::net::quic_native::{
     ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionError,
-    QuicConnection, StreamDirection, StreamId, StreamRole, StreamTableError,
+    QuicConnection, QuicPathStats, QuicTransportMachine, StreamDirection, StreamId, StreamRole,
+    StreamTableError,
 };
 use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::transport::{
@@ -137,6 +139,7 @@ pub use symbol_datagram::{
 pub use crate::net::atp::transport_rq::adaptive::{
     AdaptiveController as QuicAdaptiveController, AdaptivePolicy as QuicAdaptivePolicy,
     BlockPlan as QuicAdaptiveBlockPlan, PathEstimate as QuicPathEstimate,
+    PathSignalSample as QuicPathSignalSample,
 };
 
 /// Protocol identifier carried in the QUIC handshake; bump on wire-incompatible
@@ -502,6 +505,88 @@ pub fn apply_quic_adaptive_block_plan(
     plan: QuicAdaptiveBlockPlan,
 ) -> Result<QuicConfig, QuicTransportError> {
     QuicAdaptiveArm::from_block_plan(plan)?.apply_to_config(config)
+}
+
+/// Convert A6 connection path stats into the shared adaptive reward signal.
+///
+/// RTT is reported in seconds for the adaptive controller, with smoothed RTT
+/// preferred and the latest RTT sample used while smoothing has not initialized.
+#[must_use]
+pub fn quic_path_signal_from_stats(stats: QuicPathStats) -> QuicPathSignalSample {
+    QuicPathSignalSample {
+        smoothed_rtt_s: rtt_micros_to_seconds(
+            stats.smoothed_rtt_micros.or(stats.latest_rtt_micros),
+        ),
+        congestion_window_bytes: stats.congestion_window_bytes,
+        loss_rate: stats.loss_rate,
+    }
+    .clamped()
+}
+
+/// Snapshot the high-level A6 connection API as an adaptive path signal.
+#[must_use]
+pub fn quic_path_signal_from_connection(connection: &QuicConnection) -> QuicPathSignalSample {
+    quic_path_signal_from_stats(connection.path_stats())
+}
+
+/// Snapshot a native QUIC connection as an adaptive path signal.
+#[must_use]
+pub fn quic_path_signal_from_native_connection(
+    connection: &NativeQuicConnection,
+) -> QuicPathSignalSample {
+    quic_path_signal_from_transport(connection.transport())
+}
+
+/// Snapshot the native transport recovery/CC state as an adaptive path signal.
+#[must_use]
+pub fn quic_path_signal_from_transport(transport: &QuicTransportMachine) -> QuicPathSignalSample {
+    let rtt = transport.rtt();
+    QuicPathSignalSample {
+        smoothed_rtt_s: rtt_micros_to_seconds(
+            rtt.smoothed_rtt_micros().or(rtt.latest_rtt_micros()),
+        ),
+        congestion_window_bytes: transport.congestion_window_bytes(),
+        loss_rate: transport.packet_loss_rate(),
+    }
+    .clamped()
+}
+
+/// Convert ATP QUIC metrics snapshots into the shared adaptive reward signal.
+#[must_use]
+pub fn quic_path_signal_from_metrics(metrics: &AtpTransportMetrics) -> QuicPathSignalSample {
+    QuicPathSignalSample {
+        smoothed_rtt_s: rtt_micros_to_seconds(
+            metrics.smoothed_rtt_micros.or(metrics.latest_rtt_micros),
+        ),
+        congestion_window_bytes: metrics.congestion_window_bytes,
+        loss_rate: metrics.loss_rate,
+    }
+    .clamped()
+}
+
+/// Feed a measured QUIC block outcome plus A6 path stats into the adaptive
+/// reward update.
+pub fn observe_quic_adaptive_path_stats(
+    controller: &mut QuicAdaptiveController,
+    sent: u64,
+    received: u64,
+    wall_s: f64,
+    useful_bytes: u64,
+    symbol_size: u16,
+    stats: QuicPathStats,
+) {
+    controller.observe_path_signals(
+        sent,
+        received,
+        wall_s,
+        useful_bytes,
+        symbol_size,
+        quic_path_signal_from_stats(stats),
+    );
+}
+
+fn rtt_micros_to_seconds(rtt_micros: Option<u64>) -> f64 {
+    rtt_micros.map_or(0.0, |rtt| rtt as f64 / 1_000_000.0)
 }
 
 /// Errors from the ATP-over-QUIC transport.
@@ -4493,7 +4578,8 @@ mod tests {
     use crate::net::atp::protocol::frames::{Frame, ProtocolVersion};
     use crate::net::quic_native::{
         DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, PacketNumberSpace, QuicConnection,
-        StreamDirection, StreamRole, establish_loopback, pump_app_data, pump_until_idle,
+        QuicPathStats, QuicTransportMachine, SentPacketMeta, StreamDirection, StreamRole,
+        establish_loopback, pump_app_data, pump_until_idle,
     };
     use crate::trace::{TraceBufferHandle, TraceData};
 
@@ -5009,6 +5095,130 @@ mod tests {
         assert!(
             outcome.symbols_sent >= 3,
             "source symbols plus adaptive repair should be sprayed"
+        );
+    }
+
+    #[test]
+    fn quic_path_signal_from_a6_stats_carries_rtt_cwnd_and_loss() {
+        let signal = quic_path_signal_from_stats(QuicPathStats {
+            smoothed_rtt_micros: Some(75_000),
+            latest_rtt_micros: Some(80_000),
+            rttvar_micros: Some(5_000),
+            congestion_window_bytes: 96_000,
+            bytes_in_flight: 24_000,
+            pto_count: 1,
+            packets_acked: 90,
+            packets_lost: 10,
+            loss_rate: 0.10,
+        });
+
+        assert!((signal.smoothed_rtt_s - 0.075).abs() < f64::EPSILON);
+        assert_eq!(signal.congestion_window_bytes, 96_000);
+        assert!((signal.loss_rate - 0.10).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn quic_path_signal_from_transport_uses_recovery_loss_counters() {
+        let mut transport = QuicTransportMachine::new();
+        transport
+            .begin_handshake()
+            .expect("transport begins handshake");
+        transport.on_established().expect("transport establishes");
+        for packet_number in 1..=4 {
+            transport.on_packet_sent(SentPacketMeta {
+                space: PacketNumberSpace::ApplicationData,
+                packet_number,
+                bytes: 1_200,
+                ack_eliciting: true,
+                in_flight: true,
+                time_sent_micros: packet_number * 1_000,
+            });
+        }
+
+        let event = transport.on_ack_received(PacketNumberSpace::ApplicationData, &[4], 0, 20_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.lost_packets, 1);
+
+        let signal = quic_path_signal_from_transport(&transport);
+        assert!((signal.loss_rate - 0.5).abs() < f64::EPSILON);
+        assert_eq!(
+            signal.congestion_window_bytes,
+            transport.congestion_window_bytes()
+        );
+        assert!(signal.smoothed_rtt_s > 0.0);
+    }
+
+    #[test]
+    fn quic_adaptive_controller_consumes_a6_path_stats_and_shifts_arm() {
+        fn train(stats: QuicPathStats) -> usize {
+            let mut policy = QuicAdaptivePolicy {
+                arm_grid_k: vec![512, 8192],
+                arm_grid_fanout: vec![1],
+                exp3_eta: 0.30,
+                min_samples_to_activate: 1,
+                ..QuicAdaptivePolicy::default()
+            };
+            policy.max_overhead = 0.50;
+
+            let mut controller = QuicAdaptiveController::new(policy, 23);
+            controller.update_estimate(QuicPathEstimate {
+                samples: 8,
+                dec_symbols_per_s: 50_000_000.0,
+                ..quic_path_estimate(0.02, 20_000_000.0)
+            });
+            let mut large_selected_late = 0usize;
+            let trials = 700usize;
+            for t in 0..trials {
+                let plan = controller
+                    .next_block_plan(DEFAULT_SYMBOL_SIZE)
+                    .expect("controller activates");
+                if t >= trials - 200 && plan.k == 8192 {
+                    large_selected_late += 1;
+                }
+                let wall_s = if plan.k == 8192 { 0.004 } else { 0.006 };
+                observe_quic_adaptive_path_stats(
+                    &mut controller,
+                    u64::from(plan.k),
+                    u64::from(plan.k),
+                    wall_s,
+                    u64::from(plan.k) * u64::from(DEFAULT_SYMBOL_SIZE),
+                    DEFAULT_SYMBOL_SIZE,
+                    stats,
+                );
+            }
+            large_selected_late
+        }
+
+        let clean_large = train(QuicPathStats {
+            smoothed_rtt_micros: Some(10_000),
+            latest_rtt_micros: Some(10_000),
+            rttvar_micros: Some(1_000),
+            congestion_window_bytes: 64 * 1024 * 1024,
+            bytes_in_flight: 0,
+            pto_count: 0,
+            packets_acked: 999,
+            packets_lost: 1,
+            loss_rate: 0.001,
+        });
+        let lossy_large = train(QuicPathStats {
+            smoothed_rtt_micros: Some(50_000),
+            latest_rtt_micros: Some(50_000),
+            rttvar_micros: Some(10_000),
+            congestion_window_bytes: 512 * 1024,
+            bytes_in_flight: 128 * 1024,
+            pto_count: 2,
+            packets_acked: 75,
+            packets_lost: 25,
+            loss_rate: 0.25,
+        });
+
+        assert!(
+            clean_large > 140,
+            "clean/high-cwnd A6 stats should learn the large arm, got {clean_large}/200"
+        );
+        assert!(
+            lossy_large < 80,
+            "lossy/small-cwnd A6 stats should shift away from the large arm, got {lossy_large}/200"
         );
     }
 
