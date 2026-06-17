@@ -827,6 +827,40 @@ fn receive_connection_rejects_invalid_config_before_native_receive_body() -> Tes
 }
 
 #[test]
+fn receive_connection_start_trace_carries_stable_structured_fields() -> TestResult {
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+    let peer = SocketAddr::from(([127, 0, 0, 1], 9));
+    let temp = tempfile::tempdir()?;
+
+    let result: Result<ReceiveReport, QuicTransportError> = block_on(receive_connection(
+        &cx,
+        conn,
+        peer,
+        temp.path(),
+        trusted_quic_config(),
+        "receiver",
+    ));
+
+    match result {
+        Ok(report) => panic!("missing control stream must not fake success: {report:?}"),
+        Err(QuicTransportError::NotImplemented {
+            operation: "receive_connection",
+            ..
+        }) => panic!("receive_connection should stay wired past the B1 scaffold"),
+        Err(_) => {}
+    }
+
+    assert_transport_start_trace(&collector, "receive_connection", "receiver");
+
+    Ok(())
+}
+
+#[test]
 fn receive_once_rejects_empty_endpoint_without_fake_success() {
     let cx = Cx::for_testing();
     let mut endpoint = block_on(ManagedQuicEndpoint::bind(
