@@ -461,6 +461,12 @@
     "default-production-tokio-free",
     "metrics-production-tokio-free",
     "atp-native-self-contained",
+    "arq-quic-loopback-e2e",
+    "arq-quic-lab-determinism",
+    "arq-quic-symbol-envelope-fuzz-smoke",
+    "arq-quic-bounded-memory-loopback",
+    "arq-quic-wire-conformance",
+    "arq-quic-fleet-benchmark-no-fresh-result",
     "fuzz-tokio-quarantine",
     "workspace-tokio-audit",
     "full-graph-tokio-audit",
@@ -1847,6 +1853,258 @@
       }
     },
     {
+      "lane_id": "arq-quic-loopback-e2e",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_loopback_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test arq_quic_e2e_scripts_contract --features atp-cli,tls loopback_script_runs_real_atp_binary -- --ignored --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "atp-cli",
+        "tls"
+      ],
+      "guarantee_ids": [
+        "arq-quic-loopback-e2e"
+      ],
+      "covers": "Runs the retained ARQ/QUIC loopback E2E script through the ignored real-transfer test, proving the script can drive atp send/recv over loopback QUIC and verify retained artifacts.",
+      "explicit_not_covered": "Does not execute two-machine fleet transfer, does not prove G2 benchmark wins, does not prove broad workspace health, and does not cover provider/goodput/loss/fanout/off-overhead metrics outside the H5 script artifact.",
+      "expected_signal": "loopback_script_runs_real_atp_binary passes and retained summary/events artifacts validate",
+      "source_paths": [
+        "scripts/run_arq_quic_loopback_e2e.sh",
+        "tests/arq_quic_e2e_scripts_contract.rs",
+        "src/bin/atp.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty ATP CLI JSON report surface",
+        "loopback port allocation conflict on the remote worker",
+        "TLS certificate fixture generation failure"
+      ],
+      "escalation_notes": "Use this lane only for loopback script/retained-artifact proof. Fleet transfer remains G1 and benchmark comparison remains G2.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-loopback-e2e"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-lab-determinism",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_lab_determinism CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_transport_quic_lab_contract --features test-internals -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "arq-quic-lab-determinism"
+      ],
+      "covers": "Runs the ATP-over-QUIC LabRuntime contract that checks quiescence, cancellation oracles, loser drain, obligation leaks, and deterministic report shape for the public transport boundary.",
+      "explicit_not_covered": "Does not prove live UDP throughput, fleet behavior, benchmark performance, broad workspace health, or production security beyond the lab-runtime transport contract.",
+      "expected_signal": "atp_transport_quic_lab_contract tests pass with clean LabRunReport oracle evidence",
+      "source_paths": [
+        "tests/atp_transport_quic_lab_contract.rs",
+        "src/net/atp/transport_quic/mod.rs",
+        "src/net/atp/transport_quic/native_link.rs",
+        "src/lab"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty transport_quic implementation",
+        "LabRuntime oracle regression outside ARQ QUIC",
+        "test-internals feature graph compile blocker"
+      ],
+      "escalation_notes": "Use this lane only for deterministic lab contract evidence; pair it with loopback/fleet lanes before making live transport claims.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-lab-determinism"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-symbol-envelope-fuzz-smoke",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_symbol_envelope_fuzz CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_symbol_envelope_fuzz -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "arq-quic-symbol-envelope-fuzz-smoke"
+      ],
+      "covers": "Runs the proptest/property fuzz smoke for the RaptorQ-over-QUIC symbol-envelope codec: arbitrary decode totality, round-trip preservation, auth-posture mismatch fail-closed behavior, truncation, and byte corruption.",
+      "explicit_not_covered": "Does not run long coverage-guided fuzz campaigns, sanitizers, real UDP transfer, fleet behavior, or broad parser-fuzz inventory claims.",
+      "expected_signal": "atp_symbol_envelope_fuzz proptest suite passes",
+      "source_paths": [
+        "tests/atp_symbol_envelope_fuzz.rs",
+        "src/net/atp/transport_quic/symbol_envelope.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "proptest regression file captures a known failing case",
+        "peer-dirty symbol-envelope codec",
+        "transport_quic module compile blocker"
+      ],
+      "escalation_notes": "Use this lane as the bounded fuzz-smoke proof only; sustained fuzz campaigns need their own corpus/coverage receipts.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-symbol-envelope-fuzz-smoke"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-bounded-memory-loopback",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_bounded_memory CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' ARQ_QUIC_PAYLOAD_BYTES=10485760 scripts/run_arq_quic_loopback_e2e.sh",
+      "package": "asupersync",
+      "feature_flags": [
+        "atp-cli",
+        "tls"
+      ],
+      "guarantee_ids": [
+        "arq-quic-bounded-memory-loopback"
+      ],
+      "covers": "Runs the ARQ/QUIC loopback script with a larger deterministic payload and validates sender, receiver, and peak RSS fields in the retained summary artifact.",
+      "explicit_not_covered": "Does not prove O(chunk) RSS across the full G2 payload matrix, NUMA behavior, fleet host memory, performance improvement, or broad workspace health.",
+      "expected_signal": "run_arq_quic_loopback_e2e.sh exits 0 and summary metrics contain sender_max_rss_kb, receiver_max_rss_kb, and peak_max_rss_kb",
+      "source_paths": [
+        "scripts/run_arq_quic_loopback_e2e.sh",
+        "src/bin/atp.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "remote worker disk pressure under artifact output",
+        "peer-dirty ATP CLI build surface",
+        "loopback port allocation conflict"
+      ],
+      "escalation_notes": "Use this lane only for retained loopback RSS artifact proof. G2 must still prove flat RSS across the fleet benchmark matrix.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-bounded-memory-loopback"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-wire-conformance",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_wire_conformance CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_quic_symbol_envelope_conformance -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "arq-quic-wire-conformance"
+      ],
+      "covers": "Runs the external byte-level conformance suite for the ATP-over-QUIC RaptorQ symbol envelope carried inside QUIC DATAGRAM payloads.",
+      "explicit_not_covered": "Does not prove full QUIC RFC conformance, HTTP/3 behavior, live transfer convergence, fleet throughput, or broad workspace health.",
+      "expected_signal": "atp_quic_symbol_envelope_conformance tests pass",
+      "source_paths": [
+        "tests/atp_quic_symbol_envelope_conformance.rs",
+        "src/net/atp/transport_quic/symbol_envelope.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty symbol-envelope codec",
+        "public constant rename without conformance update",
+        "transport_quic module compile blocker"
+      ],
+      "escalation_notes": "Use this lane only for ARQ symbol-envelope wire compatibility; QUIC frame/RFC lanes remain separately scoped.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-wire-conformance"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-fleet-benchmark",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env SENDER=${SENDER:?set SENDER} RECEIVER=${RECEIVER:?set RECEIVER} RECEIVER_IP=${RECEIVER_IP:?set RECEIVER_IP} ATP_BIN_LOCAL=${ATP_BIN_LOCAL:?set ATP_BIN_LOCAL} scripts/atp_quic_vs_rsync_benchmark.sh all",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "arq-quic-fleet-benchmark-no-fresh-result"
+      ],
+      "covers": "Canonical G2 fleet benchmark command for RaptorQ-over-QUIC versus tuned rsync over the full payload matrix with SHA verification and sender/receiver metrics.",
+      "explicit_not_covered": "This manifest row records the lane only; until G2 runs it, it proves no performance improvement, no rsync win, no fleet throughput, no release readiness, and no broad workspace health.",
+      "expected_signal": "benchmark report records all payload rows, SHA verification success, RSS/load metrics, and honest rsync comparison",
+      "source_paths": [
+        "scripts/atp_quic_vs_rsync_benchmark.sh",
+        "scripts/atp_bench/collect_metrics.sh",
+        "scripts/atp_bench/report.py",
+        "artifacts/atp_quic_vs_rsync_benchmark_2026-06-16.md",
+        "artifacts/atp_quic_vs_rsync_benchmark_2026-06-16.jsonl"
+      ],
+      "common_unrelated_blockers": [
+        "SENDER/RECEIVER fleet credentials unavailable",
+        "release atp binary missing from ATP_BIN_LOCAL",
+        "remote network path unavailable",
+        "peer-owned benchmark run in progress"
+      ],
+      "escalation_notes": "Do not cite this lane as a performance proof until G2 records a fresh remote-required benchmark result.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": false,
+        "allowed_claim_scopes": [],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement",
+          "rsync-win"
+        ]
+      }
+    },
+    {
       "lane_id": "downstream-consumer-default-run",
       "kind": "test_frontier",
       "resource_envelope_class": "test-frontier-heavy",
@@ -2739,6 +2997,48 @@
       "description": "ATP native core dependency tree contains no external QUIC stacks or Tokio runtime paths in production profiles.",
       "lane_ids": [
         "atp-native-quic-dependency-audit"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-loopback-e2e",
+      "description": "ARQ/QUIC loopback E2E script has a canonical remote-required retained-artifact proof command.",
+      "lane_ids": [
+        "arq-quic-loopback-e2e"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-lab-determinism",
+      "description": "ATP-over-QUIC LabRuntime deterministic contract has a canonical remote-required proof command.",
+      "lane_ids": [
+        "arq-quic-lab-determinism"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-symbol-envelope-fuzz-smoke",
+      "description": "RaptorQ-over-QUIC symbol-envelope property fuzz smoke has a canonical remote-required proof command.",
+      "lane_ids": [
+        "arq-quic-symbol-envelope-fuzz-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-bounded-memory-loopback",
+      "description": "ARQ/QUIC loopback RSS artifact validation has a canonical remote-required proof command.",
+      "lane_ids": [
+        "arq-quic-bounded-memory-loopback"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-wire-conformance",
+      "description": "RaptorQ-over-QUIC symbol-envelope wire conformance has a canonical remote-required proof command.",
+      "lane_ids": [
+        "arq-quic-wire-conformance"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-fleet-benchmark-no-fresh-result",
+      "description": "ARQ/QUIC fleet benchmark lane is registered with an explicit no-fresh-result boundary until G2 runs.",
+      "lane_ids": [
+        "arq-quic-fleet-benchmark"
       ]
     },
     {

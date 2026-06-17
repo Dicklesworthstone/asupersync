@@ -69,6 +69,8 @@
     "scheduler fairness",
     "fuzz manifest",
     "conformance runners",
+    "ARQ QUIC proof frontier",
+    "ARQ QUIC fleet benchmark no-fresh-result",
     "admission-aware proof-lane atlas",
     "fourth-wave governor schema proof",
     "fourth-wave governor policy-engine proof",
@@ -304,6 +306,77 @@
       ],
       "blocked_frontier": null,
       "notes": "This row demonstrates the required exact red/blocker shape for conformance-adjacent proof stops."
+    },
+    {
+      "claim_id": "arq-quic-proof-frontier",
+      "category": "ARQ QUIC proof frontier",
+      "status": "yellow_frontier",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "fuzz smoke"
+        ],
+        "AGENTS.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "fuzz smoke evidence"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "arq-quic-loopback-e2e",
+        "arq-quic-lab-determinism",
+        "arq-quic-symbol-envelope-fuzz-smoke",
+        "arq-quic-bounded-memory-loopback",
+        "arq-quic-wire-conformance"
+      ],
+      "manifest_lane_ids": [
+        "arq-quic-loopback-e2e",
+        "arq-quic-lab-determinism",
+        "arq-quic-symbol-envelope-fuzz-smoke",
+        "arq-quic-bounded-memory-loopback",
+        "arq-quic-wire-conformance"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_loopback_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test arq_quic_e2e_scripts_contract --features atp-cli,tls loopback_script_runs_real_atp_binary -- --ignored --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_lab_determinism CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_transport_quic_lab_contract --features test-internals -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_symbol_envelope_fuzz CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_symbol_envelope_fuzz -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_bounded_memory CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' ARQ_QUIC_PAYLOAD_BYTES=10485760 scripts/run_arq_quic_loopback_e2e.sh",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_wire_conformance CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_quic_symbol_envelope_conformance -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-frontier maps the ARQ/QUIC loopback, lab determinism, fuzz smoke, bounded-memory/RSS artifact, and wire-conformance commands. It is not a fresh execution claim and does not prove fleet transfer, benchmark wins, release readiness, broad workspace health, or live RCH fleet availability."
+    },
+    {
+      "claim_id": "arq-quic-fleet-benchmark-no-fresh-result",
+      "category": "ARQ QUIC fleet benchmark no-fresh-result",
+      "status": "yellow_frontier",
+      "proof_evidence_status": "blocked",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_status_snapshot_v1.json",
+          "validation-frontier blocker rows"
+        ],
+        "AGENTS.md": [
+          "artifacts/proof_status_snapshot_v1.json",
+          "validation-frontier blocker rows"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "arq-quic-fleet-benchmark-no-fresh-result"
+      ],
+      "manifest_lane_ids": [
+        "arq-quic-fleet-benchmark"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env SENDER=${SENDER:?set SENDER} RECEIVER=${RECEIVER:?set RECEIVER} RECEIVER_IP=${RECEIVER_IP:?set RECEIVER_IP} ATP_BIN_LOCAL=${ATP_BIN_LOCAL:?set ATP_BIN_LOCAL} scripts/atp_quic_vs_rsync_benchmark.sh all"
+      ],
+      "blocked_frontier": {
+        "blocker_id": "asupersync-arq-quic-epic-b0k8qo.7.2",
+        "blocked_at": "2026-06-17T06:20:00Z",
+        "reason": "G2 fleet benchmark has no fresh remote-required result recorded for the full RaptorQ-over-QUIC versus tuned rsync payload matrix.",
+        "required_followup": "Rerun the exact arq-quic-fleet-benchmark manifest command from a committed main tree with SENDER, RECEIVER, RECEIVER_IP, and ATP_BIN_LOCAL set, then replace this no-fresh-result row with the measured evidence."
+      },
+      "notes": "This row intentionally records the benchmark lane without claiming a win. Until G2 runs, it proves no performance improvement, no rsync-beating result, no release readiness, and no broad workspace health."
     },
     {
       "claim_id": "admission-aware-proof-lane-atlas",

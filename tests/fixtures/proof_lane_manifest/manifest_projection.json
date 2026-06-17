@@ -391,6 +391,12 @@
     "default-production-tokio-free",
     "metrics-production-tokio-free",
     "atp-native-self-contained",
+    "arq-quic-loopback-e2e",
+    "arq-quic-lab-determinism",
+    "arq-quic-symbol-envelope-fuzz-smoke",
+    "arq-quic-bounded-memory-loopback",
+    "arq-quic-wire-conformance",
+    "arq-quic-fleet-benchmark-no-fresh-result",
     "fuzz-tokio-quarantine",
     "workspace-tokio-audit",
     "full-graph-tokio-audit",
@@ -1091,6 +1097,120 @@
       ]
     },
     {
+      "lane_id": "arq-quic-loopback-e2e",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_loopback_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test arq_quic_e2e_scripts_contract --features atp-cli,tls loopback_script_runs_real_atp_binary -- --ignored --nocapture",
+      "guarantee_ids": [
+        "arq-quic-loopback-e2e"
+      ],
+      "feature_flags": [
+        "atp-cli",
+        "tls"
+      ],
+      "expected_signal": "loopback_script_runs_real_atp_binary passes and retained summary/events artifacts validate",
+      "source_paths": [
+        "scripts/run_arq_quic_loopback_e2e.sh",
+        "tests/arq_quic_e2e_scripts_contract.rs",
+        "src/bin/atp.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ]
+    },
+    {
+      "lane_id": "arq-quic-lab-determinism",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_lab_determinism CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_transport_quic_lab_contract --features test-internals -- --nocapture",
+      "guarantee_ids": [
+        "arq-quic-lab-determinism"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
+      "expected_signal": "atp_transport_quic_lab_contract tests pass with clean LabRunReport oracle evidence",
+      "source_paths": [
+        "tests/atp_transport_quic_lab_contract.rs",
+        "src/net/atp/transport_quic/mod.rs",
+        "src/net/atp/transport_quic/native_link.rs",
+        "src/lab"
+      ]
+    },
+    {
+      "lane_id": "arq-quic-symbol-envelope-fuzz-smoke",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_symbol_envelope_fuzz CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_symbol_envelope_fuzz -- --nocapture",
+      "guarantee_ids": [
+        "arq-quic-symbol-envelope-fuzz-smoke"
+      ],
+      "feature_flags": [],
+      "expected_signal": "atp_symbol_envelope_fuzz proptest suite passes",
+      "source_paths": [
+        "tests/atp_symbol_envelope_fuzz.rs",
+        "src/net/atp/transport_quic/symbol_envelope.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ]
+    },
+    {
+      "lane_id": "arq-quic-bounded-memory-loopback",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_bounded_memory CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' ARQ_QUIC_PAYLOAD_BYTES=10485760 scripts/run_arq_quic_loopback_e2e.sh",
+      "guarantee_ids": [
+        "arq-quic-bounded-memory-loopback"
+      ],
+      "feature_flags": [
+        "atp-cli",
+        "tls"
+      ],
+      "expected_signal": "run_arq_quic_loopback_e2e.sh exits 0 and summary metrics contain sender_max_rss_kb, receiver_max_rss_kb, and peak_max_rss_kb",
+      "source_paths": [
+        "scripts/run_arq_quic_loopback_e2e.sh",
+        "src/bin/atp.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ]
+    },
+    {
+      "lane_id": "arq-quic-wire-conformance",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_wire_conformance CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_quic_symbol_envelope_conformance -- --nocapture",
+      "guarantee_ids": [
+        "arq-quic-wire-conformance"
+      ],
+      "feature_flags": [],
+      "expected_signal": "atp_quic_symbol_envelope_conformance tests pass",
+      "source_paths": [
+        "tests/atp_quic_symbol_envelope_conformance.rs",
+        "src/net/atp/transport_quic/symbol_envelope.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ]
+    },
+    {
+      "lane_id": "arq-quic-fleet-benchmark",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env SENDER=${SENDER:?set SENDER} RECEIVER=${RECEIVER:?set RECEIVER} RECEIVER_IP=${RECEIVER_IP:?set RECEIVER_IP} ATP_BIN_LOCAL=${ATP_BIN_LOCAL:?set ATP_BIN_LOCAL} scripts/atp_quic_vs_rsync_benchmark.sh all",
+      "guarantee_ids": [
+        "arq-quic-fleet-benchmark-no-fresh-result"
+      ],
+      "feature_flags": [],
+      "expected_signal": "benchmark report records all payload rows, SHA verification success, RSS/load metrics, and honest rsync comparison",
+      "source_paths": [
+        "scripts/atp_quic_vs_rsync_benchmark.sh",
+        "scripts/atp_bench/collect_metrics.sh",
+        "scripts/atp_bench/report.py",
+        "artifacts/atp_quic_vs_rsync_benchmark_2026-06-16.md",
+        "artifacts/atp_quic_vs_rsync_benchmark_2026-06-16.jsonl"
+      ]
+    },
+    {
       "lane_id": "downstream-consumer-default-run",
       "kind": "test_frontier",
       "resource_envelope_class": "test-frontier-heavy",
@@ -1551,6 +1671,42 @@
       "guarantee_id": "atp-native-self-contained",
       "lane_ids": [
         "atp-native-quic-dependency-audit"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-loopback-e2e",
+      "lane_ids": [
+        "arq-quic-loopback-e2e"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-lab-determinism",
+      "lane_ids": [
+        "arq-quic-lab-determinism"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-symbol-envelope-fuzz-smoke",
+      "lane_ids": [
+        "arq-quic-symbol-envelope-fuzz-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-bounded-memory-loopback",
+      "lane_ids": [
+        "arq-quic-bounded-memory-loopback"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-wire-conformance",
+      "lane_ids": [
+        "arq-quic-wire-conformance"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-fleet-benchmark-no-fresh-result",
+      "lane_ids": [
+        "arq-quic-fleet-benchmark"
       ]
     },
     {
