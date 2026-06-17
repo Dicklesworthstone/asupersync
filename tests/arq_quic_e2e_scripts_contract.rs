@@ -209,6 +209,28 @@ fn loopback_from_output_rejects_missing_receiver_rss_metric() {
 }
 
 #[test]
+fn lossy_quic_script_no_longer_xfails_f1_data_loss_floor() {
+    let script =
+        std::fs::read_to_string(repo_root().join("scripts/atp_e2e_lossy.sh")).expect("read script");
+
+    for eps in ["0.01", "0.05", "0.10"] {
+        let key = format!("quic:{eps}=");
+        assert!(
+            !script.contains(&key),
+            "F1-fixed data-loss eps={eps} must be a real PASS/FAIL gate, not a default XFAIL"
+        );
+    }
+    assert!(
+        script.contains("quic:0.20=G4.2/F6:extreme-loss-control-recovery-budget"),
+        "the only default data-loss XFAIL should be the extreme F6/control-budget follow-up"
+    );
+    assert!(
+        !script.contains("no-loss-repair-until-receiver-decode-on-arrival"),
+        "stale F1-not-landed wording must not remain in the lossy QUIC gate"
+    );
+}
+
+#[test]
 fn fleet_script_structure_validation_is_no_claim_and_deterministic() {
     let script_path = repo_root().join("scripts/run_arq_quic_fleet_e2e.sh");
     let script = std::fs::read_to_string(&script_path).expect("read fleet script");

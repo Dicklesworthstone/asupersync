@@ -37,15 +37,11 @@ WORKERS="${WORKERS:-4}"
 SEED="${SEED:-1}"
 PORT="${PORT_BASE:-19700}"
 RELAY="${RELAY:-$(dirname "$0")/lossy_udp_relay.py}"
-# Tracked known gaps (transport:eps => bead/reason): a FAIL whose key matches is recorded as XFAIL so
-# this stays a GREEN regression floor while the convergence ceiling is raised. Mirrors the KNOWN_GAPS
-# xfail in atp_e2e_loopback.sh. FINDING (first run 2026-06-16, loopback, 2M): eps=0 converges in ~9s,
-# but EVERY non-zero eps — even 0.01 (1.3% data loss, 26/2057 datagrams) — times out at 60s with the
-# sender hung and the receiver never committing. RaptorQ should trivially repair 1.3% loss; that it
-# cannot, on loopback, IS the F1 bug (the 256 drop-oldest inbound queue drops symbols the decoder needs
-# + there is no decode-on-arrival/working NeedMore repair). So the whole non-zero sweep is xfail until
-# F1 (.2) lands; when it does, remove these keys and they should flip XFAIL->PASS with no source change.
-KNOWN_GAPS="${KNOWN_GAPS:-quic:0.01=G4.2/F1:no-loss-repair-until-receiver-decode-on-arrival quic:0.05=G4.2/F1:no-loss-repair quic:0.10=G4.2/F1:no-loss-repair quic:0.20=G4.2/F1:no-loss-repair}"
+# Tracked known gaps (transport:eps => bead/reason): a FAIL whose key matches is recorded as XFAIL.
+# The F1 receiver work now makes the ordinary data-loss floor real: eps=0.01/0.05/0.10 must pass and
+# may no longer be hidden behind default XFAILs. Keep only the extreme eps=0.20 case as a bounded
+# follow-up until the reliable-control/F6 path proves it inside the same 60s budget.
+KNOWN_GAPS="${KNOWN_GAPS:-quic:0.20=G4.2/F6:extreme-loss-control-recovery-budget}"
 TS="$(date +%Y%m%d_%H%M%S)"; OUT="${OUT:-/tmp/atp_e2e_lossy_$TS}"; W="$OUT/work"
 mkdir -p "$W/src" "$OUT/logs"; RESULTS="$OUT/results.jsonl"; : > "$RESULTS"; PASS=0; FAIL=0; XFAIL=0; ALL_PIDS=()
 log(){ printf '%s | %s\n' "$(date '+%H:%M:%S')" "$*"; }
