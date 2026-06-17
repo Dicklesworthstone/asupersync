@@ -40,6 +40,15 @@ fn lab_contract_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+const CORE_H3_ORACLE_INVARIANTS: &[&str] = &[
+    "task_leak",
+    "obligation_leak",
+    "quiescence",
+    "loser_drain",
+    "cancellation_protocol",
+    "ambient_authority",
+];
+
 fn assert_transport_lab_report_clean(label: &str, report: &LabRunReport) {
     assert!(
         report.quiescent,
@@ -50,6 +59,15 @@ fn assert_transport_lab_report_clean(label: &str, report: &LabRunReport) {
         "{label} lab oracles must pass: {:?}",
         report.oracle_report.to_json()
     );
+    for invariant in CORE_H3_ORACLE_INVARIANTS {
+        let entry = report.oracle_report.entry(invariant).unwrap_or_else(|| {
+            panic!("{label} lab report did not check core H3 oracle invariant {invariant}")
+        });
+        assert!(
+            entry.passed,
+            "{label} core H3 oracle invariant {invariant} failed: {entry:?}"
+        );
+    }
     assert!(
         report.invariant_violations.is_empty(),
         "{label} lab invariant violations: {:?}",
