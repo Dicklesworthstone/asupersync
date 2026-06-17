@@ -407,7 +407,17 @@ pub async fn apply_entry_metadata(
             let time_res = mtime_secs.map(|secs| {
                 let secs_u64 = u64::try_from(secs)
                     .map_err(|_| "pre-epoch mtime not representable".to_string())?;
-                let when = UNIX_EPOCH + Duration::new(secs_u64, mtime_nanos);
+                // `secs`/`mtime_nanos` arrive off-wire and are untrusted. Normalise
+                // the sub-second part into [0, 1e9) (mirroring the read path's
+                // `rem_euclid`) so an out-of-range value can't carry into the
+                // seconds count, and add via `checked_add` so a crafted huge `secs`
+                // (up to i64::MAX, which passes the u64 conversion) degrades to a
+                // skipped mtime instead of panicking the blocking pool by
+                // overflowing `SystemTime` (DoS via a malicious manifest).
+                let nanos = mtime_nanos % 1_000_000_000;
+                let when = UNIX_EPOCH
+                    .checked_add(Duration::new(secs_u64, nanos))
+                    .ok_or_else(|| "mtime out of representable range".to_string())?;
                 let times = std::fs::FileTimes::new().set_modified(when);
                 std::fs::File::open(&path_buf)
                     .and_then(|f| f.set_times(times))
