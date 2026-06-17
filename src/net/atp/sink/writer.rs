@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::atp::chunking::ChunkingProfile;
+use crate::atp::journal::{TransferResumeStatus, TransferResumeSummary};
 use crate::atp::object::{DirectoryObject, FileObject, StreamObject};
 use crate::atp::session::AtpSession;
 use crate::cx::Cx;
@@ -62,6 +63,27 @@ impl Default for WriterConfig {
     }
 }
 
+/// Replay decision derived from a resume token and crash-recovered journal state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeReplayPlan {
+    /// Transfer named by the resume token.
+    pub transfer_id: TransferId,
+    /// Verified bytes covered by both the resume checkpoint and durable journal records.
+    pub committed_bytes: u64,
+    /// Verified chunks covered by both the resume checkpoint and durable journal records.
+    pub committed_chunk_count: u64,
+    /// Byte offset where replay must resume.
+    pub replay_from_byte: u64,
+    /// Chunk index where replay must resume.
+    pub replay_from_chunk_index: u64,
+    /// Durable bytes reconstructed from the journal summary.
+    pub journal_durable_bytes: u64,
+    /// Largest contiguous durable journal prefix.
+    pub journal_contiguous_prefix_bytes: u64,
+    /// Checkpoint chunks that can be carried forward into the final proof transcript.
+    pub committed_chunks: Vec<ChunkTransferProof>,
+}
+
 /// Active transfer state
 #[derive(Debug, Clone)]
 struct ActiveTransfer {
@@ -108,6 +130,123 @@ impl AtpWriter {
             transferred_chunks: Arc::new(Mutex::new(HashMap::new())),
             progress_events: Arc::new(Mutex::new(Vec::new())),
             config,
+        }
+    }
+
+    /// Validate a resume token against a crash-recovered append-journal summary.
+    ///
+    /// The returned plan only skips chunks present in the token checkpoint and
+    /// confirmed durable by the journal. Extra durable journal chunks are left
+    /// for later replay wiring because the token checkpoint owns the proof
+    /// transcript that must be carried into final verification.
+    pub fn plan_resume_from_journal(
+        resume_token: &ResumeToken,
+        summary: &TransferResumeSummary,
+    ) -> Result<ResumeReplayPlan, WriteError> {
+        let checkpoint = Self::decode_resume_checkpoint(
+            resume_token.transfer_id,
+            &resume_token.checkpoint_data,
+        )?;
+
+        if !summary.is_resumable() {
+            return Err(WriteError::ResumeFailed {
+                reason: Self::resume_summary_not_resumable_reason(summary),
+            });
+        }
+
+        if let Some(total_size) = summary.total_size
+            && checkpoint.total_bytes > total_size
+        {
+            return Err(WriteError::ResumeFailed {
+                reason: format!(
+                    "resume checkpoint covers {} bytes, but journal offer for {} is only {} bytes",
+                    checkpoint.total_bytes, summary.transfer_id, total_size
+                ),
+            });
+        }
+
+        if checkpoint.total_bytes > summary.durable_bytes {
+            return Err(WriteError::ResumeFailed {
+                reason: format!(
+                    "resume checkpoint covers {} bytes, but journal has only {} durable bytes for {}",
+                    checkpoint.total_bytes, summary.durable_bytes, summary.transfer_id
+                ),
+            });
+        }
+
+        if checkpoint.total_bytes > summary.contiguous_prefix_bytes {
+            return Err(WriteError::ResumeFailed {
+                reason: format!(
+                    "resume checkpoint covers {} bytes, but journal contiguous prefix for {} is {} bytes",
+                    checkpoint.total_bytes, summary.transfer_id, summary.contiguous_prefix_bytes
+                ),
+            });
+        }
+
+        for chunk in &checkpoint.chunks {
+            let Some(durable_chunk) = summary.durable_chunks.iter().find(|candidate| {
+                candidate.chunk_offset == chunk.byte_offset
+                    && candidate.chunk_size == chunk.size_bytes
+            }) else {
+                return Err(WriteError::ResumeFailed {
+                    reason: format!(
+                        "resume checkpoint chunk at offset {} size {} is missing from durable journal summary for {}",
+                        chunk.byte_offset, chunk.size_bytes, summary.transfer_id
+                    ),
+                });
+            };
+
+            if durable_chunk.chunk_hash != chunk.content_hash {
+                return Err(WriteError::ResumeFailed {
+                    reason: format!(
+                        "resume checkpoint chunk at offset {} size {} has a different hash than journal durable state for {}",
+                        chunk.byte_offset, chunk.size_bytes, summary.transfer_id
+                    ),
+                });
+            }
+        }
+
+        Ok(ResumeReplayPlan {
+            transfer_id: checkpoint.transfer_id,
+            committed_bytes: checkpoint.total_bytes,
+            committed_chunk_count: checkpoint.chunk_count,
+            replay_from_byte: checkpoint.total_bytes,
+            replay_from_chunk_index: checkpoint.chunk_count,
+            journal_durable_bytes: summary.durable_bytes,
+            journal_contiguous_prefix_bytes: summary.contiguous_prefix_bytes,
+            committed_chunks: checkpoint.chunks,
+        })
+    }
+
+    fn resume_summary_not_resumable_reason(summary: &TransferResumeSummary) -> String {
+        match &summary.status {
+            TransferResumeStatus::Unknown => format!(
+                "journal has no resume records for transfer {}",
+                summary.transfer_id
+            ),
+            TransferResumeStatus::CommitIntentPending => format!(
+                "journal has pending commit intent for transfer {}",
+                summary.transfer_id
+            ),
+            TransferResumeStatus::Committed {
+                final_path,
+                committed_size,
+            } => format!(
+                "journal already committed transfer {} to {} ({} bytes)",
+                summary.transfer_id, final_path, committed_size
+            ),
+            TransferResumeStatus::Cancelled { reason } => format!(
+                "journal cancelled transfer {}: {}",
+                summary.transfer_id, reason
+            ),
+            TransferResumeStatus::RolledBack {
+                reason,
+                checkpoint_sequence,
+            } => format!(
+                "journal rolled back transfer {} at sequence {}: {}",
+                summary.transfer_id, checkpoint_sequence, reason
+            ),
+            TransferResumeStatus::Resumable => "journal summary is resumable".to_string(),
         }
     }
 }
@@ -1137,6 +1276,7 @@ impl AtpWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::journal::{TransferResumeChunk, TransferResumeStatus, TransferResumeSummary};
     use futures::stream;
 
     #[tokio::test]
@@ -1238,6 +1378,85 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resume_plan_accepts_checkpoint_chunks_confirmed_by_journal() {
+        let transfer_id = TransferId::new();
+        let proof = sample_transfer_proof(transfer_id);
+        let token = ResumeToken {
+            transfer_id,
+            checkpoint_data: AtpWriter::build_resume_checkpoint(transfer_id, &proof),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+            required_capabilities: vec!["write".to_string()],
+        };
+        let mut summary = sample_resume_summary(&proof);
+        summary.durable_chunks.push(TransferResumeChunk {
+            chunk_offset: proof.total_bytes,
+            chunk_size: 7,
+            chunk_hash: [7; 32],
+        });
+        summary.durable_bytes += 7;
+        summary.contiguous_prefix_bytes += 7;
+        summary.total_size = Some(summary.durable_bytes + 1024);
+
+        let plan = AtpWriter::plan_resume_from_journal(&token, &summary).unwrap();
+
+        assert_eq!(plan.transfer_id, transfer_id);
+        assert_eq!(plan.committed_bytes, proof.total_bytes);
+        assert_eq!(plan.committed_chunk_count, proof.chunk_count);
+        assert_eq!(plan.replay_from_byte, proof.total_bytes);
+        assert_eq!(plan.replay_from_chunk_index, proof.chunk_count);
+        assert_eq!(plan.journal_durable_bytes, proof.total_bytes + 7);
+        assert_eq!(plan.journal_contiguous_prefix_bytes, proof.total_bytes + 7);
+        assert_eq!(plan.committed_chunks, proof.chunks);
+    }
+
+    #[test]
+    fn resume_plan_rejects_non_resumable_journal_state() {
+        let transfer_id = TransferId::new();
+        let proof = sample_transfer_proof(transfer_id);
+        let token = ResumeToken {
+            transfer_id,
+            checkpoint_data: AtpWriter::build_resume_checkpoint(transfer_id, &proof),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+            required_capabilities: vec!["write".to_string()],
+        };
+        let mut summary = sample_resume_summary(&proof);
+        summary.status = TransferResumeStatus::Cancelled {
+            reason: "operator stop".to_string(),
+        };
+
+        let error = AtpWriter::plan_resume_from_journal(&token, &summary).unwrap_err();
+
+        assert!(matches!(
+            error,
+            WriteError::ResumeFailed { reason }
+                if reason.contains("journal cancelled transfer journal-transfer")
+                    && reason.contains("operator stop")
+        ));
+    }
+
+    #[test]
+    fn resume_plan_rejects_journal_hash_mismatch() {
+        let transfer_id = TransferId::new();
+        let proof = sample_transfer_proof(transfer_id);
+        let token = ResumeToken {
+            transfer_id,
+            checkpoint_data: AtpWriter::build_resume_checkpoint(transfer_id, &proof),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+            required_capabilities: vec!["write".to_string()],
+        };
+        let mut summary = sample_resume_summary(&proof);
+        summary.durable_chunks[1].chunk_hash[0] ^= 0x80;
+
+        let error = AtpWriter::plan_resume_from_journal(&token, &summary).unwrap_err();
+
+        assert!(matches!(
+            error,
+            WriteError::ResumeFailed { reason }
+                if reason.contains("different hash than journal durable state")
+        ));
+    }
+
     fn sample_transfer_proof(transfer_id: TransferId) -> TransferProof {
         TransferProof::from_chunk_proofs(
             transfer_id,
@@ -1257,6 +1476,26 @@ mod tests {
             ],
             SystemTime::UNIX_EPOCH,
         )
+    }
+
+    fn sample_resume_summary(proof: &TransferProof) -> TransferResumeSummary {
+        TransferResumeSummary {
+            transfer_id: "journal-transfer".to_string(),
+            status: TransferResumeStatus::Resumable,
+            total_size: Some(proof.total_bytes + 1024),
+            durable_chunks: proof
+                .chunks
+                .iter()
+                .map(|chunk| TransferResumeChunk {
+                    chunk_offset: chunk.byte_offset,
+                    chunk_size: chunk.size_bytes,
+                    chunk_hash: chunk.content_hash,
+                })
+                .collect(),
+            durable_bytes: proof.total_bytes,
+            contiguous_prefix_bytes: proof.total_bytes,
+            last_sequence: Some(9),
+        }
     }
 
     fn assert_invalid_resume_checkpoint(result: Result<TransferProof, WriteError>) {
