@@ -3826,6 +3826,45 @@ fn quic_join_relative(base: &Path, rel: &str) -> Result<PathBuf, QuicTransportEr
     Ok(out)
 }
 
+async fn reject_quic_destination_symlink_prefix(
+    base: &Path,
+    out_path: &Path,
+) -> Result<(), QuicTransportError> {
+    let rel = out_path.strip_prefix(base).map_err(|_| {
+        QuicTransportError::Source(format!(
+            "destination path {} is outside safe base {}",
+            out_path.display(),
+            base.display()
+        ))
+    })?;
+
+    let mut current = base.to_path_buf();
+    reject_quic_existing_symlink(&current).await?;
+    for component in rel.components() {
+        let Component::Normal(component) = component else {
+            return Err(QuicTransportError::Source(format!(
+                "unsafe destination component in {}",
+                out_path.display()
+            )));
+        };
+        current.push(component);
+        reject_quic_existing_symlink(&current).await?;
+    }
+    Ok(())
+}
+
+async fn reject_quic_existing_symlink(path: &Path) -> Result<(), QuicTransportError> {
+    match crate::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_symlink() => Err(QuicTransportError::Source(format!(
+            "destination path crosses existing symlink: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 fn manifest_metadata_commitment(manifest: &TransferManifest) -> Option<String> {
     let metadata_pairs: Vec<(String, EntryMetadata)> = manifest
         .entries
@@ -3937,6 +3976,7 @@ async fn commit_quic_metadata_entry(
     let Some(metadata) = &entry.metadata else {
         return Ok(QuicMetadataCommit::Regular);
     };
+    reject_quic_destination_symlink_prefix(base, out_path).await?;
 
     if metadata.file_kind.is_special() {
         if matches!(metadata.file_kind, FileKind::Fifo) && config.allow_special_files {
@@ -4004,6 +4044,7 @@ async fn commit_decoded_entries(
     let base = quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
     let mut committed_paths = Vec::with_capacity(manifest.entries.len().saturating_add(1));
     if manifest.is_directory && manifest.entries.is_empty() {
+        reject_quic_destination_symlink_prefix(&base, &base).await?;
         crate::fs::create_dir_all(&base).await?;
         committed_paths.push(base.clone());
     }
@@ -4031,6 +4072,7 @@ async fn commit_decoded_entries(
             QuicMetadataCommit::Skipped => continue,
             QuicMetadataCommit::Regular => {}
         }
+        reject_quic_destination_symlink_prefix(&base, &out_path).await?;
         if let Some(parent) = out_path.parent() {
             crate::fs::create_dir_all(parent).await?;
         }
@@ -7562,6 +7604,50 @@ mod tests {
                 other => panic!("unsafe rel_path {rel_path:?} must fail closed, got {other:?}"),
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quic_commit_rejects_existing_destination_symlink_prefix() {
+        let cx = Cx::for_testing();
+        let dest = tempfile::tempdir().expect("dest dir");
+        let outside = tempfile::tempdir().expect("outside dir");
+        let base = dest.path().join("payload");
+        std::fs::create_dir_all(&base).expect("create destination base");
+        std::os::unix::fs::symlink(outside.path(), base.join("link"))
+            .expect("create pre-existing destination symlink");
+
+        let bytes = b"must stay inside destination".to_vec();
+        let entries = vec![("link/payload.txt".to_string(), bytes.clone())];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let decoders = vec![QuicEntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size: u64::try_from(bytes.len()).expect("bytes length fits u64"),
+            pipeline: None,
+            complete: true,
+            data: bytes,
+        }];
+
+        let err = block_on(commit_decoded_entries(
+            &cx,
+            dest.path(),
+            &manifest,
+            &decoders,
+            0,
+            0,
+            QuicDecodeStats::default(),
+            &trusted_quic_config(),
+        ))
+        .expect_err("commit must reject pre-existing symlink ancestors");
+        assert!(
+            matches!(err, QuicTransportError::Source(ref message) if message.contains("existing symlink")),
+            "expected existing-symlink source error, got {err:?}"
+        );
+        assert!(
+            !outside.path().join("payload.txt").exists(),
+            "commit must not follow a destination symlink outside dest_dir"
+        );
     }
 
     #[test]

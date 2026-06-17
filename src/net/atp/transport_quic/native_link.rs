@@ -1242,6 +1242,7 @@ async fn commit_staged_entries(
     if committed {
         let base = super::quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
         if manifest.is_directory && manifest.entries.is_empty() {
+            super::reject_quic_destination_symlink_prefix(&base, &base).await?;
             crate::fs::create_dir_all(&base).await?;
             committed_paths.push(base.clone());
         }
@@ -1260,6 +1261,7 @@ async fn commit_staged_entries(
                 super::QuicMetadataCommit::Skipped => continue,
                 super::QuicMetadataCommit::Regular => {}
             }
+            super::reject_quic_destination_symlink_prefix(&base, &out_path).await?;
             if let Some(parent) = out_path.parent() {
                 crate::fs::create_dir_all(parent).await?;
             }
