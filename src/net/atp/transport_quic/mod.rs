@@ -3323,6 +3323,28 @@ fn validate_quic_manifest(
     manifest: &TransferManifest,
     config: &QuicConfig,
 ) -> Result<(), QuicTransportError> {
+    // The off-wire `transfer_id` is interpolated directly into the receiver's
+    // on-disk staging-directory path (native_link.rs:
+    // `.atp-quic-staging-{transfer_id}-...`), which is created and then
+    // `remove_dir_all`'d during a receive. A legitimate sender always emits a
+    // bounded lowercase-hex token, so constrain it to a bounded alphanumeric
+    // token here. Without this a hostile peer could set `transfer_id` to e.g.
+    // `x/../../../../tmp/pwn` and steer the receiver's staging writes and
+    // `remove_dir_all` outside the destination directory (directory traversal /
+    // arbitrary delete). Mirrors the transport_tcp `validate_manifest` guard
+    // (asupersync-my6ocy).
+    if manifest.transfer_id.is_empty()
+        || manifest.transfer_id.len() > 64
+        || !manifest
+            .transfer_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric())
+    {
+        return Err(QuicTransportError::Source(format!(
+            "unsafe manifest transfer_id: {}",
+            manifest.transfer_id
+        )));
+    }
     if manifest.total_bytes > config.max_transfer_bytes {
         return Err(QuicTransportError::TooLarge {
             size: manifest.total_bytes,
@@ -3683,10 +3705,10 @@ pub async fn send_path(
 ) -> Result<SendReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
+    trace_config_summary(cx, "send_path", &config, peer_id);
     let prepared = prepare_source_manifest(cx, source, &config).await?;
     let config = prepared.effective_config(&config);
     config.validate()?;
-    trace_config_summary(cx, "send_path", &config, peer_id);
     #[cfg(feature = "tls")]
     {
         native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id).await
@@ -3950,6 +3972,52 @@ mod tests {
                 metadata: None,
             }],
         }
+    }
+
+    /// `validate_quic_manifest` must reject an off-wire `transfer_id` that is not a
+    /// bounded alphanumeric token, before it can steer the receiver's staging path
+    /// / `remove_dir_all` outside the destination (directory traversal). See
+    /// `asupersync-my6ocy`; mirrors the transport_tcp `validate_manifest` guard.
+    #[test]
+    fn validate_quic_manifest_rejects_unsafe_transfer_id() {
+        let config = trusted_quic_config();
+
+        // A legitimate alphanumeric transfer_id passes the guard.
+        assert!(validate_quic_manifest(&sample_manifest(), &config).is_ok());
+
+        // Traversal / separator / control / whitespace / empty tokens fail closed.
+        for bad in [
+            "x/../../../../tmp/pwn",
+            "..",
+            "a/b",
+            "a\\b",
+            "with space",
+            "tab\there",
+            "",
+        ] {
+            let mut manifest = sample_manifest();
+            manifest.transfer_id = bad.to_string();
+            assert!(
+                matches!(
+                    validate_quic_manifest(&manifest, &config),
+                    Err(QuicTransportError::Source(_))
+                ),
+                "transfer_id {bad:?} must be rejected fail-closed",
+            );
+        }
+
+        // Over-length (>64) is rejected even when alphanumeric.
+        let mut too_long = sample_manifest();
+        too_long.transfer_id = "a".repeat(65);
+        assert!(matches!(
+            validate_quic_manifest(&too_long, &config),
+            Err(QuicTransportError::Source(_))
+        ));
+
+        // The 64-char boundary alphanumeric token is accepted.
+        let mut boundary = sample_manifest();
+        boundary.transfer_id = "a".repeat(64);
+        assert!(validate_quic_manifest(&boundary, &config).is_ok());
     }
 
     fn sample_receipt() -> ReceiveReceipt {
