@@ -1532,7 +1532,47 @@ fn source_symbol_for_request(
 }
 
 #[allow(dead_code)]
-fn send_source_symbol_requests(
+async fn streaming_source_symbol_for_request(
+    cx: &Cx,
+    enc: &QuicEntryEncoder,
+    request: QuicSourceSymbolRequest,
+    config: &QuicConfig,
+) -> Result<Symbol, QuicTransportError> {
+    if request.entry != enc.index {
+        return Err(QuicTransportError::Integrity(format!(
+            "source request entry mismatch: request={}, encoder={}",
+            request.entry, enc.index
+        )));
+    }
+    let block = enc.read_block(cx, request.sbn, config).await?;
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let block_len = block.len();
+    let block_k = block_len.div_ceil(symbol_size).max(1);
+    let esi = usize::try_from(request.esi).map_err(|_| {
+        QuicTransportError::Integrity("source request ESI does not fit usize".to_string())
+    })?;
+    if esi >= block_k {
+        return Err(QuicTransportError::Integrity(format!(
+            "source request esi {} outside entry {} block {} K={}",
+            request.esi, enc.index, request.sbn, block_k
+        )));
+    }
+
+    let start = esi * symbol_size;
+    let end = (start + symbol_size).min(block_len);
+    let mut buffer = vec![0u8; symbol_size];
+    if start < end {
+        buffer[..end - start].copy_from_slice(&block[start..end]);
+    }
+    Ok(Symbol::new(
+        SymbolId::new(enc.object_id, request.sbn, request.esi),
+        buffer,
+        SymbolKind::Source,
+    ))
+}
+
+#[allow(dead_code)]
+async fn send_source_symbol_requests(
     cx: &Cx,
     conn: &mut QuicConnection,
     manifest: &TransferManifest,
@@ -1554,7 +1594,7 @@ fn send_source_symbol_requests(
                     request.entry
                 ))
             })?;
-        let symbol = source_symbol_for_request(enc, *request, config)?;
+        let symbol = streaming_source_symbol_for_request(cx, enc, *request, config).await?;
         let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
         send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
         sent = sent.saturating_add(1);
@@ -1588,7 +1628,7 @@ fn spray_initial_symbols(
 }
 
 #[allow(dead_code)]
-fn send_repair_round_and_object_complete(
+async fn send_repair_round_and_object_complete(
     cx: &Cx,
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
@@ -1628,7 +1668,7 @@ fn send_repair_round_and_object_complete(
         }
     }
     let sent = if need.source_symbols.is_empty() {
-        spray_symbol_round(
+        spray_streaming_symbol_round(
             cx,
             conn,
             manifest,
@@ -1637,7 +1677,8 @@ fn send_repair_round_and_object_complete(
             config,
             symbol_auth,
             false,
-        )?
+        )
+        .await?
     } else {
         send_source_symbol_requests(
             cx,
@@ -1647,7 +1688,8 @@ fn send_repair_round_and_object_complete(
             &need.source_symbols,
             config,
             symbol_auth,
-        )?
+        )
+        .await?
     };
     send_object_complete(cx, conn, control)?;
     Ok(sent)
@@ -1808,7 +1850,7 @@ fn finish_sender_transfer(
 }
 
 #[allow(dead_code)]
-fn handle_sender_feedback_or_proof(
+async fn handle_sender_feedback_or_proof(
     cx: &Cx,
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
@@ -1839,7 +1881,8 @@ fn handle_sender_feedback_or_proof(
                 &need,
                 state.config,
                 symbol_auth.as_ref(),
-            )?;
+            )
+            .await?;
             state.symbols_sent = state.symbols_sent.saturating_add(sent);
             Ok(None)
         }
@@ -4127,14 +4170,17 @@ mod tests {
         let (send_report, symbols_sent) = {
             let mut feedback =
                 QuicSenderFeedbackState::new(&manifest, &mut encoders, &config, peer, symbols_sent);
-            let report =
-                handle_sender_feedback_or_proof(cx, sender, &mut sender_control, &mut feedback)?
-                    .ok_or_else(|| {
-                        QuicTransportError::Integrity(
-                            "sender received repair feedback in no-repair loopback transfer"
-                                .to_string(),
-                        )
-                    })?;
+            let report = block_on(handle_sender_feedback_or_proof(
+                cx,
+                sender,
+                &mut sender_control,
+                &mut feedback,
+            ))?
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(
+                    "sender received repair feedback in no-repair loopback transfer".to_string(),
+                )
+            })?;
             (report, feedback.symbols_sent)
         };
         let receipt = send_report.receipt.clone();
@@ -5222,6 +5268,185 @@ mod tests {
     }
 
     #[test]
+    fn quic_prepared_source_feedback_retransmits_source_symbol_from_disk_file() {
+        let (cx, mut client, mut server) = established_pair();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("payload.bin");
+        let bytes = varied_bytes(8 * 1024, 53);
+        std::fs::write(&source, &bytes).expect("write source");
+        let config = QuicConfig {
+            chunk_size: 23,
+            symbol_size: 16,
+            max_block_size: 8 * 1024,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let prepared = block_on(prepare_source_manifest(&cx, &source, &config))
+            .expect("source manifest prepares from disk");
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+
+        send_sender_hello(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )
+        .expect("send hello");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_100,
+        )
+        .expect("deliver sender hello");
+        receive_sender_hello_and_ack(
+            &cx,
+            &mut server,
+            &mut receiver_control,
+            &config,
+            "receiver-peer",
+            false,
+        )
+        .expect("receiver accepts hello");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_101,
+        )
+        .expect("deliver hello ack");
+        receive_sender_hello_ack(&cx, &mut client, &mut sender_control)
+            .expect("sender receives ack");
+
+        let mut encoders = block_on(encoders_from_prepared_source(&cx, &prepared, &config))
+            .expect("file-backed encoders");
+        let symbol_auth = config.symbol_auth_context().expect("symbol auth context");
+        send_manifest(&cx, &mut client, &mut sender_control, &prepared.manifest)
+            .expect("send manifest");
+        let pending_all = encoders
+            .iter()
+            .map(|entry| entry.index)
+            .collect::<std::collections::BTreeSet<_>>();
+        let initial_sent = block_on(spray_streaming_symbol_round(
+            &cx,
+            &mut client,
+            &prepared.manifest,
+            &mut encoders,
+            &pending_all,
+            &config,
+            symbol_auth.as_ref(),
+            true,
+        ))
+        .expect("send file-backed source-only round");
+        assert_eq!(initial_sent, 512);
+        send_object_complete(&cx, &mut client, &mut sender_control).expect("send object complete");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_102,
+        )
+        .expect("deliver prepared source transfer");
+
+        let dropped = server.recv_datagram().expect("drop one source datagram");
+        assert!(!dropped.is_empty());
+        let received_manifest = receive_manifest(&cx, &mut server, &mut receiver_control)
+            .expect("receiver decodes manifest");
+        assert_eq!(received_manifest, prepared.manifest);
+        let mut decoders = decoders_from_manifest(&received_manifest, &config).expect("decoders");
+        let accepted_before =
+            drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
+                .expect("receiver drains surviving source symbols");
+        assert_eq!(accepted_before, 511);
+        receive_object_complete(&cx, &mut server, &mut receiver_control)
+            .expect("receiver sees initial object complete");
+        assemble_completed_entries(&mut decoders);
+        let pending = pending_entries(&decoders);
+        assert_eq!(pending, vec![0]);
+        let need = QuicNeedMore {
+            pending,
+            source_symbols: source_symbol_requests(&decoders, 2048),
+        };
+        assert_eq!(
+            need.source_symbols,
+            vec![QuicSourceSymbolRequest {
+                entry: 0,
+                sbn: 0,
+                esi: 0,
+            }]
+        );
+        send_need_more(&cx, &mut server, &mut receiver_control, &need).expect("send need-more");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_103,
+        )
+        .expect("deliver need-more");
+
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let mut feedback = QuicSenderFeedbackState::new(
+            &prepared.manifest,
+            &mut encoders,
+            &config,
+            peer,
+            initial_sent,
+        );
+        let report = block_on(handle_sender_feedback_or_proof(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &mut feedback,
+        ))
+        .expect("sender handles file-backed need-more");
+        assert!(report.is_none());
+        assert_eq!(feedback.feedback_rounds, 1);
+        assert_eq!(feedback.symbols_sent, 513);
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            7_104,
+        )
+        .expect("deliver source retransmit");
+
+        let source_envelope = recv_symbol_envelope(&mut server, false)
+            .expect("source retransmit envelope parses")
+            .expect("source retransmit datagram delivered");
+        assert!(!source_envelope.is_repair);
+        assert_eq!(source_envelope.entry, 0);
+        assert_eq!(source_envelope.sbn, 0);
+        assert_eq!(source_envelope.esi, 0);
+        let source_symbol =
+            authenticated_symbol_from_envelope(&source_envelope, decoders[0].object_id, false)
+                .expect("source symbol");
+        assert!(feed_authenticated_symbol(&mut decoders[0], source_symbol).expect("feed source"));
+        let accepted_extra =
+            drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
+                .expect("receiver drains any extra feedback symbols");
+        assert_eq!(accepted_extra, 0);
+        receive_object_complete(&cx, &mut server, &mut receiver_control)
+            .expect("receiver sees repair object complete");
+        assemble_completed_entries(&mut decoders);
+        assert!(
+            pending_entries(&decoders).is_empty(),
+            "file-backed source retransmit should complete the decoder"
+        );
+        let receipt = verify_in_memory_receipt(&received_manifest, &decoders);
+        assert!(receipt.committed);
+        assert_eq!(receipt.bytes_received, bytes.len() as u64);
+    }
+
+    #[test]
     fn native_sender_body_transfers_prepared_source_and_receives_proof() {
         let (cx, client, server) = established_pair();
         let mut native_client = client.inner().clone();
@@ -5495,9 +5720,13 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
         let mut feedback =
             QuicSenderFeedbackState::new(&manifest, &mut encoders, &config, peer, initial_sent);
-        let report =
-            handle_sender_feedback_or_proof(&cx, &mut client, &mut sender_control, &mut feedback)
-                .expect("sender handles need-more");
+        let report = block_on(handle_sender_feedback_or_proof(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &mut feedback,
+        ))
+        .expect("sender handles need-more");
         assert!(report.is_none());
         assert_eq!(feedback.feedback_rounds, 1);
         assert_eq!(feedback.symbols_sent, 513);
@@ -5547,10 +5776,14 @@ mod tests {
         )
         .expect("deliver proof");
 
-        let report =
-            handle_sender_feedback_or_proof(&cx, &mut client, &mut sender_control, &mut feedback)
-                .expect("sender receives proof report")
-                .expect("proof completes transfer");
+        let report = block_on(handle_sender_feedback_or_proof(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &mut feedback,
+        ))
+        .expect("sender receives proof report")
+        .expect("proof completes transfer");
         assert_eq!(report.transfer_id, manifest.transfer_id);
         assert_eq!(report.receipt.bytes_received, 8 * 1024);
         assert_eq!(report.files, 1);
@@ -5956,7 +6189,7 @@ mod tests {
         );
 
         let symbol_auth = config.symbol_auth_context().expect("auth posture");
-        let repair_sent = send_repair_round_and_object_complete(
+        let repair_sent = block_on(send_repair_round_and_object_complete(
             &cx,
             &mut client,
             &mut sender_control,
@@ -5965,7 +6198,7 @@ mod tests {
             &need,
             &config,
             symbol_auth.as_ref(),
-        )
+        ))
         .expect("sender retransmits requested source symbol");
         assert_eq!(repair_sent, 1);
         let mut native_client = client.inner().clone();
