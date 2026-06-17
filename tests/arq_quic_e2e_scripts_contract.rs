@@ -327,7 +327,7 @@ fn atp_bench_resource_guard_is_first_class_report_artifact() {
         "--max-sender-rss-mb",
         "--max-receiver-rss-mb",
         "atp-bench-resource-guard-v1",
-        "\"resource_guard\":$resource_guard",
+        r#"\"resource_guard\":$resource_guard"#,
     ] {
         assert!(
             run_bench.contains(required),
