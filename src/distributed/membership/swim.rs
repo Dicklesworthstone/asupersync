@@ -755,7 +755,14 @@ impl Swim {
         match rumor {
             Rumor::Suspect { incarnation, .. } | Rumor::Confirm { incarnation, .. } => {
                 if *incarnation >= self.incarnation {
-                    self.incarnation = *incarnation + 1;
+                    // `incarnation` is attacker-controlled (read straight off the
+                    // wire in `decode_rumor`). A crafted `u64::MAX` would make
+                    // `*incarnation + 1` overflow: a panic in debug/overflow-checked
+                    // builds (single-datagram DoS of the membership task) or a wrap
+                    // to 0 in release, which permanently defeats self-refutation —
+                    // the node could no longer out-incarnate the planted suspicion
+                    // and would be confirmed Dead while alive. Saturate instead.
+                    self.incarnation = incarnation.saturating_add(1);
                 }
                 self.gossip
                     .queue(Rumor::alive(self.local.clone(), self.incarnation));
@@ -1297,6 +1304,32 @@ mod tests {
         )));
         // We never track ourselves as a member.
         assert_eq!(s.state_of(&node("self")), None);
+    }
+
+    #[test]
+    fn self_suspicion_with_max_incarnation_saturates_without_overflow() {
+        // A crafted rumor carrying incarnation == u64::MAX about the local node
+        // must not overflow the self-incarnation bump: in debug/overflow-checked
+        // builds `*incarnation + 1` would panic (single-datagram DoS), and in
+        // release it would wrap to 0, permanently defeating self-refutation.
+        // The bump saturates at u64::MAX instead.
+        let mut s = Swim::new(node("self"), cfg(), 9);
+        let out = s.handle(
+            0,
+            node("acc"),
+            Packet {
+                payload: Payload::Ping { seq: 5 },
+                gossip: vec![Rumor::suspect(node("self"), u64::MAX, node("acc"))],
+            },
+        );
+        // Saturated: did not wrap back to 0, did not panic.
+        assert_eq!(s.incarnation(), u64::MAX);
+        // The refuting Alive piggybacked on the ack carries the saturated value.
+        let ack = &out[0];
+        assert!(ack.packet.gossip.iter().any(|r| matches!(
+            r,
+            Rumor::Alive { node: nn, incarnation } if nn == &node("self") && *incarnation == u64::MAX
+        )));
     }
 
     // ---- gossip dissemination -------------------------------------------
