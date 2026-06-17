@@ -20,6 +20,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use asupersync::cx::Cx;
+use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::net::atp::transport_quic::{
     self, ManifestEntry, QuicAdaptiveArm, QuicAdaptiveBlockPlan, QuicAdaptiveController,
     QuicAdaptivePolicy, QuicConfig, QuicPathEstimate, QuicTransportError, ReceiveReceipt,
@@ -30,6 +31,7 @@ use asupersync::net::quic_native::{
     ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionConfig,
 };
 use asupersync::observability::{DiagnosticContext, LogCollector, LogLevel};
+use asupersync::types::Budget;
 
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     futures_lite::future::block_on(fut)
@@ -274,6 +276,108 @@ fn adaptive_arm_is_visible_on_public_send_path_trace() {
     assert_eq!(start.get_field("max_block_size"), Some("256"));
     assert_eq!(start.get_field("repair_overhead"), Some("1.2500"));
     assert_eq!(start.get_field("datagram_fanout"), Some("3"));
+}
+
+fn adaptive_epoch_trace_fields_under_lab(seed: u64) -> Vec<(String, String)> {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(128));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let collector = LogCollector::new(16).with_min_level(LogLevel::Trace);
+    let collector_for_task = collector.clone();
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("lab task installs Cx");
+            cx.set_diagnostic_context(DiagnosticContext::new());
+            cx.set_log_collector(collector_for_task);
+
+            let mut controller = QuicAdaptiveController::new(QuicAdaptivePolicy::default(), 0xC1A0);
+            controller.update_estimate(quic_path_estimate(0.02, 12_000_000.0));
+            let plan = controller
+                .next_block_plan(transport_quic::DEFAULT_SYMBOL_SIZE)
+                .expect("controller activates inside lab runtime");
+            let arm = QuicAdaptiveArm::from_block_plan(plan).expect("valid QUIC adaptive arm");
+            assert_eq!(arm.k, plan.k);
+            assert_eq!(arm.datagram_fanout, plan.fanout);
+
+            controller.observe(
+                u64::from(plan.k),
+                u64::from(plan.k),
+                0.01,
+                u64::from(plan.k) * u64::from(transport_quic::DEFAULT_SYMBOL_SIZE),
+            );
+            let snapshot = controller.diagnostic_snapshot();
+            assert_eq!(snapshot.epoch, 1);
+            assert_eq!(snapshot.selected_plan, Some(plan));
+            assert_eq!(snapshot.weights.len(), 24);
+
+            controller.trace_last_decision(&cx, "atp_quic.adaptive.epoch", "quic");
+        })
+        .expect("lab adaptive trace task should spawn");
+    runtime
+        .scheduler
+        .lock()
+        .schedule(task_id, Budget::INFINITE.priority);
+    runtime.run_until_quiescent();
+
+    let violations = runtime.oracles.check_all(runtime.now());
+    assert!(
+        violations.is_empty(),
+        "adaptive epoch trace should leave lab invariants clean: {violations:?}"
+    );
+
+    let entries = collector.peek();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.adaptive.epoch")
+        .expect("adaptive epoch trace entry");
+    [
+        "transport",
+        "epoch",
+        "selected_arm_index",
+        "k",
+        "repair_overhead",
+        "fanout",
+        "weight_count",
+        "weights",
+        "loss_scale",
+    ]
+    .into_iter()
+    .map(|field| {
+        (
+            field.to_string(),
+            entry.get_field(field).expect("trace field").to_string(),
+        )
+    })
+    .collect()
+}
+
+#[test]
+fn adaptive_epoch_trace_replays_under_lab_runtime() {
+    let first = adaptive_epoch_trace_fields_under_lab(0xA5A5);
+    let second = adaptive_epoch_trace_fields_under_lab(0xA5A5);
+    assert_eq!(first, second, "same lab seed must replay trace fields");
+
+    let field = |name: &str| -> &str {
+        first
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
+            .expect("field present")
+    };
+    assert_eq!(field("transport"), "quic");
+    assert_eq!(field("epoch"), "1");
+    assert_ne!(field("selected_arm_index"), "none");
+    assert_ne!(field("k"), "none");
+    assert_ne!(field("repair_overhead"), "none");
+    assert_ne!(field("fanout"), "none");
+    assert_eq!(field("weight_count"), "24");
+    assert!(field("weights").contains(','));
+    assert_ne!(
+        field("weights"),
+        "1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000,1.000000",
+        "post-observe weights should be trace-visible, not just the initial uniform grid"
+    );
 }
 
 // ─── Error taxonomy / Display ────────────────────────────────────────────────

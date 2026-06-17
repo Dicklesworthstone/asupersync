@@ -31,7 +31,9 @@
     clippy::too_long_first_doc_paragraph
 )]
 
+use crate::cx::Cx;
 use crate::util::det_rng::DetRng;
+use std::fmt::Write as _;
 
 const FANOUT_SOCKET_EFFICIENCY: f64 = 0.6;
 const FANOUT_CAP_TARGET: f64 = 0.95;
@@ -110,6 +112,24 @@ pub struct BlockPlan {
     pub overhead: f64,
     /// UDP fan-out (sockets to spray across).
     pub fanout: usize,
+}
+
+/// Deterministic diagnostic view of the adaptive controller's latest epoch.
+///
+/// This is intentionally an owned snapshot so callers can emit structured trace
+/// events without reaching into controller internals or holding borrows across
+/// transport code. The weight vector is per-epoch diagnostic state, not a
+/// per-symbol hot-path allocation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdaptiveDecisionSnapshot {
+    /// Number of adaptive arm selections made by this controller.
+    pub epoch: u64,
+    /// Index in the bounded `(K, fanout)` arm grid selected for the latest epoch.
+    pub selected_arm_index: Option<usize>,
+    /// Latest selected block plan, if the controller has activated.
+    pub selected_plan: Option<BlockPlan>,
+    /// EXP3 weights in deterministic arm-grid order.
+    pub weights: Vec<f64>,
 }
 
 /// Cost-model knobs and the reliability target.
@@ -384,6 +404,7 @@ pub struct AdaptiveController {
     arms: Vec<(usize, usize)>,
     last_arm: Option<usize>,
     last_overhead: f64,
+    epoch: u64,
     rng: DetRng,
     /// Running max observed loss-per-byte, to normalize EXP3 losses to [0,1].
     loss_scale: f64,
@@ -407,6 +428,7 @@ impl AdaptiveController {
             arms,
             last_arm: None,
             last_overhead: 0.0,
+            epoch: 0,
             rng: DetRng::new(seed),
             loss_scale: 0.0,
         }
@@ -442,6 +464,7 @@ impl AdaptiveController {
                 break;
             }
         }
+        self.epoch = self.epoch.saturating_add(1);
         self.last_arm = Some(chosen);
         let (ki, ni) = self.arms[chosen];
         let k = self.policy.arm_grid_k[ki];
@@ -504,6 +527,79 @@ impl AdaptiveController {
     pub fn model_plan(&self, symbol_size: u16) -> BlockPlan {
         optimal_block(&self.est, &self.policy, symbol_size)
     }
+
+    /// Return the latest per-epoch arm and EXP3 weights for deterministic
+    /// logging or replay assertions.
+    #[must_use]
+    pub fn diagnostic_snapshot(&self) -> AdaptiveDecisionSnapshot {
+        let selected_plan = self.last_arm.map(|arm| {
+            let (ki, ni) = self.arms[arm];
+            BlockPlan {
+                k: self.policy.arm_grid_k[ki],
+                overhead: self.last_overhead,
+                fanout: self.policy.arm_grid_fanout[ni],
+            }
+        });
+        AdaptiveDecisionSnapshot {
+            epoch: self.epoch,
+            selected_arm_index: self.last_arm,
+            selected_plan,
+            weights: self.weights.clone(),
+        }
+    }
+
+    /// Emit the latest adaptive epoch as structured trace fields.
+    ///
+    /// This is meant to be called once per adaptive epoch, never per symbol.
+    /// It uses [`Cx::trace_with_fields`] so runtimes stay silent unless a trace
+    /// sink is installed.
+    pub fn trace_last_decision(&self, cx: &Cx, event: &str, transport: &str) {
+        let snapshot = self.diagnostic_snapshot();
+        let epoch = snapshot.epoch.to_string();
+        let selected_arm_index = snapshot
+            .selected_arm_index
+            .map(|idx| idx.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let weight_count = snapshot.weights.len().to_string();
+        let weights = format_weights(&snapshot.weights);
+        let loss_scale = format!("{:.12}", self.loss_scale);
+
+        let (k, repair_overhead, fanout) = if let Some(plan) = snapshot.selected_plan {
+            (
+                plan.k.to_string(),
+                format!("{:.6}", plan.overhead),
+                plan.fanout.to_string(),
+            )
+        } else {
+            ("none".to_string(), "none".to_string(), "none".to_string())
+        };
+
+        cx.trace_with_fields(
+            event,
+            &[
+                ("transport", transport),
+                ("epoch", &epoch),
+                ("selected_arm_index", &selected_arm_index),
+                ("k", &k),
+                ("repair_overhead", &repair_overhead),
+                ("fanout", &fanout),
+                ("weight_count", &weight_count),
+                ("weights", &weights),
+                ("loss_scale", &loss_scale),
+            ],
+        );
+    }
+}
+
+fn format_weights(weights: &[f64]) -> String {
+    let mut out = String::new();
+    for (idx, weight) in weights.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        let _ = write!(&mut out, "{weight:.6}");
+    }
+    out
 }
 
 #[cfg(test)]
