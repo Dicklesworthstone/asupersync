@@ -1,0 +1,233 @@
+//! Binary-level loopback contract for `atp send/recv --transport quic`.
+//!
+//! This is the F1 gate for `asupersync-arq-quic-epic-b0k8qo.6.1`: the actual
+//! standalone `atp` binary must drive the real ATP-over-QUIC transport rather
+//! than only exposing the lower-level `transport_quic` API.
+
+#![cfg(all(feature = "atp-cli", feature = "tls"))]
+#![allow(missing_docs)]
+
+use std::io::{BufRead, BufReader};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+// Canonical CA + leaf chain shared with the real UDP QUIC transport e2e. The
+// leaf has SAN DNS:localhost / IP:127.0.0.1, so the binary path exercises real
+// WebPKI verification with no insecure skip-verify branch.
+const LEAF_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBwTCCAWigAwIBAgIUTQyiZ96ufyKHVqRYRZBXpRQABGMwCgYIKoZIzj0EAwIw\n\
+FzEVMBMGA1UEAwwMYXRwcS10ZXN0LWNhMCAXDTI2MDYxNjA1MTYyM1oYDzIxMjYw\n\
+NTIzMDUxNjIzWjAUMRIwEAYDVQQDDAlhdHBxLXRlc3QwWTATBgcqhkjOPQIBBggq\n\
+hkjOPQMBBwNCAASqge/wCghqQ7mK2i0YFNQQqYuxtyBbxlDvlrJDWhuXLXcrwcK4\n\
+eQkpN3QBVt6JLUpAuYpUrQYUSL28G0cYl4hdo4GSMIGPMBoGA1UdEQQTMBGCCWxv\n\
+Y2FsaG9zdIcEfwAAATATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAA\n\
+MA4GA1UdDwEB/wQEAwIHgDAdBgNVHQ4EFgQUTWWIxYJyvXlJNVcDd8An36rhuMQw\n\
+HwYDVR0jBBgwFoAUG872eUJJNl9C6SZHmR9sCRNzvtYwCgYIKoZIzj0EAwIDRwAw\n\
+RAIgOkNWPyvljX7zxCWN9sJ/rpX7XV5ubXvNrPdV70sF8oECIGtMuJr6XEmcump1\n\
+YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
+-----END CERTIFICATE-----\n";
+
+const LEAF_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgpE59cRbMDhBIZaha\n\
+UPAvB8O86PWbkhxy/8cx/FrSa1ShRANCAASqge/wCghqQ7mK2i0YFNQQqYuxtyBb\n\
+xlDvlrJDWhuXLXcrwcK4eQkpN3QBVt6JLUpAuYpUrQYUSL28G0cYl4hd\n\
+-----END PRIVATE KEY-----\n";
+
+const CA_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBlDCCATugAwIBAgIUYOTxo/FMMZjqCnJT+IDmJ2BNux0wCgYIKoZIzj0EAwIw\n\
+FzEVMBMGA1UEAwwMYXRwcS10ZXN0LWNhMCAXDTI2MDYxNjA1MTYyM1oYDzIxMjYw\n\
+NTIzMDUxNjIzWjAXMRUwEwYDVQQDDAxhdHBxLXRlc3QtY2EwWTATBgcqhkjOPQIB\n\
+BggqhkjOPQMBBwNCAASAsNg5paEJFgZwYGu7aCzsZYPyDyjzzcT7fi3O5JHGW0xA\n\
+pTqjgqykWTDkyfwdITXWXIfrx2D2+QwoGXOV4OFSo2MwYTAdBgNVHQ4EFgQUG872\n\
+eUJJNl9C6SZHmR9sCRNzvtYwHwYDVR0jBBgwFoAUG872eUJJNl9C6SZHmR9sCRNz\n\
+vtYwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwCgYIKoZIzj0EAwID\n\
+RwAwRAIgFLcs0Qdsy190QfKzpvLj28srfpw6wZ2PURF20N+twm8CIFZMWnG65VsE\n\
+WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
+-----END CERTIFICATE-----\n";
+
+fn unique_tmp(label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    std::env::temp_dir().join(format!(
+        "atp_cli_quic_{label}_{}_{}",
+        std::process::id(),
+        nanos
+    ))
+}
+
+fn write_file(path: &Path, contents: &[u8]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create parent dir");
+    }
+    std::fs::write(path, contents).expect("write file");
+}
+
+fn spawn_stderr_reader(child: &mut Child) -> mpsc::Receiver<String> {
+    let stderr = child.stderr.take().expect("receiver stderr is piped");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+fn parse_quic_listen_line(line: &str) -> Option<SocketAddr> {
+    let rest = line.strip_prefix("atp: quic listening on ")?;
+    let (addr, _) = rest.split_once(", dest ")?;
+    addr.parse().ok()
+}
+
+fn wait_for_quic_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            panic!("receiver did not print QUIC readiness; stderr lines: {seen:?}");
+        }
+        let wait = (deadline - now).min(Duration::from_millis(250));
+        match rx.recv_timeout(wait) {
+            Ok(line) => {
+                if let Some(addr) = parse_quic_listen_line(&line) {
+                    return addr;
+                }
+                seen.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("receiver exited before QUIC readiness; stderr lines: {seen:?}");
+            }
+        }
+    }
+}
+
+fn wait_with_timeout(mut child: Child, label: &str) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait().expect("poll child status") {
+            Some(_) => return child.wait_with_output().expect("collect child output"),
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            None => {
+                let _ = child.kill();
+                let output = child
+                    .wait_with_output()
+                    .expect("collect killed child output");
+                panic!(
+                    "{label} did not exit within timeout; stdout: {}; stderr: {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn atp_send_recv_quic_loopback_moves_file_bytes() {
+    let root = unique_tmp("loopback");
+    let cert = root.join("tls/leaf.pem");
+    let key = root.join("tls/leaf.key");
+    let ca = root.join("tls/ca.pem");
+    write_file(&cert, LEAF_CERT_PEM.as_bytes());
+    write_file(&key, LEAF_KEY_PEM.as_bytes());
+    write_file(&ca, CA_CERT_PEM.as_bytes());
+
+    let source_dir = root.join("source");
+    let dest_dir = root.join("dest");
+    let payload_path = source_dir.join("payload.bin");
+    let payload = (0..8192u32)
+        .map(|i| (i.wrapping_mul(17) % 251) as u8)
+        .collect::<Vec<_>>();
+    write_file(&payload_path, &payload);
+    std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+
+    let mut receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "recv",
+            dest_dir.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "quic",
+            "--once",
+            "--server-cert",
+            cert.to_str().unwrap(),
+            "--server-key",
+            key.to_str().unwrap(),
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn atp quic receiver");
+    let receiver_stderr = spawn_stderr_reader(&mut receiver);
+    let listen_addr = wait_for_quic_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "send",
+            payload_path.to_str().unwrap(),
+            &listen_addr.to_string(),
+            "--transport",
+            "quic",
+            "--ca",
+            ca.to_str().unwrap(),
+            "--server-name",
+            "localhost",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .output()
+        .expect("run atp quic sender");
+    if !sender.status.success() {
+        let _ = receiver.kill();
+        let _ = receiver.wait();
+        panic!(
+            "atp quic sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+
+    let receiver = wait_with_timeout(receiver, "atp quic receiver");
+    assert!(
+        receiver.status.success(),
+        "atp quic receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+
+    let sender_stdout = String::from_utf8_lossy(&sender.stdout);
+    let receiver_stdout = String::from_utf8_lossy(&receiver.stdout);
+    assert!(
+        sender_stdout.contains("\"event\":\"atp_send\"")
+            && sender_stdout.contains("\"transport\":\"quic\"")
+            && sender_stdout.contains("\"committed\":true")
+            && sender_stdout.contains("\"bytes_sent\":8192"),
+        "sender stdout: {sender_stdout}"
+    );
+    assert!(
+        receiver_stdout.contains("\"event\":\"atp_receive\"")
+            && receiver_stdout.contains("\"transport\":\"quic\"")
+            && receiver_stdout.contains("\"committed\":true")
+            && receiver_stdout.contains("\"bytes_received\":8192"),
+        "receiver stdout: {receiver_stdout}"
+    );
+    assert_eq!(
+        std::fs::read(dest_dir.join("payload.bin")).expect("read received payload"),
+        payload
+    );
+}
