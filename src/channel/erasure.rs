@@ -46,7 +46,7 @@
 //! striping for very large messages is a recorded follow-up, as are the QUIC
 //! datagram lane and production WAN hardening.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
 use crate::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -427,6 +427,8 @@ pub fn channel(config: EcConfig) -> (EcSender, EcReceiver) {
         EcReceiver {
             rx,
             pending: HashMap::new(),
+            pending_order: VecDeque::new(),
+            max_pending: DEFAULT_MAX_PENDING_MESSAGES,
         },
     )
 }
@@ -486,10 +488,30 @@ impl EcSender {
     }
 }
 
+/// Default upper bound on the number of partially-received (not-yet-decodable)
+/// messages an [`EcReceiver`] retains for reassembly at once.
+///
+/// Incomplete messages — ones that never collect their `K` distinct source
+/// symbols because the (intended) lossy transport dropped too many, or because
+/// the sender abandoned or was cancelled mid-message — are otherwise never
+/// evicted (they never become "ready"). Without a bound, a lossy or hostile
+/// sender could grow the reassembly map without limit and exhaust memory. When
+/// the bound is reached, admitting a new message evicts the oldest still-pending
+/// one (FIFO). Worst-case retained memory is bounded by
+/// `max_pending * EcConfig::max_message_size`.
+const DEFAULT_MAX_PENDING_MESSAGES: usize = 1024;
+
 /// The receiving half of an erasure-coded channel.
 pub struct EcReceiver {
     rx: UnboundedReceiver<WireUnit>,
     pending: HashMap<u64, (MessageHeader, MessageReassembler)>,
+    /// Insertion order of the keys currently in `pending`, used to evict the
+    /// oldest still-incomplete message once `max_pending` is reached. Kept in
+    /// exact sync with `pending`'s key set (push on admit, remove on
+    /// decode/evict).
+    pending_order: VecDeque<u64>,
+    /// Cap on `pending.len()` (see [`DEFAULT_MAX_PENDING_MESSAGES`]).
+    max_pending: usize,
 }
 
 impl EcReceiver {
@@ -511,25 +533,49 @@ impl EcReceiver {
                 .recv(cx)
                 .await
                 .map_err(|_| EcError::TransportClosed)?;
-            let message_id = match unit {
-                WireUnit::Header(header) => {
-                    let id = header.message_id;
-                    let reassembler = MessageReassembler::new(&header);
-                    self.pending.entry(id).or_insert((header, reassembler));
-                    id
-                }
-                WireUnit::Symbol(frame) => {
-                    if let Some((_, reassembler)) = self.pending.get_mut(&frame.message_id) {
-                        let _ = reassembler.accept_frame(&frame);
-                    }
-                    frame.message_id
-                }
-            };
+            let message_id = self.ingest_unit(unit);
             // Check readiness after EITHER a header or a symbol: a zero-source
             // (empty) message is decodable the moment its header arrives, with no
             // symbols of its own.
             if let Some(bytes) = self.try_complete(message_id)? {
                 return Ok(bytes);
+            }
+        }
+    }
+
+    /// Routes one transport unit into the reassembly map and returns its message
+    /// id (so the caller can attempt completion).
+    ///
+    /// A header for a not-yet-seen message admits a fresh
+    /// [`MessageReassembler`]; if `pending` is already at `max_pending`, the
+    /// oldest still-incomplete message is evicted first (FIFO) so an
+    /// incomplete-message flood — intrinsic to a lossy transport, or producible
+    /// by a hostile sender — cannot grow the buffer without bound. A symbol for
+    /// an unknown id (no header yet, or already decoded/evicted) is dropped.
+    fn ingest_unit(&mut self, unit: WireUnit) -> u64 {
+        match unit {
+            WireUnit::Header(header) => {
+                let id = header.message_id;
+                if !self.pending.contains_key(&id) {
+                    while self.pending.len() >= self.max_pending {
+                        match self.pending_order.pop_front() {
+                            Some(oldest) => {
+                                self.pending.remove(&oldest);
+                            }
+                            None => break,
+                        }
+                    }
+                    let reassembler = MessageReassembler::new(&header);
+                    self.pending.insert(id, (header, reassembler));
+                    self.pending_order.push_back(id);
+                }
+                id
+            }
+            WireUnit::Symbol(frame) => {
+                if let Some((_, reassembler)) = self.pending.get_mut(&frame.message_id) {
+                    let _ = reassembler.accept_frame(&frame);
+                }
+                frame.message_id
             }
         }
     }
@@ -551,6 +597,8 @@ impl EcReceiver {
             .collect();
         let bytes = decode_message(&header, &held)?;
         self.pending.remove(&message_id);
+        // Keep the eviction index in sync with `pending`'s key set.
+        self.pending_order.retain(|&id| id != message_id);
         Ok(Some(bytes))
     }
 
@@ -1637,5 +1685,27 @@ mod tests {
         assert_eq!(ra.distinct_received(), header.total_symbols);
         assert_eq!(duplicates, u32::from(header.total_symbols));
         assert!(ra.is_ready());
+    }
+
+    #[test]
+    fn pending_reassembly_buffer_is_bounded_with_fifo_eviction() {
+        // Regression: a lossy/abandoning sender that emits headers for messages
+        // that never collect their K source symbols must not grow the
+        // reassembly map without bound. Feed 6 distinct headers (K=3) with NO
+        // symbols, so every message stays permanently incomplete.
+        let (_tx, mut rx) = channel(EcConfig::default());
+        rx.max_pending = 4;
+        for id in 0..6u64 {
+            let _ = rx.ingest_unit(WireUnit::Header(k3_n5_header(id)));
+        }
+        // Capped at 4: the two oldest (ids 0,1) are evicted FIFO, the newest
+        // four (2..=5) retained, and the eviction index stays in exact sync.
+        assert_eq!(rx.pending.len(), 4);
+        assert_eq!(rx.pending_order.len(), rx.pending.len());
+        assert!(!rx.pending.contains_key(&0));
+        assert!(!rx.pending.contains_key(&1));
+        for id in 2..6u64 {
+            assert!(rx.pending.contains_key(&id), "id {id} should be retained");
+        }
     }
 }
