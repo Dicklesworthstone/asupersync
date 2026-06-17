@@ -5,15 +5,18 @@
 
 use crate::Cx;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Schema version for ATP transfer plans
 pub const ATP_TRANSFER_PLAN_SCHEMA: &str = "atp-transfer-plan-v1";
 
 /// Schema version for ATP plan execution reports
 pub const ATP_PLAN_EXECUTION_REPORT_SCHEMA: &str = "atp-plan-execution-report-v1";
+
+const ATP_RESUME_JOURNAL_POINTER_SCHEMA: &str = "asupersync.atp.resume-journal.v1";
 
 /// Errors that can occur during planning
 #[derive(Debug, thiserror::Error)]
@@ -144,8 +147,12 @@ pub struct ResumeState {
     pub resume_token: Option<String>,
     /// Bytes already transferred
     pub bytes_completed: u64,
+    /// Bytes that still need to be transferred
+    pub bytes_remaining: u64,
     /// Chunks already verified
     pub chunks_completed: u64,
+    /// First chunk that must be resent or verified during resume
+    pub next_chunk_index: u64,
 }
 
 /// Cache hit analysis
@@ -409,6 +416,52 @@ fn completed_bytes_for_path(path: &Path) -> Result<u64, PlannerError> {
     }
 }
 
+fn metadata_modified_nanos(path: &Path) -> u128 {
+    std::fs::symlink_metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn resume_journal_pointer(
+    source_path: &Path,
+    destination_path: &Path,
+    object_graph: &ObjectGraphSummary,
+    chunk_size: u32,
+    bytes_completed: u64,
+    chunks_completed: u64,
+) -> String {
+    let material = format!(
+        "{schema}\nsource={source}\ndestination={destination}\nsource_objects={objects}\nsource_files={files}\nsource_dirs={dirs}\nsource_total_bytes={total}\ncompleted_bytes={completed}\nremaining_bytes={remaining}\nchunk_size={chunk_size}\ncompleted_chunks={chunks}\ndestination_mtime_nanos={mtime}\n",
+        schema = ATP_RESUME_JOURNAL_POINTER_SCHEMA,
+        source = source_path.display(),
+        destination = destination_path.display(),
+        objects = object_graph.object_count,
+        files = object_graph.file_count,
+        dirs = object_graph.directory_count,
+        total = object_graph.total_bytes,
+        completed = bytes_completed,
+        remaining = object_graph.total_bytes.saturating_sub(bytes_completed),
+        chunks = chunks_completed,
+        mtime = metadata_modified_nanos(destination_path),
+    );
+    format!(
+        "journal://atp-resume/v1/{}",
+        sha256_hex(material.as_bytes())
+    )
+}
+
 impl AtpTransferPlanner {
     /// Create a new transfer planner
     pub fn new(config: PlannerConfig) -> Self {
@@ -452,7 +505,13 @@ impl AtpTransferPlanner {
             .await?;
 
         // Check resume state
-        let resume_state = self.check_resume_state(destination_path, &options).await?;
+        let resume_state = Self::check_resume_state(
+            source_path,
+            destination_path,
+            &object_graph,
+            chunking_profile.chunk_size,
+            &options,
+        )?;
 
         // Generate governance profile
         let governance_profile = self.generate_governance_profile(&options);
@@ -702,9 +761,11 @@ impl AtpTransferPlanner {
         })
     }
 
-    async fn check_resume_state(
-        &self,
+    fn check_resume_state(
+        source_path: &Path,
         destination_path: &PathBuf,
+        object_graph: &ObjectGraphSummary,
+        chunk_size: u32,
         options: &PlannerOptions,
     ) -> Result<ResumeState, PlannerError> {
         // Check for existing partial transfer
@@ -712,26 +773,40 @@ impl AtpTransferPlanner {
 
         let (bytes_completed, chunks_completed) = if resume_available {
             let completed = completed_bytes_for_path(destination_path)?;
-            let chunks = completed.div_ceil(u64::from(self.config.default_chunk_size.max(1)));
+            if completed > object_graph.total_bytes {
+                return Err(PlannerError::InvalidInput(format!(
+                    "Resume checkpoint for {} has {} completed bytes, which exceeds source object graph size {}",
+                    destination_path.display(),
+                    completed,
+                    object_graph.total_bytes
+                )));
+            }
+            let chunks = completed / u64::from(chunk_size.max(1));
             (completed, chunks)
         } else {
             (0, 0)
         };
+        let bytes_remaining = object_graph.total_bytes.saturating_sub(bytes_completed);
+        let next_chunk_index = chunks_completed;
 
         Ok(ResumeState {
             resume_available,
             resume_token: if resume_available {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                SystemTime::now().hash(&mut hasher);
-                destination_path.hash(&mut hasher);
-                Some(format!("resume_{:x}", hasher.finish() as u32))
+                Some(resume_journal_pointer(
+                    source_path,
+                    destination_path,
+                    object_graph,
+                    chunk_size,
+                    bytes_completed,
+                    chunks_completed,
+                ))
             } else {
                 None
             },
             bytes_completed,
+            bytes_remaining,
             chunks_completed,
+            next_chunk_index,
         })
     }
 

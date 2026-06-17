@@ -289,8 +289,10 @@ async fn test_plan_validation_success() {
         .unwrap();
 
     let warnings = planner.validate_plan(&cx, &plan).await.unwrap();
-    // Should have warnings about confidence but not errors
-    assert!(!warnings.is_empty());
+    assert!(
+        warnings.is_empty(),
+        "default direct plan should validate without confidence warnings: {warnings:?}"
+    );
 }
 
 #[tokio::test]
@@ -431,9 +433,11 @@ async fn test_resume_scenario() {
     let source_path = temp_dir.path().join("source.txt");
     let dest_path = temp_dir.path().join("destination.txt");
 
-    std::fs::write(&source_path, b"test content for resume").unwrap();
+    let source_bytes = b"test content for resume";
+    std::fs::write(&source_path, source_bytes).unwrap();
     // Create partial destination to simulate resume
-    std::fs::write(&dest_path, b"partial").unwrap();
+    let partial_bytes = b"partial";
+    std::fs::write(&dest_path, partial_bytes).unwrap();
 
     let options = PlannerOptions {
         allow_resume: true,
@@ -446,8 +450,120 @@ async fn test_resume_scenario() {
         .unwrap();
 
     assert!(plan.resume_state.resume_available);
-    assert!(plan.resume_state.resume_token.is_some());
-    assert!(plan.resume_state.bytes_completed > 0);
+    assert!(
+        plan.resume_state
+            .resume_token
+            .as_deref()
+            .is_some_and(|token| token.starts_with("journal://atp-resume/v1/"))
+    );
+    assert_eq!(
+        plan.resume_state.bytes_completed,
+        partial_bytes.len() as u64
+    );
+    assert_eq!(
+        plan.resume_state.bytes_remaining,
+        (source_bytes.len() - partial_bytes.len()) as u64
+    );
+    assert_eq!(plan.resume_state.chunks_completed, 0);
+    assert_eq!(plan.resume_state.next_chunk_index, 0);
+}
+
+#[tokio::test]
+async fn test_resume_token_is_stable_for_unchanged_checkpoint() {
+    let runtime = TestRuntime::new().unwrap();
+    let cx = runtime.root_cx();
+    let planner = AtpTransferPlanner::new_default();
+
+    let temp_dir = TempDir::new().unwrap();
+    let source_path = temp_dir.path().join("source.txt");
+    let dest_path = temp_dir.path().join("destination.txt");
+
+    std::fs::write(&source_path, b"stable source content for resume").unwrap();
+    std::fs::write(&dest_path, b"stable partial").unwrap();
+
+    let options = PlannerOptions {
+        allow_resume: true,
+        ..Default::default()
+    };
+
+    let first = planner
+        .plan_transfer(
+            &cx,
+            TransferType::Send,
+            &source_path,
+            &dest_path,
+            options.clone(),
+        )
+        .await
+        .unwrap();
+    let second = planner
+        .plan_transfer(&cx, TransferType::Send, &source_path, &dest_path, options)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first.resume_state.resume_token,
+        second.resume_state.resume_token
+    );
+}
+
+#[tokio::test]
+async fn test_resume_rejects_checkpoint_past_source_graph() {
+    let runtime = TestRuntime::new().unwrap();
+    let cx = runtime.root_cx();
+    let planner = AtpTransferPlanner::new_default();
+
+    let temp_dir = TempDir::new().unwrap();
+    let source_path = temp_dir.path().join("source.txt");
+    let dest_path = temp_dir.path().join("destination.txt");
+
+    std::fs::write(&source_path, b"small").unwrap();
+    std::fs::write(&dest_path, b"destination is larger than the source").unwrap();
+
+    let options = PlannerOptions {
+        allow_resume: true,
+        ..Default::default()
+    };
+
+    let error = planner
+        .plan_transfer(&cx, TransferType::Send, &source_path, &dest_path, options)
+        .await
+        .expect_err("resume checkpoint beyond the source graph must fail closed")
+        .to_string();
+
+    assert!(
+        error.contains("exceeds source object graph size"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_chunk_accounting_keeps_partial_chunk_unverified() {
+    let runtime = TestRuntime::new().unwrap();
+    let cx = runtime.root_cx();
+    let planner = AtpTransferPlanner::new(PlannerConfig::default());
+
+    let temp_dir = TempDir::new().unwrap();
+    let source_path = temp_dir.path().join("source.bin");
+    let dest_path = temp_dir.path().join("destination.bin");
+
+    std::fs::write(&source_path, vec![b's'; 600 * 1024]).unwrap();
+    std::fs::write(&dest_path, vec![b'd'; 64 * 1024 + 1]).unwrap();
+
+    let options = PlannerOptions {
+        allow_resume: true,
+        ..Default::default()
+    };
+
+    let plan = planner
+        .plan_transfer(&cx, TransferType::Send, &source_path, &dest_path, options)
+        .await
+        .unwrap();
+
+    assert_eq!(plan.chunking_profile.chunk_size, 64 * 1024);
+    assert_eq!(plan.resume_state.bytes_completed, 64 * 1024 + 1);
+    assert_eq!(plan.resume_state.chunks_completed, 1);
+    assert_eq!(plan.resume_state.next_chunk_index, 1);
 }
 
 #[tokio::test]
