@@ -1048,6 +1048,38 @@ pub async fn receive_once(
     receive_connection(cx, stream, peer, dest_dir, config, peer_id).await
 }
 
+/// RAII backstop that reclaims a receive staging directory if the
+/// `receive_connection` future is dropped before reaching one of its
+/// cooperative cleanup paths — for example when [`serve`] aborts an in-flight
+/// receive task on cancellation (`abort` drops the task future without polling
+/// it to a `return`). The cooperative exits remove the directory asynchronously
+/// and then [`StagingDirGuard::disarm`] this guard, so the synchronous reclaim
+/// here only fires on a hard future-drop. That is a rare, bounded best-effort
+/// cleanup (one `remove_dir_all` on a small per-transfer scratch dir), not a hot
+/// path, so a blocking host-boundary call in `Drop` is acceptable here.
+struct StagingDirGuard {
+    dir: PathBuf,
+    armed: bool,
+}
+
+impl StagingDirGuard {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingDirGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
 /// Drive a single accepted connection through the receive protocol.
 pub async fn receive_connection(
     cx: &Cx,
@@ -1139,6 +1171,12 @@ pub async fn receive_connection(
     // Reclaim any leftover staging dir from a crashed prior attempt, then create.
     let _ = crate::fs::remove_dir_all(&staging_dir).await;
     crate::fs::create_dir_all(&staging_dir).await?;
+    // Reclaim the staging dir even if this future is dropped before reaching a
+    // cooperative cleanup path (e.g. `serve` aborting an in-flight receive task
+    // via `TaskHandle::abort`, which drops the future without polling it to a
+    // `return`). The cooperative exits below disarm this guard and remove the
+    // directory asynchronously; only a hard drop falls back to the guard.
+    let mut staging_guard = StagingDirGuard::new(staging_dir.clone());
 
     let mut states: Vec<StagedEntryReceive> = manifest
         .entries
@@ -1433,6 +1471,9 @@ pub async fn receive_connection(
     // Remove the staging directory: empty after a committed rename pass, or
     // still holding the rejected data after a verification failure.
     let _ = crate::fs::remove_dir_all(&staging_dir).await;
+    // Reclaimed on this cooperative path — the drop-guard backstop is no longer
+    // needed, so avoid a redundant synchronous remove when this scope ends.
+    staging_guard.disarm();
 
     let receipt = ReceiveReceipt {
         committed,
@@ -1558,7 +1599,12 @@ where
 {
     let mut consecutive_failures: u32 = 0;
     let max_active_connections = config.max_active_connections.max(1);
-    let capacity_wait = if config.accept_timeout.is_zero() {
+    // A zero `accept_timeout` makes `with_transport_timeout` return immediately,
+    // which would turn this accept loop into a CPU-burning busy-spin that never
+    // accepts a connection (the immediate `Timeout` is matched as "no pending
+    // connection" and loops). Clamp it to a sane default and use the same bounded
+    // wait for both the capacity backoff sleep and the accept call.
+    let accept_wait = if config.accept_timeout.is_zero() {
         DEFAULT_ACCEPT_TIMEOUT
     } else {
         config.accept_timeout
@@ -1571,11 +1617,11 @@ where
             return Ok(());
         }
         if active.len() >= max_active_connections {
-            crate::time::sleep(cx.now(), capacity_wait).await;
+            crate::time::sleep(cx.now(), accept_wait).await;
             continue;
         }
         let accept =
-            with_transport_timeout(cx, config.accept_timeout, "accept", listener.accept()).await;
+            with_transport_timeout(cx, accept_wait, "accept", listener.accept()).await;
         match accept {
             Ok((stream, peer)) => {
                 consecutive_failures = 0;
@@ -2002,5 +2048,35 @@ mod tests {
             h,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
+    }
+
+    #[test]
+    fn staging_dir_guard_reclaims_on_hard_drop_unless_disarmed() {
+        let base = std::env::temp_dir().join(format!("atp-staging-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // An armed guard reclaims the staging dir when dropped without a
+        // cooperative cleanup (the `serve`-abort / hard-future-drop path).
+        let armed = base.join("armed");
+        std::fs::create_dir_all(&armed).expect("create armed staging dir");
+        drop(StagingDirGuard::new(armed.clone()));
+        assert!(
+            !armed.exists(),
+            "armed StagingDirGuard must reclaim the staging dir on drop"
+        );
+
+        // A disarmed guard leaves the directory in place (the cooperative path
+        // already removed it asynchronously, so the backstop must not run).
+        let disarmed = base.join("disarmed");
+        std::fs::create_dir_all(&disarmed).expect("create disarmed staging dir");
+        let mut guard = StagingDirGuard::new(disarmed.clone());
+        guard.disarm();
+        drop(guard);
+        assert!(
+            disarmed.exists(),
+            "disarmed StagingDirGuard must leave the staging dir in place"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
