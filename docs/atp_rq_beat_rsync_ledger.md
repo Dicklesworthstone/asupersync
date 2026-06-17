@@ -135,8 +135,14 @@ to wire.
   performance evidence. Follow-up RCH validation (`cargo check --bench
   raptorq_large_k_profile --features criterion-benches`, build 29892352898236527 on vmi1152480)
   passed; the only warnings were peer-dirty ATP-RQ adaptive/loss imports outside this lane.
-  **Retry-condition:** rerun when RCH can complete the bench target build; then run the filtered
-  Criterion bench and append mean + cv_pct for each K.
+  A real filtered Criterion attempt (`cargo bench --bench raptorq_large_k_profile --features
+  criterion-benches e4_decode_vs_k_fixed_total_bytes`, build 29892530132746244 on vmi1152480)
+  failed before executing benchmarks because the concurrent `transport_rq/mod.rs` controller wiring
+  slice did not compile under the bench feature set: unresolved `CongestionController`,
+  `CongestionConfig`, `AtpLossDetector`, and `LossRecommendation` names. No E-4 timings or cv_pct
+  exist yet. **Retry-condition:** rerun after the RQ controller/loss wiring compiles under
+  `cargo bench --bench raptorq_large_k_profile --features criterion-benches`; then append mean +
+  cv_pct for each K.
 
 ### SCORE.1 ★ Honest cross-regime ATP-RQ vs rsync scoreboard harness
 - **Goal:** prove or falsify the user thesis, "beat tuned rsync over ANY connection, less memory,"
