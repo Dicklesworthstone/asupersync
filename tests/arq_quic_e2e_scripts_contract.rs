@@ -212,9 +212,40 @@ fn loopback_from_output_rejects_missing_receiver_rss_metric() {
 fn fleet_script_structure_validation_is_no_claim_and_deterministic() {
     let script_path = repo_root().join("scripts/run_arq_quic_fleet_e2e.sh");
     let script = std::fs::read_to_string(&script_path).expect("read fleet script");
+    let bench_script_path = repo_root().join("scripts/atp_quic_vs_rsync_benchmark.sh");
+    let bench_script =
+        std::fs::read_to_string(&bench_script_path).expect("read fleet bench script");
     assert!(
         script.contains(r#"export METHODS="atpquic""#),
         "fleet wrapper must force the H5-owned atpquic method instead of inheriting METHODS"
+    );
+    assert!(
+        bench_script.contains("RUN_ID"),
+        "fleet bench script must scope normal runs under a retained unique run id"
+    );
+    assert!(
+        bench_script.contains("artifacts/arq_quic_e2e"),
+        "fleet bench script must default local artifacts under artifacts/arq_quic_e2e"
+    );
+    assert!(
+        bench_script.contains("tcpdump"),
+        "G1 fleet runs must retain packet evidence when tcpdump is available"
+    );
+    assert!(
+        !bench_script.contains("-delete"),
+        "fleet bench script must not delete remote work-dir contents during normal runs"
+    );
+    assert!(
+        !bench_script.contains("rm -f"),
+        "fleet bench script must not remove prior receiver artifacts during normal runs"
+    );
+    assert!(
+        !bench_script.contains("rmdir "),
+        "fleet bench script must retain destination directories for inspection"
+    );
+    assert!(
+        !bench_script.contains("pkill -f"),
+        "fleet bench script must not terminate unrelated receiver processes to make a port clean"
     );
 
     let output = Command::new(repo_root().join("scripts/run_arq_quic_fleet_e2e.sh"))
@@ -232,6 +263,12 @@ fn fleet_script_structure_validation_is_no_claim_and_deterministic() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(r#""schema_version": "arq-quic-fleet-e2e-structure-v1""#));
     assert!(stdout.contains(r#""forced_methods": "atpquic""#));
+    assert!(stdout.contains(r#""local_default_root": "#));
+    assert!(stdout.contains(r#""remote_default_root": "/tmp/atp_bench/runs/<RUN_ID>""#));
+    assert!(stdout.contains(r#""packet_evidence": "#));
+    assert!(stdout.contains(r#""retained_remote_dst""#));
+    assert!(stdout.contains(r#""tcpdump_status""#));
+    assert!(stdout.contains("destination directories are retained"));
     assert!(stdout.contains("G1/G2 own two-machine evidence"));
 }
 

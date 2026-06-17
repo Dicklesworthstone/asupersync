@@ -23,6 +23,7 @@ Normal run requires the fleet benchmark environment:
 
 The run delegates to scripts/atp_quic_vs_rsync_benchmark.sh with METHODS=atpquic.
 G1/G2 own the actual two-machine execution and performance claims.
+Artifacts are retained under artifacts/arq_quic_e2e/<RUN_ID>/ unless OUTDIR is set.
 USAGE
 }
 
@@ -49,7 +50,20 @@ payload = {
     "script": str(root / "scripts/run_arq_quic_fleet_e2e.sh"),
     "delegates_to": str(bench),
     "required_env": ["SENDER", "RECEIVER", "RECEIVER_IP", "ATP_BIN_LOCAL"],
+    "optional_env": ["RUN_ID", "OUTDIR", "WR_BASE", "WR", "LOCAL_BASE", "LOCAL", "PORT", "SIZES"],
     "forced_methods": "atpquic",
+    "retained_artifacts": {
+        "local_default_root": str(root / "artifacts/arq_quic_e2e"),
+        "remote_default_root": "/tmp/atp_bench/runs/<RUN_ID>",
+        "packet_evidence": "receiver-side tcpdump_<method>_<label>.pcap when tcpdump is available",
+        "receiver_logs": "recv_<method>_<label>.log copied into OUTDIR when available",
+        "result_fields": ["retained_remote_dst", "retained_receiver_log", "tcpdump_status", "tcpdump_pcap"]
+    },
+    "no_delete_contract": [
+        "normal runs use a unique RUN_ID-scoped remote work directory",
+        "destination directories are retained for inspection",
+        "payload and receiver artifacts are retained instead of being cleaned during the run"
+    ],
     "no_claim_boundaries": [
         "structure validation does not execute the fleet transfer",
         "G1/G2 own two-machine evidence and benchmark claims",
@@ -67,6 +81,10 @@ PY
             fi
         done
         export METHODS="atpquic"
+        RUN_ID="${RUN_ID:-arq_quic_fleet_$(date -u +%Y%m%dT%H%M%SZ)_$$}"
+        export RUN_ID
+        OUTDIR="${OUTDIR:-$PROJECT_ROOT/artifacts/arq_quic_e2e/$RUN_ID}"
+        export OUTDIR
         exec "$BENCH_SCRIPT" all
         ;;
     *)
