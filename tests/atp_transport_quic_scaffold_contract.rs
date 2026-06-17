@@ -32,6 +32,7 @@ use asupersync::net::quic_native::{
     ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionConfig,
 };
 use asupersync::observability::{DiagnosticContext, LogCollector, LogLevel};
+use asupersync::security::SecurityContext;
 use asupersync::types::Budget;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -689,6 +690,64 @@ fn assert_transport_start_trace(collector: &LogCollector, operation: &str, peer_
                 .is_some_and(|value| !value.is_empty()),
             "transport start trace must include non-empty {required}"
         );
+    }
+}
+
+#[test]
+fn authenticated_start_trace_omits_key_material() {
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 9));
+    let temp = tempfile::tempdir().expect("temp dir");
+    let missing = temp.path().join("trace-authenticated-missing.bin");
+    let config = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(0xA7_51));
+
+    let result: Result<SendReport, QuicTransportError> =
+        block_on(send_path(&cx, addr, &missing, config, "sender"));
+    assert!(
+        matches!(result, Err(QuicTransportError::Source(_))),
+        "authenticated missing source should fail after start trace, got {result:?}"
+    );
+
+    let entries = collector.peek();
+    let start = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.transport.start")
+        .expect("transport start trace entry");
+    assert_transport_start_trace(&collector, "send_path", "sender");
+
+    for forbidden_field in [
+        "symbol_auth_context",
+        "auth_key",
+        "authkey",
+        "private_key",
+        "key_material",
+        "secret",
+    ] {
+        assert_eq!(
+            start.get_field(forbidden_field),
+            None,
+            "transport start trace must not expose sensitive field {forbidden_field}"
+        );
+    }
+
+    for (key, value) in start.fields() {
+        let rendered = format!("{key}={value}").to_ascii_lowercase();
+        for forbidden_fragment in [
+            "symbol_auth_context",
+            "authkey",
+            "private_key",
+            "key_material",
+            "secret",
+        ] {
+            assert!(
+                !rendered.contains(forbidden_fragment),
+                "transport start trace leaked sensitive fragment {forbidden_fragment}: {rendered}"
+            );
+        }
     }
 }
 
