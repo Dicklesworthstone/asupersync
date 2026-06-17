@@ -109,7 +109,15 @@ impl TransportParameterId {
         }
     }
 
-    /// Check if parameter is forbidden for clients
+    /// Whether a **client** is forbidden from SENDING this parameter.
+    ///
+    /// [`TransportParameters::validate`] checks an endpoint's OWN outgoing
+    /// parameters before the handshake (its `is_server` argument means "am I the
+    /// server", not "am I validating the peer"), so this answers "may a client
+    /// send it?". Per RFC 9000 §18.2 the four server-only parameters
+    /// (`stateless_reset_token`, `preferred_address`,
+    /// `original_destination_connection_id`, `retry_source_connection_id`) MUST
+    /// NOT be sent by a client.
     pub fn is_forbidden_for_client(self) -> bool {
         match self {
             Self::StatelessResetToken
@@ -120,7 +128,18 @@ impl TransportParameterId {
         }
     }
 
-    /// Check if parameter is forbidden for servers
+    /// Whether a **server** is forbidden from SENDING this parameter.
+    ///
+    /// A server may send every defined transport parameter (the server-only
+    /// parameters in [`Self::is_forbidden_for_client`] are exactly the ones only
+    /// a server sends), so none are forbidden for it — this intentionally
+    /// answers `false` for every parameter. The two explicit arms are kept only
+    /// for readability against `is_forbidden_for_client`.
+    ///
+    /// NOTE (do not "fix" this to return `true` for those arms): this validates
+    /// an endpoint's own OUTGOING parameters. Rejecting a *peer's* forbidden
+    /// parameters on receipt is a separate, not-yet-wired concern that would use
+    /// the inverted sets; see `asupersync-wstqjc`.
     pub fn is_forbidden_for_server(self) -> bool {
         match self {
             Self::OriginalDestinationConnectionId | Self::RetrySourceConnectionId => false,
