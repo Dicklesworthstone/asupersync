@@ -17,6 +17,8 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use asupersync::cx::Cx;
 use asupersync::net::atp::transport_quic::native_link::{
@@ -26,7 +28,9 @@ use asupersync::net::atp::transport_quic::{QuicConfig, send_path};
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
 use asupersync::security::SecurityContext;
 use futures_lite::future::{block_on, zip};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::time_provider::TimeProvider;
+use rustls::{ClientConfig, RootCertStore};
 
 // Canonical CA + leaf chain (P-256), leaf has SAN DNS:localhost / IP:127.0.0.1
 // and the serverAuth EKU rustls-webpki requires; the client trusts the CA, so
@@ -63,6 +67,20 @@ RwAwRAIgFLcs0Qdsy190QfKzpvLj28srfpw6wZ2PURF20N+twm8CIFZMWnG65VsE\n\
 WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 -----END CERTIFICATE-----\n";
 
+// 2127-01-01T00:00:00Z, after LEAF_CERT_PEM's 2126-05-23 notAfter.
+const AFTER_LEAF_CERT_EXPIRY_UNIX_SECS: u64 = 4_954_435_200;
+
+#[derive(Debug)]
+struct FixedTimeProvider {
+    now: UnixTime,
+}
+
+impl TimeProvider for FixedTimeProvider {
+    fn current_time(&self) -> Option<UnixTime> {
+        Some(self.now)
+    }
+}
+
 fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
     let mut reader = std::io::BufReader::new(pem.as_bytes());
     rustls_pemfile::certs(&mut reader)
@@ -86,6 +104,30 @@ fn client_tls() -> QuicClientTls {
     }
 }
 
+fn client_config_at_time(
+    roots: Vec<CertificateDer<'static>>,
+    alpn: Vec<Vec<u8>>,
+    unix_secs: u64,
+) -> Arc<ClientConfig> {
+    let mut root_store = RootCertStore::empty();
+    for cert in roots {
+        root_store.add(cert).expect("root certificate must parse");
+    }
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let fixed_time = UnixTime::since_unix_epoch(Duration::from_secs(unix_secs));
+    let mut config = ClientConfig::builder_with_details(
+        provider,
+        Arc::new(FixedTimeProvider { now: fixed_time }),
+    )
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("client protocol versions")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+    config.alpn_protocols = alpn;
+    Arc::new(config)
+}
+
 fn server_tls() -> QuicServerTls {
     let alpn = vec![ATP_QUIC_ALPN.to_vec()];
     QuicServerTls {
@@ -102,7 +144,7 @@ struct Configs {
 
 // Loopback transfers complete in well under a second; tight timeouts keep any
 // regression from hanging the suite for the 60s production default.
-const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn tighten_timeouts(cfg: &mut QuicConfig) {
     cfg.idle_timeout = TEST_TIMEOUT;
@@ -335,13 +377,13 @@ fn real_udp_quic_send_fails_closed_when_client_distrusts_server() {
         config: client_config(Vec::new(), alpn).expect("client config builds w/o roots"),
     });
     // Short handshake timeout so the doomed handshake fails fast.
-    send.handshake_timeout = std::time::Duration::from_secs(5);
-    send.accept_timeout = std::time::Duration::from_secs(5);
+    send.handshake_timeout = Duration::from_secs(5);
+    send.accept_timeout = Duration::from_secs(5);
 
     let mut recv = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(1));
     recv.server_tls = Some(server_tls());
-    recv.accept_timeout = std::time::Duration::from_secs(5);
-    recv.handshake_timeout = std::time::Duration::from_secs(5);
+    recv.accept_timeout = Duration::from_secs(5);
+    recv.handshake_timeout = Duration::from_secs(5);
 
     assert_send_fails_closed_before_commit(send, recv, "untrusted-root.bin");
 }
@@ -356,13 +398,39 @@ fn real_udp_quic_send_fails_closed_on_wrong_server_name() {
         server_name: ServerName::try_from("not-localhost.example").expect("server name"),
         config: client_config(vec![parse_one_cert(CA_CERT_PEM)], alpn).expect("client config"),
     });
-    send.handshake_timeout = std::time::Duration::from_secs(5);
-    send.accept_timeout = std::time::Duration::from_secs(5);
+    send.handshake_timeout = Duration::from_secs(5);
+    send.accept_timeout = Duration::from_secs(5);
 
     let mut recv = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(2));
     recv.server_tls = Some(server_tls());
-    recv.accept_timeout = std::time::Duration::from_secs(5);
-    recv.handshake_timeout = std::time::Duration::from_secs(5);
+    recv.accept_timeout = Duration::from_secs(5);
+    recv.handshake_timeout = Duration::from_secs(5);
 
     assert_send_fails_closed_before_commit(send, recv, "wrong-hostname.bin");
+}
+
+#[test]
+fn real_udp_quic_send_fails_closed_on_expired_server_certificate() {
+    // This trusts the CA and uses the correct SAN (`localhost`), but advances
+    // rustls' WebPKI clock past the leaf's notAfter. The production send_path
+    // path must fail closed on certificate expiry before committing bytes.
+    let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+    let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(3));
+    send.client_tls = Some(QuicClientTls {
+        server_name: ServerName::try_from("localhost").expect("server name"),
+        config: client_config_at_time(
+            vec![parse_one_cert(CA_CERT_PEM)],
+            alpn,
+            AFTER_LEAF_CERT_EXPIRY_UNIX_SECS,
+        ),
+    });
+    send.handshake_timeout = Duration::from_secs(5);
+    send.accept_timeout = Duration::from_secs(5);
+
+    let mut recv = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(3));
+    recv.server_tls = Some(server_tls());
+    recv.accept_timeout = Duration::from_secs(5);
+    recv.handshake_timeout = Duration::from_secs(5);
+
+    assert_send_fails_closed_before_commit(send, recv, "expired-cert.bin");
 }
