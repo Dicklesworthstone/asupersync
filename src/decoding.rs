@@ -8,7 +8,7 @@
 
 use crate::error::{Error, ErrorKind};
 use crate::raptorq::decoder::{
-    DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol,
+    DecodeError as RaptorDecodeError, InactivationDecoder, RankStatus, ReceivedSymbol,
 };
 use crate::raptorq::systematic::{SystematicError, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
@@ -219,6 +219,10 @@ pub struct BlockStatus {
     pub symbols_received: usize,
     /// Estimated symbols needed for this block.
     pub symbols_needed: usize,
+    /// Independent equation rank for this block, when computable.
+    pub rank: Option<usize>,
+    /// Additional independent equations required for full rank, when computable.
+    pub rank_deficit: Option<usize>,
     /// Block state.
     pub state: BlockStateKind,
 }
@@ -589,11 +593,14 @@ impl DecodingPipeline {
         let symbols_needed = progress.k.map_or(0, |k| {
             required_symbols(k, self.config.repair_overhead, self.config.min_overhead)
         });
+        let rank_status = self.block_rank_status(sbn);
 
         Some(BlockStatus {
             sbn,
             symbols_received: progress.total(),
             symbols_needed,
+            rank: rank_status.map(|status| status.rank),
+            rank_deficit: rank_status.map(|status| status.deficit),
             state,
         })
     }
@@ -760,6 +767,12 @@ impl DecodingPipeline {
         self.block_plans
             .as_ref()
             .and_then(|plans| plans.iter().find(|plan| plan.sbn == sbn))
+    }
+
+    fn block_rank_status(&self, sbn: u8) -> Option<RankStatus> {
+        let block_plan = self.block_plan(sbn)?.clone();
+        let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
+        rank_status_for_block(&block_plan, &symbols, usize::from(self.config.symbol_size)).ok()
     }
 
     /// Returns missing systematic source symbols for incomplete blocks.
@@ -945,29 +958,15 @@ fn sum_required_symbols(plans: &[BlockPlan], overhead: f64, min_overhead: usize)
     })
 }
 
-#[allow(clippy::too_many_lines)]
-fn decode_block(
+fn received_symbols_for_block(
     plan: &BlockPlan,
     symbols: &[Symbol],
-    symbol_size: usize,
-) -> Result<Vec<Symbol>, DecodingError> {
+    decoder: &InactivationDecoder,
+) -> Result<Vec<ReceivedSymbol>, DecodingError> {
     let k = plan.k;
-    if symbols.len() < k {
-        return Err(DecodingError::InsufficientSymbols {
-            received: symbols.len(),
-            needed: k,
-        });
-    }
-
-    let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
-    let block_seed = seed_for_block(object_id, plan.sbn);
-    let decoder = InactivationDecoder::new(k, symbol_size, block_seed);
-
-    // 1. Start with constraint symbols (LDPC + HDPC)
     let mut received = decoder.constraint_symbols();
     received.reserve(symbols.len());
 
-    // 2. Add received symbols (Source + Repair)
     for symbol in symbols {
         match symbol.kind() {
             SymbolKind::Source => {
@@ -1008,6 +1007,95 @@ fn decode_block(
             }
         }
     }
+
+    Ok(received)
+}
+
+fn rank_status_for_block(
+    plan: &BlockPlan,
+    symbols: &[Symbol],
+    symbol_size: usize,
+) -> Result<RankStatus, DecodingError> {
+    if plan.k == 0 {
+        return Ok(RankStatus {
+            rank: 0,
+            columns: 0,
+            deficit: 0,
+        });
+    }
+
+    let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
+    let block_seed = seed_for_block(object_id, plan.sbn);
+    let decoder = InactivationDecoder::new(plan.k, symbol_size, block_seed);
+    let received = received_symbols_for_block(plan, symbols, &decoder)?;
+    decoder.rank_status(&received).map_err(|err| match err {
+        RaptorDecodeError::SymbolSizeMismatch { expected, actual } => {
+            DecodingError::SymbolSizeMismatch {
+                expected: u16::try_from(expected).unwrap_or(u16::MAX),
+                actual,
+            }
+        }
+        RaptorDecodeError::SymbolEquationArityMismatch {
+            esi,
+            columns,
+            coefficients,
+        } => DecodingError::InconsistentMetadata {
+            sbn: plan.sbn,
+            details: format!(
+                "symbol {esi} has mismatched equation vectors: columns={columns}, coefficients={coefficients}"
+            ),
+        },
+        RaptorDecodeError::ColumnIndexOutOfRange {
+            esi,
+            column,
+            max_valid,
+        } => DecodingError::InconsistentMetadata {
+            sbn: plan.sbn,
+            details: format!(
+                "symbol {esi} references out-of-range column {column} (valid < {max_valid})"
+            ),
+        },
+        RaptorDecodeError::SourceEsiOutOfRange { esi, max_valid } => {
+            DecodingError::InconsistentMetadata {
+                sbn: plan.sbn,
+                details: format!(
+                    "source symbol {esi} falls outside the systematic domain (valid < {max_valid})"
+                ),
+            }
+        }
+        RaptorDecodeError::InvalidSourceSymbolEquation {
+            esi,
+            expected_column,
+        } => DecodingError::InconsistentMetadata {
+            sbn: plan.sbn,
+            details: format!(
+                "source symbol {esi} must use the identity equation for column {expected_column}"
+            ),
+        },
+        other => DecodingError::MatrixInversionFailed {
+            reason: format!("{other:?}"),
+        },
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn decode_block(
+    plan: &BlockPlan,
+    symbols: &[Symbol],
+    symbol_size: usize,
+) -> Result<Vec<Symbol>, DecodingError> {
+    let k = plan.k;
+    if symbols.len() < k {
+        return Err(DecodingError::InsufficientSymbols {
+            received: symbols.len(),
+            needed: k,
+        });
+    }
+
+    let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
+    let block_seed = seed_for_block(object_id, plan.sbn);
+    let decoder = InactivationDecoder::new(k, symbol_size, block_seed);
+    let received = received_symbols_for_block(plan, symbols, &decoder)?;
 
     let result = match decoder.decode(&received) {
         Ok(result) => result,
@@ -2275,6 +2363,15 @@ mod tests {
             "symbols_received",
             expected_received,
             received
+        );
+        let rank_is_available = status.rank.is_some();
+        crate::assert_with_log!(rank_is_available, "rank available", true, rank_is_available);
+        let rank_deficit_positive = status.rank_deficit.is_some_and(|deficit| deficit > 0);
+        crate::assert_with_log!(
+            rank_deficit_positive,
+            "rank_deficit positive",
+            true,
+            rank_deficit_positive
         );
         crate::test_complete!("block_status_collecting_after_partial_feed");
     }

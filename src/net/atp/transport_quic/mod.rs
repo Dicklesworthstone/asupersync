@@ -2968,12 +2968,17 @@ fn block_repair_requests(
                 if status.state == BlockStateKind::Decoded || status.symbols_needed == 0 {
                     None
                 } else {
-                    Some(
-                        status
-                            .symbols_needed
-                            .saturating_sub(status.symbols_received)
-                            .max(1),
-                    )
+                    status
+                        .rank_deficit
+                        .filter(|deficit| *deficit > 0)
+                        .or_else(|| {
+                            Some(
+                                status
+                                    .symbols_needed
+                                    .saturating_sub(status.symbols_received)
+                                    .max(1),
+                            )
+                        })
                 }
             });
             let mut deficit = status_deficit

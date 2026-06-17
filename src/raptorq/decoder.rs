@@ -378,6 +378,17 @@ pub struct DecodeResult {
     pub stats: DecodeStats,
 }
 
+/// Linear-rank summary for a received block equation set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RankStatus {
+    /// Independent equation rows in the full decoder system.
+    pub rank: usize,
+    /// Intermediate-symbol columns that must be solved.
+    pub columns: usize,
+    /// Additional independent equations required for full rank.
+    pub deficit: usize,
+}
+
 /// Result of decoding with proof artifact.
 #[derive(Debug)]
 pub struct DecodeResultWithProof {
@@ -1686,6 +1697,24 @@ impl InactivationDecoder {
         })
     }
 
+    /// Compute the current GF(256) equation rank without solving RHS data.
+    ///
+    /// The returned deficit mirrors the decoder's full system shape: caller-supplied
+    /// constraint/received rows plus the same implicit K..K' padding rows that
+    /// [`Self::decode`] synthesizes. A deficit of zero means the equation matrix
+    /// is full-rank; it does not by itself verify RHS consistency.
+    pub fn rank_status(&self, symbols: &[ReceivedSymbol]) -> Result<RankStatus, DecodeError> {
+        self.validate_rank_input(symbols)?;
+        let state = self.build_state(symbols);
+        let columns = self.params.l;
+        let rank = equation_rank(&state.equations, columns);
+        Ok(RankStatus {
+            rank,
+            columns,
+            deficit: columns.saturating_sub(rank),
+        })
+    }
+
     /// Decode using the bounded wavefront pipeline.
     ///
     /// Instead of sequential assembly→peel→solve, this pipeline fuses
@@ -2927,6 +2956,59 @@ impl InactivationDecoder {
         assert!((esi as usize) < self.params.k, "source ESI must be < K");
         self.systematic_equation(esi)
     }
+
+    fn validate_rank_input(&self, symbols: &[ReceivedSymbol]) -> Result<(), DecodeError> {
+        let k = self.params.k;
+        let l = self.params.l;
+        let symbol_size = self.params.symbol_size;
+
+        for sym in symbols {
+            if sym.data.len() != symbol_size {
+                return Err(DecodeError::SymbolSizeMismatch {
+                    expected: symbol_size,
+                    actual: sym.data.len(),
+                });
+            }
+            if sym.columns.len() != sym.coefficients.len() {
+                return Err(DecodeError::SymbolEquationArityMismatch {
+                    esi: sym.esi,
+                    columns: sym.columns.len(),
+                    coefficients: sym.coefficients.len(),
+                });
+            }
+            if sym.is_source {
+                let esi = sym.esi as usize;
+                if esi >= k {
+                    return Err(DecodeError::SourceEsiOutOfRange {
+                        esi: sym.esi,
+                        max_valid: k,
+                    });
+                }
+                let (expected_cols, expected_coefs) = self.source_equation(sym.esi);
+                let derive_canonical_from_esi =
+                    sym.columns.is_empty() && sym.coefficients.is_empty();
+                let canonical_equation =
+                    sym.columns == expected_cols && sym.coefficients == expected_coefs;
+                if !derive_canonical_from_esi && !canonical_equation {
+                    return Err(DecodeError::InvalidSourceSymbolEquation {
+                        esi: sym.esi,
+                        expected_column: esi,
+                    });
+                }
+            }
+            for &column in &sym.columns {
+                if column >= l {
+                    return Err(DecodeError::ColumnIndexOutOfRange {
+                        esi: sym.esi,
+                        column,
+                        max_valid: l,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn first_mismatch_byte(expected: &[u8], actual: &[u8]) -> Option<usize> {
@@ -2934,6 +3016,40 @@ fn first_mismatch_byte(expected: &[u8], actual: &[u8]) -> Option<usize> {
         .iter()
         .zip(actual.iter())
         .position(|(expected, actual)| expected != actual)
+}
+
+fn equation_rank(equations: &[Equation], column_count: usize) -> usize {
+    let mut basis = vec![None::<Vec<Gf256>>; column_count];
+    let mut rank = 0usize;
+
+    for equation in equations {
+        let mut row = vec![Gf256::ZERO; column_count];
+        for &(col_idx, coefficient) in &equation.terms {
+            row[col_idx] += coefficient;
+        }
+
+        for pivot in 0..column_count {
+            if row[pivot].is_zero() {
+                continue;
+            }
+            if let Some(basis_row) = basis[pivot].as_ref() {
+                let factor = row[pivot];
+                for (col_idx, value) in row.iter_mut().enumerate().skip(pivot) {
+                    *value += basis_row[col_idx] * factor;
+                }
+            } else {
+                let inv = row[pivot].inv();
+                for value in row.iter_mut().skip(pivot) {
+                    *value *= inv;
+                }
+                basis[pivot] = Some(row);
+                rank += 1;
+                break;
+            }
+        }
+    }
+
+    rank
 }
 
 fn rebuild_dense_matrix_from_equations(
@@ -3228,6 +3344,41 @@ mod tests {
         );
 
         assert_eq!(equation.terms, vec![(8, Gf256::ONE)]);
+    }
+
+    #[test]
+    fn equation_rank_counts_independent_rows_only() {
+        let equations = vec![
+            Equation::new(vec![0], vec![Gf256::ONE]),
+            Equation::new(vec![1], vec![Gf256::ONE]),
+            Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::ONE]),
+            Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::ONE]),
+        ];
+
+        assert_eq!(equation_rank(&equations, 3), 2);
+    }
+
+    #[test]
+    fn rank_status_tracks_missing_source_symbol_deficit() {
+        let decoder = InactivationDecoder::new(4, 8, 11);
+        let mut symbols = decoder.constraint_symbols();
+        symbols.extend((0..3).map(|esi| ReceivedSymbol::source(esi, vec![esi as u8; 8])));
+
+        let partial = decoder
+            .rank_status(&symbols)
+            .expect("partial source set has rank status");
+        assert_eq!(
+            partial.columns.saturating_sub(partial.rank),
+            partial.deficit
+        );
+        assert_eq!(partial.deficit, 1);
+
+        symbols.push(ReceivedSymbol::source(3, vec![3u8; 8]));
+        let complete = decoder
+            .rank_status(&symbols)
+            .expect("complete source set has rank status");
+        assert_eq!(complete.deficit, 0);
+        assert_eq!(complete.rank, complete.columns);
     }
 
     use crate::raptorq::systematic::SystematicEncoder;
