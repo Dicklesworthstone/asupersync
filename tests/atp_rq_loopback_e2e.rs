@@ -9,8 +9,9 @@
 //! closed. This is the regression wall for the fast/robust transport.
 #![allow(missing_docs)]
 
+use std::io::{Read as _, Write as _};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
@@ -20,6 +21,9 @@ use asupersync::net::atp::transport_rq::{
     ReceiveReport, RqConfig, RqError, SendReport, receive_once, send_path,
 };
 use asupersync::runtime::RuntimeBuilder;
+
+const PROFILE_TRANSFER_BYTES: usize = 1024 * 1024 * 1024;
+const PROFILE_PEAK_RSS_GROWTH_CEILING: u64 = 64 * 1024 * 1024;
 
 fn unique_tmp(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -40,6 +44,74 @@ fn test_config() -> RqConfig {
         ..RqConfig::default()
     }
     .allow_unauthenticated_for_trusted_transport()
+}
+
+fn profile_config() -> RqConfig {
+    RqConfig {
+        symbol_size: 60 * 1024,
+        max_block_size: 8 * 1024 * 1024,
+        repair_overhead: 1.0,
+        udp_fanout: 1,
+        max_transfer_bytes: PROFILE_TRANSFER_BYTES as u64,
+        round_tail_drain: std::time::Duration::from_millis(100),
+        source_retransmit_rounds: 16,
+        max_source_retransmit_requests: 0,
+        ..RqConfig::default()
+    }
+    .allow_unauthenticated_for_trusted_transport()
+}
+
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+fn write_payload_streaming(path: &Path, len: usize) {
+    let mut file = std::fs::File::create(path).expect("create profile source payload");
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut written = 0usize;
+    while written < len {
+        let take = buf.len().min(len - written);
+        for (j, byte) in buf.iter_mut().enumerate().take(take) {
+            *byte = ((written + j) % 251) as u8;
+        }
+        file.write_all(&buf[..take])
+            .expect("write profile source chunk");
+        written += take;
+    }
+    file.flush().expect("flush profile source payload");
+}
+
+fn files_are_identical(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let mut fa = std::io::BufReader::new(std::fs::File::open(a).expect("open source"));
+    let mut fb = std::io::BufReader::new(std::fs::File::open(b).expect("open destination"));
+    let mut ba = vec![0u8; 256 * 1024];
+    let mut bb = vec![0u8; 256 * 1024];
+    loop {
+        let na = fa.read(&mut ba).expect("read source");
+        let nb = fb.read(&mut bb).expect("read destination");
+        if na != nb {
+            return false;
+        }
+        if na == 0 {
+            return true;
+        }
+        if ba[..na] != bb[..nb] {
+            return false;
+        }
+    }
 }
 
 /// Spawn a receiver on its own runtime/thread; returns the bound control address
@@ -236,4 +308,63 @@ fn deterministic_merkle_root_across_runs() {
         "identical content must yield identical merkle root"
     );
     assert_eq!(s1.transfer_id, s2.transfer_id);
+}
+
+#[test]
+#[ignore = "1 GiB F2.2 RSS profile; run explicitly, not in default e2e suite"]
+fn one_gib_roundtrip_is_byte_identical_and_bounded_memory() {
+    let root = unique_tmp("profile");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let src_file = src_dir.join("one_gib.bin");
+    write_payload_streaming(&src_file, PROFILE_TRANSFER_BYTES);
+    println!("atp_rq_profile stage=source_written bytes={PROFILE_TRANSFER_BYTES}");
+
+    let config = profile_config();
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), config.clone());
+    let baseline_rss = peak_rss_bytes();
+    let send = run_sender(addr, src_file.clone(), config).expect("1 GiB send succeeds");
+    let recv = recv_handle
+        .join()
+        .expect("receiver thread")
+        .expect("1 GiB receive succeeds");
+    println!(
+        "atp_rq_profile stage=transfer_done symbols_sent={} symbols_accepted={} feedback_rounds={}",
+        send.symbols_sent, recv.symbols_accepted, recv.feedback_rounds
+    );
+    let after_rss = peak_rss_bytes();
+
+    assert!(send.receipt.committed, "sender receipt must be committed");
+    assert!(send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(send.bytes_sent, PROFILE_TRANSFER_BYTES as u64);
+    assert!(recv.committed);
+    assert_eq!(recv.bytes_received, PROFILE_TRANSFER_BYTES as u64);
+
+    let committed = dst_dir.join("one_gib.bin");
+    assert!(
+        files_are_identical(&src_file, &committed),
+        "1 GiB RQ payload must be byte-identical"
+    );
+    println!("atp_rq_profile stage=compare_done");
+
+    if let (Some(before), Some(after)) = (baseline_rss, after_rss) {
+        let growth = after.saturating_sub(before);
+        println!(
+            "atp_rq_profile rss: before_bytes={before} after_bytes={after} \
+             growth_bytes={growth} ceiling_bytes={PROFILE_PEAK_RSS_GROWTH_CEILING} \
+             transfer_bytes={PROFILE_TRANSFER_BYTES}"
+        );
+        assert!(
+            growth < PROFILE_PEAK_RSS_GROWTH_CEILING,
+            "peak RSS grew by {growth} bytes during a {PROFILE_TRANSFER_BYTES}-byte RQ transfer \
+             (before {before}, after {after}, ceiling {PROFILE_PEAK_RSS_GROWTH_CEILING}); \
+             transport_rq must stream source blocks and staged output instead of buffering entries"
+        );
+    }
+
+    // Keep artifacts for forensics; do not delete agent-owned test output.
+    let _ = root;
 }

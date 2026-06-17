@@ -49,7 +49,7 @@
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -375,6 +375,11 @@ struct Hello {
     max_block_size: u64,
     #[serde(default)]
     symbol_auth: bool,
+    /// Total payload bytes of the transfer. The receiver sizes its UDP recv buffer to absorb the
+    /// sender's (now parallel-encoded) symbol burst so the CPU-bound decode can drain it without
+    /// kernel drops. `serde(default)` keeps it tolerant of peers that do not send it.
+    #[serde(default)]
+    total_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1245,6 +1250,41 @@ struct EntryDecoder {
     file: Option<crate::fs::File>,
     bytes_written: u64,
     max_block_size: usize,
+    source_streaming: bool,
+    source_blocks: Vec<SourceBlockProgress>,
+}
+
+#[derive(Debug)]
+struct SourceBlockProgress {
+    start: u64,
+    len: usize,
+    k: usize,
+    received: Vec<bool>,
+    received_count: usize,
+    complete: bool,
+}
+
+/// Best-effort backstop for receive staging directories.
+///
+/// The RQ receiver creates a per-transfer staging directory before it starts
+/// accepting untrusted UDP symbols. Normal and error exits should not leave
+/// hidden payload fragments under the destination, and cancellation can drop the
+/// future before it reaches a cooperative return path. This mirrors the TCP
+/// transport's staging guard.
+struct RqStagingDirGuard {
+    dir: PathBuf,
+}
+
+impl RqStagingDirGuard {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+}
+
+impl Drop for RqStagingDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 // ─── Public API: send ────────────────────────────────────────────────────────
@@ -1330,6 +1370,7 @@ pub async fn send_path(
                 symbol_size: config.symbol_size,
                 max_block_size: config.max_block_size as u64,
                 symbol_auth: symbol_auth_enabled,
+                total_bytes,
             },
         )?)
         .await?;
@@ -1397,6 +1438,11 @@ pub async fn send_path(
     let mut dropper = 0u32;
     let mut feedback_rounds = 0u32;
 
+    // Parallel per-block encode is on by default, but only while the transfer is small enough that
+    // the receiver's recv buffer can absorb the burst (see PARALLEL_ENCODE_MAX_BYTES); larger
+    // transfers fall back to the sequential encode-paced spray to avoid overrunning the decoder.
+    let parallel_encode = total_bytes <= PARALLEL_ENCODE_MAX_BYTES;
+
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
     spray_round(
@@ -1411,6 +1457,7 @@ pub async fn send_path(
         &config,
         symbol_auth.as_ref(),
         /* with_source */ true,
+        parallel_encode,
     )
     .await?;
     rqtrace!("sender: round 0 sprayed, symbols_sent={symbols_sent}");
@@ -1486,6 +1533,7 @@ pub async fn send_path(
                         &config,
                         symbol_auth.as_ref(),
                         /* with_source */ false,
+                        parallel_encode,
                     )
                     .await?;
                 } else {
@@ -1543,6 +1591,55 @@ fn source_retransmit_request_limit(config: &RqConfig, feedback_round: u32) -> Op
     }
 }
 
+/// Above this total transfer size the parallel per-block encode is disabled and the sequential
+/// (encode-paced) spray is used instead. The receiver sizes its UDP recv buffer to absorb the
+/// parallel sender's burst, but that buffer is clamped near `net.core.rmem_max`; once a transfer
+/// exceeds what the buffer can hold, an unpaced parallel burst would overrun the CPU-bound decoder
+/// and trigger a feedback-round explosion. Below the cap the burst is absorbed and the encode
+/// parallelism is a pure win. Parallel decode + a rate-paced encode-ahead ring are what lift this
+/// cap for very large objects.
+const PARALLEL_ENCODE_MAX_BYTES: u64 = 112 * 1024 * 1024;
+
+/// Upper bound on the number of source blocks we fan out across the blocking pool in one round.
+/// Above this the manual block enumeration would risk diverging from the canonical encoder's `u8`
+/// SBN envelope, so we fall back to the sequential encode-paced spray.
+const MAX_RAPTORQ_SOURCE_BLOCKS: usize = 256;
+
+/// Whether a round-0 (`with_source`) spray should fan its per-block RaptorQ solves out across the
+/// runtime blocking pool. We parallelize only multi-block objects (a single/empty block would only
+/// pay pool-dispatch latency and lose the small-object latency win), only while `parallel_encode`
+/// is on (the transfer fits under [`PARALLEL_ENCODE_MAX_BYTES`]), and only within the `u8` SBN
+/// envelope.
+fn should_parallel_encode_source_blocks(block_count: usize, parallel_encode: bool) -> bool {
+    parallel_encode && block_count > 1 && block_count <= MAX_RAPTORQ_SOURCE_BLOCKS
+}
+
+/// Encode one RaptorQ source block (its `K` source symbols plus `repair_count` repair symbols) into
+/// an owned `Vec<Symbol>`.
+///
+/// Runs on the blocking pool for [`spray_round`]'s parallel per-block encode.
+/// [`EncodingPipeline::encode_single_block_with_repair`] preserves the exact object/SBN/ESI layout
+/// the sequential per-block path would have produced for `sbn`, so the emitted symbols are
+/// byte-identical regardless of which thread minted them — the speedup is a pure throughput
+/// isomorphism (decode is order-independent and the receiver verifies sha256 + merkle). The error
+/// is stringified because the closure crosses the `spawn_blocking` boundary, where the return type
+/// need only be `Send`.
+fn encode_block_symbols(
+    cfg: &crate::config::EncodingConfig,
+    object_id: ObjectId,
+    sbn: u8,
+    data: &[u8],
+    repair_count: usize,
+) -> Result<Vec<Symbol>, String> {
+    let pool = SymbolPool::new(PoolConfig::default());
+    let mut pipeline = EncodingPipeline::new(cfg.clone(), pool);
+    let mut out = Vec::new();
+    for encoded in pipeline.encode_single_block_with_repair(object_id, sbn, data, repair_count) {
+        out.push(encoded.map_err(|e| e.to_string())?.into_symbol());
+    }
+    Ok(out)
+}
+
 /// Spray one round of symbols for the `pending` entries across the UDP sockets.
 ///
 /// Round 0 (`with_source`) sends every block's source symbols plus optional
@@ -1564,6 +1661,7 @@ async fn spray_round(
     config: &RqConfig,
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
+    parallel_encode: bool,
 ) -> Result<(), RqError> {
     let batch = repair_batch_per_block(config);
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
@@ -1590,74 +1688,144 @@ async fn spray_round(
             continue;
         }
 
-        for block in blocks {
-            // The encoder's `Symbol` output owns its payload buffer, so buffers
-            // allocated from `SymbolPool` are consumed rather than returned to
-            // the pool. Keep the M=1 encode-ahead path unpooled; round sizing,
-            // UDP pacing, and receiver-side limits own memory pressure.
-            let pool = SymbolPool::new(PoolConfig::default());
-            let mut pipeline = EncodingPipeline::new(
-                crate::config::EncodingConfig {
-                    repair_overhead: config.repair_overhead,
-                    max_block_size: config.max_block_size,
-                    symbol_size: config.symbol_size,
-                    encoding_parallelism: 1,
-                    decoding_parallelism: 1,
-                },
-                pool,
-            );
-            let block_bytes = read_source_range(&enc.abs_path, block.start, block.len).await?;
-
-            if with_source {
-                for encoded in pipeline.encode_single_block_with_repair(
-                    enc.object_id,
-                    block.sbn,
-                    &block_bytes,
-                    target_repair,
-                ) {
-                    let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
-                    ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
-                    let produced = ring.pop().expect("M=1 ring drains immediately");
-                    send_symbol_datagram(
-                        cx,
-                        sockets,
-                        rr,
-                        symbols_sent,
-                        dropper,
-                        tag,
-                        produced.entry,
-                        &produced.symbol,
-                        config,
-                        symbol_auth,
-                    )
-                    .await?;
-                    debug_assert!(ring.is_empty());
+        let use_parallel_source_encode =
+            with_source && should_parallel_encode_source_blocks(blocks.len(), parallel_encode);
+        if use_parallel_source_encode {
+            // Parallel per-block encode on the runtime blocking pool. Each RaptorQ source block
+            // solves independently, so for multi-block objects we fan the K-symbol solves across
+            // cores instead of grinding them one-at-a-time on a single core (the measured
+            // large-file bottleneck: ~99% of one core for an 8 MiB / K=8192 block). Blocks are
+            // encoded and sprayed in SBN order, so the wire output is byte-identical to the
+            // sequential path — a pure throughput isomorphism (decode is order-independent; the
+            // receiver verifies sha256 + merkle). Bounded BATCHES (degree = host parallelism) cap
+            // peak symbol RAM at ~`par_batch` blocks; each batch is joined before the next
+            // checkpoint so a cancelled region drains every encode task (no strands).
+            let enc_cfg = crate::config::EncodingConfig {
+                repair_overhead: config.repair_overhead,
+                max_block_size: config.max_block_size,
+                symbol_size: config.symbol_size,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            };
+            let par_batch = std::thread::available_parallelism()
+                .map_or(4, std::num::NonZeroUsize::get)
+                .clamp(2, 64);
+            for window in blocks.chunks(par_batch) {
+                cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+                let mut handles = Vec::with_capacity(window.len());
+                for block in window {
+                    // Disk reads are cheap relative to the RaptorQ solve, so read each block's
+                    // source range here and hand the owned bytes to the pool task.
+                    let block_bytes =
+                        read_source_range(&enc.abs_path, block.start, block.len).await?;
+                    let object_id = enc.object_id;
+                    let sbn = block.sbn;
+                    let repair = target_repair;
+                    let cfg = enc_cfg.clone();
+                    let handle = cx
+                        .spawn_blocking(move |_child| {
+                            encode_block_symbols(&cfg, object_id, sbn, &block_bytes, repair)
+                        })
+                        .map_err(|e| RqError::Coding(format!("encode spawn failed: {e:?}")))?;
+                    handles.push(handle);
                 }
-            } else {
-                for encoded in pipeline.encode_single_block_repair_range(
-                    enc.object_id,
-                    block.sbn,
-                    &block_bytes,
-                    already,
-                    repair_count,
-                ) {
-                    let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
-                    ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
-                    let produced = ring.pop().expect("M=1 ring drains immediately");
-                    send_symbol_datagram(
-                        cx,
-                        sockets,
-                        rr,
-                        symbols_sent,
-                        dropper,
-                        tag,
-                        produced.entry,
-                        &produced.symbol,
-                        config,
-                        symbol_auth,
-                    )
-                    .await?;
-                    debug_assert!(ring.is_empty());
+                for mut handle in handles {
+                    let syms = match handle.join(cx).await {
+                        Ok(Ok(syms)) => syms,
+                        Ok(Err(e)) => return Err(RqError::Coding(e)),
+                        Err(join_err) => {
+                            return Err(RqError::Coding(format!(
+                                "encode task failed: {join_err:?}"
+                            )));
+                        }
+                    };
+                    for sym in &syms {
+                        send_symbol_datagram(
+                            cx,
+                            sockets,
+                            rr,
+                            symbols_sent,
+                            dropper,
+                            tag,
+                            enc.index,
+                            sym,
+                            config,
+                            symbol_auth,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        } else {
+            for block in &blocks {
+                // The encoder's `Symbol` output owns its payload buffer, so buffers
+                // allocated from `SymbolPool` are consumed rather than returned to
+                // the pool. Keep the M=1 encode-ahead path unpooled; round sizing,
+                // UDP pacing, and receiver-side limits own memory pressure.
+                let pool = SymbolPool::new(PoolConfig::default());
+                let mut pipeline = EncodingPipeline::new(
+                    crate::config::EncodingConfig {
+                        repair_overhead: config.repair_overhead,
+                        max_block_size: config.max_block_size,
+                        symbol_size: config.symbol_size,
+                        encoding_parallelism: 1,
+                        decoding_parallelism: 1,
+                    },
+                    pool,
+                );
+                let block_bytes = read_source_range(&enc.abs_path, block.start, block.len).await?;
+
+                if with_source {
+                    for encoded in pipeline.encode_single_block_with_repair(
+                        enc.object_id,
+                        block.sbn,
+                        &block_bytes,
+                        target_repair,
+                    ) {
+                        let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
+                        ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
+                        let produced = ring.pop().expect("M=1 ring drains immediately");
+                        send_symbol_datagram(
+                            cx,
+                            sockets,
+                            rr,
+                            symbols_sent,
+                            dropper,
+                            tag,
+                            produced.entry,
+                            &produced.symbol,
+                            config,
+                            symbol_auth,
+                        )
+                        .await?;
+                        debug_assert!(ring.is_empty());
+                    }
+                } else {
+                    for encoded in pipeline.encode_single_block_repair_range(
+                        enc.object_id,
+                        block.sbn,
+                        &block_bytes,
+                        already,
+                        repair_count,
+                    ) {
+                        let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
+                        ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
+                        let produced = ring.pop().expect("M=1 ring drains immediately");
+                        send_symbol_datagram(
+                            cx,
+                            sockets,
+                            rr,
+                            symbols_sent,
+                            dropper,
+                            tag,
+                            produced.entry,
+                            &produced.symbol,
+                            config,
+                            symbol_auth,
+                        )
+                        .await?;
+                        debug_assert!(ring.is_empty());
+                    }
                 }
             }
         }
@@ -1866,10 +2034,22 @@ pub async fn receive_connection(
         .parse()
         .map_err(|e| RqError::Source(format!("invalid UDP bind ip '{udp_bind_ip}': {e}")))?;
     let mut udp = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
-    // Large receive buffer absorbs the sender's symbol burst while the (CPU-bound)
-    // RaptorQ decode catches up, so kernel-side drops stay rare.
+    // Size the receive buffer to ABSORB the sender's symbol burst: the sender now encodes blocks in
+    // parallel (F3) and can spray them faster than the CPU-bound decode drains, so we set the buffer
+    // to the transfer size plus headroom, clamped to a generous cap (the kernel further caps at
+    // net.core.rmem_max). For a transfer that fits, the whole burst lands in the buffer with no
+    // kernel drops and the decoder drains at its own pace — turning the parallel encode into a
+    // wall-clock win instead of a feedback-round explosion. `total_bytes == 0` (older peers that did
+    // not advertise it) falls back to the prior fixed 16 MiB.
+    let recv_buf_bytes = if hello.total_bytes == 0 {
+        16 * 1024 * 1024
+    } else {
+        usize::try_from(hello.total_bytes.saturating_add(32 * 1024 * 1024))
+            .unwrap_or(usize::MAX)
+            .clamp(16 * 1024 * 1024, 120 * 1024 * 1024)
+    };
     let _ = udp.tune_buffers(UdpBufferConfig {
-        recv_buffer_bytes: Some(16 * 1024 * 1024),
+        recv_buffer_bytes: Some(recv_buf_bytes),
         send_buffer_bytes: None,
     });
     let udp_port = udp.local_addr()?.port();
@@ -1932,6 +2112,10 @@ pub async fn receive_connection(
         ))
     })?;
     let staging_dir = create_receive_staging_dir(dest_dir, &manifest.transfer_id).await?;
+    let _staging_guard = RqStagingDirGuard::new(staging_dir.clone());
+    let source_streaming = config.repair_overhead <= 1.0
+        && config.source_retransmit_rounds > 0
+        && !symbol_auth_enabled;
 
     // Per-entry decoders.
     let mut decoders: Vec<EntryDecoder> = manifest
@@ -1964,6 +2148,9 @@ pub async fn receive_connection(
                     params.symbols_per_block
                 );
             }
+            let source_blocks =
+                source_block_progress_for(e.size, receiver_max_block_size, symbol_size);
+            let entry_source_streaming = source_streaming && source_blocks.is_some();
             EntryDecoder {
                 index: e.index,
                 object_id,
@@ -1974,6 +2161,8 @@ pub async fn receive_connection(
                 file: None,
                 bytes_written: 0,
                 max_block_size: receiver_max_block_size,
+                source_streaming: entry_source_streaming,
+                source_blocks: source_blocks.unwrap_or_default(),
             }
         })
         .collect();
@@ -2142,10 +2331,68 @@ pub async fn receive_connection(
 /// Feed one received symbol into an entry's decoding pipeline. Returns true if
 /// the symbol was a well-formed candidate the pipeline accepted or considered
 /// (used only for the accepted-datagram counter, not correctness).
+fn source_block_progress_for(
+    size: u64,
+    max_block_size: usize,
+    symbol_size: u16,
+) -> Option<Vec<SourceBlockProgress>> {
+    if size == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut blocks = Vec::new();
+    let mut start = 0u64;
+    let block_size = u64::try_from(max_block_size.max(1)).unwrap_or(u64::MAX);
+    let symbol_size = u64::from(symbol_size.max(1));
+    while start < size {
+        if blocks.len() >= MAX_SOURCE_BLOCKS {
+            return None;
+        }
+        let remaining = size - start;
+        let len_u64 = remaining.min(block_size);
+        let len = usize::try_from(len_u64).ok()?;
+        let k = usize::try_from(len_u64.div_ceil(symbol_size)).ok()?.max(1);
+        blocks.push(SourceBlockProgress {
+            start,
+            len,
+            k,
+            received: vec![false; k],
+            received_count: 0,
+            complete: false,
+        });
+        start = start.checked_add(len_u64)?;
+    }
+    Some(blocks)
+}
+
 fn collect_source_requests(decoders: &[EntryDecoder], limit: usize) -> Vec<SourceSymbolRequest> {
     let mut requests = Vec::new();
     for decoder in decoders {
         if decoder.complete {
+            continue;
+        }
+        if decoder.source_streaming {
+            for (sbn, block) in decoder.source_blocks.iter().enumerate() {
+                if block.complete {
+                    continue;
+                }
+                for (esi, received) in block.received.iter().enumerate() {
+                    if *received {
+                        continue;
+                    }
+                    if limit != 0 && requests.len() >= limit {
+                        return requests;
+                    }
+                    let Ok(esi) = u32::try_from(esi) else {
+                        break;
+                    };
+                    requests.push(SourceSymbolRequest {
+                        entry: decoder.index,
+                        sbn: u8::try_from(sbn).unwrap_or(u8::MAX),
+                        esi,
+                    });
+                }
+            }
             continue;
         }
         let Some(pipeline) = decoder.pipeline.as_ref() else {
@@ -2187,6 +2434,9 @@ async fn feed_symbol(
         // (The final block's short tail is zero-padded by the encoder, so all
         // emitted symbols are symbol_size bytes.)
         return Ok(false);
+    }
+    if dec.source_streaming && parsed.kind.is_source() && parsed.auth_tag.is_none() {
+        return persist_source_symbol(dec, parsed, payload, symbol_size).await;
     }
     if dec.pipeline.is_none() {
         return Ok(false);
@@ -2284,6 +2534,87 @@ async fn feed_symbol(
     }
 }
 
+async fn persist_source_symbol(
+    dec: &mut EntryDecoder,
+    parsed: &ParsedDatagram,
+    payload: &[u8],
+    symbol_size: u16,
+) -> Result<bool, RqError> {
+    let sbn = usize::from(parsed.sbn);
+    if sbn >= dec.source_blocks.len() {
+        return Ok(false);
+    }
+    let Ok(esi) = usize::try_from(parsed.esi) else {
+        return Ok(false);
+    };
+    let symbol_size = usize::from(symbol_size);
+    let Some(within_block) = esi.checked_mul(symbol_size) else {
+        return Err(RqError::Coding(format!(
+            "entry {} source symbol offset overflow",
+            dec.index
+        )));
+    };
+
+    let (offset, take) = {
+        let block = &dec.source_blocks[sbn];
+        if block.complete || esi >= block.k || block.received[esi] || within_block >= block.len {
+            return Ok(false);
+        }
+        let take = symbol_size.min(block.len - within_block);
+        let offset = block
+            .start
+            .checked_add(u64::try_from(within_block).unwrap_or(u64::MAX))
+            .ok_or_else(|| {
+                RqError::Coding(format!("entry {} source symbol offset overflow", dec.index))
+            })?;
+        (offset, take)
+    };
+
+    ensure_entry_staging_file(dec).await?;
+    let Some(file) = dec.file.as_mut() else {
+        return Err(RqError::Frame(format!(
+            "internal: no staging file for entry {}",
+            dec.index
+        )));
+    };
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    file.write_all(&payload[..take]).await?;
+
+    let completed_now = {
+        let block = &mut dec.source_blocks[sbn];
+        if block.received[esi] {
+            return Ok(false);
+        }
+        block.received[esi] = true;
+        block.received_count = block.received_count.saturating_add(1);
+        if block.received_count == block.k {
+            block.complete = true;
+            dec.bytes_written = dec
+                .bytes_written
+                .checked_add(u64::try_from(block.len).unwrap_or(u64::MAX))
+                .ok_or_else(|| {
+                    RqError::Coding(format!("entry {} byte counter overflow", dec.index))
+                })?;
+            true
+        } else {
+            false
+        }
+    };
+
+    if completed_now {
+        rqtrace!(
+            "receiver: entry {} completed source-streamed block {}",
+            dec.index,
+            parsed.sbn
+        );
+    }
+    if dec.source_blocks.iter().all(|block| block.complete) {
+        dec.complete = true;
+        dec.pipeline = None;
+    }
+    Ok(true)
+}
+
 async fn ensure_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError> {
     if dec.file.is_some() {
         return Ok(());
@@ -2317,7 +2648,7 @@ async fn create_receive_staging_dir(
         let staging_dir = dest_dir.join(format!(".atp-rq-staging-{transfer_id}-{staging_seq}"));
         match crate::fs::create_dir(&staging_dir).await {
             Ok(()) => return Ok(staging_dir),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(err) => return Err(RqError::Io(err)),
         }
     }
@@ -2325,6 +2656,42 @@ async fn create_receive_staging_dir(
     Err(RqError::Frame(format!(
         "unable to create unique receiver staging directory for transfer {transfer_id}"
     )))
+}
+
+async fn reject_destination_symlink_prefix(base: &Path, out_path: &Path) -> Result<(), RqError> {
+    let rel = out_path.strip_prefix(base).map_err(|_| {
+        RqError::Source(format!(
+            "destination path {} is outside safe base {}",
+            out_path.display(),
+            base.display()
+        ))
+    })?;
+
+    let mut current = base.to_path_buf();
+    reject_existing_symlink(&current).await?;
+    for component in rel.components() {
+        let Component::Normal(component) = component else {
+            return Err(RqError::Source(format!(
+                "unsafe destination component in {}",
+                out_path.display()
+            )));
+        };
+        current.push(component);
+        reject_existing_symlink(&current).await?;
+    }
+    Ok(())
+}
+
+async fn reject_existing_symlink(path: &Path) -> Result<(), RqError> {
+    match crate::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_symlink() => Err(RqError::Source(format!(
+            "destination path crosses existing symlink: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(RqError::Io(err)),
+    }
 }
 
 async fn persist_decoded_block(
@@ -2455,12 +2822,25 @@ async fn verify_and_commit(
         // single safe component so a hostile (absolute / separator-bearing)
         // value cannot escape `dest_dir`.
         let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
-        for (e, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
-            let out_path = if manifest.is_directory {
-                join_relative(&base, &e.rel_path)?
-            } else {
-                base.clone()
-            };
+        let commit_targets: Vec<(&ManifestEntry, &PathBuf, PathBuf)> = manifest
+            .entries
+            .iter()
+            .zip(staging_paths.iter())
+            .map(|(entry, staging_path)| {
+                let out_path = if manifest.is_directory {
+                    join_relative(&base, &entry.rel_path)?
+                } else {
+                    base.clone()
+                };
+                Ok((entry, staging_path, out_path))
+            })
+            .collect::<Result<_, RqError>>()?;
+
+        for (_, _, out_path) in &commit_targets {
+            reject_destination_symlink_prefix(&base, out_path).await?;
+        }
+
+        for (_, staging_path, out_path) in commit_targets {
             if let Some(parent) = out_path.parent() {
                 crate::fs::create_dir_all(parent).await?;
             }
@@ -2494,9 +2874,7 @@ fn parse_symbol_datagram_payload(
     tag: u64,
     auth_required: bool,
 ) -> Option<(ParsedDatagram, &[u8])> {
-    let Some(parsed) = parse_symbol_header(&buf[..n], tag, auth_required) else {
-        return None;
-    };
+    let parsed = parse_symbol_header(&buf[..n], tag, auth_required)?;
     let start = parsed.header_len;
     let end = start + parsed.payload_len;
     if end > n {
@@ -2973,6 +3351,79 @@ mod tests {
                 "transfer_id {transfer_id:?} should fail closed"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rq_commit_rejects_existing_destination_symlink_prefix() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let outside = tempfile::tempdir().expect("outside dir");
+        let base = dest.path().join("payload");
+        std::fs::create_dir_all(&base).expect("create destination base");
+        std::os::unix::fs::symlink(outside.path(), base.join("link"))
+            .expect("create destination symlink");
+
+        let bytes = b"must stay inside the RQ destination".to_vec();
+        let staging_dir = dest.path().join(".atp-rq-test-staging");
+        std::fs::create_dir_all(&staging_dir).expect("create staging dir");
+        let staging_path = staging_dir.join("0");
+        std::fs::write(&staging_path, &bytes).expect("write staged payload");
+
+        let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
+        let (size, content_id, content_sha256) =
+            futures_lite::future::block_on(hash_file_streaming(&staging_path, &mut hash_buf))
+                .expect("hash staged payload");
+        let rel_path = "link/payload.txt".to_string();
+        let sha256_hex = hex_encode(&content_sha256);
+        let merkle_root_hex = flat_merkle_root_from_digests(&[EntryDigest {
+            rel_path: rel_path.clone(),
+            size,
+            content_id,
+            content_sha256,
+        }]);
+        let manifest = TransferManifest {
+            transfer_id: "rqtransfer1".to_string(),
+            root_name: "payload".to_string(),
+            is_directory: true,
+            total_bytes: size,
+            merkle_root_hex,
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path,
+                size,
+                sha256_hex,
+            }],
+        };
+        let mut decoders = vec![EntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size,
+            pipeline: None,
+            complete: true,
+            staging_path,
+            file: None,
+            bytes_written: size,
+            max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+            source_streaming: false,
+            source_blocks: Vec::new(),
+        }];
+
+        let err = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+        ))
+        .expect_err("commit must reject pre-existing symlink ancestors");
+        assert!(
+            matches!(err, RqError::Source(ref message) if message.contains("existing symlink")),
+            "expected existing-symlink source error, got {err:?}"
+        );
+        assert!(
+            !outside.path().join("payload.txt").exists(),
+            "RQ commit must not follow a destination symlink outside dest_dir"
+        );
     }
 
     #[test]
