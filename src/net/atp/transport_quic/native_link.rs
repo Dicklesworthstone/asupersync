@@ -345,6 +345,97 @@ pub struct QuicLink {
     unprotect_packets_dropped: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeReceiveTraceCounters {
+    udp_packets_received: u64,
+    one_rtt_packets_ingested: u64,
+    non_one_rtt_packets_dropped: u64,
+    unprotect_packets_dropped: u64,
+    datagrams_received: u64,
+    datagrams_dropped_on_receive: u64,
+    pending_datagrams: usize,
+    inbound_datagram_capacity: usize,
+}
+
+impl NativeReceiveTraceCounters {
+    fn capture(link: &QuicLink) -> Self {
+        Self {
+            udp_packets_received: link.udp_packets_received,
+            one_rtt_packets_ingested: link.one_rtt_packets_ingested,
+            non_one_rtt_packets_dropped: link.non_one_rtt_packets_dropped,
+            unprotect_packets_dropped: link.unprotect_packets_dropped,
+            datagrams_received: link.conn.datagrams_received(),
+            datagrams_dropped_on_receive: link.conn.datagrams_dropped_on_receive(),
+            pending_datagrams: link.conn.pending_datagram_count(),
+            inbound_datagram_capacity: link.conn.inbound_datagram_capacity(),
+        }
+    }
+
+    fn trace_decoded(
+        &self,
+        cx: &Cx,
+        transfer_id: &str,
+        symbols_accepted: u64,
+        feedback_rounds: u32,
+        decode_stats: &super::QuicDecodeStats,
+    ) {
+        let symbols_accepted_text = symbols_accepted.to_string();
+        let feedback_rounds_text = feedback_rounds.to_string();
+        let decode_count_text = decode_stats.decode_count.to_string();
+        let decode_micros_text = decode_stats.decode_micros.to_string();
+        let udp_packets_received_text = self.udp_packets_received.to_string();
+        let one_rtt_packets_ingested_text = self.one_rtt_packets_ingested.to_string();
+        let non_one_rtt_packets_dropped_text = self.non_one_rtt_packets_dropped.to_string();
+        let unprotect_packets_dropped_text = self.unprotect_packets_dropped.to_string();
+        let datagrams_received_text = self.datagrams_received.to_string();
+        let datagrams_dropped_on_receive_text = self.datagrams_dropped_on_receive.to_string();
+        let pending_datagrams_text = self.pending_datagrams.to_string();
+        let inbound_datagram_capacity_text = self.inbound_datagram_capacity.to_string();
+        let inbound_datagram_available_text = self
+            .inbound_datagram_capacity
+            .saturating_sub(self.pending_datagrams)
+            .to_string();
+        cx.trace_with_fields(
+            "atp_quic.receive.decoded",
+            &[
+                ("transfer_id", transfer_id),
+                ("symbols_accepted", symbols_accepted_text.as_str()),
+                ("feedback_rounds", feedback_rounds_text.as_str()),
+                ("decode_count", decode_count_text.as_str()),
+                ("decode_micros", decode_micros_text.as_str()),
+                ("udp_packets_received", udp_packets_received_text.as_str()),
+                (
+                    "one_rtt_packets_ingested",
+                    one_rtt_packets_ingested_text.as_str(),
+                ),
+                (
+                    "non_one_rtt_packets_dropped",
+                    non_one_rtt_packets_dropped_text.as_str(),
+                ),
+                (
+                    "unprotect_packets_dropped",
+                    unprotect_packets_dropped_text.as_str(),
+                ),
+                ("datagrams_received", datagrams_received_text.as_str()),
+                (
+                    "datagrams_dropped_on_receive",
+                    datagrams_dropped_on_receive_text.as_str(),
+                ),
+                ("pending_datagrams", pending_datagrams_text.as_str()),
+                ("reorder_occupancy", pending_datagrams_text.as_str()),
+                (
+                    "inbound_datagram_capacity",
+                    inbound_datagram_capacity_text.as_str(),
+                ),
+                (
+                    "inbound_datagram_available",
+                    inbound_datagram_available_text.as_str(),
+                ),
+            ],
+        );
+    }
+}
+
 impl QuicLink {
     fn protection_config() -> AtpPacketProtectionConfig {
         AtpPacketProtectionConfig {
@@ -518,6 +609,18 @@ impl QuicLink {
             let pending_datagrams = self.conn.pending_datagram_count();
             let datagram_capacity = self.conn.inbound_datagram_capacity();
             if pending_datagrams >= datagram_capacity {
+                let pending_datagrams_text = pending_datagrams.to_string();
+                let datagram_capacity_text = datagram_capacity.to_string();
+                let total_processed_text = total_processed.to_string();
+                cx.trace_with_fields(
+                    "atp_quic.receive.datagram_queue_full",
+                    &[
+                        ("pending_datagrams", pending_datagrams_text.as_str()),
+                        ("reorder_occupancy", pending_datagrams_text.as_str()),
+                        ("inbound_datagram_capacity", datagram_capacity_text.as_str()),
+                        ("packets_processed", total_processed_text.as_str()),
+                    ],
+                );
                 return Ok(total_processed);
             }
             let receive_limit = INBOUND_PUMP_BATCH.min(datagram_capacity - pending_datagrams);
@@ -1605,19 +1708,12 @@ async fn run_receiver_session(
             feedback_rounds = feedback_rounds.saturating_add(1);
         }
 
-        let symbols_accepted_text = symbols_accepted.to_string();
-        let feedback_rounds_text = feedback_rounds.to_string();
-        let decode_count_text = decode_stats.decode_count.to_string();
-        let decode_micros_text = decode_stats.decode_micros.to_string();
-        cx.trace_with_fields(
-            "atp_quic.receive.decoded",
-            &[
-                ("transfer_id", manifest.transfer_id.as_str()),
-                ("symbols_accepted", symbols_accepted_text.as_str()),
-                ("feedback_rounds", feedback_rounds_text.as_str()),
-                ("decode_count", decode_count_text.as_str()),
-                ("decode_micros", decode_micros_text.as_str()),
-            ],
+        NativeReceiveTraceCounters::capture(link).trace_decoded(
+            cx,
+            manifest.transfer_id.as_str(),
+            symbols_accepted,
+            feedback_rounds,
+            &decode_stats,
         );
         send_native_keep_alive(cx, &mut link.conn, &mut control)?;
         link.flush(cx).await?;
@@ -1767,6 +1863,52 @@ mod tests {
         let mut long = vec![0x80];
         long.extend_from_slice(&[0u8; ONE_RTT_HEADER_LEN + ONE_RTT_TAG_LEN]);
         assert!(decode_one_rtt_packet(&long).is_none());
+    }
+
+    #[test]
+    fn native_receive_decoded_trace_includes_receiver_counters() {
+        let cx = Cx::for_testing();
+        let collector = crate::observability::LogCollector::new(8)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_log_collector(collector.clone());
+        let counters = NativeReceiveTraceCounters {
+            udp_packets_received: 17,
+            one_rtt_packets_ingested: 16,
+            non_one_rtt_packets_dropped: 1,
+            unprotect_packets_dropped: 2,
+            datagrams_received: 12,
+            datagrams_dropped_on_receive: 0,
+            pending_datagrams: 3,
+            inbound_datagram_capacity: 1024,
+        };
+        let decode_stats = crate::net::atp::transport_quic::QuicDecodeStats {
+            decode_count: 4,
+            decode_micros: 55,
+        };
+
+        counters.trace_decoded(&cx, "transfer-g3", 99, 2, &decode_stats);
+
+        let entries = collector.peek();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.message() == "atp_quic.receive.decoded")
+            .expect("receive decoded trace entry");
+        assert_eq!(entry.level(), crate::observability::LogLevel::Trace);
+        assert_eq!(entry.get_field("transfer_id"), Some("transfer-g3"));
+        assert_eq!(entry.get_field("symbols_accepted"), Some("99"));
+        assert_eq!(entry.get_field("feedback_rounds"), Some("2"));
+        assert_eq!(entry.get_field("decode_count"), Some("4"));
+        assert_eq!(entry.get_field("decode_micros"), Some("55"));
+        assert_eq!(entry.get_field("udp_packets_received"), Some("17"));
+        assert_eq!(entry.get_field("one_rtt_packets_ingested"), Some("16"));
+        assert_eq!(entry.get_field("non_one_rtt_packets_dropped"), Some("1"));
+        assert_eq!(entry.get_field("unprotect_packets_dropped"), Some("2"));
+        assert_eq!(entry.get_field("datagrams_received"), Some("12"));
+        assert_eq!(entry.get_field("datagrams_dropped_on_receive"), Some("0"));
+        assert_eq!(entry.get_field("pending_datagrams"), Some("3"));
+        assert_eq!(entry.get_field("reorder_occupancy"), Some("3"));
+        assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("1024"));
+        assert_eq!(entry.get_field("inbound_datagram_available"), Some("1021"));
     }
 
     #[test]
