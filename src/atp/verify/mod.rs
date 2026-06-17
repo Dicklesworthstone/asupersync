@@ -431,33 +431,107 @@ impl AtpBundleVerifier {
                 }
             }
         } else {
-            warnings.push(VerificationWarning {
-                code: "missing_commit_record".to_string(),
-                message: "No commit record available for verification".to_string(),
-                category: VerificationCategory::ContentIntegrity,
-                context: BTreeMap::new(),
-            });
+            // No commit record = the manifest<->merkle binding (the content
+            // integrity anchor) is absent. Under a strict policy that requires
+            // all stages this must FAIL verification, not merely warn
+            // (asupersync-u5owrm); a lenient policy keeps it a warning.
+            if self.policy.require_all_stages {
+                checks.push(VerificationCheck {
+                    check_name: "manifest_commit".to_string(),
+                    category: VerificationCategory::ContentIntegrity,
+                    status: VerificationStatus::Failed,
+                    description: "No commit record: manifest commit cannot be verified"
+                        .to_string(),
+                    duration_micros: 0,
+                    metadata: BTreeMap::new(),
+                });
+            } else {
+                warnings.push(VerificationWarning {
+                    code: "missing_commit_record".to_string(),
+                    message: "No commit record available for verification".to_string(),
+                    category: VerificationCategory::ContentIntegrity,
+                    context: BTreeMap::new(),
+                });
+            }
             false
         };
 
-        // Calculate chunk verification coverage
-        let chunk_coverage = bundle.chunk_bitmap.completion_ratio();
+        // Calculate chunk verification coverage from the bitmap popcount, NOT the
+        // off-wire `received_count` field (a crafted bundle can set
+        // `received_count == total_chunks` without setting any bits, and
+        // `completion_ratio()` reports `1.0` for `total_chunks == 0`). We count
+        // the bits actually set within `total_chunks`, minus chunks that failed
+        // verification, so an incomplete or empty transfer cannot read as
+        // complete. A shortfall is a FAILED check (not a warning): an incomplete
+        // transfer must not pass verification (asupersync-u5owrm).
+        let chunk_coverage = {
+            let bitmap = &bundle.chunk_bitmap;
+            let total = bitmap.total_chunks;
+            if total == 0 {
+                0.0
+            } else {
+                // Popcount of bits actually set within `total_chunks` (O(bytes),
+                // so a crafted huge `total_chunks` cannot drive a per-index loop).
+                let mut received: u64 = 0;
+                for (byte_idx, &b) in bitmap.bitmap_data.iter().enumerate() {
+                    let base = (byte_idx as u64).saturating_mul(8);
+                    if base >= total {
+                        break;
+                    }
+                    let bits_in_byte = (total - base).min(8);
+                    let mask: u8 = if bits_in_byte >= 8 {
+                        0xFF
+                    } else {
+                        (1u8 << bits_in_byte) - 1
+                    };
+                    received += u64::from((b & mask).count_ones());
+                }
+                // Discount chunks that were received (bit set) but failed verification.
+                for &failed in &bitmap.failed_chunks {
+                    if failed < total {
+                        let byte = (failed / 8) as usize;
+                        let bit = (failed % 8) as u8;
+                        if byte < bitmap.bitmap_data.len()
+                            && (bitmap.bitmap_data[byte] & (1u8 << bit)) != 0
+                        {
+                            received = received.saturating_sub(1);
+                        }
+                    }
+                }
+                received as f64 / total as f64
+            }
+        };
         if chunk_coverage < self.policy.min_chunk_coverage {
-            warnings.push(VerificationWarning {
-                code: "low_chunk_coverage".to_string(),
-                message: format!(
-                    "Chunk coverage {:.2}% below required {:.2}%",
+            checks.push(VerificationCheck {
+                check_name: "chunk_coverage".to_string(),
+                category: VerificationCategory::ContentIntegrity,
+                status: VerificationStatus::Failed,
+                description: format!(
+                    "Chunk coverage {:.2}% below required {:.2}% (incomplete transfer)",
                     chunk_coverage * 100.0,
                     self.policy.min_chunk_coverage * 100.0
                 ),
-                category: VerificationCategory::ContentIntegrity,
-                context: BTreeMap::new(),
+                duration_micros: 0,
+                metadata: BTreeMap::from([
+                    ("coverage".to_string(), format!("{chunk_coverage:.6}")),
+                    (
+                        "required".to_string(),
+                        format!("{:.6}", self.policy.min_chunk_coverage),
+                    ),
+                ]),
             });
         }
 
         // Count verification stages
+        // Reported for visibility only: this raw count is intentionally NOT a
+        // hard gate. The "8" is a placeholder and `verification_evidence.len()`
+        // does not map 1:1 to required stages, so a `passed >= total` comparison
+        // would fail many legitimate bundles. Proper per-stage required-set
+        // enforcement is tracked in asupersync-u5owrm; the concrete content gates
+        // above (chunk coverage, manifest commit, repair justification, proof
+        // strength) are the fail-closed checks that actually matter.
         let verification_stages_passed = bundle.verification_evidence.len();
-        let verification_stages_total = if self.policy.require_all_stages { 8 } else { 2 }; // Minimum chunk + manifest
+        let verification_stages_total = if self.policy.require_all_stages { 8 } else { 2 };
 
         // Verify repair integrity if present
         let repair_integrity =
@@ -548,6 +622,22 @@ impl AtpBundleVerifier {
                 .raptorq_metadata
                 .as_ref()
                 .is_some_and(|m| m.repair_symbols_used > 0);
+        if !repair_justification_verified {
+            // Repair activation claimed by repair_groups must agree with the
+            // RaptorQ repair_symbols_used signal. A mismatch is inconsistent /
+            // fabricated repair evidence and must FAIL verification, not merely
+            // populate the report field (asupersync-u5owrm). "Both absent" yields
+            // `true` here, so this only fires on a genuine mismatch.
+            checks.push(VerificationCheck {
+                check_name: "repair_justification".to_string(),
+                category: VerificationCategory::ContentIntegrity,
+                status: VerificationStatus::Failed,
+                description: "Repair activation does not match RaptorQ repair-symbol usage"
+                    .to_string(),
+                duration_micros: 0,
+                metadata: BTreeMap::new(),
+            });
+        }
 
         RepairIntegrityReport {
             raptorq_verified,
@@ -564,7 +654,7 @@ impl AtpBundleVerifier {
     ) -> ProofStrengthReport {
         let calculated_strength = bundle.calculate_proof_strength();
         let required_strength = bundle.metadata.required_proof_strength;
-        let requirements_met = calculated_strength >= required_strength;
+        let strength_met = calculated_strength >= required_strength;
 
         let mut evidence_types = Vec::new();
         let mut missing_evidence = Vec::new();
@@ -603,6 +693,12 @@ impl AtpBundleVerifier {
             }
             ProofStrength::Cryptographic | ProofStrength::Basic => {}
         }
+
+        // The required strength is only "met" if the concrete evidence it demands
+        // is actually present — a bundle that aggregates to the required strength
+        // but is missing the specific evidence (repair / peer-auth / signatures)
+        // must FAIL, not pass on the aggregate score alone (asupersync-u5owrm).
+        let requirements_met = strength_met && missing_evidence.is_empty();
 
         checks.push(VerificationCheck {
             check_name: "proof_strength".to_string(),
@@ -931,13 +1027,39 @@ mod tests {
     fn create_test_bundle() -> AtpProofBundle {
         let manifest_root = crate::atp::manifest::MerkleRoot::new([1; 32]);
         let object_id = Object::file(b"test".to_vec()).id;
+        // A COMPLETE transfer: all 10 chunks received so it passes the
+        // fail-closed coverage gate (asupersync-u5owrm). Tests that want an
+        // incomplete/empty transfer override `bundle.chunk_bitmap` afterwards.
         let mut chunk_bitmap = ChunkBitmap::new(10);
-        chunk_bitmap.mark_received(0);
+        for i in 0..10 {
+            chunk_bitmap.mark_received(i);
+        }
+        // A valid commit record so strict verification (the default policy
+        // requires it) has the manifest<->merkle binding to verify.
+        let mut commit_graph = crate::atp::object::ObjectGraph::new();
+        commit_graph
+            .add_root(Object::file(b"test".to_vec()))
+            .expect("add root to commit graph");
+        let commit_manifest = crate::atp::manifest::Manifest::from_graph(
+            &commit_graph,
+            crate::atp::object::MetadataPolicy::default(),
+        )
+        .expect("manifest from graph");
+        let commit = crate::atp::manifest::GraphCommit::new(
+            None,
+            commit_manifest,
+            crate::atp::manifest::CommitMetadata {
+                timestamp_nanos: 1_234_567_890,
+                author: "test".to_string(),
+                message: "test commit".to_string(),
+            },
+        );
 
         AtpProofBundleBuilder::new("test-transfer")
             .manifest_root(manifest_root)
             .object_roots(vec![object_id])
             .chunk_bitmap(chunk_bitmap)
+            .commit_record(commit)
             .peer_identity(PeerIdentityInfo {
                 source_peer_id: "source".to_string(),
                 destination_peer_id: "dest".to_string(),
@@ -1043,5 +1165,77 @@ mod tests {
 
         let result = verifier.verify_bundle(&bundle);
         assert!(result.status.is_success()); // Should pass with relaxed policy
+    }
+
+    #[test]
+    fn incomplete_transfer_is_rejected_under_default_policy() {
+        // Headline asupersync-u5owrm fix: a transfer missing chunks must NOT pass
+        // verification (it was only a warning -> PassedWithWarnings -> accepted).
+        let mut bundle = create_test_bundle();
+        let mut partial = ChunkBitmap::new(10);
+        partial.mark_received(0); // 1 of 10
+        bundle.chunk_bitmap = partial;
+
+        let result = AtpBundleVerifier::new().verify_bundle(&bundle);
+        assert!(
+            result.status.is_failure(),
+            "incomplete transfer must fail, got {:?}",
+            result.status
+        );
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.check_name == "chunk_coverage" && c.status.is_failure()),
+            "a failed chunk_coverage check must be present"
+        );
+    }
+
+    #[test]
+    fn empty_bitmap_is_not_reported_complete() {
+        // total_chunks == 0 must not read as 100% complete (completion_ratio()
+        // returns 1.0 there); coverage is computed from the popcount as 0.0.
+        let mut bundle = create_test_bundle();
+        bundle.chunk_bitmap = ChunkBitmap::new(0);
+
+        let result = AtpBundleVerifier::new().verify_bundle(&bundle);
+        assert!(
+            result.status.is_failure(),
+            "empty bitmap must not pass as complete, got {:?}",
+            result.status
+        );
+    }
+
+    #[test]
+    fn inflated_received_count_does_not_bypass_coverage() {
+        // A crafted bundle that sets received_count == total_chunks without
+        // setting the bitmap bits must still fail: coverage is recomputed from
+        // the bitmap popcount, not the off-wire received_count field.
+        let mut bundle = create_test_bundle();
+        let mut crafted = ChunkBitmap::new(10);
+        crafted.received_count = 10; // lie: no bits actually set
+        bundle.chunk_bitmap = crafted;
+
+        let result = AtpBundleVerifier::new().verify_bundle(&bundle);
+        assert!(
+            result.status.is_failure(),
+            "inflated received_count must not bypass coverage, got {:?}",
+            result.status
+        );
+    }
+
+    #[test]
+    fn missing_commit_record_fails_strict_policy() {
+        // A complete-coverage bundle with no commit record must FAIL the strict
+        // default policy (the manifest<->merkle binding is absent), not just warn.
+        let mut bundle = create_test_bundle();
+        bundle.commit_record = None;
+
+        let result = AtpBundleVerifier::new().verify_bundle(&bundle);
+        assert!(
+            result.status.is_failure(),
+            "strict policy must reject a bundle with no commit record, got {:?}",
+            result.status
+        );
     }
 }
