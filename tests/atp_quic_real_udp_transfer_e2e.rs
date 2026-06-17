@@ -24,7 +24,7 @@ use asupersync::cx::Cx;
 use asupersync::net::atp::transport_quic::native_link::{
     QuicClientTls, QuicServerTls, bind_server_endpoint, receive_on_endpoint,
 };
-use asupersync::net::atp::transport_quic::{QuicConfig, send_path};
+use asupersync::net::atp::transport_quic::{QuicConfig, QuicTransportError, send_path};
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
 use asupersync::security::SecurityContext;
 use futures_lite::future::{block_on, zip};
@@ -433,4 +433,48 @@ fn real_udp_quic_send_fails_closed_on_expired_server_certificate() {
     recv.handshake_timeout = Duration::from_secs(5);
 
     assert_send_fails_closed_before_commit(send, recv, "expired-cert.bin");
+}
+
+#[test]
+fn real_udp_quic_rejects_auth_failing_symbols_before_commit() {
+    // TLS succeeds and both peers require per-symbol authentication, but the
+    // receiver uses a different HMAC context. The first symbol must be rejected
+    // before decode/commit rather than being treated as unauthenticated data.
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join("auth-failing-symbol.bin");
+    let payload: Vec<u8> = (0..4096u32)
+        .map(|i| (i.wrapping_mul(17).wrapping_add(23) % 251) as u8)
+        .collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(0xA17A));
+    send.client_tls = Some(client_tls());
+    send.idle_timeout = Duration::from_secs(5);
+    send.handshake_timeout = Duration::from_secs(5);
+    send.accept_timeout = Duration::from_secs(5);
+
+    let mut recv = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(0xBEEF));
+    recv.server_tls = Some(server_tls());
+    recv.idle_timeout = Duration::from_secs(5);
+    recv.handshake_timeout = Duration::from_secs(5);
+    recv.accept_timeout = Duration::from_secs(5);
+
+    let (send_res, recv_res) = run_transfer(send, recv, &source, dst.path());
+    assert!(
+        matches!(
+            recv_res,
+            Err(QuicTransportError::Integrity(message))
+                if message.contains("symbol authentication failed")
+        ),
+        "receiver must fail closed on auth-failing symbols, got {recv_res:?}"
+    );
+    assert!(
+        send_res.is_err(),
+        "sender must not receive a committed proof after auth failure"
+    );
+    assert!(
+        std::fs::read(dst.path().join("auth-failing-symbol.bin")).is_err(),
+        "auth-failing symbols must not commit destination bytes"
+    );
 }
