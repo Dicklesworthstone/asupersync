@@ -154,7 +154,41 @@ Per `/asupersync-mega-skill`. Findings on whether atp-rq exploits asupersync's m
 - **Plan:** pane-2 reads adaptive.rs + the design doc, assesses why it's unwired, wires it with a
   deterministic conservative fallback (per alien-artifact: never ship adaptive without a safe mode),
   A/B vs F3 on clean + netem-lossy + netem-spotty. Reserve adaptive.rs + send_path.
-- **Result:** _pending — primary post-E-0 lever_
+- **Result:** _in progress — wiring plan below (E-7.1 done by SapphireHill, read-only)_
+
+#### E-7.1 controller assessment + wiring plan (for pane-2 / MaroonIvy)
+adaptive.rs IS complete + sophisticated; it was just never threaded into send_path. Design:
+- `AdaptiveController` = **EXP3 adversarial bandit** (no-regret) over arms `(k ∈ {256,512,1024,2048,
+  4096,8192}) × (fanout ∈ {1,2,4,8})`; reward = wall-seconds / useful-byte (lower=better).
+- `overhead_for_target(k, p̄, α)` = inverse-normal-tail analytic seed + bisection on
+  `decode_fail_probability` → calibrated repair overhead hitting decode-failure α (default 1e-3),
+  capped `max_overhead=0.5`. THIS is adaptive FEC.
+- `PathEstimate{rtt_s, loss_p_hat, loss_p_bar, bw_median_bps, trough(CVaR), samples}` +
+  `decode_symbols_per_s_at(k)`; `PathSignalSample{smoothed_rtt, cwnd, loss_rate}` (EMA-smoothed).
+- **Built-in safe fallback:** `next_block_plan` returns `None` until `samples ≥ min_samples (3)` →
+  caller uses fixed config. Deterministic via `DetRng(seed)` → lab-replayable.
+**WIRING STEPS:**
+1. In `send_path`: `let mut ctl = AdaptiveController::new(AdaptivePolicy{cores: available_parallelism
+   as f64, ..default()}, seed_from_transfer_id)`. Pick initial k/fanout ONCE at start (block
+   boundaries + sockets are fixed at round 0 — do NOT churn k/fanout mid-transfer; only overhead +
+   pace adapt per-round).
+2. **Round 0 conservative start (fixes the burst E-0 found):** do NOT full-burst. Start paced
+   (slow-start-like) at a conservative rate; this alone should cut the 6 feedback rounds.
+3. Each feedback round, build `PathEstimate` from the NeedMore WITHOUT a wire change: infer
+   `loss_p_hat ≈ pending_or_missing / sent_this_round`; `rtt_s` from control send→NeedMore timing;
+   `bw_median_bps` from delivered_bytes/round_wall; `samples += 1`. `ctl.update_estimate(est)`.
+4. `ctl.next_block_plan(symbol_size)` → `BlockPlan{k, overhead, fanout}` (or None→fixed). Apply
+   `overhead` to this round's repair (replaces static `repair_overhead`).
+5. **PACING (the core anti-burst lever — NOT returned directly):** compute
+   `rate = min(est.bw_median_bps, decode_symbols_per_s_at(k)*symbol_size)` and pace the spray
+   (token bucket / inter-packet sleep in send_symbol_datagram). This is the λ/(1+ε) rate-match.
+   Add a `ctl.pacing_bytes_per_s()` helper if cleaner.
+6. After the round: `ctl.observe(sent, received, wall_s, useful_bytes)` to update the bandit.
+7. **Conservative fallback (E-7.5):** None / high loss-variance / regime-shift → conservative pace +
+   modest overhead. Round-0 conservative start covers warmup.
+**CAVEATS for pane-2:** (a) k/fanout adapt only at transfer start, overhead+pace adapt per-round;
+(b) prefer inferring loss from `pending` (no wire change) over adding a NeedMore loss field;
+(c) keep byte-identical wire + sha; (d) reserve adaptive.rs (may be peer-dirty) + send_path.
 
 ### E-8 · Memory: paced delivery + bounded retention (less RSS than rsync, ideally O(1) in file size)
 - **Hypothesis:** E-0 receiver RSS was **1.7 GB** (vs rsync ~13 MB) — driven by the 120 MiB recv
