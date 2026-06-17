@@ -412,7 +412,15 @@ impl DefendedFrameProcessor {
             Outcome::Ok(Some(version)) => version,
             _ => return None,
         };
-        if !ManifestVersion(version_varint.value() as u32).is_supported() {
+        // `value()` is a u64 (up to 62 bits); a plain `as u32` would silently
+        // truncate the high bits, so e.g. `0x1_0000_0001` would masquerade as
+        // the supported version `1` — a fail-open on the version gate. Reject
+        // anything that does not fit in u32 before the support check.
+        let version = match u32::try_from(version_varint.value()) {
+            Ok(version) => version,
+            Err(_) => return None,
+        };
+        if !ManifestVersion(version).is_supported() {
             return None;
         }
         offset += version_varint.encoded_len();
