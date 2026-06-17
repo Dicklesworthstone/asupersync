@@ -37,6 +37,10 @@ use std::fmt::Write as _;
 
 const FANOUT_SOCKET_EFFICIENCY: f64 = 0.6;
 const FANOUT_CAP_TARGET: f64 = 0.95;
+const PATH_SIGNAL_EMA_ALPHA: f64 = 0.20;
+const MIN_PATH_RTT_S: f64 = 0.000_001;
+const MAX_PATH_RTT_S: f64 = 60.0;
+const MAX_PATH_LOSS_RATE: f64 = 0.999;
 
 #[must_use]
 fn fanout_gain(fanout: usize) -> f64 {
@@ -103,6 +107,34 @@ impl PathEstimate {
     }
 }
 
+/// QUIC recovery/congestion-control signals used to shape adaptive rewards.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathSignalSample {
+    /// Smoothed round-trip time in seconds.
+    pub smoothed_rtt_s: f64,
+    /// Congestion window in bytes.
+    pub congestion_window_bytes: u64,
+    /// Recent packet/symbol loss rate in `[0, 1)`.
+    pub loss_rate: f64,
+}
+
+impl PathSignalSample {
+    /// Clamp raw transport signals to finite ranges before smoothing/reward use.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        Self {
+            smoothed_rtt_s: finite_or(self.smoothed_rtt_s, MIN_PATH_RTT_S)
+                .clamp(MIN_PATH_RTT_S, MAX_PATH_RTT_S),
+            congestion_window_bytes: self.congestion_window_bytes.max(1),
+            loss_rate: finite_or(self.loss_rate, 0.0).clamp(0.0, MAX_PATH_LOSS_RATE),
+        }
+    }
+}
+
+fn finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() { value } else { fallback }
+}
+
 /// One per-block decision.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockPlan {
@@ -130,6 +162,8 @@ pub struct AdaptiveDecisionSnapshot {
     pub selected_plan: Option<BlockPlan>,
     /// EXP3 weights in deterministic arm-grid order.
     pub weights: Vec<f64>,
+    /// Latest smoothed QUIC path signals, if the caller has supplied them.
+    pub path_signals: Option<PathSignalSample>,
 }
 
 /// Cost-model knobs and the reliability target.
@@ -408,6 +442,8 @@ pub struct AdaptiveController {
     rng: DetRng,
     /// Running max observed loss-per-byte, to normalize EXP3 losses to [0,1].
     loss_scale: f64,
+    /// Smoothed path signals supplied by a QUIC recovery/CC layer.
+    path_signals: Option<PathSignalSample>,
 }
 
 impl AdaptiveController {
@@ -431,12 +467,28 @@ impl AdaptiveController {
             epoch: 0,
             rng: DetRng::new(seed),
             loss_scale: 0.0,
+            path_signals: None,
         }
     }
 
     /// Replace the current path estimate (from the estimation layer).
     pub fn update_estimate(&mut self, est: PathEstimate) {
         self.est = est;
+    }
+
+    /// Update the smoothed QUIC path-signal view.
+    ///
+    /// Raw samples are clamped before entering the EMA so a single bad RTT/loss
+    /// sample cannot dominate the next reward update.
+    pub fn update_path_signals(&mut self, sample: PathSignalSample) -> PathSignalSample {
+        let sample = sample.clamped();
+        let smoothed = if let Some(prev) = self.path_signals {
+            smooth_path_signals(prev, sample)
+        } else {
+            sample
+        };
+        self.path_signals = Some(smoothed);
+        smoothed
     }
 
     /// EXP3 selection probability for arm `i`.
@@ -494,7 +546,45 @@ impl AdaptiveController {
             return;
         }
         let raw = wall_s / (useful_bytes as f64); // seconds per useful byte
-        if !raw.is_finite() {
+        self.apply_observed_loss(arm, raw);
+    }
+
+    /// Feed back a measured block outcome plus QUIC path signals.
+    ///
+    /// The base loss remains seconds per useful byte. Smoothed RTT/cwnd/loss add
+    /// a path penalty to arms whose selected block footprint would overrun the
+    /// current congestion window, so synthetic lossy/small-cwnd paths can steer
+    /// EXP3 toward smaller arms without changing the deterministic selection
+    /// machinery.
+    pub fn observe_path_signals(
+        &mut self,
+        sent: u64,
+        received: u64,
+        wall_s: f64,
+        useful_bytes: u64,
+        symbol_size: u16,
+        signals: PathSignalSample,
+    ) {
+        let Some(arm) = self.last_arm else {
+            return;
+        };
+        if useful_bytes == 0 || wall_s <= 0.0 {
+            return;
+        }
+        let base = wall_s / (useful_bytes as f64);
+        let signals = self.update_path_signals(signals);
+        let measured_loss = if sent == 0 {
+            0.0
+        } else {
+            let missing = sent.saturating_sub(received);
+            (missing as f64 / sent as f64).clamp(0.0, MAX_PATH_LOSS_RATE)
+        };
+        let raw = base + self.path_signal_penalty(arm, symbol_size, signals, measured_loss);
+        self.apply_observed_loss(arm, raw);
+    }
+
+    fn apply_observed_loss(&mut self, arm: usize, raw: f64) {
+        if !raw.is_finite() || raw <= 0.0 {
             return;
         }
         self.loss_scale = self.loss_scale.max(raw).max(f64::MIN_POSITIVE);
@@ -521,6 +611,33 @@ impl AdaptiveController {
         }
     }
 
+    fn path_signal_penalty(
+        &self,
+        arm: usize,
+        symbol_size: u16,
+        signals: PathSignalSample,
+        measured_loss: f64,
+    ) -> f64 {
+        let (ki, ni) = self.arms[arm];
+        let k = self.policy.arm_grid_k[ki];
+        let fanout = self.policy.arm_grid_fanout[ni];
+        let payload_bytes = f64::from(k) * f64::from(symbol_size.max(1));
+        let overhead = self.last_overhead.max(0.0);
+        let block_bytes = payload_bytes * (1.0 + overhead);
+        let cwnd_bytes = signals.congestion_window_bytes.max(1) as f64;
+        let cwnd_overrun = (block_bytes / cwnd_bytes - 1.0).max(0.0);
+        let loss_rate = signals
+            .loss_rate
+            .max(measured_loss)
+            .clamp(0.0, MAX_PATH_LOSS_RATE);
+        let fanout_pressure = fanout.max(1) as f64;
+
+        // Convert path pressure into seconds/useful-byte so it can share the
+        // same EXP3 normalization path as wall-clock reward observations.
+        (signals.smoothed_rtt_s * cwnd_overrun * (1.0 + loss_rate) * fanout_pressure)
+            / payload_bytes.max(1.0)
+    }
+
     /// The closed-form model recommendation (warm-start reference; for diagnostics
     /// and shadow-mode comparison).
     #[must_use]
@@ -545,6 +662,7 @@ impl AdaptiveController {
             selected_arm_index: self.last_arm,
             selected_plan,
             weights: self.weights.clone(),
+            path_signals: self.path_signals,
         }
     }
 
@@ -563,6 +681,16 @@ impl AdaptiveController {
         let weight_count = snapshot.weights.len().to_string();
         let weights = format_weights(&snapshot.weights);
         let loss_scale = format!("{:.12}", self.loss_scale);
+        let (path_rtt_s, path_cwnd_bytes, path_loss_rate) =
+            if let Some(signals) = snapshot.path_signals {
+                (
+                    format!("{:.6}", signals.smoothed_rtt_s),
+                    signals.congestion_window_bytes.to_string(),
+                    format!("{:.6}", signals.loss_rate),
+                )
+            } else {
+                ("none".to_string(), "none".to_string(), "none".to_string())
+            };
 
         let (k, repair_overhead, fanout) = if let Some(plan) = snapshot.selected_plan {
             (
@@ -586,9 +714,31 @@ impl AdaptiveController {
                 ("weight_count", &weight_count),
                 ("weights", &weights),
                 ("loss_scale", &loss_scale),
+                ("path_rtt_s", &path_rtt_s),
+                ("path_cwnd_bytes", &path_cwnd_bytes),
+                ("path_loss_rate", &path_loss_rate),
             ],
         );
     }
+}
+
+fn smooth_path_signals(prev: PathSignalSample, sample: PathSignalSample) -> PathSignalSample {
+    let alpha = PATH_SIGNAL_EMA_ALPHA;
+    PathSignalSample {
+        smoothed_rtt_s: ema(prev.smoothed_rtt_s, sample.smoothed_rtt_s, alpha),
+        congestion_window_bytes: ema(
+            prev.congestion_window_bytes as f64,
+            sample.congestion_window_bytes as f64,
+            alpha,
+        )
+        .round()
+        .max(1.0) as u64,
+        loss_rate: ema(prev.loss_rate, sample.loss_rate, alpha).clamp(0.0, MAX_PATH_LOSS_RATE),
+    }
+}
+
+fn ema(prev: f64, sample: f64, alpha: f64) -> f64 {
+    prev.mul_add(1.0 - alpha, sample * alpha)
 }
 
 fn format_weights(weights: &[f64]) -> String {
@@ -749,6 +899,96 @@ mod tests {
             picks
         };
         assert_eq!(mk(), mk(), "same seed ⇒ identical decision sequence");
+    }
+
+    #[test]
+    fn path_signals_are_clamped_and_smoothed() {
+        let mut c = AdaptiveController::new(AdaptivePolicy::default(), 11);
+        let first = c.update_path_signals(PathSignalSample {
+            smoothed_rtt_s: f64::NAN,
+            congestion_window_bytes: 0,
+            loss_rate: f64::INFINITY,
+        });
+        assert_eq!(first.smoothed_rtt_s, MIN_PATH_RTT_S);
+        assert_eq!(first.congestion_window_bytes, 1);
+        assert_eq!(first.loss_rate, 0.0);
+
+        let second = c.update_path_signals(PathSignalSample {
+            smoothed_rtt_s: 1.0,
+            congestion_window_bytes: 1_000_000,
+            loss_rate: 0.50,
+        });
+        assert!(
+            second.smoothed_rtt_s > MIN_PATH_RTT_S && second.smoothed_rtt_s < 1.0,
+            "RTT should move by EMA, not jump to the sample: {second:?}"
+        );
+        assert!(
+            second.congestion_window_bytes > 1 && second.congestion_window_bytes < 1_000_000,
+            "cwnd should move by EMA, not jump to the sample: {second:?}"
+        );
+        assert!(
+            second.loss_rate > 0.0 && second.loss_rate < 0.50,
+            "loss should move by EMA, not jump to the sample: {second:?}"
+        );
+    }
+
+    #[test]
+    fn path_signal_reward_shifts_arm_under_loss_and_small_cwnd() {
+        fn train(signals: PathSignalSample) -> usize {
+            let mut policy = AdaptivePolicy {
+                arm_grid_k: vec![512, 8192],
+                arm_grid_fanout: vec![1],
+                exp3_eta: 0.30,
+                min_samples_to_activate: 1,
+                ..AdaptivePolicy::default()
+            };
+            policy.max_overhead = 0.50;
+
+            let mut c = AdaptiveController::new(policy, 23);
+            c.update_estimate(PathEstimate {
+                samples: 8,
+                dec_symbols_per_s: 50_000_000.0,
+                ..est(0.02, 20_000_000.0)
+            });
+            let mut large_selected_late = 0usize;
+            let trials = 700usize;
+            for t in 0..trials {
+                let plan = c.next_block_plan(1024).expect("controller activates");
+                if t >= trials - 200 && plan.k == 8192 {
+                    large_selected_late += 1;
+                }
+                let wall_s = if plan.k == 8192 { 0.004 } else { 0.006 };
+                c.observe_path_signals(
+                    u64::from(plan.k),
+                    u64::from(plan.k),
+                    wall_s,
+                    u64::from(plan.k) * 1024,
+                    1024,
+                    signals,
+                );
+            }
+            large_selected_late
+        }
+
+        let clean_large = train(PathSignalSample {
+            smoothed_rtt_s: 0.010,
+            congestion_window_bytes: 64 * 1024 * 1024,
+            loss_rate: 0.001,
+        });
+        let lossy_large = train(PathSignalSample {
+            smoothed_rtt_s: 0.050,
+            congestion_window_bytes: 512 * 1024,
+            loss_rate: 0.25,
+        });
+
+        assert!(
+            clean_large > 140,
+            "clean/high-cwnd path should learn the large arm, got {clean_large}/200"
+        );
+        assert!(
+            lossy_large < 80,
+            "lossy/small-cwnd path should shift away from the large arm, got {lossy_large}/200"
+        );
     }
 
     #[test]
