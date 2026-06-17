@@ -86,8 +86,13 @@ fn manifest_and_receipt_types_are_reused_from_transport_tcp() {
 
 #[test]
 fn default_config_requires_symbol_auth_or_trusted_mode() {
+    let default = QuicConfig::default();
+    assert_eq!(
+        default.max_block_size,
+        usize::from(default.symbol_size) * 512
+    );
     assert!(matches!(
-        QuicConfig::default().validate(),
+        default.validate(),
         Err(QuicTransportError::Config(message)) if message.contains("symbol_auth_context")
     ));
     assert!(trusted_quic_config().validate().is_ok());

@@ -975,6 +975,8 @@ async fn run_sender_session(
     config: &QuicConfig,
     peer_id: &str,
 ) -> Result<SendReport, QuicTransportError> {
+    let config = prepared.effective_config(config);
+    let config = &config;
     config.validate()?;
     super::validate_quic_manifest(&prepared.manifest, config)?;
     let manifest = &prepared.manifest;
@@ -1470,6 +1472,13 @@ async fn run_receiver_session(
     }
     .await;
 
+    // Reclaim the staging directory on every exit path. A successful commit
+    // renames each entry out (leaving an empty dir); a failed transfer leaves
+    // orphaned partial blocks behind. Either way the receiver must not leak a
+    // `.atp-quic-staging-*` directory into the destination — restoring the
+    // cleanup that 2a3400567 dropped, caught by
+    // atp_quic_real_udp_transfer_e2e::assert_no_staging_residue.
+    let _ = crate::fs::remove_dir_all(&staging_dir).await;
     receive_result
 }
 
@@ -1487,6 +1496,8 @@ pub(crate) async fn send_prepared_over_udp(
     config: &QuicConfig,
     peer_id: &str,
 ) -> Result<SendReport, QuicTransportError> {
+    let config = prepared.effective_config(config);
+    config.validate()?;
     let client_tls = config.client_tls.as_ref().ok_or_else(|| {
         QuicTransportError::Config(
             "ATP-over-QUIC send requires client TLS trust config; set QuicConfig::client_tls \
@@ -1494,8 +1505,8 @@ pub(crate) async fn send_prepared_over_udp(
                 .to_string(),
         )
     })?;
-    let mut link = connect(cx, addr, client_tls, config).await?;
-    run_sender_session(cx, &mut link, prepared, config, peer_id).await
+    let mut link = connect(cx, addr, client_tls, &config).await?;
+    run_sender_session(cx, &mut link, prepared, &config, peer_id).await
 }
 
 /// Accept one transfer on the pre-bound server `endpoint`, write it under

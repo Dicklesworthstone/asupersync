@@ -95,6 +95,9 @@ use crate::net::atp::transport_common::{
     EntryDigest, SourceEntry, StreamingError, collect_entries, flat_merkle_root_from_digests,
     flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
 };
+use crate::net::atp::transport_rq::{
+    RqConfig, RqError, effective_max_block_size_for_largest_entry as rq_effective_max_block_size,
+};
 use crate::net::quic_native::{
     ManagedEndpointError, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionError,
     QuicConnection, StreamDirection, StreamId, StreamRole, StreamTableError,
@@ -141,8 +144,14 @@ pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 /// its envelope fits a single QUIC DATAGRAM well under a 1500-byte path MTU.
 pub const DEFAULT_SYMBOL_SIZE: u16 = 1024;
 
-/// Default RaptorQ source-block ceiling in bytes.
-pub const DEFAULT_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
+/// Default RaptorQ source-block size in bytes.
+///
+/// With 1 KiB symbols this targets K ~= 512 source symbols per block, matching
+/// the RQ transport's effective block plan for normal transfer entries. The
+/// sender carries this value in the QUIC Hello and the receiver rejects
+/// mismatches, so mixed-version peers fail closed instead of silently decoding
+/// with different block geometry.
+pub const DEFAULT_MAX_BLOCK_SIZE: usize = 512 * 1024;
 
 /// Default ceiling on a single QUIC DATAGRAM's application payload.
 ///
@@ -957,6 +966,45 @@ fn block_count_for_len(size: u64, config: &QuicConfig) -> Result<usize, QuicTran
     })
 }
 
+fn effective_quic_max_block_size_for_largest_entry(
+    config: &QuicConfig,
+    max_entry_len: usize,
+) -> Result<usize, QuicTransportError> {
+    let rq_config = RqConfig {
+        symbol_size: config.symbol_size,
+        max_block_size: config.max_block_size,
+        ..RqConfig::default()
+    };
+    rq_effective_max_block_size(&rq_config, max_entry_len).map_err(|err| match err {
+        RqError::TooLarge { size, max } => QuicTransportError::TooLarge { size, max },
+        other => QuicTransportError::Config(format!("QUIC block-size planning failed: {other}")),
+    })
+}
+
+fn effective_quic_config_for_largest_entry(
+    config: &QuicConfig,
+    max_entry_len: usize,
+) -> Result<QuicConfig, QuicTransportError> {
+    let mut config = config.clone();
+    config.max_block_size =
+        effective_quic_max_block_size_for_largest_entry(&config, max_entry_len)?;
+    config.validate()?;
+    Ok(config)
+}
+
+#[cfg(test)]
+fn effective_quic_config_for_entries(
+    config: &QuicConfig,
+    entries: &[(String, Vec<u8>)],
+) -> Result<QuicConfig, QuicTransportError> {
+    let max_entry_len = entries
+        .iter()
+        .map(|(_, bytes)| bytes.len())
+        .max()
+        .unwrap_or(0);
+    effective_quic_config_for_largest_entry(config, max_entry_len)
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct QuicSourceEntry {
@@ -973,6 +1021,15 @@ struct QuicSourceEntry {
 pub(crate) struct QuicPreparedSource {
     manifest: TransferManifest,
     entries: Vec<QuicSourceEntry>,
+    max_block_size: usize,
+}
+
+impl QuicPreparedSource {
+    pub(crate) fn effective_config(&self, config: &QuicConfig) -> QuicConfig {
+        let mut config = config.clone();
+        config.max_block_size = self.max_block_size;
+        config
+    }
 }
 
 #[allow(dead_code)]
@@ -1031,13 +1088,14 @@ impl<'a> QuicSenderFeedbackState<'a> {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn encoders_from_entries(
     manifest: &TransferManifest,
     entries: &[(String, Vec<u8>)],
-) -> Vec<QuicEntryEncoder> {
-    let config = QuicConfig::default();
-    manifest
+    config: &QuicConfig,
+) -> Result<Vec<QuicEntryEncoder>, QuicTransportError> {
+    let config = effective_quic_config_for_entries(config, entries)?;
+    Ok(manifest
         .entries
         .iter()
         .zip(entries)
@@ -1049,7 +1107,7 @@ fn encoders_from_entries(
                 &config,
             )
         })
-        .collect()
+        .collect())
 }
 
 #[allow(dead_code)]
@@ -1097,6 +1155,15 @@ async fn prepare_source_manifest(
         });
     }
 
+    let max_entry_len = digests.iter().try_fold(0usize, |max, digest| {
+        usize::try_from(digest.size)
+            .map(|size| max.max(size))
+            .map_err(|_| QuicTransportError::TooLarge {
+                size: digest.size,
+                max: usize::MAX as u64,
+            })
+    })?;
+    let effective_config = effective_quic_config_for_largest_entry(config, max_entry_len)?;
     let merkle_root_hex = flat_merkle_root_from_digests(&digests);
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, digests.len());
     let manifest_entries = digests
@@ -1119,7 +1186,7 @@ async fn prepare_source_manifest(
         metadata_root_hex: None,
         entries: manifest_entries,
     };
-    validate_quic_manifest(&manifest, config)?;
+    validate_quic_manifest(&manifest, &effective_config)?;
 
     let entries = source_entries
         .into_iter()
@@ -1137,7 +1204,11 @@ async fn prepare_source_manifest(
         })
         .collect::<Result<Vec<_>, QuicTransportError>>()?;
 
-    Ok(QuicPreparedSource { manifest, entries })
+    Ok(QuicPreparedSource {
+        manifest,
+        entries,
+        max_block_size: effective_config.max_block_size,
+    })
 }
 
 fn digest_index(manifest: &TransferManifest, rel_path: &str) -> Result<usize, QuicTransportError> {
@@ -1646,10 +1717,12 @@ async fn encoders_from_prepared_source(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
 ) -> Result<Vec<QuicEntryEncoder>, QuicTransportError> {
+    let config = prepared.effective_config(config);
+    config.validate()?;
     let mut encoders = Vec::with_capacity(prepared.entries.len());
     for entry in &prepared.entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        encoders.push(QuicEntryEncoder::file(entry, config)?);
+        encoders.push(QuicEntryEncoder::file(entry, &config)?);
     }
     Ok(encoders)
 }
@@ -1680,8 +1753,10 @@ async fn send_prepared_source_manifest_symbols_complete(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
-    validate_quic_manifest(&prepared.manifest, config)?;
-    let mut encoders = encoders_from_prepared_source(cx, prepared, config).await?;
+    let config = prepared.effective_config(config);
+    config.validate()?;
+    validate_quic_manifest(&prepared.manifest, &config)?;
+    let mut encoders = encoders_from_prepared_source(cx, prepared, &config).await?;
     let symbol_auth = config.symbol_auth_context()?;
     send_manifest(cx, conn, control, &prepared.manifest)?;
     let pending = encoders
@@ -1694,7 +1769,7 @@ async fn send_prepared_source_manifest_symbols_complete(
         &prepared.manifest,
         &mut encoders,
         &pending,
-        config,
+        &config,
         symbol_auth.as_ref(),
         true,
     )
@@ -2988,15 +3063,17 @@ async fn send_native_prepared_source_manifest_symbols_complete(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
 ) -> Result<(Vec<QuicEntryEncoder>, u64), QuicTransportError> {
-    validate_quic_manifest(&prepared.manifest, config)?;
-    let mut encoders = encoders_from_prepared_source(cx, prepared, config).await?;
+    let config = prepared.effective_config(config);
+    config.validate()?;
+    validate_quic_manifest(&prepared.manifest, &config)?;
+    let mut encoders = encoders_from_prepared_source(cx, prepared, &config).await?;
     let symbols_sent = send_native_manifest_symbols_complete(
         cx,
         conn,
         control,
         &prepared.manifest,
         &mut encoders,
-        config,
+        &config,
     )
     .await?;
     Ok((encoders, symbols_sent))
@@ -3092,14 +3169,22 @@ async fn send_prepared_source_over_established_native_connection<F>(
 where
     F: FnMut(NativeSenderDrivePoint, &mut NativeQuicConnection) -> Result<(), QuicTransportError>,
 {
+    let config = prepared.effective_config(config);
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
-    validate_quic_manifest(&prepared.manifest, config)?;
+    validate_quic_manifest(&prepared.manifest, &config)?;
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
     let mut control = NativeQuicFrameTransport::open(cx, conn)?;
 
-    send_native_sender_hello(cx, conn, &mut control, config, peer_id, symbol_auth_enabled)?;
+    send_native_sender_hello(
+        cx,
+        conn,
+        &mut control,
+        &config,
+        peer_id,
+        symbol_auth_enabled,
+    )?;
     drive_peer(NativeSenderDrivePoint::HelloSent, conn)?;
     receive_native_sender_hello_ack(cx, conn, &mut control)?;
 
@@ -3108,7 +3193,7 @@ where
         conn,
         &mut control,
         prepared,
-        config,
+        &config,
     )
     .await?;
     drive_peer(NativeSenderDrivePoint::ObjectCompleteSent, conn)?;
@@ -3116,7 +3201,7 @@ where
     let mut state = QuicSenderFeedbackState::new(
         &prepared.manifest,
         &mut encoders,
-        config,
+        &config,
         peer,
         symbols_sent,
     );
@@ -3598,8 +3683,10 @@ pub async fn send_path(
 ) -> Result<SendReport, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
-    trace_config_summary(cx, "send_path", &config, peer_id);
     let prepared = prepare_source_manifest(cx, source, &config).await?;
+    let config = prepared.effective_config(&config);
+    config.validate()?;
+    trace_config_summary(cx, "send_path", &config, peer_id);
     #[cfg(feature = "tls")]
     {
         native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id).await
@@ -3897,7 +3984,7 @@ mod tests {
         entries: &[(String, Vec<u8>)],
         config: QuicConfig,
     ) -> Result<QuicConnectionTransferOutcome, QuicTransportError> {
-        config.validate()?;
+        let config = effective_quic_config_for_entries(&config, entries)?;
         let symbol_auth = config.symbol_auth_context()?;
         let symbol_auth_enabled = symbol_auth.is_some();
         let manifest = manifest_from_entries("payload", true, entries);
@@ -3927,7 +4014,7 @@ mod tests {
         let ack = receive_sender_hello_ack(cx, sender, &mut sender_control)?;
         assert_eq!(ack.peer_id, "receiver-peer");
 
-        let mut encoders = encoders_from_entries(&manifest, entries);
+        let mut encoders = encoders_from_entries(&manifest, entries, &config)?;
         let symbols_sent = send_manifest_symbols_complete(
             cx,
             sender,
@@ -4022,6 +4109,7 @@ mod tests {
         assert_eq!(c.chunk_size, DEFAULT_CHUNK_SIZE);
         assert_eq!(c.symbol_size, DEFAULT_SYMBOL_SIZE);
         assert_eq!(c.max_block_size, DEFAULT_MAX_BLOCK_SIZE);
+        assert_eq!(c.max_block_size, usize::from(DEFAULT_SYMBOL_SIZE) * 512);
         assert_eq!(c.max_datagram_size, DEFAULT_MAX_DATAGRAM_SIZE);
         assert_eq!(c.max_transfer_bytes, DEFAULT_MAX_TRANSFER_BYTES);
         assert_eq!(c.idle_timeout, DEFAULT_IDLE_TIMEOUT);
@@ -4034,6 +4122,30 @@ mod tests {
             c.symbol_auth_mode(),
             QuicSymbolAuthMode::MissingAuthenticationContext
         );
+    }
+
+    #[test]
+    fn quic_block_sizer_reuses_rq_k512_plan_for_wide_configs() {
+        let config = QuicConfig {
+            max_block_size: 8 * 1024 * 1024,
+            ..trusted_quic_config()
+        };
+        let effective = effective_quic_config_for_largest_entry(&config, 10 * 1024 * 1024)
+            .expect("normal 10MiB entry fits the bounded-K QUIC plan");
+
+        assert_eq!(
+            effective.max_block_size,
+            usize::from(effective.symbol_size) * 512
+        );
+
+        let params = object_params_for(
+            entry_object_id("bounded-k512", 0),
+            10 * 1024 * 1024,
+            effective.symbol_size,
+            effective.max_block_size,
+        );
+        assert_eq!(params.symbols_per_block, 512);
+        assert_eq!(params.source_blocks, 20);
     }
 
     #[test]
@@ -4216,6 +4328,45 @@ mod tests {
         assert!(
             outcome.symbols_sent >= 3,
             "source symbols plus adaptive repair should be sprayed"
+        );
+    }
+
+    #[test]
+    fn quic_effective_block_size_reuses_rq_sizer_for_large_entries() {
+        let config = QuicConfig {
+            max_block_size: 8 * 1024 * 1024,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("large.bin".to_string(), vec![7_u8; 1024 * 1024])];
+
+        let transfer_config =
+            effective_quic_config_for_entries(&config, &entries).expect("sized config");
+
+        assert_eq!(transfer_config.max_block_size, 512 * 1024);
+    }
+
+    #[test]
+    fn quic_prepare_source_manifest_carries_effective_block_geometry() {
+        let cx = Cx::for_testing();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let file = temp.path().join("payload.bin");
+        std::fs::write(&file, varied_bytes(1024 * 1024, 19)).expect("write payload");
+        let config = QuicConfig {
+            chunk_size: 31 * 1024,
+            max_block_size: 8 * 1024 * 1024,
+            ..trusted_quic_config()
+        };
+
+        let prepared = block_on(prepare_source_manifest(&cx, &file, &config))
+            .expect("source manifest prepares");
+        let transfer_config = prepared.effective_config(&config);
+
+        assert_eq!(prepared.max_block_size, 512 * 1024);
+        assert_eq!(transfer_config.max_block_size, 512 * 1024);
+        assert_eq!(
+            block_count_for_len(prepared.manifest.entries[0].size, &transfer_config)
+                .expect("block count"),
+            2
         );
     }
 
@@ -5169,15 +5320,16 @@ mod tests {
     }
 
     #[test]
-    fn quic_sender_repair_feedback_round_recovers_after_source_loss() {
+    fn quic_bounded_k512_repair_feedback_round_recovers_after_source_loss() {
         let (cx, mut client, mut server) = established_pair();
         let config = QuicConfig {
-            symbol_size: 128,
-            max_block_size: 512,
+            symbol_size: 16,
+            max_block_size: 8 * 1024,
             repair_overhead: 1.0,
             ..trusted_quic_config()
         };
-        let entries = vec![("alpha.bin".to_string(), varied_bytes(384, 47))];
+        assert_eq!(config.max_block_size / usize::from(config.symbol_size), 512);
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(8 * 1024, 47))];
         let manifest = manifest_from_entries("payload", true, &entries);
         let mut sender_control =
             QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
@@ -5220,7 +5372,7 @@ mod tests {
         receive_sender_hello_ack(&cx, &mut client, &mut sender_control)
             .expect("sender receives ack");
 
-        let mut encoders = encoders_from_entries(&manifest, &entries);
+        let mut encoders = encoders_from_entries(&manifest, &entries, &config).expect("encoders");
         let initial_sent = send_manifest_symbols_complete(
             &cx,
             &mut client,
@@ -5230,7 +5382,7 @@ mod tests {
             &config,
         )
         .expect("send source-only round");
-        assert_eq!(initial_sent, 3);
+        assert_eq!(initial_sent, 512);
         pump_until_idle(
             &cx,
             &mut client,
@@ -5248,7 +5400,7 @@ mod tests {
         let accepted_before =
             drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
                 .expect("receiver drains surviving source symbols");
-        assert_eq!(accepted_before, 2);
+        assert_eq!(accepted_before, 511);
         receive_object_complete(&cx, &mut server, &mut receiver_control)
             .expect("receiver sees initial object complete");
         assemble_completed_entries(&mut decoders);
@@ -5280,7 +5432,7 @@ mod tests {
                 .expect("sender handles need-more");
         assert!(report.is_none());
         assert_eq!(feedback.feedback_rounds, 1);
-        assert_eq!(feedback.symbols_sent, 4);
+        assert_eq!(feedback.symbols_sent, 513);
         pump_until_idle(
             &cx,
             &mut client,
@@ -5332,10 +5484,10 @@ mod tests {
                 .expect("sender receives proof report")
                 .expect("proof completes transfer");
         assert_eq!(report.transfer_id, manifest.transfer_id);
-        assert_eq!(report.receipt.bytes_received, 384);
+        assert_eq!(report.receipt.bytes_received, 8 * 1024);
         assert_eq!(report.files, 1);
         assert_eq!(feedback.feedback_rounds, 1);
-        assert_eq!(feedback.symbols_sent, 4);
+        assert_eq!(feedback.symbols_sent, 513);
     }
 
     #[test]
@@ -5365,7 +5517,7 @@ mod tests {
         )
         .expect("send hello");
         send_manifest(&cx, &mut client, &mut sender_control, &manifest).expect("send manifest");
-        let mut encoders = encoders_from_entries(&manifest, &entries);
+        let mut encoders = encoders_from_entries(&manifest, &entries, &config).expect("encoders");
         let symbol_auth = config.symbol_auth_context().expect("auth posture");
         let sent = spray_initial_symbols(
             &cx,
@@ -5670,7 +5822,7 @@ mod tests {
             false,
         )
         .expect("send hello");
-        let mut encoders = encoders_from_entries(&manifest, &entries);
+        let mut encoders = encoders_from_entries(&manifest, &entries, &config).expect("encoders");
         let initial_sent = send_manifest_symbols_complete(
             &cx,
             &mut client,
@@ -5821,7 +5973,7 @@ mod tests {
             false,
         )
         .expect("send hello");
-        let mut encoders = encoders_from_entries(&manifest, &entries);
+        let mut encoders = encoders_from_entries(&manifest, &entries, &config).expect("encoders");
         send_manifest_symbols_complete(
             &cx,
             &mut client,

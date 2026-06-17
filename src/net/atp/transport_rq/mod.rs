@@ -1097,7 +1097,7 @@ fn effective_transfer_max_block_size(
     effective_max_block_size_for_largest_entry(config, max_entry_len)
 }
 
-fn effective_max_block_size_for_largest_entry(
+pub(in crate::net::atp) fn effective_max_block_size_for_largest_entry(
     config: &RqConfig,
     max_entry_len: usize,
 ) -> Result<usize, RqError> {
