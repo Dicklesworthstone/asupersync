@@ -1,0 +1,147 @@
+# ATP-rq "beat rsync" — negative-evidence ledger + experiment designs
+
+> Discipline from `/running-the-gauntlet-on-your-rust-port`: every perf hypothesis gets an
+> experiment-design entry (hypothesis / minimal-repro / expected-signal / falsifiability /
+> one-line-invocation / result-inline). Every REFUTED candidate gets a negative-ledger entry with
+> a **retry-condition predicate** (never "later", never "if it seems important"). Grep this file
+> BEFORE re-chasing a lever. Keep-gate: profile-first, both gates same run window, report cv_pct,
+> attribute to a frame ≥0.1% self-time, isomorphism proof per change.
+
+Reference benchmark (cross-machine OVH 16c → Contabo 10c, 100M, sha-verified):
+rsync(tuned)=8.44s · baseline atp-rq(scalar,serial)=164.75s · F3(parallel encode)=113.85s.
+Target: ≤ rsync on clean; FASTER under loss/high-BDP.
+
+---
+
+## CONFIRMED FACTS (positive evidence)
+
+- **F-POS-1 · Systematic fast path EXISTS and is correct.** `DecodingPipeline::try_decode_block`
+  (src/decoding.rs:664) calls `try_complete_from_source_symbols` first; if all K source symbols of
+  a block are present it reassembles by **memcpy** (decoding.rs:736-754) and never runs the O(K²)
+  `decode_block` inactivation solve. The solve runs ONLY for blocks missing source symbols.
+  ⇒ Implication: clean, loss-free delivery of source symbols = near-memcpy receive. The slow path
+  is entered only when symbols are DROPPED.
+- **F-POS-2 · F3 parallel per-block encode landed** (commit 4c665fe6a) — 164.75→113.85s (1.45×),
+  byte-identical. Removes the *sender* single-core encode wall (CPU 99%→125%).
+
+## REFUTED / NEGATIVE (do NOT re-chase unless retry-condition fires)
+
+- **N-1 · SIMD AVX2 GF(256) (`simd-intrinsics`) gives no net throughput win for atp-rq.**
+  Evidence: 100M xmachine F3+simd 133.57s vs F3-scalar 113.85s (slower, within variance);
+  loopback 170 vs 162. The receive bottleneck is feedback-rounds + solve-on-incomplete-blocks +
+  per-symbol bookkeeping, NOT GF(256) vector throughput.
+  **Retry-condition:** re-test SIMD ONLY if a profile shows `gf256_{mul,addmul}_slice` frames
+  ≥5% self-time in a steady-state run (i.e. after pacing makes the solve the dominant cost again).
+- **N-2 · Parallel encode ALONE does not approach rsync on a fast/loopback path.**
+  Evidence: loopback 100M 204→160s (1.27×) — shifts wall to receiver; the parallel burst (~10MB/s)
+  outruns the receiver drain → recv-buffer overflow → 5-6 feedback rounds, 2.25× symbol inflation
+  (230600 sent / 102565 needed for 100M).
+  **Retry-condition:** N/A — F3 is kept (helps the WAN encode-bound case); this entry records that
+  encode-parallelism is NOT sufficient on its own. Must be paired with pacing (E-1).
+
+## OPEN HYPOTHESES (experiment queue — profile-first)
+
+### E-0 · PROFILE: where does the 113.85s actually go? (BLOCKS all others)
+- **Hypothesis:** the F3 100M wall is dominated by feedback-round latency + solve-on-incomplete
+  blocks (caused by burst-induced drops), NOT by sender encode (already parallel) nor raw GF256.
+- **Minimal repro:** cross-machine 100M with F3 binary; capture sender CPU%, receiver CPU%,
+  feedback_rounds, symbols_sent/accepted, and a per-phase timeline (round0-spray / drain / solve /
+  needmore-RTT). `/usr/bin/time -v` both ends + the JSON `feedback_rounds`.
+- **Expected signal (if true):** sender CPU << 100% (not encode-bound anymore); receiver shows
+  bursty solve activity; wall ≈ Σ(feedback round RTTs + per-round drain). symbols_sent ≫ source.
+- **Falsifiability:** if sender stays ~99% CPU → still encode-bound (E-0 false, revisit encode).
+  If receiver pegs one core for ~all of wall with feedback_rounds≤1 → solve-bound (→ N-1 retry).
+- **One-line:** `bash /tmp/xm_profile.sh` (to author).
+- **Result:** _pending_
+
+### E-1 · Rate-paced spray (F2 / 317hxr.3.x): eliminate self-inflicted drops
+- **Hypothesis:** pacing the spray to ≈ receiver drain rate (or link rate) keeps blocks
+  source-complete → systematic memcpy fast path (F-POS-1) → 0-1 feedback rounds → big win.
+- **Expected signal:** feedback_rounds → 0-1; symbols_sent ≈ source count (overhead → ~1.0x);
+  100M wall drops toward network-bound (~rsync).
+- **Falsifiability:** if paced run still has many feedback rounds → drops are network-loss not
+  burst (→ FEC is genuinely needed, tune E-2 instead).
+- **One-line:** prototype a token-bucket / sleep-paced `send_symbol_datagram`; A/B vs F3.
+- **Result:** _pending_
+
+### E-2 · repair_overhead + source-retransmit tuning (lazy vs eager FEC)
+- **Hypothesis:** on a low-loss link, `repair_overhead=1.0` (source-only round 0) + cheap
+  missing-source retransmit (the `missing_source_symbols` path already exists, decoding.rs:778)
+  beats sending speculative repair. Under real loss, a small overhead amortizes an RTT.
+- **Expected signal:** clean-link: less encode + fewer bytes → faster. lossy-link: find the
+  overhead that minimizes wall (convergence in ≤2 rounds).
+- **Falsifiability:** if source-retransmit costs more RTTs than speculative repair saves → eager
+  wins; record crossover loss rate.
+- **One-line:** sweep `--repair-overhead {1.0,1.03,1.1}` × loss {0,1%,5%} cross-machine + netem.
+- **Result:** _pending_
+
+### E-3 · Multi-stream UDP saturation vs single-TCP rsync on high-BDP
+- **Hypothesis:** ATP's N-way UDP spray fills a high-bandwidth×delay pipe that rsync's single TCP
+  stream (cwnd/RTT-limited) cannot — IF ATP is not CPU-bound (requires E-1).
+- **Expected signal:** at high RTT (e.g. 100ms) + moderate bandwidth, atp-rq (paced) throughput
+  > rsync; widen the `--streams` count until the NIC/loss saturates.
+- **Falsifiability:** if a single paced UDP stream already saturates → multi-stream adds nothing.
+- **One-line:** netem delay 50-100ms; atp `--streams {1,4,8,16}` vs rsync; same link.
+- **Result:** _pending_
+
+### E-4 · max_block_size sweep (is decode superlinear in K?)
+- **Hypothesis:** default 8MiB ⇒ K=8192; if `decode_block` is superlinear in K, smaller blocks
+  cut solve cost AND widen encode/decode parallelism (more independent blocks). If decode is
+  ~linear, smaller blocks only help parallelism width.
+- **Expected signal:** microbench `decode_block` wall vs K for fixed total bytes; superlinear ⇒
+  smaller K wins. (CLI does not expose max_block_size yet → would add `--max-block-size`.)
+- **Falsifiability:** if decode wall ∝ total bytes regardless of K → block size irrelevant to
+  solve cost (only parallelism). 
+- **One-line:** criterion bench `decode_block` at K ∈ {256,1024,4096,8192} same total bytes.
+- **Result:** _pending_
+
+### E-5 · Parallel decode (F6.3 / 317hxr.7.3) — only if E-0 shows solve-bound
+- **Hypothesis:** decode the independent blocks concurrently on the blocking pool (receiver has
+  10-64 cores). Only worth it if E-0 proves solve CPU (not feedback latency) is the wall.
+- **Gate:** blocked on E-0 result. The receive path (`feed_symbol`/`EntryDecoder`) is peer-hot.
+- **Result:** _pending (gated on E-0)_
+
+---
+
+## ASUPERSYNC LEVERAGE AUDIT (are we fully using the runtime?)
+
+Per `/asupersync-mega-skill`. Findings on whether atp-rq exploits asupersync's machinery:
+
+- **L-FINDING-1 · Sender does ONE syscall per symbol.** `send_symbol_datagram`
+  (transport_rq/mod.rs:1907) → `sock.send(&dgram)` (one `send_to` per symbol; ~100k for 100M).
+- **L-FINDING-2 · Receiver does ONE `poll_recv` per symbol.** `pump_until_control`
+  (transport_rq/mod.rs:2955) polls `udp.poll_recv` for a single datagram per loop iter (biased
+  select with the control stream). It does NOT use `recv_batch_from` (udp.rs:1226), which drains
+  ALL immediately-ready packets after a single reactor-readiness wait.
+- **L-FINDING-3 · asupersync has NO true batched-syscall UDP path.** `send_batch_to` (udp.rs:1190)
+  is a portable no-op loop (`fallback_used:true`, one `send_to` each — no `sendmmsg`).
+  `grep sendmmsg|recvmmsg|UDP_SEGMENT src/net/` ⇒ none. So GSO/GRO/sendmmsg/recvmmsg are
+  UNIMPLEMENTED in the runtime. This is both a missed-leverage finding AND a runtime-enhancement
+  opportunity that would also benefit transport_quic + quic_native.
+- **L-FINDING-4 · CLI blocking pool IS used** (599356511) and F3 dispatches encode to it. Good.
+  spawn_blocking is region-owned + cancel-correct. The receiver decode does NOT use it (E-5).
+
+### E-6 · Batched UDP syscalls + GSO (deepest runtime-leverage lever)
+- **Hypothesis (two tiers):**
+  (a) cheap: switch the rq receiver pump to `recv_batch_from` (amortize the reactor-readiness wait
+      per burst). Possibly a small win.
+  (b) high-ceiling: add a real `sendmmsg`/`recvmmsg` + **GSO (`UDP_SEGMENT`)** fast path to
+      `UdpSocket` (one `sendmsg` pushes up to 64 segments; kernel/NIC segments). This is how
+      WireGuard/quinn hit line rate. Collapses ~100k syscalls → ~1.5k and offloads segmentation.
+- **Expected signal:** (a) modest drain-time reduction at high packet rate; (b) sender packet rate
+  rises from ~per-syscall-bound to GSO-bound (≫12 MB/s ceiling) → lets ATP EXCEED rsync on fat
+  pipes, not just match it.
+- **Falsifiability:** if E-0 shows the wall is feedback-rounds (not syscall/packet-rate), E-6 is a
+  ceiling-raiser not a near-term win — defer behind E-1. Only matters once paced + clean.
+- **Scope/risk:** (b) needs `#[allow(unsafe_code)]` libc in udp.rs + reactor integration + the
+  unsafe ledger (artifacts/unsafe_boundary_ledger_v1.json). Benefits QUIC too.
+- **One-line:** (a) prototype recv_batch_from in pump_until_control; (b) microbench sendmmsg+GSO
+  packet rate vs send_to loop on loopback.
+- **Result:** _pending_
+
+### Synthesis — why ATP can beat rsync (the actual thesis)
+On a CLEAN link, the win path is: **lazy/paced source-symbol streaming (E-1,E-2) → systematic
+memcpy receive (F-POS-1, already built) → 0 feedback rounds → match rsync**; then **GSO + N-stream
+UDP (E-6,E-3) → EXCEED rsync** by saturating a fat/long pipe a single TCP stream can't fill. On a
+LOSSY link, the *same* fountain machinery repairs loss without TCP's retransmit/HoL collapse — but
+ONLY once ATP is not self-bottlenecked on CPU/feedback. Order: E-0 → E-1 → E-2 → (E-3,E-6) → E-5.
