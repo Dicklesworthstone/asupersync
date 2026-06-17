@@ -847,7 +847,7 @@ fn put_u64(out: &mut Vec<u8>, value: u64) {
 }
 
 fn put_len(out: &mut Vec<u8>, len: usize) {
-    let len = u32::try_from(len).expect("journal field exceeds u32 length");
+    let len = checked_u32_len(len, "journal field").expect("journal field length was prevalidated");
     out.extend_from_slice(&len.to_le_bytes());
 }
 
@@ -871,6 +871,85 @@ fn put_object_id(out: &mut Vec<u8>, object_id: &ObjectId) {
 
 fn put_merkle_root(out: &mut Vec<u8>, root: &MerkleRoot) {
     out.extend_from_slice(root.hash());
+}
+
+fn checked_u32_len(len: usize, field_name: &'static str) -> Result<u32, JournalError> {
+    u32::try_from(len).map_err(|_| {
+        JournalError::Serialization(format!("{field_name} exceeds u32 length: {len} bytes"))
+    })
+}
+
+fn validate_string_len(value: &str, field_name: &'static str) -> Result<(), JournalError> {
+    checked_u32_len(value.len(), field_name).map(|_| ())
+}
+
+fn validate_record_lengths(record: &JournalRecord) -> Result<(), JournalError> {
+    match record {
+        JournalRecord::Offer { transfer_id, .. } => validate_string_len(transfer_id, "transfer_id"),
+        JournalRecord::Accept {
+            transfer_id,
+            peer_id,
+            ..
+        } => {
+            validate_string_len(transfer_id, "transfer_id")?;
+            validate_string_len(peer_id, "peer_id")
+        }
+        JournalRecord::ChunkReceived { transfer_id, .. }
+        | JournalRecord::ChunkVerified { transfer_id, .. }
+        | JournalRecord::CommitIntent { transfer_id, .. } => {
+            validate_string_len(transfer_id, "transfer_id")
+        }
+        JournalRecord::Cancellation {
+            transfer_id,
+            reason,
+            ..
+        } => {
+            validate_string_len(transfer_id, "transfer_id")?;
+            validate_string_len(reason, "reason")
+        }
+        JournalRecord::ProofDigest {
+            transfer_id,
+            proof_type,
+            ..
+        } => {
+            validate_string_len(transfer_id, "transfer_id")?;
+            validate_string_len(proof_type, "proof_type")
+        }
+        JournalRecord::ChunkWritten {
+            transfer_id,
+            file_path,
+            ..
+        } => {
+            validate_string_len(transfer_id, "transfer_id")?;
+            validate_string_len(file_path, "file_path")
+        }
+        JournalRecord::RepairDecode {
+            transfer_id,
+            source_chunks,
+            ..
+        } => {
+            validate_string_len(transfer_id, "transfer_id")?;
+            checked_u32_len(source_chunks.len(), "source_chunks")?;
+            Ok(())
+        }
+        JournalRecord::Rollback {
+            transfer_id,
+            rollback_reason,
+            ..
+        } => {
+            validate_string_len(transfer_id, "transfer_id")?;
+            validate_string_len(rollback_reason, "rollback_reason")
+        }
+        JournalRecord::CommitComplete {
+            transfer_id,
+            final_path,
+            ..
+        } => {
+            validate_string_len(transfer_id, "transfer_id")?;
+            validate_string_len(final_path, "final_path")
+        }
+        JournalRecord::CompactionBoundary { .. } => Ok(()),
+    }
 }
 
 struct DecodeCursor<'a> {
@@ -977,17 +1056,20 @@ pub struct JournalEntry {
 impl JournalEntry {
     /// Create a new journal entry
     pub fn new(sequence: u64, record: JournalRecord) -> Self {
+        Self::try_new(sequence, record).expect("journal record length was prevalidated")
+    }
+
+    fn try_new(sequence: u64, record: JournalRecord) -> Result<Self, JournalError> {
         let serialized = record.encode_payload();
         let checksum = crc32fast::hash(&serialized);
-        let entry_size =
-            u32::try_from(serialized.len()).expect("journal record exceeds u32 length");
+        let entry_size = checked_u32_len(serialized.len(), "journal record")?;
 
-        Self {
+        Ok(Self {
             sequence,
             record,
             checksum,
             entry_size,
-        }
+        })
     }
 
     /// Validate the entry's checksum
@@ -1143,7 +1225,14 @@ impl AppendJournal {
         }
 
         let is_boundary = matches!(record, JournalRecord::CompactionBoundary { .. });
-        let entry = JournalEntry::new(self.sequence, record.with_signature(&self.auth_key));
+        if let Err(err) = validate_record_lengths(&record) {
+            return Outcome::Err(err);
+        }
+        let entry =
+            match JournalEntry::try_new(self.sequence, record.with_signature(&self.auth_key)) {
+                Ok(entry) => entry,
+                Err(err) => return Outcome::Err(err),
+            };
 
         // Serialize the entry
         let serialized = entry.encode();
@@ -1151,7 +1240,10 @@ impl AppendJournal {
         // Write to disk
         if let Some(ref mut writer) = self.writer {
             // Write length prefix
-            let length = serialized.len() as u32;
+            let length = match checked_u32_len(serialized.len(), "journal frame") {
+                Ok(length) => length,
+                Err(err) => return Outcome::Err(err),
+            };
             if let Err(e) = writer.write_all(&length.to_le_bytes()) {
                 return Outcome::Err(JournalError::WriteFailure(e.to_string()));
             }
@@ -1165,6 +1257,8 @@ impl AppendJournal {
                 if let Err(e) = sync_writer_data(writer) {
                     return Outcome::Err(e);
                 }
+            } else if let Err(e) = flush_writer_buffer(writer) {
+                return Outcome::Err(e);
             }
         }
 
@@ -1268,32 +1362,41 @@ impl AppendJournal {
             return Outcome::Ok(());
         }
 
-        let file_path = journal_file_path(&self.config.base_dir, self.generation);
+        let (file_path, writer) = match self.open_generation_writer(self.generation) {
+            Outcome::Ok(writer) => writer,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
 
+        self.writer = Some(writer);
+        self.current_file = Some(file_path);
+
+        Outcome::Ok(())
+    }
+
+    fn open_generation_writer(
+        &self,
+        generation: u64,
+    ) -> Outcome<(PathBuf, BufWriter<File>), JournalError> {
+        let file_path = journal_file_path(&self.config.base_dir, generation);
         let file = match OpenOptions::new()
             .create(true)
             .append(true)
             .open(&file_path)
         {
-            Ok(f) => {
-                if self.config.force_sync {
-                    // Sync the parent directory to ensure the new file entry is durable
-                    if let Ok(dir) = File::open(&self.config.base_dir) {
-                        let _ = dir.sync_all();
-                    }
-                }
-                f
-            }
+            Ok(f) => f,
             Err(e) => return Outcome::Err(JournalError::FileOpen(e.to_string())),
         };
 
-        self.writer = Some(BufWriter::with_capacity(
-            self.config.write_buffer_size,
-            file,
-        ));
-        self.current_file = Some(file_path);
+        if let Err(err) = sync_journal_directory(&self.config.base_dir) {
+            return Outcome::Err(err);
+        }
 
-        Outcome::Ok(())
+        Outcome::Ok((
+            file_path,
+            BufWriter::with_capacity(self.config.write_buffer_size, file),
+        ))
     }
 
     fn should_compact(&self) -> Outcome<bool, JournalError> {
@@ -1315,9 +1418,18 @@ impl AppendJournal {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
+        let next_generation = match self.generation.checked_add(1) {
+            Some(generation) => generation,
+            None => {
+                return Outcome::Err(JournalError::CompactionFailed(
+                    "journal generation overflow".to_string(),
+                ));
+            }
+        };
+
         // Create compaction boundary record
         let boundary_record = JournalRecord::signed_compaction_boundary(
-            self.generation + 1,
+            next_generation,
             self.sequence,
             SystemTime::now() // ubs:ignore - timestamp used for recording, not crypto randomness
                 .duration_since(UNIX_EPOCH)
@@ -1334,11 +1446,18 @@ impl AppendJournal {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
-        // Close current writer
+        // Close current writer and create the next generation before success is
+        // reported, so recovery observes the boundary and its target file.
         self.writer = None;
+        self.current_file = None;
 
-        // Increment generation
-        self.generation += 1;
+        self.generation = next_generation;
+        match self.ensure_writer() {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         // Clean up old generations
         match self.cleanup_old_generations() {
@@ -1558,6 +1677,12 @@ impl AppendJournal {
     }
 }
 
+fn flush_writer_buffer(writer: &mut BufWriter<File>) -> Result<(), JournalError> {
+    writer
+        .flush()
+        .map_err(|err| JournalError::WriteFailure(err.to_string()))
+}
+
 fn sync_writer_data(writer: &mut BufWriter<File>) -> Result<(), JournalError> {
     // BufWriter bytes must reach the file descriptor before the durability
     // barrier. Calling sync_data before flush would fsync the old file state.
@@ -1568,6 +1693,18 @@ fn sync_writer_data(writer: &mut BufWriter<File>) -> Result<(), JournalError> {
         .get_ref()
         .sync_data()
         .map_err(|err| JournalError::SyncFailure(err.to_string()))
+}
+
+#[cfg(unix)]
+fn sync_journal_directory(path: &Path) -> Result<(), JournalError> {
+    let dir = File::open(path).map_err(|err| JournalError::SyncFailure(err.to_string()))?;
+    dir.sync_all()
+        .map_err(|err| JournalError::SyncFailure(err.to_string()))
+}
+
+#[cfg(not(unix))]
+fn sync_journal_directory(_path: &Path) -> Result<(), JournalError> {
+    Ok(())
 }
 
 /// Journal operation errors
@@ -1636,6 +1773,14 @@ mod tests {
         AuthenticationTag::zero()
     }
 
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now() // ubs:ignore - timestamp used for test uniqueness, not crypto
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), unique))
+    }
+
     #[test]
     fn journal_file_name_contract_matches_generation_parser() {
         assert_eq!(journal_file_name(0), "journal_gen_000000.dat");
@@ -1643,6 +1788,14 @@ mod tests {
         assert_eq!(parse_journal_generation(&journal_file_name(42)), Some(42));
         assert_eq!(parse_journal_generation("journal_42.dat"), None);
         assert_eq!(parse_journal_generation("journal_gen_000042.tmp"), None);
+    }
+
+    #[test]
+    fn checked_u32_len_rejects_oversized_field_without_panic() {
+        let err = checked_u32_len(u32::MAX as usize + 1, "source_chunks")
+            .expect_err("oversized fields must become serialization errors");
+        assert!(matches!(err, JournalError::Serialization(_)));
+        assert!(err.to_string().contains("source_chunks"));
     }
 
     #[test]
@@ -1726,6 +1879,34 @@ mod tests {
         assert_eq!(recovered_stats.recent_entries_count, 1);
 
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn non_force_sync_append_is_recoverable_before_explicit_flush_or_drop() {
+        let temp_dir = unique_temp_dir("test_journal_non_force_sync");
+        let config = JournalConfig {
+            base_dir: temp_dir,
+            force_sync: false,
+            ..Default::default()
+        };
+
+        let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+        let sequence = journal
+            .append(JournalRecord::Accept {
+                transfer_id: "buffered_transfer".to_string(),
+                peer_id: "peer123".to_string(),
+                timestamp: 1234567890,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+
+        assert_eq!(sequence, 0);
+        assert_eq!(journal.get_stats().sequence, 1);
+
+        let recovered = AppendJournal::new(config, test_auth_key()).unwrap();
+        let recovered_stats = recovered.get_stats();
+        assert_eq!(recovered_stats.sequence, 1);
+        assert_eq!(recovered_stats.recent_entries_count, 1);
     }
 
     #[test]
@@ -1895,23 +2076,15 @@ mod tests {
 
     #[test]
     fn compaction_boundary_is_signed_and_verifiable() {
-        let unique = SystemTime::now() // ubs:ignore - timestamp used for test uniqueness, not crypto
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "test_compaction_boundary_{}_{}",
-            std::process::id(),
-            unique
-        ));
+        let temp_dir = unique_temp_dir("test_compaction_boundary");
         let key = test_auth_key();
         let config = JournalConfig {
-            base_dir: temp_dir,
+            base_dir: temp_dir.clone(),
             max_journal_size: u64::MAX,
             ..Default::default()
         };
 
-        let mut journal = AppendJournal::new(config, key.clone()).unwrap();
+        let mut journal = AppendJournal::new(config.clone(), key.clone()).unwrap();
         journal
             .append(JournalRecord::Accept {
                 transfer_id: "transfer_a".to_string(),
@@ -1930,5 +2103,15 @@ mod tests {
 
         assert!(!boundary.record.auth_tag().is_zero());
         assert!(boundary.record.verify_signature(&key));
+        assert_eq!(journal.get_stats().generation, 1);
+        assert!(
+            journal_file_path(&temp_dir, 1).exists(),
+            "compaction must create the next generation before reporting success"
+        );
+
+        let recovered = AppendJournal::new(config, test_auth_key()).unwrap();
+        let recovered_stats = recovered.get_stats();
+        assert_eq!(recovered_stats.generation, 1);
+        assert_eq!(recovered_stats.sequence, 2);
     }
 }
