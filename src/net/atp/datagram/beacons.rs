@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+/// Default interval for path RTT probes.
+pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Default idle interval before emitting a keepalive decision.
+pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Path quality beacon payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathBeacon {
@@ -137,6 +143,11 @@ impl PathBeacon {
             BeaconType::Keepalive,
             BeaconMeasurement::empty(),
         )
+    }
+
+    /// Create path-quality probe beacon
+    pub fn probe(sequence: u64, path_id: u64, measurement_data: BeaconMeasurement) -> Self {
+        Self::new(sequence, path_id, BeaconType::Probe, measurement_data)
     }
 
     /// Encode beacon to bytes
@@ -399,6 +410,63 @@ impl BeaconManager {
         Some(beacon)
     }
 
+    /// Create path probe beacon
+    pub fn create_probe_beacon(
+        &mut self,
+        path_id: u64,
+        measurement: BeaconMeasurement,
+    ) -> Option<PathBeacon> {
+        if !self.is_beacon_type_enabled(BeaconType::Probe) {
+            return None;
+        }
+
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+
+        let beacon = PathBeacon::probe(sequence, path_id, measurement);
+
+        let stats = self
+            .path_stats
+            .entry(path_id)
+            .or_insert_with(|| BeaconStats::new(path_id));
+        stats.record_sent(sequence);
+
+        self.last_beacon_time.insert(path_id, Instant::now());
+
+        Some(beacon)
+    }
+
+    /// Create NAT/liveness keepalive beacon
+    pub fn create_keepalive_beacon(&mut self, path_id: u64) -> Option<PathBeacon> {
+        if !self.is_beacon_type_enabled(BeaconType::Keepalive) {
+            return None;
+        }
+
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+
+        let beacon = PathBeacon::keepalive(sequence, path_id);
+
+        let stats = self
+            .path_stats
+            .entry(path_id)
+            .or_insert_with(|| BeaconStats::new(path_id));
+        stats.record_sent(sequence);
+
+        self.last_beacon_time.insert(path_id, Instant::now());
+
+        Some(beacon)
+    }
+
+    /// Record a path RTT sample observed by a transport-level probe.
+    pub fn record_path_rtt(&mut self, path_id: u64, rtt: Duration) {
+        let stats = self
+            .path_stats
+            .entry(path_id)
+            .or_insert_with(|| BeaconStats::new(path_id));
+        stats.record_response(rtt);
+    }
+
     /// Process received beacon
     pub fn process_received_beacon(&mut self, beacon: PathBeacon) -> Option<PathBeacon> {
         let path_id = beacon.path_id;
@@ -482,6 +550,131 @@ impl BeaconManager {
     }
 }
 
+/// Scheduled beacon action for one path.
+#[derive(Debug, Clone)]
+pub struct BeaconScheduleAction {
+    /// Beacon to send or account for.
+    pub beacon: PathBeacon,
+    /// How long the peer had been idle when the action was selected.
+    pub idle_for: Duration,
+}
+
+/// Keepalive/probe scheduler for unreliable DATAGRAM-capable paths.
+///
+/// The scheduler is transport-neutral: callers may send the returned beacon on
+/// a DATAGRAM path, or account for an existing protocol exchange as the probe
+/// carrier when adding a new wire frame would break byte-isomorphism.
+#[derive(Debug)]
+pub struct BeaconScheduler {
+    manager: BeaconManager,
+    path_id: u64,
+    keepalive_interval: Duration,
+    probe_interval: Duration,
+    last_peer_activity: Instant,
+    last_keepalive: Option<Instant>,
+    last_probe: Option<Instant>,
+    latest_rtt: Option<Duration>,
+}
+
+impl BeaconScheduler {
+    /// Create a scheduler with RQ/QUIC-safe defaults.
+    #[must_use]
+    pub fn new(path_id: u64, now: Instant) -> Self {
+        Self::with_intervals(
+            path_id,
+            now,
+            DEFAULT_KEEPALIVE_INTERVAL,
+            DEFAULT_PROBE_INTERVAL,
+        )
+    }
+
+    /// Create a scheduler with explicit keepalive and probe intervals.
+    #[must_use]
+    pub fn with_intervals(
+        path_id: u64,
+        now: Instant,
+        keepalive_interval: Duration,
+        probe_interval: Duration,
+    ) -> Self {
+        Self {
+            manager: BeaconManager::new(probe_interval),
+            path_id,
+            keepalive_interval,
+            probe_interval,
+            last_peer_activity: now,
+            last_keepalive: None,
+            last_probe: None,
+            latest_rtt: None,
+        }
+    }
+
+    /// Path ID tracked by this scheduler.
+    #[must_use]
+    pub fn path_id(&self) -> u64 {
+        self.path_id
+    }
+
+    /// Latest observed probe RTT.
+    #[must_use]
+    pub fn latest_rtt(&self) -> Option<Duration> {
+        self.latest_rtt
+    }
+
+    /// Beacon accounting for this path.
+    #[must_use]
+    pub fn manager(&self) -> &BeaconManager {
+        &self.manager
+    }
+
+    /// Mark inbound peer activity, suppressing idle keepalives.
+    pub fn mark_peer_activity(&mut self, now: Instant) {
+        self.last_peer_activity = now;
+    }
+
+    /// Return the next due keepalive/probe action, if any.
+    pub fn next_action(
+        &mut self,
+        now: Instant,
+        measurement: BeaconMeasurement,
+    ) -> Option<BeaconScheduleAction> {
+        let idle_for = elapsed_since(now, self.last_peer_activity);
+        let keepalive_due = idle_for >= self.keepalive_interval
+            && self
+                .last_keepalive
+                .is_none_or(|last| elapsed_since(now, last) >= self.keepalive_interval);
+        if keepalive_due {
+            let beacon = self.manager.create_keepalive_beacon(self.path_id)?;
+            self.last_keepalive = Some(now);
+            return Some(BeaconScheduleAction { beacon, idle_for });
+        }
+
+        let probe_due = self
+            .last_probe
+            .is_none_or(|last| elapsed_since(now, last) >= self.probe_interval);
+        if probe_due {
+            let beacon = self
+                .manager
+                .create_probe_beacon(self.path_id, measurement)?;
+            self.last_probe = Some(now);
+            return Some(BeaconScheduleAction { beacon, idle_for });
+        }
+
+        None
+    }
+
+    /// Record a received peer response and update path RTT statistics.
+    pub fn observe_probe_result(&mut self, now: Instant, rtt: Duration) {
+        self.last_probe = Some(now);
+        self.latest_rtt = Some(rtt);
+        self.mark_peer_activity(now);
+        self.manager.record_path_rtt(self.path_id, rtt);
+    }
+}
+
+fn elapsed_since(now: Instant, then: Instant) -> Duration {
+    now.checked_duration_since(then).unwrap_or_default()
+}
+
 /// Beacon summary statistics
 #[derive(Debug, Clone, Default)]
 pub struct BeaconSummary {
@@ -538,6 +731,17 @@ mod tests {
         assert_eq!(metadata.path_id, Some(42));
         assert_eq!(metadata.priority, DatagramPriority::Normal);
         assert_eq!(metadata.payload_class, "beacon_periodic");
+    }
+
+    #[test]
+    fn test_probe_beacon_creation() {
+        let measurement = BeaconMeasurement::with_rtt(50_000, 5_000);
+        let beacon = PathBeacon::probe(7, 42, measurement);
+
+        assert_eq!(beacon.sequence, 7);
+        assert_eq!(beacon.path_id, 42);
+        assert_eq!(beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(beacon.metadata().priority, DatagramPriority::High);
     }
 
     #[test]
@@ -604,5 +808,43 @@ mod tests {
         manager.set_beacon_type_enabled(BeaconType::Periodic, false);
         assert!(!manager.is_beacon_type_enabled(BeaconType::Periodic));
         assert!(!manager.should_send_beacon(1)); // No beacon when disabled
+    }
+
+    #[test]
+    fn test_beacon_scheduler_probe_and_keepalive() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::with_intervals(
+            42,
+            now,
+            Duration::from_secs(10),
+            Duration::from_secs(2),
+        );
+
+        let first = scheduler
+            .next_action(now, BeaconMeasurement::empty())
+            .expect("initial probe is due");
+        assert_eq!(first.beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(first.idle_for, Duration::ZERO);
+
+        let reply_at = now + Duration::from_millis(50);
+        scheduler.observe_probe_result(reply_at, Duration::from_millis(50));
+        assert_eq!(scheduler.latest_rtt(), Some(Duration::from_millis(50)));
+        assert!(
+            scheduler
+                .next_action(
+                    reply_at + Duration::from_secs(1),
+                    BeaconMeasurement::empty(),
+                )
+                .is_none()
+        );
+
+        let keepalive = scheduler
+            .next_action(
+                reply_at + Duration::from_secs(11),
+                BeaconMeasurement::empty(),
+            )
+            .expect("idle keepalive is due");
+        assert_eq!(keepalive.beacon.beacon_type, BeaconType::Keepalive);
+        assert!(keepalive.idle_for >= Duration::from_secs(10));
     }
 }

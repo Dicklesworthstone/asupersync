@@ -382,7 +382,34 @@ transfer timescale. It must not own per-packet sleeps or per-round repair math.
   unsafe ledger (artifacts/unsafe_boundary_ledger_v1.json). Benefits QUIC too.
 - **One-line:** (a) prototype recv_batch_from in pump_until_control; (b) microbench sendmmsg+GSO
   packet rate vs send_to loop on loopback.
-- **Result:** _pending_
+- **Result (2026-06-17, MossyCastle, E-6.1 + WIRE-5 current-tree loopback):**
+  - Code under test: RQ receiver `pump_until_control` switched from one `udp.poll_recv` per loop to
+    `recv_batch_from` with QUIC-mirrored width/bounded full-batch quiet drain
+    (`RQ_INBOUND_PUMP_BATCH=512`, max full batches 64, 1 ms grace). `datagram/beacons.rs` gained a
+    `BeaconScheduler` plus Probe/Keepalive constructors/helpers; RQ sender wires the scheduler as a
+    **no-new-wire** probe carrier by feeding existing `ObjectComplete` control-reply RTT into
+    `PathEstimate`/`PathSignalSample`. Symbol datagrams and control frame sequence stay
+    byte-identical; receiver SHA-256 + Merkle verification remained green.
+  - Baseline artifact `/tmp/atp_e6a_baseline_20260617T213957Z`, 32 MiB loopback random payload,
+    `rq`, `--streams 4`, `--workers 4`, unauth lab auth, 3 runs: wall
+    57.58/57.98/57.90 s, mean **57.820 s**, sd 0.173 s, **cv_pct=0.30**; peak RSS sender
+    190844 KiB, receiver 243696 KiB; `feedback_rounds=5`, `symbols_sent=73792`,
+    `symbols_accepted≈32803`; sha/merkle ok.
+  - Post artifact `/tmp/atp_wire5_e61_20260617T222032Z`, same local shape, 3 runs: wall
+    103.88/104.58/103.77 s, mean **104.077 s**, sd 0.359 s, **cv_pct=0.34**; peak RSS sender
+    192944 KiB, receiver 253480 KiB; `feedback_rounds=5`, `symbols_sent=70336`,
+    `symbols_accepted≈32786`; sha/merkle ok.
+  - Interpretation: **negative for immediate wall/RSS claim on this dirty current tree**; do not
+    spend a cross-machine 100M slot from this result. The feedback-round count did not change, and
+    post sender CPU fell from ~119% to ~73% while voluntary context switches rose from ~73k to
+    ~225k, so the wall regression is consistent with concurrent WIRE-2 pacing/loss-controller WIP
+    being active in the same `transport_rq/mod.rs` build, not proven to be caused by batching alone.
+  - Retry-condition predicate: rerun an A/B on the **same current tree** after pane-2 pacing reaches
+    a stable/owned commit, toggling only the pump implementation (`poll_recv` vs `recv_batch_from`)
+    with the same binary profile and payload. Keep E-6.1 only if mean wall decreases with
+    `cv_pct <= 1.0`, sha/merkle ok, and receiver peak RSS does not exceed the poll-recv control.
+    If it still loses, retry only with a zero-copy/slab-backed batch receive or much smaller bounded
+    batch width; the current `UdpRecvBatch` alloc/copy shape is not enough evidence for a keep.
 
 ### Synthesis — why ATP can beat rsync (the actual thesis)
 On a CLEAN link, the win path is: **lazy/paced source-symbol streaming (E-1,E-2) → systematic
