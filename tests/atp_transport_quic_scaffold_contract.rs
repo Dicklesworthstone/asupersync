@@ -204,6 +204,49 @@ fn adaptive_controller_replays_same_quic_arm_trajectory() {
 }
 
 #[test]
+fn adaptive_model_profile_matches_online_single_arm_selection() {
+    let mut policy = QuicAdaptivePolicy::default();
+    policy.arm_grid_k = vec![512];
+    policy.arm_grid_fanout = vec![3];
+
+    let mut controller = QuicAdaptiveController::new(policy, 0xC4C4);
+    controller.update_estimate(quic_path_estimate(0.04, 9_000_000.0));
+
+    let profile = controller.model_plan(transport_quic::DEFAULT_SYMBOL_SIZE);
+    let selected = controller
+        .next_block_plan(transport_quic::DEFAULT_SYMBOL_SIZE)
+        .expect("single-arm evidence activates online controller");
+    assert_eq!(
+        selected, profile,
+        "single-arm offline/model profile must match online selection"
+    );
+    assert_eq!(selected.k, 512);
+    assert_eq!(selected.fanout, 3);
+
+    let profile_config =
+        apply_quic_adaptive_block_plan(trusted_quic_config(), profile).expect("profile applies");
+    let selected_config =
+        apply_quic_adaptive_block_plan(trusted_quic_config(), selected).expect("selection applies");
+    assert_eq!(selected_config.symbol_size, profile_config.symbol_size);
+    assert_eq!(
+        selected_config.max_block_size,
+        profile_config.max_block_size
+    );
+    assert_eq!(
+        selected_config.repair_overhead,
+        profile_config.repair_overhead
+    );
+    assert_eq!(
+        selected_config.datagram_fanout,
+        profile_config.datagram_fanout
+    );
+
+    let snapshot = controller.diagnostic_snapshot();
+    assert_eq!(snapshot.epoch, 1);
+    assert_eq!(snapshot.selected_plan, Some(profile));
+}
+
+#[test]
 fn adaptive_arm_rejects_invalid_controller_output() {
     assert!(matches!(
         QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
