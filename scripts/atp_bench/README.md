@@ -42,7 +42,7 @@ bit-for-bit SHA-256 verification of every single transfer.
 | Avg RSS / %CPU | `sampler.sh` (0.5s `ps` samples) | sender + receiver |
 | CPU cycles / instructions | `perf stat` when available, else omitted | sender |
 | Per-core utilization | `mpstat -P ALL 1` during run | sender |
-| Responsiveness guard | 1-min loadavg sampled; run flagged if > 1.5×cores | both |
+| Responsiveness guard | 1-min loadavg sampled; run fails if > configured cap × cores | both |
 | Throughput | payload bytes / wall | derived |
 
 ## Files
@@ -87,6 +87,23 @@ sender, receiver, and local artifacts. Use `--base` when the sender is not
 `root`; the directory must be writable on both machines. Cleanup is
 intentionally manual: inspect or archive `<base>/recv/<run-id>` and
 `<base>/runs/<run-id>` on the receiver before removing anything.
+
+## Resource Guard
+
+Every benchmark row records a `resource_guard` object with schema
+`atp-bench-resource-guard-v1`. The guard evaluates sampled load and optional
+RSS caps as a pass/fail artifact, so the G3 responsiveness claim is not inferred
+from prose in `report.md`.
+
+```bash
+--max-load-per-core 1.5     # default; applies to sender and receiver load1
+--max-sender-rss-mb 0       # 0 disables the sender RSS cap
+--max-receiver-rss-mb 0     # 0 disables the receiver RSS cap
+```
+
+The load cap is enforced before each series and after each measured run. RSS
+caps are opt-in because valid ceilings depend on payload/profile size; when set,
+the row fails closed if `/usr/bin/time -v` or sampler evidence crosses the cap.
 
 ## Usage
 

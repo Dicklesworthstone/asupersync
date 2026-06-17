@@ -132,6 +132,60 @@ def main():
                   f"| {cell(util, '{:.0f}')} "
                   f"| {cell(load, '{:.2f}')} |")
 
+    print("\n## Resource Guard\n")
+    load_cap = conditions.get("max_load_per_core")
+    sender_rss_cap = conditions.get("max_sender_rss_mb")
+    receiver_rss_cap = conditions.get("max_receiver_rss_mb")
+    if load_cap is not None or sender_rss_cap is not None or receiver_rss_cap is not None:
+        print(
+            f"- Configured caps: load1 <= {load_cap}x cores; "
+            f"sender RSS <= {sender_rss_cap} MiB; receiver RSS <= {receiver_rss_cap} MiB."
+        )
+    guard_rows = [
+        r for r in rows
+        if r.get("run") != 0 and isinstance(r.get("resource_guard"), dict)
+    ]
+    if not guard_rows:
+        print("- No `resource_guard` objects were present in measured rows.")
+    else:
+        print("| Payload | Tool | Guard pass | Worst observed / limit | Status |")
+        print("|---|---|---|---|---|")
+        for p in payloads:
+            for t in tools:
+                runs = [
+                    r for r in groups.get((p, t), [])
+                    if isinstance(r.get("resource_guard"), dict)
+                ]
+                if not runs:
+                    print(f"| {p} | {t} | 0/0 | - | MISSING |")
+                    continue
+                passed = sum(1 for r in runs if r["resource_guard"].get("ok") is True)
+                worst = None
+                for r in runs:
+                    for check in r["resource_guard"].get("checks", []):
+                        limit = check.get("limit")
+                        observed = check.get("observed")
+                        if not isinstance(limit, (int, float)) or limit <= 0:
+                            continue
+                        if not isinstance(observed, (int, float)):
+                            continue
+                        ratio = observed / limit
+                        if worst is None or ratio > worst[0]:
+                            worst = (
+                                ratio,
+                                check.get("name", "unknown"),
+                                observed,
+                                limit,
+                                check.get("unit", ""),
+                            )
+                status = "PASS" if passed == len(runs) else "FAIL"
+                if worst is None:
+                    worst_cell = "no configured checks"
+                else:
+                    _, name, observed, limit, unit = worst
+                    worst_cell = f"{name}: {observed:.3g} / {limit:.3g} {unit}"
+                print(f"| {p} | {t} | {passed}/{len(runs)} | {worst_cell} | {status} |")
+
     print("\n## Speedup (rsync wall / atp wall; >1 means atp is faster)\n")
     atp_tools = [t for t in tools if t.startswith("atp")]
     rsync_tools = [t for t in tools if not t.startswith("atp")]
@@ -161,6 +215,16 @@ def main():
                   f"status={f['sender'].get('status')} stderr: {f['sender'].get('stderr_head', '')[:200]}")
     else:
         print("- Zero verification failures.")
+    guard_failures = [
+        r for r in rows
+        if r.get("run") != 0
+        and isinstance(r.get("resource_guard"), dict)
+        and r["resource_guard"].get("ok") is not True
+    ]
+    if guard_failures:
+        print(f"- **{len(guard_failures)} measured runs FAILED the RSS/load resource guard.**")
+    elif guard_rows:
+        print("- RSS/load resource guard passed for every measured run.")
     return 0
 
 

@@ -273,6 +273,70 @@ fn fleet_script_structure_validation_is_no_claim_and_deterministic() {
 }
 
 #[test]
+fn atp_bench_resource_guard_is_first_class_report_artifact() {
+    let root = unique_tmp("bench_resource_guard");
+    let results = root.join("results.jsonl");
+    let conditions = root.join("conditions.json");
+    write_file(
+        &conditions,
+        r#"{
+  "date": "2026-06-17T00:00:00Z",
+  "sender": "fixture-sender",
+  "receiver": "fixture-receiver",
+  "rtt": "fixture",
+  "sender_cores": 4,
+  "receiver_cores": 4,
+  "runs": 2,
+  "max_load_per_core": 1.5,
+  "max_sender_rss_mb": 64,
+  "max_receiver_rss_mb": 64
+}"#,
+    );
+    write_file(
+        &results,
+        r#"{"tool":"atp-quic","payload":"10m","run":1,"verify_ok":true,"sender":{"wall_s":2.0,"bytes":10485760,"max_rss_kb":32768,"user_s":0.5,"sys_s":0.25,"cycles":1000000000,"instructions":2000000000,"avg_core_util_pct":55,"load1_start":1.0,"load1_end":1.2},"receiver_sampler":{"peak_rss_kb":40960,"avg_rss_kb":30000,"peak_cpu_pct":40,"avg_cpu_pct":25,"peak_load1":1.4},"receiver_time":{"max_rss_kb":42000},"resource_guard":{"schema_version":"atp-bench-resource-guard-v1","ok":true,"checks":[{"name":"sender_load1","observed":1.2,"limit":6.0,"unit":"loadavg","passed":true},{"name":"receiver_load1","observed":1.4,"limit":6.0,"unit":"loadavg","passed":true},{"name":"sender_peak_rss","observed":32.0,"limit":64.0,"unit":"MiB","passed":true},{"name":"receiver_peak_rss","observed":41.0,"limit":64.0,"unit":"MiB","passed":true}],"configured":{"max_load_per_core":1.5,"max_sender_rss_mb":64,"max_receiver_rss_mb":64}}}
+{"tool":"atp-quic","payload":"10m","run":2,"verify_ok":true,"sender":{"wall_s":2.2,"bytes":10485760,"max_rss_kb":32768,"user_s":0.55,"sys_s":0.25,"cycles":1000000000,"instructions":2000000000,"avg_core_util_pct":58,"load1_start":1.0,"load1_end":1.2},"receiver_sampler":{"peak_rss_kb":90112,"avg_rss_kb":50000,"peak_cpu_pct":40,"avg_cpu_pct":25,"peak_load1":7.2},"receiver_time":{"max_rss_kb":90112},"resource_guard":{"schema_version":"atp-bench-resource-guard-v1","ok":false,"checks":[{"name":"sender_load1","observed":1.2,"limit":6.0,"unit":"loadavg","passed":true},{"name":"receiver_load1","observed":7.2,"limit":6.0,"unit":"loadavg","passed":false},{"name":"sender_peak_rss","observed":32.0,"limit":64.0,"unit":"MiB","passed":true},{"name":"receiver_peak_rss","observed":88.0,"limit":64.0,"unit":"MiB","passed":false}],"configured":{"max_load_per_core":1.5,"max_sender_rss_mb":64,"max_receiver_rss_mb":64}}}
+"#,
+    );
+
+    let output = Command::new("python3")
+        .arg(repo_root().join("scripts/atp_bench/report.py"))
+        .arg(&results)
+        .arg(&conditions)
+        .output()
+        .expect("run atp bench report");
+
+    assert!(
+        output.status.success(),
+        "report rejected resource guard fixture; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("## Resource Guard"));
+    assert!(stdout.contains("load1 <= 1.5x cores"));
+    assert!(stdout.contains("| 10m | atp-quic | 1/2 |"));
+    assert!(stdout.contains("receiver_peak_rss"));
+    assert!(stdout.contains("| FAIL |"));
+    assert!(stdout.contains("FAILED the RSS/load resource guard"));
+
+    let run_bench = std::fs::read_to_string(repo_root().join("scripts/atp_bench/run_bench.sh"))
+        .expect("read atp bench runner");
+    for required in [
+        "--max-load-per-core",
+        "--max-sender-rss-mb",
+        "--max-receiver-rss-mb",
+        "atp-bench-resource-guard-v1",
+        "\"resource_guard\":$resource_guard",
+    ] {
+        assert!(
+            run_bench.contains(required),
+            "run_bench must contain {required}"
+        );
+    }
+}
+
+#[test]
 #[ignore = "runs the real atp QUIC loopback; invoke explicitly through RCH"]
 fn loopback_script_runs_real_atp_binary() {
     let atp_bin = std::env::var_os("CARGO_BIN_EXE_atp")

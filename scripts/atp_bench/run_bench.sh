@@ -21,6 +21,9 @@ ATP_RQ_SYMBOL_SIZE=1024
 ATP_RQ_REPAIR_OVERHEAD=1.001
 ATP_RQ_TAIL_DRAIN_MS=2
 ATP_RQ_AUTH_KEY_HEX=""
+MAX_LOAD_PER_CORE=1.5
+MAX_SENDER_RSS_MB=0
+MAX_RECEIVER_RSS_MB=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -40,6 +43,9 @@ while [[ $# -gt 0 ]]; do
         --atp-rq-repair-overhead) ATP_RQ_REPAIR_OVERHEAD="$2"; shift 2;;
         --atp-rq-tail-drain-ms) ATP_RQ_TAIL_DRAIN_MS="$2"; shift 2;;
         --atp-rq-auth-key-hex) ATP_RQ_AUTH_KEY_HEX="$2"; shift 2;;
+        --max-load-per-core) MAX_LOAD_PER_CORE="$2"; shift 2;;
+        --max-sender-rss-mb) MAX_SENDER_RSS_MB="$2"; shift 2;;
+        --max-receiver-rss-mb) MAX_RECEIVER_RSS_MB="$2"; shift 2;;
         *) echo "unknown arg: $1" >&2; exit 2;;
     esac
 done
@@ -101,7 +107,7 @@ RTT=$("${SSH_S[@]}" "ping -c 10 -q $RECEIVER_IP 2>/dev/null | tail -1" || echo "
 SENDER_CORES=$("${SSH_S[@]}" nproc)
 RECEIVER_CORES=$("${SSH_R[@]}" nproc)
 cat > "$OUT/conditions.json" <<EOF
-{"date":"$(date -u +%FT%TZ)","run_id":"$RUN_ID","sender":"$SENDER","receiver":"$RECEIVER","rtt":"$RTT","sender_cores":$SENDER_CORES,"receiver_cores":$RECEIVER_CORES,"tools":"$TOOLS","payloads":"$PAYLOADS","runs":$RUNS,"atp_rq_streams":$ATP_RQ_STREAMS,"atp_rq_symbol_size":$ATP_RQ_SYMBOL_SIZE,"atp_rq_repair_overhead":$ATP_RQ_REPAIR_OVERHEAD,"atp_rq_tail_drain_ms":$ATP_RQ_TAIL_DRAIN_MS,"atp_rq_auth":"per-run-env-key"}
+{"date":"$(date -u +%FT%TZ)","run_id":"$RUN_ID","sender":"$SENDER","receiver":"$RECEIVER","rtt":"$RTT","sender_cores":$SENDER_CORES,"receiver_cores":$RECEIVER_CORES,"tools":"$TOOLS","payloads":"$PAYLOADS","runs":$RUNS,"atp_rq_streams":$ATP_RQ_STREAMS,"atp_rq_symbol_size":$ATP_RQ_SYMBOL_SIZE,"atp_rq_repair_overhead":$ATP_RQ_REPAIR_OVERHEAD,"atp_rq_tail_drain_ms":$ATP_RQ_TAIL_DRAIN_MS,"atp_rq_auth":"per-run-env-key","max_load_per_core":$MAX_LOAD_PER_CORE,"max_sender_rss_mb":$MAX_SENDER_RSS_MB,"max_receiver_rss_mb":$MAX_RECEIVER_RSS_MB}
 EOF
 note "RTT: $RTT"
 
@@ -222,17 +228,97 @@ print(json.dumps(d) if d else 'null')
 PY")
     fi
 
+    local resource_guard
+    resource_guard=$(SENDER_JSON="$sender_json" RECEIVER_SAMPLER_JSON="$recv_sampler" RECEIVER_TIME_JSON="$recv_time_json" \
+        MAX_LOAD_PER_CORE="$MAX_LOAD_PER_CORE" MAX_SENDER_RSS_MB="$MAX_SENDER_RSS_MB" MAX_RECEIVER_RSS_MB="$MAX_RECEIVER_RSS_MB" \
+        SENDER_CORES="$SENDER_CORES" RECEIVER_CORES="$RECEIVER_CORES" python3 - <<'PY'
+import json
+import os
+
+
+def number(value, default=0.0):
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+sender = json.loads(os.environ["SENDER_JSON"])
+sampler = json.loads(os.environ["RECEIVER_SAMPLER_JSON"])
+receiver_time_raw = os.environ["RECEIVER_TIME_JSON"]
+receiver_time = {} if receiver_time_raw == "null" else json.loads(receiver_time_raw)
+
+max_load_per_core = number(os.environ["MAX_LOAD_PER_CORE"])
+max_sender_rss_mb = number(os.environ["MAX_SENDER_RSS_MB"])
+max_receiver_rss_mb = number(os.environ["MAX_RECEIVER_RSS_MB"])
+sender_cores = max(1.0, number(os.environ["SENDER_CORES"], 1.0))
+receiver_cores = max(1.0, number(os.environ["RECEIVER_CORES"], 1.0))
+
+checks = []
+
+
+def add_check(name, observed, limit, unit):
+    checks.append(
+        {
+            "name": name,
+            "observed": round(observed, 3),
+            "limit": round(limit, 3),
+            "unit": unit,
+            "passed": observed <= limit,
+        }
+    )
+
+
+if max_load_per_core > 0:
+    sender_load_limit = sender_cores * max_load_per_core
+    receiver_load_limit = receiver_cores * max_load_per_core
+    sender_load = max(number(sender.get("load1_start")), number(sender.get("load1_end")))
+    receiver_load = number(sampler.get("peak_load1"))
+    add_check("sender_load1", sender_load, sender_load_limit, "loadavg")
+    add_check("receiver_load1", receiver_load, receiver_load_limit, "loadavg")
+
+if max_sender_rss_mb > 0:
+    add_check("sender_peak_rss", number(sender.get("max_rss_kb")) / 1024.0, max_sender_rss_mb, "MiB")
+
+if max_receiver_rss_mb > 0:
+    receiver_rss_kb = max(number(receiver_time.get("max_rss_kb")), number(sampler.get("peak_rss_kb")))
+    add_check("receiver_peak_rss", receiver_rss_kb / 1024.0, max_receiver_rss_mb, "MiB")
+
+print(
+    json.dumps(
+        {
+            "schema_version": "atp-bench-resource-guard-v1",
+            "ok": all(check["passed"] for check in checks),
+            "checks": checks,
+            "configured": {
+                "max_load_per_core": max_load_per_core,
+                "max_sender_rss_mb": max_sender_rss_mb,
+                "max_receiver_rss_mb": max_receiver_rss_mb,
+            },
+        },
+        separators=(",", ":"),
+    )
+)
+PY
+    )
+
     # Bit-for-bit verification against the manifest. Always recorded.
     local verify_ok=false
     if "${SSH_R[@]}" "cd $run_dest && sha256sum --status -c $BASE/manifests/$mname.sha256"; then
         verify_ok=true
     fi
 
-    echo "{\"tool\":\"$tool\",\"payload\":\"$payload\",\"run\":$run_idx,\"run_id\":\"$RUN_ID\",\"receiver_dest\":\"$run_dest\",\"receiver_run_dir\":\"$run_dir\",\"verify_ok\":$verify_ok,\"sender\":$sender_json,\"receiver_sampler\":$recv_sampler,\"receiver_time\":$recv_time_json}" >> "$RESULTS"
+    echo "{\"tool\":\"$tool\",\"payload\":\"$payload\",\"run\":$run_idx,\"run_id\":\"$RUN_ID\",\"receiver_dest\":\"$run_dest\",\"receiver_run_dir\":\"$run_dir\",\"verify_ok\":$verify_ok,\"sender\":$sender_json,\"receiver_sampler\":$recv_sampler,\"receiver_time\":$recv_time_json,\"resource_guard\":$resource_guard}" >> "$RESULTS"
     local wall
     wall=$(echo "$sender_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["wall_s"])')
     note "$label: wall=${wall}s verify_ok=$verify_ok"
     [[ "$verify_ok" == true ]] || note "!!! VERIFY FAILED for $label"
+    if [[ "$(echo "$resource_guard" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["ok"]).lower())')" != true ]]; then
+        note "!!! RESOURCE GUARD FAILED for $label: $resource_guard"
+        exit 1
+    fi
 }
 
 # ─── Main loop ───────────────────────────────────────────────────────────────
@@ -247,8 +333,8 @@ for tool in "${TOOL_LIST[@]}"; do
             declare -n ssh_ref=$host_cmd
             load=$("${ssh_ref[@]}" "cut -d' ' -f1 /proc/loadavg")
             cores=$("${ssh_ref[@]}" nproc)
-            if python3 -c "exit(0 if float('$load') < 1.5*$cores else 1)"; then :; else
-                note "ABORT series: $host_cmd loadavg $load exceeds 1.5x$cores cores"; exit 1
+            if python3 -c "exit(0 if float('$load') < float('$MAX_LOAD_PER_CORE')*$cores else 1)"; then :; else
+                note "ABORT series: $host_cmd loadavg $load exceeds ${MAX_LOAD_PER_CORE}x$cores cores"; exit 1
             fi
         done
         run_transfer "$tool" "$payload" 0   # warmup
