@@ -137,6 +137,18 @@ Per `/asupersync-mega-skill`. Findings on whether atp-rq exploits asupersync's m
   it directly produces the pacing rate (E-1) + repair overhead (E-2) + fan-out (E-3) the campaign
   needs, adaptively per link. Violates the "all optimizations default-on" mandate.
 
+- **L-FINDING-6 · QUIC native_link is a WORKING REFERENCE for the rq mechanics.**
+  `transport_quic/native_link.rs` already has: a **paced outbound queue** ("spray one symbol,
+  flushing first if the paced outbound queue is full", line 693), **`recv_batch_from`** drain
+  (line 194, INBOUND_PUMP_BATCH=512 + drain batching), **control-PTO** (re-send NeedMore on idle),
+  and adaptive **reward** plumbing (`observe_quic_adaptive_path_stats`). So the rq panes can MIRROR
+  these patterns instead of inventing them: E-6.1 (recv_batch_from in the rq pump) and E-7.3 (paced
+  spray) both have a same-repo reference. CAVEAT: neither rq NOR QUIC actually calls
+  `next_block_plan` on the live path (QUIC only in tests at mod.rs:6024) — applying the controller's
+  PLAN (block-size/overhead/fanout) is the shared E-7 gap for BOTH transports. So E-7, done once
+  cleanly, should be portable rq↔quic. Also: QUIC throughput-vs-rsync is UNMEASURED (the QUIC work
+  was convergence/correctness, not throughput) — benchmark it (SCORE.1 includes atp-quic).
+
 ### E-7 ★ MASTER LEVER · Wire the AdaptiveController (adaptive over ANY link, default-on)
 - **Goal (user):** atp-rq faster than tuned rsync over ANY connection (good/bad/spotty), adaptive,
   lower memory. The controller already computes the knobs; wire it into the live send/feedback loop.
