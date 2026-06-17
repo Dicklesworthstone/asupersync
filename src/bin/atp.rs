@@ -190,6 +190,10 @@ struct SendArgs {
     /// Defaults to the target host.
     #[arg(long, value_name = "NAME")]
     server_name: Option<String>,
+    /// Maximum QUIC handshake wait before sender fallback, in milliseconds
+    /// (quic/auto only).
+    #[arg(long, default_value_t = 30_000)]
+    quic_handshake_timeout_ms: u64,
     /// For SSH bootstrap with `--transport quic`: path *on the remote host* to the
     /// PEM certificate chain the spawned receiver should present.
     #[arg(long, value_name = "REMOTE_PATH")]
@@ -247,6 +251,9 @@ struct RecvArgs {
     /// PEM private key for the QUIC receiver's certificate (quic only).
     #[arg(long, value_name = "PATH")]
     server_key: Option<PathBuf>,
+    /// Maximum QUIC handshake wait, in milliseconds (quic only).
+    #[arg(long, default_value_t = 30_000)]
+    quic_handshake_timeout_ms: u64,
 }
 
 fn tcp_config(max_bytes: u64) -> TransferConfig {
@@ -385,6 +392,7 @@ fn quic_config_send(
         symbol_size: args.symbol_size,
         repair_overhead: args.repair_overhead.max(1.0),
         max_transfer_bytes: args.max_bytes,
+        handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
         ..QuicConfig::default()
     };
     let mut cfg = quic_with_symbol_auth(
@@ -423,6 +431,7 @@ fn quic_config_recv(
         symbol_size: args.symbol_size,
         repair_overhead: args.repair_overhead.max(1.0),
         max_transfer_bytes: args.max_bytes,
+        handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
         ..QuicConfig::default()
     };
     let mut cfg = quic_with_symbol_auth(

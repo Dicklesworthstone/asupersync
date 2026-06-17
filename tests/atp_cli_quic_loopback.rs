@@ -105,6 +105,18 @@ fn parse_quic_listen_line(line: &str) -> Option<SocketAddr> {
     addr.parse().ok()
 }
 
+fn parse_tcp_listen_line(line: &str) -> Option<SocketAddr> {
+    let rest = line.strip_prefix("atp: tcp listening on ")?;
+    let (addr, _) = rest.split_once(", dest ")?;
+    addr.parse().ok()
+}
+
+fn parse_rq_listen_line(line: &str) -> Option<SocketAddr> {
+    let rest = line.strip_prefix("atp: rq control listening on ")?;
+    let (addr, _) = rest.split_once(" (udp on ")?;
+    addr.parse().ok()
+}
+
 fn parse_tracing_bind_addr(line: &str, marker: &str) -> Option<SocketAddr> {
     if !line.contains(marker) {
         return None;
@@ -134,6 +146,54 @@ fn wait_for_quic_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 panic!("receiver exited before QUIC readiness; stderr lines: {seen:?}");
+            }
+        }
+    }
+}
+
+fn wait_for_tcp_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            panic!("receiver did not print TCP readiness; stderr lines: {seen:?}");
+        }
+        let wait = (deadline - now).min(Duration::from_millis(250));
+        match rx.recv_timeout(wait) {
+            Ok(line) => {
+                if let Some(addr) = parse_tcp_listen_line(&line) {
+                    return addr;
+                }
+                seen.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("receiver exited before TCP readiness; stderr lines: {seen:?}");
+            }
+        }
+    }
+}
+
+fn wait_for_rq_listen_addr(rx: &mpsc::Receiver<String>) -> SocketAddr {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            panic!("receiver did not print RQ readiness; stderr lines: {seen:?}");
+        }
+        let wait = (deadline - now).min(Duration::from_millis(250));
+        match rx.recv_timeout(wait) {
+            Ok(line) => {
+                if let Some(addr) = parse_rq_listen_line(&line) {
+                    return addr;
+                }
+                seen.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("receiver exited before RQ readiness; stderr lines: {seen:?}");
             }
         }
     }
@@ -207,6 +267,38 @@ fn wait_for_file(path: &Path, label: &str) {
         thread::sleep(Duration::from_millis(50));
     }
     panic!("{label} did not appear at {}", path.display());
+}
+
+struct ChildKillGuard {
+    child: Option<Child>,
+}
+
+impl ChildKillGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child guard has child")
+    }
+
+    fn into_inner(mut self) -> Child {
+        self.child.take().expect("child guard has child")
+    }
+
+    fn kill_and_wait(&mut self) {
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.child = None;
+    }
+}
+
+impl Drop for ChildKillGuard {
+    fn drop(&mut self) {
+        self.kill_and_wait();
+    }
 }
 
 fn fetch_diagnostics_json(addr: SocketAddr) -> serde_json::Value {
@@ -322,6 +414,201 @@ fn atp_send_recv_quic_loopback_moves_file_bytes() {
         std::fs::read(dest_dir.join("payload.bin")).expect("read received payload"),
         payload
     );
+}
+
+#[test]
+fn atp_send_auto_falls_back_to_tcp_after_quic_and_rq_fail() {
+    let root = unique_tmp("auto-fallback-tcp");
+    let source_dir = root.join("source");
+    let dest_dir = root.join("dest");
+    let payload_path = source_dir.join("payload.bin");
+    let payload = (0..4096u32)
+        .map(|i| (i.wrapping_mul(31) % 251) as u8)
+        .collect::<Vec<_>>();
+    write_file(&payload_path, &payload);
+    std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "recv",
+            dest_dir.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "tcp",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn persistent atp tcp receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_tcp_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "send",
+            payload_path.to_str().unwrap(),
+            &listen_addr.to_string(),
+            "--transport",
+            "auto",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+            "--quic-handshake-timeout-ms",
+            "100",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn atp auto sender");
+    let sender = wait_with_timeout(sender, "atp auto sender");
+    if !sender.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "atp auto sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+
+    wait_for_file(&dest_dir.join("payload.bin"), "auto fallback TCP payload");
+    assert_eq!(
+        std::fs::read(dest_dir.join("payload.bin")).expect("read received payload"),
+        payload
+    );
+
+    let sender_report: serde_json::Value =
+        serde_json::from_slice(&sender.stdout).expect("sender stdout json");
+    assert_eq!(sender_report["event"], serde_json::json!("atp_send"));
+    assert_eq!(sender_report["transport"], serde_json::json!("tcp"));
+    assert_eq!(
+        sender_report["requested_transport"],
+        serde_json::json!("auto")
+    );
+    assert_eq!(
+        sender_report["selected_transport"],
+        serde_json::json!("tcp")
+    );
+    assert_eq!(sender_report["committed"], serde_json::json!(true));
+    assert_eq!(sender_report["bytes_sent"], serde_json::json!(4096));
+
+    let attempts = sender_report["transport_attempts"]
+        .as_array()
+        .expect("transport attempts array");
+    assert_eq!(attempts.len(), 3);
+    assert_eq!(attempts[0]["transport"], serde_json::json!("quic"));
+    assert_eq!(attempts[0]["status"], serde_json::json!("failed"));
+    assert_eq!(attempts[1]["transport"], serde_json::json!("rq"));
+    assert_eq!(attempts[1]["status"], serde_json::json!("failed"));
+    assert_eq!(attempts[2]["transport"], serde_json::json!("tcp"));
+    assert_eq!(attempts[2]["status"], serde_json::json!("selected"));
+
+    let sender_stderr = String::from_utf8_lossy(&sender.stderr);
+    assert!(sender_stderr.contains("transport selection: trying quic"));
+    assert!(sender_stderr.contains("transport selection: quic unavailable"));
+    assert!(sender_stderr.contains("transport selection: trying rq"));
+    assert!(sender_stderr.contains("transport selection: rq unavailable"));
+    assert!(sender_stderr.contains("transport selection: selected tcp"));
+
+    receiver.kill_and_wait();
+}
+
+#[test]
+fn atp_send_auto_falls_back_to_rq_after_quic_fails() {
+    let root = unique_tmp("auto-fallback-rq");
+    let source_dir = root.join("source");
+    let dest_dir = root.join("dest");
+    let payload_path = source_dir.join("payload.bin");
+    let payload = (0..4096u32)
+        .map(|i| (i.wrapping_mul(43) % 251) as u8)
+        .collect::<Vec<_>>();
+    write_file(&payload_path, &payload);
+    std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "recv",
+            dest_dir.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "rq",
+            "--once",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn one-shot atp rq receiver");
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
+    let listen_addr = wait_for_rq_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "send",
+            payload_path.to_str().unwrap(),
+            &listen_addr.to_string(),
+            "--transport",
+            "auto",
+            "--rq-auth-key-hex",
+            VALID_KEY_HEX,
+            "--quic-handshake-timeout-ms",
+            "100",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn atp auto sender");
+    let sender = wait_with_timeout(sender, "atp auto sender");
+    if !sender.status.success() {
+        receiver.kill_and_wait();
+        panic!(
+            "atp auto sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+
+    let receiver = wait_with_timeout(receiver.into_inner(), "atp rq receiver");
+    assert!(
+        receiver.status.success(),
+        "atp rq receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dest_dir.join("payload.bin")).expect("read received payload"),
+        payload
+    );
+
+    let sender_report: serde_json::Value =
+        serde_json::from_slice(&sender.stdout).expect("sender stdout json");
+    assert_eq!(sender_report["event"], serde_json::json!("atp_send"));
+    assert_eq!(sender_report["transport"], serde_json::json!("rq"));
+    assert_eq!(
+        sender_report["requested_transport"],
+        serde_json::json!("auto")
+    );
+    assert_eq!(sender_report["selected_transport"], serde_json::json!("rq"));
+    assert_eq!(sender_report["committed"], serde_json::json!(true));
+    assert_eq!(sender_report["bytes_sent"], serde_json::json!(4096));
+
+    let attempts = sender_report["transport_attempts"]
+        .as_array()
+        .expect("transport attempts array");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["transport"], serde_json::json!("quic"));
+    assert_eq!(attempts[0]["status"], serde_json::json!("failed"));
+    assert_eq!(attempts[1]["transport"], serde_json::json!("rq"));
+    assert_eq!(attempts[1]["status"], serde_json::json!("selected"));
+
+    let sender_stderr = String::from_utf8_lossy(&sender.stderr);
+    assert!(sender_stderr.contains("transport selection: trying quic"));
+    assert!(sender_stderr.contains("transport selection: quic unavailable"));
+    assert!(sender_stderr.contains("transport selection: trying rq"));
+    assert!(sender_stderr.contains("transport selection: selected rq"));
 }
 
 #[test]
