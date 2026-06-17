@@ -5,13 +5,17 @@
 //! run. It moves actual file bytes, verified end to end, and fails closed. There
 //! is no simulated progress.
 //!
-//! Two real transports are available:
+//! Three real transports are available, plus explicit sender-side fallback:
 //! - `--transport tcp` (default): one reliable TCP stream
 //!   (`asupersync::net::atp::transport_tcp`). Simple and robust.
 //! - `--transport rq`: RaptorQ fountain symbols sprayed over multiple UDP
 //!   sockets with a reliable TCP control plane
 //!   (`asupersync::net::atp::transport_rq`). Built to saturate a lossy,
 //!   high-latency path and tolerate packet loss without head-of-line blocking.
+//! - `--transport quic`: ATP over QUIC/TLS-1.3 when built with `--features tls`.
+//! - `--transport auto`: sender-side selection that tries QUIC, then RQ, then
+//!   TCP, recording the selected transport and failed attempts in the JSON
+//!   report.
 //!
 //! ```text
 //! KEY=$(atp rq-keygen)
@@ -72,8 +76,10 @@ enum Command {
 }
 
 /// Which real transport to use.
-#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Transport {
+    /// Sender-side fallback: try QUIC, then RQ, then TCP.
+    Auto,
     /// One reliable TCP stream.
     Tcp,
     /// RaptorQ fountain symbols over multiple UDP sockets (+ TCP control).
@@ -88,10 +94,15 @@ enum Transport {
 impl Transport {
     const fn cli_arg(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Tcp => "tcp",
             Self::Rq => "rq",
             Self::Quic => "quic",
         }
+    }
+
+    const fn auto_fallback_order() -> &'static [Self] {
+        &[Self::Quic, Self::Rq, Self::Tcp]
     }
 }
 
@@ -594,11 +605,138 @@ fn run_send_dry_run(args: &SendArgs) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransportAttempt {
+    transport: Transport,
+    status: TransportAttemptStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TransportAttemptStatus {
+    Failed(String),
+    Selected,
+}
+
+impl TransportAttemptStatus {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Failed(_) => "failed",
+            Self::Selected => "selected",
+        }
+    }
+}
+
+fn transport_attempts_json(attempts: &[TransportAttempt]) -> Vec<serde_json::Value> {
+    attempts
+        .iter()
+        .map(|attempt| match &attempt.status {
+            TransportAttemptStatus::Failed(error) => serde_json::json!({
+                "transport": attempt.transport.cli_arg(),
+                "status": attempt.status.as_str(),
+                "error": error,
+            }),
+            TransportAttemptStatus::Selected => serde_json::json!({
+                "transport": attempt.transport.cli_arg(),
+                "status": attempt.status.as_str(),
+            }),
+        })
+        .collect()
+}
+
+fn add_auto_selection_metadata(
+    mut report: serde_json::Value,
+    attempts: &[TransportAttempt],
+) -> serde_json::Value {
+    if let Some(object) = report.as_object_mut() {
+        let selected_transport = object
+            .get("transport")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!(null));
+        object.insert(
+            "requested_transport".to_string(),
+            serde_json::json!(Transport::Auto.cli_arg()),
+        );
+        object.insert("selected_transport".to_string(), selected_transport);
+        object.insert(
+            "transport_attempts".to_string(),
+            serde_json::json!(transport_attempts_json(attempts)),
+        );
+    }
+    report
+}
+
+fn auto_transport_exhausted_error(attempts: &[TransportAttempt]) -> String {
+    let details = attempts
+        .iter()
+        .filter_map(|attempt| match &attempt.status {
+            TransportAttemptStatus::Failed(error) => {
+                Some(format!("{}: {error}", attempt.transport.cli_arg()))
+            }
+            TransportAttemptStatus::Selected => None,
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("atp --transport auto exhausted fallback order (quic -> rq -> tcp): {details}")
+}
+
 fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
     let runtime = build_runtime(args.workers)?;
+    let report = if args.transport == Transport::Auto {
+        run_send_auto_to_addr(&runtime, &args, addr)?
+    } else {
+        send_to_addr_with_transport(&runtime, &args, args.transport, addr)?
+    };
+    print_json(&report);
+    Ok(())
+}
+
+fn run_send_auto_to_addr(
+    runtime: &asupersync::runtime::Runtime,
+    args: &SendArgs,
+    addr: SocketAddr,
+) -> Result<serde_json::Value, String> {
+    let mut attempts = Vec::new();
+    for transport in Transport::auto_fallback_order().iter().copied() {
+        eprintln!("[atp] transport selection: trying {}", transport.cli_arg());
+        match send_to_addr_with_transport(runtime, args, transport, addr) {
+            Ok(report) => {
+                eprintln!(
+                    "[atp] transport selection: selected {}",
+                    transport.cli_arg()
+                );
+                attempts.push(TransportAttempt {
+                    transport,
+                    status: TransportAttemptStatus::Selected,
+                });
+                return Ok(add_auto_selection_metadata(report, &attempts));
+            }
+            Err(error) => {
+                eprintln!(
+                    "[atp] transport selection: {} unavailable: {error}",
+                    transport.cli_arg()
+                );
+                attempts.push(TransportAttempt {
+                    transport,
+                    status: TransportAttemptStatus::Failed(error),
+                });
+            }
+        }
+    }
+    Err(auto_transport_exhausted_error(&attempts))
+}
+
+fn send_to_addr_with_transport(
+    runtime: &asupersync::runtime::Runtime,
+    args: &SendArgs,
+    transport: Transport,
+    addr: SocketAddr,
+) -> Result<serde_json::Value, String> {
     let source = args.source.clone();
     let peer_id = args.peer_id.clone();
-    match args.transport {
+    match transport {
+        Transport::Auto => {
+            Err("internal error: auto is a selector, not a concrete transport".to_string())
+        }
         Transport::Tcp => {
             let cfg = tcp_config(args.max_bytes);
             // Monotonic progress + ETA on stderr (stdout stays the JSON report).
@@ -631,7 +769,7 @@ fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
                     .await
                 }))
                 .map_err(|e: TransportError| e.to_string())?;
-            print_json(&tcp_send_json(&report));
+            Ok(tcp_send_json(&report))
         }
         Transport::Rq => {
             let cfg = rq_config(
@@ -649,12 +787,12 @@ fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
                     transport_rq::send_path(&cx, addr, &source, cfg, &peer_id).await
                 }))
                 .map_err(|e| e.to_string())?;
-            print_json(&rq_send_json(&report));
+            Ok(rq_send_json(&report))
         }
         Transport::Quic => {
             #[cfg(feature = "tls")]
             {
-                let cfg = quic_config_send(&args)?;
+                let cfg = quic_config_send(args)?;
                 let report = runtime
                     .block_on(runtime.handle().spawn(async move {
                         let cx = Cx::current().expect("sender cx");
@@ -666,18 +804,14 @@ fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
                     .map_err(
                         |e: asupersync::net::atp::transport_quic::QuicTransportError| e.to_string(),
                     )?;
-                print_json(&quic_send_json(&report));
+                Ok(quic_send_json(&report))
             }
             #[cfg(not(feature = "tls"))]
             {
-                let _ = (&addr, &source, &peer_id);
-                return Err(
-                    "atp --transport quic requires building atp with --features tls".to_string(),
-                );
+                Err("atp --transport quic requires building atp with --features tls".to_string())
             }
         }
     }
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -723,6 +857,12 @@ fn split_remote_target(target: &str) -> Option<(&str, &str)> {
 fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), String> {
     if args.no_tailscale && args.prefer == PathPreference::Tailscale {
         return Err("--no-tailscale conflicts with --prefer tailscale".to_string());
+    }
+    if args.transport == Transport::Auto {
+        return Err(
+            "SSH bootstrap with --transport auto is not wired yet; choose tcp, rq, or quic"
+                .to_string(),
+        );
     }
 
     // Both the RQ and QUIC transports carry per-symbol HMAC auth; SSH bootstrap
@@ -1016,6 +1156,11 @@ fn last_log_lines(log: &str, count: usize) -> String {
 }
 
 fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
+    if args.transport == Transport::Auto {
+        return Err(
+            "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
+        );
+    }
     let runtime = build_runtime(args.workers)?;
     let dest = args.dest.clone();
     let listen = args.listen;
@@ -1024,6 +1169,9 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
     let udp_bind_ip = listen.ip().to_string();
 
     match args.transport {
+        Transport::Auto => Err(
+            "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
+        ),
         Transport::Tcp => {
             let cfg = tcp_config(args.max_bytes);
             runtime.block_on(runtime.handle().spawn(async move {
@@ -1349,6 +1497,78 @@ mod tests {
 
         let remote_v6 = RemoteTarget::parse("user@[2001:db8::10]:/srv/inbox").unwrap();
         assert_eq!(default_quic_server_name_for_ssh(&remote_v6), "2001:db8::10");
+    }
+
+    #[test]
+    fn auto_transport_order_prefers_quic_then_rq_then_tcp() {
+        assert_eq!(
+            Transport::auto_fallback_order(),
+            &[Transport::Quic, Transport::Rq, Transport::Tcp]
+        );
+        assert_eq!(Transport::Auto.cli_arg(), "auto");
+    }
+
+    #[test]
+    fn auto_selection_metadata_preserves_concrete_transport_and_attempts() {
+        let report = serde_json::json!({
+            "event": "atp_send",
+            "transport": "tcp",
+            "committed": true,
+        });
+        let attempts = vec![
+            TransportAttempt {
+                transport: Transport::Quic,
+                status: TransportAttemptStatus::Failed("tls unavailable".to_string()),
+            },
+            TransportAttempt {
+                transport: Transport::Rq,
+                status: TransportAttemptStatus::Failed("auth missing".to_string()),
+            },
+            TransportAttempt {
+                transport: Transport::Tcp,
+                status: TransportAttemptStatus::Selected,
+            },
+        ];
+
+        let annotated = add_auto_selection_metadata(report, &attempts);
+
+        assert_eq!(annotated["transport"], "tcp");
+        assert_eq!(annotated["requested_transport"], "auto");
+        assert_eq!(annotated["selected_transport"], "tcp");
+        assert_eq!(annotated["transport_attempts"][0]["transport"], "quic");
+        assert_eq!(annotated["transport_attempts"][0]["status"], "failed");
+        assert_eq!(
+            annotated["transport_attempts"][0]["error"],
+            "tls unavailable"
+        );
+        assert_eq!(annotated["transport_attempts"][2]["transport"], "tcp");
+        assert_eq!(annotated["transport_attempts"][2]["status"], "selected");
+        assert!(annotated["transport_attempts"][2]["error"].is_null());
+    }
+
+    #[test]
+    fn auto_transport_exhausted_error_lists_failed_fallbacks() {
+        let attempts = vec![
+            TransportAttempt {
+                transport: Transport::Quic,
+                status: TransportAttemptStatus::Failed("quic refused".to_string()),
+            },
+            TransportAttempt {
+                transport: Transport::Rq,
+                status: TransportAttemptStatus::Failed("rq refused".to_string()),
+            },
+            TransportAttempt {
+                transport: Transport::Tcp,
+                status: TransportAttemptStatus::Failed("tcp refused".to_string()),
+            },
+        ];
+
+        let error = auto_transport_exhausted_error(&attempts);
+
+        assert!(error.contains("quic -> rq -> tcp"));
+        assert!(error.contains("quic: quic refused"));
+        assert!(error.contains("rq: rq refused"));
+        assert!(error.contains("tcp: tcp refused"));
     }
 }
 
