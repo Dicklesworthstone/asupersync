@@ -288,6 +288,77 @@ fn real_udp_quic_transfer_directory_tree_authenticated() {
     assert_no_staging_residue(dst.path());
 }
 
+fn write_many_entry_tree(root: &Path, count: usize) -> Vec<(String, Vec<u8>)> {
+    let mut expected = Vec::with_capacity(count);
+    for index in 0..count {
+        let rel = match index % 5 {
+            0 => format!("alpha/file_{index:02}.bin"),
+            1 => format!("alpha/beta/file_{index:02}.bin"),
+            2 => format!("gamma/file_{index:02}.dat"),
+            3 => format!("delta/epsilon/file_{index:02}.txt"),
+            _ => format!("zeta/file_{index:02}.bin"),
+        };
+        let path = root.join(&rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+
+        let len = 4096 + (index % 7) * 257;
+        let payload = (0..len)
+            .map(|byte_index| ((byte_index.wrapping_mul(31) + index.wrapping_mul(17)) % 251) as u8)
+            .collect::<Vec<_>>();
+        std::fs::write(&path, &payload).expect("write many-entry tree file");
+        expected.push((rel, payload));
+    }
+    expected
+}
+
+#[test]
+fn real_udp_quic_transfer_many_entry_tree_reports_sender_success() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let root = src.path().join("tree");
+    let expected = write_many_entry_tree(&root, 35);
+
+    let cfg = authenticated_configs(0x6909);
+    let (send_result, recv_result) = run_transfer(cfg.send, cfg.recv, &root, dst.path());
+
+    let send = send_result.unwrap_or_else(|err| {
+        panic!(
+            "sender receives the final Proof for a 35-entry tree: {err:?}; receiver result: {recv_result:?}"
+        )
+    });
+    let recv = recv_result.expect("receiver commits the 35-entry tree");
+    assert!(recv.committed, "receiver must commit every entry");
+    assert!(send.receipt.committed, "sender receipt must report commit");
+    assert!(
+        send.receipt.sha_ok,
+        "sender receipt must preserve sha proof"
+    );
+    assert!(
+        send.receipt.merkle_ok,
+        "sender receipt must preserve merkle proof"
+    );
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.files, expected.len() as u32);
+    assert_eq!(recv.files, expected.len() as u32);
+    assert_eq!(
+        send.receipt.committed_paths.len(),
+        expected.len(),
+        "sender must receive the full committed-path proof without timing out"
+    );
+
+    let committed_root = dst.path().join("tree");
+    for (rel, payload) in expected {
+        assert_eq!(
+            std::fs::read(committed_root.join(&rel)).expect("read committed many-entry file"),
+            payload,
+            "committed bytes must match source for {rel}"
+        );
+    }
+    assert_no_staging_residue(dst.path());
+}
+
 #[test]
 fn real_udp_quic_transfer_multiblock_authenticated() {
     // A file that spans more than one RaptorQ source block (256-byte symbols,

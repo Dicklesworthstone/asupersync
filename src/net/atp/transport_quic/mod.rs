@@ -2597,22 +2597,21 @@ impl QuicFrameTransport {
         cx: &Cx,
         conn: &mut QuicConnection,
     ) -> Result<Option<crate::net::atp::protocol::frames::Frame>, QuicTransportError> {
-        if let Some(frame) = self
-            .codec
-            .decode(&mut self.rbuf)
-            .map_err(|err| QuicTransportError::Frame(err.to_string()))?
-        {
-            return Ok(Some(frame));
-        }
+        loop {
+            if let Some(frame) = self
+                .codec
+                .decode(&mut self.rbuf)
+                .map_err(|err| QuicTransportError::Frame(err.to_string()))?
+            {
+                return Ok(Some(frame));
+            }
 
-        let chunk = conn.read_control(cx, self.stream, CONTROL_READ_CHUNK)?;
-        if chunk.is_empty() {
-            return Ok(None);
+            let chunk = conn.read_control(cx, self.stream, CONTROL_READ_CHUNK)?;
+            if chunk.is_empty() {
+                return Ok(None);
+            }
+            self.rbuf.extend_from_slice(&chunk);
         }
-        self.rbuf.extend_from_slice(&chunk);
-        self.codec
-            .decode(&mut self.rbuf)
-            .map_err(|err| QuicTransportError::Frame(err.to_string()))
     }
 
     /// Try to receive a typed JSON control payload, rejecting unexpected frame
@@ -2690,30 +2689,29 @@ impl NativeQuicFrameTransport {
         cx: &Cx,
         conn: &mut NativeQuicConnection,
     ) -> Result<Option<Frame>, QuicTransportError> {
-        if let Some(frame) = self
-            .codec
-            .decode(&mut self.rbuf)
-            .map_err(|err| QuicTransportError::Frame(err.to_string()))?
-        {
-            return Ok(Some(frame));
-        }
+        loop {
+            if let Some(frame) = self
+                .codec
+                .decode(&mut self.rbuf)
+                .map_err(|err| QuicTransportError::Frame(err.to_string()))?
+            {
+                return Ok(Some(frame));
+            }
 
-        let chunk = match conn.read_stream_bytes(cx, self.stream, CONTROL_READ_CHUNK) {
-            Ok(chunk) => chunk,
-            Err(NativeQuicConnectionError::StreamTable(StreamTableError::UnknownStream(
-                stream,
-            ))) if stream == self.stream => {
+            let chunk = match conn.read_stream_bytes(cx, self.stream, CONTROL_READ_CHUNK) {
+                Ok(chunk) => chunk,
+                Err(NativeQuicConnectionError::StreamTable(StreamTableError::UnknownStream(
+                    stream,
+                ))) if stream == self.stream => {
+                    return Ok(None);
+                }
+                Err(err) => return Err(err.into()),
+            };
+            if chunk.is_empty() {
                 return Ok(None);
             }
-            Err(err) => return Err(err.into()),
-        };
-        if chunk.is_empty() {
-            return Ok(None);
+            self.rbuf.extend_from_slice(&chunk);
         }
-        self.rbuf.extend_from_slice(&chunk);
-        self.codec
-            .decode(&mut self.rbuf)
-            .map_err(|err| QuicTransportError::Frame(err.to_string()))
     }
 }
 

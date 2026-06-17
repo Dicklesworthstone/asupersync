@@ -33,8 +33,8 @@ RESULTS="$OUT/results.jsonl"; : > "$RESULTS"
 PASS=0; FAIL=0; XFAIL=0; PORT="$PORT_BASE"
 # Known gaps tracked by beads — a matching case is reported XFAIL (tracked), not FAIL,
 # so the floor stays green on working behavior. Format: "transport:label=tag" (space-sep).
-# Remove an entry once its bead lands. quic:tree = multi-entry proof-exchange timeout (bead).
-KNOWN_GAPS="${KNOWN_GAPS:-quic:tree=multi-entry-proof-timeout}"
+# Remove an entry once its bead lands.
+KNOWN_GAPS="${KNOWN_GAPS:-}"
 
 log(){ printf '%s | %s\n' "$(date '+%H:%M:%S')" "$*"; }
 banner(){ printf '\n========== %s ==========\n' "$*"; }
