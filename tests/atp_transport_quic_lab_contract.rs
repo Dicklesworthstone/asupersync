@@ -79,9 +79,10 @@ fn assert_transport_lab_report_clean(label: &str, report: &LabRunReport) {
         !report.refinement_firewall_skipped_due_to_trace_truncation,
         "{label} refinement firewall must not be skipped by trace truncation"
     );
-    assert!(
-        report.trace_certificate.event_count == report.trace_len as u64,
-        "{label} trace certificate event count must match buffered trace length"
+    assert_eq!(
+        report.trace_certificate.event_count,
+        u64::try_from(report.trace_len).expect("trace length fits in u64"),
+        "{label} trace certificate event count must match buffered trace length",
     );
     assert!(
         report.lab_test_passed(),
