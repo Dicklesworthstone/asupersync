@@ -3262,7 +3262,7 @@ mod tests {
             for encoded in pipeline.encode_single_block_with_repair(
                 object_id,
                 block.sbn,
-                &bytes[block.start..block.end()],
+                &bytes[block.start..block.start + block.len],
                 repair_count,
             ) {
                 let encoded = encoded.expect("M=1 source encode succeeds");
@@ -3308,7 +3308,7 @@ mod tests {
             for encoded in pipeline.encode_single_block_repair_range(
                 object_id,
                 block.sbn,
-                &bytes[block.start..block.end()],
+                &bytes[block.start..block.start + block.len],
                 first_repair,
                 repair_count,
             ) {
