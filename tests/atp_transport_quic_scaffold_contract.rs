@@ -596,6 +596,40 @@ fn send_path_start_trace_carries_stable_structured_fields() {
     }
 }
 
+fn assert_transport_start_trace(collector: &LogCollector, operation: &str, peer_id: &str) {
+    let entries = collector.peek();
+    let start = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.transport.start")
+        .expect("transport start trace entry");
+    assert_eq!(start.level(), LogLevel::Trace);
+    assert_eq!(start.get_field("operation"), Some(operation));
+    assert_eq!(start.get_field("protocol"), Some("3"));
+    assert_eq!(start.get_field("peer_id"), Some(peer_id));
+
+    for required in [
+        "chunk_size",
+        "symbol_size",
+        "max_block_size",
+        "max_datagram_size",
+        "repair_overhead",
+        "max_transfer_bytes",
+        "idle_timeout",
+        "handshake_timeout",
+        "accept_timeout",
+        "max_active_connections",
+        "max_feedback_rounds",
+        "datagram_fanout",
+    ] {
+        assert!(
+            start
+                .get_field(required)
+                .is_some_and(|value| !value.is_empty()),
+            "transport start trace must include non-empty {required}"
+        );
+    }
+}
+
 #[test]
 fn send_path_observes_cancel_before_source_preflight() {
     let cx = Cx::for_testing();
@@ -712,6 +746,46 @@ fn receive_once_rejects_empty_endpoint_without_fake_success() {
 }
 
 #[test]
+fn receive_once_start_trace_carries_stable_structured_fields() {
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let mut endpoint = block_on(ManagedQuicEndpoint::bind(
+        &cx,
+        "127.0.0.1:0".parse().unwrap(),
+        ManagedEndpointConfig {
+            is_server: true,
+            ..ManagedEndpointConfig::default()
+        },
+    ))
+    .expect("managed endpoint should bind");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut config = trusted_quic_config();
+    config.accept_timeout = Duration::from_millis(10);
+
+    let result: Result<ReceiveReport, QuicTransportError> = block_on(receive_once(
+        &cx,
+        &mut endpoint,
+        temp.path(),
+        config,
+        "receiver",
+    ));
+    assert!(
+        matches!(
+            result,
+            Err(QuicTransportError::Timeout {
+                operation: "receive_once accept",
+                ..
+            })
+        ),
+        "empty receive_once should fail closed as accept timeout, got {result:?}"
+    );
+    assert_transport_start_trace(&collector, "receive_once", "receiver");
+}
+
+#[test]
 fn serve_empty_endpoint_drains_without_fake_result() {
     let cx = Cx::for_testing();
     let endpoint = block_on(ManagedQuicEndpoint::bind(
@@ -725,12 +799,14 @@ fn serve_empty_endpoint_drains_without_fake_result() {
     .expect("managed endpoint should bind");
     let temp = tempfile::tempdir().expect("temp dir");
     let mut callbacks = 0usize;
+    let mut config = trusted_quic_config();
+    config.accept_timeout = Duration::from_millis(10);
 
     let result = block_on(transport_quic::serve(
         &cx,
         endpoint,
         temp.path().to_path_buf(),
-        trusted_quic_config(),
+        config,
         "receiver".to_string(),
         |result| {
             callbacks += 1;
@@ -743,4 +819,45 @@ fn serve_empty_endpoint_drains_without_fake_result() {
         "empty endpoint serve should drain: {result:?}"
     );
     assert_eq!(callbacks, 0);
+}
+
+#[test]
+fn serve_start_trace_carries_stable_structured_fields() {
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let endpoint = block_on(ManagedQuicEndpoint::bind(
+        &cx,
+        "127.0.0.1:0".parse().unwrap(),
+        ManagedEndpointConfig {
+            is_server: true,
+            ..ManagedEndpointConfig::default()
+        },
+    ))
+    .expect("managed endpoint should bind");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut callbacks = 0usize;
+    let mut config = trusted_quic_config();
+    config.accept_timeout = Duration::from_millis(10);
+
+    let result = block_on(transport_quic::serve(
+        &cx,
+        endpoint,
+        temp.path().to_path_buf(),
+        config,
+        "receiver".to_string(),
+        |result| {
+            callbacks += 1;
+            panic!("empty endpoint must not report a transfer result: {result:?}");
+        },
+    ));
+
+    assert!(
+        result.is_ok(),
+        "empty endpoint serve should drain: {result:?}"
+    );
+    assert_eq!(callbacks, 0);
+    assert_transport_start_trace(&collector, "serve", "receiver");
 }
