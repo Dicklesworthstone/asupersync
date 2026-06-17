@@ -145,8 +145,9 @@ validate_output() {
       .receiver.transport == "quic" and
       .receiver.committed == true and
       (.metrics.sender_max_rss_kb | type == "number") and
-      (.transport_counters.symbols_sent_available | type == "boolean") and
-      (.transport_counters.feedback_rounds_available | type == "boolean") and
+      .transport_counters.symbols_sent_available == true and
+      .transport_counters.symbols_accepted_available == true and
+      .transport_counters.feedback_rounds_available == true and
       (.transport_counters.decode_count_available | type == "boolean") and
       (.transport_counters.no_claim | type == "string") and
       (.artifacts.events_ndjson | type == "string")
@@ -319,7 +320,7 @@ jq -n \
         symbols_accepted_available: (($receiver[0] | has("symbols_accepted")) and ($receiver[0].symbols_accepted != null)),
         feedback_rounds_available: ((($sender[0] | has("feedback_rounds")) and ($sender[0].feedback_rounds != null)) or (($receiver[0] | has("feedback_rounds")) and ($receiver[0].feedback_rounds != null))),
         decode_count_available: false,
-        no_claim: "Current QUIC atp CLI JSON reuses the TCP report shape and does not expose RaptorQ symbol, feedback-round, or per-block decode counters. H1/H2 own the transport/report metrics needed to populate these fields."
+        no_claim: "Current QUIC atp CLI JSON exposes transfer-level RaptorQ symbol and feedback-round counters but not per-block decode counters/timings. H2 owns the remaining per-block decode metrics."
       },
       artifacts: {
         events_ndjson: $events,

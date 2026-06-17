@@ -1865,6 +1865,8 @@ fn finish_sender_transfer(
     manifest: &TransferManifest,
     peer: SocketAddr,
     receipt: ReceiveReceipt,
+    symbols_sent: u64,
+    feedback_rounds: u32,
 ) -> Result<SendReport, QuicTransportError> {
     send_close(cx, conn, control)?;
     if !receipt.committed {
@@ -1880,6 +1882,8 @@ fn finish_sender_transfer(
         transfer_id: manifest.transfer_id.clone(),
         bytes_sent: manifest.total_bytes,
         files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        symbols_sent,
+        feedback_rounds,
         merkle_root_hex: manifest.merkle_root_hex.clone(),
         receipt,
         peer,
@@ -1894,9 +1898,17 @@ async fn handle_sender_feedback_or_proof(
     state: &mut QuicSenderFeedbackState<'_>,
 ) -> Result<Option<SendReport>, QuicTransportError> {
     match receive_proof_or_need_more(cx, conn, control)? {
-        QuicControlReply::Proof(receipt) => {
-            finish_sender_transfer(cx, conn, control, state.manifest, state.peer, receipt).map(Some)
-        }
+        QuicControlReply::Proof(receipt) => finish_sender_transfer(
+            cx,
+            conn,
+            control,
+            state.manifest,
+            state.peer,
+            receipt,
+            state.symbols_sent,
+            state.feedback_rounds,
+        )
+        .map(Some),
         QuicControlReply::NeedMore(need) => {
             state.feedback_rounds = state.feedback_rounds.saturating_add(1);
             if state.feedback_rounds > state.config.max_feedback_rounds {
@@ -1943,7 +1955,7 @@ fn receive_proof_close_and_report(
             )));
         }
     };
-    finish_sender_transfer(cx, conn, control, manifest, peer, receipt)
+    finish_sender_transfer(cx, conn, control, manifest, peer, receipt, 0, 0)
 }
 
 #[allow(dead_code)]
@@ -2281,6 +2293,8 @@ fn verify_in_memory_receipt(
         files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
         sha_ok,
         merkle_ok,
+        symbols_accepted: 0,
+        feedback_rounds: 0,
         reason: if committed {
             None
         } else if !sha_ok {
@@ -3233,6 +3247,8 @@ fn finish_native_sender_transfer(
     manifest: &TransferManifest,
     peer: SocketAddr,
     receipt: ReceiveReceipt,
+    symbols_sent: u64,
+    feedback_rounds: u32,
 ) -> Result<SendReport, QuicTransportError> {
     send_native_close(cx, conn, control)?;
     if !receipt.committed {
@@ -3248,6 +3264,8 @@ fn finish_native_sender_transfer(
         transfer_id: manifest.transfer_id.clone(),
         bytes_sent: manifest.total_bytes,
         files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        symbols_sent,
+        feedback_rounds,
         merkle_root_hex: manifest.merkle_root_hex.clone(),
         receipt,
         peer,
@@ -3262,10 +3280,17 @@ async fn handle_native_sender_feedback_or_proof(
     state: &mut QuicSenderFeedbackState<'_>,
 ) -> Result<Option<SendReport>, QuicTransportError> {
     match receive_native_proof_or_need_more(cx, conn, control)? {
-        QuicControlReply::Proof(receipt) => {
-            finish_native_sender_transfer(cx, conn, control, state.manifest, state.peer, receipt)
-                .map(Some)
-        }
+        QuicControlReply::Proof(receipt) => finish_native_sender_transfer(
+            cx,
+            conn,
+            control,
+            state.manifest,
+            state.peer,
+            receipt,
+            state.symbols_sent,
+            state.feedback_rounds,
+        )
+        .map(Some),
         QuicControlReply::NeedMore(need) => {
             state.feedback_rounds = state.feedback_rounds.saturating_add(1);
             if state.feedback_rounds > state.config.max_feedback_rounds {
@@ -3655,8 +3680,12 @@ async fn commit_decoded_entries(
     dest_dir: &Path,
     manifest: &TransferManifest,
     decoders: &[QuicEntryDecoder],
+    symbols_accepted: u64,
+    feedback_rounds: u32,
 ) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
     let mut receipt = verify_in_memory_receipt(manifest, decoders);
+    receipt.symbols_accepted = symbols_accepted;
+    receipt.feedback_rounds = feedback_rounds;
     if !receipt.committed {
         return Ok((receipt, Vec::new()));
     }
@@ -3799,8 +3828,15 @@ async fn receive_established_native_connection(
         }
     }
 
-    let (receipt, committed_paths) =
-        commit_decoded_entries(cx, dest_dir, &manifest, &decoders).await?;
+    let (receipt, committed_paths) = commit_decoded_entries(
+        cx,
+        dest_dir,
+        &manifest,
+        &decoders,
+        symbols_accepted,
+        feedback_rounds,
+    )
+    .await?;
     send_native_proof(cx, &mut connection, &mut control, &receipt)?;
     let _ = send_native_close(cx, &mut connection, &mut control);
 
@@ -3818,6 +3854,8 @@ async fn receive_established_native_connection(
         bytes_received: receipt.bytes_received,
         files: receipt.files,
         committed: true,
+        symbols_accepted: receipt.symbols_accepted,
+        feedback_rounds: receipt.feedback_rounds,
         committed_paths,
         peer,
     })
@@ -4213,6 +4251,8 @@ mod tests {
             files: 1,
             sha_ok: true,
             merkle_ok: true,
+            symbols_accepted: 0,
+            feedback_rounds: 0,
             reason: None,
             committed_paths: vec!["/dest/a/b.txt".to_string()],
         }
@@ -5699,6 +5739,8 @@ mod tests {
                             dest.path(),
                             &received_manifest,
                             &decoders,
+                            symbols_accepted,
+                            0,
                         ))?;
                         assert!(receipt.committed);
                         assert_eq!(committed_paths.len(), 2);
@@ -6394,6 +6436,8 @@ mod tests {
             temp.path(),
             &received_manifest,
             &decoders,
+            symbols_accepted,
+            feedback_rounds,
         ))
         .expect("commit decoded repair result");
         assert!(receipt.committed);
@@ -7148,6 +7192,8 @@ mod tests {
             files: 1,
             sha_ok: true,
             merkle_ok: true,
+            symbols_accepted: 3,
+            feedback_rounds: 1,
             reason: None,
             committed_paths: vec!["/dest/a.txt".to_string()],
         };

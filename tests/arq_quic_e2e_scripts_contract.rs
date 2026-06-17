@@ -69,16 +69,16 @@ fn write_fixture(dir: &Path, sha_match: bool) {
   "metrics": {{"sender_max_rss_kb": 12345, "sender_elapsed_raw":"0:00.01"}},
   "transport_counters": {{
     "source":"atp-cli-json",
-    "symbols_sent": null,
-    "symbols_accepted": null,
-    "feedback_rounds_sender": null,
-    "feedback_rounds_receiver": null,
+    "symbols_sent": 64,
+    "symbols_accepted": 64,
+    "feedback_rounds_sender": 0,
+    "feedback_rounds_receiver": 0,
     "decode_count": null,
-    "symbols_sent_available": false,
-    "symbols_accepted_available": false,
-    "feedback_rounds_available": false,
+    "symbols_sent_available": true,
+    "symbols_accepted_available": true,
+    "feedback_rounds_available": true,
     "decode_count_available": false,
-    "no_claim": "fixture no-claim"
+    "no_claim": "fixture decode-count no-claim"
   }},
   "artifacts": {{"events_ndjson":"events.ndjson"}}
 }}"#
@@ -214,6 +214,10 @@ fn loopback_script_runs_real_atp_binary() {
     assert!(summary.contains(r#""transport": "quic""#));
     assert!(summary.contains(r#""sha256_match": true"#));
     assert!(summary.contains(r#""sender_max_rss_kb":"#));
+    assert!(summary.contains(r#""symbols_sent_available": true"#));
+    assert!(summary.contains(r#""symbols_accepted_available": true"#));
+    assert!(summary.contains(r#""feedback_rounds_available": true"#));
+    assert!(summary.contains(r#""decode_count_available": false"#));
     assert!(events.contains(r#""stage":"receiver_ready","status":"passed""#));
     assert!(events.contains(r#""stage":"sender_transfer","status":"passed""#));
     assert!(events.contains(r#""stage":"sha256_verify","status":"passed""#));

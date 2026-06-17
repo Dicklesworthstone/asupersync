@@ -40,12 +40,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, FileKind, FilterSet, StagedEntryReceive, StreamingError,
     apply_entry_metadata, collect_entries, flat_merkle_root_from_digests, hash_file_streaming,
     hex_encode, metadata_commitment, read_entry_metadata,
 };
-use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
 // supporting imports are gated to the test build to keep `-D warnings` clean.
@@ -292,6 +292,17 @@ pub struct ReceiveReceipt {
     pub sha_ok: bool,
     /// Whether the rebuilt merkle root matched the manifest.
     pub merkle_ok: bool,
+    /// Total RaptorQ symbol datagrams accepted by the receiver.
+    ///
+    /// Plain TCP does not use RaptorQ symbols, so its receipts report zero. QUIC
+    /// reuses this schema and populates the counter from its fountain receive path.
+    #[serde(default)]
+    pub symbols_accepted: u64,
+    /// Fountain feedback rounds used by the receiver.
+    ///
+    /// Plain TCP has no feedback loop, so its receipts report zero.
+    #[serde(default)]
+    pub feedback_rounds: u32,
     /// Failure reason when `committed` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -308,6 +319,15 @@ pub struct SendReport {
     pub bytes_sent: u64,
     /// Number of files sent.
     pub files: u32,
+    /// Total RaptorQ symbol datagrams emitted.
+    ///
+    /// Plain TCP does not use RaptorQ symbols, so it reports zero. QUIC reuses
+    /// this schema and populates the counter from its fountain sender path.
+    pub symbols_sent: u64,
+    /// Fountain feedback rounds used by the sender.
+    ///
+    /// Plain TCP has no feedback loop, so it reports zero.
+    pub feedback_rounds: u32,
     /// Merkle root (hex) of the transfer.
     pub merkle_root_hex: String,
     /// The receiver's receipt.
@@ -327,6 +347,15 @@ pub struct ReceiveReport {
     pub files: u32,
     /// Whether the transfer was committed to the destination.
     pub committed: bool,
+    /// Total RaptorQ symbol datagrams accepted.
+    ///
+    /// Plain TCP does not use RaptorQ symbols, so it reports zero. QUIC reuses
+    /// this schema and populates the counter from its fountain receive path.
+    pub symbols_accepted: u64,
+    /// Fountain feedback rounds used by the receiver.
+    ///
+    /// Plain TCP has no feedback loop, so it reports zero.
+    pub feedback_rounds: u32,
     /// Absolute committed paths.
     pub committed_paths: Vec<PathBuf>,
     /// Peer address.
@@ -768,7 +797,16 @@ pub async fn send_path(
     config: TransferConfig,
     peer_id: &str,
 ) -> Result<SendReport, TransportError> {
-    send_path_filtered(cx, addr, source, config, peer_id, &FilterSet::new(), |_, _| {}).await
+    send_path_filtered(
+        cx,
+        addr,
+        source,
+        config,
+        peer_id,
+        &FilterSet::new(),
+        |_, _| {},
+    )
+    .await
 }
 
 /// Like [`send_path`], but applies an include/exclude [`FilterSet`] to the source
@@ -840,7 +878,11 @@ pub async fn send_path_filtered(
             // sees zero ObjectData frames for this entry — reconstructs the same
             // digest.
             let empty_sha: [u8; 32] = Sha256::digest(b"").into();
-            (0u64, ObjectId::content(ContentId::from_bytes(b"")), empty_sha)
+            (
+                0u64,
+                ObjectId::content(ContentId::from_bytes(b"")),
+                empty_sha,
+            )
         } else {
             hash_file_streaming(&entry.abs_path, &mut read_buf).await?
         };
@@ -1015,6 +1057,8 @@ pub async fn send_path_filtered(
         transfer_id,
         bytes_sent: total_bytes,
         files: u32::try_from(entries.len()).unwrap_or(u32::MAX),
+        symbols_sent: 0,
+        feedback_rounds: 0,
         merkle_root_hex,
         receipt,
         peer,
@@ -1481,6 +1525,8 @@ pub async fn receive_connection(
         files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
         sha_ok,
         merkle_ok,
+        symbols_accepted: 0,
+        feedback_rounds: 0,
         reason: if committed {
             None
         } else if !sha_ok {
@@ -1525,6 +1571,8 @@ pub async fn receive_connection(
         bytes_received: received,
         files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
         committed,
+        symbols_accepted: 0,
+        feedback_rounds: 0,
         committed_paths,
         peer,
     })
@@ -1620,8 +1668,7 @@ where
             crate::time::sleep(cx.now(), accept_wait).await;
             continue;
         }
-        let accept =
-            with_transport_timeout(cx, accept_wait, "accept", listener.accept()).await;
+        let accept = with_transport_timeout(cx, accept_wait, "accept", listener.accept()).await;
         match accept {
             Ok((stream, peer)) => {
                 consecutive_failures = 0;
@@ -1931,14 +1978,14 @@ mod tests {
     fn reject_symlink_traversal_blocks_entries_nested_under_a_symlink() {
         // A file written through a manifest-declared symlink would escape dest.
         let bad = manifest_with(
-            vec![
-                symlink_entry(0, "x", "/etc"),
-                named_entry(1, "x/payload"),
-            ],
+            vec![symlink_entry(0, "x", "/etc"), named_entry(1, "x/payload")],
             0,
         );
         assert!(
-            matches!(reject_symlink_traversal(&bad), Err(TransportError::Source(_))),
+            matches!(
+                reject_symlink_traversal(&bad),
+                Err(TransportError::Source(_))
+            ),
             "entry nested under a symlink must be rejected"
         );
 

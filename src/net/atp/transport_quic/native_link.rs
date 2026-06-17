@@ -1057,11 +1057,12 @@ async fn run_sender_session(
                             .unwrap_or_else(|| "receiver did not commit".to_string()),
                     ));
                 }
-                let _ = symbols_sent;
                 return Ok(SendReport {
                     transfer_id: manifest.transfer_id.clone(),
                     bytes_sent: manifest.total_bytes,
                     files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                    symbols_sent,
+                    feedback_rounds,
                     merkle_root_hex: manifest.merkle_root_hex.clone(),
                     receipt,
                     peer: link.peer,
@@ -1264,6 +1265,8 @@ async fn commit_staged_entries(
             files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
             sha_ok,
             merkle_ok,
+            symbols_accepted: 0,
+            feedback_rounds: 0,
             reason: if committed {
                 None
             } else if !sha_ok {
@@ -1445,8 +1448,10 @@ async fn run_receiver_session(
                 ("feedback_rounds", feedback_rounds_text.as_str()),
             ],
         );
-        let (receipt, committed_paths) =
+        let (mut receipt, committed_paths) =
             commit_staged_entries(cx, dest_dir, &manifest, &mut staged, config).await?;
+        receipt.symbols_accepted = symbols_accepted;
+        receipt.feedback_rounds = feedback_rounds;
         super::send_native_proof(cx, &mut link.conn, &mut control, &receipt)?;
         link.flush(cx).await?;
         let _ = super::send_native_close(cx, &mut link.conn, &mut control);
@@ -1466,6 +1471,8 @@ async fn run_receiver_session(
             bytes_received: receipt.bytes_received,
             files: receipt.files,
             committed: true,
+            symbols_accepted: receipt.symbols_accepted,
+            feedback_rounds: receipt.feedback_rounds,
             committed_paths,
             peer: link.peer,
         })
