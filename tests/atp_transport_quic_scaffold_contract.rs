@@ -41,6 +41,18 @@ fn trusted_quic_config() -> QuicConfig {
     QuicConfig::default().allow_unauthenticated_for_trusted_transport()
 }
 
+fn bind_managed_server_endpoint(cx: &Cx) -> ManagedQuicEndpoint {
+    block_on(ManagedQuicEndpoint::bind(
+        cx,
+        "127.0.0.1:0".parse().unwrap(),
+        ManagedEndpointConfig {
+            is_server: true,
+            ..ManagedEndpointConfig::default()
+        },
+    ))
+    .expect("managed endpoint should bind")
+}
+
 fn quic_path_estimate(loss: f64, bw_median_bps: f64) -> QuicPathEstimate {
     QuicPathEstimate {
         rtt_s: 0.075,
@@ -752,6 +764,52 @@ fn receive_once_rejects_empty_endpoint_without_fake_success() {
 }
 
 #[test]
+fn receive_once_observes_cancel_before_endpoint_accept() {
+    let setup_cx = Cx::for_testing();
+    let mut endpoint = bind_managed_server_endpoint(&setup_cx);
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+    let temp = tempfile::tempdir().expect("temp dir");
+
+    let result: Result<ReceiveReport, QuicTransportError> = block_on(receive_once(
+        &cx,
+        &mut endpoint,
+        temp.path(),
+        trusted_quic_config(),
+        "receiver",
+    ));
+
+    assert!(
+        matches!(result, Err(QuicTransportError::Cancelled)),
+        "cancelled receive_once must fail closed before endpoint accept, got {result:?}"
+    );
+}
+
+#[test]
+fn receive_once_rejects_invalid_config_before_endpoint_accept() {
+    let cx = Cx::for_testing();
+    let mut endpoint = bind_managed_server_endpoint(&cx);
+    let temp = tempfile::tempdir().expect("temp dir");
+    let cfg = QuicConfig {
+        accept_timeout: Duration::ZERO,
+        ..trusted_quic_config()
+    };
+
+    let result: Result<ReceiveReport, QuicTransportError> = block_on(receive_once(
+        &cx,
+        &mut endpoint,
+        temp.path(),
+        cfg,
+        "receiver",
+    ));
+
+    assert!(
+        matches!(result, Err(QuicTransportError::Config(_))),
+        "invalid receive_once config must fail before endpoint accept, got {result:?}"
+    );
+}
+
+#[test]
 fn receive_once_start_trace_carries_stable_structured_fields() {
     let cx = Cx::for_testing();
     let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
@@ -823,6 +881,64 @@ fn serve_empty_endpoint_drains_without_fake_result() {
     assert!(
         result.is_ok(),
         "empty endpoint serve should drain: {result:?}"
+    );
+    assert_eq!(callbacks, 0);
+}
+
+#[test]
+fn serve_observes_cancel_before_endpoint_drain() {
+    let setup_cx = Cx::for_testing();
+    let endpoint = bind_managed_server_endpoint(&setup_cx);
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut callbacks = 0usize;
+
+    let result = block_on(transport_quic::serve(
+        &cx,
+        endpoint,
+        temp.path().to_path_buf(),
+        trusted_quic_config(),
+        "receiver".to_string(),
+        |result| {
+            callbacks += 1;
+            panic!("cancelled serve must not report a transfer result: {result:?}");
+        },
+    ));
+
+    assert!(
+        matches!(result, Err(QuicTransportError::Cancelled)),
+        "cancelled serve must fail closed before endpoint drain, got {result:?}"
+    );
+    assert_eq!(callbacks, 0);
+}
+
+#[test]
+fn serve_rejects_invalid_config_before_endpoint_drain() {
+    let cx = Cx::for_testing();
+    let endpoint = bind_managed_server_endpoint(&cx);
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut callbacks = 0usize;
+    let cfg = QuicConfig {
+        accept_timeout: Duration::ZERO,
+        ..trusted_quic_config()
+    };
+
+    let result = block_on(transport_quic::serve(
+        &cx,
+        endpoint,
+        temp.path().to_path_buf(),
+        cfg,
+        "receiver".to_string(),
+        |result| {
+            callbacks += 1;
+            panic!("invalid-config serve must not report a transfer result: {result:?}");
+        },
+    ));
+
+    assert!(
+        matches!(result, Err(QuicTransportError::Config(_))),
+        "invalid serve config must fail before endpoint drain, got {result:?}"
     );
     assert_eq!(callbacks, 0);
 }
