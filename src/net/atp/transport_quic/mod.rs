@@ -5064,6 +5064,96 @@ mod tests {
         assert!(validate_quic_manifest(&boundary, &config).is_ok());
     }
 
+    fn quic_manifest_with_metadata(entries: Vec<ManifestEntry>) -> TransferManifest {
+        let mut manifest = TransferManifest {
+            transfer_id: "transfer42".to_string(),
+            root_name: "data".to_string(),
+            is_directory: true,
+            total_bytes: entries
+                .iter()
+                .fold(0u64, |acc, entry| acc.saturating_add(entry.size)),
+            merkle_root_hex: "00".repeat(32),
+            metadata_root_hex: None,
+            entries,
+        };
+        manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
+        manifest
+    }
+
+    fn quic_symlink_entry(index: u32, rel: &str, target: &str) -> ManifestEntry {
+        ManifestEntry {
+            index,
+            rel_path: rel.to_string(),
+            size: 0,
+            sha256_hex: sha256_hex(b""),
+            metadata: Some(EntryMetadata {
+                file_kind: FileKind::Symlink,
+                symlink_target: Some(target.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn quic_empty_regular_entry(index: u32, rel: &str) -> ManifestEntry {
+        ManifestEntry {
+            index,
+            rel_path: rel.to_string(),
+            size: 0,
+            sha256_hex: sha256_hex(b""),
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn validate_quic_manifest_rejects_entries_nested_under_manifest_symlink() {
+        let config = trusted_quic_config();
+        let bad = quic_manifest_with_metadata(vec![
+            quic_symlink_entry(0, "link", "/tmp/outside"),
+            quic_empty_regular_entry(1, "link/payload.txt"),
+        ]);
+
+        assert!(
+            matches!(
+                validate_quic_manifest(&bad, &config),
+                Err(QuicTransportError::Source(ref message))
+                    if message.contains("nested under symlink")
+            ),
+            "QUIC manifest must reject writes through declared symlink entries"
+        );
+
+        let nested_symlink = quic_manifest_with_metadata(vec![
+            quic_symlink_entry(0, "a", "/tmp/a"),
+            quic_symlink_entry(1, "a/b", "/tmp/b"),
+        ]);
+        assert!(
+            matches!(
+                validate_quic_manifest(&nested_symlink, &config),
+                Err(QuicTransportError::Source(ref message))
+                    if message.contains("nested under symlink")
+            ),
+            "nested symlink entries must fail closed before commit"
+        );
+    }
+
+    #[test]
+    fn validate_quic_manifest_allows_symlink_siblings_and_plain_entries() {
+        let config = trusted_quic_config();
+        let sibling = quic_manifest_with_metadata(vec![
+            quic_symlink_entry(0, "link", "target.txt"),
+            quic_empty_regular_entry(1, "link-sibling/payload.txt"),
+        ]);
+        assert!(
+            validate_quic_manifest(&sibling, &config).is_ok(),
+            "component-aligned symlink guard must not reject sibling prefixes"
+        );
+
+        let plain = quic_manifest_with_metadata(vec![
+            quic_empty_regular_entry(0, "link/payload.txt"),
+            quic_empty_regular_entry(1, "link-sibling/payload.txt"),
+        ]);
+        assert!(validate_quic_manifest(&plain, &config).is_ok());
+    }
+
     fn sample_receipt() -> ReceiveReceipt {
         ReceiveReceipt {
             committed: true,
