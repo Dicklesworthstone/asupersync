@@ -112,7 +112,7 @@ and a contributor-guide row.
 | --- | --- | --- | --- |
 | Transfer actor and per-transfer ownership | `ATP-E1`, `asupersync-9yjgrz` | `src/atp/actor/`, `src/atp/transfer/` | state-machine tests for offer, accept, pause, cancel, resume, commit, restart, and no obligation leaks; actor e2e script with structured state-transition logs |
 | ATP Transfer Brain and scheduler feedback | `ATP-E`, `ATP-E8` | `src/net/atp/quic/transfer_brain.rs`, scheduler/autotune adapters | deterministic scheduling tests for priority, hedging, backpressure, relay cost, disk pressure, repair ROI, and cancellation drain |
-| ACK, loss, PTO, congestion, and anti-amplification | `ATP-A6`, `asupersync-51uf70` | `src/net/atp/loss/`, `src/net/atp/quic/recovery.rs`, `src/net/atp/quic/metrics.rs` | ACK range, RTT, PTO, persistent-congestion, anti-amplification, migration, and replay tests under deterministic network models |
+| ACK, loss, PTO, congestion, and anti-amplification | `ATP-A6`, `asupersync-51uf70` | `src/net/atp/loss/`, `src/net/atp/quic/recovery.rs`, `src/net/atp/quic/metrics.rs` | ACK range, RTT, PTO, persistent-congestion, anti-amplification, migration, and replay tests under deterministic network models plus real-UDP amplification/replay checks in `tests/quic_application_data_udp_loopback.rs` |
 | Chunking profiles | `ATP-C3`, `asupersync-9jgb8r` | `src/net/atp/chunk/` | fixed-size bulk, content-defined sync-tree, media prefix, sparse-image hole, artifact reproducibility, and rolling-stream manifest tests |
 | Crash-safe disk writer and journal | `ATP-D2`, `ATP-D3`, `ATP-D5` | `src/atp/disk/`, `src/atp/journal/` | sparse/prealloc/fsync/atomic-rename tests plus crash injection around write, journal append, bitmap update, repair decode, and final rename |
 | RaptorQ repair coordinator | `ATP-G2`, `asupersync-3ui2zb` | `src/atp/repair/` with existing `src/raptorq/` primitives | manifest-bound repair group tests, symbol authentication, K/K-prime boundaries, malicious peer rejection, decode proof entries, lossy/resume/swarm e2e |
@@ -249,6 +249,8 @@ endpoint crates. The current model layers are:
   `src/net/quic_native/endpoint.rs`.
 - Packet protection, header protection, key lifecycle, key update, and TLS
   provider boundary: `src/net/quic_native/tls.rs`.
+- TLS handshake driver and server-identity verification: `src/net/quic_native/handshake_driver.rs`
+  and the ATP threat model in `docs/quic_atp_threat_model.md`.
 
 The endpoint contract is guarded by
 `tests/atp_native_quic_endpoint_contract.rs` and
