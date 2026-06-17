@@ -103,6 +103,10 @@ use crate::net::quic_native::{
     QuicConnection, StreamDirection, StreamId, StreamRole, StreamTableError,
 };
 use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
+use crate::transport::{
+    AggregatorConfig, MultipathAggregator, PathId, ReordererConfig, TransportPath,
+};
+use crate::types::Time;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 
@@ -184,6 +188,8 @@ pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 
 /// Maximum sparse source-symbol retransmit requests accepted in one feedback round.
 const MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
+
+const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 
 /// Default adaptive datagram fan-out hint.
 ///
@@ -2021,12 +2027,96 @@ fn authenticated_symbol_from_envelope(
     Ok(AuthenticatedSymbol::new_unauthenticated(symbol))
 }
 
+fn primary_quic_receive_aggregator(remote: impl Into<String>) -> MultipathAggregator {
+    let aggregator = MultipathAggregator::new(AggregatorConfig {
+        reorder: ReordererConfig {
+            immediate_delivery: true,
+            ..ReordererConfig::default()
+        },
+        ..AggregatorConfig::default()
+    });
+    aggregator.paths().register(TransportPath::new(
+        QUIC_PRIMARY_RECEIVE_PATH_ID,
+        "quic-primary",
+        remote,
+    ));
+    aggregator
+}
+
+fn authenticated_symbol_with_existing_tag(
+    symbol: Symbol,
+    source: &AuthenticatedSymbol,
+) -> AuthenticatedSymbol {
+    let tag = *source.tag();
+    if tag.is_zero() {
+        AuthenticatedSymbol::new_unauthenticated(symbol)
+    } else {
+        AuthenticatedSymbol::from_parts(symbol, tag)
+    }
+}
+
+fn feed_aggregated_symbol_for_entry(
+    decoders: &mut [QuicEntryDecoder],
+    entry: u32,
+    auth_symbol: AuthenticatedSymbol,
+    aggregator: &MultipathAggregator,
+    path: PathId,
+    now: Time,
+) -> Result<u64, QuicTransportError> {
+    let decoder = decoders
+        .iter_mut()
+        .find(|decoder| decoder.index == entry)
+        .ok_or_else(|| {
+            QuicTransportError::Integrity(format!("symbol for unknown manifest entry {entry}"))
+        })?;
+
+    let source_symbol_id = auth_symbol.symbol().id();
+    let source_tag = *auth_symbol.tag();
+    let aggregated = aggregator.process(auth_symbol.symbol().clone(), path, now);
+    let mut accepted = 0u64;
+    for symbol in aggregated.ready {
+        if !source_tag.is_zero() && symbol.id() != source_symbol_id {
+            return Err(QuicTransportError::Integrity(
+                "authenticated QUIC receive aggregation emitted a buffered symbol without its original tag"
+                    .to_string(),
+            ));
+        }
+        let ready = authenticated_symbol_with_existing_tag(symbol, &auth_symbol);
+        if feed_authenticated_symbol(decoder, ready)? {
+            accepted = accepted.saturating_add(1);
+        }
+    }
+    Ok(accepted)
+}
+
 #[allow(dead_code)]
 fn drain_symbol_datagrams(
     conn: &mut QuicConnection,
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let aggregator = primary_quic_receive_aggregator("quic-scaffold-peer");
+    drain_symbol_datagrams_with_aggregator(
+        conn,
+        manifest,
+        decoders,
+        config,
+        &aggregator,
+        QUIC_PRIMARY_RECEIVE_PATH_ID,
+        Time::ZERO,
+    )
+}
+
+#[allow(dead_code)]
+fn drain_symbol_datagrams_with_aggregator(
+    conn: &mut QuicConnection,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    aggregator: &MultipathAggregator,
+    path: PathId,
+    now: Time,
 ) -> Result<u64, QuicTransportError> {
     let symbol_auth = config.symbol_auth_context()?;
     let auth_required = symbol_auth.is_some();
@@ -2047,7 +2137,7 @@ fn drain_symbol_datagrams(
             )));
         }
         let decoder = decoders
-            .iter_mut()
+            .iter()
             .find(|decoder| decoder.index == envelope.entry)
             .ok_or_else(|| {
                 QuicTransportError::Integrity(format!(
@@ -2057,9 +2147,14 @@ fn drain_symbol_datagrams(
             })?;
         let auth_symbol =
             authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
-        if feed_authenticated_symbol(decoder, auth_symbol)? {
-            accepted = accepted.saturating_add(1);
-        }
+        accepted = accepted.saturating_add(feed_aggregated_symbol_for_entry(
+            decoders,
+            envelope.entry,
+            auth_symbol,
+            aggregator,
+            path,
+            now,
+        )?);
     }
     Ok(accepted)
 }
@@ -3280,11 +3375,33 @@ fn recv_native_symbol_envelope(
     }
 }
 
+#[allow(dead_code)]
 fn drain_native_symbol_datagrams(
     conn: &mut NativeQuicConnection,
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
+) -> Result<u64, QuicTransportError> {
+    let aggregator = primary_quic_receive_aggregator("quic-native-peer");
+    drain_native_symbol_datagrams_with_aggregator(
+        conn,
+        manifest,
+        decoders,
+        config,
+        &aggregator,
+        QUIC_PRIMARY_RECEIVE_PATH_ID,
+        Time::ZERO,
+    )
+}
+
+fn drain_native_symbol_datagrams_with_aggregator(
+    conn: &mut NativeQuicConnection,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    aggregator: &MultipathAggregator,
+    path: PathId,
+    now: Time,
 ) -> Result<u64, QuicTransportError> {
     let symbol_auth = config.symbol_auth_context()?;
     let auth_required = symbol_auth.is_some();
@@ -3305,7 +3422,7 @@ fn drain_native_symbol_datagrams(
             )));
         }
         let decoder = decoders
-            .iter_mut()
+            .iter()
             .find(|decoder| decoder.index == envelope.entry)
             .ok_or_else(|| {
                 QuicTransportError::Integrity(format!(
@@ -3315,9 +3432,14 @@ fn drain_native_symbol_datagrams(
             })?;
         let auth_symbol =
             authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
-        if feed_authenticated_symbol(decoder, auth_symbol)? {
-            accepted = accepted.saturating_add(1);
-        }
+        accepted = accepted.saturating_add(feed_aggregated_symbol_for_entry(
+            decoders,
+            envelope.entry,
+            auth_symbol,
+            aggregator,
+            path,
+            now,
+        )?);
     }
     Ok(accepted)
 }
@@ -3578,13 +3700,21 @@ fn receive_native_symbol_round(
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
+    aggregator: &MultipathAggregator,
     symbols_accepted: &mut u64,
     feedback_rounds: &mut u32,
 ) -> Result<Option<QuicNeedMore>, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    *symbols_accepted = (*symbols_accepted).saturating_add(drain_native_symbol_datagrams(
-        connection, manifest, decoders, config,
-    )?);
+    *symbols_accepted =
+        (*symbols_accepted).saturating_add(drain_native_symbol_datagrams_with_aggregator(
+            connection,
+            manifest,
+            decoders,
+            config,
+            aggregator,
+            QUIC_PRIMARY_RECEIVE_PATH_ID,
+            cx.now(),
+        )?);
     receive_native_object_complete(cx, connection, control)?;
     assemble_completed_entries(decoders);
 
@@ -3647,6 +3777,7 @@ async fn receive_established_native_connection(
     let manifest = receive_native_manifest(cx, &mut connection, &mut control)?;
     validate_quic_manifest(&manifest, &config)?;
     let mut decoders = decoders_from_manifest(&manifest, &config)?;
+    let aggregator = primary_quic_receive_aggregator(peer.to_string());
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
 
@@ -3658,6 +3789,7 @@ async fn receive_established_native_connection(
             &manifest,
             &mut decoders,
             &config,
+            &aggregator,
             &mut symbols_accepted,
             &mut feedback_rounds,
         )?
@@ -5974,6 +6106,7 @@ mod tests {
         let mut receiver_control: Option<NativeQuicFrameTransport> = None;
         let mut receiver_manifest: Option<TransferManifest> = None;
         let mut receiver_decoders: Option<Vec<QuicEntryDecoder>> = None;
+        let receiver_aggregator = primary_quic_receive_aggregator("native-test-peer");
         let mut symbols_accepted = 0u64;
         let mut feedback_rounds = 0u32;
         let mut proof_sent = false;
@@ -6051,6 +6184,7 @@ mod tests {
                             manifest,
                             decoders,
                             &config,
+                            &receiver_aggregator,
                             &mut symbols_accepted,
                             &mut feedback_rounds,
                         )? {
@@ -6183,6 +6317,7 @@ mod tests {
                 .expect("native receiver decodes manifest");
         assert_eq!(received_manifest, manifest);
         let mut decoders = decoders_from_manifest(&received_manifest, &config).expect("decoders");
+        let receiver_aggregator = primary_quic_receive_aggregator("native-test-peer");
         let mut symbols_accepted = 0u64;
         let mut feedback_rounds = 0u32;
         let need = match receive_native_symbol_round(
@@ -6192,6 +6327,7 @@ mod tests {
             &received_manifest,
             &mut decoders,
             &config,
+            &receiver_aggregator,
             &mut symbols_accepted,
             &mut feedback_rounds,
         )
@@ -6242,6 +6378,7 @@ mod tests {
                 &received_manifest,
                 &mut decoders,
                 &config,
+                &receiver_aggregator,
                 &mut symbols_accepted,
                 &mut feedback_rounds,
             )
@@ -6345,6 +6482,60 @@ mod tests {
                 pending: 1,
             }
         ));
+    }
+
+    #[test]
+    fn quic_receiver_aggregator_deduplicates_symbols_across_paths_before_decoder() {
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 128,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 21))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let object_id = decoders[0].object_id;
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, 0, 0),
+            entries[0].1.clone(),
+            SymbolKind::Source,
+        );
+        let aggregator = primary_quic_receive_aggregator("quic-path-a");
+        let secondary_path = PathId::new(2);
+        aggregator.paths().register(TransportPath::new(
+            secondary_path,
+            "quic-secondary",
+            "quic-path-b",
+        ));
+
+        let first = feed_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbol.clone()),
+            &aggregator,
+            QUIC_PRIMARY_RECEIVE_PATH_ID,
+            Time::ZERO,
+        )
+        .expect("first path symbol reaches decoder");
+        let duplicate = feed_aggregated_symbol_for_entry(
+            &mut decoders,
+            0,
+            AuthenticatedSymbol::new_unauthenticated(symbol),
+            &aggregator,
+            secondary_path,
+            Time::ZERO,
+        )
+        .expect("duplicate path symbol is handled");
+
+        assert_eq!(first, 1, "first path delivers one symbol");
+        assert_eq!(duplicate, 0, "duplicate path is suppressed pre-decoder");
+        let stats = aggregator.stats();
+        assert_eq!(stats.total_processed, 2);
+        assert_eq!(stats.dedup.unique_symbols, 1);
+        assert_eq!(stats.dedup.duplicates_detected, 1);
+        assert_eq!(stats.paths.total_received, 2);
+        assert_eq!(stats.paths.total_duplicates, 1);
     }
 
     #[test]
