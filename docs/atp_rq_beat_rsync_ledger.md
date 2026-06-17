@@ -51,8 +51,13 @@ Target: ≤ rsync on clean; FASTER under loss/high-BDP.
   bursty solve activity; wall ≈ Σ(feedback round RTTs + per-round drain). symbols_sent ≫ source.
 - **Falsifiability:** if sender stays ~99% CPU → still encode-bound (E-0 false, revisit encode).
   If receiver pegs one core for ~all of wall with feedback_rounds≤1 → solve-bound (→ N-1 retry).
-- **One-line:** `bash /tmp/xm_profile.sh` (to author).
-- **Result:** _pending_
+- **One-line:** `bash /tmp/xm_profile.sh`.
+- **Result (2026-06-17, SapphireHill):** ★ **FEEDBACK-ROUND-BOUND, not CPU-bound.** 100M xmachine
+  wall 116s: **sender 124% CPU** (NOT pegged — F3 fixed encode), **receiver 16% CPU** (NOT
+  decode-bound — mostly idle/waiting!), **feedback_rounds=6**, symbols_sent 256200 vs accepted
+  102600 (2.5× inflation). ⇒ The wall is the burst→kernel-recv-overflow→drop→NeedMore-RTT cycle,
+  NOT encode CPU and NOT decode CPU. **E-1 (pacing) is THE primary lever.** E-5 (parallel decode)
+  is DECONFIRMED. N-1 (SIMD) re-confirmed irrelevant (receiver isn't GF256-bound).
 
 ### E-1 · Rate-paced spray (F2 / 317hxr.3.x): eliminate self-inflicted drops
 - **Hypothesis:** pacing the spray to ≈ receiver drain rate (or link rate) keeps blocks
@@ -95,11 +100,12 @@ Target: ≤ rsync on clean; FASTER under loss/high-BDP.
 - **One-line:** criterion bench `decode_block` at K ∈ {256,1024,4096,8192} same total bytes.
 - **Result:** _pending_
 
-### E-5 · Parallel decode (F6.3 / 317hxr.7.3) — only if E-0 shows solve-bound
-- **Hypothesis:** decode the independent blocks concurrently on the blocking pool (receiver has
-  10-64 cores). Only worth it if E-0 proves solve CPU (not feedback latency) is the wall.
-- **Gate:** blocked on E-0 result. The receive path (`feed_symbol`/`EntryDecoder`) is peer-hot.
-- **Result:** _pending (gated on E-0)_
+### E-5 · Parallel decode (F6.3 / 317hxr.7.3) — DECONFIRMED by E-0
+- **Hypothesis:** decode independent blocks concurrently. **Status: NOT the lever.** E-0 measured
+  the receiver at **16% CPU** during a 100M transfer — it is NOT decode-bound, it is idle waiting
+  on feedback-round RTTs. Parallelizing an idle decoder yields nothing.
+- **Retry-condition:** revisit ONLY if, AFTER pacing (E-1) eliminates feedback rounds, a profile
+  then shows the receiver decode pegged ≥80% CPU on a single core. Until then, do not pursue.
 
 ---
 
