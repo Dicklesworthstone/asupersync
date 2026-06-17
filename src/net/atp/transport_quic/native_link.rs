@@ -154,6 +154,16 @@ const SPRAY_FLUSH_PAUSE: Duration = Duration::from_millis(1);
 /// pump room to drain a burst between paced sender flushes.
 const ROUND_PROGRESS_IDLE_GRACE: Duration = Duration::from_millis(250);
 
+/// Control-plane PTO. When the receiver is awaiting repair after a NeedMore and the link goes idle,
+/// the NeedMore (receiver->sender) or the repair round (sender->receiver) was likely lost on the wire
+/// — ATP control rides best-effort 1-RTT here, so under real-internet loss a single dropped NeedMore
+/// otherwise deadlocks both sides until the full idle timeout. Re-send the NeedMore on this interval
+/// instead; this is what lets cross-machine transfers converge through control-frame loss.
+const NEEDMORE_PTO: Duration = Duration::from_millis(1500);
+/// Max NeedMore re-sends while awaiting one round's repair before giving up
+/// (`NEEDMORE_PTO * MAX_NEEDMORE_PTO` is the effective per-round idle budget).
+const MAX_NEEDMORE_PTO: u32 = 40;
+
 /// Monotonic data-plane clock step (microseconds) fed to the connection per pump
 /// operation. The transfer's correctness does not depend on real time; this only
 /// keeps the connection's loss/ACK bookkeeping monotonic.
@@ -1368,6 +1378,10 @@ async fn run_receiver_session(
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
     let mut decode_stats = super::QuicDecodeStats::default();
+    // Control-plane PTO state: the last NeedMore we sent and how many times we have re-sent it while
+    // awaiting this round's repair. Lets a lost control frame self-heal instead of deadlocking.
+    let mut last_need: Option<QuicNeedMore> = None;
+    let mut needmore_pto_attempts = 0u32;
 
     let receive_result: Result<ReceiveReport, QuicTransportError> = async {
         'rounds: loop {
@@ -1389,6 +1403,10 @@ async fn run_receiver_session(
                         &mut decode_stats,
                     )?;
                 symbols_accepted = symbols_accepted.saturating_add(accepted);
+                if accepted > 0 {
+                    // Repair (or spray) is flowing again — reset the control-PTO budget.
+                    needmore_pto_attempts = 0;
+                }
                 for block in completed_blocks {
                     let entry = manifest
                         .entries
@@ -1430,12 +1448,27 @@ async fn run_receiver_session(
                 let round_made_progress = symbols_accepted > round_symbols_start;
                 let pump_timeout = if round_made_progress {
                     ROUND_PROGRESS_IDLE_GRACE
+                } else if last_need.is_some() {
+                    // Awaiting a repair round after a NeedMore: poll on the short control-PTO interval
+                    // so a lost NeedMore/repair self-heals quickly rather than stalling for idle_timeout.
+                    NEEDMORE_PTO
                 } else {
                     config.idle_timeout
                 };
                 if link.pump_inbound_for(cx, pump_timeout).await? == 0 {
                     if round_made_progress {
                         break;
+                    }
+                    // Idle with no progress. If we are awaiting a repair round, the NeedMore (or the
+                    // repair) was lost on the wire — re-send the NeedMore (control PTO) up to a budget
+                    // before giving up, so cross-machine transfers converge through control-frame loss.
+                    if let Some(need) = last_need.as_ref() {
+                        if needmore_pto_attempts < MAX_NEEDMORE_PTO {
+                            needmore_pto_attempts = needmore_pto_attempts.saturating_add(1);
+                            super::send_native_need_more(cx, &mut link.conn, &mut control, need)?;
+                            link.flush(cx).await?;
+                            continue;
+                        }
                     }
                     return Err(link.symbol_round_timeout(config.idle_timeout, symbols_accepted));
                 }
@@ -1467,6 +1500,10 @@ async fn run_receiver_session(
             };
             super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
             link.flush(cx).await?;
+            // Remember it so the inner loop can re-send it on the control PTO if the repair round
+            // does not arrive (lost NeedMore/repair); reset the per-round PTO budget.
+            last_need = Some(need);
+            needmore_pto_attempts = 0;
             feedback_rounds = feedback_rounds.saturating_add(1);
         }
 
