@@ -1236,10 +1236,15 @@ async fn commit_staged_entries(
     }
 
     let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex;
-    let committed = sha_ok && merkle_ok;
+    let metadata_ok = super::manifest_metadata_commitment(manifest) == manifest.metadata_root_hex;
+    let committed = sha_ok && merkle_ok && metadata_ok;
     let mut committed_paths = Vec::new();
     if committed {
         let base = super::quic_safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+        if manifest.is_directory && manifest.entries.is_empty() {
+            crate::fs::create_dir_all(&base).await?;
+            committed_paths.push(base.clone());
+        }
         for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter()) {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let out_path = if manifest.is_directory {
@@ -1247,10 +1252,19 @@ async fn commit_staged_entries(
             } else {
                 base.clone()
             };
+            match super::commit_quic_metadata_entry(cx, &base, &out_path, entry, config).await? {
+                super::QuicMetadataCommit::Committed => {
+                    committed_paths.push(out_path);
+                    continue;
+                }
+                super::QuicMetadataCommit::Skipped => continue,
+                super::QuicMetadataCommit::Regular => {}
+            }
             if let Some(parent) = out_path.parent() {
                 crate::fs::create_dir_all(parent).await?;
             }
             crate::fs::rename(&staged_entry.staging_path, &out_path).await?;
+            super::apply_quic_entry_metadata(cx, &out_path, entry).await?;
             committed_paths.push(out_path);
         }
     }
@@ -1271,8 +1285,10 @@ async fn commit_staged_entries(
                 None
             } else if !sha_ok {
                 Some("per-entry SHA-256 mismatch".to_string())
-            } else {
+            } else if !merkle_ok {
                 Some("merkle-root mismatch".to_string())
+            } else {
+                Some("metadata commitment mismatch".to_string())
             },
             committed_paths: committed_paths
                 .iter()
