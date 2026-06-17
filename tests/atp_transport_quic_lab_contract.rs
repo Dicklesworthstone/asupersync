@@ -15,9 +15,12 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::lab::{LabConfig, LabRunReport, run_async_under_lab_with_config};
 use asupersync::net::atp::transport_quic::{
-    QuicConfig, QuicTransportError, ReceiveReport, SendReport, receive_once, send_path, serve,
+    QuicConfig, QuicTransportError, ReceiveReport, SendReport, receive_connection, receive_once,
+    send_path, serve,
 };
-use asupersync::net::quic_native::{ManagedEndpointConfig, ManagedQuicEndpoint};
+use asupersync::net::quic_native::{
+    ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnection, NativeQuicConnectionConfig,
+};
 use asupersync::types::{CancelKind, CancelReason};
 use serde_json::Value;
 
@@ -276,6 +279,85 @@ fn cancelled_receive_once_lab_report(seed: u64) -> Value {
     report.to_json()
 }
 
+fn cancelled_receive_connection_lab_report(seed: u64) -> Value {
+    let (_output, report) = run_async_under_lab_with_config(lab_config(seed), |cx| async move {
+        cx.checkpoint()
+            .expect("lab root context must remain uncancelled");
+
+        let cancelled_cx = Cx::for_testing();
+        cancelled_cx.set_cancel_reason(
+            CancelReason::new(CancelKind::User)
+                .with_message("H3 transport_quic receive_connection lab cancellation proof"),
+        );
+        let connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer addr");
+        let destination = PathBuf::from("h3-lab-cancelled-receive-connection-destination");
+
+        let result: Result<ReceiveReport, QuicTransportError> = receive_connection(
+            &cancelled_cx,
+            connection,
+            peer,
+            &destination,
+            trusted_quic_config(),
+            "h3-lab-cancelled-receive-connection",
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(QuicTransportError::Cancelled)),
+            "cancelled lab receive_connection must fail closed before native receive body, got {result:?}"
+        );
+    });
+
+    assert_transport_lab_report_clean("cancelled receive_connection", &report);
+
+    report.to_json()
+}
+
+fn invalid_receive_connection_config_lab_report(seed: u64) -> Value {
+    let (_output, report) = run_async_under_lab_with_config(lab_config(seed), |cx| async move {
+        cx.checkpoint()
+            .expect("lab root context must remain uncancelled");
+
+        let connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        let peer: SocketAddr = "127.0.0.1:9".parse().expect("loopback peer addr");
+        let destination = PathBuf::from("h3-lab-invalid-receive-connection-config-destination");
+        let invalid_config = QuicConfig {
+            accept_timeout: Duration::ZERO,
+            ..trusted_quic_config()
+        };
+
+        let result: Result<ReceiveReport, QuicTransportError> = receive_connection(
+            &cx,
+            connection,
+            peer,
+            &destination,
+            invalid_config,
+            "h3-lab-invalid-config-receive-connection",
+        )
+        .await;
+
+        match result {
+            Err(QuicTransportError::Config(message)) => {
+                assert!(
+                    message.contains("accept_timeout"),
+                    "invalid accept timeout should be named in the Config error, got {message:?}"
+                );
+            }
+            Ok(report) => {
+                panic!("invalid lab receive_connection config must not fake success: {report:?}")
+            }
+            Err(err) => {
+                panic!("invalid lab receive_connection config must fail as Config, got {err:?}")
+            }
+        }
+    });
+
+    assert_transport_lab_report_clean("invalid receive_connection config", &report);
+
+    report.to_json()
+}
+
 fn cancelled_serve_lab_report(seed: u64) -> Value {
     let (_output, report) = run_async_under_lab_with_config(lab_config(seed), |cx| async move {
         cx.checkpoint()
@@ -429,6 +511,34 @@ fn cancelled_receive_once_is_quiescent_oracle_clean_and_replay_stable() {
     assert_eq!(
         first, second,
         "same-seed transport_quic cancelled receive_once lab run must replay identically"
+    );
+}
+
+#[test]
+fn cancelled_receive_connection_is_quiescent_oracle_clean_and_replay_stable() {
+    let _guard = lab_contract_lock()
+        .lock()
+        .expect("lab contract tests serialize cleanly");
+    let first = cancelled_receive_connection_lab_report(0xb0c8_9009);
+    let second = cancelled_receive_connection_lab_report(0xb0c8_9009);
+
+    assert_eq!(
+        first, second,
+        "same-seed transport_quic cancelled receive_connection lab run must replay identically"
+    );
+}
+
+#[test]
+fn invalid_receive_connection_config_is_quiescent_oracle_clean_and_replay_stable() {
+    let _guard = lab_contract_lock()
+        .lock()
+        .expect("lab contract tests serialize cleanly");
+    let first = invalid_receive_connection_config_lab_report(0xb0c8_900a);
+    let second = invalid_receive_connection_config_lab_report(0xb0c8_900a);
+
+    assert_eq!(
+        first, second,
+        "same-seed transport_quic invalid receive_connection config lab run must replay identically"
     );
 }
 
