@@ -1,4 +1,4 @@
-//! Contract tests for the ARQ/QUIC H5 E2E script surfaces.
+//! Contract tests for the ARQ/QUIC H2/H5 E2E script surfaces.
 //!
 //! These tests intentionally exercise offline validation and structure paths.
 //! The full loopback transfer is run through `scripts/run_arq_quic_loopback_e2e.sh`
@@ -71,7 +71,15 @@ fn write_fixture(dir: &Path, sha_match: bool) {
     "receiver_max_rss_kb": 23456,
     "peak_max_rss_kb": 23456,
     "sender_elapsed_raw":"0:00.01",
-    "receiver_elapsed_raw":"0:00.02"
+    "receiver_elapsed_raw":"0:00.02",
+    "sender_elapsed_seconds": 0.01,
+    "receiver_elapsed_seconds": 0.02,
+    "transfer_elapsed_seconds": 0.01,
+    "goodput_bytes_per_second": 819200.0,
+    "goodput_bits_per_second": 6553600.0,
+    "symbol_loss_rate": 0.0,
+    "feedback_rounds_total": 0,
+    "decode_time_per_block_micros": 25.0
   }},
   "transport_counters": {{
     "source":"atp-cli-json",
@@ -203,6 +211,87 @@ fn loopback_from_output_rejects_missing_receiver_rss_metric() {
     assert!(
         !output.status.success(),
         "validator accepted missing receiver RSS metric; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_missing_goodput_metric() {
+    let root = unique_tmp("missing_goodput");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    write_file(
+        &summary_path,
+        &summary.replace(
+            r#""goodput_bytes_per_second": 819200.0"#,
+            r#""goodput_bytes_per_second": null"#,
+        ),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted missing goodput metric; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_out_of_range_symbol_loss_metric() {
+    let root = unique_tmp("bad_symbol_loss");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    write_file(
+        &summary_path,
+        &summary.replace(r#""symbol_loss_rate": 0.0"#, r#""symbol_loss_rate": 1.25"#),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted out-of-range symbol-loss metric; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_missing_decode_time_metric() {
+    let root = unique_tmp("missing_decode_time");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    write_file(
+        &summary_path,
+        &summary.replace(
+            r#""decode_time_per_block_micros": 25.0"#,
+            r#""decode_time_per_block_micros": null"#,
+        ),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted missing decode-time metric; stdout: {}; stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

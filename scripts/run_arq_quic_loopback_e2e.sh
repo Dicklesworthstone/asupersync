@@ -142,6 +142,33 @@ extract_elapsed_raw() {
         | tail -n1
 }
 
+elapsed_to_seconds() {
+    local raw="$1"
+    python3 - "$raw" <<'PY'
+import sys
+
+raw = sys.argv[1].strip()
+if not raw:
+    print("0")
+    raise SystemExit
+
+parts = raw.split(":")
+try:
+    if len(parts) == 3:
+        seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    elif len(parts) == 2:
+        seconds = int(parts[0]) * 60 + float(parts[1])
+    else:
+        seconds = float(parts[0])
+except ValueError:
+    seconds = 0.0
+
+if seconds < 0:
+    seconds = 0.0
+print(f"{seconds:.6f}")
+PY
+}
+
 validate_output() {
     local dir="$1"
     local summary="$dir/summary.json"
@@ -170,10 +197,18 @@ validate_output() {
       (.metrics.peak_max_rss_kb | type == "number") and
       .metrics.peak_max_rss_kb >= .metrics.sender_max_rss_kb and
       .metrics.peak_max_rss_kb >= .metrics.receiver_max_rss_kb and
+      (.metrics.sender_elapsed_seconds | type == "number" and . >= 0) and
+      (.metrics.receiver_elapsed_seconds | type == "number" and . >= 0) and
+      (.metrics.transfer_elapsed_seconds | type == "number" and . >= 0) and
+      (.metrics.goodput_bytes_per_second | type == "number" and . >= 0) and
+      (.metrics.goodput_bits_per_second | type == "number" and . >= 0) and
+      (.metrics.symbol_loss_rate | type == "number" and . >= 0 and . <= 1) and
+      (.metrics.feedback_rounds_total | type == "number" and . >= 0) and
+      (.metrics.decode_time_per_block_micros | type == "number" and . >= 0) and
       .transport_counters.symbols_sent_available == true and
-      (.transport_counters.symbols_sent | type == "number" and . >= 0) and
+      (.transport_counters.symbols_sent | type == "number" and . > 0) and
       .transport_counters.symbols_accepted_available == true and
-      (.transport_counters.symbols_accepted | type == "number" and . >= 0) and
+      (.transport_counters.symbols_accepted | type == "number" and . > 0) and
       .transport_counters.feedback_rounds_available == true and
       (.transport_counters.feedback_rounds_sender | type == "number" and . >= 0) and
       (.transport_counters.feedback_rounds_receiver | type == "number" and . >= 0) and
@@ -311,6 +346,8 @@ else
 fi
 SENDER_ELAPSED_RAW="$(extract_elapsed_raw "$SENDER_TIME")"
 RECEIVER_ELAPSED_RAW="$(extract_elapsed_raw "$RECEIVER_TIME")"
+SENDER_ELAPSED_SECONDS="$(elapsed_to_seconds "$SENDER_ELAPSED_RAW")"
+RECEIVER_ELAPSED_SECONDS="$(elapsed_to_seconds "$RECEIVER_ELAPSED_RAW")"
 
 jq -n \
     --slurpfile sender "$SENDER_JSON" \
@@ -329,10 +366,20 @@ jq -n \
     --arg receiver_time "$RECEIVER_TIME" \
     --arg sender_elapsed_raw "$SENDER_ELAPSED_RAW" \
     --arg receiver_elapsed_raw "$RECEIVER_ELAPSED_RAW" \
+    --argjson sender_elapsed_seconds "$SENDER_ELAPSED_SECONDS" \
+    --argjson receiver_elapsed_seconds "$RECEIVER_ELAPSED_SECONDS" \
     --argjson sender_max_rss_kb "$SENDER_MAX_RSS_KB" \
     --argjson receiver_max_rss_kb "$RECEIVER_MAX_RSS_KB" \
     --argjson peak_max_rss_kb "$PEAK_MAX_RSS_KB" \
-    '{
+    '($sender[0].symbols_sent // null) as $symbols_sent |
+    ($receiver[0].symbols_accepted // null) as $symbols_accepted |
+    ($sender[0].feedback_rounds // null) as $feedback_rounds_sender |
+    ($receiver[0].feedback_rounds // null) as $feedback_rounds_receiver |
+    ($receiver[0].decode_count // null) as $decode_count |
+    ($receiver[0].decode_micros // null) as $decode_micros |
+    ($receiver[0].bytes_received // 0) as $bytes_received |
+    (if $sender_elapsed_seconds > 0 then $sender_elapsed_seconds else $receiver_elapsed_seconds end) as $transfer_elapsed_seconds |
+    {
       schema_version: "arq-quic-loopback-e2e-summary-v1",
       status: "passed",
       transport: "quic",
@@ -350,22 +397,43 @@ jq -n \
         receiver_max_rss_kb: $receiver_max_rss_kb,
         peak_max_rss_kb: $peak_max_rss_kb,
         sender_elapsed_raw: $sender_elapsed_raw,
-        receiver_elapsed_raw: $receiver_elapsed_raw
+        receiver_elapsed_raw: $receiver_elapsed_raw,
+        sender_elapsed_seconds: $sender_elapsed_seconds,
+        receiver_elapsed_seconds: $receiver_elapsed_seconds,
+        transfer_elapsed_seconds: $transfer_elapsed_seconds,
+        goodput_bytes_per_second: (if $transfer_elapsed_seconds > 0 then ($bytes_received / $transfer_elapsed_seconds) else 0 end),
+        goodput_bits_per_second: (if $transfer_elapsed_seconds > 0 then (($bytes_received * 8) / $transfer_elapsed_seconds) else 0 end),
+        symbol_loss_rate: (
+          if (($symbols_sent | type) == "number" and $symbols_sent > 0 and (($symbols_accepted | type) == "number"))
+          then (([($symbols_sent - $symbols_accepted), 0] | max) / $symbols_sent)
+          else 0
+          end
+        ),
+        feedback_rounds_total: (
+          (if (($feedback_rounds_sender | type) == "number") then $feedback_rounds_sender else 0 end) +
+          (if (($feedback_rounds_receiver | type) == "number") then $feedback_rounds_receiver else 0 end)
+        ),
+        decode_time_per_block_micros: (
+          if (($decode_count | type) == "number" and $decode_count > 0 and (($decode_micros | type) == "number"))
+          then ($decode_micros / $decode_count)
+          else 0
+          end
+        )
       },
       transport_counters: {
         source: "atp-cli-json",
-        symbols_sent: ($sender[0].symbols_sent // null),
-        symbols_accepted: ($receiver[0].symbols_accepted // null),
-        feedback_rounds_sender: ($sender[0].feedback_rounds // null),
-        feedback_rounds_receiver: ($receiver[0].feedback_rounds // null),
-        decode_count: ($receiver[0].decode_count // null),
-        decode_micros: ($receiver[0].decode_micros // null),
-        symbols_sent_available: (($sender[0].symbols_sent // null | type) == "number"),
-        symbols_accepted_available: (($receiver[0].symbols_accepted // null | type) == "number"),
-        feedback_rounds_available: ((($sender[0].feedback_rounds // null | type) == "number") and (($receiver[0].feedback_rounds // null | type) == "number")),
-        decode_count_available: (($receiver[0].decode_count // null | type) == "number"),
-        decode_micros_available: (($receiver[0].decode_micros // null | type) == "number"),
-        no_claim: "Loopback summary exposes sender/receiver peak RSS plus receiver decode block count and decode completion time from retained artifacts and atp CLI JSON. H2 still does not claim goodput, loss, fanout, avg RSS/provider metrics, off-overhead, or fleet proof."
+        symbols_sent: $symbols_sent,
+        symbols_accepted: $symbols_accepted,
+        feedback_rounds_sender: $feedback_rounds_sender,
+        feedback_rounds_receiver: $feedback_rounds_receiver,
+        decode_count: $decode_count,
+        decode_micros: $decode_micros,
+        symbols_sent_available: (($symbols_sent | type) == "number"),
+        symbols_accepted_available: (($symbols_accepted | type) == "number"),
+        feedback_rounds_available: ((($feedback_rounds_sender | type) == "number") and (($feedback_rounds_receiver | type) == "number")),
+        decode_count_available: (($decode_count | type) == "number"),
+        decode_micros_available: (($decode_micros | type) == "number"),
+        no_claim: "Loopback summary derives goodput and symbol-loss headline metrics from retained time/CLI artifacts, and exposes sender/receiver peak RSS plus receiver decode block count/time. The loss rate is a loopback artifact metric, not a fleet/network-loss proof. H2 still does not claim metrics-provider emission, fanout/per-path stats, avg RSS, optional-metrics off-overhead, or fleet proof."
       },
       artifacts: {
         events_ndjson: $events,
