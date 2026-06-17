@@ -218,6 +218,115 @@ impl AtpWriter {
         })
     }
 
+    /// Validate a journal-backed resume plan against the source bytes to be replayed.
+    ///
+    /// This is the fail-closed preflight for buffer re-invocation: callers may
+    /// only skip checkpoint chunks when the same chunking profile over the new
+    /// source bytes produces matching offsets, sizes, and hashes.
+    pub fn plan_buffer_resume_from_journal(
+        resume_token: &ResumeToken,
+        summary: &TransferResumeSummary,
+        data: &[u8],
+        options: &WriteOptions,
+    ) -> Result<ResumeReplayPlan, WriteError> {
+        let plan = Self::plan_resume_from_journal(resume_token, summary)?;
+        let data_len = u64::try_from(data.len()).map_err(|_| WriteError::ResumeFailed {
+            reason: "source buffer length exceeds u64::MAX".to_string(),
+        })?;
+        if plan.committed_bytes > data_len {
+            return Err(WriteError::ResumeFailed {
+                reason: format!(
+                    "resume plan skips {} bytes, but source buffer has only {} bytes",
+                    plan.committed_bytes, data_len
+                ),
+            });
+        }
+
+        let chunking_profile = Self::chunking_profile_for_data(data, options);
+        let chunk_boundaries =
+            chunking_profile
+                .compute_boundaries(data)
+                .map_err(|error| WriteError::Internal {
+                    message: format!("Chunking failed: {}", error),
+                })?;
+
+        if plan.replay_from_chunk_index > chunk_boundaries.len() as u64 {
+            return Err(WriteError::ResumeFailed {
+                reason: format!(
+                    "resume plan skips {} chunks, but source chunking produced only {} chunks",
+                    plan.replay_from_chunk_index,
+                    chunk_boundaries.len()
+                ),
+            });
+        }
+
+        for chunk in &plan.committed_chunks {
+            let chunk_index =
+                usize::try_from(chunk.chunk_index).map_err(|_| WriteError::ResumeFailed {
+                    reason: format!(
+                        "resume checkpoint chunk index {} exceeds usize::MAX",
+                        chunk.chunk_index
+                    ),
+                })?;
+            let Some(boundary) = chunk_boundaries.get(chunk_index) else {
+                return Err(WriteError::ResumeFailed {
+                    reason: format!(
+                        "resume checkpoint chunk {} is absent from source chunking",
+                        chunk.chunk_index
+                    ),
+                });
+            };
+
+            if boundary.byte_offset != chunk.byte_offset || boundary.size_bytes != chunk.size_bytes
+            {
+                return Err(WriteError::ResumeFailed {
+                    reason: format!(
+                        "resume checkpoint chunk {} expects offset {} size {}, but source chunking produced offset {} size {}",
+                        chunk.chunk_index,
+                        chunk.byte_offset,
+                        chunk.size_bytes,
+                        boundary.byte_offset,
+                        boundary.size_bytes
+                    ),
+                });
+            }
+
+            let chunk_end = boundary
+                .byte_offset
+                .checked_add(boundary.size_bytes)
+                .ok_or_else(|| WriteError::ResumeFailed {
+                    reason: format!("source chunk {} range overflows", chunk.chunk_index),
+                })?;
+            let start =
+                usize::try_from(boundary.byte_offset).map_err(|_| WriteError::ResumeFailed {
+                    reason: format!(
+                        "source chunk {} byte offset exceeds usize::MAX",
+                        chunk.chunk_index
+                    ),
+                })?;
+            let end = usize::try_from(chunk_end).map_err(|_| WriteError::ResumeFailed {
+                reason: format!("source chunk {} end exceeds usize::MAX", chunk.chunk_index),
+            })?;
+            let Some(chunk_data) = data.get(start..end) else {
+                return Err(WriteError::ResumeFailed {
+                    reason: format!("source chunk {} exceeds buffer length", chunk.chunk_index),
+                });
+            };
+
+            let expected_hash = Self::chunk_digest(chunk_index, boundary.byte_offset, chunk_data);
+            if expected_hash != chunk.content_hash {
+                return Err(WriteError::ResumeFailed {
+                    reason: format!(
+                        "source bytes for resume checkpoint chunk {} do not match checkpoint hash",
+                        chunk.chunk_index
+                    ),
+                });
+            }
+        }
+
+        Ok(plan)
+    }
+
     fn resume_summary_not_resumable_reason(summary: &TransferResumeSummary) -> String {
         match &summary.status {
             TransferResumeStatus::Unknown => format!(
@@ -248,6 +357,24 @@ impl AtpWriter {
             ),
             TransferResumeStatus::Resumable => "journal summary is resumable".to_string(),
         }
+    }
+
+    fn chunking_profile_for_data(data: &[u8], options: &WriteOptions) -> ChunkingProfile {
+        options
+            .chunking_strategy
+            .map(|strategy| match strategy {
+                ChunkingStrategy::FixedSize => ChunkingProfile::BulkFile,
+                ChunkingStrategy::ContentDefined => ChunkingProfile::Artifact,
+                ChunkingStrategy::Adaptive => {
+                    if data.len() > 10 * 1024 * 1024 {
+                        ChunkingProfile::BulkFile
+                    } else {
+                        ChunkingProfile::Artifact
+                    }
+                }
+                ChunkingStrategy::ApplicationDefined => ChunkingProfile::Stream,
+            })
+            .unwrap_or(ChunkingProfile::BulkFile)
     }
 }
 
@@ -295,22 +422,7 @@ impl super::AtpWriter for AtpWriter {
         let chunking_started = Instant::now();
 
         // Determine chunking strategy
-        let chunking_profile = options
-            .chunking_strategy
-            .map(|s| match s {
-                ChunkingStrategy::FixedSize => ChunkingProfile::BulkFile,
-                ChunkingStrategy::ContentDefined => ChunkingProfile::Artifact,
-                ChunkingStrategy::Adaptive => {
-                    // Choose based on data characteristics
-                    if data.len() > 10 * 1024 * 1024 {
-                        ChunkingProfile::BulkFile
-                    } else {
-                        ChunkingProfile::Artifact
-                    }
-                }
-                ChunkingStrategy::ApplicationDefined => ChunkingProfile::Stream,
-            })
-            .unwrap_or(ChunkingProfile::BulkFile);
+        let chunking_profile = Self::chunking_profile_for_data(data, &options);
 
         let chunk_boundaries = match chunking_profile.compute_boundaries(data) {
             Ok(boundaries) => boundaries,
@@ -1457,6 +1569,95 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resume_buffer_plan_accepts_matching_source_prefix() {
+        let transfer_id = TransferId::new();
+        let data = deterministic_bytes(10 * 1024);
+        let options = WriteOptions {
+            chunking_strategy: Some(ChunkingStrategy::ApplicationDefined),
+            ..Default::default()
+        };
+        let proof = sample_transfer_proof_for_prefix(transfer_id, &data, &options, 2);
+        let token = ResumeToken {
+            transfer_id,
+            checkpoint_data: AtpWriter::build_resume_checkpoint(transfer_id, &proof),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+            required_capabilities: vec!["write".to_string()],
+        };
+        let mut summary = sample_resume_summary(&proof);
+        summary.total_size = Some(data.len() as u64);
+
+        let plan =
+            AtpWriter::plan_buffer_resume_from_journal(&token, &summary, &data, &options).unwrap();
+
+        assert_eq!(plan.committed_bytes, proof.total_bytes);
+        assert_eq!(plan.replay_from_byte, proof.total_bytes);
+        assert_eq!(plan.replay_from_chunk_index, 2);
+        assert!(plan.replay_from_byte < data.len() as u64);
+    }
+
+    #[test]
+    fn resume_buffer_plan_rejects_changed_source_prefix() {
+        let transfer_id = TransferId::new();
+        let data = deterministic_bytes(10 * 1024);
+        let options = WriteOptions {
+            chunking_strategy: Some(ChunkingStrategy::ApplicationDefined),
+            ..Default::default()
+        };
+        let proof = sample_transfer_proof_for_prefix(transfer_id, &data, &options, 2);
+        let token = ResumeToken {
+            transfer_id,
+            checkpoint_data: AtpWriter::build_resume_checkpoint(transfer_id, &proof),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+            required_capabilities: vec!["write".to_string()],
+        };
+        let mut summary = sample_resume_summary(&proof);
+        summary.total_size = Some(data.len() as u64);
+        let mut changed_data = data;
+        changed_data[0] ^= 0x80;
+
+        let error =
+            AtpWriter::plan_buffer_resume_from_journal(&token, &summary, &changed_data, &options)
+                .unwrap_err();
+
+        assert!(matches!(
+            error,
+            WriteError::ResumeFailed { reason }
+                if reason.contains("source bytes for resume checkpoint chunk 0")
+        ));
+    }
+
+    #[test]
+    fn resume_buffer_plan_rejects_changed_chunk_profile() {
+        let transfer_id = TransferId::new();
+        let data = deterministic_bytes(10 * 1024);
+        let stream_options = WriteOptions {
+            chunking_strategy: Some(ChunkingStrategy::ApplicationDefined),
+            ..Default::default()
+        };
+        let proof = sample_transfer_proof_for_prefix(transfer_id, &data, &stream_options, 2);
+        let token = ResumeToken {
+            transfer_id,
+            checkpoint_data: AtpWriter::build_resume_checkpoint(transfer_id, &proof),
+            expires_at: SystemTime::now() + Duration::from_secs(60),
+            required_capabilities: vec!["write".to_string()],
+        };
+        let mut summary = sample_resume_summary(&proof);
+        summary.total_size = Some(data.len() as u64);
+        let bulk_options = WriteOptions::default();
+
+        let error =
+            AtpWriter::plan_buffer_resume_from_journal(&token, &summary, &data, &bulk_options)
+                .unwrap_err();
+
+        assert!(matches!(
+            error,
+            WriteError::ResumeFailed { reason }
+                if reason.contains("source chunking produced only")
+                    || reason.contains("source chunking produced offset")
+        ));
+    }
+
     fn sample_transfer_proof(transfer_id: TransferId) -> TransferProof {
         TransferProof::from_chunk_proofs(
             transfer_id,
@@ -1478,6 +1679,38 @@ mod tests {
         )
     }
 
+    fn sample_transfer_proof_for_prefix(
+        transfer_id: TransferId,
+        data: &[u8],
+        options: &WriteOptions,
+        committed_chunk_count: usize,
+    ) -> TransferProof {
+        let chunking_profile = AtpWriter::chunking_profile_for_data(data, options);
+        let boundaries = chunking_profile.compute_boundaries(data).unwrap();
+        assert!(boundaries.len() >= committed_chunk_count);
+        let chunks = boundaries
+            .iter()
+            .take(committed_chunk_count)
+            .enumerate()
+            .map(|(chunk_idx, boundary)| {
+                let start = boundary.byte_offset as usize;
+                let end = (boundary.byte_offset + boundary.size_bytes) as usize;
+                ChunkTransferProof {
+                    chunk_index: chunk_idx as u64,
+                    byte_offset: boundary.byte_offset,
+                    size_bytes: boundary.size_bytes,
+                    content_hash: AtpWriter::chunk_digest(
+                        chunk_idx,
+                        boundary.byte_offset,
+                        &data[start..end],
+                    ),
+                }
+            })
+            .collect();
+
+        TransferProof::from_chunk_proofs(transfer_id, chunks, SystemTime::UNIX_EPOCH)
+    }
+
     fn sample_resume_summary(proof: &TransferProof) -> TransferResumeSummary {
         TransferResumeSummary {
             transfer_id: "journal-transfer".to_string(),
@@ -1496,6 +1729,10 @@ mod tests {
             contiguous_prefix_bytes: proof.total_bytes,
             last_sequence: Some(9),
         }
+    }
+
+    fn deterministic_bytes(len: usize) -> Vec<u8> {
+        (0..len).map(|index| (index % 251) as u8).collect()
     }
 
     fn assert_invalid_resume_checkpoint(result: Result<TransferProof, WriteError>) {
