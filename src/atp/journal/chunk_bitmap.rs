@@ -133,6 +133,18 @@ pub enum ChunkBitmapDecodeError {
     TrailingBytes(usize),
     #[error("field length {0} exceeds remaining input")]
     OversizedField(u64),
+    #[error("invalid chunk bitmap geometry: total_size={total_size}, chunk_size={chunk_size}")]
+    InvalidGeometry { total_size: u64, chunk_size: u64 },
+    #[error("chunk count {actual} exceeds expected geometry count {expected}")]
+    InvalidChunkCount { expected: u64, actual: u64 },
+    #[error("invalid chunk offset {offset} for total_size={total_size}, chunk_size={chunk_size}")]
+    InvalidChunkOffset {
+        offset: u64,
+        total_size: u64,
+        chunk_size: u64,
+    },
+    #[error("duplicate chunk offset {0}")]
+    DuplicateChunkOffset(u64),
 }
 
 /// A chunk entry in the bitmap
@@ -229,6 +241,26 @@ impl ChunkBitmap {
         }
     }
 
+    fn expected_chunk_count_for(total_size: u64, chunk_size: u64) -> Option<u64> {
+        if chunk_size == 0 {
+            return None;
+        }
+        Some(total_size.div_ceil(chunk_size))
+    }
+
+    fn expected_chunk_count(&self) -> Option<usize> {
+        let expected = Self::expected_chunk_count_for(self.total_size, self.chunk_size)?;
+        usize::try_from(expected).ok()
+    }
+
+    fn is_valid_chunk_offset_for(total_size: u64, chunk_size: u64, offset: u64) -> bool {
+        chunk_size != 0 && offset < total_size && offset % chunk_size == 0
+    }
+
+    fn is_valid_chunk_offset(&self, offset: u64) -> bool {
+        Self::is_valid_chunk_offset_for(self.total_size, self.chunk_size, offset)
+    }
+
     /// Initialize all chunks as wanted
     pub fn initialize_wanted_chunks(&mut self, timestamp: u64) {
         // A zero `chunk_size` is invalid geometry that can arrive from a crafted
@@ -240,7 +272,13 @@ impl ChunkBitmap {
             self.updated_at = timestamp;
             return;
         }
-        let num_chunks = self.total_size.div_ceil(self.chunk_size);
+        let num_chunks = match Self::expected_chunk_count_for(self.total_size, self.chunk_size) {
+            Some(num_chunks) => num_chunks,
+            None => {
+                self.updated_at = timestamp;
+                return;
+            }
+        };
 
         for i in 0..num_chunks {
             // `i * self.chunk_size` could overflow u64 for a crafted
@@ -389,11 +427,19 @@ impl ChunkBitmap {
             state_counts.insert(*state, 0);
         }
 
-        for entry in self.chunks.values() {
-            *state_counts.get_mut(&entry.state).unwrap() += 1; // ubs:ignore - map pre-initialized with all variants
+        let expected_chunks = self.expected_chunk_count().unwrap_or(0);
+        let mut valid_tracked_chunks = 0usize;
+        for (&offset, entry) in &self.chunks {
+            if self.is_valid_chunk_offset(offset) {
+                valid_tracked_chunks += 1;
+                *state_counts.get_mut(&entry.state).unwrap() += 1; // ubs:ignore - map pre-initialized with all variants
+            }
         }
 
-        let total_chunks = self.chunks.len();
+        let missing_chunks = expected_chunks.saturating_sub(valid_tracked_chunks);
+        *state_counts.get_mut(&ChunkState::Wanted).unwrap() += missing_chunks; // ubs:ignore - map pre-initialized with all variants
+
+        let total_chunks = expected_chunks;
         let verified_chunks = state_counts[&ChunkState::Verified]
             + state_counts[&ChunkState::Written]
             + state_counts[&ChunkState::Committed];
@@ -424,11 +470,14 @@ impl ChunkBitmap {
 
     /// Check if transfer is complete (all chunks committed)
     pub fn is_complete(&self) -> bool {
-        !self.chunks.is_empty()
-            && self
-                .chunks
-                .values()
-                .all(|entry| entry.state == ChunkState::Committed)
+        let Some(expected_chunks) = self.expected_chunk_count() else {
+            return false;
+        };
+        expected_chunks > 0
+            && self.chunks.len() == expected_chunks
+            && self.chunks.iter().all(|(&offset, entry)| {
+                self.is_valid_chunk_offset(offset) && entry.state == ChunkState::Committed
+            })
     }
 
     /// Check if transfer has any errors (quarantined or invalidated chunks)
@@ -628,11 +677,31 @@ impl ChunkBitmap {
         let chunk_size = cursor.read_u64()?;
         let created_at = cursor.read_u64()?;
         let updated_at = cursor.read_u64()?;
-        let chunk_count = cursor.read_u32()? as usize;
+        let chunk_count_raw = cursor.read_u32()?;
+        let expected_chunks = Self::expected_chunk_count_for(total_size, chunk_size).ok_or(
+            ChunkBitmapDecodeError::InvalidGeometry {
+                total_size,
+                chunk_size,
+            },
+        )?;
+        if u64::from(chunk_count_raw) > expected_chunks {
+            return Err(ChunkBitmapDecodeError::InvalidChunkCount {
+                expected: expected_chunks,
+                actual: u64::from(chunk_count_raw),
+            });
+        }
+        let chunk_count = chunk_count_raw as usize;
 
-        let mut chunks = HashMap::with_capacity(chunk_count);
+        let mut chunks = HashMap::new();
         for _ in 0..chunk_count {
             let offset = cursor.read_u64()?;
+            if !Self::is_valid_chunk_offset_for(total_size, chunk_size, offset) {
+                return Err(ChunkBitmapDecodeError::InvalidChunkOffset {
+                    offset,
+                    total_size,
+                    chunk_size,
+                });
+            }
             let state = ChunkState::from_u8(cursor.read_u8()?)?;
             let state_timestamp = cursor.read_u64()?;
             let chunk_hash = match cursor.read_u8()? {
@@ -641,13 +710,13 @@ impl ChunkBitmap {
                 other => return Err(ChunkBitmapDecodeError::InvalidBool(other)),
             };
             let metadata_count = cursor.read_u32()? as usize;
-            let mut metadata = HashMap::with_capacity(metadata_count);
+            let mut metadata = HashMap::new();
             for _ in 0..metadata_count {
                 let key = cursor.read_string()?;
                 let value = cursor.read_string()?;
                 metadata.insert(key, value);
             }
-            chunks.insert(
+            let old = chunks.insert(
                 offset,
                 ChunkEntry {
                     state,
@@ -656,6 +725,9 @@ impl ChunkBitmap {
                     metadata,
                 },
             );
+            if old.is_some() {
+                return Err(ChunkBitmapDecodeError::DuplicateChunkOffset(offset));
+            }
         }
 
         cursor.finish()?;
@@ -937,6 +1009,36 @@ mod tests {
     }
 
     #[test]
+    fn sparse_committed_entry_does_not_make_bitmap_complete() {
+        let mut bitmap = ChunkBitmap::new("sparse".to_string(), 1024, 256, 1000);
+
+        assert!(bitmap.update_chunk_state(0, ChunkState::Committed, 1001, None));
+
+        let stats = bitmap.get_stats();
+        assert_eq!(stats.total_chunks, 4);
+        assert_eq!(stats.completed_chunks, 1);
+        assert_eq!(stats.state_counts[&ChunkState::Wanted], 3);
+        assert_eq!(stats.completion_ratio, 0.25);
+        assert_eq!(stats.verification_ratio, 0.25);
+        assert!(!bitmap.is_complete());
+    }
+
+    #[test]
+    fn out_of_grid_entries_do_not_count_toward_completion() {
+        let mut bitmap = ChunkBitmap::new("bad-offset".to_string(), 512, 256, 1000);
+
+        assert!(bitmap.update_chunk_state(512, ChunkState::Committed, 1001, None));
+
+        let stats = bitmap.get_stats();
+        assert_eq!(stats.total_chunks, 2);
+        assert_eq!(stats.completed_chunks, 0);
+        assert_eq!(stats.state_counts[&ChunkState::Wanted], 2);
+        assert_eq!(stats.completion_ratio, 0.0);
+        assert_eq!(stats.verification_ratio, 0.0);
+        assert!(!bitmap.is_complete());
+    }
+
+    #[test]
     fn initialize_wanted_chunks_zero_chunk_size_does_not_panic() {
         // A crafted/corrupt bitmap with chunk_size == 0 must not divide-by-zero
         // or underflow in initialize_wanted_chunks (regression for the recovery
@@ -1000,6 +1102,16 @@ mod tests {
         bitmap.set_chunk_metadata(256, "source".into(), "peer-a".into(), 5_050);
         bitmap.set_chunk_metadata(256, "verifier".into(), "sha256".into(), 5_060);
         bitmap
+    }
+
+    fn chunk_count_offset(transfer_id: &str) -> usize {
+        ChunkBitmap::SERIALIZATION_MAGIC.len() + 1 + 4 + transfer_id.len() + 8 * 4
+    }
+
+    fn rewrite_crc(bytes: &mut [u8]) {
+        let payload_len = bytes.len() - 4;
+        let crc = crc32fast::hash(&bytes[..payload_len]);
+        bytes[payload_len..].copy_from_slice(&crc.to_le_bytes());
     }
 
     #[test]
@@ -1105,5 +1217,84 @@ mod tests {
         assert_eq!(decoded.transfer_id(), "empty");
         assert_eq!(decoded.entry_count(), 0);
         assert_eq!(decoded.chunk_size(), 4096);
+    }
+
+    #[test]
+    fn partial_serialized_bitmap_round_trips_but_is_not_complete() {
+        let mut original = ChunkBitmap::new("partial".to_string(), 1024, 256, 7);
+        original.update_chunk_state(0, ChunkState::Committed, 8, None);
+
+        let decoded =
+            ChunkBitmap::deserialize_from_bytes(&original.serialize_to_bytes()).expect("partial");
+        let stats = decoded.get_stats();
+        assert_eq!(stats.total_chunks, 4);
+        assert_eq!(stats.completed_chunks, 1);
+        assert_eq!(stats.state_counts[&ChunkState::Wanted], 3);
+        assert_eq!(stats.completion_ratio, 0.25);
+        assert!(!decoded.is_complete());
+    }
+
+    #[test]
+    fn deserialize_rejects_zero_chunk_size_geometry() {
+        let original = ChunkBitmap::new("bad-geometry".to_string(), 1024, 0, 7);
+        match ChunkBitmap::deserialize_from_bytes(&original.serialize_to_bytes()) {
+            Err(ChunkBitmapDecodeError::InvalidGeometry {
+                total_size: 1024,
+                chunk_size: 0,
+            }) => (),
+            other => panic!("expected InvalidGeometry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_chunk_count_above_expected_without_preallocating() {
+        let transfer_id = "bad-count";
+        let original = ChunkBitmap::new(transfer_id.to_string(), 512, 256, 7);
+        let mut bytes = original.serialize_to_bytes();
+        let count_offset = chunk_count_offset(transfer_id);
+        bytes[count_offset..count_offset + 4].copy_from_slice(&3u32.to_le_bytes());
+        rewrite_crc(&mut bytes);
+
+        match ChunkBitmap::deserialize_from_bytes(&bytes) {
+            Err(ChunkBitmapDecodeError::InvalidChunkCount {
+                expected: 2,
+                actual: 3,
+            }) => (),
+            other => panic!("expected InvalidChunkCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_out_of_grid_chunk_offset() {
+        let mut original = ChunkBitmap::new("bad-offset".to_string(), 512, 256, 7);
+        original.update_chunk_state(512, ChunkState::Committed, 8, None);
+
+        match ChunkBitmap::deserialize_from_bytes(&original.serialize_to_bytes()) {
+            Err(ChunkBitmapDecodeError::InvalidChunkOffset {
+                offset: 512,
+                total_size: 512,
+                chunk_size: 256,
+            }) => (),
+            other => panic!("expected InvalidChunkOffset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_duplicate_chunk_offsets() {
+        let transfer_id = "dupe-offset";
+        let mut original = ChunkBitmap::new(transfer_id.to_string(), 512, 256, 7);
+        original.update_chunk_state(0, ChunkState::Committed, 8, None);
+        original.update_chunk_state(256, ChunkState::Committed, 9, None);
+        let mut bytes = original.serialize_to_bytes();
+
+        let first_entry_offset = chunk_count_offset(transfer_id) + 4;
+        let second_entry_offset = first_entry_offset + 22;
+        bytes[second_entry_offset..second_entry_offset + 8].copy_from_slice(&0u64.to_le_bytes());
+        rewrite_crc(&mut bytes);
+
+        match ChunkBitmap::deserialize_from_bytes(&bytes) {
+            Err(ChunkBitmapDecodeError::DuplicateChunkOffset(0)) => (),
+            other => panic!("expected DuplicateChunkOffset, got {other:?}"),
+        }
     }
 }
