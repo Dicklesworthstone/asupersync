@@ -7873,6 +7873,9 @@ mod tests {
     #[test]
     fn native_receive_rounds_commit_after_targeted_repair_request() {
         let (cx, mut client, mut server) = established_pair();
+        let collector = crate::observability::LogCollector::new(16)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_log_collector(collector.clone());
         let config = QuicConfig {
             symbol_size: 128,
             max_block_size: 512,
@@ -7880,8 +7883,8 @@ mod tests {
             max_feedback_rounds: 2,
             ..trusted_quic_config()
         };
-        let entries = vec![("alpha.bin".to_string(), varied_bytes(384, 47))];
-        let manifest = manifest_from_entries("payload", true, &entries);
+        let payload_entries = vec![("alpha.bin".to_string(), varied_bytes(384, 47))];
+        let manifest = manifest_from_entries("payload", true, &payload_entries);
         let mut sender_control =
             QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
 
@@ -7894,7 +7897,8 @@ mod tests {
             false,
         )
         .expect("send hello");
-        let mut encoders = encoders_from_entries(&manifest, &entries, &config).expect("encoders");
+        let mut encoders =
+            encoders_from_entries(&manifest, &payload_entries, &config).expect("encoders");
         let initial_sent = send_manifest_symbols_complete(
             &cx,
             &mut client,
@@ -7968,6 +7972,21 @@ mod tests {
             "receiver should ask for fresh repair targeted to the incomplete block"
         );
         assert!(need.source_symbols.is_empty());
+        let trace_entries = collector.peek();
+        let need_more_trace = trace_entries
+            .iter()
+            .find(|entry| entry.message() == "atp_quic.receive.need_more")
+            .expect("need-more trace emitted before feedback is sent");
+        assert_eq!(
+            need_more_trace.level(),
+            crate::observability::LogLevel::Trace
+        );
+        assert_eq!(need_more_trace.get_field("round"), Some("1"));
+        assert_eq!(need_more_trace.get_field("pending"), Some("1"));
+        assert_eq!(need_more_trace.get_field("block_requests"), Some("1"));
+        assert_eq!(need_more_trace.get_field("repair_symbols"), Some("1"));
+        assert_eq!(need_more_trace.get_field("source_requests"), Some("0"));
+        assert_eq!(need_more_trace.get_field("symbols_accepted"), Some("2"));
 
         let symbol_auth = config.symbol_auth_context().expect("auth posture");
         let repair_sent = block_on(send_repair_round_and_object_complete(
@@ -8033,7 +8052,7 @@ mod tests {
         assert_eq!(committed_paths.len(), 1);
         assert_eq!(
             std::fs::read(temp.path().join("payload/alpha.bin")).expect("read alpha"),
-            entries[0].1
+            payload_entries[0].1
         );
     }
 

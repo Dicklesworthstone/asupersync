@@ -36,8 +36,10 @@ use crate::types::symbol::{ObjectId, Symbol, SymbolId, SymbolKind};
 use super::symbol_envelope::{QuicSymbolEnvelope, QuicSymbolEnvelopeError};
 
 /// Build a [`QuicSymbolEnvelope`] from a [`Symbol`] plus its transfer routing
-/// context (`transfer_tag` / `entry` come from the manifest, `auth_tag` from the
-/// security context when per-symbol auth is in use).
+/// context.
+///
+/// `transfer_tag` / `entry` come from the manifest, and `auth_tag` comes from
+/// the security context when per-symbol auth is in use.
 #[must_use]
 pub fn symbol_to_envelope(
     symbol: &Symbol,
