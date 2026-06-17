@@ -165,6 +165,23 @@ fn assert_no_staging_residue(dest_dir: &Path) {
     }
 }
 
+fn assert_send_fails_closed_before_commit(send: QuicConfig, recv: QuicConfig, file_name: &str) {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let source = src.path().join(file_name);
+    std::fs::write(&source, b"secret payload").expect("write source");
+
+    let (send_res, _recv_res) = run_transfer(send, recv, &source, dst.path());
+    assert!(
+        send_res.is_err(),
+        "client must not complete a transfer when server identity verification fails"
+    );
+    assert!(
+        std::fs::read(dst.path().join(file_name)).is_err(),
+        "no bytes may be committed when the handshake fails closed"
+    );
+}
+
 #[test]
 fn real_udp_quic_transfer_single_file_authenticated() {
     let src = tempfile::tempdir().expect("src dir");
@@ -302,11 +319,6 @@ fn real_udp_quic_transfer_recovers_from_symbol_loss() {
 fn real_udp_quic_send_fails_closed_when_client_distrusts_server() {
     // Client that trusts NO roots must fail the handshake closed (no fake
     // transfer), proving send_path inherits the driver's WebPKI verification.
-    let src = tempfile::tempdir().expect("src dir");
-    let dst = tempfile::tempdir().expect("dst dir");
-    let source = src.path().join("payload.bin");
-    std::fs::write(&source, b"secret payload").expect("write source");
-
     let alpn = vec![ATP_QUIC_ALPN.to_vec()];
     let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(1));
     send.client_tls = Some(QuicClientTls {
@@ -323,14 +335,26 @@ fn real_udp_quic_send_fails_closed_when_client_distrusts_server() {
     recv.accept_timeout = std::time::Duration::from_secs(5);
     recv.handshake_timeout = std::time::Duration::from_secs(5);
 
-    let (send_res, _recv_res) = run_transfer(send, recv, &source, dst.path());
-    assert!(
-        send_res.is_err(),
-        "client must not complete a transfer against an untrusted server"
-    );
-    // Nothing should have been committed at the destination.
-    assert!(
-        std::fs::read(dst.path().join("payload.bin")).is_err(),
-        "no bytes may be committed when the handshake fails closed"
-    );
+    assert_send_fails_closed_before_commit(send, recv, "untrusted-root.bin");
+}
+
+#[test]
+fn real_udp_quic_send_fails_closed_on_wrong_server_name() {
+    // The client trusts the CA but asks WebPKI for a DNS name not present in the
+    // server certificate SAN. The production send_path path must fail closed.
+    let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+    let mut send = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(2));
+    send.client_tls = Some(QuicClientTls {
+        server_name: ServerName::try_from("not-localhost.example").expect("server name"),
+        config: client_config(vec![parse_one_cert(CA_CERT_PEM)], alpn).expect("client config"),
+    });
+    send.handshake_timeout = std::time::Duration::from_secs(5);
+    send.accept_timeout = std::time::Duration::from_secs(5);
+
+    let mut recv = QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(2));
+    recv.server_tls = Some(server_tls());
+    recv.accept_timeout = std::time::Duration::from_secs(5);
+    recv.handshake_timeout = std::time::Duration::from_secs(5);
+
+    assert_send_fails_closed_before_commit(send, recv, "wrong-hostname.bin");
 }
