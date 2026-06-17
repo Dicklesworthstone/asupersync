@@ -8,6 +8,7 @@
 #   - summary.json: machine-readable transfer summary
 #   - sender.json / receiver.json: raw atp JSON reports
 #   - sender.time.txt: /usr/bin/time -v sender metrics
+#   - receiver.time.txt: /usr/bin/time -v receiver metrics
 #
 # Offline mode (`--from-output DIR`) validates a retained output directory
 # without rerunning the transfer. This is the negative-test hook for corrupted
@@ -121,6 +122,26 @@ emit_summary_event() {
         >> "$OUTPUT_DIR/events.ndjson"
 }
 
+extract_max_rss_kb() {
+    local time_file="$1"
+    local value
+    value="$(
+        awk -F: '/Maximum resident set size/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2 }' "$time_file" \
+            | tail -n1
+    )"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$value"
+    else
+        printf '0\n'
+    fi
+}
+
+extract_elapsed_raw() {
+    local time_file="$1"
+    sed -n 's/^[[:space:]]*Elapsed (wall clock) time (h:mm:ss or m:ss):[[:space:]]*//p' "$time_file" \
+        | tail -n1
+}
+
 validate_output() {
     local dir="$1"
     local summary="$dir/summary.json"
@@ -145,6 +166,10 @@ validate_output() {
       .receiver.transport == "quic" and
       .receiver.committed == true and
       (.metrics.sender_max_rss_kb | type == "number") and
+      (.metrics.receiver_max_rss_kb | type == "number") and
+      (.metrics.peak_max_rss_kb | type == "number") and
+      .metrics.peak_max_rss_kb >= .metrics.sender_max_rss_kb and
+      .metrics.peak_max_rss_kb >= .metrics.receiver_max_rss_kb and
       .transport_counters.symbols_sent_available == true and
       (.transport_counters.symbols_sent | type == "number" and . >= 0) and
       .transport_counters.symbols_accepted_available == true and
@@ -211,11 +236,12 @@ emit_event "payload" "passed" "wrote deterministic payload"
 
 RECEIVER_JSON="$OUTPUT_DIR/receiver.json"
 RECEIVER_STDERR="$OUTPUT_DIR/receiver.stderr"
+RECEIVER_TIME="$OUTPUT_DIR/receiver.time.txt"
 SENDER_JSON="$OUTPUT_DIR/sender.json"
 SENDER_STDERR="$OUTPUT_DIR/sender.stderr"
 SENDER_TIME="$OUTPUT_DIR/sender.time.txt"
 
-"$ATP_BIN" recv "$OUTPUT_DIR/dest" \
+/usr/bin/time -v -o "$RECEIVER_TIME" "$ATP_BIN" recv "$OUTPUT_DIR/dest" \
     --listen 127.0.0.1:0 \
     --transport quic \
     --once \
@@ -276,15 +302,15 @@ emit_event "sha256_verify" "passed" "source and received sha256 match" "$(jq -cn
     --arg received_sha "$RECEIVED_SHA" \
     '{source_sha256:$source_sha,received_sha256:$received_sha,match:true}')"
 
-MAX_RSS_KB="$(
-    awk -F: '/Maximum resident set size/ { gsub(/^[ \t]+/, "", $2); print $2 }' "$SENDER_TIME" \
-        | tail -n1
-)"
-MAX_RSS_KB="${MAX_RSS_KB:-0}"
-ELAPSED_RAW="$(
-    sed -n 's/^[[:space:]]*Elapsed (wall clock) time (h:mm:ss or m:ss):[[:space:]]*//p' "$SENDER_TIME" \
-        | tail -n1
-)"
+SENDER_MAX_RSS_KB="$(extract_max_rss_kb "$SENDER_TIME")"
+RECEIVER_MAX_RSS_KB="$(extract_max_rss_kb "$RECEIVER_TIME")"
+if (( SENDER_MAX_RSS_KB >= RECEIVER_MAX_RSS_KB )); then
+    PEAK_MAX_RSS_KB="$SENDER_MAX_RSS_KB"
+else
+    PEAK_MAX_RSS_KB="$RECEIVER_MAX_RSS_KB"
+fi
+SENDER_ELAPSED_RAW="$(extract_elapsed_raw "$SENDER_TIME")"
+RECEIVER_ELAPSED_RAW="$(extract_elapsed_raw "$RECEIVER_TIME")"
 
 jq -n \
     --slurpfile sender "$SENDER_JSON" \
@@ -300,8 +326,12 @@ jq -n \
     --arg sender_stderr "$SENDER_STDERR" \
     --arg receiver_stderr "$RECEIVER_STDERR" \
     --arg sender_time "$SENDER_TIME" \
-    --arg elapsed_raw "$ELAPSED_RAW" \
-    --argjson sender_max_rss_kb "$MAX_RSS_KB" \
+    --arg receiver_time "$RECEIVER_TIME" \
+    --arg sender_elapsed_raw "$SENDER_ELAPSED_RAW" \
+    --arg receiver_elapsed_raw "$RECEIVER_ELAPSED_RAW" \
+    --argjson sender_max_rss_kb "$SENDER_MAX_RSS_KB" \
+    --argjson receiver_max_rss_kb "$RECEIVER_MAX_RSS_KB" \
+    --argjson peak_max_rss_kb "$PEAK_MAX_RSS_KB" \
     '{
       schema_version: "arq-quic-loopback-e2e-summary-v1",
       status: "passed",
@@ -315,7 +345,13 @@ jq -n \
       receiver: $receiver[0],
       sha256: {source: $source_sha, received: $received_sha, match: ($source_sha == $received_sha)},
       sha256_match: ($source_sha == $received_sha),
-      metrics: {sender_max_rss_kb: $sender_max_rss_kb, sender_elapsed_raw: $elapsed_raw},
+      metrics: {
+        sender_max_rss_kb: $sender_max_rss_kb,
+        receiver_max_rss_kb: $receiver_max_rss_kb,
+        peak_max_rss_kb: $peak_max_rss_kb,
+        sender_elapsed_raw: $sender_elapsed_raw,
+        receiver_elapsed_raw: $receiver_elapsed_raw
+      },
       transport_counters: {
         source: "atp-cli-json",
         symbols_sent: ($sender[0].symbols_sent // null),
@@ -329,7 +365,7 @@ jq -n \
         feedback_rounds_available: ((($sender[0].feedback_rounds // null | type) == "number") and (($receiver[0].feedback_rounds // null | type) == "number")),
         decode_count_available: (($receiver[0].decode_count // null | type) == "number"),
         decode_micros_available: (($receiver[0].decode_micros // null | type) == "number"),
-        no_claim: "Loopback summary exposes receiver decode block count and decode completion time from atp CLI JSON. H2 still does not claim goodput, loss, fanout, RSS provider metrics, off-overhead, or fleet proof."
+        no_claim: "Loopback summary exposes sender/receiver peak RSS plus receiver decode block count and decode completion time from retained artifacts and atp CLI JSON. H2 still does not claim goodput, loss, fanout, avg RSS/provider metrics, off-overhead, or fleet proof."
       },
       artifacts: {
         events_ndjson: $events,
@@ -337,7 +373,8 @@ jq -n \
         receiver_json: $receiver_json,
         sender_stderr: $sender_stderr,
         receiver_stderr: $receiver_stderr,
-        sender_time: $sender_time
+        sender_time: $sender_time,
+        receiver_time: $receiver_time
       }
     }' > "$OUTPUT_DIR/summary.json"
 

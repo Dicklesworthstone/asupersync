@@ -66,7 +66,13 @@ fn write_fixture(dir: &Path, sha_match: bool) {
   "sender": {{"event":"atp_send","transport":"quic","committed":true,"bytes_sent":8192}},
   "receiver": {{"event":"atp_receive","transport":"quic","committed":true,"bytes_received":8192}},
   "sha256_match": {sha_match},
-  "metrics": {{"sender_max_rss_kb": 12345, "sender_elapsed_raw":"0:00.01"}},
+  "metrics": {{
+    "sender_max_rss_kb": 12345,
+    "receiver_max_rss_kb": 23456,
+    "peak_max_rss_kb": 23456,
+    "sender_elapsed_raw":"0:00.01",
+    "receiver_elapsed_raw":"0:00.02"
+  }},
   "transport_counters": {{
     "source":"atp-cli-json",
     "symbols_sent": 64,
@@ -101,6 +107,7 @@ fn real_loopback_debug_dump(root: &Path) -> String {
         ("sender.stderr", root.join("sender.stderr")),
         ("receiver.stderr", root.join("receiver.stderr")),
         ("sender.time.txt", root.join("sender.time.txt")),
+        ("receiver.time.txt", root.join("receiver.time.txt")),
         ("certs.log", root.join("certs.log")),
     ]
     .into_iter()
@@ -168,6 +175,34 @@ fn loopback_from_output_rejects_missing_counter_values_even_when_flags_claim_ava
     assert!(
         !output.status.success(),
         "validator accepted unavailable feedback counter hidden by availability flag; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn loopback_from_output_rejects_missing_receiver_rss_metric() {
+    let root = unique_tmp("missing_receiver_rss");
+    write_fixture(&root, true);
+
+    let summary_path = root.join("summary.json");
+    let summary = std::fs::read_to_string(&summary_path).expect("read summary fixture");
+    write_file(
+        &summary_path,
+        &summary.replace(
+            r#""receiver_max_rss_kb": 23456"#,
+            r#""receiver_max_rss_kb": null"#,
+        ),
+    );
+
+    let output = Command::new(repo_root().join("scripts/run_arq_quic_loopback_e2e.sh"))
+        .args(["--from-output", root.to_str().unwrap()])
+        .output()
+        .expect("run loopback from-output validator");
+
+    assert!(
+        !output.status.success(),
+        "validator accepted missing receiver RSS metric; stdout: {}; stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -244,6 +279,8 @@ fn loopback_script_runs_real_atp_binary() {
     assert!(summary.contains(r#""transport": "quic""#));
     assert!(summary.contains(r#""sha256_match": true"#));
     assert!(summary.contains(r#""sender_max_rss_kb":"#));
+    assert!(summary.contains(r#""receiver_max_rss_kb":"#));
+    assert!(summary.contains(r#""peak_max_rss_kb":"#));
     assert!(summary.contains(r#""symbols_sent_available": true"#));
     assert!(summary.contains(r#""symbols_accepted_available": true"#));
     assert!(summary.contains(r#""feedback_rounds_available": true"#));
