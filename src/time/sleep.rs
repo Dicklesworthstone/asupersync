@@ -24,6 +24,30 @@ use std::time::{Duration, Instant};
 static START_TIME: OnceLock<Instant> = OnceLock::new();
 const CUSTOM_TIME_GETTER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
+/// Returns the canonical process epoch shared by every wall-clock-based time
+/// source in the runtime.
+///
+/// Both `wall_now`'s capability-free fallback path AND the production
+/// [`WallClock`](super::driver::WallClock) (the timer driver the deadline
+/// monitor reads) must measure elapsed time from the *same* `Instant`.
+/// Otherwise a `Time` produced by one is not comparable to a `Time` produced by
+/// the other: e.g. a request-budget deadline computed via `wall_now()` (which
+/// may hit this fallback when no timer-driver `Cx` is current) is compared by
+/// the deadline monitor against `timer_driver.now()`. If the two anchor to
+/// different epochs the skew equals the gap between their creation instants, so
+/// once process uptime exceeds the request timeout every such request is born
+/// already past its deadline and is cancelled immediately.
+///
+/// Anchoring both to this single `OnceLock` makes `wall_now` honor its
+/// documented contract — "elapsed since the first call to any time-related
+/// function in this module" — regardless of which branch it takes. Whichever
+/// time source is constructed first (typically the driver's `WallClock` at
+/// runtime startup) claims the epoch; all later ones share it.
+#[must_use]
+pub(crate) fn process_epoch() -> Instant {
+    *START_TIME.get_or_init(Instant::now)
+}
+
 #[derive(Debug)]
 struct FallbackThread {
     stop: Arc<AtomicBool>,
@@ -96,14 +120,16 @@ pub fn wall_now() -> Time {
         // path. Calling `Cx::now()` here would recurse back through this helper.
     }
 
-    // Absolute fallback: no Cx context or capabilities available
-    // This preserves compatibility for truly capability-free contexts
-    let start = START_TIME.get_or_init(Instant::now);
+    // Absolute fallback: no Cx context or capabilities available.
+    // This preserves compatibility for truly capability-free contexts. The
+    // epoch is the shared process epoch so this branch stays comparable with
+    // the production `WallClock` timer driver (see `process_epoch`).
+    let start = process_epoch();
     let now = Instant::now();
-    if now < *start {
+    if now < start {
         Time::ZERO
     } else {
-        let elapsed = now.duration_since(*start);
+        let elapsed = now.duration_since(start);
         Time::from_nanos(duration_to_nanos(elapsed))
     }
 }
@@ -878,6 +904,50 @@ mod tests {
             second >= first
         );
         crate::test_complete!("wall_now_falls_back_when_current_cx_has_no_timer_driver");
+    }
+
+    /// Regression: the production [`WallClock`](crate::time::driver::WallClock)
+    /// timer driver and `wall_now()`'s capability-free fallback must measure
+    /// elapsed time from the *same* process epoch.
+    ///
+    /// Before the fix each `WallClock::new()` captured its own
+    /// `Instant::now()` epoch, distinct from `wall_now()`'s `START_TIME`
+    /// fallback epoch. A request-budget deadline computed via `wall_now()` was
+    /// then evaluated by the deadline monitor against `timer_driver.now()` on a
+    /// *different* epoch; once process uptime exceeded the request timeout every
+    /// such request was born already past its deadline and cancelled
+    /// immediately — surfacing as spurious "pool acquire cancelled" DB failures
+    /// under load.
+    #[test]
+    fn wall_clock_instances_share_process_epoch() {
+        use crate::time::driver::{TimeSource, WallClock};
+        init_test("wall_clock_instances_share_process_epoch");
+
+        let first = WallClock::new();
+        std::thread::sleep(Duration::from_millis(20));
+        let second = WallClock::new();
+
+        let a = first.now().as_nanos();
+        let b = second.now().as_nanos();
+
+        // Same shared epoch => readings taken back-to-back agree within a small
+        // delta, NOT separated by the 20ms gap a per-instance epoch produces.
+        let delta = a.abs_diff(b);
+        crate::assert_with_log!(
+            delta < 5_000_000,
+            "WallClock instances share one process epoch (delta < 5ms)",
+            true,
+            delta < 5_000_000
+        );
+        // The later clock measures from the earlier shared epoch, so it observes
+        // the 20ms that elapsed before it was even constructed.
+        crate::assert_with_log!(
+            b >= 15_000_000,
+            "later WallClock observes pre-construction elapsed time",
+            true,
+            b >= 15_000_000
+        );
+        crate::test_complete!("wall_clock_instances_share_process_epoch");
     }
 
     fn get_time() -> Time {
