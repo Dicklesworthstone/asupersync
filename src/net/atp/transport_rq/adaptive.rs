@@ -123,16 +123,27 @@ impl PathSignalSample {
     #[must_use]
     pub fn clamped(self) -> Self {
         Self {
-            smoothed_rtt_s: finite_or(self.smoothed_rtt_s, MIN_PATH_RTT_S)
-                .clamp(MIN_PATH_RTT_S, MAX_PATH_RTT_S),
+            smoothed_rtt_s: clamp_path_rtt(self.smoothed_rtt_s),
             congestion_window_bytes: self.congestion_window_bytes.max(1),
-            loss_rate: finite_or(self.loss_rate, 0.0).clamp(0.0, MAX_PATH_LOSS_RATE),
+            loss_rate: clamp_path_loss(self.loss_rate),
         }
     }
 }
 
-fn finite_or(value: f64, fallback: f64) -> f64 {
-    if value.is_finite() { value } else { fallback }
+fn clamp_path_rtt(value: f64) -> f64 {
+    if value.is_nan() {
+        MIN_PATH_RTT_S
+    } else {
+        value.clamp(MIN_PATH_RTT_S, MAX_PATH_RTT_S)
+    }
+}
+
+fn clamp_path_loss(value: f64) -> f64 {
+    if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, MAX_PATH_LOSS_RATE)
+    }
 }
 
 /// One per-block decision.
@@ -568,16 +579,22 @@ impl AdaptiveController {
         let Some(arm) = self.last_arm else {
             return;
         };
-        if useful_bytes == 0 || wall_s <= 0.0 {
+        if wall_s <= 0.0 || (sent == 0 && useful_bytes == 0) {
             return;
         }
-        let base = wall_s / (useful_bytes as f64);
         let signals = self.update_path_signals(signals);
         let measured_loss = if sent == 0 {
             0.0
         } else {
             let missing = sent.saturating_sub(received);
             (missing as f64 / sent as f64).clamp(0.0, MAX_PATH_LOSS_RATE)
+        };
+        let base = if useful_bytes == 0 {
+            let sent_payload_bytes = sent.saturating_mul(u64::from(symbol_size.max(1))).max(1);
+            let zero_useful_penalty = 1.0 + measured_loss.max(signals.loss_rate);
+            (wall_s / sent_payload_bytes as f64) * zero_useful_penalty
+        } else {
+            wall_s / (useful_bytes as f64)
         };
         let raw = base + self.path_signal_penalty(arm, symbol_size, signals, measured_loss);
         self.apply_observed_loss(arm, raw);
@@ -907,11 +924,21 @@ mod tests {
         let first = c.update_path_signals(PathSignalSample {
             smoothed_rtt_s: f64::NAN,
             congestion_window_bytes: 0,
-            loss_rate: f64::INFINITY,
+            loss_rate: f64::NAN,
         });
         assert_eq!(first.smoothed_rtt_s, MIN_PATH_RTT_S);
         assert_eq!(first.congestion_window_bytes, 1);
         assert_eq!(first.loss_rate, 0.0);
+
+        let bounded = PathSignalSample {
+            smoothed_rtt_s: f64::INFINITY,
+            congestion_window_bytes: 0,
+            loss_rate: f64::INFINITY,
+        }
+        .clamped();
+        assert_eq!(bounded.smoothed_rtt_s, MAX_PATH_RTT_S);
+        assert_eq!(bounded.congestion_window_bytes, 1);
+        assert_eq!(bounded.loss_rate, MAX_PATH_LOSS_RATE);
 
         let second = c.update_path_signals(PathSignalSample {
             smoothed_rtt_s: 1.0,
@@ -929,6 +956,60 @@ mod tests {
         assert!(
             second.loss_rate > 0.0 && second.loss_rate < 0.50,
             "loss should move by EMA, not jump to the sample: {second:?}"
+        );
+    }
+
+    #[test]
+    fn path_signal_zero_useful_outcome_updates_reward() {
+        let policy = AdaptivePolicy {
+            arm_grid_k: vec![512, 8192],
+            arm_grid_fanout: vec![1],
+            exp3_eta: 0.30,
+            min_samples_to_activate: 1,
+            ..AdaptivePolicy::default()
+        };
+        let mut c = AdaptiveController::new(policy, 31);
+        c.update_estimate(PathEstimate {
+            samples: 8,
+            dec_symbols_per_s: 50_000_000.0,
+            ..est(0.02, 20_000_000.0)
+        });
+
+        let plan = c.next_block_plan(1024).expect("controller activates");
+        let before = c.diagnostic_snapshot();
+        let arm = before
+            .selected_arm_index
+            .expect("next_block_plan records selected arm");
+        let before_weight = before.weights[arm];
+        assert!(before.path_signals.is_none());
+
+        c.observe_path_signals(
+            u64::from(plan.k),
+            0,
+            0.050,
+            0,
+            1024,
+            PathSignalSample {
+                smoothed_rtt_s: 0.050,
+                congestion_window_bytes: 512 * 1024,
+                loss_rate: 0.75,
+            },
+        );
+
+        let after = c.diagnostic_snapshot();
+        assert!(
+            after.path_signals.is_some(),
+            "sent-but-zero-useful outcomes must still record path signals"
+        );
+        assert!(
+            after.weights[arm] < before_weight,
+            "sent-but-zero-useful outcomes must penalize the played arm: before={} after={}",
+            before_weight,
+            after.weights[arm]
+        );
+        assert!(
+            c.loss_scale > 0.0,
+            "zero-useful feedback must enter the EXP3 loss normalizer"
         );
     }
 
