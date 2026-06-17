@@ -1042,7 +1042,24 @@ mod tests {
         // Run maintenance
         processor.maintain();
 
-        // Resource stats should reflect cleanup
+        // `maintain` preserves recent rate-limit history so a just-active peer
+        // cannot immediately reset its admission window by finishing work. The
+        // cleanup invariant here is that all outstanding resources are released.
+        let usage = processor
+            .resource_manager
+            .peer_usage(&peer_id)
+            .expect("recent peer history is retained");
+        assert_eq!(usage.memory_usage, 0);
+        assert_eq!(usage.pending_frames, 0);
+        assert_eq!(usage.active_sessions, 0);
+        assert_eq!(usage.pending_requests, 0);
+        assert_eq!(usage.recent_frame_count, 1);
+
+        let stats = processor.resource_stats();
+        assert_eq!(stats.peer_count, 1);
+
+        // Immediate removal is still available through the explicit force-cleanup path.
+        processor.force_cleanup_peer(&peer_id);
         let stats = processor.resource_stats();
         assert_eq!(stats.peer_count, 0);
     }
