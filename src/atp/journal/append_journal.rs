@@ -5,7 +5,7 @@ use crate::atp::object::{ContentId, ManifestId, ObjectId};
 use crate::cx::Cx;
 use crate::security::{AuthKey, AuthenticationTag};
 use crate::types::outcome::Outcome;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -111,6 +111,79 @@ pub enum JournalRecord {
         timestamp: u64,
         auth_tag: AuthenticationTag,
     },
+}
+
+/// Crash-recovered transfer state suitable for deciding what can be skipped on resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferResumeSummary {
+    /// Transfer identifier used by the journal.
+    pub transfer_id: String,
+    /// Recovered resume status.
+    pub status: TransferResumeStatus,
+    /// Offered transfer size, when an offer record was recovered.
+    pub total_size: Option<u64>,
+    /// Durable verified chunks that can be skipped by a resumable replay.
+    pub durable_chunks: Vec<TransferResumeChunk>,
+    /// Sum of durable verified chunk sizes.
+    pub durable_bytes: u64,
+    /// Largest contiguous durable prefix from byte offset zero.
+    pub contiguous_prefix_bytes: u64,
+    /// Last journal sequence observed for this transfer.
+    pub last_sequence: Option<u64>,
+}
+
+impl TransferResumeSummary {
+    /// Whether the transfer can safely resume by skipping `durable_chunks`.
+    pub fn is_resumable(&self) -> bool {
+        matches!(self.status, TransferResumeStatus::Resumable)
+    }
+}
+
+/// Terminal or resumable state reconstructed from append-journal records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferResumeStatus {
+    /// No records exist for the transfer.
+    Unknown,
+    /// Transfer has no terminal record and may resume from durable chunks.
+    Resumable,
+    /// Commit intent was persisted, but commit completion was not.
+    CommitIntentPending,
+    /// Transfer completed; resume should not resend it.
+    Committed {
+        /// Final committed path.
+        final_path: String,
+        /// Final committed byte count.
+        committed_size: u64,
+    },
+    /// Transfer was cancelled; callers must not infer resumable progress.
+    Cancelled {
+        /// Persisted cancellation reason.
+        reason: String,
+    },
+    /// Transfer rolled back; callers must restart or use the checkpoint policy.
+    RolledBack {
+        /// Persisted rollback reason.
+        reason: String,
+        /// Journal sequence checkpoint named by the rollback record.
+        checkpoint_sequence: u64,
+    },
+}
+
+/// Durable chunk evidence reconstructed from matching verified and written records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferResumeChunk {
+    /// Byte offset in the logical object stream.
+    pub chunk_offset: u64,
+    /// Chunk size in bytes.
+    pub chunk_size: u64,
+    /// Verified chunk hash from the journal.
+    pub chunk_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ResumeChunkKey {
+    chunk_offset: u64,
+    chunk_size: u64,
 }
 
 impl JournalRecord {
@@ -1333,6 +1406,24 @@ impl AppendJournal {
         Outcome::Ok(entries)
     }
 
+    /// Reconstruct resumable transfer progress from the crash-safe journal index.
+    pub fn get_resume_summary(
+        &self,
+        transfer_id: &str,
+    ) -> Outcome<TransferResumeSummary, JournalError> {
+        let entries = match self.get_transfer_entries(transfer_id) {
+            Outcome::Ok(entries) => entries,
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+
+        match Self::build_resume_summary(transfer_id, &entries) {
+            Ok(summary) => Outcome::Ok(summary),
+            Err(err) => Outcome::Err(err),
+        }
+    }
+
     /// Force compaction of the journal
     pub fn compact(&mut self) -> Outcome<(), JournalError> {
         self.trigger_compaction()
@@ -1592,6 +1683,174 @@ impl AppendJournal {
                 Err(position) => entries.insert(position, entry.clone()),
             }
         }
+    }
+
+    fn build_resume_summary(
+        transfer_id: &str,
+        entries: &[JournalEntry],
+    ) -> Result<TransferResumeSummary, JournalError> {
+        let mut total_size = None;
+        let mut last_sequence = None;
+        let mut terminal_status = None;
+        let mut verified_chunks: HashMap<ResumeChunkKey, [u8; 32]> = HashMap::new();
+        let mut written_chunks: HashSet<ResumeChunkKey> = HashSet::new();
+
+        for entry in entries {
+            last_sequence = Some(entry.sequence);
+            match &entry.record {
+                JournalRecord::Offer {
+                    total_size: offered_size,
+                    ..
+                } => {
+                    total_size = Some(*offered_size);
+                }
+                JournalRecord::ChunkVerified {
+                    chunk_offset,
+                    chunk_size,
+                    verified_hash,
+                    ..
+                } => {
+                    verified_chunks.insert(
+                        ResumeChunkKey {
+                            chunk_offset: *chunk_offset,
+                            chunk_size: *chunk_size,
+                        },
+                        *verified_hash,
+                    );
+                }
+                JournalRecord::ChunkWritten {
+                    chunk_offset,
+                    chunk_size,
+                    ..
+                } => {
+                    written_chunks.insert(ResumeChunkKey {
+                        chunk_offset: *chunk_offset,
+                        chunk_size: *chunk_size,
+                    });
+                }
+                JournalRecord::CommitIntent { .. } => {
+                    terminal_status = Some(TransferResumeStatus::CommitIntentPending);
+                }
+                JournalRecord::CommitComplete {
+                    final_path,
+                    committed_size,
+                    ..
+                } => {
+                    terminal_status = Some(TransferResumeStatus::Committed {
+                        final_path: final_path.clone(),
+                        committed_size: *committed_size,
+                    });
+                }
+                JournalRecord::Cancellation { reason, .. } => {
+                    terminal_status = Some(TransferResumeStatus::Cancelled {
+                        reason: reason.clone(),
+                    });
+                }
+                JournalRecord::Rollback {
+                    rollback_reason,
+                    checkpoint_sequence,
+                    ..
+                } => {
+                    terminal_status = Some(TransferResumeStatus::RolledBack {
+                        reason: rollback_reason.clone(),
+                        checkpoint_sequence: *checkpoint_sequence,
+                    });
+                }
+                JournalRecord::Accept { .. }
+                | JournalRecord::ChunkReceived { .. }
+                | JournalRecord::RepairDecode { .. }
+                | JournalRecord::CompactionBoundary { .. }
+                | JournalRecord::ProofDigest { .. } => {}
+            }
+        }
+
+        let status = terminal_status.unwrap_or_else(|| {
+            if entries.is_empty() {
+                TransferResumeStatus::Unknown
+            } else {
+                TransferResumeStatus::Resumable
+            }
+        });
+
+        let (durable_chunks, durable_bytes, contiguous_prefix_bytes) =
+            if matches!(status, TransferResumeStatus::Resumable) {
+                Self::durable_resume_chunks(&verified_chunks, &written_chunks, total_size)?
+            } else {
+                (Vec::new(), 0, 0)
+            };
+
+        Ok(TransferResumeSummary {
+            transfer_id: transfer_id.to_string(),
+            status,
+            total_size,
+            durable_chunks,
+            durable_bytes,
+            contiguous_prefix_bytes,
+            last_sequence,
+        })
+    }
+
+    fn durable_resume_chunks(
+        verified_chunks: &HashMap<ResumeChunkKey, [u8; 32]>,
+        written_chunks: &HashSet<ResumeChunkKey>,
+        total_size: Option<u64>,
+    ) -> Result<(Vec<TransferResumeChunk>, u64, u64), JournalError> {
+        let mut chunks = written_chunks
+            .iter()
+            .filter_map(|key| {
+                verified_chunks
+                    .get(key)
+                    .map(|chunk_hash| TransferResumeChunk {
+                        chunk_offset: key.chunk_offset,
+                        chunk_size: key.chunk_size,
+                        chunk_hash: *chunk_hash,
+                    })
+            })
+            .collect::<Vec<_>>();
+        chunks.sort_by_key(|chunk| (chunk.chunk_offset, chunk.chunk_size));
+
+        let mut durable_bytes = 0_u64;
+        let mut contiguous_prefix_bytes = 0_u64;
+        let mut prefix_is_contiguous = true;
+        let mut previous_end = 0_u64;
+
+        for chunk in &chunks {
+            if chunk.chunk_size == 0 {
+                return Err(JournalError::Deserialization(
+                    "resume chunk has zero size".to_string(),
+                ));
+            }
+            let end = chunk
+                .chunk_offset
+                .checked_add(chunk.chunk_size)
+                .ok_or_else(|| {
+                    JournalError::Deserialization("resume chunk range overflow".to_string())
+                })?;
+            if chunk.chunk_offset < previous_end {
+                return Err(JournalError::Deserialization(
+                    "resume chunks overlap".to_string(),
+                ));
+            }
+            if let Some(total_size) = total_size
+                && end > total_size
+            {
+                return Err(JournalError::Deserialization(
+                    "resume chunk exceeds offered transfer size".to_string(),
+                ));
+            }
+
+            durable_bytes = durable_bytes.checked_add(chunk.chunk_size).ok_or_else(|| {
+                JournalError::Deserialization("resume durable byte count overflow".to_string())
+            })?;
+            if prefix_is_contiguous && chunk.chunk_offset == contiguous_prefix_bytes {
+                contiguous_prefix_bytes = end;
+            } else if chunk.chunk_offset > contiguous_prefix_bytes {
+                prefix_is_contiguous = false;
+            }
+            previous_end = end;
+        }
+
+        Ok((chunks, durable_bytes, contiguous_prefix_bytes))
     }
 
     fn read_entries_from_file(
@@ -2072,6 +2331,214 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 2]
         );
+    }
+
+    #[test]
+    fn resume_summary_reconstructs_durable_chunks_after_recovery() {
+        let temp_dir = unique_temp_dir("test_resume_summary_recovery");
+        let key = test_auth_key();
+        let config = JournalConfig {
+            base_dir: temp_dir,
+            ..Default::default()
+        };
+
+        {
+            let mut journal = AppendJournal::new(config.clone(), key.clone()).unwrap();
+            journal
+                .append(JournalRecord::Offer {
+                    transfer_id: "resume_a".to_string(),
+                    object_id: test_object_id(b"resume_a"),
+                    manifest_root: test_root(7),
+                    total_size: 4096,
+                    timestamp: 1000,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+
+            for (chunk_offset, chunk_size, hash_seed, timestamp) in
+                [(0, 512, 1, 1001), (512, 512, 2, 1003), (2048, 512, 3, 1005)]
+            {
+                journal
+                    .append(JournalRecord::ChunkVerified {
+                        transfer_id: "resume_a".to_string(),
+                        chunk_offset,
+                        chunk_size,
+                        verified_hash: [hash_seed; 32],
+                        timestamp,
+                        auth_tag: unsigned_tag(),
+                    })
+                    .unwrap();
+                journal
+                    .append(JournalRecord::ChunkWritten {
+                        transfer_id: "resume_a".to_string(),
+                        chunk_offset,
+                        chunk_size,
+                        file_path: format!("stage/{chunk_offset}"),
+                        timestamp: timestamp + 1,
+                        auth_tag: unsigned_tag(),
+                    })
+                    .unwrap();
+            }
+
+            journal
+                .append(JournalRecord::ChunkVerified {
+                    transfer_id: "resume_a".to_string(),
+                    chunk_offset: 3072,
+                    chunk_size: 512,
+                    verified_hash: [4; 32],
+                    timestamp: 1007,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+            journal.flush().unwrap();
+        }
+
+        let recovered = AppendJournal::new(config, key).unwrap();
+        let summary = recovered.get_resume_summary("resume_a").unwrap();
+
+        assert!(summary.is_resumable());
+        assert_eq!(summary.status, TransferResumeStatus::Resumable);
+        assert_eq!(summary.total_size, Some(4096));
+        assert_eq!(summary.durable_bytes, 1536);
+        assert_eq!(summary.contiguous_prefix_bytes, 1024);
+        assert_eq!(
+            summary
+                .durable_chunks
+                .iter()
+                .map(|chunk| (chunk.chunk_offset, chunk.chunk_size, chunk.chunk_hash[0]))
+                .collect::<Vec<_>>(),
+            vec![(0, 512, 1), (512, 512, 2), (2048, 512, 3)]
+        );
+        assert_eq!(summary.last_sequence, Some(7));
+    }
+
+    #[test]
+    fn resume_summary_fail_closes_for_terminal_states() {
+        let temp_dir = unique_temp_dir("test_resume_summary_terminal");
+        let mut journal = AppendJournal::new(
+            JournalConfig {
+                base_dir: temp_dir,
+                ..Default::default()
+            },
+            test_auth_key(),
+        )
+        .unwrap();
+
+        for transfer_id in ["cancelled", "rolled_back"] {
+            journal
+                .append(JournalRecord::ChunkVerified {
+                    transfer_id: transfer_id.to_string(),
+                    chunk_offset: 0,
+                    chunk_size: 128,
+                    verified_hash: [9; 32],
+                    timestamp: 2000,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+            journal
+                .append(JournalRecord::ChunkWritten {
+                    transfer_id: transfer_id.to_string(),
+                    chunk_offset: 0,
+                    chunk_size: 128,
+                    file_path: "stage/0".to_string(),
+                    timestamp: 2001,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+        }
+        journal
+            .append(JournalRecord::Cancellation {
+                transfer_id: "cancelled".to_string(),
+                reason: "operator stop".to_string(),
+                timestamp: 2002,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+        journal
+            .append(JournalRecord::Rollback {
+                transfer_id: "rolled_back".to_string(),
+                rollback_reason: "hash mismatch".to_string(),
+                checkpoint_sequence: 1,
+                timestamp: 2003,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+
+        let cancelled = journal.get_resume_summary("cancelled").unwrap();
+        assert_eq!(
+            cancelled.status,
+            TransferResumeStatus::Cancelled {
+                reason: "operator stop".to_string()
+            }
+        );
+        assert_eq!(cancelled.durable_chunks, Vec::new());
+        assert_eq!(cancelled.contiguous_prefix_bytes, 0);
+
+        let rolled_back = journal.get_resume_summary("rolled_back").unwrap();
+        assert_eq!(
+            rolled_back.status,
+            TransferResumeStatus::RolledBack {
+                reason: "hash mismatch".to_string(),
+                checkpoint_sequence: 1,
+            }
+        );
+        assert_eq!(rolled_back.durable_bytes, 0);
+        assert!(!rolled_back.is_resumable());
+    }
+
+    #[test]
+    fn resume_summary_rejects_overlapping_durable_chunks() {
+        let temp_dir = unique_temp_dir("test_resume_summary_overlap");
+        let mut journal = AppendJournal::new(
+            JournalConfig {
+                base_dir: temp_dir,
+                ..Default::default()
+            },
+            test_auth_key(),
+        )
+        .unwrap();
+
+        journal
+            .append(JournalRecord::Offer {
+                transfer_id: "overlap".to_string(),
+                object_id: test_object_id(b"overlap"),
+                manifest_root: test_root(8),
+                total_size: 128,
+                timestamp: 3000,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+
+        for (chunk_offset, hash_seed) in [(0, 1), (8, 2)] {
+            journal
+                .append(JournalRecord::ChunkVerified {
+                    transfer_id: "overlap".to_string(),
+                    chunk_offset,
+                    chunk_size: 16,
+                    verified_hash: [hash_seed; 32],
+                    timestamp: 3001 + chunk_offset,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+            journal
+                .append(JournalRecord::ChunkWritten {
+                    transfer_id: "overlap".to_string(),
+                    chunk_offset,
+                    chunk_size: 16,
+                    file_path: format!("stage/{chunk_offset}"),
+                    timestamp: 3002 + chunk_offset,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+        }
+
+        match journal.get_resume_summary("overlap") {
+            Outcome::Err(err) => {
+                assert!(matches!(err, JournalError::Deserialization(_)));
+                assert!(err.to_string().contains("overlap"));
+            }
+            other => panic!("expected overlap to fail closed, got {other:?}"),
+        }
     }
 
     #[test]

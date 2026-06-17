@@ -19,7 +19,10 @@ mod tests;
 #[cfg(test)]
 mod basic_tests;
 
-pub use append_journal::{AppendJournal, JournalConfig, JournalRecord};
+pub use append_journal::{
+    AppendJournal, JournalConfig, JournalRecord, TransferResumeChunk, TransferResumeStatus,
+    TransferResumeSummary,
+};
 pub use chunk_bitmap::{ChunkBitmap, ChunkState};
 pub use commit_policy::{AtomicPolicy, CommitPolicy, FsyncPolicy};
 pub use platform_caps::{FilesystemFeatures, PlatformCapabilities};
