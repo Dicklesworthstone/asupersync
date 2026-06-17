@@ -20,10 +20,11 @@
 //! # Integrity (fail-closed, identical guarantee to `transport_tcp`)
 //!
 //! After decode, the receiver (1) checks every entry's SHA-256 against the
-//! manifest and (2) rebuilds the deterministic flat [`ObjectGraph`] and compares
-//! [`MerkleRoot::from_graph`] to the manifest root. Only if both hold does it
-//! atomically write the destination and report `committed = true`. Any mismatch,
-//! oversize entry, unreachable peer, or undecodable transfer is a hard error.
+//! manifest and (2) rebuilds the deterministic flat
+//! [`crate::atp::object::ObjectGraph`] and compares the flat Merkle root to the
+//! manifest root. Only if both hold does it atomically write the destination and
+//! report `committed = true`. Any mismatch, oversize entry, unreachable peer, or
+//! undecodable transfer is a hard error.
 //!
 //! # Fountain feedback loop
 //!
@@ -59,8 +60,6 @@ pub mod adaptive;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::atp::manifest::MerkleRoot;
-use crate::atp::object::{Object, ObjectEdge, ObjectGraph};
 use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
@@ -69,6 +68,10 @@ use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_ob
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
+use crate::net::atp::transport_common::{
+    EntryDigest, flat_merkle_root_from_digests, flat_merkle_root_from_slices, hash_file_streaming,
+    hex_encode,
+};
 use crate::net::{TcpListener, TcpStream, UdpBufferConfig, UdpSocket};
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::security::tag::TAG_SIZE;
@@ -553,44 +556,6 @@ fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError>
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex_encode(&hasher.finalize())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap_or('0'));
-    }
-    out
-}
-
-/// Build the deterministic flat object graph and return `merkle_root_hex`. This
-/// is the *same* construction `transport_tcp` uses (single directory root, edges
-/// keyed by relative path, anchored on [`MerkleRoot::from_graph`]); both
-/// transports therefore agree on the merkle root for identical content.
-fn flat_merkle_root(entries: &[(String, Vec<u8>)]) -> String {
-    let mut sorted: Vec<&(String, Vec<u8>)> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut graph = ObjectGraph::new();
-    let mut edges = Vec::with_capacity(sorted.len());
-    for (rel_path, bytes) in sorted {
-        let obj = Object::file(bytes.clone());
-        let id = obj.id.clone();
-        if !graph.contains_object(&id) {
-            let _ = graph.add_object(obj);
-        }
-        edges.push(ObjectEdge::new(id, rel_path.clone()));
-    }
-    let root = Object::directory(edges);
-    let _ = graph.add_root(root);
-    MerkleRoot::from_graph(&graph).to_hex()
-}
-
 /// Derive the per-entry RaptorQ [`ObjectId`] deterministically from the transfer
 /// id and entry index, so sender and receiver agree without extra signaling.
 fn entry_object_id(transfer_id: &str, index: u32) -> ObjectId {
@@ -614,7 +579,17 @@ fn transfer_tag(transfer_id: &str) -> u64 {
     u64::from_be_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
 }
 
-async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<(String, Vec<u8>)>), RqError> {
+/// Hash-pass buffer size for sender manifest construction. This bounds the
+/// manifest pass independently of transfer size.
+const RQ_STREAM_HASH_BUFFER_SIZE: usize = 1024 * 1024;
+
+#[derive(Debug, Clone)]
+struct RqSourceEntry {
+    rel_path: String,
+    abs_path: PathBuf,
+}
+
+async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry>), RqError> {
     let meta = crate::fs::metadata(root)
         .await
         .map_err(|e| RqError::Source(format!("{}: {e}", root.display())))?;
@@ -624,15 +599,19 @@ async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<(String, Vec<
     );
 
     if meta.is_file() {
-        let bytes = crate::fs::read(root)
-            .await
-            .map_err(|e| RqError::Source(format!("{}: {e}", root.display())))?;
-        return Ok((root_name.clone(), false, vec![(root_name, bytes)]));
+        return Ok((
+            root_name.clone(),
+            false,
+            vec![RqSourceEntry {
+                rel_path: root_name,
+                abs_path: root.to_path_buf(),
+            }],
+        ));
     }
     if meta.is_dir() {
         let mut entries = Vec::new();
         collect_dir(root, String::new(), &mut entries).await?;
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
         return Ok((root_name, true, entries));
     }
     Err(RqError::Source(format!(
@@ -644,7 +623,7 @@ async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<(String, Vec<
 fn collect_dir<'a>(
     dir: &'a Path,
     prefix: String,
-    out: &'a mut Vec<(String, Vec<u8>)>,
+    out: &'a mut Vec<RqSourceEntry>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), RqError>> + Send + 'a>> {
     Box::pin(async move {
         let mut read_dir = crate::fs::read_dir(dir)
@@ -675,10 +654,10 @@ fn collect_dir<'a>(
             if is_dir {
                 collect_dir(&path, rel, out).await?;
             } else {
-                let bytes = crate::fs::read(&path)
-                    .await
-                    .map_err(|e| RqError::Source(format!("{}: {e}", path.display())))?;
-                out.push((rel, bytes));
+                out.push(RqSourceEntry {
+                    rel_path: rel,
+                    abs_path: path,
+                });
             }
         }
         Ok(())
@@ -1094,12 +1073,6 @@ struct EncodeAheadBlock {
     k: usize,
 }
 
-impl EncodeAheadBlock {
-    fn end(self) -> usize {
-        self.start + self.len
-    }
-}
-
 #[derive(Debug)]
 struct EncodeAheadSymbol {
     entry: u32,
@@ -1195,13 +1168,16 @@ fn encode_ahead_blocks(
 
 fn effective_transfer_max_block_size(
     config: &RqConfig,
-    entries: &[(String, Vec<u8>)],
+    entries: &[EntryDigest],
 ) -> Result<usize, RqError> {
-    let max_entry_len = entries
-        .iter()
-        .map(|(_, bytes)| bytes.len())
-        .max()
-        .unwrap_or(0);
+    let mut max_entry_len = 0usize;
+    for entry in entries {
+        let len = usize::try_from(entry.size).map_err(|_| RqError::TooLarge {
+            size: entry.size,
+            max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+        })?;
+        max_entry_len = max_entry_len.max(len);
+    }
     effective_max_block_size_for_largest_entry(config, max_entry_len)
 }
 
@@ -1232,12 +1208,14 @@ pub(in crate::net::atp) fn effective_max_block_size_for_largest_entry(
         .max(symbol_size))
 }
 
-/// Sender-side encoder state for one entry. Holds the bytes so successive
-/// feedback rounds can mint fresh repair symbols at ever-higher ESI ranges.
+/// Sender-side encoder state for one entry. Holds only source metadata; each
+/// encode-ahead block is read on demand so the sender never retains the whole
+/// object in memory.
 struct EntryEncoder {
     index: u32,
     object_id: ObjectId,
-    bytes: Vec<u8>,
+    abs_path: PathBuf,
+    size: usize,
     /// Cumulative repair symbols already requested from the encoder (per block).
     /// Feedback rounds request more and send only the newly-minted ones at their
     /// TRUE encoder ESIs — a RaptorQ repair symbol's payload is bound to its ESI,
@@ -1276,24 +1254,42 @@ pub async fn send_path(
     let symbol_auth_enabled = symbol_auth.is_some();
 
     let (root_name, is_directory, entries) = collect_entries(source).await?;
-    let total_bytes: u64 = entries.iter().map(|(_, b)| b.len() as u64).sum();
-    if total_bytes > config.max_transfer_bytes {
-        return Err(RqError::TooLarge {
-            size: total_bytes,
+    let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
+    let mut digests = Vec::with_capacity(entries.len());
+    let mut total_bytes = 0u64;
+    for entry in &entries {
+        let (size, content_id, content_sha256) =
+            hash_file_streaming(&entry.abs_path, &mut hash_buf)
+                .await
+                .map_err(|e| RqError::Source(e.into_message()))?;
+        total_bytes = total_bytes.checked_add(size).ok_or(RqError::TooLarge {
+            size: u64::MAX,
             max: config.max_transfer_bytes,
+        })?;
+        if total_bytes > config.max_transfer_bytes {
+            return Err(RqError::TooLarge {
+                size: total_bytes,
+                max: config.max_transfer_bytes,
+            });
+        }
+        digests.push(EntryDigest {
+            rel_path: entry.rel_path.clone(),
+            size,
+            content_id,
+            content_sha256,
         });
     }
-    config.max_block_size = effective_transfer_max_block_size(&config, &entries)?;
+    config.max_block_size = effective_transfer_max_block_size(&config, &digests)?;
 
-    let merkle_root_hex = flat_merkle_root(&entries);
-    let manifest_entries: Vec<ManifestEntry> = entries
+    let merkle_root_hex = flat_merkle_root_from_digests(&digests);
+    let manifest_entries: Vec<ManifestEntry> = digests
         .iter()
         .enumerate()
-        .map(|(i, (rel, bytes))| ManifestEntry {
+        .map(|(i, digest)| ManifestEntry {
             index: u32::try_from(i).unwrap_or(u32::MAX),
-            rel_path: rel.clone(),
-            size: bytes.len() as u64,
-            sha256_hex: sha256_hex(bytes),
+            rel_path: digest.rel_path.clone(),
+            size: digest.size,
+            sha256_hex: hex_encode(&digest.content_sha256),
         })
         .collect();
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
@@ -1363,13 +1359,16 @@ pub async fn send_path(
 
     let mut encoders: Vec<EntryEncoder> = entries
         .iter()
+        .zip(digests.iter())
         .enumerate()
-        .map(|(i, (_, bytes))| {
+        .map(|(i, (entry, digest))| {
             let index = u32::try_from(i).unwrap_or(u32::MAX);
+            let size = usize::try_from(digest.size).unwrap_or(usize::MAX);
             EntryEncoder {
                 index,
                 object_id: entry_object_id(&transfer_id, index),
-                bytes: bytes.clone(),
+                abs_path: entry.abs_path.clone(),
+                size,
                 repair_cursor: 0,
             }
         })
@@ -1557,7 +1556,7 @@ async fn spray_round(
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let mut ring = EncodeAheadRing::default();
-        let blocks = encode_ahead_blocks(enc.bytes.len(), config)?;
+        let blocks = encode_ahead_blocks(enc.size, config)?;
         let block_source_n = blocks.iter().map(|block| block.k).max().unwrap_or(1);
 
         // Cumulative repair count requested from the encoder this round. The
@@ -1594,13 +1593,13 @@ async fn spray_round(
                 },
                 pool,
             );
-            let block_bytes = &enc.bytes[block.start..block.end()];
+            let block_bytes = read_source_range(&enc.abs_path, block.start, block.len).await?;
 
             if with_source {
                 for encoded in pipeline.encode_single_block_with_repair(
                     enc.object_id,
                     block.sbn,
-                    block_bytes,
+                    &block_bytes,
                     target_repair,
                 ) {
                     let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
@@ -1625,7 +1624,7 @@ async fn spray_round(
                 for encoded in pipeline.encode_single_block_repair_range(
                     enc.object_id,
                     block.sbn,
-                    block_bytes,
+                    &block_bytes,
                     already,
                     repair_count,
                 ) {
@@ -1654,6 +1653,29 @@ async fn spray_round(
     Ok(())
 }
 
+async fn read_source_range(path: &Path, offset: usize, len: usize) -> Result<Vec<u8>, RqError> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let offset_u64 = u64::try_from(offset).map_err(|_| {
+        RqError::Coding(format!(
+            "{}: source range offset does not fit u64: {offset}",
+            path.display()
+        ))
+    })?;
+    let mut file = crate::fs::File::open(path)
+        .await
+        .map_err(|e| RqError::Source(format!("{}: {e}", path.display())))?;
+    file.seek(std::io::SeekFrom::Start(offset_u64))
+        .await
+        .map_err(|e| RqError::Source(format!("{}: {e}", path.display())))?;
+    let mut bytes = vec![0u8; len];
+    file.read_exact(&mut bytes)
+        .await
+        .map_err(|e| RqError::Source(format!("{}: {e}", path.display())))?;
+    Ok(bytes)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spray_source_requests(
     cx: &Cx,
@@ -1677,7 +1699,7 @@ async fn spray_source_requests(
                     request.entry
                 ))
             })?;
-        let sym = source_symbol_for_request(enc, *request, config)?;
+        let sym = source_symbol_for_request(enc, *request, config).await?;
 
         send_symbol_datagram(
             cx,
@@ -1735,7 +1757,7 @@ async fn send_symbol_datagram(
     Ok(())
 }
 
-fn source_symbol_for_request(
+async fn source_symbol_for_request(
     enc: &EntryEncoder,
     request: SourceSymbolRequest,
     config: &RqConfig,
@@ -1750,16 +1772,14 @@ fn source_symbol_for_request(
     let block_start = usize::from(request.sbn)
         .checked_mul(config.max_block_size)
         .ok_or_else(|| RqError::Coding("source request block offset overflow".to_string()))?;
-    if block_start >= enc.bytes.len() {
+    if block_start >= enc.size {
         return Err(RqError::Coding(format!(
             "source request block {} outside entry {} ({} bytes)",
-            request.sbn,
-            enc.index,
-            enc.bytes.len()
+            request.sbn, enc.index, enc.size
         )));
     }
 
-    let block_len = config.max_block_size.min(enc.bytes.len() - block_start);
+    let block_len = config.max_block_size.min(enc.size - block_start);
     let block_k = block_len.div_ceil(symbol_size).max(1);
     let esi = usize::try_from(request.esi)
         .map_err(|_| RqError::Coding("source request ESI does not fit usize".to_string()))?;
@@ -1774,7 +1794,8 @@ fn source_symbol_for_request(
     let end = (start + symbol_size).min(block_start + block_len);
     let mut buffer = vec![0u8; symbol_size];
     if start < end {
-        buffer[..end - start].copy_from_slice(&enc.bytes[start..end]);
+        let bytes = read_source_range(&enc.abs_path, start, end - start).await?;
+        buffer[..bytes.len()].copy_from_slice(&bytes);
     }
     Ok(Symbol::new(
         SymbolId::new(enc.object_id, request.sbn, request.esi),
@@ -2318,7 +2339,8 @@ async fn verify_and_commit(
         match data {
             Some(bytes) => {
                 received += bytes.len() as u64;
-                if bytes.len() as u64 != e.size || sha256_hex(bytes) != e.sha256_hex {
+                let content_sha256: [u8; 32] = Sha256::digest(bytes).into();
+                if bytes.len() as u64 != e.size || hex_encode(&content_sha256) != e.sha256_hex {
                     sha_ok = false;
                 }
             }
@@ -2336,7 +2358,11 @@ async fn verify_and_commit(
             )
         })
         .collect();
-    let merkle_ok = flat_merkle_root(&rebuilt) == manifest.merkle_root_hex;
+    let merkle_ok = flat_merkle_root_from_slices(
+        rebuilt
+            .iter()
+            .map(|(rel_path, bytes)| (rel_path.as_str(), bytes.as_slice())),
+    ) == manifest.merkle_root_hex;
 
     let committed = sha_ok && merkle_ok;
     let mut committed_paths: Vec<String> = Vec::new();
@@ -3055,14 +3081,18 @@ mod tests {
             ..RqConfig::default()
         };
         let bytes: Vec<u8> = (0..1500).map(|i| (i % 251) as u8).collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_path = dir.path().join("source.bin");
+        std::fs::write(&source_path, &bytes).expect("write source");
         let enc = EntryEncoder {
             index: 7,
             object_id: entry_object_id("source-request", 7),
-            bytes: bytes.clone(),
+            abs_path: source_path,
+            size: bytes.len(),
             repair_cursor: 0,
         };
 
-        let first_block_tail = source_symbol_for_request(
+        let first_block_tail = futures_lite::future::block_on(source_symbol_for_request(
             &enc,
             SourceSymbolRequest {
                 entry: 7,
@@ -3070,14 +3100,14 @@ mod tests {
                 esi: 1,
             },
             &config,
-        )
+        ))
         .expect("source symbol");
         assert!(first_block_tail.kind().is_source());
         assert_eq!(first_block_tail.sbn(), 0);
         assert_eq!(first_block_tail.esi(), 1);
         assert_eq!(first_block_tail.data(), &bytes[512..1024]);
 
-        let final_block = source_symbol_for_request(
+        let final_block = futures_lite::future::block_on(source_symbol_for_request(
             &enc,
             SourceSymbolRequest {
                 entry: 7,
@@ -3085,7 +3115,7 @@ mod tests {
                 esi: 0,
             },
             &config,
-        )
+        ))
         .expect("final source symbol");
         assert_eq!(&final_block.data()[..476], &bytes[1024..]);
         assert!(final_block.data()[476..].iter().all(|byte| *byte == 0));
