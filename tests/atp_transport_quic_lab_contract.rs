@@ -143,6 +143,45 @@ fn cancelled_send_path_lab_report(seed: u64) -> Value {
     report.to_json()
 }
 
+fn invalid_send_path_config_lab_report(seed: u64) -> Value {
+    let (_output, report) = run_async_under_lab_with_config(lab_config(seed), |cx| async move {
+        cx.checkpoint()
+            .expect("lab root context must remain uncancelled");
+
+        let addr: SocketAddr = "127.0.0.1:9".parse().expect("loopback discard addr");
+        let untouched_source =
+            PathBuf::from("h3-lab-invalid-send-config-should-not-touch-source.bin");
+        let invalid_config = QuicConfig {
+            accept_timeout: Duration::ZERO,
+            ..trusted_quic_config()
+        };
+
+        let result: Result<SendReport, QuicTransportError> = send_path(
+            &cx,
+            addr,
+            &untouched_source,
+            invalid_config,
+            "h3-lab-invalid-config-sender",
+        )
+        .await;
+
+        match result {
+            Err(QuicTransportError::Config(message)) => {
+                assert!(
+                    message.contains("accept_timeout"),
+                    "invalid accept timeout should be named in the Config error, got {message:?}"
+                );
+            }
+            Ok(report) => panic!("invalid lab send_path config must not fake success: {report:?}"),
+            Err(err) => panic!("invalid lab send_path config must fail as Config, got {err:?}"),
+        }
+    });
+
+    assert_transport_lab_report_clean("invalid send_path config", &report);
+
+    report.to_json()
+}
+
 fn empty_receive_once_lab_report(seed: u64) -> Value {
     let (_output, report) = run_async_under_lab_with_config(lab_config(seed), |cx| async move {
         cx.checkpoint()
@@ -411,6 +450,63 @@ fn cancelled_serve_lab_report(seed: u64) -> Value {
     report.to_json()
 }
 
+fn invalid_serve_config_lab_report(seed: u64) -> Value {
+    let (_output, report) = run_async_under_lab_with_config(lab_config(seed), |cx| async move {
+        cx.checkpoint()
+            .expect("lab root context must remain uncancelled");
+
+        let listen: SocketAddr = "127.0.0.1:0".parse().expect("loopback bind addr");
+        let endpoint = ManagedQuicEndpoint::bind(
+            &cx,
+            listen,
+            ManagedEndpointConfig {
+                is_server: true,
+                ..ManagedEndpointConfig::default()
+            },
+        )
+        .await
+        .expect("managed endpoint binds under lab");
+        let destination = PathBuf::from("h3-lab-invalid-serve-config-destination");
+        let invalid_config = QuicConfig {
+            accept_timeout: Duration::ZERO,
+            ..trusted_quic_config()
+        };
+
+        let callback_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_flag = std::sync::Arc::clone(&callback_called);
+        let result = serve(
+            &cx,
+            endpoint,
+            destination,
+            invalid_config,
+            "h3-lab-invalid-config-serve".to_string(),
+            move |_result| {
+                callback_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            },
+        )
+        .await;
+
+        match result {
+            Err(QuicTransportError::Config(message)) => {
+                assert!(
+                    message.contains("accept_timeout"),
+                    "invalid accept timeout should be named in the Config error, got {message:?}"
+                );
+            }
+            Ok(()) => panic!("invalid lab serve config must not fake success"),
+            Err(err) => panic!("invalid lab serve config must fail as Config, got {err:?}"),
+        }
+        assert!(
+            !callback_called.load(std::sync::atomic::Ordering::Relaxed),
+            "invalid lab serve config must not invoke the receive result callback"
+        );
+    });
+
+    assert_transport_lab_report_clean("invalid serve config", &report);
+
+    report.to_json()
+}
+
 fn empty_serve_lab_report(seed: u64) -> Value {
     let (_output, report) = run_async_under_lab_with_config(lab_config(seed), |cx| async move {
         cx.checkpoint()
@@ -469,6 +565,20 @@ fn cancelled_send_path_is_quiescent_oracle_clean_and_replay_stable() {
     assert_eq!(
         first, second,
         "same-seed transport_quic lab cancellation run must replay identically"
+    );
+}
+
+#[test]
+fn invalid_send_path_config_is_quiescent_oracle_clean_and_replay_stable() {
+    let _guard = lab_contract_lock()
+        .lock()
+        .expect("lab contract tests serialize cleanly");
+    let first = invalid_send_path_config_lab_report(0xb0c8_900b);
+    let second = invalid_send_path_config_lab_report(0xb0c8_900b);
+
+    assert_eq!(
+        first, second,
+        "same-seed transport_quic invalid send_path config lab run must replay identically"
     );
 }
 
@@ -553,6 +663,20 @@ fn cancelled_serve_is_quiescent_oracle_clean_and_replay_stable() {
     assert_eq!(
         first, second,
         "same-seed transport_quic cancelled serve lab run must replay identically"
+    );
+}
+
+#[test]
+fn invalid_serve_config_is_quiescent_oracle_clean_and_replay_stable() {
+    let _guard = lab_contract_lock()
+        .lock()
+        .expect("lab contract tests serialize cleanly");
+    let first = invalid_serve_config_lab_report(0xb0c8_900c);
+    let second = invalid_serve_config_lab_report(0xb0c8_900c);
+
+    assert_eq!(
+        first, second,
+        "same-seed transport_quic invalid serve config lab run must replay identically"
     );
 }
 
