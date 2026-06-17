@@ -80,6 +80,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::atp::object::{ContentId, MetadataPolicy};
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
 use crate::config::EncodingConfig;
@@ -92,8 +93,9 @@ use crate::io::AsyncReadExt;
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::atp::transport_common::{
-    EntryDigest, SourceEntry, StreamingError, collect_entries, flat_merkle_root_from_digests,
-    flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
+    EntryDigest, EntryMetadata, FileKind, StreamingError, collect_entries,
+    flat_merkle_root_from_digests, flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
+    metadata_commitment, read_entry_metadata,
 };
 use crate::net::atp::transport_rq::{
     RqConfig, RqError, effective_max_block_size_for_largest_entry as rq_effective_max_block_size,
@@ -246,6 +248,12 @@ pub struct QuicConfig {
     /// Explicit escape hatch for trusted loopback/lab links that intentionally
     /// accept integrity-vs-manifest only.
     pub allow_unauthenticated_symbols: bool,
+    /// Filesystem-metadata fidelity policy for manifest entries.
+    pub metadata_policy: MetadataPolicy,
+    /// Opt-in recreation of safe special files. Defaults to skip-and-trace.
+    pub allow_special_files: bool,
+    /// Opt-in hardlink preservation within a transfer.
+    pub preserve_hardlinks: bool,
     /// Deterministic test/diagnostic symbol-loss injection. When nonzero, the
     /// sender skips every Nth symbol on the *initial* spray only (never on a
     /// repair round), so the fountain feedback loop must recover them. Zero
@@ -291,6 +299,9 @@ impl Default for QuicConfig {
             datagram_fanout: DEFAULT_DATAGRAM_FANOUT,
             symbol_auth_context: None,
             allow_unauthenticated_symbols: false,
+            metadata_policy: MetadataPolicy::default(),
+            allow_special_files: false,
+            preserve_hardlinks: false,
             debug_drop_one_in: 0,
             #[cfg(feature = "tls")]
             client_tls: None,
@@ -1065,6 +1076,16 @@ fn effective_quic_config_for_entries(
     effective_quic_config_for_largest_entry(config, max_entry_len)
 }
 
+fn empty_quic_entry_digest(rel_path: String) -> EntryDigest {
+    let empty_sha: [u8; 32] = Sha256::digest(b"").into();
+    EntryDigest {
+        rel_path,
+        size: 0,
+        content_id: crate::atp::object::ObjectId::content(ContentId::from_bytes(b"")),
+        content_sha256: empty_sha,
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct QuicSourceEntry {
@@ -1179,22 +1200,46 @@ async fn prepare_source_manifest(
     config.validate()?;
     let (root_name, is_directory, source_entries) = collect_entries(source).await?;
     let _ = quic_safe_base_for_root_name(Path::new("base"), &root_name)?;
-    if is_directory && source_entries.is_empty() {
-        return Err(QuicTransportError::Source(format!(
-            "transport_quic does not yet encode empty directory root {root_name}"
-        )));
-    }
     let mut read_buf = vec![0_u8; config.chunk_size];
     let mut digests = Vec::with_capacity(source_entries.len());
+    let mut metadatas = Vec::with_capacity(source_entries.len());
     let mut total_bytes = 0u64;
+    let mut hardlink_primary: std::collections::HashMap<(u64, u64), String> =
+        std::collections::HashMap::new();
 
     for source_entry in &source_entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         quic_join_relative(Path::new("base"), &source_entry.rel_path)?;
-        reject_unencoded_source_entry(source_entry).await?;
-
-        let (size, content_id, content_sha256) =
-            hash_file_streaming(&source_entry.abs_path, &mut read_buf).await?;
+        let mut metadata =
+            read_entry_metadata(&source_entry.abs_path, &config.metadata_policy).await?;
+        if config.preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
+            if let Some(key) = crate::net::atp::transport_common::metadata::inode_key_if_regular(
+                &source_entry.abs_path,
+            )
+            .await?
+            {
+                if let Some(primary) = hardlink_primary.get(&key) {
+                    metadata.hardlink_target = Some(primary.clone());
+                } else {
+                    hardlink_primary.insert(key, source_entry.rel_path.clone());
+                }
+            }
+        }
+        let zero_content =
+            !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some();
+        let digest = if zero_content {
+            empty_quic_entry_digest(source_entry.rel_path.clone())
+        } else {
+            let (size, content_id, content_sha256) =
+                hash_file_streaming(&source_entry.abs_path, &mut read_buf).await?;
+            EntryDigest {
+                rel_path: source_entry.rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            }
+        };
+        let size = digest.size;
         total_bytes = total_bytes
             .checked_add(size)
             .ok_or(QuicTransportError::TooLarge {
@@ -1207,12 +1252,8 @@ async fn prepare_source_manifest(
                 max: config.max_transfer_bytes,
             });
         }
-        digests.push(EntryDigest {
-            rel_path: source_entry.rel_path.clone(),
-            size,
-            content_id,
-            content_sha256,
-        });
+        digests.push(digest);
+        metadatas.push(metadata);
     }
 
     let max_entry_len = digests.iter().try_fold(0usize, |max, digest| {
@@ -1225,16 +1266,27 @@ async fn prepare_source_manifest(
     })?;
     let effective_config = effective_quic_config_for_largest_entry(config, max_entry_len)?;
     let merkle_root_hex = flat_merkle_root_from_digests(&digests);
+    let metadata_pairs: Vec<(&str, &EntryMetadata)> = digests
+        .iter()
+        .zip(&metadatas)
+        .map(|(digest, metadata)| (digest.rel_path.as_str(), metadata))
+        .collect();
+    let metadata_root_hex = metadata_commitment(&metadata_pairs);
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, digests.len());
     let manifest_entries = digests
         .iter()
+        .zip(&metadatas)
         .enumerate()
-        .map(|(i, digest)| ManifestEntry {
+        .map(|(i, (digest, metadata))| ManifestEntry {
             index: u32::try_from(i).unwrap_or(u32::MAX),
             rel_path: digest.rel_path.clone(),
             size: digest.size,
             sha256_hex: hex_encode(&digest.content_sha256),
-            metadata: None,
+            metadata: if metadata.is_bare() {
+                None
+            } else {
+                Some(metadata.clone())
+            },
         })
         .collect::<Vec<_>>();
     let manifest = TransferManifest {
@@ -1243,7 +1295,7 @@ async fn prepare_source_manifest(
         is_directory,
         total_bytes,
         merkle_root_hex,
-        metadata_root_hex: None,
+        metadata_root_hex,
         entries: manifest_entries,
     };
     validate_quic_manifest(&manifest, &effective_config)?;
@@ -1281,25 +1333,6 @@ fn digest_index(manifest: &TransferManifest, rel_path: &str) -> Result<usize, Qu
                 "prepared source entry {rel_path} missing from manifest"
             ))
         })
-}
-
-async fn reject_unencoded_source_entry(entry: &SourceEntry) -> Result<(), QuicTransportError> {
-    let meta = crate::fs::metadata(&entry.abs_path)
-        .await
-        .map_err(|err| StreamingError::new(format!("{}: {err}", entry.abs_path.display())))?;
-    if meta.is_file() {
-        return Ok(());
-    }
-    if meta.is_dir() {
-        return Err(QuicTransportError::Source(format!(
-            "transport_quic does not yet encode explicit directory entry {}",
-            entry.rel_path
-        )));
-    }
-    Err(QuicTransportError::Source(format!(
-        "{}: not a regular file",
-        entry.abs_path.display()
-    )))
 }
 
 #[allow(dead_code)]
