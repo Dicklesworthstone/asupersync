@@ -569,9 +569,21 @@ impl FromStr for W3CTraceContext {
         // Parse span ID
         let span_id = SpanId::from_str(parts[2])?;
 
-        // Parse flags
-        let flags_byte = u8::from_str_radix(parts[3], 16)
-            .map_err(|_| TraceContextError::InvalidFormat("invalid flags hex".into()))?;
+        // Parse flags. Like trace_id/parent_id above, the W3C version-00
+        // traceparent format requires the flags to be exactly two hex digits.
+        // `u8::from_str_radix` is too lenient here — it accepts a `+` sign and
+        // shorter/odd input (e.g. "1" or "+f") — so validate the length and
+        // decode with `hex::decode` to keep field parsing consistently strict on
+        // untrusted headers.
+        if parts[3].len() != 2 {
+            return Err(TraceContextError::InvalidFormat(
+                "flags must be 2 hex digits".into(),
+            ));
+        }
+        let flags_byte = *hex::decode(parts[3])
+            .map_err(|_| TraceContextError::InvalidFormat("invalid flags hex".into()))?
+            .first()
+            .ok_or_else(|| TraceContextError::InvalidFormat("invalid flags hex".into()))?;
 
         Ok(Self {
             trace_id,
@@ -929,5 +941,26 @@ mod tests {
         let result = W3CTraceContext::from_str(invalid);
 
         assert!(matches!(result, Err(TraceContextError::InvalidTraceId)));
+    }
+
+    #[test]
+    fn flags_must_be_exactly_two_hex_digits() {
+        let base = "4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7";
+        // Well-formed two-hex-digit flags parse.
+        assert!(W3CTraceContext::from_str(&format!("00-{base}-01")).is_ok());
+        assert!(W3CTraceContext::from_str(&format!("00-{base}-ff")).is_ok());
+        // Wrong length, non-hex, sign-prefixed, or whitespace flags must be
+        // rejected — the W3C version-00 traceparent format requires exactly two
+        // hex digits, and `u8::from_str_radix` would otherwise leniently accept
+        // "1" / "+1".
+        for bad in ["1", "001", "+1", "0g", "", " 1"] {
+            assert!(
+                matches!(
+                    W3CTraceContext::from_str(&format!("00-{base}-{bad}")),
+                    Err(TraceContextError::InvalidFormat(_))
+                ),
+                "flags {bad:?} should be rejected"
+            );
+        }
     }
 }
