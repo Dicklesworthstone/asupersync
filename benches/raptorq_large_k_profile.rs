@@ -14,7 +14,7 @@
 use criterion::{
     BenchmarkId, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
 };
-use std::time::Duration;
+use std::{hint::black_box, time::Duration};
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
@@ -125,6 +125,113 @@ fn create_scattered_loss_pattern(k: usize, loss_fraction: f64, seed: u64) -> Vec
         }
     }
     pattern
+}
+
+#[derive(Debug)]
+struct FixedTotalDecodeScenario {
+    k: usize,
+    symbol_size: usize,
+    total_bytes: usize,
+    seed: u64,
+    received_symbols: Vec<ReceivedSymbol>,
+    expected_source_symbols: Vec<Vec<u8>>,
+}
+
+fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
+    const TOTAL_BYTES: usize = 4 * 1024 * 1024;
+    const LOSS_FRACTION: f64 = 0.02;
+    const EXTRA_REPAIR: usize = 32;
+
+    assert_eq!(TOTAL_BYTES % k, 0, "fixed total bytes must divide K");
+
+    let symbol_size = TOTAL_BYTES / k;
+    let seed = 0xE400_0000_u64 ^ k as u64;
+    let source_symbols = generate_source_symbols(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source_symbols, symbol_size, seed)
+        .expect("encoder creation failed");
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let loss_pattern = create_scattered_loss_pattern(k, LOSS_FRACTION, seed ^ 0x5EED);
+    let mut received_symbols = Vec::with_capacity(k + EXTRA_REPAIR);
+
+    for (i, &lost) in loss_pattern.iter().enumerate() {
+        if !lost {
+            let esi = u32::try_from(i).expect("source ESI must fit in u32");
+            received_symbols.push(ReceivedSymbol::source(esi, source_symbols[i].clone()));
+        }
+    }
+
+    let params = decoder.params();
+    let required_symbols = params.l - params.k_prime.saturating_sub(params.k);
+    let needed_repairs = required_symbols.saturating_sub(received_symbols.len()) + EXTRA_REPAIR;
+    for i in 0..needed_repairs {
+        let repair_esi = u32::try_from(k + i).expect("repair ESI must fit in u32");
+        let repair_data = encoder.repair_symbol(repair_esi);
+        let (columns, coefficients) = decoder
+            .repair_equation(repair_esi)
+            .expect("repair equation creation failed");
+        received_symbols.push(ReceivedSymbol::repair(
+            repair_esi,
+            columns,
+            coefficients,
+            repair_data,
+        ));
+    }
+
+    let decoded = decoder
+        .decode(&received_symbols)
+        .expect("fixed-total decode scenario must be solvable");
+    assert_eq!(
+        decoded.source, source_symbols,
+        "fixed-total decode scenario must round-trip"
+    );
+
+    FixedTotalDecodeScenario {
+        k,
+        symbol_size,
+        total_bytes: TOTAL_BYTES,
+        seed,
+        received_symbols,
+        expected_source_symbols: source_symbols,
+    }
+}
+
+fn bench_e4_decode_vs_k_fixed_total_bytes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("e4_decode_vs_k_fixed_total_bytes");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+    group.warm_up_time(Duration::from_secs(2));
+
+    for &k in &[256usize, 1024, 4096, 8192] {
+        let scenario = build_fixed_total_decode_scenario(k);
+        group.throughput(Throughput::Bytes(scenario.total_bytes as u64));
+
+        let bench_name = format!(
+            "k{}_sym{}_total{}",
+            scenario.k, scenario.symbol_size, scenario.total_bytes
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("decode_block_path", &bench_name),
+            &scenario,
+            |b, scenario| {
+                b.iter(|| {
+                    let decoder =
+                        InactivationDecoder::new(scenario.k, scenario.symbol_size, scenario.seed);
+                    let decoded = decoder
+                        .decode(black_box(&scenario.received_symbols))
+                        .expect("decode failed");
+                    assert_eq!(
+                        decoded.source.len(),
+                        scenario.expected_source_symbols.len(),
+                        "decoded source symbol count mismatch"
+                    );
+                    black_box(decoded);
+                });
+            },
+        );
+    }
+
+    group.finish();
 }
 
 fn bench_large_k_encoder_roundtrip(c: &mut Criterion) {
@@ -443,6 +550,7 @@ criterion_group!(
     config = Criterion::default().with_output_color(true);
     targets =
         bench_large_k_encoder_roundtrip,
+        bench_e4_decode_vs_k_fixed_total_bytes,
         bench_gf256_bulk_operations,
         bench_matrix_operations_stress,
         bench_row_scale_add_batching_optimization,

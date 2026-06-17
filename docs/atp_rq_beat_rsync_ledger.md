@@ -124,7 +124,39 @@ to wire.
 - **Falsifiability:** if decode wall ∝ total bytes regardless of K → block size irrelevant to
   solve cost (only parallelism). 
 - **One-line:** criterion bench `decode_block` at K ∈ {256,1024,4096,8192} same total bytes.
-- **Result:** _pending_
+- **Result (2026-06-17, MagentaGoose):** bench harness added in
+  `benches/raptorq_large_k_profile.rs` as
+  `e4_decode_vs_k_fixed_total_bytes/decode_block_path/k{256,1024,4096,8192}`. It precomputes
+  a fixed 4 MiB solvable symbol set per K, holds total bytes constant, and times
+  `InactivationDecoder::decode`, the hot path called by `src/decoding.rs::decode_block`.
+  First RCH compile attempt (`cargo bench --bench raptorq_large_k_profile --features
+  criterion-benches --no-run`, build 29892352898236522 on vmi1152480) was canceled after
+  detector_progress_stale=true with fresh heartbeat before a bench binary/result. This is **not**
+  performance evidence. Follow-up RCH validation (`cargo check --bench
+  raptorq_large_k_profile --features criterion-benches`, build 29892352898236527 on vmi1152480)
+  passed; the only warnings were peer-dirty ATP-RQ adaptive/loss imports outside this lane.
+  **Retry-condition:** rerun when RCH can complete the bench target build; then run the filtered
+  Criterion bench and append mean + cv_pct for each K.
+
+### SCORE.1 ★ Honest cross-regime ATP-RQ vs rsync scoreboard harness
+- **Goal:** prove or falsify the user thesis, "beat tuned rsync over ANY connection, less memory,"
+  with the same artifact shape across clean, lossy, spotty, and high-BDP links.
+- **Harness:** `scripts/atp_rq_regime_bench.sh` (netns/veth/netem pattern from
+  `/tmp/loss_bench_contabo.sh`, but generalized into a scoreboard runner). It runs ATP-RQ and
+  tuned rsync through an isolated namespace link at configurable `RATE` (default 100mbit), sizes
+  `10M/100M/1G`, and regimes:
+  `clean`, `lossy1`, `lossy3`, `lossy10`, `spotty`, `highbdp50`, `highbdp100`.
+- **Metrics captured per row:** wall_seconds, sender_peak_rss_kb, receiver_peak_rss_kb,
+  feedback_rounds (ATP only), source_sha/dest_sha/sha_ok, process status, and artifact directory.
+  Output is both JSONL (`results.jsonl`) and TSV (`results.tsv`) under a unique run directory.
+- **Proof rule:** a row is admissible only if `sha_ok=true`. A "speed win" is not a keep if either
+  sender or receiver RSS grows above rsync for the same size/regime without a documented reason.
+- **Smoke:** local syntax check `bash -n scripts/atp_rq_regime_bench.sh` passed 2026-06-17.
+- **One-line smoke on Contabo:** `sudo env BIN=/tmp/atp_bench/atp_f3 SIZES=1M:1048576
+  REGIMES=clean bash scripts/atp_rq_regime_bench.sh`
+- **One-line full scoreboard:** `sudo env BIN=/tmp/atp_bench/atp_f3
+  bash scripts/atp_rq_regime_bench.sh`
+- **Result:** _harness ready; no admissible scoreboard rows yet in this ledger._
 
 ### E-5 · Parallel decode (F6.3 / 317hxr.7.3) — DECONFIRMED by E-0
 - **Hypothesis:** decode independent blocks concurrently. **Status: NOT the lever.** E-0 measured
@@ -227,6 +259,95 @@ adaptive.rs IS complete + sophisticated; it was just never threaded into send_pa
 **CAVEATS for pane-2:** (a) k/fanout adapt only at transfer start, overhead+pace adapt per-round;
 (b) prefer inferring loss from `pending` (no wire change) over adding a NeedMore loss field;
 (c) keep byte-identical wire + sha; (d) reserve adaptive.rs (may be peer-dirty) + send_path.
+
+#### WIRE-4 loss detector + persistent congestion assessment/wiring plan (read-only, MagentaGoose)
+
+**Inventory verdict:** `src/net/atp/loss/detector.rs` and
+`src/net/atp/loss/persistent_congestion.rs` are public via `loss/mod.rs`, tested, and mostly
+standalone. `AtpLossDetector` tracks sent packets, ACK ranges, adaptive packet/time thresholds,
+reordering, and pattern classes (`Burst`, `Periodic`, `Congestion`, `Tail`) and emits
+`LossRecommendation::{EnablePacing, EnableFec, SwitchCongestionControl, ReduceCongestionWindow}`.
+`PersistentCongestionDetector` emits severity + `CongestionRecommendation::{ReduceSendingRate,
+EnablePacing, EnableFec, ConsiderPathSwitch, ResetCongestionWindow}`. The live QUIC recovery path
+already has loss telemetry, but these recommendation objects are not feeding ATP-RQ pacing/FEC
+decisions or the TransferBrain meta-layer. For RQ specifically, the live feedback signal is
+`NeedMore`/pending-bytes/round timing, not QUIC ACK ranges.
+
+**Plan for pane-2 / loss-controller wiring:**
+1. Treat WIRE-4 as **sense-only**. It may classify loss and persistent congestion, but it must not
+   directly mutate `RqConfig`, send rate, block size, or fanout. WIRE-1/WIRE-2 remain the single
+   writers for FEC overhead and pacing.
+2. QUIC path: instantiate `AtpLossDetector` beside the ATP QUIC recovery manager, feed
+   `on_packet_sent` from sent packet metadata and `on_ack_received` from ACK ranges using
+   `LossTransportState::from_transport`. Preserve native QUIC recovery behavior; the ATP detector
+   is advisory until tests prove the mapping.
+3. Persistent congestion path: feed `PersistentCongestionDetector` from the same lost-packet
+   metadata before recovery drops it, plus PTO/cwnd-reduction events. If only aggregate lost counts
+   are available, add a narrow adapter at the recovery boundary rather than inventing packet data.
+4. RQ path: do **not** shoehorn `AtpLossDetector` directly onto UDP symbols without packet ACK
+   ranges. Instead, convert RQ `NeedMore` feedback into the existing `PathEstimate` fields
+   (`loss_p_hat`, `loss_p_bar`, RTT/control-wait, goodput trough) and map WIRE-4 recommendation
+   vocabulary onto controller inputs. A future symbol-level ACK design is a wire-format change and
+   needs its own isomorphism proof.
+5. Recommendation mapping: `EnablePacing`/`ReduceSendingRate` lowers the WIRE-2 pacing ceiling;
+   `EnableFec` raises WIRE-1 loss-bar/FEC floor; `SwitchCongestionControl` and
+   `ConsiderPathSwitch` are forwarded to WIRE-3 TransferBrain, not applied inside the spray loop.
+   Persistent congestion severity >0.8 means conservative fallback: min safe pace + repair floor,
+   then let WIRE-3 consider relay/path switch at a transfer boundary.
+6. Interference check: never let WIRE-4 and WIRE-1 independently compute competing repair rates.
+   The detector can label the regime; AdaptiveController owns the quantitative overhead. Never let
+   WIRE-4 and WIRE-2 both sleep/send; CongestionControl/pacer owns timing. All outputs must be
+   deterministic from replayed ACK/NeedMore events.
+7. Validation: unit tests for recommendation-to-controller mapping; lab replay for loss/reordering
+   sequences; SCORE.1 rows for lossy1/lossy3/lossy10/spotty showing fewer feedback rounds, lower
+   wall, sha_ok=true, and no RSS regression vs rsync.
+
+#### WIRE-3 AtpTransferBrain meta-layer assessment/wiring plan (read-only, MagentaGoose)
+
+**Inventory verdict:** WIRE-3 is `src/net/atp/quic/transfer_brain.rs` `AtpTransferBrain`, the
+path/relay/FEC/congestion **meta** brain. It is public via `quic/mod.rs` and heavily unit-tested,
+but production usage search finds no live callers outside tests. Do not confuse it with
+`src/atp/transfer_brain.rs`, which is the data/chunk scheduling brain for early usability,
+repair ROI, disk/CPU pressure, and object/chunk priority. WIRE-3 consumes
+`AtpTransportMetrics` snapshots and emits `TransferDecision` with selected paths, rejected-path
+evidence, pressure/fairness snapshots, congestion params, repair enable/fec_rate, relay suggestion,
+priority, ETA, confidence, and reason_vector.
+
+**Composition rule:** WIRE-3 composes **above** pane-2's controllers and should land after WIRE-1/2
+are stable. Layering remains: WIRE-4 senses loss/persistent congestion → WIRE-1 computes FEC
+overhead/block/fanout, WIRE-2 computes pacing → WIRE-3 chooses path/relay/policy ceilings at
+transfer timescale. It must not own per-packet sleeps or per-round repair math.
+
+**Plan for pane-2 / meta-controller wiring:**
+1. Build a per-peer/path `AtpTransferBrain` instance and feed it `AtpTransportMetrics` from
+   `AtpTransportMetricsCollector` (QUIC) or an RQ metrics adapter (direct peer path id,
+   feedback_rounds-derived loss, control-wait RTT, offered/useful throughput, RSS pressure when
+   available).
+2. Before opening a transfer, call `make_transfer_decision(transfer_id, total_bytes, priority)`.
+   Use `selected_paths` to choose direct vs candidate path, `suggested_relay` only if relay support
+   for that transport is actually configured, and record `decision_id`/`reason_vector` in trace/CLI
+   reports. Core library stays silent.
+3. Treat `decision.enable_repair` as a gate/floor for WIRE-1, not as a direct replacement for the
+   analytic overhead. Convert `decision.fec_rate` into "minimum overhead allowed" only; the
+   AdaptiveController still decides the final per-round overhead from measured loss.
+4. Treat `decision.congestion_params` as initial/conservative caps for WIRE-2. If
+   `pacing_rate=None`, do not reset an active pacer to burst mode. The pacer remains the only timing
+   writer.
+5. Mid-transfer path switching is **not** enabled by this plan. A WIRE-3 path switch/relay decision
+   applies at transfer start or resume boundary until QUIC migration/resume proof is green.
+   Otherwise it can create a new feedback-round failure mode by moving bytes while decoder state is
+   bound to an old path.
+6. Feed completion outcome back with `report_transfer_completion` after sha/merkle proof, wall,
+   RSS, and success/failure are known. This closes the brain's learning loop without changing wire
+   bytes.
+7. Interference check: WIRE-3 may veto obviously bad paths/relays and set policy ceilings, but it
+   must not fight WIRE-1 over FEC or WIRE-2 over pacing. If WIRE-3 says relay/path switch while
+   WIRE-4 says persistent congestion, prefer conservative fallback + transfer-boundary switch, not
+   a live in-flight transport rewrite.
+8. Validation: deterministic unit tests for decision ordering and reason vectors already exist;
+   add integration tests proving decision metadata does not alter RaptorQ symbol layout. SCORE.1 is
+   the acceptance surface: clean must not regress vs rsync, lossy/spotty/high-BDP must improve wall
+   and feedback_rounds, and RSS must be below same-row rsync before claiming "less memory."
 
 ### E-8 · Memory: paced delivery + bounded retention (less RSS than rsync, ideally O(1) in file size)
 - **Hypothesis:** E-0 receiver RSS was **1.7 GB** (vs rsync ~13 MB) — driven by the 120 MiB recv
