@@ -182,6 +182,9 @@ pub const DEFAULT_MAX_ACTIVE_CONNECTIONS: usize = 64;
 /// Default bound on fountain feedback rounds before failing closed.
 pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 
+/// Maximum sparse source-symbol retransmit requests accepted in one feedback round.
+const MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
+
 /// Default adaptive datagram fan-out hint.
 ///
 /// Phase D wires true multi-connection fan-out. Until then this remains a
@@ -636,6 +639,57 @@ struct QuicSourceSymbolRequest {
     entry: u32,
     sbn: u8,
     esi: u32,
+}
+
+#[allow(dead_code)]
+fn validate_need_more_feedback(
+    manifest: &TransferManifest,
+    need: &QuicNeedMore,
+) -> Result<std::collections::BTreeSet<u32>, QuicTransportError> {
+    if need.source_symbols.len() > MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND {
+        return Err(QuicTransportError::Integrity(format!(
+            "receiver requested {} source symbols in one feedback round (max {})",
+            need.source_symbols.len(),
+            MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND
+        )));
+    }
+
+    let manifest_entries = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.index)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut pending = std::collections::BTreeSet::new();
+    for entry in &need.pending {
+        if !manifest_entries.contains(entry) {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested repair for unknown entry {entry}"
+            )));
+        }
+        if !pending.insert(*entry) {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested duplicate repair entry {entry}"
+            )));
+        }
+    }
+
+    let mut source_requests = std::collections::BTreeSet::new();
+    for request in &need.source_symbols {
+        if !pending.contains(&request.entry) {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested source symbol for non-pending entry {}",
+                request.entry
+            )));
+        }
+        if !source_requests.insert((request.entry, request.sbn, request.esi)) {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested duplicate source symbol entry={} sbn={} esi={}",
+                request.entry, request.sbn, request.esi
+            )));
+        }
+    }
+
+    Ok(pending)
 }
 
 #[allow(dead_code)]
@@ -1643,30 +1697,7 @@ async fn send_repair_round_and_object_complete(
         send_object_complete(cx, conn, control)?;
         return Ok(0);
     }
-    for entry in &need.pending {
-        if !manifest
-            .entries
-            .iter()
-            .any(|manifest| manifest.index == *entry)
-        {
-            return Err(QuicTransportError::Integrity(format!(
-                "receiver requested repair for unknown entry {entry}"
-            )));
-        }
-    }
-    let pending = need
-        .pending
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    for request in &need.source_symbols {
-        if !pending.contains(&request.entry) {
-            return Err(QuicTransportError::Integrity(format!(
-                "receiver requested source symbol for non-pending entry {}",
-                request.entry
-            )));
-        }
-    }
+    let pending = validate_need_more_feedback(manifest, need)?;
     let sent = if need.source_symbols.is_empty() {
         spray_streaming_symbol_round(
             cx,
@@ -3027,30 +3058,7 @@ async fn send_native_repair_round_and_object_complete(
         send_native_object_complete(cx, conn, control)?;
         return Ok(0);
     }
-    for entry in &need.pending {
-        if !manifest
-            .entries
-            .iter()
-            .any(|manifest| manifest.index == *entry)
-        {
-            return Err(QuicTransportError::Integrity(format!(
-                "receiver requested repair for unknown entry {entry}"
-            )));
-        }
-    }
-    let pending = need
-        .pending
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    for request in &need.source_symbols {
-        if !pending.contains(&request.entry) {
-            return Err(QuicTransportError::Integrity(format!(
-                "receiver requested source symbol for non-pending entry {}",
-                request.entry
-            )));
-        }
-    }
+    let pending = validate_need_more_feedback(manifest, need)?;
     let sent = if need.source_symbols.is_empty() {
         spray_native_symbol_round(
             cx,
@@ -3592,7 +3600,10 @@ fn receive_native_symbol_round(
     }
     let need = QuicNeedMore {
         pending,
-        source_symbols: source_symbol_requests(decoders, 2048),
+        source_symbols: source_symbol_requests(
+            decoders,
+            MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
+        ),
     };
     let round = (*feedback_rounds).saturating_add(1);
     let pending_count = need.pending.len().to_string();
@@ -4159,7 +4170,10 @@ mod tests {
                 &mut receiver_control,
                 &QuicNeedMore {
                     pending,
-                    source_symbols: source_symbol_requests(&decoders, 2048),
+                    source_symbols: source_symbol_requests(
+                        &decoders,
+                        MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
+                    ),
                 },
             )?;
         }
@@ -5372,7 +5386,10 @@ mod tests {
         assert_eq!(pending, vec![0]);
         let need = QuicNeedMore {
             pending,
-            source_symbols: source_symbol_requests(&decoders, 2048),
+            source_symbols: source_symbol_requests(
+                &decoders,
+                MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
+            ),
         };
         assert_eq!(
             need.source_symbols,
@@ -5701,7 +5718,10 @@ mod tests {
         assert_eq!(pending, vec![0]);
         let need = QuicNeedMore {
             pending,
-            source_symbols: source_symbol_requests(&decoders, 2048),
+            source_symbols: source_symbol_requests(
+                &decoders,
+                MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
+            ),
         };
         assert!(
             !need.source_symbols.is_empty(),
@@ -6366,6 +6386,56 @@ mod tests {
                 esi: 2,
             }
         );
+    }
+
+    #[test]
+    fn quic_sender_rejects_oversized_source_symbol_feedback() {
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 21))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut source_symbols =
+            Vec::with_capacity(MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND + 1);
+        for esi in 0..=MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND {
+            source_symbols.push(QuicSourceSymbolRequest {
+                entry: 0,
+                sbn: 0,
+                esi: u32::try_from(esi).unwrap_or(u32::MAX),
+            });
+        }
+        let need = QuicNeedMore {
+            pending: vec![0],
+            source_symbols,
+        };
+
+        let err = validate_need_more_feedback(&manifest, &need)
+            .expect_err("oversized peer feedback should fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message)
+                if message.contains("source symbols") && message.contains("max")
+        ));
+    }
+
+    #[test]
+    fn quic_sender_rejects_duplicate_source_symbol_feedback() {
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 22))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let duplicate = QuicSourceSymbolRequest {
+            entry: 0,
+            sbn: 0,
+            esi: 0,
+        };
+        let need = QuicNeedMore {
+            pending: vec![0],
+            source_symbols: vec![duplicate, duplicate],
+        };
+
+        let err = validate_need_more_feedback(&manifest, &need)
+            .expect_err("duplicate peer feedback should fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message)
+                if message.contains("duplicate source symbol")
+        ));
     }
 
     #[test]
