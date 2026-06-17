@@ -427,7 +427,7 @@ fn replayed_protected_udp_packet_fails_closed_without_duplicate_delivery() {
         match err {
             ConnectionRouterError::PacketProcessingFailed { reason, .. } => {
                 assert!(
-                    reason.contains("replayed nonce"),
+                    reason.contains("ReplayedNonce"),
                     "expected replay rejection, got {reason}"
                 );
             }
