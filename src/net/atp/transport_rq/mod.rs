@@ -50,6 +50,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Adaptive block-size / overhead / fan-out optimizer (opt-in; see
@@ -69,8 +70,7 @@ use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::atp::transport_common::{
-    EntryDigest, flat_merkle_root_from_digests, flat_merkle_root_from_slices, hash_file_streaming,
-    hex_encode,
+    EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
 };
 use crate::net::{TcpListener, TcpStream, UdpBufferConfig, UdpSocket};
 use crate::security::authenticated::AuthenticatedSymbol;
@@ -108,6 +108,9 @@ pub const DEFAULT_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 /// the effective block size grows only as much as required to stay within the
 /// 256-block SBN wire limit.
 const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
+/// Byte ceiling for the normal streaming block-size target. Larger blocks are
+/// allowed only when the 256-block SBN wire limit requires them.
+const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
 /// Default round-0 repair multiplier.
 ///
@@ -149,6 +152,10 @@ pub const DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS: usize = 2048;
 
 /// Default receiver-side quiet drain after each round-complete marker.
 pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROUND_TAIL_DRAIN_MS);
+
+/// Process-unique suffix for RQ receive staging directories.
+static RQ_STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
+const RQ_STAGING_CREATE_ATTEMPTS: u64 = 1024;
 
 /// UDP datagram header size (magic + transfer tag + entry + sbn + esi + kind +
 /// len), big-endian.
@@ -1195,7 +1202,9 @@ pub(in crate::net::atp) fn effective_max_block_size_for_largest_entry(
         });
     }
 
-    let target = symbol_size.saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK);
+    let target = symbol_size
+        .saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK)
+        .min(TARGET_STREAMING_BLOCK_BYTES);
     let min_for_block_limit = max_entry_len
         .div_ceil(MAX_SOURCE_BLOCKS)
         .max(symbol_size)
@@ -1228,10 +1237,14 @@ struct EntryDecoder {
     index: u32,
     object_id: ObjectId,
     size: u64,
-    /// `Option` so the completed pipeline can be consumed by `into_data()`.
+    /// `Option` so completed entries can drop decoder state after streaming all
+    /// blocks to disk.
     pipeline: Option<DecodingPipeline>,
     complete: bool,
-    data: Vec<u8>,
+    staging_path: PathBuf,
+    file: Option<crate::fs::File>,
+    bytes_written: u64,
+    max_block_size: usize,
 }
 
 // ─── Public API: send ────────────────────────────────────────────────────────
@@ -1912,6 +1925,13 @@ pub async fn receive_connection(
     let manifest: TransferManifest = parse_json(&manifest_frame)?;
     validate_manifest(&manifest, &config)?;
     let symbol_size = hello.symbol_size;
+    let receiver_max_block_size = usize::try_from(hello.max_block_size).map_err(|_| {
+        RqError::Frame(format!(
+            "peer max_block_size {} does not fit usize",
+            hello.max_block_size
+        ))
+    })?;
+    let staging_dir = create_receive_staging_dir(dest_dir, &manifest.transfer_id).await?;
 
     // Per-entry decoders.
     let mut decoders: Vec<EntryDecoder> = manifest
@@ -1921,7 +1941,7 @@ pub async fn receive_connection(
             let object_id = entry_object_id(&manifest.transfer_id, e.index);
             let dconfig = DecodingConfig {
                 symbol_size,
-                max_block_size: hello.max_block_size as usize,
+                max_block_size: receiver_max_block_size,
                 repair_overhead: config.repair_overhead,
                 min_overhead: 0,
                 max_buffered_symbols: 0,
@@ -1950,7 +1970,10 @@ pub async fn receive_connection(
                 size: e.size,
                 pipeline: Some(pipeline),
                 complete: e.size == 0,
-                data: Vec::new(),
+                staging_path: staging_dir.join(e.index.to_string()),
+                file: None,
+                bytes_written: 0,
+                max_block_size: receiver_max_block_size,
             }
         })
         .collect();
@@ -1985,13 +2008,9 @@ pub async fn receive_connection(
             tag,
             symbol_auth_enabled,
             &mut rbuf,
-            |parsed, payload| {
-                if let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) {
-                    if feed_symbol(&mut decoders[pos], parsed, payload, symbol_size) {
-                        symbols_accepted += 1;
-                    }
-                }
-            },
+            &mut decoders,
+            symbol_size,
+            &mut symbols_accepted,
         )
         .await?;
         rqtrace!(
@@ -2008,32 +2027,15 @@ pub async fn receive_connection(
                     symbol_auth_enabled,
                     &mut rbuf,
                     config.round_tail_drain,
-                    |parsed, payload| {
-                        if let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) {
-                            if feed_symbol(&mut decoders[pos], parsed, payload, symbol_size) {
-                                symbols_accepted += 1;
-                            }
-                        }
-                    },
+                    &mut decoders,
+                    symbol_size,
+                    &mut symbols_accepted,
                 )
                 .await?;
                 if drained > 0 {
                     rqtrace!("receiver: tail-drained {drained} datagrams after ObjectComplete");
                 }
 
-                // Assemble any entries that just completed.
-                for d in &mut decoders {
-                    if !d.complete
-                        && d.pipeline
-                            .as_ref()
-                            .is_some_and(DecodingPipeline::is_complete)
-                    {
-                        if let Some(bytes) = assemble_entry(d) {
-                            d.data = bytes;
-                            d.complete = true;
-                        }
-                    }
-                }
                 let pending: Vec<u32> = decoders
                     .iter()
                     .filter(|d| !d.complete)
@@ -2171,24 +2173,24 @@ fn collect_source_requests(decoders: &[EntryDecoder], limit: usize) -> Vec<Sourc
     requests
 }
 
-fn feed_symbol(
+async fn feed_symbol(
     dec: &mut EntryDecoder,
     parsed: &ParsedDatagram,
     payload: &[u8],
     symbol_size: u16,
-) -> bool {
+) -> Result<bool, RqError> {
     if dec.complete {
-        return false;
+        return Ok(false);
     }
     if payload.len() != usize::from(symbol_size) {
         // RaptorQ symbols are fixed-size; ignore malformed/truncated payloads.
         // (The final block's short tail is zero-padded by the encoder, so all
         // emitted symbols are symbol_size bytes.)
-        return false;
+        return Ok(false);
     }
-    let Some(pipeline) = dec.pipeline.as_mut() else {
-        return false;
-    };
+    if dec.pipeline.is_none() {
+        return Ok(false);
+    }
     let sym = Symbol::new(
         SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
         payload.to_vec(),
@@ -2199,7 +2201,12 @@ fn feed_symbol(
     } else {
         AuthenticatedSymbol::new_unauthenticated(sym)
     };
-    match pipeline.feed(auth) {
+    let result = dec
+        .pipeline
+        .as_mut()
+        .expect("checked above")
+        .feed_streaming_block(auth);
+    match result {
         Ok(SymbolAcceptResult::Accepted { received, needed }) => {
             if received >= needed || received % 64 == 0 {
                 rqtrace!(
@@ -2212,7 +2219,7 @@ fn feed_symbol(
                     needed
                 );
             }
-            true
+            Ok(true)
         }
         Ok(SymbolAcceptResult::DecodingStarted { block_sbn }) => {
             rqtrace!(
@@ -2222,9 +2229,18 @@ fn feed_symbol(
                 parsed.esi,
                 parsed.kind
             );
-            true
+            Ok(true)
         }
-        Ok(SymbolAcceptResult::BlockComplete { block_sbn, .. }) => {
+        Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
+            persist_decoded_block(dec, block_sbn, &data).await?;
+            if dec
+                .pipeline
+                .as_ref()
+                .is_some_and(DecodingPipeline::is_complete)
+            {
+                dec.complete = true;
+                dec.pipeline = None;
+            }
             rqtrace!(
                 "receiver: entry {} completed block {} via esi={} kind={:?}",
                 dec.index,
@@ -2232,7 +2248,7 @@ fn feed_symbol(
                 parsed.esi,
                 parsed.kind
             );
-            true
+            Ok(true)
         }
         Ok(SymbolAcceptResult::Duplicate) => {
             rqtrace!(
@@ -2242,7 +2258,7 @@ fn feed_symbol(
                 parsed.esi,
                 parsed.kind
             );
-            false
+            Ok(false)
         }
         Ok(SymbolAcceptResult::Rejected(reason)) => {
             rqtrace!(
@@ -2253,7 +2269,7 @@ fn feed_symbol(
                 parsed.kind,
                 reason
             );
-            false
+            Ok(false)
         }
         Err(err) => {
             rqtrace!(
@@ -2263,28 +2279,92 @@ fn feed_symbol(
                 parsed.esi,
                 parsed.kind
             );
-            false
+            Ok(false)
         }
     }
 }
 
-/// Assemble a decoded entry's bytes by consuming the completed pipeline.
-fn assemble_entry(dec: &mut EntryDecoder) -> Option<Vec<u8>> {
-    if dec.size == 0 {
-        return Some(Vec::new());
+async fn ensure_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError> {
+    if dec.file.is_some() {
+        return Ok(());
     }
-    let pipeline = dec.pipeline.take()?;
-    match pipeline.into_data() {
-        Ok(mut bytes) => {
-            bytes.truncate(usize::try_from(dec.size).unwrap_or(usize::MAX));
-            Some(bytes)
-        }
-        Err(_) => {
-            // Re-arm nothing: a failed assemble means we were not actually
-            // complete; the entry stays pending and more symbols are requested.
-            None
+    if let Some(parent) = dec.staging_path.parent() {
+        crate::fs::create_dir_all(parent).await?;
+    }
+    let file = crate::fs::File::create_new(&dec.staging_path)
+        .await
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                RqError::Frame(format!(
+                    "staging file already exists for entry {}",
+                    dec.index
+                ))
+            } else {
+                RqError::Io(err)
+            }
+        })?;
+    file.set_len(dec.size).await?;
+    dec.file = Some(file);
+    Ok(())
+}
+
+async fn create_receive_staging_dir(
+    dest_dir: &Path,
+    transfer_id: &str,
+) -> Result<PathBuf, RqError> {
+    for _ in 0..RQ_STAGING_CREATE_ATTEMPTS {
+        let staging_seq = RQ_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+        let staging_dir = dest_dir.join(format!(".atp-rq-staging-{transfer_id}-{staging_seq}"));
+        match crate::fs::create_dir(&staging_dir).await {
+            Ok(()) => return Ok(staging_dir),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(RqError::Io(err)),
         }
     }
+
+    Err(RqError::Frame(format!(
+        "unable to create unique receiver staging directory for transfer {transfer_id}"
+    )))
+}
+
+async fn persist_decoded_block(
+    dec: &mut EntryDecoder,
+    block_sbn: u8,
+    data: &[u8],
+) -> Result<(), RqError> {
+    let block_size = u64::try_from(dec.max_block_size).map_err(|_| {
+        RqError::Coding(format!(
+            "entry {} max_block_size does not fit u64: {}",
+            dec.index, dec.max_block_size
+        ))
+    })?;
+    let offset = u64::from(block_sbn)
+        .checked_mul(block_size)
+        .ok_or_else(|| RqError::Coding(format!("entry {} block offset overflow", dec.index)))?;
+    let end = offset
+        .checked_add(u64::try_from(data.len()).unwrap_or(u64::MAX))
+        .ok_or_else(|| RqError::Coding(format!("entry {} block end overflow", dec.index)))?;
+    if end > dec.size {
+        return Err(RqError::Frame(format!(
+            "decoded block {} for entry {} overruns declared size {}",
+            block_sbn, dec.index, dec.size
+        )));
+    }
+
+    ensure_entry_staging_file(dec).await?;
+    let Some(file) = dec.file.as_mut() else {
+        return Err(RqError::Frame(format!(
+            "internal: no staging file for entry {}",
+            dec.index
+        )));
+    };
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    file.write_all(data).await?;
+    dec.bytes_written = dec
+        .bytes_written
+        .checked_add(u64::try_from(data.len()).unwrap_or(u64::MAX))
+        .ok_or_else(|| RqError::Coding(format!("entry {} byte counter overflow", dec.index)))?;
+    Ok(())
 }
 
 fn object_params_for(
@@ -2327,42 +2407,46 @@ async fn verify_and_commit(
     symbols_accepted: u64,
     feedback_rounds: u32,
 ) -> Result<ReceiveReceipt, RqError> {
-    let mut by_index = std::collections::HashMap::new();
-    for d in decoders.iter() {
-        by_index.insert(d.index, d.data.clone());
+    for d in decoders.iter_mut() {
+        if d.size == 0 && d.file.is_none() {
+            ensure_entry_staging_file(d).await?;
+        }
+        if let Some(mut file) = d.file.take() {
+            file.flush().await?;
+        }
     }
 
     let mut sha_ok = true;
     let mut received: u64 = 0;
+    let mut digests: Vec<EntryDigest> = Vec::with_capacity(manifest.entries.len());
+    let mut staging_paths: Vec<PathBuf> = Vec::with_capacity(manifest.entries.len());
+    let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
     for e in &manifest.entries {
-        let data = by_index.get(&e.index);
-        match data {
-            Some(bytes) => {
-                received += bytes.len() as u64;
-                let content_sha256: [u8; 32] = Sha256::digest(bytes).into();
-                if bytes.len() as u64 != e.size || hex_encode(&content_sha256) != e.sha256_hex {
-                    sha_ok = false;
-                }
-            }
-            None => sha_ok = false,
+        let Some(decoder) = decoders.iter().find(|d| d.index == e.index) else {
+            sha_ok = false;
+            continue;
+        };
+        if !decoder.complete || decoder.bytes_written != e.size {
+            sha_ok = false;
         }
+        let (size, content_id, content_sha256) =
+            hash_file_streaming(&decoder.staging_path, &mut hash_buf)
+                .await
+                .map_err(|e| RqError::Source(e.into_message()))?;
+        received = received.saturating_add(size);
+        if size != e.size || hex_encode(&content_sha256) != e.sha256_hex {
+            sha_ok = false;
+        }
+        digests.push(EntryDigest {
+            rel_path: e.rel_path.clone(),
+            size,
+            content_id,
+            content_sha256,
+        });
+        staging_paths.push(decoder.staging_path.clone());
     }
 
-    let rebuilt: Vec<(String, Vec<u8>)> = manifest
-        .entries
-        .iter()
-        .map(|e| {
-            (
-                e.rel_path.clone(),
-                by_index.get(&e.index).cloned().unwrap_or_default(),
-            )
-        })
-        .collect();
-    let merkle_ok = flat_merkle_root_from_slices(
-        rebuilt
-            .iter()
-            .map(|(rel_path, bytes)| (rel_path.as_str(), bytes.as_slice())),
-    ) == manifest.merkle_root_hex;
+    let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex;
 
     let committed = sha_ok && merkle_ok;
     let mut committed_paths: Vec<String> = Vec::new();
@@ -2371,8 +2455,7 @@ async fn verify_and_commit(
         // single safe component so a hostile (absolute / separator-bearing)
         // value cannot escape `dest_dir`.
         let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
-        for e in &manifest.entries {
-            let bytes = by_index.get(&e.index).cloned().unwrap_or_default();
+        for (e, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
             let out_path = if manifest.is_directory {
                 join_relative(&base, &e.rel_path)?
             } else {
@@ -2381,7 +2464,7 @@ async fn verify_and_commit(
             if let Some(parent) = out_path.parent() {
                 crate::fs::create_dir_all(parent).await?;
             }
-            crate::fs::write_atomic(&out_path, &bytes).await?;
+            crate::fs::rename(staging_path, &out_path).await?;
             committed_paths.push(out_path.display().to_string());
         }
     }
@@ -2405,26 +2488,38 @@ async fn verify_and_commit(
     })
 }
 
-fn parse_and_deliver_datagram<F>(
+fn parse_symbol_datagram_payload(
     buf: &[u8],
     n: usize,
     tag: u64,
     auth_required: bool,
-    on_symbol: &mut F,
-) -> bool
-where
-    F: FnMut(&ParsedDatagram, &[u8]),
-{
+) -> Option<(ParsedDatagram, &[u8])> {
     let Some(parsed) = parse_symbol_header(&buf[..n], tag, auth_required) else {
-        return false;
+        return None;
     };
     let start = parsed.header_len;
     let end = start + parsed.payload_len;
     if end > n {
-        return false;
+        return None;
     }
-    on_symbol(&parsed, &buf[start..end]);
-    true
+    Some((parsed, &buf[start..end]))
+}
+
+async fn feed_datagram_to_decoders(
+    buf: &[u8],
+    n: usize,
+    tag: u64,
+    auth_required: bool,
+    decoders: &mut [EntryDecoder],
+    symbol_size: u16,
+) -> Result<bool, RqError> {
+    let Some((parsed, payload)) = parse_symbol_datagram_payload(buf, n, tag, auth_required) else {
+        return Ok(false);
+    };
+    let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
+        return Ok(false);
+    };
+    feed_symbol(&mut decoders[pos], &parsed, payload, symbol_size).await
 }
 
 /// Pump UDP symbol datagrams into the decoders until a control frame arrives.
@@ -2433,18 +2528,19 @@ where
 /// so by interleaving `udp.recv` with `control.recv` we absorb the bulk symbols
 /// and return as soon as the round's control marker lands. We use the runtime's
 /// `poll_fn`-style readiness on both fds via a manual 2-way poll.
-async fn pump_until_control<S, F>(
+async fn pump_until_control<S>(
     cx: &Cx,
     control: &mut FrameTransport<S>,
     udp: &mut UdpSocket,
     tag: u64,
     auth_required: bool,
     rbuf: &mut [u8],
-    mut on_symbol: F,
+    decoders: &mut [EntryDecoder],
+    symbol_size: u16,
+    symbols_accepted: &mut u64,
 ) -> Result<Frame, RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
-    F: FnMut(&ParsedDatagram, &[u8]),
 {
     use std::future::poll_fn;
     use std::pin::Pin;
@@ -2498,8 +2594,11 @@ where
 
         match ready {
             Ready::Udp(n) => {
-                if parse_and_deliver_datagram(rbuf, n, tag, auth_required, &mut on_symbol) {
+                if feed_datagram_to_decoders(rbuf, n, tag, auth_required, decoders, symbol_size)
+                    .await?
+                {
                     pumped += 1;
+                    *symbols_accepted = (*symbols_accepted).saturating_add(1);
                 }
             }
             Ready::Control(n) => {
@@ -2528,18 +2627,17 @@ where
 /// not prove the receiver has drained every datagram already queued locally. The
 /// drain stops after a quiet window with no matching ATP-RQ symbol, with a hard
 /// cap of 8x that window so stale or hostile UDP traffic cannot pin the task.
-async fn drain_round_tail<F>(
+async fn drain_round_tail(
     cx: &Cx,
     udp: &mut UdpSocket,
     tag: u64,
     auth_required: bool,
     rbuf: &mut [u8],
     quiet_window: Duration,
-    mut on_symbol: F,
-) -> Result<u64, RqError>
-where
-    F: FnMut(&ParsedDatagram, &[u8]),
-{
+    decoders: &mut [EntryDecoder],
+    symbol_size: u16,
+    symbols_accepted: &mut u64,
+) -> Result<u64, RqError> {
     if quiet_window.is_zero() {
         return Ok(0);
     }
@@ -2579,8 +2677,9 @@ where
             return Ok(drained);
         };
 
-        if parse_and_deliver_datagram(rbuf, n, tag, auth_required, &mut on_symbol) {
+        if feed_datagram_to_decoders(rbuf, n, tag, auth_required, decoders, symbol_size).await? {
             drained += 1;
+            *symbols_accepted = (*symbols_accepted).saturating_add(1);
             quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
         }
 
