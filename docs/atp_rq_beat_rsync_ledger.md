@@ -126,6 +126,46 @@ Per `/asupersync-mega-skill`. Findings on whether atp-rq exploits asupersync's m
   opportunity that would also benefit transport_quic + quic_native.
 - **L-FINDING-4 · CLI blocking pool IS used** (599356511) and F3 dispatches encode to it. Good.
   spawn_blocking is region-owned + cancel-correct. The receiver decode does NOT use it (E-5).
+- **L-FINDING-5 ★ THE BIG ONE · A complete adaptive controller EXISTS but is UNWIRED.**
+  `src/net/atp/transport_rq/adaptive.rs` (1105 lines, `br-asupersync-mixdaw`, design doc
+  `docs/atp_rq_adaptive_design.md` 443 lines) implements `AdaptiveController` +
+  `update_estimate`/`update_path_signals`/`next_block_plan` + `AdaptivePolicy` + `PathEstimate`
+  (online RTT/loss/bandwidth/**CVaR trough goodput**/coding-throughput) and DERIVES the calibrated
+  repair overhead ε*(K, p̄, α) for a target decode-failure prob AND rate-matches λ/(1+ε) to coding
+  throughput. `grep adaptive::|AdaptiveController|PathEstimate src/net/atp/transport_rq/mod.rs
+  src/bin/atp.rs` ⇒ **ZERO callers**. It is opt-in/dead. Wiring it is the master lever (E-7):
+  it directly produces the pacing rate (E-1) + repair overhead (E-2) + fan-out (E-3) the campaign
+  needs, adaptively per link. Violates the "all optimizations default-on" mandate.
+
+### E-7 ★ MASTER LEVER · Wire the AdaptiveController (adaptive over ANY link, default-on)
+- **Goal (user):** atp-rq faster than tuned rsync over ANY connection (good/bad/spotty), adaptive,
+  lower memory. The controller already computes the knobs; wire it into the live send/feedback loop.
+- **Hypothesis:** drive `AdaptiveController` from online feedback (receiver reports loss/RTT/pending
+  → `PathEstimate`); apply its outputs each round: (1) **rate-matched pacing** (λ/(1+ε)) so the
+  spray never overruns the receiver (kills the feedback-round explosion E-0 found) → clean link
+  hits the systematic memcpy fast path → MATCH rsync; (2) **calibrated overhead ε*(p̄)** so a lossy
+  link decodes in ~1 round instead of 6 → BEAT rsync (whose single TCP collapses under loss);
+  (3) **CVaR-trough conservative fallback** under high loss-variance → "acceptable robustness".
+- **Expected signal:** clean: feedback_rounds→0-1, overhead→~1.0, wall→network-bound (~rsync).
+  lossy (1-10%): feedback_rounds≤2, wall ≪ rsync (no TCP collapse). spotty: regime shift detected,
+  overhead/rate adapt within ~1-2 RTT, no divergence.
+- **Falsifiability:** if the wired controller still oscillates / overshoots on a regime shift, the
+  estimator/control law needs the changepoint reset (project has `changepoint_exp3_reset`); record.
+- **Plan:** pane-2 reads adaptive.rs + the design doc, assesses why it's unwired, wires it with a
+  deterministic conservative fallback (per alien-artifact: never ship adaptive without a safe mode),
+  A/B vs F3 on clean + netem-lossy + netem-spotty. Reserve adaptive.rs + send_path.
+- **Result:** _pending — primary post-E-0 lever_
+
+### E-8 · Memory: paced delivery + bounded retention (less RSS than rsync, ideally O(1) in file size)
+- **Hypothesis:** E-0 receiver RSS was **1.7 GB** (vs rsync ~13 MB) — driven by the 120 MiB recv
+  buffer + symbols retained across 6 feedback rounds + per-K=8192 decoder state. With pacing (E-7)
+  there are ~0 feedback rounds and blocks complete on arrival → recv buffer can be SMALL and symbol
+  retention bounded to a few in-flight blocks → RSS becomes O(in-flight) not O(file). Smaller
+  max_block_size (E-4) further cuts per-block decoder memory.
+- **Expected signal:** receiver RSS bounded (flat vs file size), target < 100 MB for 1G.
+- **Cross-cutting:** every experiment reports peak RSS (both ends); a "faster" change that blows
+  memory is not a keep.
+- **Result:** _pending_
 
 ### E-6 · Batched UDP syscalls + GSO (deepest runtime-leverage lever)
 - **Hypothesis (two tiers):**
@@ -150,4 +190,12 @@ On a CLEAN link, the win path is: **lazy/paced source-symbol streaming (E-1,E-2)
 memcpy receive (F-POS-1, already built) → 0 feedback rounds → match rsync**; then **GSO + N-stream
 UDP (E-6,E-3) → EXCEED rsync** by saturating a fat/long pipe a single TCP stream can't fill. On a
 LOSSY link, the *same* fountain machinery repairs loss without TCP's retransmit/HoL collapse — but
-ONLY once ATP is not self-bottlenecked on CPU/feedback. Order: E-0 → E-1 → E-2 → (E-3,E-6) → E-5.
+ONLY once ATP is not self-bottlenecked on CPU/feedback.
+
+**Revised priority after E-0 + L-FINDING-5:** E-0 (done: feedback-round-bound, recv 16% CPU) →
+**E-7 (wire AdaptiveController = E-1 pacing + E-2 calibrated overhead, adaptive per link)** →
+E-8 (memory falls out of pacing) → E-3 multi-stream + E-6 GSO (ceiling-raisers to EXCEED rsync on
+fat pipes) → E-4 block-size. E-5 (parallel decode) DECONFIRMED. N-1 (SIMD) refuted.
+The user's goal "beat tuned rsync over ANY connection, less memory" = E-7 + E-8 as the spine,
+E-3/E-6 to win on high-BDP, fountain-FEC to win under loss. The adaptive math already exists
+(adaptive.rs); the work is wiring + a conservative fallback + honest A/B across link regimes.
