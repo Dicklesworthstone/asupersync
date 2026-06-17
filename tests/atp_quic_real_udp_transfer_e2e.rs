@@ -464,7 +464,7 @@ fn real_udp_quic_rejects_auth_failing_symbols_before_commit() {
     assert!(
         matches!(
             recv_res,
-            Err(QuicTransportError::Integrity(message))
+            Err(QuicTransportError::Integrity(ref message))
                 if message.contains("symbol authentication failed")
         ),
         "receiver must fail closed on auth-failing symbols, got {recv_res:?}"
