@@ -47,7 +47,7 @@ attacker who simply drops all packets (unpreventable at this layer).
 
 | Threat | Mitigation (implemented) | Pinning test | Residual gap |
 |--------|--------------------------|--------------|--------------|
-| **Server impersonation / MITM** | Client X.509 verification (chain + hostname + signature) against configured roots; **fail closed** — a client cannot reach `Established` unless a genuine verification recorded the identity (`record_verified_server_identity`); the native `rustls::quic` handshake driver exchanges CRYPTO bytes, installs 1-RTT keys, and has **no insecure skip-verify default** | `tests/quic_native_x509_verification.rs`, `tests/quic_legacy_no_accept_all_cert_verifier.rs`, `tests/quic_native_handshake_udp_loopback.rs` | The handshake driver is pinned, but the public ATP file-transfer path is still not a closed open-internet safety claim (see §5.1): `send_path`/`receive_once`/`serve`, manifest/control authentication, and bad-cert rejection over the production transfer path remain to be proven |
+| **Server impersonation / MITM** | Client X.509 verification (chain + hostname + signature) against configured roots; **fail closed** — a client cannot reach `Established` unless a genuine verification recorded the identity (`record_verified_server_identity`); the native `rustls::quic` handshake driver exchanges CRYPTO bytes, installs 1-RTT keys, and has **no insecure skip-verify default** | `tests/quic_native_x509_verification.rs`, `tests/quic_legacy_no_accept_all_cert_verifier.rs`, `tests/quic_native_handshake_udp_loopback.rs`, `tests/atp_quic_real_udp_transfer_e2e.rs` | The handshake driver and production bad-cert transfer path are pinned, but the public ATP file-transfer path is still not a closed open-internet safety claim (see §5.1): `send_path`/`receive_once`/`serve` manifest/control authentication and real-path symbol-forgery/replay/amplification bounds remain to be proven |
 | **Symbol injection / forgery** | Per-symbol HMAC auth; `transport_rq` default posture is `MissingAuthenticationContext` → `send_path`/`receive_once` **refuse to run before any I/O** unless the caller chooses `with_symbol_auth(ctx)` (every UDP symbol signed+verified) or the explicit `allow_unauthenticated_for_trusted_transport()` opt-out; handshake rejects posture mismatch both directions | `tests/atp_rq_symbol_auth_e2e_contract.rs`, `tests/decoding_secure_default.rs` | Authenticated mode protects the **UDP symbol plane only** — the control channel + manifest are unauthenticated (see §5.3) |
 | **Packet tampering** | 1-RTT AEAD (encrypt+authenticate) + header protection | `atp::quic::packet_protection` inline tests (round-trip / tamper / header-protection) | AEAD/header-protection is implemented and unit-tested, and the handshake proof uses protected handshake packets, but ATP file-transfer data-plane interposition is still part of the §5.1 integration — not yet an end-to-end transfer guarantee |
 | **Replay** | Bounded per-PN-space replay window (`REPLAY_WINDOW_CAPACITY = 1024`, span 1023): duplicate or too-old packet numbers rejected | `packet_protection.rs` replay-window inline tests | Window is bounded by design; very-old packets outside the window are dropped, not replay-checked individually. Like AEAD, the window is exercised at unit level and not yet interposed in a live transfer (§5.1) |
@@ -79,14 +79,14 @@ and rejects untrusted server certificates before the client reaches completion.
 loopback UDP, and `handshake_driver` inline tests pin protected-packet and
 untrusted-root behavior. `tests/atp_quic_real_udp_transfer_e2e.rs` now pins the
 production `send_path` / `receive_on_endpoint` path failing closed before commit
-for untrusted-root and wrong-hostname server identity failures.
+for untrusted-root, wrong-hostname, and expired-certificate server identity
+failures.
 
 That closes the old "no exchanged-byte handshake driver" gap, but it is not a
 full ATP file-transfer or open-internet safety proof. The remaining no-claim
 boundary is the public transport path: `send_path` / `receive_once` / `serve`
-must carry manifest/control and symbol traffic through the verified connection,
-pin the expired-certificate production-transfer case, and preserve the
-fail-closed posture while B2/B3/B4 finish.
+must carry manifest/control and symbol traffic through the verified connection
+and preserve the fail-closed posture while B2/B3/B4 finish.
 
 ### 5.2 X.509 verification surfaces are explicit and fail closed
 Two X.509 verification surfaces exist. The handshake driver uses the rustls
@@ -125,8 +125,7 @@ and be pinned by tests (G4 acceptance, part a — owned by the respective Phase 
 beads):
 
 - [x] Wire-CRYPTO handshake driver completing the handshake from exchanged bytes (§5.1; `tests/quic_native_handshake_udp_loopback.rs`, `handshake_driver` inline tests).
-- [x] End-to-end bad-cert rejection over the production transfer path: untrusted-root / wrong-hostname → fail closed before commit (`tests/atp_quic_real_udp_transfer_e2e.rs`).
-- [ ] End-to-end expired-certificate rejection over the production transfer path (extends `quic_native_x509_verification` and `handshake_driver` evidence into the ATP coroutine path).
+- [x] End-to-end bad-cert rejection over the production transfer path: untrusted-root / wrong-hostname / expired-certificate → fail closed before commit (`tests/atp_quic_real_udp_transfer_e2e.rs`).
 - [ ] Authenticated control channel + manifest, or manifest carried inside the verified TLS channel (§5.3).
 - [ ] Forged/auth-failing symbol rejected on the real UDP path (extends `atp_rq_symbol_auth_e2e_contract`).
 - [ ] Amplification + replay bounds asserted on the real transport (not just unit level).
