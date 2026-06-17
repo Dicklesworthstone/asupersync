@@ -152,7 +152,10 @@ validate_output() {
       .transport_counters.feedback_rounds_available == true and
       (.transport_counters.feedback_rounds_sender | type == "number" and . >= 0) and
       (.transport_counters.feedback_rounds_receiver | type == "number" and . >= 0) and
-      (.transport_counters.decode_count_available | type == "boolean") and
+      .transport_counters.decode_count_available == true and
+      (.transport_counters.decode_count | type == "number" and . >= 0) and
+      .transport_counters.decode_micros_available == true and
+      (.transport_counters.decode_micros | type == "number" and . >= 0) and
       (.transport_counters.no_claim | type == "string") and
       (.artifacts.events_ndjson | type == "string")
     ' "$summary" >/dev/null
@@ -319,12 +322,14 @@ jq -n \
         symbols_accepted: ($receiver[0].symbols_accepted // null),
         feedback_rounds_sender: ($sender[0].feedback_rounds // null),
         feedback_rounds_receiver: ($receiver[0].feedback_rounds // null),
-        decode_count: null,
+        decode_count: ($receiver[0].decode_count // null),
+        decode_micros: ($receiver[0].decode_micros // null),
         symbols_sent_available: (($sender[0].symbols_sent // null | type) == "number"),
         symbols_accepted_available: (($receiver[0].symbols_accepted // null | type) == "number"),
         feedback_rounds_available: ((($sender[0].feedback_rounds // null | type) == "number") and (($receiver[0].feedback_rounds // null | type) == "number")),
-        decode_count_available: false,
-        no_claim: "Current QUIC atp CLI JSON exposes transfer-level RaptorQ symbol and feedback-round counters but not per-block decode counters/timings. H2 owns the remaining per-block decode metrics."
+        decode_count_available: (($receiver[0].decode_count // null | type) == "number"),
+        decode_micros_available: (($receiver[0].decode_micros // null | type) == "number"),
+        no_claim: "Loopback summary exposes receiver decode block count and decode completion time from atp CLI JSON. H2 still does not claim goodput, loss, fanout, RSS provider metrics, off-overhead, or fleet proof."
       },
       artifacts: {
         events_ndjson: $events,

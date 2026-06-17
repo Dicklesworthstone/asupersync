@@ -303,6 +303,16 @@ pub struct ReceiveReceipt {
     /// Plain TCP has no feedback loop, so its receipts report zero.
     #[serde(default)]
     pub feedback_rounds: u32,
+    /// Completed RaptorQ decode blocks observed by the receiver.
+    ///
+    /// Plain TCP does not decode RaptorQ blocks, so its receipts report zero.
+    #[serde(default)]
+    pub decode_count: u64,
+    /// Cumulative receiver-side decode completion time in microseconds.
+    ///
+    /// Plain TCP does not decode RaptorQ blocks, so its receipts report zero.
+    #[serde(default)]
+    pub decode_micros: u64,
     /// Failure reason when `committed` is false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -356,6 +366,14 @@ pub struct ReceiveReport {
     ///
     /// Plain TCP has no feedback loop, so it reports zero.
     pub feedback_rounds: u32,
+    /// Completed RaptorQ decode blocks observed by the receiver.
+    ///
+    /// Plain TCP does not decode RaptorQ blocks, so it reports zero.
+    pub decode_count: u64,
+    /// Cumulative receiver-side decode completion time in microseconds.
+    ///
+    /// Plain TCP does not decode RaptorQ blocks, so it reports zero.
+    pub decode_micros: u64,
     /// Absolute committed paths.
     pub committed_paths: Vec<PathBuf>,
     /// Peer address.
@@ -1527,6 +1545,8 @@ pub async fn receive_connection(
         merkle_ok,
         symbols_accepted: 0,
         feedback_rounds: 0,
+        decode_count: 0,
+        decode_micros: 0,
         reason: if committed {
             None
         } else if !sha_ok {
@@ -1573,6 +1593,8 @@ pub async fn receive_connection(
         committed,
         symbols_accepted: 0,
         feedback_rounds: 0,
+        decode_count: 0,
+        decode_micros: 0,
         committed_paths,
         peer,
     })

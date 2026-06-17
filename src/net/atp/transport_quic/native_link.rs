@@ -1281,6 +1281,8 @@ async fn commit_staged_entries(
             merkle_ok,
             symbols_accepted: 0,
             feedback_rounds: 0,
+            decode_count: 0,
+            decode_micros: 0,
             reason: if committed {
                 None
             } else if !sha_ok {
@@ -1363,6 +1365,7 @@ async fn run_receiver_session(
         .collect::<Vec<_>>();
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
+    let mut decode_stats = super::QuicDecodeStats::default();
 
     let receive_result: Result<ReceiveReport, QuicTransportError> = async {
         'rounds: loop {
@@ -1381,6 +1384,7 @@ async fn run_receiver_session(
                         &manifest,
                         &mut decoders,
                         config,
+                        &mut decode_stats,
                     )?;
                 symbols_accepted = symbols_accepted.saturating_add(accepted);
                 for block in completed_blocks {
@@ -1456,18 +1460,24 @@ async fn run_receiver_session(
 
         let symbols_accepted_text = symbols_accepted.to_string();
         let feedback_rounds_text = feedback_rounds.to_string();
+        let decode_count_text = decode_stats.decode_count.to_string();
+        let decode_micros_text = decode_stats.decode_micros.to_string();
         cx.trace_with_fields(
             "atp_quic.receive.decoded",
             &[
                 ("transfer_id", manifest.transfer_id.as_str()),
                 ("symbols_accepted", symbols_accepted_text.as_str()),
                 ("feedback_rounds", feedback_rounds_text.as_str()),
+                ("decode_count", decode_count_text.as_str()),
+                ("decode_micros", decode_micros_text.as_str()),
             ],
         );
         let (mut receipt, committed_paths) =
             commit_staged_entries(cx, dest_dir, &manifest, &mut staged, config).await?;
         receipt.symbols_accepted = symbols_accepted;
         receipt.feedback_rounds = feedback_rounds;
+        receipt.decode_count = decode_stats.decode_count;
+        receipt.decode_micros = decode_stats.decode_micros;
         super::send_native_proof(cx, &mut link.conn, &mut control, &receipt)?;
         link.flush(cx).await?;
         let _ = super::send_native_close(cx, &mut link.conn, &mut control);
@@ -1489,6 +1499,8 @@ async fn run_receiver_session(
             committed: true,
             symbols_accepted: receipt.symbols_accepted,
             feedback_rounds: receipt.feedback_rounds,
+            decode_count: receipt.decode_count,
+            decode_micros: receipt.decode_micros,
             committed_paths,
             peer: link.peer,
         })

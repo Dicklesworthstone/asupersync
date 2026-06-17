@@ -73,12 +73,14 @@ fn write_fixture(dir: &Path, sha_match: bool) {
     "symbols_accepted": 64,
     "feedback_rounds_sender": 0,
     "feedback_rounds_receiver": 0,
-    "decode_count": null,
+    "decode_count": 1,
+    "decode_micros": 25,
     "symbols_sent_available": true,
     "symbols_accepted_available": true,
     "feedback_rounds_available": true,
-    "decode_count_available": false,
-    "no_claim": "fixture decode-count no-claim"
+    "decode_count_available": true,
+    "decode_micros_available": true,
+    "no_claim": "fixture decode metrics no-claim"
   }},
   "artifacts": {{"events_ndjson":"events.ndjson"}}
 }}"#
@@ -245,7 +247,8 @@ fn loopback_script_runs_real_atp_binary() {
     assert!(summary.contains(r#""symbols_sent_available": true"#));
     assert!(summary.contains(r#""symbols_accepted_available": true"#));
     assert!(summary.contains(r#""feedback_rounds_available": true"#));
-    assert!(summary.contains(r#""decode_count_available": false"#));
+    assert!(summary.contains(r#""decode_count_available": true"#));
+    assert!(summary.contains(r#""decode_micros_available": true"#));
     assert!(events.contains(r#""stage":"receiver_ready","status":"passed""#));
     assert!(events.contains(r#""stage":"sender_transfer","status":"passed""#));
     assert!(events.contains(r#""stage":"sha256_verify","status":"passed""#));

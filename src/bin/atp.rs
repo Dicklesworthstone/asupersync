@@ -1162,6 +1162,8 @@ fn tcp_recv_json(report: &ReceiveReport) -> serde_json::Value {
         "files": report.files,
         "symbols_accepted": report.symbols_accepted,
         "feedback_rounds": report.feedback_rounds,
+        "decode_count": report.decode_count,
+        "decode_micros": report.decode_micros,
         "committed_paths": report.committed_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "peer": report.peer.to_string(),
     })
@@ -1225,6 +1227,8 @@ fn quic_recv_json(
         "files": report.files,
         "symbols_accepted": report.symbols_accepted,
         "feedback_rounds": report.feedback_rounds,
+        "decode_count": report.decode_count,
+        "decode_micros": report.decode_micros,
         "committed_paths": report.committed_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "peer": report.peer.to_string(),
     })

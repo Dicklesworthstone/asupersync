@@ -75,7 +75,7 @@ pub mod symbol_envelope;
 
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1131,6 +1131,25 @@ pub(crate) struct QuicDecodedBlock {
     pub(crate) data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct QuicDecodeStats {
+    pub(crate) decode_count: u64,
+    pub(crate) decode_micros: u64,
+}
+
+impl QuicDecodeStats {
+    fn record_completed_block(&mut self, elapsed: Duration) {
+        self.decode_count = self.decode_count.saturating_add(1);
+        let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+        self.decode_micros = self.decode_micros.saturating_add(micros);
+    }
+
+    fn add(&mut self, other: Self) {
+        self.decode_count = self.decode_count.saturating_add(other.decode_count);
+        self.decode_micros = self.decode_micros.saturating_add(other.decode_micros);
+    }
+}
+
 #[allow(dead_code)]
 struct QuicConnectionTransferOutcome {
     manifest: TransferManifest,
@@ -2023,6 +2042,7 @@ fn feed_authenticated_symbol(
 fn feed_authenticated_symbol_take_block(
     decoder: &mut QuicEntryDecoder,
     auth_symbol: AuthenticatedSymbol,
+    decode_stats: &mut QuicDecodeStats,
 ) -> Result<(bool, Option<QuicDecodedBlock>), QuicTransportError> {
     if decoder.complete {
         return Ok((false, None));
@@ -2030,8 +2050,10 @@ fn feed_authenticated_symbol_take_block(
     let Some(pipeline) = decoder.pipeline.as_mut() else {
         return Ok((false, None));
     };
+    let started_at = Instant::now();
     match pipeline.feed_streaming_block(auth_symbol) {
         Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
+            decode_stats.record_completed_block(started_at.elapsed());
             decoder.complete = pipeline.is_complete();
             Ok((
                 true,
@@ -2263,7 +2285,8 @@ fn drain_symbol_datagrams_with_aggregator(
 }
 
 #[allow(dead_code)]
-fn assemble_completed_entries(decoders: &mut [QuicEntryDecoder]) {
+fn assemble_completed_entries(decoders: &mut [QuicEntryDecoder]) -> QuicDecodeStats {
+    let mut stats = QuicDecodeStats::default();
     for decoder in decoders {
         if decoder.complete
             || !decoder
@@ -2276,12 +2299,15 @@ fn assemble_completed_entries(decoders: &mut [QuicEntryDecoder]) {
         let Some(pipeline) = decoder.pipeline.take() else {
             continue;
         };
+        let started_at = Instant::now();
         if let Ok(mut bytes) = pipeline.into_data() {
+            stats.record_completed_block(started_at.elapsed());
             bytes.truncate(usize::try_from(decoder.size).unwrap_or(usize::MAX));
             decoder.data = bytes;
             decoder.complete = true;
         }
     }
+    stats
 }
 
 #[allow(dead_code)]
@@ -2387,6 +2413,8 @@ fn verify_in_memory_receipt(
         merkle_ok,
         symbols_accepted: 0,
         feedback_rounds: 0,
+        decode_count: 0,
+        decode_micros: 0,
         reason: if committed {
             None
         } else if !sha_ok {
@@ -3559,6 +3587,7 @@ fn drain_native_symbol_datagrams_with_blocks(
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
+    decode_stats: &mut QuicDecodeStats,
 ) -> Result<(u64, Vec<QuicDecodedBlock>), QuicTransportError> {
     let symbol_auth = config.symbol_auth_context()?;
     let auth_required = symbol_auth.is_some();
@@ -3590,7 +3619,8 @@ fn drain_native_symbol_datagrams_with_blocks(
             })?;
         let auth_symbol =
             authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
-        let (was_accepted, block) = feed_authenticated_symbol_take_block(decoder, auth_symbol)?;
+        let (was_accepted, block) =
+            feed_authenticated_symbol_take_block(decoder, auth_symbol, decode_stats)?;
         if was_accepted {
             accepted = accepted.saturating_add(1);
         }
@@ -3959,11 +3989,14 @@ async fn commit_decoded_entries(
     decoders: &[QuicEntryDecoder],
     symbols_accepted: u64,
     feedback_rounds: u32,
+    decode_stats: QuicDecodeStats,
     config: &QuicConfig,
 ) -> Result<(ReceiveReceipt, Vec<PathBuf>), QuicTransportError> {
     let mut receipt = verify_in_memory_receipt(manifest, decoders);
     receipt.symbols_accepted = symbols_accepted;
     receipt.feedback_rounds = feedback_rounds;
+    receipt.decode_count = decode_stats.decode_count;
+    receipt.decode_micros = decode_stats.decode_micros;
     if !receipt.committed {
         return Ok((receipt, Vec::new()));
     }
@@ -4023,6 +4056,7 @@ fn receive_native_symbol_round(
     aggregator: &MultipathAggregator,
     symbols_accepted: &mut u64,
     feedback_rounds: &mut u32,
+    decode_stats: &mut QuicDecodeStats,
 ) -> Result<Option<QuicNeedMore>, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     *symbols_accepted =
@@ -4035,7 +4069,7 @@ fn receive_native_symbol_round(
                 .with_trace(cx),
         )?);
     receive_native_object_complete(cx, connection, control)?;
-    assemble_completed_entries(decoders);
+    decode_stats.add(assemble_completed_entries(decoders));
 
     let pending = pending_entries(decoders);
     if pending.is_empty() {
@@ -4099,6 +4133,7 @@ async fn receive_established_native_connection(
     let aggregator = primary_quic_receive_aggregator(peer.to_string());
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
+    let mut decode_stats = QuicDecodeStats::default();
 
     loop {
         if receive_native_symbol_round(
@@ -4111,6 +4146,7 @@ async fn receive_established_native_connection(
             &aggregator,
             &mut symbols_accepted,
             &mut feedback_rounds,
+            &mut decode_stats,
         )?
         .is_none()
         {
@@ -4125,6 +4161,7 @@ async fn receive_established_native_connection(
         &decoders,
         symbols_accepted,
         feedback_rounds,
+        decode_stats,
         &config,
     )
     .await?;
@@ -4147,6 +4184,8 @@ async fn receive_established_native_connection(
         committed: true,
         symbols_accepted: receipt.symbols_accepted,
         feedback_rounds: receipt.feedback_rounds,
+        decode_count: receipt.decode_count,
+        decode_micros: receipt.decode_micros,
         committed_paths,
         peer,
     })
@@ -4551,6 +4590,8 @@ mod tests {
             merkle_ok: true,
             symbols_accepted: 0,
             feedback_rounds: 0,
+            decode_count: 0,
+            decode_micros: 0,
             reason: None,
             committed_paths: vec!["/dest/a/b.txt".to_string()],
         }
@@ -5497,6 +5538,7 @@ mod tests {
             &decoders,
             0,
             0,
+            QuicDecodeStats::default(),
             &config,
         ))
         .expect("commit empty directory entry");
@@ -5531,6 +5573,7 @@ mod tests {
             &decoders,
             0,
             0,
+            QuicDecodeStats::default(),
             &config,
         ))
         .expect("commit empty directory root");
@@ -6068,7 +6111,7 @@ mod tests {
                             &mut native_server,
                             &mut receiver_control,
                         )?;
-                        assemble_completed_entries(&mut decoders);
+                        let decode_stats = assemble_completed_entries(&mut decoders);
                         assert!(
                             pending_entries(&decoders).is_empty(),
                             "prepared native source symbols should decode without repair feedback"
@@ -6081,6 +6124,7 @@ mod tests {
                             &decoders,
                             symbols_accepted,
                             0,
+                            decode_stats,
                             &config,
                         ))?;
                         assert!(receipt.committed);
@@ -6492,6 +6536,7 @@ mod tests {
         let receiver_aggregator = primary_quic_receive_aggregator("native-test-peer");
         let mut symbols_accepted = 0u64;
         let mut feedback_rounds = 0u32;
+        let mut decode_stats = QuicDecodeStats::default();
         let mut proof_sent = false;
 
         let report = block_on(send_prepared_source_over_established_native_connection(
@@ -6570,6 +6615,7 @@ mod tests {
                             &receiver_aggregator,
                             &mut symbols_accepted,
                             &mut feedback_rounds,
+                            &mut decode_stats,
                         )? {
                             Some(_) => {
                                 let moved = pump_native_until_idle(
@@ -6703,6 +6749,7 @@ mod tests {
         let receiver_aggregator = primary_quic_receive_aggregator("native-test-peer");
         let mut symbols_accepted = 0u64;
         let mut feedback_rounds = 0u32;
+        let mut decode_stats = QuicDecodeStats::default();
         let need = match receive_native_symbol_round(
             &cx,
             &mut native_server,
@@ -6713,6 +6760,7 @@ mod tests {
             &receiver_aggregator,
             &mut symbols_accepted,
             &mut feedback_rounds,
+            &mut decode_stats,
         )
         .expect("initial native receive round asks for repair")
         {
@@ -6764,6 +6812,7 @@ mod tests {
                 &receiver_aggregator,
                 &mut symbols_accepted,
                 &mut feedback_rounds,
+                &mut decode_stats,
             )
             .expect("repair native receive round converges"),
             None
@@ -6779,6 +6828,7 @@ mod tests {
             &decoders,
             symbols_accepted,
             feedback_rounds,
+            decode_stats,
             &config,
         ))
         .expect("commit decoded repair result");
@@ -7549,6 +7599,8 @@ mod tests {
             merkle_ok: true,
             symbols_accepted: 3,
             feedback_rounds: 1,
+            decode_count: 1,
+            decode_micros: 7,
             reason: None,
             committed_paths: vec!["/dest/a.txt".to_string()],
         };

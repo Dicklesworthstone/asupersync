@@ -97,6 +97,8 @@ fn manifest_and_receipt_types_are_reused_from_transport_tcp() {
         merkle_ok: false,
         symbols_accepted: 0,
         feedback_rounds: 0,
+        decode_count: 0,
+        decode_micros: 0,
         reason: Some("x".to_string()),
         committed_paths: vec![],
     };
@@ -499,6 +501,8 @@ fn receipt_json_roundtrips_committed_and_rejected() {
         merkle_ok: true,
         symbols_accepted: 8,
         feedback_rounds: 1,
+        decode_count: 2,
+        decode_micros: 17,
         reason: None,
         committed_paths: vec!["/dest/dir/a.txt".to_string(), "/dest/dir/b.bin".to_string()],
     };
@@ -510,6 +514,8 @@ fn receipt_json_roundtrips_committed_and_rejected() {
         merkle_ok: true,
         symbols_accepted: 3,
         feedback_rounds: 2,
+        decode_count: 1,
+        decode_micros: 11,
         reason: Some("per-entry SHA-256 mismatch".to_string()),
         committed_paths: vec![],
     };
