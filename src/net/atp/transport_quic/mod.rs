@@ -2067,13 +2067,66 @@ fn authenticated_symbol_with_existing_tag(
     }
 }
 
+fn trace_aggregated_symbol_result(
+    cx: Option<&Cx>,
+    entry: u32,
+    path: PathId,
+    symbol: SymbolId,
+    ready: usize,
+    accepted: u64,
+    duplicate: bool,
+) {
+    let Some(cx) = cx else {
+        return;
+    };
+    let entry = entry.to_string();
+    let path = path.to_string();
+    let symbol = symbol.to_string();
+    let ready = ready.to_string();
+    let accepted = accepted.to_string();
+    let duplicate = duplicate.to_string();
+    cx.trace_with_fields(
+        "atp_quic.receive.aggregate_symbol",
+        &[
+            ("entry", entry.as_str()),
+            ("path", path.as_str()),
+            ("symbol", symbol.as_str()),
+            ("ready", ready.as_str()),
+            ("accepted", accepted.as_str()),
+            ("duplicate", duplicate.as_str()),
+        ],
+    );
+}
+
+#[derive(Clone, Copy)]
+struct QuicReceiveAggregation<'a> {
+    aggregator: &'a MultipathAggregator,
+    path: PathId,
+    now: Time,
+    trace_cx: Option<&'a Cx>,
+}
+
+impl<'a> QuicReceiveAggregation<'a> {
+    fn new(aggregator: &'a MultipathAggregator, path: PathId, now: Time) -> Self {
+        Self {
+            aggregator,
+            path,
+            now,
+            trace_cx: None,
+        }
+    }
+
+    fn with_trace(mut self, cx: &'a Cx) -> Self {
+        self.trace_cx = Some(cx);
+        self
+    }
+}
+
 fn feed_aggregated_symbol_for_entry(
     decoders: &mut [QuicEntryDecoder],
     entry: u32,
     auth_symbol: AuthenticatedSymbol,
-    aggregator: &MultipathAggregator,
-    path: PathId,
-    now: Time,
+    receive: QuicReceiveAggregation<'_>,
 ) -> Result<u64, QuicTransportError> {
     let decoder = decoders
         .iter_mut()
@@ -2084,7 +2137,12 @@ fn feed_aggregated_symbol_for_entry(
 
     let source_symbol_id = auth_symbol.symbol().id();
     let source_tag = *auth_symbol.tag();
-    let aggregated = aggregator.process(auth_symbol.symbol().clone(), path, now);
+    let aggregated =
+        receive
+            .aggregator
+            .process(auth_symbol.symbol().clone(), receive.path, receive.now);
+    let duplicate = aggregated.was_duplicate;
+    let ready = aggregated.ready.len();
     let mut accepted = 0u64;
     for symbol in aggregated.ready {
         if !source_tag.is_zero() && symbol.id() != source_symbol_id {
@@ -2098,6 +2156,15 @@ fn feed_aggregated_symbol_for_entry(
             accepted = accepted.saturating_add(1);
         }
     }
+    trace_aggregated_symbol_result(
+        receive.trace_cx,
+        entry,
+        receive.path,
+        source_symbol_id,
+        ready,
+        accepted,
+        duplicate,
+    );
     Ok(accepted)
 }
 
@@ -2109,15 +2176,9 @@ fn drain_symbol_datagrams(
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
     let aggregator = primary_quic_receive_aggregator("quic-scaffold-peer");
-    drain_symbol_datagrams_with_aggregator(
-        conn,
-        manifest,
-        decoders,
-        config,
-        &aggregator,
-        QUIC_PRIMARY_RECEIVE_PATH_ID,
-        Time::ZERO,
-    )
+    let receive =
+        QuicReceiveAggregation::new(&aggregator, QUIC_PRIMARY_RECEIVE_PATH_ID, Time::ZERO);
+    drain_symbol_datagrams_with_aggregator(conn, manifest, decoders, config, receive)
 }
 
 #[allow(dead_code)]
@@ -2126,9 +2187,7 @@ fn drain_symbol_datagrams_with_aggregator(
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
-    aggregator: &MultipathAggregator,
-    path: PathId,
-    now: Time,
+    receive: QuicReceiveAggregation<'_>,
 ) -> Result<u64, QuicTransportError> {
     let symbol_auth = config.symbol_auth_context()?;
     let auth_required = symbol_auth.is_some();
@@ -2163,9 +2222,7 @@ fn drain_symbol_datagrams_with_aggregator(
             decoders,
             envelope.entry,
             auth_symbol,
-            aggregator,
-            path,
-            now,
+            receive,
         )?);
     }
     Ok(accepted)
@@ -3408,15 +3465,9 @@ fn drain_native_symbol_datagrams(
     config: &QuicConfig,
 ) -> Result<u64, QuicTransportError> {
     let aggregator = primary_quic_receive_aggregator("quic-native-peer");
-    drain_native_symbol_datagrams_with_aggregator(
-        conn,
-        manifest,
-        decoders,
-        config,
-        &aggregator,
-        QUIC_PRIMARY_RECEIVE_PATH_ID,
-        Time::ZERO,
-    )
+    let receive =
+        QuicReceiveAggregation::new(&aggregator, QUIC_PRIMARY_RECEIVE_PATH_ID, Time::ZERO);
+    drain_native_symbol_datagrams_with_aggregator(conn, manifest, decoders, config, receive)
 }
 
 fn drain_native_symbol_datagrams_with_aggregator(
@@ -3424,9 +3475,7 @@ fn drain_native_symbol_datagrams_with_aggregator(
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
-    aggregator: &MultipathAggregator,
-    path: PathId,
-    now: Time,
+    receive: QuicReceiveAggregation<'_>,
 ) -> Result<u64, QuicTransportError> {
     let symbol_auth = config.symbol_auth_context()?;
     let auth_required = symbol_auth.is_some();
@@ -3461,9 +3510,7 @@ fn drain_native_symbol_datagrams_with_aggregator(
             decoders,
             envelope.entry,
             auth_symbol,
-            aggregator,
-            path,
-            now,
+            receive,
         )?);
     }
     Ok(accepted)
@@ -3740,9 +3787,8 @@ fn receive_native_symbol_round(
             manifest,
             decoders,
             config,
-            aggregator,
-            QUIC_PRIMARY_RECEIVE_PATH_ID,
-            cx.now(),
+            QuicReceiveAggregation::new(aggregator, QUIC_PRIMARY_RECEIVE_PATH_ID, cx.now())
+                .with_trace(cx),
         )?);
     receive_native_object_complete(cx, connection, control)?;
     assemble_completed_entries(decoders);
@@ -4117,6 +4163,7 @@ mod tests {
         DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, PacketNumberSpace, QuicConnection,
         StreamDirection, StreamRole, establish_loopback, pump_app_data, pump_until_idle,
     };
+    use crate::trace::{TraceBufferHandle, TraceData};
 
     fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         futures_lite::future::block_on(fut)
@@ -6539,6 +6586,9 @@ mod tests {
         let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 21))];
         let manifest = manifest_from_entries("payload", true, &entries);
         let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let cx = Cx::for_testing();
+        let trace = TraceBufferHandle::new(4);
+        cx.set_trace_buffer(trace.clone());
         let object_id = decoders[0].object_id;
         let symbol = Symbol::new(
             SymbolId::new(object_id, 0, 0),
@@ -6557,23 +6607,35 @@ mod tests {
             &mut decoders,
             0,
             AuthenticatedSymbol::new_unauthenticated(symbol.clone()),
-            &aggregator,
-            QUIC_PRIMARY_RECEIVE_PATH_ID,
-            Time::ZERO,
+            QuicReceiveAggregation::new(&aggregator, QUIC_PRIMARY_RECEIVE_PATH_ID, Time::ZERO)
+                .with_trace(&cx),
         )
         .expect("first path symbol reaches decoder");
         let duplicate = feed_aggregated_symbol_for_entry(
             &mut decoders,
             0,
             AuthenticatedSymbol::new_unauthenticated(symbol),
-            &aggregator,
-            secondary_path,
-            Time::ZERO,
+            QuicReceiveAggregation::new(&aggregator, secondary_path, Time::ZERO).with_trace(&cx),
         )
         .expect("duplicate path symbol is handled");
 
         assert_eq!(first, 1, "first path delivers one symbol");
         assert_eq!(duplicate, 0, "duplicate path is suppressed pre-decoder");
+        let aggregate_traces = trace
+            .snapshot()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.data,
+                    TraceData::Message(message)
+                        if message == "atp_quic.receive.aggregate_symbol"
+                )
+            })
+            .count();
+        assert_eq!(
+            aggregate_traces, 2,
+            "accepted and duplicate path decisions should be traced"
+        );
         let stats = aggregator.stats();
         assert_eq!(stats.total_processed, 2);
         assert_eq!(stats.dedup.unique_symbols, 1);
@@ -6642,27 +6704,25 @@ mod tests {
             &mut decoders,
             0,
             AuthenticatedSymbol::new_unauthenticated(symbols[0].clone()),
-            &aggregator,
-            QUIC_PRIMARY_RECEIVE_PATH_ID,
-            Time::ZERO,
+            QuicReceiveAggregation::new(&aggregator, QUIC_PRIMARY_RECEIVE_PATH_ID, Time::ZERO),
         )
         .expect("first source symbol reaches decoder");
         let seq2 = feed_aggregated_symbol_for_entry(
             &mut decoders,
             0,
             AuthenticatedSymbol::new_unauthenticated(symbols[2].clone()),
-            &aggregator,
-            secondary_path,
-            Time::from_millis(1),
+            QuicReceiveAggregation::new(&aggregator, secondary_path, Time::from_millis(1)),
         )
         .expect("out-of-order source symbol is buffered");
         let seq1 = feed_aggregated_symbol_for_entry(
             &mut decoders,
             0,
             AuthenticatedSymbol::new_unauthenticated(symbols[1].clone()),
-            &aggregator,
-            QUIC_PRIMARY_RECEIVE_PATH_ID,
-            Time::from_millis(2),
+            QuicReceiveAggregation::new(
+                &aggregator,
+                QUIC_PRIMARY_RECEIVE_PATH_ID,
+                Time::from_millis(2),
+            ),
         )
         .expect("gap-fill source symbol releases buffered symbol");
 
