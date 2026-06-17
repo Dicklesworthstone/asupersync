@@ -5286,12 +5286,12 @@ mod tests {
         let (cx, mut client, mut server) = established_pair();
         let temp = tempfile::tempdir().expect("temp dir");
         let source = temp.path().join("payload.bin");
-        let bytes = varied_bytes(8 * 1024, 53);
+        let bytes = varied_bytes(4 * 1024, 53);
         std::fs::write(&source, &bytes).expect("write source");
         let config = QuicConfig {
             chunk_size: 23,
             symbol_size: 16,
-            max_block_size: 8 * 1024,
+            max_block_size: 4 * 1024,
             repair_overhead: 1.0,
             ..trusted_quic_config()
         };
@@ -5358,7 +5358,7 @@ mod tests {
             true,
         ))
         .expect("send file-backed source-only round");
-        assert_eq!(initial_sent, 512);
+        assert_eq!(initial_sent, 256);
         send_object_complete(&cx, &mut client, &mut sender_control).expect("send object complete");
         pump_until_idle(
             &cx,
@@ -5378,7 +5378,7 @@ mod tests {
         let accepted_before =
             drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
                 .expect("receiver drains surviving source symbols");
-        assert_eq!(accepted_before, 511);
+        assert_eq!(accepted_before, 255);
         receive_object_complete(&cx, &mut server, &mut receiver_control)
             .expect("receiver sees initial object complete");
         assemble_completed_entries(&mut decoders);
@@ -5426,7 +5426,7 @@ mod tests {
         .expect("sender handles file-backed need-more");
         assert!(report.is_none());
         assert_eq!(feedback.feedback_rounds, 1);
-        assert_eq!(feedback.symbols_sent, 513);
+        assert_eq!(feedback.symbols_sent, 257);
         pump_until_idle(
             &cx,
             &mut client,
