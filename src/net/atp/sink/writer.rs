@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 const DIRECTORY_ARCHIVE_DOMAIN: &[u8] = b"asupersync.atp.sink.directory.v1\0";
+const RESUME_CHECKPOINT_DOMAIN: &[u8] = b"asupersync.atp.sink.resume.v1\0";
+const RESUME_CHECKPOINT_CHUNK_PROOF_LEN: usize = 8 + 8 + 8 + 32;
 
 /// Concrete ATP writer implementation
 pub struct AtpWriter {
@@ -493,10 +495,20 @@ impl super::AtpWriter for AtpWriter {
             return Outcome::Err(WriteError::InvalidResumeToken);
         }
 
+        let checkpoint = match Self::decode_resume_checkpoint(
+            resume_token.transfer_id,
+            &resume_token.checkpoint_data,
+        ) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => return Outcome::Err(error),
+        };
+
         let _ = (cx, options);
         Outcome::Err(WriteError::ResumeFailed {
-            reason: "resume requires a persisted checkpoint and verified chunk transcript"
-                .to_string(),
+            reason: format!(
+                "resume checkpoint covers {} committed bytes across {} chunks, but replay requires persisted source bytes and verified chunk transcript",
+                checkpoint.total_bytes, checkpoint.chunk_count
+            ),
         })
     }
 
@@ -870,8 +882,10 @@ impl AtpWriter {
     }
 
     fn build_resume_checkpoint(transfer_id: TransferId, proof: &TransferProof) -> Vec<u8> {
-        let mut out = Vec::with_capacity(104 + proof.chunks.len() * 56);
-        out.extend_from_slice(b"asupersync.atp.sink.resume.v1\0");
+        let header_len = RESUME_CHECKPOINT_DOMAIN.len() + 16 + 8 + 8 + 32 + 32;
+        let mut out =
+            Vec::with_capacity(header_len + proof.chunks.len() * RESUME_CHECKPOINT_CHUNK_PROOF_LEN);
+        out.extend_from_slice(RESUME_CHECKPOINT_DOMAIN);
         out.extend_from_slice(&transfer_id.0);
         out.extend_from_slice(&proof.total_bytes.to_be_bytes());
         out.extend_from_slice(&proof.chunk_count.to_be_bytes());
@@ -884,6 +898,130 @@ impl AtpWriter {
             out.extend_from_slice(&chunk.content_hash);
         }
         out
+    }
+
+    fn decode_resume_checkpoint(
+        transfer_id: TransferId,
+        checkpoint_data: &[u8],
+    ) -> Result<TransferProof, WriteError> {
+        let header_len = RESUME_CHECKPOINT_DOMAIN.len() + 16 + 8 + 8 + 32 + 32;
+        if checkpoint_data.len() < header_len {
+            return Err(WriteError::InvalidResumeToken);
+        }
+
+        let mut cursor = 0;
+        if Self::read_checkpoint_bytes(
+            checkpoint_data,
+            &mut cursor,
+            RESUME_CHECKPOINT_DOMAIN.len(),
+        )? != RESUME_CHECKPOINT_DOMAIN
+        {
+            return Err(WriteError::InvalidResumeToken);
+        }
+
+        let checkpoint_transfer_id = TransferId(Self::read_checkpoint_array_16(
+            checkpoint_data,
+            &mut cursor,
+        )?);
+        if checkpoint_transfer_id != transfer_id {
+            return Err(WriteError::InvalidResumeToken);
+        }
+
+        let total_bytes = Self::read_checkpoint_u64(checkpoint_data, &mut cursor)?;
+        let chunk_count = Self::read_checkpoint_u64(checkpoint_data, &mut cursor)?;
+        let content_hash = Self::read_checkpoint_array_32(checkpoint_data, &mut cursor)?;
+        let manifest_root = Self::read_checkpoint_array_32(checkpoint_data, &mut cursor)?;
+        let chunk_count_usize =
+            usize::try_from(chunk_count).map_err(|_| WriteError::InvalidResumeToken)?;
+        let chunk_bytes = chunk_count_usize
+            .checked_mul(RESUME_CHECKPOINT_CHUNK_PROOF_LEN)
+            .ok_or(WriteError::InvalidResumeToken)?;
+        let expected_len = header_len
+            .checked_add(chunk_bytes)
+            .ok_or(WriteError::InvalidResumeToken)?;
+        if checkpoint_data.len() != expected_len {
+            return Err(WriteError::InvalidResumeToken);
+        }
+
+        let mut chunks = Vec::with_capacity(chunk_count_usize);
+        let mut expected_byte_offset = 0_u64;
+        for expected_chunk_index in 0..chunk_count {
+            let chunk_index = Self::read_checkpoint_u64(checkpoint_data, &mut cursor)?;
+            let byte_offset = Self::read_checkpoint_u64(checkpoint_data, &mut cursor)?;
+            let size_bytes = Self::read_checkpoint_u64(checkpoint_data, &mut cursor)?;
+            let content_hash = Self::read_checkpoint_array_32(checkpoint_data, &mut cursor)?;
+
+            if chunk_index != expected_chunk_index
+                || byte_offset != expected_byte_offset
+                || size_bytes == 0
+            {
+                return Err(WriteError::InvalidResumeToken);
+            }
+
+            expected_byte_offset = expected_byte_offset
+                .checked_add(size_bytes)
+                .ok_or(WriteError::InvalidResumeToken)?;
+            chunks.push(ChunkTransferProof {
+                chunk_index,
+                byte_offset,
+                size_bytes,
+                content_hash,
+            });
+        }
+
+        if cursor != checkpoint_data.len() || expected_byte_offset != total_bytes {
+            return Err(WriteError::InvalidResumeToken);
+        }
+
+        let proof = TransferProof::from_chunk_proofs(transfer_id, chunks, SystemTime::UNIX_EPOCH);
+        if proof.total_bytes != total_bytes
+            || proof.chunk_count != chunk_count
+            || proof.content_hash != content_hash
+            || proof.manifest_root != manifest_root
+        {
+            return Err(WriteError::InvalidResumeToken);
+        }
+
+        Ok(proof)
+    }
+
+    fn read_checkpoint_bytes<'a>(
+        checkpoint_data: &'a [u8],
+        cursor: &mut usize,
+        len: usize,
+    ) -> Result<&'a [u8], WriteError> {
+        let end = cursor
+            .checked_add(len)
+            .ok_or(WriteError::InvalidResumeToken)?;
+        let bytes = checkpoint_data
+            .get(*cursor..end)
+            .ok_or(WriteError::InvalidResumeToken)?;
+        *cursor = end;
+        Ok(bytes)
+    }
+
+    fn read_checkpoint_u64(checkpoint_data: &[u8], cursor: &mut usize) -> Result<u64, WriteError> {
+        let mut out = [0_u8; 8];
+        out.copy_from_slice(Self::read_checkpoint_bytes(checkpoint_data, cursor, 8)?);
+        Ok(u64::from_be_bytes(out))
+    }
+
+    fn read_checkpoint_array_16(
+        checkpoint_data: &[u8],
+        cursor: &mut usize,
+    ) -> Result<[u8; 16], WriteError> {
+        let mut out = [0_u8; 16];
+        out.copy_from_slice(Self::read_checkpoint_bytes(checkpoint_data, cursor, 16)?);
+        Ok(out)
+    }
+
+    fn read_checkpoint_array_32(
+        checkpoint_data: &[u8],
+        cursor: &mut usize,
+    ) -> Result<[u8; 32], WriteError> {
+        let mut out = [0_u8; 32];
+        out.copy_from_slice(Self::read_checkpoint_bytes(checkpoint_data, cursor, 32)?);
+        Ok(out)
     }
 
     fn update_transfer_phase(&self, transfer_id: TransferId, phase: TransferPhase) {
@@ -967,20 +1105,22 @@ impl AtpWriter {
             .filter(|chunks| !chunks.is_empty())
             .map(|chunks| TransferProof::from_chunk_proofs(transfer_id, chunks, SystemTime::now()));
 
+        let resume_token = if state == CancellationState::Resumable {
+            partial_proof.as_ref().map(|proof| ResumeToken {
+                transfer_id,
+                checkpoint_data: Self::build_resume_checkpoint(transfer_id, proof),
+                expires_at: SystemTime::now() + Duration::from_secs(86400),
+                required_capabilities: vec!["write".to_string()],
+            })
+        } else {
+            None
+        };
+
         let result = CancellationResult {
             transfer_id,
             cancelled_at: SystemTime::now(),
             final_state: state,
-            resume_token: if state == CancellationState::Resumable {
-                Some(ResumeToken {
-                    transfer_id,
-                    checkpoint_data: Vec::new(),
-                    expires_at: SystemTime::now() + Duration::from_secs(86400),
-                    required_capabilities: vec!["write".to_string()],
-                })
-            } else {
-                None
-            },
+            resume_token,
             partial_proof,
             cleanup_required: vec![CleanupAction::ClearCacheEntries(vec![format!(
                 "transfer:{:?}",
@@ -1044,5 +1184,82 @@ mod tests {
         assert_eq!(proof.chunks, vec![chunk]);
         assert_ne!(proof.content_hash, [0; 32]);
         assert_ne!(proof.manifest_root, [0; 32]);
+    }
+
+    #[test]
+    fn resume_checkpoint_round_trips_verified_chunk_transcript() {
+        let transfer_id = TransferId::new();
+        let proof = sample_transfer_proof(transfer_id);
+        let checkpoint = AtpWriter::build_resume_checkpoint(transfer_id, &proof);
+        let decoded = AtpWriter::decode_resume_checkpoint(transfer_id, &checkpoint).unwrap();
+
+        assert_eq!(decoded.transfer_id, transfer_id);
+        assert_eq!(decoded.total_bytes, proof.total_bytes);
+        assert_eq!(decoded.chunk_count, proof.chunk_count);
+        assert_eq!(decoded.content_hash, proof.content_hash);
+        assert_eq!(decoded.manifest_root, proof.manifest_root);
+        assert_eq!(decoded.chunks, proof.chunks);
+    }
+
+    #[test]
+    fn resume_checkpoint_rejects_torn_forged_or_tampered_tokens() {
+        let transfer_id = TransferId::new();
+        let proof = sample_transfer_proof(transfer_id);
+        let checkpoint = AtpWriter::build_resume_checkpoint(transfer_id, &proof);
+
+        let mut truncated = checkpoint.clone();
+        truncated.pop();
+        assert_invalid_resume_checkpoint(AtpWriter::decode_resume_checkpoint(
+            transfer_id,
+            &truncated,
+        ));
+
+        let mut trailing = checkpoint.clone();
+        trailing.push(0);
+        assert_invalid_resume_checkpoint(AtpWriter::decode_resume_checkpoint(
+            transfer_id,
+            &trailing,
+        ));
+
+        let other_transfer_id = TransferId::new();
+        assert_invalid_resume_checkpoint(AtpWriter::decode_resume_checkpoint(
+            other_transfer_id,
+            &checkpoint,
+        ));
+
+        let mut tampered = checkpoint;
+        let last = tampered
+            .last_mut()
+            .expect("checkpoint contains chunk proof bytes");
+        *last ^= 0x80;
+        assert_invalid_resume_checkpoint(AtpWriter::decode_resume_checkpoint(
+            transfer_id,
+            &tampered,
+        ));
+    }
+
+    fn sample_transfer_proof(transfer_id: TransferId) -> TransferProof {
+        TransferProof::from_chunk_proofs(
+            transfer_id,
+            vec![
+                ChunkTransferProof {
+                    chunk_index: 0,
+                    byte_offset: 0,
+                    size_bytes: 11,
+                    content_hash: AtpWriter::chunk_digest(0, 0, b"hello world"),
+                },
+                ChunkTransferProof {
+                    chunk_index: 1,
+                    byte_offset: 11,
+                    size_bytes: 5,
+                    content_hash: AtpWriter::chunk_digest(1, 11, b"again"),
+                },
+            ],
+            SystemTime::UNIX_EPOCH,
+        )
+    }
+
+    fn assert_invalid_resume_checkpoint(result: Result<TransferProof, WriteError>) {
+        assert!(matches!(result, Err(WriteError::InvalidResumeToken)));
     }
 }
