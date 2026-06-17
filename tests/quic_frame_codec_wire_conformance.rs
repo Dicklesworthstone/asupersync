@@ -196,8 +196,10 @@ fn roundtrip_stream_frame_flag_matrix() {
             });
         }
     }
-    // Empty-data stream with no LEN bit: decoder reads "rest of packet", which is
-    // empty when the frame stands alone — still an identity.
+    // Empty-data STREAM frame: now encoded WITH the LEN bit (explicit length 0),
+    // so it is self-delimiting and round-trips as an identity even when it is not
+    // the last frame in a packet (see
+    // `empty_stream_frame_does_not_swallow_following_frame`).
     assert_roundtrip(&QuicFrame::Stream {
         stream_id: vi(8),
         offset: None,
@@ -259,6 +261,43 @@ fn golden_wire_bytes_pin_codec() {
     );
 }
 
+/// Regression: an empty / FIN-only STREAM frame must be self-delimiting (LEN bit
+/// set, explicit length 0) so it does not swallow a following frame's bytes when
+/// it is not the last frame in a packet. Before the fix the encoder omitted the
+/// LEN bit for empty data and the decoder then consumed the rest of the packet as
+/// stream data, silently corrupting trailing DATAGRAM symbols.
+#[test]
+fn empty_stream_frame_does_not_swallow_following_frame() {
+    // STREAM (empty, FIN) followed by PING in the same packet buffer, mirroring
+    // connection.rs emitting STREAM frames before other frames.
+    let mut packet = encode(&QuicFrame::Stream {
+        stream_id: vi(8),
+        offset: None,
+        data: BytesMut::new().freeze(),
+        fin: true,
+    });
+    packet.extend_from_slice(&encode(&QuicFrame::Ping));
+
+    let mut slice: &[u8] = &packet;
+    let first = QuicFrame::decode(&mut slice)
+        .expect("first frame decodes")
+        .expect("a STREAM frame is produced");
+    match first {
+        QuicFrame::Stream { fin, ref data, .. } => {
+            assert!(fin, "FIN preserved");
+            assert!(data.is_empty(), "empty stream data, not the swallowed PING");
+        }
+        other => panic!("expected STREAM frame, got {other:?}"),
+    }
+    // The trailing PING must survive — before the fix the no-LEN STREAM frame
+    // swallowed the rest of the packet as stream data.
+    let second = QuicFrame::decode(&mut slice)
+        .expect("following frame decodes")
+        .expect("the trailing PING survives the STREAM frame");
+    assert_eq!(second, QuicFrame::Ping, "trailing frame not swallowed");
+    assert!(slice.is_empty(), "packet fully consumed");
+}
+
 #[test]
 fn golden_stream_frame_type_flag_bits() {
     let base = |offset, data: &'static [u8], fin| {
@@ -269,12 +308,13 @@ fn golden_stream_frame_type_flag_bits() {
             fin,
         })[0]
     };
-    // 0x08 base; +0x04 OFF, +0x02 LEN (set iff data non-empty), +0x01 FIN.
-    assert_eq!(base(None, b"", false), 0x08, "bare STREAM");
+    // 0x08 base; +0x04 OFF, +0x02 LEN (ALWAYS set so STREAM frames are
+    // self-delimiting — see the encoder), +0x01 FIN.
+    assert_eq!(base(None, b"", false), 0x0a, "empty STREAM (LEN always set)");
     assert_eq!(base(None, b"x", false), 0x0a, "LEN bit");
     assert_eq!(base(Some(vi(1)), b"x", false), 0x0e, "OFF|LEN");
     assert_eq!(base(Some(vi(1)), b"x", true), 0x0f, "OFF|LEN|FIN");
-    assert_eq!(base(None, b"", true), 0x09, "FIN only");
+    assert_eq!(base(None, b"", true), 0x0b, "FIN only (LEN always set)");
 }
 
 // --- boundary: varint size classes ----------------------------------------
