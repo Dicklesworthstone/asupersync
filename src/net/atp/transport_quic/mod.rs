@@ -6536,6 +6536,17 @@ mod tests {
         assert_eq!(stats.dedup.duplicates_detected, 1);
         assert_eq!(stats.paths.total_received, 2);
         assert_eq!(stats.paths.total_duplicates, 1);
+
+        assemble_completed_entries(&mut decoders);
+        assert!(
+            decoders[0].complete,
+            "unique symbol should decode the object"
+        );
+        assert_eq!(decoders[0].data, entries[0].1);
+        let receipt = verify_in_memory_receipt(&manifest, &decoders);
+        assert!(receipt.committed);
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
     }
 
     #[test]
