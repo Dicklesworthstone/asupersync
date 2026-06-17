@@ -194,8 +194,10 @@ fn hash_opt_i64(hasher: &mut Sha256, v: Option<i64>) {
 }
 
 /// Compute the metadata commitment over `(rel_path, metadata)` pairs, or `None`
-/// when every entry is [`EntryMetadata::is_bare`] (so a portable transfer carries
-/// no commitment and stays byte-identical to the pre-J1 manifest).
+/// when every entry is [`EntryMetadata::is_bare`].
+///
+/// That means a portable transfer carries no commitment and stays
+/// byte-identical to the pre-J1 manifest.
 ///
 /// The pairs are sorted by `rel_path` for order-independence, mirroring the
 /// content merkle, so sender and receiver agree regardless of entry order.
@@ -342,10 +344,11 @@ pub async fn read_entry_metadata(
     Ok(meta)
 }
 
-/// Returns the `(dev, ino)` identity of `abs_path` when it is a regular file —
-/// the basis for detecting hardlinks within a transfer (two entries sharing an
-/// inode are hardlinks). Returns `None` for symlinks/dirs/special files, or on
-/// non-unix targets.
+/// Returns the `(dev, ino)` identity of `abs_path` when it is a regular file.
+///
+/// This identity is the basis for detecting hardlinks within a transfer (two
+/// entries sharing an inode are hardlinks). Returns `None` for
+/// symlinks/dirs/special files, or on non-unix targets.
 ///
 /// # Errors
 ///

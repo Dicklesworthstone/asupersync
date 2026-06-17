@@ -1429,8 +1429,7 @@ impl RelaySocketLoop {
             let is_preferred = self
                 .endpoints
                 .first_tcp_tls_stream_for_peer(peer_id)
-                .map(|preferred| preferred == stream_id)
-                .unwrap_or(false);
+                .is_ok_and(|preferred| preferred == stream_id);
             if !is_preferred && !self.tcp_tls_pending_writes.contains_key(&stream_id) {
                 continue;
             }

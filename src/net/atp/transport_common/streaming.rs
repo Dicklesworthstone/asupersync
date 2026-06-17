@@ -72,9 +72,11 @@ impl std::fmt::Display for StreamingError {
 impl std::error::Error for StreamingError {}
 
 /// Per-entry content digests sufficient to reproduce the flat object-graph
-/// merkle root without holding any file content in memory. The sender fills
-/// these while streaming each file off disk; the receiver fills them while
-/// streaming incoming chunks. Both then call [`flat_merkle_root_from_digests`].
+/// merkle root without holding any file content in memory.
+///
+/// The sender fills these while streaming each file off disk; the receiver
+/// fills them while streaming incoming chunks. Both then call
+/// [`flat_merkle_root_from_digests`].
 #[derive(Debug, Clone)]
 pub struct EntryDigest {
     /// Transfer-relative path (forward-slash separated).
@@ -102,11 +104,12 @@ enum FlatNode<'a> {
 }
 
 /// Reproduce `MerkleRoot::from_graph` over the flat object graph from per-entry
-/// digests alone — byte-identical hashing to the owned-graph builder, but it
-/// never materializes file content, so peak memory is `O(number_of_entries)`
-/// digests rather than `O(total_bytes)`. Identical builder on both sides ⇒
-/// identical root, so any two transports that agree on the digests agree on the
-/// merkle root.
+/// digests alone.
+///
+/// The hashing is byte-identical to the owned-graph builder, but it never
+/// materializes file content, so peak memory is `O(number_of_entries)` digests
+/// rather than `O(total_bytes)`. Identical builders on both sides produce
+/// identical roots.
 #[must_use]
 pub fn flat_merkle_root_from_digests(entries: &[EntryDigest]) -> String {
     let mut sorted: Vec<&EntryDigest> = entries.iter().collect();
@@ -180,8 +183,11 @@ pub fn flat_merkle_root_from_digests(entries: &[EntryDigest]) -> String {
 }
 
 /// Compute the flat object-graph merkle root from in-memory `(rel_path, bytes)`
-/// slices. This is useful for tests, golden vectors, and callers that already
-/// hold content; streaming transports should prefer [`flat_merkle_root_from_digests`].
+/// slices.
+///
+/// This is useful for tests, golden vectors, and callers that already hold
+/// content; streaming transports should prefer
+/// [`flat_merkle_root_from_digests`].
 #[must_use]
 pub fn flat_merkle_root_from_slices<'a>(
     entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
@@ -211,9 +217,10 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 }
 
 /// One source file discovered by [`collect_entries`]: its transfer-relative
-/// path and absolute on-disk path. Crucially this carries **no content** — files
-/// are streamed off disk later (size is computed during the streaming hash pass),
-/// never slurped into RAM.
+/// path and absolute on-disk path.
+///
+/// Crucially this carries no content: files are streamed off disk later (size is
+/// computed during the streaming hash pass), never slurped into RAM.
 #[derive(Debug, Clone)]
 pub struct SourceEntry {
     /// Transfer-relative path (forward-slash separated).
@@ -223,8 +230,10 @@ pub struct SourceEntry {
 }
 
 /// Walk a path into [`SourceEntry`] metadata (paths only). A single file yields
-/// one entry keyed by its file name; a directory yields one entry per regular
-/// file keyed by path relative to the directory. No bytes are read here.
+/// one entry keyed by its file name.
+///
+/// A directory yields one entry per regular file keyed by path relative to the
+/// directory. No bytes are read here.
 ///
 /// Returns `(root_name, is_directory, entries)`.
 ///

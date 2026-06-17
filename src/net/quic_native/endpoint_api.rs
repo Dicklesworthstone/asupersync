@@ -74,10 +74,11 @@ macro_rules! apitrace {
 }
 
 /// Default maximum 1-RTT packet payload budget used by the deterministic
-/// loopback transport when a caller does not specify one. A datagram frame is
-/// bounded to 1200 bytes by the connection, so this comfortably carries a full
-/// datagram plus framing while still exercising the multi-packet path for large
-/// stream transfers.
+/// loopback transport when a caller does not specify one.
+///
+/// A datagram frame is bounded to 1200 bytes by the connection, so this
+/// comfortably carries a full datagram plus framing while still exercising the
+/// multi-packet path for large stream transfers.
 pub const DEFAULT_MAX_PACKET_BYTES: usize = 1350;
 
 /// Safety cap on [`pump_until_idle`] iterations so a misbehaving queue can never

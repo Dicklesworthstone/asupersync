@@ -1245,14 +1245,14 @@ impl AtpProofBundle {
         &self,
         trusted_keys: &BTreeMap<String, AuthKey>,
     ) -> ProofStrength {
-        let mut strength = self.calculate_proof_strength();
         if matches!(
             self.verify_cryptographic_signatures_with_keys(trusted_keys),
             Ok(true)
         ) {
-            strength = ProofStrength::Cryptographic;
+            ProofStrength::Cryptographic
+        } else {
+            self.calculate_proof_strength()
         }
-        strength
     }
 
     /// Sign the proof bundle with cryptographic signatures.

@@ -100,7 +100,7 @@ fn ac3_managed_mode_follows_ramp_within_bounds_no_flap() {
     for (i, arrivals) in ramp.iter().enumerate() {
         controller.observe(window(*arrivals, 500_000), (i as u64) + 1);
         let size = controller.current_size();
-        assert!(size >= 1 && size <= 32, "size {size} stayed within bounds");
+        assert!((1..=32).contains(&size), "size {size} stayed within bounds");
         sizes.push(size);
     }
 

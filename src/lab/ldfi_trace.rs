@@ -383,8 +383,10 @@ pub fn ldfi_report(
 }
 
 /// The number of single-fault experiments undirected blind chaos would run on
-/// this trace: one per fault-able event. This is the baseline the directed LDFI
-/// hypothesis count is compared against (AC1's committed count comparison).
+/// this trace: one per fault-able event.
+///
+/// This is the baseline the directed LDFI hypothesis count is compared against
+/// (AC1's committed count comparison).
 #[must_use]
 pub fn blind_chaos_single_fault_count(events: &[TraceEvent]) -> usize {
     events
@@ -543,8 +545,23 @@ mod tests {
     #[test]
     fn obligation_lifecycle_chains_reserve_to_commit() {
         let events = vec![
-            TraceEvent::obligation_reserve(0, Time::ZERO, ob(1), task(1), region(), ObligationKind::Lease),
-            TraceEvent::obligation_commit(1, Time::ZERO, ob(1), task(1), region(), ObligationKind::Lease, 10),
+            TraceEvent::obligation_reserve(
+                0,
+                Time::ZERO,
+                ob(1),
+                task(1),
+                region(),
+                ObligationKind::Lease,
+            ),
+            TraceEvent::obligation_commit(
+                1,
+                Time::ZERO,
+                ob(1),
+                task(1),
+                region(),
+                ObligationKind::Lease,
+                10,
+            ),
         ];
         // Reserve and commit are both fault-able leases; commit's support is both.
         let lineage = build_causal_lineage(
@@ -593,8 +610,10 @@ mod tests {
         ack_vc.increment(&b);
 
         let events = vec![
-            TraceEvent::io_result(0, Time::ZERO, 10, 4).with_logical_time(LogicalTime::Vector(send_vc)),
-            TraceEvent::io_ready(1, Time::ZERO, 20, 1).with_logical_time(LogicalTime::Vector(ack_vc)),
+            TraceEvent::io_result(0, Time::ZERO, 10, 4)
+                .with_logical_time(LogicalTime::Vector(send_vc)),
+            TraceEvent::io_ready(1, Time::ZERO, 20, 1)
+                .with_logical_time(LogicalTime::Vector(ack_vc)),
         ];
         // Different tokens => only the logical clock can link them.
         let with_lt = build_causal_lineage(&events, TraceLineageConfig::default());
@@ -641,11 +660,16 @@ mod tests {
         ok_b_vc.increment(&b);
 
         let events = vec![
-            TraceEvent::io_result(1, Time::ZERO, 10, 4).with_logical_time(LogicalTime::Vector(send_vc)),
-            TraceEvent::io_ready(2, Time::ZERO, 20, 1).with_logical_time(LogicalTime::Vector(ack_a_vc)),
-            TraceEvent::io_ready(3, Time::ZERO, 30, 1).with_logical_time(LogicalTime::Vector(ack_b_vc)),
-            TraceEvent::user_trace(10, Time::ZERO, "delivered-a").with_logical_time(LogicalTime::Vector(ok_a_vc)),
-            TraceEvent::user_trace(11, Time::ZERO, "delivered-b").with_logical_time(LogicalTime::Vector(ok_b_vc)),
+            TraceEvent::io_result(1, Time::ZERO, 10, 4)
+                .with_logical_time(LogicalTime::Vector(send_vc)),
+            TraceEvent::io_ready(2, Time::ZERO, 20, 1)
+                .with_logical_time(LogicalTime::Vector(ack_a_vc)),
+            TraceEvent::io_ready(3, Time::ZERO, 30, 1)
+                .with_logical_time(LogicalTime::Vector(ack_b_vc)),
+            TraceEvent::user_trace(10, Time::ZERO, "delivered-a")
+                .with_logical_time(LogicalTime::Vector(ok_a_vc)),
+            TraceEvent::user_trace(11, Time::ZERO, "delivered-b")
+                .with_logical_time(LogicalTime::Vector(ok_b_vc)),
         ];
 
         let graph = support_graph_for(&events, TraceLineageConfig::default(), |ev| {

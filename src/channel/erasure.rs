@@ -407,7 +407,10 @@ pub enum WireUnit {
 
 /// Creates a connected erasure-coded channel: an [`EcSender`] that encodes
 /// messages into symbols and an [`EcReceiver`] that reassembles and decodes
-/// them, joined by an in-memory reliable, ordered symbol transport.
+/// them.
+///
+/// The channel endpoints are joined by an in-memory reliable, ordered symbol
+/// transport.
 ///
 /// The transport here is loss-free (an unbounded in-memory queue), so this is
 /// the channel-shaped *composition* — the substrate a lossy transport (UDP

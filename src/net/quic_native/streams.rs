@@ -1276,7 +1276,7 @@ impl StreamTable {
             .entry(id)
             .and_modify(|registered| {
                 if !registered.will_wake(waker) {
-                    *registered = waker.clone();
+                    registered.clone_from(waker);
                 }
             })
             .or_insert_with(|| waker.clone());
@@ -1287,7 +1287,7 @@ impl StreamTable {
             .entry(id)
             .and_modify(|registered| {
                 if !registered.will_wake(waker) {
-                    *registered = waker.clone();
+                    registered.clone_from(waker);
                 }
             })
             .or_insert_with(|| waker.clone());
@@ -1779,7 +1779,11 @@ mod tests {
         // unbounded so existing callers keep their prior behavior; only the
         // connection layer opts into a finite cap.
         let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
-        let high = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 1_000_000);
+        let high = StreamId::local(
+            StreamRole::Client,
+            StreamDirection::Bidirectional,
+            1_000_000,
+        );
         tbl.accept_remote_stream(high)
             .expect("default remote limit must be unbounded");
     }
