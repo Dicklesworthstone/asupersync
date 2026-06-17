@@ -364,6 +364,85 @@ fn tampered_protected_udp_packet_fails_closed() {
     });
 }
 
+#[test]
+fn replayed_protected_udp_packet_fails_closed_without_duplicate_delivery() {
+    block_on(async {
+        let cx = test_cx();
+        let connection_id = ConnectionId::new(b"a7replay").expect("connection id");
+        let udp_config = QuicUdpEndpointConfig::default();
+        let mut client_udp =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                .await
+                .expect("bind client UDP");
+        let mut server_udp = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+            .await
+            .expect("bind server UDP");
+        let (mut client, mut server) = build_router_pair(
+            &cx,
+            connection_id,
+            client_udp.local_addr(),
+            server_udp.local_addr(),
+        )
+        .await;
+
+        {
+            let conn = client
+                .connection_mut_for_testing(&cx, connection_id)
+                .expect("client connection");
+            conn.send_datagram(&cx, Bytes::from_static(b"replay-target"))
+                .expect("queue replay target");
+        }
+        let packets = client
+            .drain_application_data_for_testing(
+                &cx,
+                connection_id,
+                server_udp.local_addr(),
+                Instant::now(),
+            )
+            .await
+            .expect("drain protected packet");
+        assert_eq!(packets.len(), 1);
+        client_udp
+            .send_batch(&cx, &packets)
+            .await
+            .expect("send original packet");
+
+        let routed = receive_and_route_udp_batch(&cx, &mut server_udp, &mut server)
+            .await
+            .expect("route original packet");
+        assert_eq!(routed, 1);
+        let conn = server
+            .connection_mut_for_testing(&cx, connection_id)
+            .expect("server connection");
+        assert_eq!(conn.recv_datagram().as_deref(), Some(&b"replay-target"[..]));
+        assert!(conn.recv_datagram().is_none());
+
+        client_udp
+            .send_batch(&cx, &packets)
+            .await
+            .expect("re-send captured packet");
+        let err = receive_and_route_udp_batch(&cx, &mut server_udp, &mut server)
+            .await
+            .expect_err("replayed protected packet must fail closed");
+        match err {
+            ConnectionRouterError::PacketProcessingFailed { reason, .. } => {
+                assert!(
+                    reason.contains("replayed nonce"),
+                    "expected replay rejection, got {reason}"
+                );
+            }
+            other => panic!("expected packet-processing failure, got {other:?}"),
+        }
+        let conn = server
+            .connection_mut_for_testing(&cx, connection_id)
+            .expect("server connection");
+        assert!(
+            conn.recv_datagram().is_none(),
+            "replayed datagram must not be delivered twice"
+        );
+    });
+}
+
 #[cfg(feature = "tls")]
 mod tls_identity {
     use super::*;
