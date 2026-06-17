@@ -1701,22 +1701,37 @@ impl AppendJournal {
                 JournalRecord::Offer {
                     total_size: offered_size,
                     ..
-                } => {
-                    total_size = Some(*offered_size);
-                }
+                } => match total_size {
+                    None => total_size = Some(*offered_size),
+                    Some(existing) if existing == *offered_size => {}
+                    Some(existing) => {
+                        return Err(JournalError::Deserialization(format!(
+                            "resume offer total_size conflict: previous {existing}, recovered {offered_size}"
+                        )));
+                    }
+                },
                 JournalRecord::ChunkVerified {
                     chunk_offset,
                     chunk_size,
                     verified_hash,
                     ..
                 } => {
-                    verified_chunks.insert(
-                        ResumeChunkKey {
-                            chunk_offset: *chunk_offset,
-                            chunk_size: *chunk_size,
-                        },
-                        *verified_hash,
-                    );
+                    let key = ResumeChunkKey {
+                        chunk_offset: *chunk_offset,
+                        chunk_size: *chunk_size,
+                    };
+                    match verified_chunks.get(&key) {
+                        Some(existing_hash) if existing_hash != verified_hash => {
+                            return Err(JournalError::Deserialization(format!(
+                                "resume chunk verified hash conflict at offset {} size {}",
+                                chunk_offset, chunk_size
+                            )));
+                        }
+                        Some(_) => {}
+                        None => {
+                            verified_chunks.insert(key, *verified_hash);
+                        }
+                    }
                 }
                 JournalRecord::ChunkWritten {
                     chunk_offset,
@@ -2538,6 +2553,102 @@ mod tests {
                 assert!(err.to_string().contains("overlap"));
             }
             other => panic!("expected overlap to fail closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_summary_rejects_conflicting_offer_total_size() {
+        let temp_dir = unique_temp_dir("test_resume_summary_offer_conflict");
+        let mut journal = AppendJournal::new(
+            JournalConfig {
+                base_dir: temp_dir,
+                ..Default::default()
+            },
+            test_auth_key(),
+        )
+        .unwrap();
+
+        for (total_size, timestamp) in [(1024, 4000), (2048, 4001)] {
+            journal
+                .append(JournalRecord::Offer {
+                    transfer_id: "offer_conflict".to_string(),
+                    object_id: test_object_id(b"offer_conflict"),
+                    manifest_root: test_root(9),
+                    total_size,
+                    timestamp,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+        }
+
+        match journal.get_resume_summary("offer_conflict") {
+            Outcome::Err(err) => {
+                assert!(matches!(&err, JournalError::Deserialization(_)));
+                assert!(err.to_string().contains("total_size conflict"));
+            }
+            other => panic!("expected conflicting offer sizes to fail closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_summary_rejects_conflicting_verified_chunk_hash() {
+        let temp_dir = unique_temp_dir("test_resume_summary_hash_conflict");
+        let mut journal = AppendJournal::new(
+            JournalConfig {
+                base_dir: temp_dir,
+                ..Default::default()
+            },
+            test_auth_key(),
+        )
+        .unwrap();
+
+        journal
+            .append(JournalRecord::Offer {
+                transfer_id: "hash_conflict".to_string(),
+                object_id: test_object_id(b"hash_conflict"),
+                manifest_root: test_root(10),
+                total_size: 512,
+                timestamp: 5000,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+        journal
+            .append(JournalRecord::ChunkVerified {
+                transfer_id: "hash_conflict".to_string(),
+                chunk_offset: 0,
+                chunk_size: 128,
+                verified_hash: [1; 32],
+                timestamp: 5001,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+        journal
+            .append(JournalRecord::ChunkWritten {
+                transfer_id: "hash_conflict".to_string(),
+                chunk_offset: 0,
+                chunk_size: 128,
+                file_path: "stage/0".to_string(),
+                timestamp: 5002,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+        journal
+            .append(JournalRecord::ChunkVerified {
+                transfer_id: "hash_conflict".to_string(),
+                chunk_offset: 0,
+                chunk_size: 128,
+                verified_hash: [2; 32],
+                timestamp: 5003,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+
+        match journal.get_resume_summary("hash_conflict") {
+            Outcome::Err(err) => {
+                assert!(matches!(&err, JournalError::Deserialization(_)));
+                assert!(err.to_string().contains("verified hash conflict"));
+            }
+            other => panic!("expected conflicting chunk hashes to fail closed, got {other:?}"),
         }
     }
 
