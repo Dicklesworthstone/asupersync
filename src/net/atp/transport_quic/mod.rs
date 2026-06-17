@@ -86,7 +86,8 @@ use crate::codec::Decoder;
 use crate::config::EncodingConfig;
 use crate::cx::Cx;
 use crate::decoding::{
-    DecodingConfig, DecodingPipeline, MissingSourceSymbol, RejectReason, SymbolAcceptResult,
+    BlockStateKind, DecodingConfig, DecodingPipeline, MissingSourceSymbol, RejectReason,
+    SymbolAcceptResult,
 };
 use crate::encoding::EncodingPipeline;
 use crate::io::AsyncReadExt;
@@ -194,6 +195,12 @@ pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 
 /// Maximum sparse source-symbol retransmit requests accepted in one feedback round.
 const MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
+
+/// Maximum targeted repair block entries accepted in one feedback round.
+const MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
+
+/// Maximum targeted fresh repair symbols accepted in one feedback round.
+const MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND: usize = 2048;
 
 /// Maximum native QUIC DATAGRAM symbols decoded before returning to the async
 /// receiver loop. This keeps large real-UDP queues from monopolizing the
@@ -1074,9 +1081,21 @@ struct QuicHelloAck {
 struct QuicNeedMore {
     /// Entry indices that have not yet decoded.
     pending: Vec<u32>,
+    /// Fresh repair deficits for specific incomplete blocks.
+    #[serde(default)]
+    repair_blocks: Vec<QuicBlockRepairRequest>,
     /// Sparse systematic source symbols missing from incomplete blocks.
     #[serde(default)]
     source_symbols: Vec<QuicSourceSymbolRequest>,
+}
+
+/// Request for fresh repair symbols for one incomplete source block.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct QuicBlockRepairRequest {
+    entry: u32,
+    sbn: u8,
+    symbols: u32,
 }
 
 /// Request for retransmission of one systematic source symbol.
@@ -1091,8 +1110,21 @@ struct QuicSourceSymbolRequest {
 #[allow(dead_code)]
 fn validate_need_more_feedback(
     manifest: &TransferManifest,
+    config: &QuicConfig,
     need: &QuicNeedMore,
 ) -> Result<std::collections::BTreeSet<u32>, QuicTransportError> {
+    if !need.repair_blocks.is_empty() && !need.source_symbols.is_empty() {
+        return Err(QuicTransportError::Integrity(
+            "receiver requested both fresh repair blocks and source-symbol retransmits".to_string(),
+        ));
+    }
+    if need.repair_blocks.len() > MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND {
+        return Err(QuicTransportError::Integrity(format!(
+            "receiver requested {} repair blocks in one feedback round (max {})",
+            need.repair_blocks.len(),
+            MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND
+        )));
+    }
     if need.source_symbols.len() > MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND {
         return Err(QuicTransportError::Integrity(format!(
             "receiver requested {} source symbols in one feedback round (max {})",
@@ -1104,11 +1136,11 @@ fn validate_need_more_feedback(
     let manifest_entries = manifest
         .entries
         .iter()
-        .map(|entry| entry.index)
-        .collect::<std::collections::BTreeSet<_>>();
+        .map(|entry| (entry.index, entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut pending = std::collections::BTreeSet::new();
     for entry in &need.pending {
-        if !manifest_entries.contains(entry) {
+        if !manifest_entries.contains_key(entry) {
             return Err(QuicTransportError::Integrity(format!(
                 "receiver requested repair for unknown entry {entry}"
             )));
@@ -1116,6 +1148,44 @@ fn validate_need_more_feedback(
         if !pending.insert(*entry) {
             return Err(QuicTransportError::Integrity(format!(
                 "receiver requested duplicate repair entry {entry}"
+            )));
+        }
+    }
+
+    let mut block_requests = std::collections::BTreeSet::new();
+    let mut repair_symbols = 0usize;
+    for request in &need.repair_blocks {
+        if !pending.contains(&request.entry) {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested repair block for non-pending entry {}",
+                request.entry
+            )));
+        }
+        if request.symbols == 0 {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested zero repair symbols for entry={} sbn={}",
+                request.entry, request.sbn
+            )));
+        }
+        let Some(entry) = manifest_entries.get(&request.entry).copied() else {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested repair block for unknown entry {}",
+                request.entry
+            )));
+        };
+        validate_feedback_block(entry, request.sbn, config, "repair")?;
+        if !block_requests.insert((request.entry, request.sbn)) {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested duplicate repair block entry={} sbn={}",
+                request.entry, request.sbn
+            )));
+        }
+        repair_symbols =
+            repair_symbols.saturating_add(usize::try_from(request.symbols).unwrap_or(usize::MAX));
+        if repair_symbols > MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested {repair_symbols} repair symbols in one feedback round (max {})",
+                MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND
             )));
         }
     }
@@ -1128,6 +1198,25 @@ fn validate_need_more_feedback(
                 request.entry
             )));
         }
+        let Some(entry) = manifest_entries.get(&request.entry).copied() else {
+            return Err(QuicTransportError::Integrity(format!(
+                "receiver requested source symbol for unknown entry {}",
+                request.entry
+            )));
+        };
+        let block_k = validate_feedback_block(entry, request.sbn, config, "source symbol")?;
+        let esi = usize::try_from(request.esi).map_err(|_| {
+            QuicTransportError::Integrity(format!(
+                "source request esi {} outside entry {} block {} K={block_k}",
+                request.esi, request.entry, request.sbn
+            ))
+        })?;
+        if esi >= block_k {
+            return Err(QuicTransportError::Integrity(format!(
+                "source request esi {} outside entry {} block {} K={block_k}",
+                request.esi, request.entry, request.sbn
+            )));
+        }
         if !source_requests.insert((request.entry, request.sbn, request.esi)) {
             return Err(QuicTransportError::Integrity(format!(
                 "receiver requested duplicate source symbol entry={} sbn={} esi={}",
@@ -1137,6 +1226,35 @@ fn validate_need_more_feedback(
     }
 
     Ok(pending)
+}
+
+fn validate_feedback_block(
+    entry: &ManifestEntry,
+    sbn: u8,
+    config: &QuicConfig,
+    request_kind: &str,
+) -> Result<usize, QuicTransportError> {
+    let block_count = block_count_for_len(entry.size, config)?;
+    let block_index = usize::from(sbn);
+    if block_index >= block_count {
+        return Err(QuicTransportError::Integrity(format!(
+            "receiver requested {request_kind} block {sbn} outside entry {} ({block_count} blocks)",
+            entry.index
+        )));
+    }
+    let block_start = u64::from(sbn)
+        .checked_mul(config.max_block_size as u64)
+        .ok_or_else(|| {
+            QuicTransportError::Integrity(format!(
+                "receiver requested {request_kind} block offset overflow for entry {}",
+                entry.index
+            ))
+        })?;
+    let block_len = usize::try_from((entry.size - block_start).min(config.max_block_size as u64))
+        .unwrap_or(usize::MAX);
+    Ok(block_len
+        .div_ceil(usize::from(config.symbol_size.max(1)))
+        .max(1))
 }
 
 #[allow(dead_code)]
@@ -2145,6 +2263,55 @@ async fn send_source_symbol_requests(
 }
 
 #[allow(dead_code)]
+async fn send_block_repair_requests(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    requests: &[QuicBlockRepairRequest],
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut sent = 0u64;
+    for request in requests {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let enc = encoders
+            .iter_mut()
+            .find(|entry| entry.index == request.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "receiver requested repair block for unknown entry {}",
+                    request.entry
+                ))
+            })?;
+        let repair_count = usize::try_from(request.symbols).map_err(|_| {
+            QuicTransportError::Integrity("repair symbol count does not fit usize".to_string())
+        })?;
+        let block = enc.read_block(cx, request.sbn, config).await?;
+        let already = enc.repair_cursor(request.sbn);
+        let target_repair = already.saturating_add(repair_count);
+        let mut pipeline = encoding_pipeline(config);
+        for encoded in pipeline.encode_single_block_repair_range(
+            enc.object_id,
+            request.sbn,
+            &block,
+            already,
+            repair_count,
+        ) {
+            let symbol = encoded
+                .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                .into_symbol();
+            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+            send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
+            sent = sent.saturating_add(1);
+        }
+        enc.set_repair_cursor(request.sbn, target_repair);
+    }
+    Ok(sent)
+}
+
+#[allow(dead_code)]
 fn spray_initial_symbols(
     cx: &Cx,
     conn: &mut QuicConnection,
@@ -2181,12 +2348,23 @@ async fn send_repair_round_and_object_complete(
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
-    if need.pending.is_empty() && need.source_symbols.is_empty() {
+    if need.pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
         send_object_complete(cx, conn, control)?;
         return Ok(0);
     }
-    let pending = validate_need_more_feedback(manifest, need)?;
-    let sent = if need.source_symbols.is_empty() {
+    let pending = validate_need_more_feedback(manifest, config, need)?;
+    let sent = if !need.repair_blocks.is_empty() {
+        send_block_repair_requests(
+            cx,
+            conn,
+            manifest,
+            encoders,
+            &need.repair_blocks,
+            config,
+            symbol_auth,
+        )
+        .await?
+    } else if need.source_symbols.is_empty() {
         spray_streaming_symbol_round(
             cx,
             conn,
@@ -2399,7 +2577,10 @@ async fn handle_sender_feedback_or_proof(
                     pending: need.pending.len(),
                 });
             }
-            if need.pending.is_empty() && need.source_symbols.is_empty() {
+            if need.pending.is_empty()
+                && need.repair_blocks.is_empty()
+                && need.source_symbols.is_empty()
+            {
                 return Ok(None);
             }
             let symbol_auth = state.config.symbol_auth_context()?;
@@ -2746,6 +2927,76 @@ fn pending_entries(decoders: &[QuicEntryDecoder]) -> Vec<u32> {
         .filter(|decoder| !decoder.complete)
         .map(|decoder| decoder.index)
         .collect()
+}
+
+#[allow(dead_code)]
+fn block_repair_requests(
+    decoders: &[QuicEntryDecoder],
+    limit: usize,
+) -> Vec<QuicBlockRepairRequest> {
+    let mut requests = Vec::new();
+    let mut requested_symbols = 0usize;
+    'decoders: for decoder in decoders {
+        if decoder.complete {
+            continue;
+        }
+        let Some(pipeline) = decoder.pipeline.as_ref() else {
+            continue;
+        };
+        let remaining = if limit == 0 {
+            0
+        } else {
+            limit.saturating_sub(requested_symbols)
+        };
+        if limit != 0 && remaining == 0 {
+            break;
+        }
+
+        let mut missing_by_block = std::collections::BTreeMap::<u8, usize>::new();
+        for MissingSourceSymbol { sbn, .. } in pipeline.missing_source_symbols(remaining) {
+            *missing_by_block.entry(sbn).or_default() += 1;
+        }
+
+        for (sbn, missing_source_symbols) in missing_by_block {
+            if limit != 0 && requested_symbols >= limit {
+                break 'decoders;
+            }
+            if requests.len() >= MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND {
+                break 'decoders;
+            }
+            let status_deficit = pipeline.block_status(sbn).and_then(|status| {
+                if status.state == BlockStateKind::Decoded || status.symbols_needed == 0 {
+                    None
+                } else {
+                    Some(
+                        status
+                            .symbols_needed
+                            .saturating_sub(status.symbols_received)
+                            .max(1),
+                    )
+                }
+            });
+            let mut deficit = status_deficit
+                .unwrap_or(missing_source_symbols.max(1))
+                .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
+            if deficit == 0 {
+                continue;
+            }
+            if limit != 0 {
+                deficit = deficit.min(limit.saturating_sub(requested_symbols));
+            }
+            if deficit == 0 {
+                break 'decoders;
+            }
+            requested_symbols = requested_symbols.saturating_add(deficit);
+            requests.push(QuicBlockRepairRequest {
+                entry: decoder.index,
+                sbn,
+                symbols: u32::try_from(deficit).unwrap_or(u32::MAX),
+            });
+        }
+    }
+    requests
 }
 
 #[allow(dead_code)]
@@ -3701,6 +3952,55 @@ async fn send_native_source_symbol_requests(
 }
 
 #[allow(dead_code)]
+async fn send_native_block_repair_requests(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    requests: &[QuicBlockRepairRequest],
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<u64, QuicTransportError> {
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut sent = 0u64;
+    for request in requests {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let enc = encoders
+            .iter_mut()
+            .find(|entry| entry.index == request.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "receiver requested repair block for unknown entry {}",
+                    request.entry
+                ))
+            })?;
+        let repair_count = usize::try_from(request.symbols).map_err(|_| {
+            QuicTransportError::Integrity("repair symbol count does not fit usize".to_string())
+        })?;
+        let block = enc.read_block(cx, request.sbn, config).await?;
+        let already = enc.repair_cursor(request.sbn);
+        let target_repair = already.saturating_add(repair_count);
+        let mut pipeline = encoding_pipeline(config);
+        for encoded in pipeline.encode_single_block_repair_range(
+            enc.object_id,
+            request.sbn,
+            &block,
+            already,
+            repair_count,
+        ) {
+            let symbol = encoded
+                .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                .into_symbol();
+            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+            send_native_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
+            sent = sent.saturating_add(1);
+        }
+        enc.set_repair_cursor(request.sbn, target_repair);
+    }
+    Ok(sent)
+}
+
+#[allow(dead_code)]
 async fn send_native_repair_round_and_object_complete(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
@@ -3712,12 +4012,23 @@ async fn send_native_repair_round_and_object_complete(
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
-    if need.pending.is_empty() && need.source_symbols.is_empty() {
+    if need.pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
         send_native_object_complete(cx, conn, control)?;
         return Ok(0);
     }
-    let pending = validate_need_more_feedback(manifest, need)?;
-    let sent = if need.source_symbols.is_empty() {
+    let pending = validate_need_more_feedback(manifest, config, need)?;
+    let sent = if !need.repair_blocks.is_empty() {
+        send_native_block_repair_requests(
+            cx,
+            conn,
+            manifest,
+            encoders,
+            &need.repair_blocks,
+            config,
+            symbol_auth,
+        )
+        .await?
+    } else if need.source_symbols.is_empty() {
         spray_native_symbol_round(
             cx,
             conn,
@@ -3848,7 +4159,10 @@ async fn handle_native_sender_feedback_or_proof(
                     pending: need.pending.len(),
                 });
             }
-            if need.pending.is_empty() && need.source_symbols.is_empty() {
+            if need.pending.is_empty()
+                && need.repair_blocks.is_empty()
+                && need.source_symbols.is_empty()
+            {
                 return Ok(None);
             }
             let symbol_auth = state.config.symbol_auth_context()?;
@@ -4555,15 +4869,27 @@ fn receive_native_symbol_round(
             pending: pending.len(),
         });
     }
+    let repair_blocks = block_repair_requests(decoders, MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
+    let source_symbols = if repair_blocks.is_empty() {
+        source_symbol_requests(decoders, MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND)
+    } else {
+        Vec::new()
+    };
     let need = QuicNeedMore {
         pending,
-        source_symbols: source_symbol_requests(
-            decoders,
-            MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
-        ),
+        repair_blocks,
+        source_symbols,
     };
     let round = (*feedback_rounds).saturating_add(1);
     let pending_count = need.pending.len().to_string();
+    let block_request_count = need.repair_blocks.len().to_string();
+    let repair_symbol_count = need
+        .repair_blocks
+        .iter()
+        .fold(0u64, |acc, request| {
+            acc.saturating_add(u64::from(request.symbols))
+        })
+        .to_string();
     let source_request_count = need.source_symbols.len().to_string();
     let accepted_count = symbols_accepted.to_string();
     let round_text = round.to_string();
@@ -4572,6 +4898,8 @@ fn receive_native_symbol_round(
         &[
             ("round", round_text.as_str()),
             ("pending", pending_count.as_str()),
+            ("block_requests", block_request_count.as_str()),
+            ("repair_symbols", repair_symbol_count.as_str()),
             ("source_requests", source_request_count.as_str()),
             ("symbols_accepted", accepted_count.as_str()),
         ],
@@ -5254,6 +5582,7 @@ mod tests {
                 &mut receiver_control,
                 &QuicNeedMore {
                     pending,
+                    repair_blocks: Vec::new(),
                     source_symbols: source_symbol_requests(
                         &decoders,
                         MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
@@ -6141,6 +6470,7 @@ mod tests {
 
         let need_more = QuicNeedMore {
             pending: vec![0, 2, 7],
+            repair_blocks: Vec::new(),
             source_symbols: vec![QuicSourceSymbolRequest {
                 entry: 2,
                 sbn: 1,
@@ -6167,6 +6497,7 @@ mod tests {
 
         let need = parse_json::<QuicNeedMore>(&frame).expect("parse legacy need-more shape");
         assert_eq!(need.pending, vec![3, 5]);
+        assert!(need.repair_blocks.is_empty());
         assert!(need.source_symbols.is_empty());
     }
 
@@ -6214,6 +6545,7 @@ mod tests {
 
         let need = QuicNeedMore {
             pending: vec![1, 3],
+            repair_blocks: Vec::new(),
             source_symbols: vec![QuicSourceSymbolRequest {
                 entry: 3,
                 sbn: 2,
@@ -6788,6 +7120,7 @@ mod tests {
         assert_eq!(pending, vec![0]);
         let need = QuicNeedMore {
             pending,
+            repair_blocks: Vec::new(),
             source_symbols: source_symbol_requests(
                 &decoders,
                 MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
@@ -7124,14 +7457,17 @@ mod tests {
         assert_eq!(pending, vec![0]);
         let need = QuicNeedMore {
             pending,
-            source_symbols: source_symbol_requests(
-                &decoders,
-                MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
-            ),
+            repair_blocks: block_repair_requests(&decoders, MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND),
+            source_symbols: Vec::new(),
         };
-        assert!(
-            !need.source_symbols.is_empty(),
-            "receiver should report sparse missing source symbols"
+        assert_eq!(
+            need.repair_blocks,
+            vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 0,
+                symbols: 1,
+            }],
+            "receiver should request the exact missing repair deficit for the incomplete block"
         );
         send_need_more(&cx, &mut server, &mut receiver_control, &need).expect("send need-more");
         pump_until_idle(
@@ -7165,18 +7501,18 @@ mod tests {
         )
         .expect("deliver repair round");
 
-        let source_envelope = recv_symbol_envelope(&mut server, false)
-            .expect("source retransmit envelope parses")
-            .expect("source retransmit datagram delivered");
-        assert!(!source_envelope.is_repair);
-        assert_eq!(source_envelope.entry, 0);
-        assert_eq!(source_envelope.sbn, 0);
-        assert_eq!(source_envelope.esi, 0);
-        let source_symbol =
-            authenticated_symbol_from_envelope(&source_envelope, decoders[0].object_id, false)
-                .expect("source symbol");
-        assert!(source_symbol.symbol().kind().is_source());
-        assert!(feed_authenticated_symbol(&mut decoders[0], source_symbol).expect("feed source"));
+        let repair_envelope = recv_symbol_envelope(&mut server, false)
+            .expect("repair envelope parses")
+            .expect("targeted repair datagram delivered");
+        assert!(repair_envelope.is_repair);
+        assert_eq!(repair_envelope.entry, 0);
+        assert_eq!(repair_envelope.sbn, 0);
+        assert!(repair_envelope.esi >= 256);
+        let repair_symbol =
+            authenticated_symbol_from_envelope(&repair_envelope, decoders[0].object_id, false)
+                .expect("repair symbol");
+        assert!(repair_symbol.symbol().kind().is_repair());
+        assert!(feed_authenticated_symbol(&mut decoders[0], repair_symbol).expect("feed repair"));
         let accepted_extra =
             drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
                 .expect("receiver drains any extra feedback symbols");
@@ -7530,7 +7866,7 @@ mod tests {
     }
 
     #[test]
-    fn native_receive_rounds_commit_after_source_symbol_retransmit() {
+    fn native_receive_rounds_commit_after_targeted_repair_request() {
         let (cx, mut client, mut server) = established_pair();
         let config = QuicConfig {
             symbol_size: 128,
@@ -7617,10 +7953,16 @@ mod tests {
         assert_eq!(symbols_accepted, 2);
         assert_eq!(feedback_rounds, 1);
         assert_eq!(need.pending, vec![0]);
-        assert!(
-            !need.source_symbols.is_empty(),
-            "receiver should ask for the missing source symbol"
+        assert_eq!(
+            need.repair_blocks,
+            vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 0,
+                symbols: 1,
+            }],
+            "receiver should ask for fresh repair targeted to the incomplete block"
         );
+        assert!(need.source_symbols.is_empty());
 
         let symbol_auth = config.symbol_auth_context().expect("auth posture");
         let repair_sent = block_on(send_repair_round_and_object_complete(
@@ -7633,7 +7975,7 @@ mod tests {
             &config,
             symbol_auth.as_ref(),
         ))
-        .expect("sender retransmits requested source symbol");
+        .expect("sender sends requested repair symbol");
         assert_eq!(repair_sent, 1);
         let mut native_client = client.inner().clone();
         let mut client_packet_number = 0u64;
@@ -7982,6 +8324,7 @@ mod tests {
 
     #[test]
     fn quic_sender_rejects_oversized_source_symbol_feedback() {
+        let config = trusted_quic_config();
         let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 21))];
         let manifest = manifest_from_entries("payload", true, &entries);
         let mut source_symbols =
@@ -7995,10 +8338,11 @@ mod tests {
         }
         let need = QuicNeedMore {
             pending: vec![0],
+            repair_blocks: Vec::new(),
             source_symbols,
         };
 
-        let err = validate_need_more_feedback(&manifest, &need)
+        let err = validate_need_more_feedback(&manifest, &config, &need)
             .expect_err("oversized peer feedback should fail closed");
         assert!(matches!(
             err,
@@ -8008,7 +8352,84 @@ mod tests {
     }
 
     #[test]
+    fn quic_sender_validates_targeted_repair_feedback() {
+        let config = trusted_quic_config();
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 23))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let repair = QuicBlockRepairRequest {
+            entry: 0,
+            sbn: 0,
+            symbols: 3,
+        };
+        let valid = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![repair],
+            source_symbols: Vec::new(),
+        };
+        let pending =
+            validate_need_more_feedback(&manifest, &config, &valid).expect("valid repair request");
+        assert!(pending.contains(&0));
+
+        let mixed = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![repair],
+            source_symbols: vec![QuicSourceSymbolRequest {
+                entry: 0,
+                sbn: 0,
+                esi: 0,
+            }],
+        };
+        let err = validate_need_more_feedback(&manifest, &config, &mixed)
+            .expect_err("mixed source and repair feedback must fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message)
+                if message.contains("both fresh repair blocks")
+        ));
+
+        let zero = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                symbols: 0,
+                ..repair
+            }],
+            source_symbols: Vec::new(),
+        };
+        let err = validate_need_more_feedback(&manifest, &config, &zero)
+            .expect_err("zero-symbol repair request must fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message) if message.contains("zero repair symbols")
+        ));
+
+        let invalid_block = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest { sbn: 1, ..repair }],
+            source_symbols: Vec::new(),
+        };
+        let err = validate_need_more_feedback(&manifest, &config, &invalid_block)
+            .expect_err("out-of-range repair block request must fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message) if message.contains("repair block 1 outside")
+        ));
+
+        let duplicate = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![repair, repair],
+            source_symbols: Vec::new(),
+        };
+        let err = validate_need_more_feedback(&manifest, &config, &duplicate)
+            .expect_err("duplicate repair block request must fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message) if message.contains("duplicate repair block")
+        ));
+    }
+
+    #[test]
     fn quic_sender_rejects_duplicate_source_symbol_feedback() {
+        let config = trusted_quic_config();
         let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 22))];
         let manifest = manifest_from_entries("payload", true, &entries);
         let duplicate = QuicSourceSymbolRequest {
@@ -8018,15 +8439,32 @@ mod tests {
         };
         let need = QuicNeedMore {
             pending: vec![0],
+            repair_blocks: Vec::new(),
             source_symbols: vec![duplicate, duplicate],
         };
 
-        let err = validate_need_more_feedback(&manifest, &need)
+        let err = validate_need_more_feedback(&manifest, &config, &need)
             .expect_err("duplicate peer feedback should fail closed");
         assert!(matches!(
             err,
             QuicTransportError::Integrity(message)
                 if message.contains("duplicate source symbol")
+        ));
+
+        let invalid_esi = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: Vec::new(),
+            source_symbols: vec![QuicSourceSymbolRequest {
+                entry: 0,
+                sbn: 0,
+                esi: 1,
+            }],
+        };
+        let err = validate_need_more_feedback(&manifest, &config, &invalid_esi)
+            .expect_err("out-of-range source ESI request must fail closed");
+        assert!(matches!(
+            err,
+            QuicTransportError::Integrity(message) if message.contains("source request esi 1 outside")
         ));
     }
 

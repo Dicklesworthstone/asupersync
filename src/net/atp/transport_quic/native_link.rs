@@ -85,10 +85,10 @@ use crate::types::outcome::Outcome;
 use crate::types::symbol::Symbol;
 
 use super::{
-    NativeQuicFrameTransport, QuicConfig, QuicControlReply, QuicEntryEncoder, QuicHello,
-    QuicHelloAck, QuicNeedMore, QuicPreparedSource, QuicSourceSymbolRequest,
-    QuicSprayPacingDecision, QuicTransportError, ReceiveReceipt, ReceiveReport, SendReport,
-    TransferManifest,
+    NativeQuicFrameTransport, QuicBlockRepairRequest, QuicConfig, QuicControlReply,
+    QuicEntryEncoder, QuicHello, QuicHelloAck, QuicNeedMore, QuicPreparedSource,
+    QuicSourceSymbolRequest, QuicSprayPacingDecision, QuicTransportError, ReceiveReceipt,
+    ReceiveReport, SendReport, TransferManifest,
 };
 
 /// Shared QUIC Initial Destination Connection ID for ATP-over-QUIC.
@@ -1153,6 +1153,60 @@ async fn spray_source_requests(
     Ok(sent)
 }
 
+/// Send fresh repair symbols for the specific source blocks a receiver still lacks.
+async fn spray_block_repair_requests(
+    cx: &Cx,
+    link: &mut QuicLink,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    requests: &[QuicBlockRepairRequest],
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<u64, QuicTransportError> {
+    let tag = super::transfer_tag(&manifest.transfer_id);
+    let pacing = link.spray_pacing_decision(config);
+    pacing.trace_epoch(cx, 3);
+    let mut sent = 0u64;
+    for request in requests {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let enc = encoders
+            .iter_mut()
+            .find(|entry| entry.index == request.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "receiver requested repair block for unknown entry {}",
+                    request.entry
+                ))
+            })?;
+        let repair_count = usize::try_from(request.symbols).map_err(|_| {
+            QuicTransportError::Integrity("repair symbol count does not fit usize".to_string())
+        })?;
+        let block = enc.read_block(cx, request.sbn, config).await?;
+        let already = enc.repair_cursor(request.sbn);
+        let target_repair = already.saturating_add(repair_count);
+        let mut pipeline = super::encoding_pipeline(config);
+        let object_id = enc.object_id;
+        let entry_index = enc.index;
+        for encoded in pipeline.encode_single_block_repair_range(
+            object_id,
+            request.sbn,
+            &block,
+            already,
+            repair_count,
+        ) {
+            let symbol = encoded
+                .map_err(|err| QuicTransportError::Control(err.to_string()))?
+                .into_symbol();
+            let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
+            link.spray_symbol(cx, &symbol, tag, entry_index, auth_tag, &pacing)
+                .await?;
+            sent = sent.saturating_add(1);
+        }
+        enc.set_repair_cursor(request.sbn, target_repair);
+    }
+    Ok(sent)
+}
+
 /// Receiver `HandshakeAck` parse (mirrors `super::receive_native_sender_hello_ack`).
 fn parse_hello_ack(frame: &Frame) -> Result<QuicHelloAck, QuicTransportError> {
     if frame.frame_type() != FrameType::HandshakeAck {
@@ -1284,13 +1338,27 @@ async fn run_sender_session(
                         pending: need.pending.len(),
                     });
                 }
-                if need.pending.is_empty() && need.source_symbols.is_empty() {
+                if need.pending.is_empty()
+                    && need.repair_blocks.is_empty()
+                    && need.source_symbols.is_empty()
+                {
                     super::send_native_object_complete(cx, &mut link.conn, &mut control)?;
                     link.flush(cx).await?;
                     continue;
                 }
-                let pending = super::validate_need_more_feedback(manifest, &need)?;
-                let sent = if need.source_symbols.is_empty() {
+                let pending = super::validate_need_more_feedback(manifest, config, &need)?;
+                let sent = if !need.repair_blocks.is_empty() {
+                    spray_block_repair_requests(
+                        cx,
+                        link,
+                        manifest,
+                        &mut encoders,
+                        &need.repair_blocks,
+                        config,
+                        symbol_auth.as_ref(),
+                    )
+                    .await?
+                } else if need.source_symbols.is_empty() {
                     spray_round(
                         cx,
                         link,
@@ -1693,10 +1761,16 @@ async fn run_receiver_session(
             // recomputes the deficit before the paced datagrams the reliable ObjectComplete raced
             // ahead of have settled) AND could request `esi >= block_k` for the last partial block,
             // which made the sender's `native_source_symbol_for_request` error out and die, so the
-            // receiver idled to a timeout. Empty `source_symbols` routes the sender to its fresh-repair
-            // round (`spray_native_symbol_round`), which converges under loss.
+            // receiver idled to a timeout. `repair_blocks` routes the sender to fresh repair for
+            // the incomplete source blocks only, so a single final block is not starved by complete
+            // blocks in the same pending entry.
+            let repair_blocks = super::block_repair_requests(
+                &decoders,
+                super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+            );
             let need = QuicNeedMore {
                 pending,
+                repair_blocks,
                 source_symbols: Vec::new(),
             };
             super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
