@@ -492,11 +492,8 @@ fn collect_changed_ranges(
         return;
     }
     let current_hash = merkle_range_hash(current, start, end);
-    let baseline_hash = merkle_range_hash(
-        baseline,
-        start.min(baseline.len()),
-        end.min(baseline.len()),
-    );
+    let baseline_hash =
+        merkle_range_hash(baseline, start.min(baseline.len()), end.min(baseline.len()));
     if current_hash == baseline_hash && end <= baseline.len() {
         return;
     }

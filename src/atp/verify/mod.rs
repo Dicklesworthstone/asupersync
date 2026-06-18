@@ -440,8 +440,7 @@ impl AtpBundleVerifier {
                     check_name: "manifest_commit".to_string(),
                     category: VerificationCategory::ContentIntegrity,
                     status: VerificationStatus::Failed,
-                    description: "No commit record: manifest commit cannot be verified"
-                        .to_string(),
+                    description: "No commit record: manifest commit cannot be verified".to_string(),
                     duration_micros: 0,
                     metadata: BTreeMap::new(),
                 });

@@ -21,6 +21,7 @@ use profiles::ChunkingProfile as ChunkingProfileTrait;
 pub mod artifact;
 pub mod bulk_file;
 pub mod cas;
+pub mod change_detect;
 pub mod dedupe;
 pub mod delta_stream;
 pub mod media;

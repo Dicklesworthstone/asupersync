@@ -130,7 +130,11 @@ pub async fn plan_transfer(
             !matches!(metadata.file_kind, FileKind::Regular) || is_hardlink_secondary;
         let (size, content_id, content_sha256) = if zero_content {
             let empty_sha: [u8; 32] = Sha256::digest(b"").into();
-            (0u64, ObjectId::content(ContentId::from_bytes(b"")), empty_sha)
+            (
+                0u64,
+                ObjectId::content(ContentId::from_bytes(b"")),
+                empty_sha,
+            )
         } else {
             hash_file_streaming(&entry.abs_path, &mut read_buf).await?
         };

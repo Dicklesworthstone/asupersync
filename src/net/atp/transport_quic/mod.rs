@@ -2906,6 +2906,23 @@ fn authenticated_symbol_from_envelope(
     Ok(AuthenticatedSymbol::new_unauthenticated(symbol))
 }
 
+fn verified_authenticated_symbol_from_envelope(
+    envelope: &QuicSymbolEnvelope,
+    object_id: ObjectId,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<AuthenticatedSymbol, QuicTransportError> {
+    let mut authenticated =
+        authenticated_symbol_from_envelope(envelope, object_id, symbol_auth.is_some())?;
+    if let Some(context) = symbol_auth {
+        context
+            .verify_authenticated_symbol(&mut authenticated)
+            .map_err(|_| {
+                QuicTransportError::Integrity("symbol authentication failed".to_string())
+            })?;
+    }
+    Ok(authenticated)
+}
+
 fn primary_quic_receive_aggregator(remote: impl Into<String>) -> MultipathAggregator {
     let aggregator = MultipathAggregator::new(AggregatorConfig {
         reorder: ReordererConfig {
@@ -3083,8 +3100,11 @@ fn drain_symbol_datagrams_with_aggregator(
                     envelope.entry
                 ))
             })?;
-        let auth_symbol =
-            authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
+        let auth_symbol = verified_authenticated_symbol_from_envelope(
+            &envelope,
+            decoder.object_id,
+            symbol_auth.as_ref(),
+        )?;
         accepted = accepted.saturating_add(feed_aggregated_symbol_for_entry(
             decoders,
             envelope.entry,
@@ -4516,8 +4536,11 @@ fn drain_native_symbol_datagrams_with_aggregator(
                     envelope.entry
                 ))
             })?;
-        let auth_symbol =
-            authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
+        let auth_symbol = verified_authenticated_symbol_from_envelope(
+            &envelope,
+            decoder.object_id,
+            symbol_auth.as_ref(),
+        )?;
         accepted = accepted.saturating_add(feed_aggregated_symbol_for_entry(
             decoders,
             envelope.entry,
@@ -4565,8 +4588,11 @@ fn drain_native_symbol_datagrams_with_blocks(
                     envelope.entry
                 ))
             })?;
-        let auth_symbol =
-            authenticated_symbol_from_envelope(&envelope, decoder.object_id, auth_required)?;
+        let auth_symbol = verified_authenticated_symbol_from_envelope(
+            &envelope,
+            decoder.object_id,
+            symbol_auth.as_ref(),
+        )?;
         let (was_accepted, block) =
             feed_authenticated_symbol_take_block(decoder, auth_symbol, decode_stats)?;
         if was_accepted {
@@ -7316,15 +7342,30 @@ mod tests {
             &entries[0].1,
             SymbolKind::Source,
         );
-        let bad = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
+        let bad_tag = *AuthenticationTag::zero().as_bytes();
+        let envelope = symbol_to_envelope(
+            &symbol,
+            transfer_tag(&manifest.transfer_id),
+            decoders[0].index,
+            Some(bad_tag),
+        );
+        let symbol_auth = config
+            .symbol_auth_context()
+            .expect("auth config should be valid")
+            .expect("auth context should be present");
 
-        let err = feed_authenticated_symbol(&mut decoders[0], bad)
-            .expect_err("bad auth tag must fail closed");
+        let err = verified_authenticated_symbol_from_envelope(
+            &envelope,
+            decoders[0].object_id,
+            Some(&symbol_auth),
+        )
+        .expect_err("bad auth tag must fail closed before decoder feed");
         assert!(matches!(
             err,
             QuicTransportError::Integrity(message)
                 if message.contains("authentication failed")
         ));
+        assert!(!decoders[0].complete);
     }
 
     #[test]
@@ -7346,6 +7387,7 @@ mod tests {
         };
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
             .expect("source manifest prepares from disk");
+        let transfer_config = prepared.effective_config(&config);
         let mut sender_control =
             QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
         let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
@@ -7354,7 +7396,7 @@ mod tests {
             &cx,
             &mut client,
             &mut sender_control,
-            &config,
+            &transfer_config,
             "sender-peer",
             false,
         )
@@ -7371,7 +7413,7 @@ mod tests {
             &cx,
             &mut server,
             &mut receiver_control,
-            &config,
+            &transfer_config,
             "receiver-peer",
             false,
         )
@@ -7392,7 +7434,7 @@ mod tests {
             &mut client,
             &mut sender_control,
             &prepared,
-            &config,
+            &transfer_config,
         ))
         .expect("prepared source sends manifest and symbols");
         pump_until_idle(
@@ -7407,10 +7449,15 @@ mod tests {
         let received_manifest = receive_manifest(&cx, &mut server, &mut receiver_control)
             .expect("receiver decodes manifest");
         assert_eq!(received_manifest, prepared.manifest);
-        let mut decoders = decoders_from_manifest(&received_manifest, &config).expect("decoders");
-        let symbols_accepted =
-            drain_symbol_datagrams(&mut server, &received_manifest, &mut decoders, &config)
-                .expect("receiver drains symbols");
+        let mut decoders =
+            decoders_from_manifest(&received_manifest, &transfer_config).expect("decoders");
+        let symbols_accepted = drain_symbol_datagrams(
+            &mut server,
+            &received_manifest,
+            &mut decoders,
+            &transfer_config,
+        )
+        .expect("receiver drains symbols");
         receive_object_complete(&cx, &mut server, &mut receiver_control)
             .expect("receiver sees object complete");
         assemble_completed_entries(&mut decoders);
@@ -7653,6 +7700,7 @@ mod tests {
         };
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
             .expect("source manifest prepares from disk");
+        let transfer_config = prepared.effective_config(&config);
         let mut receiver_control = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
         let mut client_to_server_pn = 0u64;
         let mut server_to_client_pn = 0u64;
@@ -7665,7 +7713,7 @@ mod tests {
             &mut native_client,
             peer,
             &prepared,
-            &config,
+            &transfer_config,
             "sender-peer",
             |drive_point, sender| {
                 match drive_point {
@@ -7682,7 +7730,7 @@ mod tests {
                             &cx,
                             &mut native_server,
                             &mut receiver_control,
-                            &config,
+                            &transfer_config,
                             "receiver-peer",
                             false,
                         )?;
@@ -7713,12 +7761,13 @@ mod tests {
                             &mut receiver_control,
                         )?;
                         assert_eq!(received_manifest, prepared.manifest);
-                        let mut decoders = decoders_from_manifest(&received_manifest, &config)?;
+                        let mut decoders =
+                            decoders_from_manifest(&received_manifest, &transfer_config)?;
                         let symbols_accepted = drain_native_symbol_datagrams(
                             &mut native_server,
                             &received_manifest,
                             &mut decoders,
-                            &config,
+                            &transfer_config,
                         )?;
                         receive_native_object_complete(
                             &cx,
@@ -7739,7 +7788,7 @@ mod tests {
                             symbols_accepted,
                             0,
                             decode_stats,
-                            &config,
+                            &transfer_config,
                         ))?;
                         assert!(receipt.committed);
                         assert_eq!(committed_paths.len(), 2);
@@ -8144,6 +8193,7 @@ mod tests {
         std::fs::write(root.join("nested/beta.bin"), &beta).expect("write beta");
         let prepared = block_on(prepare_source_manifest(&cx, &root, &config))
             .expect("source manifest prepares from disk");
+        let transfer_config = prepared.effective_config(&config);
         let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
         let mut client_packet_number = 0u64;
         let mut server_packet_number = 0u64;
@@ -8161,7 +8211,7 @@ mod tests {
             &mut native_client,
             peer,
             &prepared,
-            &config,
+            &transfer_config,
             "sender-peer",
             |point, sender_conn| {
                 match point {
@@ -8182,7 +8232,7 @@ mod tests {
                             &cx,
                             &mut native_server,
                             control,
-                            &config,
+                            &transfer_config,
                             "receiver-peer",
                             false,
                         )?;
@@ -8213,7 +8263,8 @@ mod tests {
                             let manifest =
                                 receive_native_manifest(&cx, &mut native_server, control)?;
                             assert_eq!(manifest, prepared.manifest);
-                            receiver_decoders = Some(decoders_from_manifest(&manifest, &config)?);
+                            receiver_decoders =
+                                Some(decoders_from_manifest(&manifest, &transfer_config)?);
                             receiver_manifest = Some(manifest);
                         }
                         let manifest = receiver_manifest
@@ -8228,7 +8279,7 @@ mod tests {
                             control,
                             manifest,
                             decoders,
-                            &config,
+                            &transfer_config,
                             &receiver_aggregator,
                             &mut symbols_accepted,
                             &mut feedback_rounds,

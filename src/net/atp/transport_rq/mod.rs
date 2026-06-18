@@ -1369,7 +1369,14 @@ fn collect_dir<'a>(
 /// file cannot be created/written.
 async fn pack_small_files(
     entries: Vec<RqSourceEntry>,
-) -> Result<(Vec<RqSourceEntry>, Vec<EntryDigest>, Option<tempfile::TempDir>), RqError> {
+) -> Result<
+    (
+        Vec<RqSourceEntry>,
+        Vec<EntryDigest>,
+        Option<tempfile::TempDir>,
+    ),
+    RqError,
+> {
     let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
 
     // Group consecutive small files into packs. Each `Vec<usize>` is a list of
@@ -2260,6 +2267,16 @@ pub async fn send_path(
             members: entry.members.clone(),
         })
         .collect();
+    let packed_objects = manifest_entries
+        .iter()
+        .filter(|e| !e.members.is_empty())
+        .count();
+    rqtrace!(
+        "sender: E-15 pack: {} logical files -> {} RaptorQ objects ({} packed)",
+        logical_digests.len(),
+        manifest_entries.len(),
+        packed_objects
+    );
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
     let tag = transfer_tag(&transfer_id);
     let manifest = TransferManifest {
@@ -5358,8 +5375,14 @@ mod tests {
         // FEC completes the block (decoder emits the full block).
         futures_lite::future::block_on(persist_decoded_block(&mut decoder, 0, &data))
             .expect("persist decoded block");
-        assert!(decoder.complete, "FEC completion finishes the single-block entry");
-        assert_eq!(decoder.bytes_written, 8, "block counted exactly once after FEC");
+        assert!(
+            decoder.complete,
+            "FEC completion finishes the single-block entry"
+        );
+        assert_eq!(
+            decoder.bytes_written, 8,
+            "block counted exactly once after FEC"
+        );
         assert!(
             decoder.source_blocks[0].complete,
             "FEC must mark the source block complete (E-9)"
@@ -5408,8 +5431,7 @@ mod tests {
             bytes_written: 0,
             max_block_size: 4,
             source_streaming: true,
-            source_blocks: source_block_progress_for(8, 4, symbol_size)
-                .expect("two source blocks"),
+            source_blocks: source_block_progress_for(8, 4, symbol_size).expect("two source blocks"),
         };
         assert_eq!(decoder.source_blocks.len(), 2);
 
@@ -5430,10 +5452,17 @@ mod tests {
             payload_len: 4,
             header_len: 0,
         };
-        let accepted =
-            futures_lite::future::block_on(persist_source_symbol(&mut decoder, &late, &data[0..4], symbol_size))
-                .expect("late source");
-        assert!(!accepted, "late source for a completed block is ignored (E-9)");
+        let accepted = futures_lite::future::block_on(persist_source_symbol(
+            &mut decoder,
+            &late,
+            &data[0..4],
+            symbol_size,
+        ))
+        .expect("late source");
+        assert!(
+            !accepted,
+            "late source for a completed block is ignored (E-9)"
+        );
         assert_eq!(decoder.bytes_written, 4, "no double count for block 0");
 
         // Block 1 completes via source.
@@ -5447,11 +5476,19 @@ mod tests {
             header_len: 0,
         };
         assert!(
-            futures_lite::future::block_on(persist_source_symbol(&mut decoder, &b1, &data[4..8], symbol_size))
-                .expect("block 1 source")
+            futures_lite::future::block_on(persist_source_symbol(
+                &mut decoder,
+                &b1,
+                &data[4..8],
+                symbol_size
+            ))
+            .expect("block 1 source")
         );
         assert!(decoder.complete, "all blocks complete -> entry complete");
-        assert_eq!(decoder.bytes_written, 8, "each block counted once; bytes_written == size");
+        assert_eq!(
+            decoder.bytes_written, 8,
+            "each block counted once; bytes_written == size"
+        );
 
         drop(decoder.file.take());
         assert_eq!(std::fs::read(&staging_path).expect("read staged"), data);
@@ -6211,7 +6248,11 @@ mod tests {
             futures_lite::future::block_on(pack_small_files(entries)).expect("pack");
         let _tempdir = tempdir.expect("a pack temp dir was produced");
 
-        assert_eq!(packed.len(), 1, "three small files coalesce into one object");
+        assert_eq!(
+            packed.len(),
+            1,
+            "three small files coalesce into one object"
+        );
         let pack = &packed[0];
         assert_eq!(pack.rel_path, ".atp-pack-0");
         assert_eq!(pack.members.len(), 3);
@@ -6383,7 +6424,10 @@ mod tests {
         ))
         .expect("verify_and_commit");
 
-        assert!(receipt.committed, "packed transfer must commit: {receipt:?}");
+        assert!(
+            receipt.committed,
+            "packed transfer must commit: {receipt:?}"
+        );
         assert!(receipt.sha_ok);
         assert!(receipt.merkle_ok);
         assert_eq!(receipt.files, 2, "two LOGICAL files delivered");
@@ -6420,7 +6464,9 @@ mod tests {
             sha256_hex: "cc".repeat(32),
             members: good_members.clone(),
         };
-        assert!(validate_manifest(&manifest_with(vec![ok_entry], 15), &RqConfig::default()).is_ok());
+        assert!(
+            validate_manifest(&manifest_with(vec![ok_entry], 15), &RqConfig::default()).is_ok()
+        );
 
         // Non-contiguous offsets fail closed.
         let mut gap = good_members.clone();

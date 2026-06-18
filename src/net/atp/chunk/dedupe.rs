@@ -140,7 +140,7 @@ impl CdcEngine {
         if last_boundary < data_len {
             let final_size = data_len - last_boundary;
             if final_size < params.min_chunk_size && !chunks.is_empty() {
-                let previous_start = chunks.last().map(|chunk| chunk.byte_offset).unwrap_or(0);
+                let previous_start = chunks.last().map_or(0, |chunk| chunk.byte_offset);
                 if data_len - previous_start <= params.max_chunk_size {
                     chunks.pop();
                     last_boundary = previous_start;
@@ -241,12 +241,10 @@ impl CdcEngine {
             return true;
         }
 
-        let mask = if chunk_size < target_chunk_size {
-            small_mask
-        } else if chunk_size == target_chunk_size {
-            normal_mask
-        } else {
-            large_mask
+        let mask = match chunk_size.cmp(&target_chunk_size) {
+            std::cmp::Ordering::Less => small_mask,
+            std::cmp::Ordering::Equal => normal_mask,
+            std::cmp::Ordering::Greater => large_mask,
         };
 
         (hash & mask) == 0

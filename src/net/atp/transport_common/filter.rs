@@ -262,7 +262,10 @@ fn basename(rel_path: &str) -> &str {
 
 /// Whether `path` is the directory `dir` itself or lies beneath it.
 fn is_under(path: &str, dir: &str) -> bool {
-    path == dir || path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
+    path == dir
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Glob match: `*` = any run of non-`/`, `?` = one non-`/`, `**` = any run
@@ -365,7 +368,10 @@ mod tests {
             FilterRule::include("keep/needed.tmp"),
             FilterRule::exclude("*.tmp"),
         ]);
-        assert_eq!(fs.decision("keep/needed.tmp", false), FilterDecision::Include);
+        assert_eq!(
+            fs.decision("keep/needed.tmp", false),
+            FilterDecision::Include
+        );
         assert_eq!(fs.decision("other.tmp", false), FilterDecision::Exclude);
         // Unmatched -> default include.
         assert_eq!(fs.decision("src/main.rs", false), FilterDecision::Include);
@@ -373,14 +379,8 @@ mod tests {
 
     #[test]
     fn parse_rsync_style_lines() {
-        let fs = FilterSet::parse([
-            "# comment",
-            "",
-            "+ keep/needed.tmp",
-            "- *.tmp",
-            "- target/",
-        ])
-        .unwrap();
+        let fs = FilterSet::parse(["# comment", "", "+ keep/needed.tmp", "- *.tmp", "- target/"])
+            .unwrap();
         assert_eq!(fs.len(), 3);
         assert!(fs.is_included("keep/needed.tmp", false));
         assert!(!fs.is_included("a/b.tmp", false));
