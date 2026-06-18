@@ -157,7 +157,7 @@ pub fn donor_esi_stream(
 }
 
 /// Iterator over one donor's global ESI sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DonorEsiStream {
     partition: EsiPartition,
     next_sequence: Option<u32>,

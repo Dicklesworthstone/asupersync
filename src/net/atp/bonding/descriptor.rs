@@ -345,6 +345,10 @@ impl BondTransferDescriptor {
 /// Returns `None` for an unsafe path so the donor refuses rather than hashing an
 /// arbitrary file off disk.
 fn safe_entry_path(root_dir: &Path, rel_path: &str) -> Option<PathBuf> {
+    if Path::new(rel_path).is_absolute() {
+        return None;
+    }
+
     let mut out = root_dir.to_path_buf();
     let mut pushed = false;
     for component in rel_path.split('/') {
@@ -444,6 +448,13 @@ mod tests {
         unsafe_path.entries[0].rel_path = "../escape".to_string();
         assert!(matches!(
             unsafe_path.verify_local_digests(&[]).unwrap_err(),
+            BondProofError::UnsafePath { .. }
+        ));
+
+        let mut absolute_path = desc.clone();
+        absolute_path.entries[0].rel_path = "/abs/path".to_string();
+        assert!(matches!(
+            absolute_path.verify_local_digests(&[]).unwrap_err(),
             BondProofError::UnsafePath { .. }
         ));
 

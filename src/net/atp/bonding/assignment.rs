@@ -157,8 +157,7 @@ impl DonorAssignment {
         }
 
         EsiPartition::new(self.donor_index, self.donor_count)
-            .map(|partition| partition.owns_esi(esi))
-            .unwrap_or(false)
+            .is_ok_and(|partition| partition.owns_esi(esi))
     }
 
     /// Whether the assignment expects authenticated symbols.
@@ -270,7 +269,10 @@ impl fmt::Display for DonorAssignmentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedVersion { version } => {
-                write!(f, "unsupported channel-bonding assignment version {version}")
+                write!(
+                    f,
+                    "unsupported channel-bonding assignment version {version}"
+                )
             }
             Self::InvalidPartition(err) => write!(f, "{err}"),
             Self::TooManyDonors { donor_count, max } => write!(
@@ -374,7 +376,10 @@ mod tests {
         );
         assignment.validate().expect("valid windowed assignment");
 
-        assert!(!assignment.owns_esi(1), "windowed assignments override residue");
+        assert!(
+            !assignment.owns_esi(1),
+            "windowed assignments override residue"
+        );
         assert!(assignment.owns_esi(10));
         assert!(assignment.owns_esi(11));
         assert!(!assignment.owns_esi(12));
