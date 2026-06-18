@@ -346,7 +346,7 @@ async-trait = { version = "0.1", optional = true }
 tokio = { version = "1.0", features = ["rt", "fs", "process"], optional = true }
 # System information for benchmark environment
 num_cpus = { version = "1.0", optional = true }
-whoami = { version = "1.6", optional = true }
+whoami = { version = "2", optional = true }
 # TLS support via rustls
 rustls = { version = "0.23.39", default-features = false, features = ["std", "tls12"], optional = true }
 rustls-pki-types = { version = "1.14.1", optional = true }
@@ -388,7 +388,7 @@ subtle = "2.6"
 # Secure memory zeroization for AuthKey and other sensitive data
 zeroize = { version = "1.8", features = ["derive"] }
 # HKDF for QUIC key derivation (RFC 9001)
-hkdf = "0.12"
+hkdf = "0.13"
 # CRC32 for Kafka RecordBatch v2 format validation (KIP-98)
 crc32fast = "1.4"
 # QUIC/HTTP3 is intentionally native-only for ATP and the runtime core.

@@ -77,7 +77,10 @@ impl BenchmarkEnvironment {
     /// Returns [`BenchmarkError`] if environment detection fails.
     pub fn collect() -> Result<Self, BenchmarkError> {
         Ok(Self {
-            os_info: whoami::distro(),
+            // whoami 2.x made `distro()` fallible; os_info is best-effort
+            // benchmark metadata, so degrade to "unknown" rather than aborting
+            // environment collection on a detection failure.
+            os_info: whoami::distro().unwrap_or_else(|_| "unknown".to_string()),
             cpu_info: format!("{}x {}", num_cpus::get(), std::env::consts::ARCH),
             memory_info: format!("Available: {} bytes", get_available_memory()),
             network_info: describe_network_environment(),
