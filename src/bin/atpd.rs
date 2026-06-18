@@ -136,16 +136,16 @@ enum AtpdCommand {
 #[derive(Args, Clone)]
 struct StartArgs {
     /// Bind address for ATP service
-    #[arg(long, default_value = "0.0.0.0:8472")]
-    bind: SocketAddr,
+    #[arg(long)]
+    bind: Option<SocketAddr>,
 
     /// Data directory for ATP daemon
-    #[arg(long, default_value_os_t = default_atpd_data_dir())]
-    data_dir: PathBuf,
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
 
     /// Maximum concurrent transfers
-    #[arg(long, default_value = "16")]
-    max_transfers: u32,
+    #[arg(long)]
+    max_transfers: Option<u32>,
 
     /// Enable relay mode
     #[arg(long)]
@@ -1319,34 +1319,7 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
         AtpdConfig::default()
     });
 
-    // Override config with command line arguments
-    config.network.bind_addr = args.bind;
-    config.storage.data_dir.clone_from(&args.data_dir);
-    config.storage.cache_dir = args.data_dir.join("cache");
-    config.storage.journal.journal_path = args.data_dir.join("journal");
-    config.identity.private_key_path = init_identity_store_path(&args.data_dir);
-    config.transfers.max_concurrent = args.max_transfers;
-    config.network.enable_relay = args.enable_relay;
-    config.network.enable_mailbox = args.enable_mailbox;
-    if args.enable_quic {
-        config.network.enable_quic = true;
-    }
-    if let Some(path) = args.quic_server_cert {
-        config.network.quic.server_cert_path = Some(path);
-    }
-    if let Some(path) = args.quic_server_key {
-        config.network.quic.server_key_path = Some(path);
-    }
-    if let Some(key_hex) = args.rq_auth_key_hex {
-        config.network.quic.rq_auth_key_hex = Some(key_hex);
-    }
-    if args.rq_allow_unauthenticated_lab {
-        config.network.quic.allow_unauthenticated_lab = true;
-    }
-    if let Some(addr) = args.diagnostics_bind {
-        config.diagnostics.enable_metrics = true;
-        config.diagnostics.metrics_bind = Some(addr);
-    }
+    apply_start_overrides(&mut config, args);
 
     prepare_daemon_directories(&config)?;
 
@@ -1374,6 +1347,46 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
 
     info!("ATP daemon stopped");
     Ok(())
+}
+
+fn apply_start_overrides(config: &mut AtpdConfig, args: StartArgs) {
+    if let Some(bind) = args.bind {
+        config.network.bind_addr = bind;
+    }
+    if let Some(data_dir) = args.data_dir {
+        config.storage.data_dir.clone_from(&data_dir);
+        config.storage.cache_dir = data_dir.join("cache");
+        config.storage.journal.journal_path = data_dir.join("journal");
+        config.identity.private_key_path = init_identity_store_path(&data_dir);
+    }
+    if let Some(max_transfers) = args.max_transfers {
+        config.transfers.max_concurrent = max_transfers;
+    }
+    if args.enable_relay {
+        config.network.enable_relay = true;
+    }
+    if args.enable_mailbox {
+        config.network.enable_mailbox = true;
+    }
+    if args.enable_quic {
+        config.network.enable_quic = true;
+    }
+    if let Some(path) = args.quic_server_cert {
+        config.network.quic.server_cert_path = Some(path);
+    }
+    if let Some(path) = args.quic_server_key {
+        config.network.quic.server_key_path = Some(path);
+    }
+    if let Some(key_hex) = args.rq_auth_key_hex {
+        config.network.quic.rq_auth_key_hex = Some(key_hex);
+    }
+    if args.rq_allow_unauthenticated_lab {
+        config.network.quic.allow_unauthenticated_lab = true;
+    }
+    if let Some(addr) = args.diagnostics_bind {
+        config.diagnostics.enable_metrics = true;
+        config.diagnostics.metrics_bind = Some(addr);
+    }
 }
 
 async fn run_daemon_service(
@@ -2164,6 +2177,22 @@ mod tests {
         SocketAddr::from(([127, 0, 0, 1], port))
     }
 
+    fn empty_start_args() -> StartArgs {
+        StartArgs {
+            bind: None,
+            data_dir: None,
+            max_transfers: None,
+            enable_relay: false,
+            enable_mailbox: false,
+            enable_quic: false,
+            quic_server_cert: None,
+            quic_server_key: None,
+            rq_auth_key_hex: None,
+            rq_allow_unauthenticated_lab: false,
+            diagnostics_bind: None,
+        }
+    }
+
     #[test]
     fn quic_listener_is_an_explicit_daemon_capability() {
         let config = AtpdConfig::default();
@@ -2176,6 +2205,94 @@ mod tests {
         assert!(config.network.quic.server_key_path.is_none());
         assert!(config.network.quic.rq_auth_key_hex.is_none());
         assert!(!config.network.quic.allow_unauthenticated_lab);
+    }
+
+    #[test]
+    fn start_overrides_preserve_configured_quic_listener_when_flags_absent() {
+        let mut config = AtpdConfig::default();
+        config.network.bind_addr = loopback(9443);
+        config.network.enable_relay = true;
+        config.network.enable_mailbox = true;
+        config.network.enable_quic = true;
+        config.network.quic.server_cert_path = Some(PathBuf::from("/etc/atpd/quic/server.pem"));
+        config.network.quic.server_key_path = Some(PathBuf::from("/etc/atpd/quic/server.key"));
+        config.network.quic.rq_auth_key_hex =
+            Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string());
+        config.storage.data_dir = PathBuf::from("/srv/atpd/data");
+        config.storage.cache_dir = PathBuf::from("/srv/atpd/data/cache");
+        config.storage.journal.journal_path = PathBuf::from("/srv/atpd/data/journal");
+        config.identity.private_key_path = PathBuf::from("/srv/atpd/data/identity/peer.key");
+        config.transfers.max_concurrent = 64;
+        config.diagnostics.metrics_bind = Some(loopback(9444));
+
+        apply_start_overrides(&mut config, empty_start_args());
+
+        assert_eq!(config.network.bind_addr, loopback(9443));
+        assert!(config.network.enable_relay);
+        assert!(config.network.enable_mailbox);
+        assert!(config.network.enable_quic);
+        assert_eq!(
+            config.network.quic.server_cert_path.as_deref(),
+            Some(Path::new("/etc/atpd/quic/server.pem"))
+        );
+        assert_eq!(
+            config.network.quic.server_key_path.as_deref(),
+            Some(Path::new("/etc/atpd/quic/server.key"))
+        );
+        assert_eq!(config.storage.data_dir, PathBuf::from("/srv/atpd/data"));
+        assert_eq!(config.transfers.max_concurrent, 64);
+        assert_eq!(config.diagnostics.metrics_bind, Some(loopback(9444)));
+    }
+
+    #[test]
+    fn start_overrides_apply_explicit_quic_listener_flags() {
+        let mut config = AtpdConfig::default();
+        let mut args = empty_start_args();
+        args.bind = Some(loopback(0));
+        args.data_dir = Some(PathBuf::from("/tmp/atpd-cli-data"));
+        args.max_transfers = Some(8);
+        args.enable_relay = true;
+        args.enable_mailbox = true;
+        args.enable_quic = true;
+        args.quic_server_cert = Some(PathBuf::from("/tmp/atpd-cli-data/quic/server.pem"));
+        args.quic_server_key = Some(PathBuf::from("/tmp/atpd-cli-data/quic/server.key"));
+        args.rq_auth_key_hex =
+            Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string());
+        args.diagnostics_bind = Some(loopback(0));
+
+        apply_start_overrides(&mut config, args);
+
+        assert_eq!(config.network.bind_addr, loopback(0));
+        assert!(config.network.enable_relay);
+        assert!(config.network.enable_mailbox);
+        assert!(config.network.enable_quic);
+        assert_eq!(
+            config.network.quic.server_cert_path.as_deref(),
+            Some(Path::new("/tmp/atpd-cli-data/quic/server.pem"))
+        );
+        assert_eq!(
+            config.network.quic.server_key_path.as_deref(),
+            Some(Path::new("/tmp/atpd-cli-data/quic/server.key"))
+        );
+        assert_eq!(
+            config.network.quic.rq_auth_key_hex.as_deref(),
+            Some("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+        );
+        assert_eq!(config.storage.data_dir, PathBuf::from("/tmp/atpd-cli-data"));
+        assert_eq!(
+            config.storage.cache_dir,
+            PathBuf::from("/tmp/atpd-cli-data/cache")
+        );
+        assert_eq!(
+            config.storage.journal.journal_path,
+            PathBuf::from("/tmp/atpd-cli-data/journal")
+        );
+        assert_eq!(
+            config.identity.private_key_path,
+            PathBuf::from("/tmp/atpd-cli-data/identity/private.key")
+        );
+        assert_eq!(config.transfers.max_concurrent, 8);
+        assert_eq!(config.diagnostics.metrics_bind, Some(loopback(0)));
     }
 
     #[test]
