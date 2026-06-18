@@ -47,7 +47,7 @@
 //! loop only engages under real loss, which the loopback loss-injection test
 //! exercises deterministically.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,7 +72,8 @@ use crate::net::atp::loss::detector::{AtpLossDetector, LossRecommendation};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::atp::transport_common::{
-    EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
+    EntryDigest, MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests,
+    hash_file_streaming, hex_encode, plan_multi_object_split,
 };
 use crate::net::{TcpListener, TcpStream, UdpBufferConfig, UdpOutboundDatagram, UdpSocket};
 use crate::security::authenticated::AuthenticatedSymbol;
@@ -1044,6 +1045,30 @@ pub struct PackedMember {
     pub sha256_hex: String,
 }
 
+/// One ordered RaptorQ object shard of a larger logical file.
+///
+/// A fragmented entry's manifest `rel_path` names the encoded object, while
+/// this metadata names the logical file that will be reassembled and committed
+/// after all shards verify. `sha256_hex` is the whole logical file SHA-256, not
+/// the per-shard object hash (that remains [`ManifestEntry::sha256_hex`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LargeObjectFragment {
+    /// Logical file path relative to the transfer root.
+    pub rel_path: String,
+    /// Zero-based shard ordinal within the logical file.
+    pub shard_index: u32,
+    /// Total shard count for this logical file.
+    pub shard_count: u32,
+    /// Byte offset of this shard in the logical file.
+    pub logical_offset: u64,
+    /// Byte length carried by this shard.
+    pub len: u64,
+    /// Whole logical file size.
+    pub logical_size: u64,
+    /// Lowercase hex SHA-256 of the whole logical file.
+    pub sha256_hex: String,
+}
+
 /// One file within a transfer manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManifestEntry {
@@ -1061,6 +1086,10 @@ pub struct ManifestEntry {
     /// receive. `skip_serializing_if` keeps the no-packing wire byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<PackedMember>,
+    /// Large-file multi-object metadata. Present when this manifest entry is one
+    /// ordered shard of a single logical file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<LargeObjectFragment>,
 }
 
 /// Transfer manifest carried in the `ObjectManifest` frame.
@@ -1257,12 +1286,19 @@ const RQ_STREAM_HASH_BUFFER_SIZE: usize = 1024 * 1024;
 struct RqSourceEntry {
     rel_path: String,
     abs_path: PathBuf,
+    /// Byte offset in `abs_path` where this encoded object starts.
+    source_offset: u64,
+    /// Byte length of this encoded object. `None` means the whole file at
+    /// `abs_path`, preserving the historical no-split path.
+    source_len: Option<u64>,
     /// Logical files packed into this combined RaptorQ object (E-15 coalescing).
     /// Empty = a normal single-file entry whose content IS the file at `abs_path`
     /// (prior behavior, byte-identical wire). Non-empty = `abs_path` points at a
     /// temp file holding the concatenation of these members in `offset` order, and
     /// the receiver splits it back into the member files on commit.
     members: Vec<PackedMember>,
+    /// Large-file multi-object metadata for this encoded object.
+    fragment: Option<LargeObjectFragment>,
 }
 
 async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry>), RqError> {
@@ -1281,7 +1317,10 @@ async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry
             vec![RqSourceEntry {
                 rel_path: root_name,
                 abs_path: root.to_path_buf(),
+                source_offset: 0,
+                source_len: None,
                 members: Vec::new(),
+                fragment: None,
             }],
         ));
     }
@@ -1334,7 +1373,10 @@ fn collect_dir<'a>(
                 out.push(RqSourceEntry {
                     rel_path: rel,
                     abs_path: path,
+                    source_offset: 0,
+                    source_len: None,
                     members: Vec::new(),
+                    fragment: None,
                 });
             }
         }
@@ -1523,11 +1565,89 @@ async fn pack_small_files(
         new_entries.push(RqSourceEntry {
             rel_path: format!(".atp-pack-{pack_idx}"),
             abs_path: pack_path,
+            source_offset: 0,
+            source_len: None,
             members,
+            fragment: None,
         });
     }
 
     Ok((new_entries, logical_digests, Some(tempdir)))
+}
+
+/// Split large unpacked entries into ordered RaptorQ objects while preserving the
+/// logical file digest list used for the transfer merkle root.
+async fn split_large_entries(
+    entries: Vec<RqSourceEntry>,
+    logical_digests: &[EntryDigest],
+    config: &RqConfig,
+) -> Result<Vec<RqSourceEntry>, RqError> {
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let block_size = config.max_block_size.max(symbol_size);
+    let split_config = MultiObjectSplitConfig::new(u64::try_from(block_size).map_err(|_| {
+        RqError::Coding(format!("max_block_size does not fit u64: {block_size}"))
+    })?);
+
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if !entry.members.is_empty() {
+            out.push(entry);
+            continue;
+        }
+
+        let size = crate::fs::metadata(&entry.abs_path)
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))?
+            .len();
+        let plan = plan_multi_object_split(size, split_config)
+            .map_err(|e| RqError::Coding(e.to_string()))?;
+        if !plan.is_split() {
+            out.push(entry);
+            continue;
+        }
+
+        let logical_digest = logical_digests
+            .iter()
+            .find(|digest| digest.rel_path == entry.rel_path)
+            .ok_or_else(|| {
+                RqError::Coding(format!(
+                    "large-entry split missing logical digest for {}",
+                    entry.rel_path
+                ))
+            })?;
+        let shard_count = u32::try_from(plan.shard_count()).map_err(|_| {
+            RqError::Coding(format!(
+                "large-entry split produced too many shards for {}",
+                entry.rel_path
+            ))
+        })?;
+        let whole_sha256_hex = hex_encode(&logical_digest.content_sha256);
+        for shard in plan.shards {
+            let object_rel_path = format!(
+                ".atp-fragment-{}-{}",
+                out.len(),
+                shard.shard_index
+            );
+            out.push(RqSourceEntry {
+                rel_path: object_rel_path,
+                abs_path: entry.abs_path.clone(),
+                source_offset: shard.logical_offset,
+                source_len: Some(shard.len),
+                members: Vec::new(),
+                fragment: Some(LargeObjectFragment {
+                    rel_path: entry.rel_path.clone(),
+                    shard_index: shard.shard_index,
+                    shard_count,
+                    logical_offset: shard.logical_offset,
+                    len: shard.len,
+                    logical_size: plan.logical_size,
+                    sha256_hex: whole_sha256_hex.clone(),
+                }),
+            });
+        }
+    }
+
+    Ok(out)
 }
 
 /// Reduce an attacker-controlled `root_name` to a single safe path component
@@ -1593,14 +1713,30 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
             manifest.entries.len()
         )));
     }
-    if !manifest.is_directory && manifest.entries.len() != 1 {
+    let single_file_fragmented = !manifest.is_directory
+        && !manifest.entries.is_empty()
+        && manifest
+            .entries
+            .iter()
+            .all(|entry| entry.fragment.is_some());
+    if !manifest.is_directory && manifest.entries.len() != 1 && !single_file_fragmented {
         return Err(RqError::Frame(format!(
             "single-file transfer manifest declares {} entries",
             manifest.entries.len()
         )));
     }
 
-    let mut seen_rel_paths = BTreeSet::new();
+    #[derive(Debug)]
+    struct FragmentGroupValidation {
+        logical_size: u64,
+        shard_count: u32,
+        sha256_hex: String,
+        shards: Vec<(u32, u64, u64)>,
+    }
+
+    let mut seen_object_rel_paths: BTreeSet<String> = BTreeSet::new();
+    let mut seen_logical_rel_paths: BTreeSet<String> = BTreeSet::new();
+    let mut fragment_groups: BTreeMap<String, FragmentGroupValidation> = BTreeMap::new();
     let declared_total =
         manifest
             .entries
@@ -1617,9 +1753,72 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                     )));
                 }
                 validate_manifest_rel_path(&entry.rel_path)?;
-                if !seen_rel_paths.insert(entry.rel_path.as_str()) {
+                if !seen_object_rel_paths.insert(entry.rel_path.clone()) {
                     return Err(RqError::Frame(format!(
                         "duplicate manifest rel_path: {}",
+                        entry.rel_path
+                    )));
+                }
+                if let Some(fragment) = &entry.fragment {
+                    if !entry.members.is_empty() {
+                        return Err(RqError::Frame(format!(
+                            "manifest entry {} cannot be both packed and fragmented",
+                            entry.rel_path
+                        )));
+                    }
+                    validate_manifest_rel_path(&fragment.rel_path)?;
+                    if fragment.shard_count == 0 || fragment.shard_index >= fragment.shard_count {
+                        return Err(RqError::Frame(format!(
+                            "fragment {} has invalid shard {}/{}",
+                            fragment.rel_path, fragment.shard_index, fragment.shard_count
+                        )));
+                    }
+                    if fragment.len != entry.size {
+                        return Err(RqError::Frame(format!(
+                            "fragment {} len {} does not match object {} size {}",
+                            fragment.rel_path, fragment.len, entry.rel_path, entry.size
+                        )));
+                    }
+                    let end = fragment
+                        .logical_offset
+                        .checked_add(fragment.len)
+                        .ok_or_else(|| {
+                            RqError::Frame(format!(
+                                "fragment {} byte range overflows",
+                                fragment.rel_path
+                            ))
+                        })?;
+                    if end > fragment.logical_size {
+                        return Err(RqError::Frame(format!(
+                            "fragment {} range ends at {end} beyond logical size {}",
+                            fragment.rel_path, fragment.logical_size
+                        )));
+                    }
+                    let group = fragment_groups.entry(fragment.rel_path.clone()).or_insert_with(
+                        || FragmentGroupValidation {
+                            logical_size: fragment.logical_size,
+                            shard_count: fragment.shard_count,
+                            sha256_hex: fragment.sha256_hex.clone(),
+                            shards: Vec::new(),
+                        },
+                    );
+                    if group.logical_size != fragment.logical_size
+                        || group.shard_count != fragment.shard_count
+                        || group.sha256_hex != fragment.sha256_hex
+                    {
+                        return Err(RqError::Frame(format!(
+                            "fragment {} metadata is inconsistent across shards",
+                            fragment.rel_path
+                        )));
+                    }
+                    group
+                        .shards
+                        .push((fragment.shard_index, fragment.logical_offset, fragment.len));
+                } else if entry.members.is_empty()
+                    && !seen_logical_rel_paths.insert(entry.rel_path.clone())
+                {
+                    return Err(RqError::Frame(format!(
+                        "duplicate logical rel_path: {}",
                         entry.rel_path
                     )));
                 }
@@ -1633,7 +1832,7 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                     let mut expected_offset = 0u64;
                     for member in &entry.members {
                         validate_manifest_rel_path(&member.rel_path)?;
-                        if !seen_rel_paths.insert(member.rel_path.as_str()) {
+                        if !seen_logical_rel_paths.insert(member.rel_path.clone()) {
                             return Err(RqError::Frame(format!(
                                 "duplicate packed member rel_path: {}",
                                 member.rel_path
@@ -1668,6 +1867,50 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
             size: declared_total,
             max: config.max_transfer_bytes,
         });
+    }
+    if single_file_fragmented && fragment_groups.len() != 1 {
+        return Err(RqError::Frame(format!(
+            "single-file fragmented manifest declares {} logical files",
+            fragment_groups.len()
+        )));
+    }
+    for (rel_path, group) in fragment_groups {
+        if !seen_logical_rel_paths.insert(rel_path.clone()) {
+            return Err(RqError::Frame(format!(
+                "duplicate logical rel_path: {rel_path}"
+            )));
+        }
+        if group.shards.len() != usize::try_from(group.shard_count).unwrap_or(usize::MAX) {
+            return Err(RqError::Frame(format!(
+                "fragment {rel_path} declares {} shards but manifest carries {}",
+                group.shard_count,
+                group.shards.len()
+            )));
+        }
+        let mut shards = group.shards;
+        shards.sort_by_key(|(shard_index, _, _)| *shard_index);
+        let mut expected_offset = 0u64;
+        for (position, (shard_index, offset, len)) in shards.iter().enumerate() {
+            if *shard_index != u32::try_from(position).unwrap_or(u32::MAX) {
+                return Err(RqError::Frame(format!(
+                    "fragment {rel_path} has non-contiguous shard index {shard_index}"
+                )));
+            }
+            if *offset != expected_offset {
+                return Err(RqError::Frame(format!(
+                    "fragment {rel_path} offset {offset} is not contiguous (expected {expected_offset})"
+                )));
+            }
+            expected_offset = expected_offset.checked_add(*len).ok_or_else(|| {
+                RqError::Frame(format!("fragment {rel_path} length sum overflows"))
+            })?;
+        }
+        if expected_offset != group.logical_size {
+            return Err(RqError::Frame(format!(
+                "fragment {rel_path} shards cover {expected_offset} bytes but logical size is {}",
+                group.logical_size
+            )));
+        }
     }
     Ok(())
 }
@@ -2133,6 +2376,7 @@ struct EntryEncoder {
     index: u32,
     object_id: ObjectId,
     abs_path: PathBuf,
+    source_offset: usize,
     size: usize,
     /// Cumulative repair symbols already requested from the encoder, indexed by
     /// source block. Feedback rounds request more and send only the newly-minted
@@ -2220,7 +2464,8 @@ pub async fn send_path(
     // no-packing case `entries == raw_entries` and `logical_digests` equals the
     // per-file digests, so everything is byte-identical to a prior transfer. The
     // temp dir owns every pack temp file and must outlive the spray loop below.
-    let (entries, logical_digests, _pack_tempdir) = pack_small_files(raw_entries).await?;
+    let (packed_entries, logical_digests, _pack_tempdir) = pack_small_files(raw_entries).await?;
+    let entries = split_large_entries(packed_entries, &logical_digests, &config).await?;
 
     let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
     // Per-OBJECT digests: size + sha of each entry's `abs_path` (the temp file for
@@ -2230,7 +2475,7 @@ pub async fn send_path(
     let mut total_bytes = 0u64;
     for entry in &entries {
         let (size, content_id, content_sha256) =
-            hash_file_streaming(&entry.abs_path, &mut hash_buf)
+            hash_source_entry_streaming(entry, &mut hash_buf)
                 .await
                 .map_err(|e| RqError::Source(e.into_message()))?;
         total_bytes = total_bytes.checked_add(size).ok_or(RqError::TooLarge {
@@ -2265,6 +2510,7 @@ pub async fn send_path(
             size: digest.size,
             sha256_hex: hex_encode(&digest.content_sha256),
             members: entry.members.clone(),
+            fragment: entry.fragment.clone(),
         })
         .collect();
     let packed_objects = manifest_entries
@@ -2344,22 +2590,26 @@ pub async fn send_path(
         sockets.push(sock);
     }
 
-    let mut encoders: Vec<EntryEncoder> = entries
-        .iter()
-        .zip(digests.iter())
-        .enumerate()
-        .map(|(i, (entry, digest))| {
-            let index = u32::try_from(i).unwrap_or(u32::MAX);
-            let size = usize::try_from(digest.size).unwrap_or(usize::MAX);
-            EntryEncoder {
-                index,
-                object_id: entry_object_id(&transfer_id, index),
-                abs_path: entry.abs_path.clone(),
-                size,
-                repair_cursors: Vec::new(),
-            }
-        })
-        .collect();
+    let mut encoders: Vec<EntryEncoder> = Vec::with_capacity(entries.len());
+    for (i, (entry, digest)) in entries.iter().zip(digests.iter()).enumerate() {
+        let index = u32::try_from(i).unwrap_or(u32::MAX);
+        let size = usize::try_from(digest.size).map_err(|_| RqError::TooLarge {
+            size: digest.size,
+            max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+        })?;
+        let source_offset = usize::try_from(entry.source_offset).map_err(|_| RqError::TooLarge {
+            size: entry.source_offset,
+            max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+        })?;
+        encoders.push(EntryEncoder {
+            index,
+            object_id: entry_object_id(&transfer_id, index),
+            abs_path: entry.abs_path.clone(),
+            source_offset,
+            size,
+            repair_cursors: Vec::new(),
+        });
+    }
 
     // Send the manifest, then spray round 0 (source + optional overhead repair).
     control
@@ -2728,8 +2978,11 @@ async fn spray_round(
                 for (window_offset, block) in window.iter().enumerate() {
                     // Disk reads are cheap relative to the RaptorQ solve, so read each block's
                     // source range here and hand the owned bytes to the pool task.
+                    let read_start = enc.source_offset.checked_add(block.start).ok_or_else(|| {
+                        RqError::Coding("encode source range offset overflow".to_string())
+                    })?;
                     let block_bytes =
-                        read_source_range(&enc.abs_path, block.start, block.len).await?;
+                        read_source_range(&enc.abs_path, read_start, block.len).await?;
                     let object_id = enc.object_id;
                     let sbn = block.sbn;
                     let block_index = window_start + window_offset;
@@ -2809,7 +3062,10 @@ async fn spray_round(
                     },
                     pool,
                 );
-                let block_bytes = read_source_range(&enc.abs_path, block.start, block.len).await?;
+                let read_start = enc.source_offset.checked_add(block.start).ok_or_else(|| {
+                    RqError::Coding("encode source range offset overflow".to_string())
+                })?;
+                let block_bytes = read_source_range(&enc.abs_path, read_start, block.len).await?;
 
                 let mut send_batch = RqPendingSendBatch::new(sockets.len());
                 if with_source {
@@ -2874,6 +3130,65 @@ async fn spray_round(
         }
     }
     Ok(())
+}
+
+async fn hash_source_entry_streaming(
+    entry: &RqSourceEntry,
+    buf: &mut [u8],
+) -> Result<(u64, crate::atp::object::ObjectId, [u8; 32]), StreamingError> {
+    if entry.source_offset == 0 && entry.source_len.is_none() {
+        return hash_file_streaming(&entry.abs_path, buf).await;
+    }
+    let len = entry.source_len.ok_or_else(|| {
+        StreamingError::new(format!(
+            "{}: ranged source entry missing source_len",
+            entry.abs_path.display()
+        ))
+    })?;
+    hash_file_range_streaming(&entry.abs_path, entry.source_offset, len, buf).await
+}
+
+async fn hash_file_range_streaming(
+    path: &Path,
+    offset: u64,
+    len: u64,
+    buf: &mut [u8],
+) -> Result<(u64, crate::atp::object::ObjectId, [u8; 32]), StreamingError> {
+    let mut file = crate::fs::File::open(path)
+        .await
+        .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
+
+    let mut sha = Sha256::new();
+    let mut cid = crate::atp::object::ContentId::streaming();
+    let mut remaining = len;
+    let mut size = 0u64;
+    while remaining > 0 {
+        let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+        let n = file
+            .read(&mut buf[..want])
+            .await
+            .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
+        if n == 0 {
+            return Err(StreamingError::new(format!(
+                "{}: short read while hashing source range offset={offset} len={len}",
+                path.display()
+            )));
+        }
+        sha.update(&buf[..n]);
+        cid.update(&buf[..n]);
+        let n_u64 = n as u64;
+        remaining -= n_u64;
+        size = size.saturating_add(n_u64);
+    }
+
+    Ok((
+        size,
+        crate::atp::object::ObjectId::content(cid.finalize()),
+        sha.finalize().into(),
+    ))
 }
 
 async fn read_source_range(path: &Path, offset: usize, len: usize) -> Result<Vec<u8>, RqError> {
@@ -3059,7 +3374,10 @@ async fn source_symbol_for_request(
     let end = (start + symbol_size).min(block_start + block_len);
     let mut buffer = vec![0u8; symbol_size];
     if start < end {
-        let bytes = read_source_range(&enc.abs_path, start, end - start).await?;
+        let read_start = enc.source_offset.checked_add(start).ok_or_else(|| {
+            RqError::Coding("source request range offset overflow".to_string())
+        })?;
+        let bytes = read_source_range(&enc.abs_path, read_start, end - start).await?;
         buffer[..bytes.len()].copy_from_slice(&bytes);
     }
     Ok(Symbol::new(
@@ -4062,6 +4380,83 @@ async fn read_member_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>
     read_source_range(path, offset, len).await
 }
 
+#[derive(Debug, Clone)]
+struct LargeObjectCommitShard {
+    staging_path: PathBuf,
+    fragment: LargeObjectFragment,
+}
+
+async fn hash_large_object_fragments(
+    shards: &[LargeObjectCommitShard],
+    buf: &mut [u8],
+) -> Result<(u64, crate::atp::object::ObjectId, [u8; 32]), RqError> {
+    let mut sha = Sha256::new();
+    let mut cid = crate::atp::object::ContentId::streaming();
+    let mut total = 0u64;
+    for shard in shards {
+        let mut file = crate::fs::File::open(&shard.staging_path)
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", shard.staging_path.display())))?;
+        let mut remaining = shard.fragment.len;
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+            let n = file
+                .read(&mut buf[..want])
+                .await
+                .map_err(|e| RqError::Source(format!("{}: {e}", shard.staging_path.display())))?;
+            if n == 0 {
+                return Err(RqError::Source(format!(
+                    "{}: short read while hashing fragment {}",
+                    shard.staging_path.display(),
+                    shard.fragment.rel_path
+                )));
+            }
+            sha.update(&buf[..n]);
+            cid.update(&buf[..n]);
+            let n_u64 = n as u64;
+            remaining -= n_u64;
+            total = total.saturating_add(n_u64);
+        }
+    }
+    Ok((
+        total,
+        crate::atp::object::ObjectId::content(cid.finalize()),
+        sha.finalize().into(),
+    ))
+}
+
+async fn write_large_object_fragments(
+    shards: &[LargeObjectCommitShard],
+    out_path: &Path,
+    buf: &mut [u8],
+) -> Result<(), RqError> {
+    let mut out = crate::fs::File::create(out_path).await?;
+    for shard in shards {
+        let mut file = crate::fs::File::open(&shard.staging_path)
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", shard.staging_path.display())))?;
+        let mut remaining = shard.fragment.len;
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+            let n = file
+                .read(&mut buf[..want])
+                .await
+                .map_err(|e| RqError::Source(format!("{}: {e}", shard.staging_path.display())))?;
+            if n == 0 {
+                return Err(RqError::Source(format!(
+                    "{}: short read while committing fragment {}",
+                    shard.staging_path.display(),
+                    shard.fragment.rel_path
+                )));
+            }
+            out.write_all(&buf[..n]).await?;
+            remaining -= n as u64;
+        }
+    }
+    out.flush().await?;
+    Ok(())
+}
+
 /// Verify every entry (SHA-256 + rebuilt merkle root) and, on success, atomically
 /// write them to `dest_dir`.
 ///
@@ -4106,8 +4501,15 @@ async fn verify_and_commit(
             staging_path: PathBuf,
             members: Vec<PackedMember>,
         },
+        /// Large-file entry split into ordered RaptorQ objects: reassemble the
+        /// shard staging files into one logical destination file.
+        Fragments {
+            rel_path: String,
+            shards: Vec<LargeObjectCommitShard>,
+        },
     }
     let mut commits: Vec<EntryCommit> = Vec::with_capacity(manifest.entries.len());
+    let mut fragment_groups: BTreeMap<String, Vec<LargeObjectCommitShard>> = BTreeMap::new();
     let mut logical_files: u64 = 0;
     let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
     for e in &manifest.entries {
@@ -4134,7 +4536,15 @@ async fn verify_and_commit(
             sha_ok = false;
         }
 
-        if e.members.is_empty() {
+        if let Some(fragment) = &e.fragment {
+            fragment_groups
+                .entry(fragment.rel_path.clone())
+                .or_default()
+                .push(LargeObjectCommitShard {
+                    staging_path: decoder.staging_path.clone(),
+                    fragment: fragment.clone(),
+                });
+        } else if e.members.is_empty() {
             // Normal single-file entry: its content IS the file (byte-identical to
             // the prior wire). Its own digest is the logical digest; rename on commit.
             logical_digests.push(EntryDigest {
@@ -4177,6 +4587,29 @@ async fn verify_and_commit(
         }
     }
 
+    for (rel_path, mut shards) in fragment_groups {
+        shards.sort_by_key(|shard| shard.fragment.shard_index);
+        let (size, content_id, content_sha256) =
+            hash_large_object_fragments(&shards, &mut hash_buf).await?;
+        let Some(first) = shards.first() else {
+            sha_ok = false;
+            continue;
+        };
+        if size != first.fragment.logical_size
+            || hex_encode(&content_sha256) != first.fragment.sha256_hex
+        {
+            sha_ok = false;
+        }
+        logical_digests.push(EntryDigest {
+            rel_path: rel_path.clone(),
+            size,
+            content_id,
+            content_sha256,
+        });
+        logical_files = logical_files.saturating_add(1);
+        commits.push(EntryCommit::Fragments { rel_path, shards });
+    }
+
     let merkle_ok = flat_merkle_root_from_digests(&logical_digests) == manifest.merkle_root_hex;
 
     let committed = sha_ok && merkle_ok;
@@ -4198,6 +4631,10 @@ async fn verify_and_commit(
                 staging_path: PathBuf,
                 offset: u64,
                 len: u64,
+                out_path: PathBuf,
+            },
+            Fragments {
+                shards: Vec<LargeObjectCommitShard>,
                 out_path: PathBuf,
             },
         }
@@ -4234,14 +4671,25 @@ async fn verify_and_commit(
                         });
                     }
                 }
+                EntryCommit::Fragments { rel_path, shards } => {
+                    let out_path = if manifest.is_directory {
+                        join_relative(&base, rel_path)?
+                    } else {
+                        base.clone()
+                    };
+                    writes.push(CommitWrite::Fragments {
+                        shards: shards.clone(),
+                        out_path,
+                    });
+                }
             }
         }
 
         for write in &writes {
             let out_path = match write {
-                CommitWrite::Rename { out_path, .. } | CommitWrite::Member { out_path, .. } => {
-                    out_path
-                }
+                CommitWrite::Rename { out_path, .. }
+                | CommitWrite::Member { out_path, .. }
+                | CommitWrite::Fragments { out_path, .. } => out_path,
             };
             reject_destination_symlink_prefix(&base, out_path).await?;
         }
@@ -4273,6 +4721,13 @@ async fn verify_and_commit(
                     // O(member) memory.
                     let bytes = read_member_range(&staging_path, offset, len).await?;
                     crate::fs::write(&out_path, &bytes).await?;
+                    committed_paths.push(out_path.display().to_string());
+                }
+                CommitWrite::Fragments { shards, out_path } => {
+                    if let Some(parent) = out_path.parent() {
+                        crate::fs::create_dir_all(parent).await?;
+                    }
+                    write_large_object_fragments(&shards, &out_path, &mut hash_buf).await?;
                     committed_paths.push(out_path.display().to_string());
                 }
             }
@@ -4856,6 +5311,7 @@ mod tests {
             size,
             sha256_hex: "0".repeat(64),
             members: Vec::new(),
+            fragment: None,
         }
     }
 
@@ -4893,6 +5349,7 @@ mod tests {
                     sha256_hex: "bb".repeat(32),
                 },
             ],
+            fragment: None,
         };
         let json = serde_json::to_string(&packed).expect("serialize packed");
         assert!(json.contains("members"), "packed entry serializes members");
@@ -5055,6 +5512,7 @@ mod tests {
                 size,
                 sha256_hex,
                 members: Vec::new(),
+                fragment: None,
             }],
         };
         let mut decoders = vec![EntryDecoder {
@@ -5663,6 +6121,7 @@ mod tests {
             index: 7,
             object_id: entry_object_id("source-request", 7),
             abs_path: source_path,
+            source_offset: 0,
             size: bytes.len(),
             repair_cursors: Vec::new(),
         };
@@ -6216,6 +6675,232 @@ mod tests {
         assert_eq!(p2.symbols_per_block, 8192);
     }
 
+    // ─── E-12 large-entry multi-object split ───────────────────────────────
+
+    fn digest_for_bytes(rel_path: &str, bytes: &[u8]) -> EntryDigest {
+        EntryDigest {
+            rel_path: rel_path.to_string(),
+            size: bytes.len() as u64,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(bytes),
+            ),
+            content_sha256: Sha256::digest(bytes).into(),
+        }
+    }
+
+    fn fragment_entry(
+        index: u32,
+        object_rel_path: &str,
+        object_bytes: &[u8],
+        fragment: LargeObjectFragment,
+    ) -> ManifestEntry {
+        ManifestEntry {
+            index,
+            rel_path: object_rel_path.to_string(),
+            size: object_bytes.len() as u64,
+            sha256_hex: hex_encode(&Sha256::digest(object_bytes)),
+            members: Vec::new(),
+            fragment: Some(fragment),
+        }
+    }
+
+    #[test]
+    fn split_large_entries_plans_bounded_ranged_objects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes: Vec<u8> = (0..600).map(|i| (i % 251) as u8).collect();
+        let entry = source_entry(dir.path(), "huge.bin", &bytes);
+        let logical = vec![digest_for_bytes("huge.bin", &bytes)];
+        let config = RqConfig {
+            symbol_size: 1,
+            max_block_size: 1,
+            ..RqConfig::default()
+        };
+
+        let split =
+            futures_lite::future::block_on(split_large_entries(vec![entry], &logical, &config))
+                .expect("split large entry");
+
+        assert_eq!(split.len(), 3, "600 bytes at 256-byte objects => 3 shards");
+        assert_eq!(split[0].source_offset, 0);
+        assert_eq!(split[0].source_len, Some(256));
+        assert_eq!(split[1].source_offset, 256);
+        assert_eq!(split[1].source_len, Some(256));
+        assert_eq!(split[2].source_offset, 512);
+        assert_eq!(split[2].source_len, Some(88));
+        for (idx, shard) in split.iter().enumerate() {
+            let fragment = shard.fragment.as_ref().expect("fragment metadata");
+            assert_eq!(fragment.rel_path, "huge.bin");
+            assert_eq!(fragment.shard_index, idx as u32);
+            assert_eq!(fragment.shard_count, 3);
+            assert_eq!(fragment.logical_size, bytes.len() as u64);
+            assert_eq!(fragment.sha256_hex, hex_encode(&Sha256::digest(&bytes)));
+        }
+
+        let mut buf = vec![0u8; 64];
+        let (range_size, _, range_sha) =
+            futures_lite::future::block_on(hash_source_entry_streaming(&split[1], &mut buf))
+                .expect("range hash");
+        assert_eq!(range_size, 256);
+        assert_eq!(range_sha, Sha256::digest(&bytes[256..512]).into());
+    }
+
+    #[test]
+    fn validate_manifest_accepts_and_bounds_fragment_table() {
+        let whole = b"abcdefghijklmnopqrstuvwxyz".to_vec();
+        let a = &whole[..10];
+        let b = &whole[10..];
+        let whole_sha = hex_encode(&Sha256::digest(&whole));
+        let entries = vec![
+            fragment_entry(
+                0,
+                ".atp-fragment-0-0",
+                a,
+                LargeObjectFragment {
+                    rel_path: "huge.bin".to_string(),
+                    shard_index: 0,
+                    shard_count: 2,
+                    logical_offset: 0,
+                    len: a.len() as u64,
+                    logical_size: whole.len() as u64,
+                    sha256_hex: whole_sha.clone(),
+                },
+            ),
+            fragment_entry(
+                1,
+                ".atp-fragment-0-1",
+                b,
+                LargeObjectFragment {
+                    rel_path: "huge.bin".to_string(),
+                    shard_index: 1,
+                    shard_count: 2,
+                    logical_offset: a.len() as u64,
+                    len: b.len() as u64,
+                    logical_size: whole.len() as u64,
+                    sha256_hex: whole_sha,
+                },
+            ),
+        ];
+        let manifest = TransferManifest {
+            transfer_id: "rqtransfer1".to_string(),
+            root_name: "huge.bin".to_string(),
+            is_directory: false,
+            total_bytes: whole.len() as u64,
+            merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
+            entries,
+        };
+        assert!(validate_manifest(&manifest, &RqConfig::default()).is_ok());
+
+        let mut gapped = manifest.clone();
+        gapped.entries[1]
+            .fragment
+            .as_mut()
+            .expect("fragment")
+            .logical_offset += 1;
+        assert!(matches!(
+            validate_manifest(&gapped, &RqConfig::default()),
+            Err(RqError::Frame(m)) if m.contains("not contiguous")
+        ));
+    }
+
+    #[test]
+    fn verify_and_commit_reassembles_fragmented_file() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let staging_dir = dest.path().join(".atp-rq-fragment-staging");
+        std::fs::create_dir_all(&staging_dir).expect("staging dir");
+
+        let a = b"first fragment ".to_vec();
+        let b = b"second fragment".to_vec();
+        let mut whole = Vec::new();
+        whole.extend_from_slice(&a);
+        whole.extend_from_slice(&b);
+        let a_path = staging_dir.join("0");
+        let b_path = staging_dir.join("1");
+        std::fs::write(&a_path, &a).expect("write first shard");
+        std::fs::write(&b_path, &b).expect("write second shard");
+
+        let whole_sha = hex_encode(&Sha256::digest(&whole));
+        let manifest = TransferManifest {
+            transfer_id: "rqtransfer1".to_string(),
+            root_name: "huge.bin".to_string(),
+            is_directory: false,
+            total_bytes: whole.len() as u64,
+            merkle_root_hex: flat_merkle_root_from_digests(&[digest_for_bytes("huge.bin", &whole)]),
+            entries: vec![
+                fragment_entry(
+                    0,
+                    ".atp-fragment-0-0",
+                    &a,
+                    LargeObjectFragment {
+                        rel_path: "huge.bin".to_string(),
+                        shard_index: 0,
+                        shard_count: 2,
+                        logical_offset: 0,
+                        len: a.len() as u64,
+                        logical_size: whole.len() as u64,
+                        sha256_hex: whole_sha.clone(),
+                    },
+                ),
+                fragment_entry(
+                    1,
+                    ".atp-fragment-0-1",
+                    &b,
+                    LargeObjectFragment {
+                        rel_path: "huge.bin".to_string(),
+                        shard_index: 1,
+                        shard_count: 2,
+                        logical_offset: a.len() as u64,
+                        len: b.len() as u64,
+                        logical_size: whole.len() as u64,
+                        sha256_hex: whole_sha,
+                    },
+                ),
+            ],
+        };
+        let mut decoders = vec![
+            EntryDecoder {
+                index: 0,
+                object_id: entry_object_id(&manifest.transfer_id, 0),
+                size: a.len() as u64,
+                pipeline: None,
+                complete: true,
+                staging_path: a_path,
+                file: None,
+                bytes_written: a.len() as u64,
+                max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+                source_streaming: false,
+                source_blocks: Vec::new(),
+            },
+            EntryDecoder {
+                index: 1,
+                object_id: entry_object_id(&manifest.transfer_id, 1),
+                size: b.len() as u64,
+                pipeline: None,
+                complete: true,
+                staging_path: b_path,
+                file: None,
+                bytes_written: b.len() as u64,
+                max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+                source_streaming: false,
+                source_blocks: Vec::new(),
+            },
+        ];
+
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+        ))
+        .expect("verify fragmented file");
+
+        assert!(receipt.committed, "fragmented transfer must commit");
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+        assert_eq!(receipt.files, 1);
+        assert_eq!(std::fs::read(dest.path().join("huge.bin")).unwrap(), whole);
+    }
+
     // ─── E-15 tree coalescing (pack / split) ───────────────────────────────
 
     fn source_entry(dir: &Path, rel: &str, bytes: &[u8]) -> RqSourceEntry {
@@ -6227,7 +6912,10 @@ mod tests {
         RqSourceEntry {
             rel_path: rel.to_string(),
             abs_path: abs,
+            source_offset: 0,
+            source_len: None,
             members: Vec::new(),
+            fragment: None,
         }
     }
 
@@ -6399,6 +7087,7 @@ mod tests {
                 size: object.len() as u64,
                 sha256_hex: object_sha,
                 members,
+                fragment: None,
             }],
         };
         let mut decoders = vec![EntryDecoder {
@@ -6463,6 +7152,7 @@ mod tests {
             size: 15,
             sha256_hex: "cc".repeat(32),
             members: good_members.clone(),
+            fragment: None,
         };
         assert!(
             validate_manifest(&manifest_with(vec![ok_entry], 15), &RqConfig::default()).is_ok()
@@ -6477,6 +7167,7 @@ mod tests {
             size: 15,
             sha256_hex: "cc".repeat(32),
             members: gap,
+            fragment: None,
         };
         assert!(matches!(
             validate_manifest(&manifest_with(vec![entry], 15), &RqConfig::default()),
@@ -6490,6 +7181,7 @@ mod tests {
             size: 99,
             sha256_hex: "cc".repeat(32),
             members: good_members.clone(),
+            fragment: None,
         };
         assert!(matches!(
             validate_manifest(&manifest_with(vec![entry], 99), &RqConfig::default()),
@@ -6505,6 +7197,7 @@ mod tests {
             size: 15,
             sha256_hex: "cc".repeat(32),
             members: evil,
+            fragment: None,
         };
         assert!(matches!(
             validate_manifest(&manifest_with(vec![entry], 15), &RqConfig::default()),
@@ -6568,6 +7261,7 @@ mod tests {
                         sha256_hex: "ff".repeat(32),
                     },
                 ],
+                fragment: None,
             }],
         };
         let mut decoders = vec![EntryDecoder {
