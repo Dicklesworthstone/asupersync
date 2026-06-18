@@ -141,6 +141,9 @@ pub use crate::net::atp::transport_rq::adaptive::{
     AdaptiveController as QuicAdaptiveController, AdaptivePolicy as QuicAdaptivePolicy,
     BlockPlan as QuicAdaptiveBlockPlan, PathEstimate as QuicPathEstimate,
     PathSignalSample as QuicPathSignalSample,
+    RateMatchedPacingPlan as QuicRateMatchedPacingPlan,
+    DEFAULT_COLD_START_PACING_BYTES_PER_S as QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S,
+    rate_matched_pacing_plan as rq_rate_matched_pacing_plan,
 };
 
 /// Protocol identifier carried in the QUIC handshake; bump on wire-incompatible
@@ -565,6 +568,93 @@ pub fn apply_quic_adaptive_block_plan(
     plan: QuicAdaptiveBlockPlan,
 ) -> Result<QuicConfig, QuicTransportError> {
     QuicAdaptiveArm::from_block_plan(plan)?.apply_to_config(config)
+}
+
+/// Result of one QUIC adaptive pacing epoch.
+#[derive(Debug, Clone)]
+pub struct QuicAdaptivePacingDecision {
+    /// Transfer config with the selected block/FEC/fan-out geometry and raw
+    /// pacing cap applied.
+    pub config: QuicConfig,
+    /// Shared calibrated rate plan used to produce this decision.
+    pub rate_plan: QuicRateMatchedPacingPlan,
+    /// QUIC spray pacing decision derived from `config` and the current path
+    /// signal.
+    pub spray: QuicSprayPacingDecision,
+}
+
+/// Convert a shared adaptive path estimate into a QUIC transfer config and
+/// spray pacing decision.
+///
+/// This is the Phase-C bridge from `PathEstimate` to QUIC's datagram pacing:
+/// the shared model computes calibrated FEC overhead and a raw rate cap
+/// `lambda`, where useful payload is bounded by `lambda / (1 + epsilon)`.
+/// QUIC applies that raw cap through the existing deterministic spray pacer.
+/// If evidence is too thin, the fixed transfer geometry is preserved and only a
+/// conservative cold-start rate cap is applied.
+pub fn quic_adaptive_rate_matched_pacing_decision(
+    config: &QuicConfig,
+    estimate: &QuicPathEstimate,
+    path: QuicPathSignalSample,
+    policy: &QuicAdaptivePolicy,
+    cpu_parallelism: usize,
+) -> Result<QuicAdaptivePacingDecision, QuicTransportError> {
+    config.validate()?;
+
+    let cold_start_bytes_per_s = config
+        .bwlimit_bps
+        .map_or(QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S, |cap| {
+            cap.max(1) as f64
+        });
+    let max_burst_datagrams = u32::try_from(config.max_spray_symbols_per_flush)
+        .unwrap_or(u32::MAX)
+        .max(1);
+    let rate_plan = rq_rate_matched_pacing_plan(
+        estimate,
+        policy,
+        config.symbol_size,
+        cold_start_bytes_per_s,
+        max_burst_datagrams,
+    );
+
+    let mut adapted = if rate_plan.cold_start {
+        config.clone()
+    } else {
+        apply_quic_adaptive_block_plan(config.clone(), rate_plan.block)?
+    };
+    adapted.bwlimit_bps = Some(adaptive_raw_pacing_bytes_per_s(config, rate_plan));
+    adapted.max_spray_symbols_per_flush = adapted
+        .max_spray_symbols_per_flush
+        .min(usize::try_from(rate_plan.max_burst_datagrams).unwrap_or(usize::MAX))
+        .max(1);
+    adapted.validate()?;
+
+    let spray = quic_spray_pacing_decision_from_config_with_cpu(
+        &adapted,
+        path.clamped(),
+        cpu_parallelism,
+    );
+
+    Ok(QuicAdaptivePacingDecision {
+        config: adapted,
+        rate_plan,
+        spray,
+    })
+}
+
+fn adaptive_raw_pacing_bytes_per_s(
+    config: &QuicConfig,
+    rate_plan: QuicRateMatchedPacingPlan,
+) -> u64 {
+    let raw_bytes = rate_plan
+        .raw_pacing_bits_per_s
+        .saturating_add(7)
+        .checked_div(8)
+        .unwrap_or(1)
+        .max(1);
+    config
+        .bwlimit_bps
+        .map_or(raw_bytes, |cap| cap.max(1).min(raw_bytes))
 }
 
 const MIN_QUIC_SPRAY_PACING_RTT_S: f64 = 0.001;
@@ -6130,6 +6220,99 @@ mod tests {
             outcome.symbols_sent >= 3,
             "source symbols plus adaptive repair should be sprayed"
         );
+    }
+
+    #[test]
+    fn quic_rate_matched_adaptation_applies_calibrated_fec_and_raw_pacing_cap() {
+        let config = QuicConfig {
+            symbol_size: 1024,
+            max_spray_symbols_per_flush: 64,
+            ..trusted_quic_config()
+        };
+        let policy = QuicAdaptivePolicy {
+            min_samples_to_activate: 1,
+            max_overhead: 0.50,
+            ..QuicAdaptivePolicy::default()
+        };
+        let decision = quic_adaptive_rate_matched_pacing_decision(
+            &config,
+            &quic_path_estimate(0.05, 24_000_000.0),
+            pacing_signal(0.050, 16 * 1024 * 1024, 0.05),
+            &policy,
+            8,
+        )
+        .expect("activated estimate yields a QUIC adaptive pacing decision");
+
+        assert!(!decision.rate_plan.cold_start);
+        assert!(
+            decision.rate_plan.block.overhead > 0.05,
+            "lossy path should request calibrated repair overhead"
+        );
+        assert_eq!(
+            decision.config.repair_overhead,
+            1.0 + decision.rate_plan.block.overhead
+        );
+        assert_eq!(
+            decision.config.max_block_size,
+            usize::from(config.symbol_size)
+                * usize::try_from(decision.rate_plan.block.k).expect("test k fits usize")
+        );
+        assert_eq!(
+            decision.config.datagram_fanout,
+            decision.rate_plan.block.fanout
+        );
+        assert_eq!(
+            decision.config.bwlimit_bps,
+            Some(adaptive_raw_pacing_bytes_per_s(&config, decision.rate_plan))
+        );
+        assert!(
+            decision.spray.pacing_rate_bps <= decision.config.bwlimit_bps.unwrap(),
+            "spray pacer must honor the raw rate-matched cap"
+        );
+    }
+
+    #[test]
+    fn quic_rate_matched_adaptation_preserves_operator_bwlimit() {
+        let config = QuicConfig {
+            bwlimit_bps: Some(128 * 1024),
+            max_spray_symbols_per_flush: 64,
+            ..trusted_quic_config()
+        };
+        let policy = QuicAdaptivePolicy {
+            min_samples_to_activate: 1,
+            ..QuicAdaptivePolicy::default()
+        };
+        let decision = quic_adaptive_rate_matched_pacing_decision(
+            &config,
+            &quic_path_estimate(0.01, 64_000_000.0),
+            pacing_signal(0.025, 64 * 1024 * 1024, 0.0),
+            &policy,
+            8,
+        )
+        .expect("operator-capped adaptation should be valid");
+
+        assert_eq!(decision.config.bwlimit_bps, Some(128 * 1024));
+        assert_eq!(decision.spray.limiter, QuicSprayPacingLimiter::BandwidthLimit);
+        assert!(decision.spray.pacing_rate_bps <= 128 * 1024);
+    }
+
+    #[test]
+    fn quic_rate_matched_adaptation_cold_starts_without_changing_geometry() {
+        let config = trusted_quic_config();
+        let decision = quic_adaptive_rate_matched_pacing_decision(
+            &config,
+            &QuicPathEstimate::unknown(),
+            pacing_signal(0.050, 256 * 1024, 0.0),
+            &QuicAdaptivePolicy::default(),
+            4,
+        )
+        .expect("thin evidence should still produce a bounded pacing cap");
+
+        assert!(decision.rate_plan.cold_start);
+        assert_eq!(decision.config.max_block_size, config.max_block_size);
+        assert_eq!(decision.config.repair_overhead, config.repair_overhead);
+        assert_eq!(decision.config.datagram_fanout, config.datagram_fanout);
+        assert_eq!(decision.config.bwlimit_bps, Some(8 * 1024 * 1024));
     }
 
     #[test]
