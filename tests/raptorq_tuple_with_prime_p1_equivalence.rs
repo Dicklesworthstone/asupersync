@@ -131,7 +131,11 @@ fn composite_p_is_corrected_to_prime() {
         assert!(!ref_is_prime(p), "test bug: {p} is not composite");
         let p1 = ref_next_prime_ge(p);
         assert!(p1 > p, "smallest_prime_ge of composite {p} must exceed it");
-        assert_eq!(next_prime_ge(p), Some(p1), "production prime derivation mismatch");
+        assert_eq!(
+            next_prime_ge(p),
+            Some(p1),
+            "production prime derivation mismatch"
+        );
 
         for &j in SYSTEMATIC_INDICES {
             for &x in ESIS {

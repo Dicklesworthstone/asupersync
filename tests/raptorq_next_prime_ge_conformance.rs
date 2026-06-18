@@ -60,12 +60,10 @@ fn next_prime_ge_matches_independent_sieve() {
         next_prime[n] = last; // 0 means "none found at/above n within sieve"
     }
 
-    for n in 0..=SWEEP_BOUND {
-        let expected = next_prime[n];
+    for (n, &expected) in next_prime.iter().enumerate().take(SWEEP_BOUND + 1) {
         assert_ne!(expected, 0, "sieve too small for n={n}");
-        let got = next_prime_ge(n).unwrap_or_else(|| {
-            panic!("next_prime_ge({n}) returned None within sieved range")
-        });
+        let got = next_prime_ge(n)
+            .unwrap_or_else(|| panic!("next_prime_ge({n}) returned None within sieved range"));
         assert_eq!(
             got, expected,
             "next_prime_ge({n}) = {got}, expected smallest prime >= n = {expected}; \
@@ -75,11 +73,8 @@ fn next_prime_ge_matches_independent_sieve() {
         // no prime in [n, got).
         assert!(is_prime[got], "next_prime_ge({n}) = {got} is not prime");
         assert!(got >= n, "next_prime_ge({n}) = {got} < n");
-        for m in n..got {
-            assert!(
-                !is_prime[m],
-                "next_prime_ge({n}) skipped prime {m} (< {got})"
-            );
+        for (m, &prime) in is_prime.iter().enumerate().take(got).skip(n) {
+            assert!(!prime, "next_prime_ge({n}) skipped prime {m} (< {got})");
         }
     }
 }
@@ -95,8 +90,8 @@ fn next_prime_ge_rfc_golden_pairs() {
     let golden: &[(usize, usize)] = &[
         (3, 3),
         (4, 5),
-        (10, 11),   // RQ-D1-TUPLE golden P=10 -> P1=11
-        (15, 17),   // RQ-D1-TUPLE-007/008 golden P=15 -> P1=17
+        (10, 11), // RQ-D1-TUPLE golden P=10 -> P1=11
+        (15, 17), // RQ-D1-TUPLE-007/008 golden P=15 -> P1=17
         (100, 101),
         (113, 113), // 113 is itself prime
         (114, 127), // 114..126 composite, 127 prime
