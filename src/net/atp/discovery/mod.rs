@@ -928,11 +928,21 @@ fn tailscale_candidate(
         ));
     }
 
-    if now_micros
-        > observation
-            .observed_at_micros()
-            .saturating_add(policy.tailscale_max_staleness_micros)
-    {
+    let observed_at_micros = observation.observed_at_micros();
+    if observed_at_micros > now_micros {
+        return Err(DirectDiscoveryError::new(
+            DirectCandidateSource::TailscaleProvider,
+            DirectCandidateRejection::StaleCandidate,
+            format!(
+                "policy={} source={} observed_at=future scope={}",
+                policy.tailscale_policy.code(),
+                observation.detection_source().code(),
+                endpoint_scope(endpoint)
+            ),
+        ));
+    }
+
+    if now_micros > observed_at_micros.saturating_add(policy.tailscale_max_staleness_micros) {
         return Err(DirectDiscoveryError::new(
             DirectCandidateSource::TailscaleProvider,
             DirectCandidateRejection::StaleCandidate,
@@ -1612,6 +1622,28 @@ mod tests {
             rejection.source == DirectCandidateSource::TailscaleProvider
                 && rejection.reason == DirectCandidateRejection::StaleCandidate
                 && rejection.detail.contains("source=status_command")
+                && !rejection.detail.contains("100.100.10.20")
+        }));
+
+        let future_dated = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default()
+                .with_tailscale_policy(TailscalePathPolicy::Allow)
+                .with_tailscale_max_staleness_micros(30_000_000),
+            PathDiscoveryInputs {
+                tailscale_candidates: vec![TailscaleCandidateObservation::new(
+                    socket("100.100.10.20:41641"),
+                    TailscaleDetectionSource::StatusCommand,
+                    2_001,
+                )],
+                now_micros: 2_000,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+        assert!(future_dated.candidates.is_empty());
+        assert!(future_dated.rejections.iter().any(|rejection| {
+            rejection.source == DirectCandidateSource::TailscaleProvider
+                && rejection.reason == DirectCandidateRejection::StaleCandidate
+                && rejection.detail.contains("observed_at=future")
                 && !rejection.detail.contains("100.100.10.20")
         }));
 
