@@ -356,6 +356,7 @@ struct NativeReceiveTraceCounters {
     pending_datagrams: usize,
     inbound_datagram_capacity: usize,
     inbound_datagram_available: usize,
+    inbound_pump_batch_limit: usize,
 }
 
 impl NativeReceiveTraceCounters {
@@ -370,6 +371,7 @@ impl NativeReceiveTraceCounters {
             pending_datagrams: link.conn.pending_datagram_count(),
             inbound_datagram_capacity: link.conn.inbound_datagram_capacity(),
             inbound_datagram_available: link.conn.inbound_datagram_remaining_capacity(),
+            inbound_pump_batch_limit: INBOUND_PUMP_BATCH,
         }
     }
 
@@ -394,6 +396,7 @@ impl NativeReceiveTraceCounters {
         let pending_datagrams_text = self.pending_datagrams.to_string();
         let inbound_datagram_capacity_text = self.inbound_datagram_capacity.to_string();
         let inbound_datagram_available_text = self.inbound_datagram_available.to_string();
+        let inbound_pump_batch_limit_text = self.inbound_pump_batch_limit.to_string();
         cx.trace_with_fields(
             "atp_quic.receive.decoded",
             &[
@@ -429,6 +432,10 @@ impl NativeReceiveTraceCounters {
                 (
                     "inbound_datagram_available",
                     inbound_datagram_available_text.as_str(),
+                ),
+                (
+                    "inbound_pump_batch_limit",
+                    inbound_pump_batch_limit_text.as_str(),
                 ),
             ],
         );
@@ -1960,6 +1967,7 @@ mod tests {
             pending_datagrams: 3,
             inbound_datagram_capacity: 1024,
             inbound_datagram_available: 1021,
+            inbound_pump_batch_limit: INBOUND_PUMP_BATCH,
         };
         let decode_stats = crate::net::atp::transport_quic::QuicDecodeStats {
             decode_count: 4,
@@ -1989,6 +1997,7 @@ mod tests {
         assert_eq!(entry.get_field("reorder_occupancy"), Some("3"));
         assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("1024"));
         assert_eq!(entry.get_field("inbound_datagram_available"), Some("1021"));
+        assert_eq!(entry.get_field("inbound_pump_batch_limit"), Some("512"));
     }
 
     #[test]
