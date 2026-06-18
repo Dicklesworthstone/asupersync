@@ -619,6 +619,28 @@ impl RqAdaptiveSendState {
         self.beacons.observe_probe_result(now, control_wait);
     }
 
+    fn mark_control_peer_activity(&mut self) {
+        self.beacons.mark_peer_activity(Instant::now());
+    }
+
+    fn next_control_keepalive_due(&mut self) -> bool {
+        let measurement = self.beacons.latest_rtt().map_or_else(
+            BeaconMeasurement::empty,
+            |rtt| BeaconMeasurement::with_rtt(duration_micros_u32(rtt), 0),
+        );
+        self.beacons
+            .next_action(Instant::now(), measurement)
+            .is_some()
+    }
+
+    fn control_liveness_expired(&self) -> bool {
+        self.beacons.peer_liveness_expired()
+    }
+
+    fn missed_control_probes(&self) -> u8 {
+        self.beacons.missed_probes()
+    }
+
     fn round_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
         let fixed = RqRoundTuning {
             repair_overhead: config.repair_overhead.max(1.0),
@@ -1230,6 +1252,45 @@ where
             }
             self.rbuf.extend_from_slice(&tmp[..n]);
         }
+    }
+
+    async fn try_recv_ready(&mut self) -> Result<Option<Frame>, RqError> {
+        use std::future::poll_fn;
+        use std::pin::Pin;
+        use std::task::Poll;
+
+        if let Some(frame) = self
+            .codec
+            .decode(&mut self.rbuf)
+            .map_err(|e| RqError::Frame(e.to_string()))?
+        {
+            return Ok(Some(frame));
+        }
+
+        let mut tmp = [0u8; 4096];
+        let ready = poll_fn(|task_cx| {
+            let mut read_buf = ReadBuf::new(&mut tmp);
+            match Pin::new(&mut self.stream).poll_read(task_cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(Some(read_buf.filled().len()))),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Ready(Ok(None)),
+            }
+        })
+        .await?;
+
+        let Some(n) = ready else {
+            return Ok(None);
+        };
+        if n == 0 {
+            return Err(RqError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "peer closed control connection mid-transfer",
+            )));
+        }
+        self.rbuf.extend_from_slice(&tmp[..n]);
+        self.codec
+            .decode(&mut self.rbuf)
+            .map_err(|e| RqError::Frame(e.to_string()))
     }
 }
 
@@ -2659,6 +2720,8 @@ pub async fn send_path(
     let mut round_symbols_start = symbols_sent;
     spray_round(
         cx,
+        &mut control,
+        &mut adaptive,
         &mut sockets,
         &mut rr,
         &mut symbols_sent,
@@ -2720,6 +2783,10 @@ pub async fn send_path(
                     peer,
                 });
             }
+            FrameType::KeepAlive => {
+                adaptive.mark_control_peer_activity();
+                continue;
+            }
             FrameType::ObjectRequest => {
                 let need: NeedMore = parse_json(&reply)?;
                 feedback_rounds += 1;
@@ -2765,6 +2832,8 @@ pub async fn send_path(
                     // still-pending entries.
                     spray_round(
                         cx,
+                        &mut control,
+                        &mut adaptive,
                         &mut sockets,
                         &mut rr,
                         &mut symbols_sent,
@@ -2785,6 +2854,8 @@ pub async fn send_path(
                     round_symbols_start = symbols_sent;
                     spray_source_requests(
                         cx,
+                        &mut control,
+                        &mut adaptive,
                         &mut sockets,
                         &mut rr,
                         &mut symbols_sent,
@@ -2800,6 +2871,8 @@ pub async fn send_path(
                     if source_fec_fallback_active {
                         spray_round(
                             cx,
+                            &mut control,
+                            &mut adaptive,
                             &mut sockets,
                             &mut rr,
                             &mut symbols_sent,
@@ -2821,7 +2894,7 @@ pub async fn send_path(
             other => {
                 return Err(RqError::Unexpected {
                     got: other,
-                    expected: "Proof | NeedMore",
+                    expected: "Proof | NeedMore | KeepAlive",
                 });
             }
         }
@@ -2942,8 +3015,10 @@ fn encode_block_symbols(
 /// relabeled. Per-block repair cursors advance so each round's repair is fresh
 /// for every source block in a pending entry.
 #[allow(clippy::too_many_arguments)]
-async fn spray_round(
+async fn spray_round<S>(
     cx: &Cx,
+    control: &mut FrameTransport<S>,
+    adaptive: &mut RqAdaptiveSendState,
     sockets: &mut [UdpSocket],
     rr: &mut usize,
     symbols_sent: &mut u64,
@@ -2957,7 +3032,10 @@ async fn spray_round(
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
     parallel_encode: bool,
-) -> Result<(), RqError> {
+) -> Result<(), RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let batch = repair_batch_per_block(config);
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
@@ -3030,6 +3108,8 @@ async fn spray_round(
                     };
                     send_symbol_datagrams(
                         cx,
+                        control,
+                        adaptive,
                         sockets,
                         rr,
                         symbols_sent,
@@ -3102,6 +3182,8 @@ async fn spray_round(
                         let produced = ring.pop().expect("M=1 ring drains immediately");
                         queue_symbol_datagram(
                             cx,
+                            control,
+                            adaptive,
                             sockets,
                             rr,
                             symbols_sent,
@@ -3130,6 +3212,8 @@ async fn spray_round(
                         let produced = ring.pop().expect("M=1 ring drains immediately");
                         queue_symbol_datagram(
                             cx,
+                            control,
+                            adaptive,
                             sockets,
                             rr,
                             symbols_sent,
@@ -3147,6 +3231,7 @@ async fn spray_round(
                     }
                 }
                 send_batch.flush(sockets, symbols_sent).await?;
+                service_rq_spray_control(cx, control, adaptive).await?;
                 enc.repair_cursors[block_index] = target_repair;
             }
         }
@@ -3237,8 +3322,10 @@ async fn read_source_range(path: &Path, offset: usize, len: usize) -> Result<Vec
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn spray_source_requests(
+async fn spray_source_requests<S>(
     cx: &Cx,
+    control: &mut FrameTransport<S>,
+    adaptive: &mut RqAdaptiveSendState,
     sockets: &mut [UdpSocket],
     rr: &mut usize,
     symbols_sent: &mut u64,
@@ -3249,7 +3336,10 @@ async fn spray_source_requests(
     config: &RqConfig,
     pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
-) -> Result<(), RqError> {
+) -> Result<(), RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let mut send_batch = RqPendingSendBatch::new(sockets.len());
     for request in requests {
         let enc = encoders
@@ -3265,6 +3355,8 @@ async fn spray_source_requests(
 
         queue_symbol_datagram(
             cx,
+            control,
+            adaptive,
             sockets,
             rr,
             symbols_sent,
@@ -3280,6 +3372,7 @@ async fn spray_source_requests(
         .await?;
     }
     send_batch.flush(sockets, symbols_sent).await?;
+    service_rq_spray_control(cx, control, adaptive).await?;
     rqtrace!(
         "sender: retransmitted {} requested source symbols",
         requests.len()
@@ -3288,8 +3381,10 @@ async fn spray_source_requests(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn send_symbol_datagrams(
+async fn send_symbol_datagrams<S>(
     cx: &Cx,
+    control: &mut FrameTransport<S>,
+    adaptive: &mut RqAdaptiveSendState,
     sockets: &mut [UdpSocket],
     rr: &mut usize,
     symbols_sent: &mut u64,
@@ -3300,11 +3395,16 @@ async fn send_symbol_datagrams(
     config: &RqConfig,
     pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
-) -> Result<(), RqError> {
+) -> Result<(), RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let mut send_batch = RqPendingSendBatch::new(sockets.len());
     for sym in symbols {
         queue_symbol_datagram(
             cx,
+            control,
+            adaptive,
             sockets,
             rr,
             symbols_sent,
@@ -3319,12 +3419,15 @@ async fn send_symbol_datagrams(
         )
         .await?;
     }
-    send_batch.flush(sockets, symbols_sent).await
+    send_batch.flush(sockets, symbols_sent).await?;
+    service_rq_spray_control(cx, control, adaptive).await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn queue_symbol_datagram(
+async fn queue_symbol_datagram<S>(
     cx: &Cx,
+    control: &mut FrameTransport<S>,
+    adaptive: &mut RqAdaptiveSendState,
     sockets: &mut [UdpSocket],
     rr: &mut usize,
     symbols_sent: &mut u64,
@@ -3336,7 +3439,10 @@ async fn queue_symbol_datagram(
     pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
     send_batch: &mut RqPendingSendBatch,
-) -> Result<(), RqError> {
+) -> Result<(), RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     if config.debug_drop_one_in > 0 {
         *dropper = dropper.wrapping_add(1);
@@ -3355,7 +3461,54 @@ async fn queue_symbol_datagram(
     send_batch.push(socket_index, dgram);
     if send_batch.should_flush() {
         send_batch.flush(sockets, symbols_sent).await?;
+        service_rq_spray_control(cx, control, adaptive).await?;
     }
+    Ok(())
+}
+
+async fn service_rq_spray_control<S>(
+    cx: &Cx,
+    control: &mut FrameTransport<S>,
+    adaptive: &mut RqAdaptiveSendState,
+) -> Result<(), RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+    while let Some(frame) = control.try_recv_ready().await? {
+        match frame.frame_type() {
+            FrameType::KeepAlive => adaptive.mark_control_peer_activity(),
+            FrameType::Close => {
+                return Err(RqError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "peer closed control during RQ spray",
+                )));
+            }
+            got => {
+                return Err(RqError::Unexpected {
+                    got,
+                    expected: "KeepAlive while spraying",
+                });
+            }
+        }
+    }
+
+    if adaptive.next_control_keepalive_due() {
+        let frame = Frame::empty(FrameType::KeepAlive)
+            .map_err(|err| RqError::Frame(err.to_string()))?;
+        control.send(&frame).await?;
+    }
+
+    if adaptive.control_liveness_expired() {
+        return Err(RqError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "peer liveness expired during RQ spray after {} missed beacon probes",
+                adaptive.missed_control_probes()
+            ),
+        )));
+    }
+
     Ok(())
 }
 
@@ -3735,6 +3888,15 @@ pub async fn receive_connection(
                     )?)
                     .await?;
             }
+            FrameType::KeepAlive => {
+                control
+                    .send(
+                        &Frame::empty(FrameType::KeepAlive)
+                            .map_err(|e| RqError::Frame(e.to_string()))?,
+                    )
+                    .await?;
+                continue;
+            }
             FrameType::Close => {
                 return Err(RqError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -3744,7 +3906,7 @@ pub async fn receive_connection(
             other => {
                 return Err(RqError::Unexpected {
                     got: other,
-                    expected: "ObjectComplete",
+                    expected: "ObjectComplete | KeepAlive",
                 });
             }
         }

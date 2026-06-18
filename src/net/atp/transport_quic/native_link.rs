@@ -54,7 +54,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ServerConfig};
@@ -63,6 +63,7 @@ use crate::bytes::BytesMut;
 use crate::cx::Cx;
 use crate::io::AsyncWriteExt;
 use crate::net::atp::protocol::frames::{Frame, FrameType};
+use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
 use crate::net::atp::transport_common::{
     EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
@@ -339,6 +340,7 @@ pub struct QuicLink {
     /// Max application payload that fits one 1-RTT packet under the endpoint MTU.
     max_app_payload: usize,
     idle_timeout: Duration,
+    beacons: BeaconScheduler,
     udp_packets_received: u64,
     one_rtt_packets_ingested: u64,
     non_one_rtt_packets_dropped: u64,
@@ -456,6 +458,60 @@ impl QuicLink {
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.endpoint.local_addr()
+    }
+
+    fn mark_peer_activity(&mut self) {
+        self.beacons.mark_peer_activity(Instant::now());
+    }
+
+    fn beacon_measurement(&self) -> BeaconMeasurement {
+        self.beacons.latest_rtt().map_or_else(
+            BeaconMeasurement::empty,
+            |rtt| {
+                BeaconMeasurement::with_rtt(
+                    u32::try_from(rtt.as_micros()).unwrap_or(u32::MAX),
+                    0,
+                )
+            },
+        )
+    }
+
+    async fn service_spray_liveness(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+    ) -> Result<(), QuicTransportError> {
+        let _ = self.pump_inbound_for(cx, INBOUND_PUMP_DRAIN_GRACE).await?;
+        while let Some(frame) = control.try_recv(cx, &mut self.conn)? {
+            match frame.frame_type() {
+                FrameType::KeepAlive => self.mark_peer_activity(),
+                got => {
+                    return Err(QuicTransportError::Unexpected {
+                        got,
+                        expected: "KeepAlive while spraying",
+                    });
+                }
+            }
+        }
+
+        let measurement = self.beacon_measurement();
+        if self
+            .beacons
+            .next_action(Instant::now(), measurement)
+            .is_some()
+        {
+            send_native_keep_alive(cx, &mut self.conn, control)?;
+            self.flush(cx).await?;
+        }
+
+        if self.beacons.peer_liveness_expired() {
+            return Err(QuicTransportError::Timeout {
+                operation: "spray peer liveness",
+                timeout: self.idle_timeout,
+            });
+        }
+
+        Ok(())
     }
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
@@ -577,6 +633,7 @@ impl QuicLink {
             self.clock,
         )?;
         self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
+        self.mark_peer_activity();
         Ok(true)
     }
 
@@ -706,6 +763,7 @@ impl QuicLink {
     async fn spray_symbol(
         &mut self,
         cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
         symbol: &Symbol,
         tag: u64,
         entry: u32,
@@ -714,6 +772,7 @@ impl QuicLink {
     ) -> Result<(), QuicTransportError> {
         if self.conn.pending_outbound_datagram_count() >= pacing.max_burst_symbols {
             self.flush(cx).await?;
+            self.service_spray_liveness(cx, control).await?;
             crate::time::sleep(cx.now(), pacing.pause_after_burst).await;
         }
         super::send_native_symbol(cx, &mut self.conn, symbol, tag, entry, auth_tag)
@@ -838,6 +897,7 @@ fn link_from_handshake(
         clock: 0,
         max_app_payload,
         idle_timeout: config.idle_timeout,
+        beacons: BeaconScheduler::new(1, Instant::now()),
         udp_packets_received: 0,
         one_rtt_packets_ingested: 0,
         non_one_rtt_packets_dropped: 0,
@@ -1033,6 +1093,7 @@ async fn accept(
 async fn spray_round(
     cx: &Cx,
     link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
     manifest: &TransferManifest,
     encoders: &mut [QuicEntryEncoder],
     pending: &std::collections::BTreeSet<u32>,
@@ -1099,7 +1160,7 @@ async fn spray_round(
                     continue;
                 }
                 let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
-                link.spray_symbol(cx, &symbol, tag, entry_index, auth_tag, &pacing)
+                link.spray_symbol(cx, control, &symbol, tag, entry_index, auth_tag, &pacing)
                     .await?;
                 sent = sent.saturating_add(1);
             }
@@ -1113,6 +1174,7 @@ async fn spray_round(
 async fn spray_source_requests(
     cx: &Cx,
     link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
     manifest: &TransferManifest,
     encoders: &[QuicEntryEncoder],
     requests: &[QuicSourceSymbolRequest],
@@ -1158,7 +1220,7 @@ async fn spray_source_requests(
             crate::types::symbol::SymbolKind::Source,
         );
         let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
-        link.spray_symbol(cx, &symbol, tag, request.entry, auth_tag, &pacing)
+        link.spray_symbol(cx, control, &symbol, tag, request.entry, auth_tag, &pacing)
             .await?;
         sent = sent.saturating_add(1);
     }
@@ -1169,6 +1231,7 @@ async fn spray_source_requests(
 async fn spray_block_repair_requests(
     cx: &Cx,
     link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
     manifest: &TransferManifest,
     encoders: &mut [QuicEntryEncoder],
     requests: &[QuicBlockRepairRequest],
@@ -1210,7 +1273,7 @@ async fn spray_block_repair_requests(
                 .map_err(|err| QuicTransportError::Control(err.to_string()))?
                 .into_symbol();
             let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
-            link.spray_symbol(cx, &symbol, tag, entry_index, auth_tag, &pacing)
+            link.spray_symbol(cx, control, &symbol, tag, entry_index, auth_tag, &pacing)
                 .await?;
             sent = sent.saturating_add(1);
         }
@@ -1280,6 +1343,7 @@ async fn run_sender_session(
     let mut symbols_sent = spray_round(
         cx,
         link,
+        &mut control,
         manifest,
         &mut encoders,
         &pending_all,
@@ -1363,6 +1427,7 @@ async fn run_sender_session(
                     spray_block_repair_requests(
                         cx,
                         link,
+                        &mut control,
                         manifest,
                         &mut encoders,
                         &need.repair_blocks,
@@ -1374,6 +1439,7 @@ async fn run_sender_session(
                     spray_round(
                         cx,
                         link,
+                        &mut control,
                         manifest,
                         &mut encoders,
                         &pending,
@@ -1386,6 +1452,7 @@ async fn run_sender_session(
                     spray_source_requests(
                         cx,
                         link,
+                        &mut control,
                         manifest,
                         &encoders,
                         &need.source_symbols,
@@ -1717,13 +1784,19 @@ async fn run_receiver_session(
                     continue;
                 }
                 if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
-                    if frame.frame_type() != FrameType::ObjectComplete {
-                        return Err(QuicTransportError::Unexpected {
-                            got: frame.frame_type(),
-                            expected: "ObjectComplete",
-                        });
+                    match frame.frame_type() {
+                        FrameType::ObjectComplete => break,
+                        FrameType::KeepAlive => {
+                            send_and_flush_native_keep_alive(cx, link, &mut control).await?;
+                            continue;
+                        }
+                        got => {
+                            return Err(QuicTransportError::Unexpected {
+                                got,
+                                expected: "ObjectComplete | KeepAlive",
+                            });
+                        }
                     }
-                    break;
                 }
                 link.flush(cx).await?;
                 let round_made_progress = symbols_accepted > round_symbols_start;
