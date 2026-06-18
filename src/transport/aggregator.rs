@@ -13,7 +13,7 @@ use crate::types::Time;
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -1818,6 +1818,44 @@ pub struct ProcessResult {
     pub path: PathId,
 }
 
+/// Result of processing one fungible RaptorQ symbol.
+#[derive(Debug)]
+pub struct FungibleProcessResult {
+    /// Unique symbol ready for immediate decoder ingestion.
+    pub ready: Option<Symbol>,
+
+    /// Whether the symbol was a duplicate already seen on another path.
+    pub was_duplicate: bool,
+
+    /// Path the symbol arrived on.
+    pub path: PathId,
+
+    /// First path that delivered this symbol, when tracked.
+    pub first_path: Option<PathId>,
+}
+
+/// Multi-source collection progress for one fungible RaptorQ object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiSourceFungibleReport {
+    /// Object being collected.
+    pub object_id: ObjectId,
+
+    /// Unique symbols required by the caller before decode can proceed.
+    pub target_unique_symbols: usize,
+
+    /// Unique symbols accepted for `object_id`.
+    pub unique_symbols: usize,
+
+    /// Duplicate arrivals skipped across all paths.
+    pub duplicate_symbols: usize,
+
+    /// Paths that contributed at least one unique symbol.
+    pub contributing_paths: Vec<PathId>,
+
+    /// True once `unique_symbols >= target_unique_symbols`.
+    pub complete: bool,
+}
+
 /// The main multipath aggregator.
 #[derive(Debug)]
 pub struct MultipathAggregator {
@@ -1956,6 +1994,95 @@ impl MultipathAggregator {
             ready: reorder_result.ready,
             was_duplicate: false,
             path,
+        }
+    }
+
+    /// Processes an incoming RaptorQ symbol as fungible decoder input.
+    ///
+    /// RaptorQ does not require symbol ordering: any unique symbols for the
+    /// object can advance decode. This path therefore uses the existing
+    /// cross-path deduplicator and bypasses sequence reordering, which keeps
+    /// multi-source collection from stalling behind gaps that another peer may
+    /// fill later.
+    pub fn process_fungible_symbol(
+        &self,
+        symbol: Symbol,
+        path: PathId,
+        now: Time,
+    ) -> FungibleProcessResult {
+        self.total_processed.fetch_add(1, Ordering::Relaxed);
+        let object_id = symbol.object_id();
+        let symbol_id = symbol.id();
+
+        if let Some(p) = self.paths.get(path) {
+            p.record_receipt(now);
+        }
+
+        let is_unique = self.dedup.check_and_record(&symbol, path, now);
+        if !is_unique {
+            if let Some(p) = self.paths.get(path) {
+                p.record_duplicate();
+            }
+            return FungibleProcessResult {
+                ready: None,
+                was_duplicate: true,
+                path,
+                first_path: self.dedup.first_path(object_id, symbol_id),
+            };
+        }
+
+        FungibleProcessResult {
+            ready: Some(symbol),
+            was_duplicate: false,
+            path,
+            first_path: Some(path),
+        }
+    }
+
+    /// Collects unique fungible symbols until the requested decode target is met.
+    ///
+    /// The iterator is consumed only until `target_unique_symbols` matching
+    /// symbols have arrived. This is the multi-source ATP/RaptorQ core: no peer
+    /// needs to have a complete set alone, because the union of unique symbols
+    /// across paths is enough.
+    pub fn collect_fungible_symbols_until<I>(
+        &self,
+        object_id: ObjectId,
+        target_unique_symbols: usize,
+        symbols: I,
+        now: Time,
+    ) -> MultiSourceFungibleReport
+    where
+        I: IntoIterator<Item = (Symbol, PathId)>,
+    {
+        let mut unique_symbols = 0usize;
+        let mut duplicate_symbols = 0usize;
+        let mut contributing_paths = BTreeSet::new();
+
+        for (symbol, path) in symbols {
+            if unique_symbols >= target_unique_symbols {
+                break;
+            }
+            let result = self.process_fungible_symbol(symbol, path, now);
+            if result.was_duplicate {
+                duplicate_symbols = duplicate_symbols.saturating_add(1);
+                continue;
+            }
+            if let Some(symbol) = result.ready {
+                if symbol.object_id() == object_id {
+                    unique_symbols = unique_symbols.saturating_add(1);
+                    contributing_paths.insert(path);
+                }
+            }
+        }
+
+        MultiSourceFungibleReport {
+            object_id,
+            target_unique_symbols,
+            unique_symbols,
+            duplicate_symbols,
+            contributing_paths: contributing_paths.into_iter().collect(),
+            complete: unique_symbols >= target_unique_symbols,
         }
     }
 
@@ -3577,6 +3704,76 @@ mod tests {
         }
 
         crate::test_complete!("test_aggregator_multi_path_dedup");
+    }
+
+    #[test]
+    fn aggregator_collects_fungible_symbols_from_union_of_sources() {
+        init_test("aggregator_collects_fungible_symbols_from_union_of_sources");
+        let aggregator = MultipathAggregator::new(AggregatorConfig::default());
+        let p1 =
+            aggregator
+                .paths()
+                .create_path("p1", "localhost:1", PathCharacteristics::default());
+        let p2 = aggregator
+            .paths()
+            .create_path("p2", "localhost:2", PathCharacteristics::backup());
+
+        let s0 = Symbol::new_for_test(42, 0, 0, &[0]);
+        let object_id = s0.object_id();
+        let report = aggregator.collect_fungible_symbols_until(
+            object_id,
+            3,
+            [
+                (s0, p1),
+                (Symbol::new_for_test(42, 0, 0, &[0]), p2),
+                (Symbol::new_for_test(42, 0, 2, &[2]), p2),
+                (Symbol::new_for_test(42, 0, 1, &[1]), p1),
+            ],
+            Time::ZERO,
+        );
+
+        assert!(report.complete);
+        assert_eq!(report.unique_symbols, 3);
+        assert_eq!(report.duplicate_symbols, 1);
+        assert_eq!(report.contributing_paths, vec![p1, p2]);
+        let stats = aggregator.stats();
+        assert_eq!(stats.dedup.unique_symbols, 3);
+        assert_eq!(stats.dedup.duplicates_detected, 1);
+    }
+
+    #[test]
+    fn fungible_symbol_path_bypasses_reorder_buffer_for_raptorq() {
+        init_test("fungible_symbol_path_bypasses_reorder_buffer_for_raptorq");
+        let aggregator = MultipathAggregator::new(AggregatorConfig {
+            enable_reordering: true,
+            reorder: ReordererConfig {
+                immediate_delivery: false,
+                max_sequence_gap: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let path = aggregator.paths().create_path(
+            "source-a",
+            "localhost:7000",
+            PathCharacteristics::default(),
+        );
+
+        let result = aggregator.process_fungible_symbol(
+            Symbol::new_for_test(77, 0, 9, &[9]),
+            path,
+            Time::ZERO,
+        );
+
+        assert!(!result.was_duplicate);
+        assert_eq!(result.path, path);
+        assert_eq!(result.first_path, Some(path));
+        assert_eq!(result.ready.as_ref().map(Symbol::esi), Some(9));
+        let stats = aggregator.stats();
+        assert_eq!(
+            stats.reorder.symbols_buffered, 0,
+            "fungible RaptorQ symbols should not enter sequence reorder buffers"
+        );
     }
 
     // Test 12: MultipathAggregator object completion
