@@ -25,11 +25,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+const DEFAULT_MAX_CONNECTIONS: usize = 4096;
+
 /// Connection routing table that maps connection IDs to active QUIC connections.
 #[derive(Debug)]
 pub struct ConnectionRouter {
     /// Map from destination connection ID to connection handle.
     connections: HashMap<ConnectionId, ConnectionHandle>,
+    /// Maximum active connections accepted by this router.
+    max_connections: usize,
     /// Next connection ID counter for generating new connections.
     next_connection_id: u64,
     /// Connection configuration template.
@@ -204,8 +208,20 @@ impl std::error::Error for ConnectionRouterError {}
 impl ConnectionRouter {
     /// Create a new connection router with the given configuration template.
     pub fn new(config_template: NativeQuicConnectionConfig) -> Self {
+        Self::with_max_connections(config_template, DEFAULT_MAX_CONNECTIONS)
+    }
+
+    /// Create a connection router with an explicit active-connection cap.
+    ///
+    /// A zero cap is normalized to one connection so the router never accepts an
+    /// unbounded configuration by accident.
+    pub fn with_max_connections(
+        config_template: NativeQuicConnectionConfig,
+        max_connections: usize,
+    ) -> Self {
         Self {
             connections: HashMap::new(),
+            max_connections: max_connections.max(1),
             next_connection_id: 1,
             config_template,
             clock_origin: Instant::now(),
@@ -302,6 +318,16 @@ impl ConnectionRouter {
                 connection_id,
                 outgoing_packets,
             })
+        } else if routing_info.kind == PacketRoutingKind::Initial
+            && self.connections.len() >= self.max_connections
+        {
+            Ok(RoutingResult::Drop {
+                reason: format!(
+                    "connection limit reached: active={}, max={}",
+                    self.connections.len(),
+                    self.max_connections
+                ),
+            })
         } else if routing_info.kind == PacketRoutingKind::Initial {
             let new_connection_id = connection_id;
 
@@ -336,6 +362,19 @@ impl ConnectionRouter {
     ) -> Result<(), ConnectionRouterError> {
         if cx.checkpoint().is_err() {
             return Err(ConnectionRouterError::Cancelled);
+        }
+
+        if self.connections.contains_key(&connection_id) {
+            return Err(ConnectionRouterError::ConnectionCreationFailed(format!(
+                "connection ID collision: {connection_id:?}"
+            )));
+        }
+        if self.connections.len() >= self.max_connections {
+            return Err(ConnectionRouterError::ConnectionCreationFailed(format!(
+                "connection limit reached: active={}, max={}",
+                self.connections.len(),
+                self.max_connections
+            )));
         }
 
         let mut config = self.config_template;
@@ -1151,6 +1190,81 @@ mod tests {
 
             assert_eq!(router.connections.len(), 1);
             assert!(router.connections.contains_key(&connection_id));
+        });
+    }
+
+    #[test]
+    fn create_connection_rejects_duplicate_connection_id_without_overwrite() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = ConnectionId::new(&[0x31, 0x71, 0x00, 0x01]).expect("cid");
+            let original_peer: SocketAddr = "127.0.0.1:4401".parse().unwrap();
+            let colliding_peer: SocketAddr = "127.0.0.1:4402".parse().unwrap();
+
+            router
+                .create_connection(&cx, connection_id, original_peer, true)
+                .await
+                .expect("first connection creation should succeed");
+
+            let err = router
+                .create_connection(&cx, connection_id, colliding_peer, false)
+                .await
+                .expect_err("duplicate destination CID must fail closed");
+            assert!(matches!(
+                err,
+                ConnectionRouterError::ConnectionCreationFailed(ref msg)
+                    if msg.contains("connection ID collision")
+            ));
+            assert_eq!(router.connections.len(), 1);
+            assert_eq!(
+                router
+                    .connections
+                    .get(&connection_id)
+                    .expect("original connection remains")
+                    .peer_addr,
+                original_peer
+            );
+        });
+    }
+
+    #[test]
+    fn connection_limit_rejects_create_and_drops_unknown_initials() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::with_max_connections(config, 0);
+            assert_eq!(router.max_connections, 1);
+
+            let peer_addr: SocketAddr = "127.0.0.1:4403".parse().unwrap();
+            let first = ConnectionId::new(&[0x31, 0x71, 0x00, 0x02]).expect("first cid");
+            router
+                .create_connection(&cx, first, peer_addr, true)
+                .await
+                .expect("first connection within normalized limit should succeed");
+
+            let second = ConnectionId::new(&[0x31, 0x71, 0x00, 0x03]).expect("second cid");
+            let err = router
+                .create_connection(&cx, second, peer_addr, true)
+                .await
+                .expect_err("second connection must hit the cap");
+            assert!(matches!(
+                err,
+                ConnectionRouterError::ConnectionCreationFailed(ref msg)
+                    if msg.contains("connection limit reached")
+            ));
+
+            let packet = ReceivedPacket {
+                src_addr: peer_addr,
+                data: encode_long_packet(second, LongPacketType::Initial, 0, QuicFrame::Ping),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+            match router.route_packet(&cx, packet).await.expect("route") {
+                RoutingResult::Drop { reason } => {
+                    assert!(reason.contains("connection limit reached"));
+                }
+                other => panic!("full router must not advertise a new connection: {other:?}"),
+            }
         });
     }
 

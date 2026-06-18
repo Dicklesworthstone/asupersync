@@ -204,6 +204,7 @@ pub struct NativeQuicConnection {
     transport: QuicTransportMachine,
     streams: StreamTable,
     next_packet_numbers: [u64; 3],
+    received_ack_trackers: [ReceivedPacketTracker; 3],
     migration_disabled: bool,
     active_path_id: u64,
     migration_events: u64,
@@ -301,6 +302,11 @@ impl NativeQuicConnection {
             transport: QuicTransportMachine::new(),
             streams,
             next_packet_numbers: [0, 0, 0],
+            received_ack_trackers: [
+                ReceivedPacketTracker::default(),
+                ReceivedPacketTracker::default(),
+                ReceivedPacketTracker::default(),
+            ],
             migration_disabled: false,
             active_path_id: 0,
             migration_events: 0,
@@ -1177,7 +1183,7 @@ impl NativeQuicConnection {
         }
 
         if ack_eliciting {
-            self.queue_ack_frame(packet_number);
+            self.queue_ack_frame(space, packet_number);
         }
 
         Ok(())
@@ -1737,15 +1743,84 @@ impl NativeQuicConnection {
         );
     }
 
-    fn queue_ack_frame(&mut self, packet_number: u64) {
-        self.pending_control_frames.push_back(QuicFrame::Ack {
-            largest_acknowledged: VarInt::from_u64_unchecked(packet_number),
-            ack_delay: VarInt::from_u64_unchecked(0),
-            ack_range_count: VarInt::from_u64_unchecked(0),
-            first_ack_range: VarInt::from_u64_unchecked(0),
-            ack_ranges: Vec::new(),
-            ecn_counts: None,
+    fn queue_ack_frame(&mut self, space: PacketNumberSpace, packet_number: u64) {
+        let tracker = &mut self.received_ack_trackers[packet_number_space_idx(space)];
+        tracker.observe(packet_number);
+        let Some(frame) = tracker.ack_frame() else {
+            return;
+        };
+        self.pending_control_frames
+            .retain(|frame| !matches!(frame, QuicFrame::Ack { .. }));
+        self.pending_control_frames.push_back(frame);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReceivedPacketTracker {
+    ranges: Vec<AckRange>,
+}
+
+impl ReceivedPacketTracker {
+    fn observe(&mut self, packet_number: u64) {
+        self.ranges.push(AckRange {
+            largest: packet_number,
+            smallest: packet_number,
         });
+        self.ranges.sort_by(|lhs, rhs| {
+            rhs.largest
+                .cmp(&lhs.largest)
+                .then_with(|| rhs.smallest.cmp(&lhs.smallest))
+        });
+
+        let mut merged: Vec<AckRange> = Vec::with_capacity(self.ranges.len());
+        for range in self.ranges.drain(..) {
+            if let Some(last) = merged.last_mut()
+                && range.largest.saturating_add(1) >= last.smallest
+            {
+                last.smallest = last.smallest.min(range.smallest);
+                continue;
+            }
+            merged.push(range);
+        }
+        self.ranges = merged;
+    }
+
+    fn ack_frame(&self) -> Option<QuicFrame> {
+        let first = *self.ranges.first()?;
+        let mut previous_smallest = first.smallest;
+        let mut ack_ranges = Vec::new();
+
+        for range in self.ranges.iter().skip(1) {
+            let gap = previous_smallest
+                .saturating_sub(range.largest)
+                .saturating_sub(2);
+            ack_ranges.push(crate::net::atp::protocol::quic_frames::AckRange {
+                gap: VarInt::from_u64_unchecked(gap),
+                ack_range_length: VarInt::from_u64_unchecked(
+                    range.largest.saturating_sub(range.smallest),
+                ),
+            });
+            previous_smallest = range.smallest;
+        }
+
+        Some(QuicFrame::Ack {
+            largest_acknowledged: VarInt::from_u64_unchecked(first.largest),
+            ack_delay: VarInt::from_u64_unchecked(0),
+            ack_range_count: VarInt::from_u64_unchecked(ack_ranges.len() as u64),
+            first_ack_range: VarInt::from_u64_unchecked(
+                first.largest.saturating_sub(first.smallest),
+            ),
+            ack_ranges,
+            ecn_counts: None,
+        })
+    }
+}
+
+fn packet_number_space_idx(space: PacketNumberSpace) -> usize {
+    match space {
+        PacketNumberSpace::Initial => 0,
+        PacketNumberSpace::Handshake => 1,
+        PacketNumberSpace::ApplicationData => 2,
     }
 }
 
@@ -2339,6 +2414,61 @@ mod tests {
             .on_ack_ranges(&cx, PacketNumberSpace::ApplicationData, &ranges, 0, 20_000)
             .expect("ack");
         assert_eq!(ack.acked_packets, 2);
+    }
+
+    #[test]
+    fn queued_ack_does_not_regress_largest_on_reordered_packets() {
+        let mut conn = established_conn();
+        conn.queue_ack_frame(PacketNumberSpace::ApplicationData, 5);
+        conn.queue_ack_frame(PacketNumberSpace::ApplicationData, 3);
+
+        let acks = conn
+            .pending_control_frames
+            .iter()
+            .filter_map(|frame| match frame {
+                QuicFrame::Ack {
+                    largest_acknowledged,
+                    first_ack_range,
+                    ack_ranges,
+                    ..
+                } => Some((*largest_acknowledged, *first_ack_range, ack_ranges)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(acks.len(), 1, "ACK queue should coalesce stale ACK frames");
+        let (largest, first_range, ranges) = acks[0];
+        assert_eq!(largest.value(), 5);
+        assert_eq!(first_range.value(), 0);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].gap.value(), 0);
+        assert_eq!(ranges[0].ack_range_length.value(), 0);
+    }
+
+    #[test]
+    fn queued_ack_coalesces_contiguous_received_packets() {
+        let mut conn = established_conn();
+        conn.queue_ack_frame(PacketNumberSpace::ApplicationData, 5);
+        conn.queue_ack_frame(PacketNumberSpace::ApplicationData, 4);
+        conn.queue_ack_frame(PacketNumberSpace::ApplicationData, 3);
+
+        let ack = conn
+            .pending_control_frames
+            .iter()
+            .find_map(|frame| match frame {
+                QuicFrame::Ack {
+                    largest_acknowledged,
+                    first_ack_range,
+                    ack_ranges,
+                    ..
+                } => Some((*largest_acknowledged, *first_ack_range, ack_ranges)),
+                _ => None,
+            })
+            .expect("ACK frame queued");
+
+        assert_eq!(ack.0.value(), 5);
+        assert_eq!(ack.1.value(), 2);
+        assert!(ack.2.is_empty());
     }
 
     #[test]
