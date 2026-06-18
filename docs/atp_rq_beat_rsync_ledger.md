@@ -291,6 +291,28 @@ to wire.
   WIN: 3 wrong memory hypotheses (seed-all, arena, large-K) refuted; heaptrack named the real cause.
   **Next:** target (a) first (biggest, in decoding.rs) — sha-isomorphic, unit-test byte-identical,
   re-heaptrack + re-time 50M/bad (expect alloc count ↓↓, RSS ↓, and perfect-50M wall ↓ too).
+- **★ CORRECTION 2026-06-18 (decode-clone is GATED — re-target the churn):** decoding.rs:521 only
+  calls `try_decode_block` (the `cloned().collect()`) when `source_received >= k || received >=
+  needed` (threshold reached). So the clone-all is NOT per-attempt churn — it fires ~once per block
+  when enough symbols exist. ⇒ the ~32 allocs/symbol churn is the **per-symbol recv→auth→persist
+  path**, dominated by the **per-symbol file-`seek` `spawn_blocking_io` dispatch** in
+  `persist_source_symbol` (each dispatch boxes a closure + channel) plus `payload.to_vec()` + the
+  HMAC verify. **THIS UNIFIES E-10 (per-symbol file dispatch) + E-11 (alloc churn) + the perfect-link
+  diffuse futex/ctx-switch into ONE ROOT: per-symbol file-op dispatch.** Single highest-EV lever =
+  **B-1 mmap the staging file** (writes become memory stores → ZERO per-symbol dispatch → kills the
+  alloc churn AND the futex/ctx-switch AND the CPU on BOTH frontiers); isomorphic alt = per-block
+  write batching (accumulate a block, one write/dispatch per block instead of per symbol). Build a
+  receiver `SymbolPool`/buffer reuse to kill `payload.to_vec()` too.
+- **★ E-12 · 5G FAILS = real 2 GB max-OBJECT limit (NOT a harness/max-bytes issue).** All 5G/atp
+  cells error at ~5.8s `TooLarge` (MAX_BYTES in run_matrix_cell.sh is 6 GB, so not that). RaptorQ uses
+  a u8 SBN ⇒ ≤256 source blocks; `effective_max_block_size` caps the block at `configured_max`
+  (8 MiB default) via `.min(configured_max)`, so max object ≈ 256 × 8 MiB = **2 GB**. 5 GB > 2 GB →
+  rejected. rsync transfers 5G fine ⇒ atp has a **hard >2 GB single-file gap** = a real
+  "any-workload" blocker. Fix options: (a) for large entries raise the per-block size ABOVE
+  configured_max so block-count ≤256 (but K grows → O(K²) decode matrix balloons — 5G/256≈20 MB block
+  → K≈14k → ~196 MB matrix/block, bad); (b) ★ MULTI-OBJECT split: chunk a huge entry into ≤2 GB
+  RaptorQ sub-objects (keeps K sane), transfer + reassemble — the right fix, a real feature. The 5G
+  matrix rows are recorded `error` (correctly excluded from headline); re-run 5G only after the fix.
 
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
