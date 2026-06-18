@@ -138,6 +138,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
+      - name: Generate release lockfile for locked publish
+        run: cargo generate-lockfile
+
       - name: Verify version matches tag
         run: |
           cargo_version=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)

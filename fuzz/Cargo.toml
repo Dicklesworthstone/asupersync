@@ -16,7 +16,7 @@ asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracin
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
-opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 
 # Optional: for structured fuzzing
 bytes = "1"
@@ -27,7 +27,7 @@ futures = "0.3"
 futures-util = "0.3"
 rustls = { version = "0.23.38", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pemfile = "2.2"
-opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
 
 # For SCRAM-SHA-256 parsing
 base64 = "0.22"
@@ -6223,5 +6223,4 @@ path = "fuzz_targets/replay_minimization_invariants.rs"
 test = false
 doc = false
 bench = false
-
 

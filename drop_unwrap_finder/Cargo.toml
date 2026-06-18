@@ -9,5 +9,5 @@ license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 [dependencies]
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
-syn = { version = "2.0.117", features = ["full", "fold", "visit"] }
+syn = { version = "2.0.118", features = ["full", "fold", "visit"] }
 walkdir = "2.5.0"

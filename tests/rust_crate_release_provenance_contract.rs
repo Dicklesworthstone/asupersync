@@ -900,6 +900,8 @@ fn publish_workflow_records_and_validates_provenance_before_live_publish() {
         "Upload Rust crate release provenance",
         "rust-crate-release-provenance",
         "WASM and npm provenance remain separate workflow surfaces.",
+        "Generate release lockfile for locked publish",
+        "cargo generate-lockfile",
     ] {
         assert!(
             workflow.contains(marker),

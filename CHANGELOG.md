@@ -14,6 +14,22 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 ## [Unreleased]
 
+## [v0.3.5] -- 2026-06-18
+
+> Dependency-refresh and release-train patch for Rust workspace crates and
+> Browser Edition packages.
+
+### Release highlights
+
+- Synchronized publishable Rust crates, Browser Edition package manifests, and
+  local workspace path dependencies on version 0.3.5.
+- Raised remaining non-compatible dependency requirements for the conformance,
+  fuzz, SQLite, OpenTelemetry, Redis, SQLx, RaptorQ, and Browser Edition tool
+  surfaces so validation resolves against current upstream releases.
+- Kept compatible patch/minor dependency resolution in the ignored local
+  `Cargo.lock`, preserving the library crate's no-committed-lock policy.
+- Updated the public README dependency snippets from 0.3.4 to 0.3.5.
+
 ## [v0.3.3] -- 2026-06-01
 
 > 1,991 commits since v0.3.2 (2026-05-20 -> 2026-06-01) | [compare](https://github.com/Dicklesworthstone/asupersync/compare/v0.3.2...v0.3.3)
@@ -1392,7 +1408,9 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.5...HEAD
+[v0.3.5]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.4...v0.3.5
+[v0.3.4]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.3...v0.3.4
 [v0.3.3]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.2...v0.3.3
 [v0.3.2]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.1...v0.3.2
 [v0.3.1]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.0...v0.3.1

@@ -1,6 +1,6 @@
 {
   "name": "@asupersync/browser",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "High-level Browser Edition SDK surface for Asupersync.",
   "homepage": "https://github.com/Dicklesworthstone/asupersync#readme",
   "bugs": {
@@ -43,7 +43,7 @@
     "@asupersync/browser-core": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "^5.4.0"
+    "typescript": "^6.0.3"
   },
   "keywords": [
     "asupersync",

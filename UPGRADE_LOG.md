@@ -141,3 +141,86 @@ Only **dev-dependencies / the conformance sub-crate**: `sqlx` 0.8→0.9 (also cl
 the pre-existing RUSTSEC-2023-0071 `rsa`/Marvin advisory in the MySQL conformance
 test), `redis` 0.26→1.2, `raptorq` 1→2, conformance `hyper` 0.14→1.x +
 `env_logger` 0.10→0.11. None can affect the production runtime.
+
+---
+
+## 2026-06-18 — asupersync — comprehensive dependency/release pass (pass 3)
+
+Scope: complete the remaining dev-dependency and conformance-harness majors,
+align workspace crate/package versions for a `0.3.5` release, and verify that
+local path/workspace libraries remain the preferred source for user-developed
+code in `/dp`.
+
+### Version alignment
+
+All Rust workspace crates now publish as `0.3.5` and all in-workspace path
+dependency pins were raised with them:
+
+- `asupersync`
+- `asupersync-macros`
+- `asupersync-browser-core`
+- `asupersync-tokio-compat`
+- `asupersync-conformance`
+- `franken-kernel`
+- `franken-evidence`
+- `franken-decision`
+- `frankenlab`
+
+The browser/npm workspace packages were also aligned to `0.3.5`.
+
+### Dependency bumps applied this pass
+
+| Dependency | From | To | Kind | Code change |
+|------------|------|----|------|-------------|
+| `opentelemetry` | 0.31 | 0.32 | prod optional / metrics | proto field drift |
+| `opentelemetry_sdk` | 0.31 | 0.32 | prod optional + dev | proto field drift |
+| `opentelemetry-proto` | 0.31 | 0.32 | fuzz/test OTLP helpers | proto field drift |
+| `rusqlite` | 0.39 | 0.40 | prod optional (`sqlite`) | none observed |
+| `sqlx` | 0.8.6 | 0.9 | dev MySQL differential harness | none observed |
+| `redis` | 0.26 | 1.2 | dev RESP3 differential harness | clone values at conversion boundary |
+| `raptorq` | 1.7.0 | 2.0 | dev RFC6330 differential harness | constructor/payload-id drift |
+| `hyper` | 0.14 | 1.x | conformance crate | manifest-only, already compatible |
+| `env_logger` | 0.10 | 0.11 | conformance crate | manifest-only |
+| `prometheus-client` | 0.23 | 0.25 | conformance crate | manifest-only |
+| `syn` | 2.0.117 | 2.0.118 | helper CLI | manifest-only |
+| `typescript` | 5.x | 6.0.3 | npm dev tooling | manifest-only |
+| `@types/react` | 18.x | 19.2.17 | npm dev tooling | manifest-only |
+
+`opentelemetry-proto` 0.32 adds `key_strindex` to OTLP `KeyValue` and string
+value references to the protobuf enum. The runtime exporter and OTLP
+wire-format tests now emit `key_strindex: 0` for literal keys and ignore
+string-table indexed string values because this crate does not maintain an OTLP
+string table.
+
+`redis` 1.2 consumes `Value` in `from_redis_value`, so the differential parser
+clones the test fixture value before conversion. The fixture is small and this
+keeps the parser comparison deterministic.
+
+`raptorq` 2.0 replaces `SourceBlockEncoder::new2` with `new`. Its payload-id
+helper no longer applies the old repair-symbol adjustment, so the local
+systematic decoder now creates the external repair payload ID with
+`PayloadId::new(0, esi)`.
+
+### `/dp` local-library scan
+
+`/dp` resolves to `/data/projects`. A manifest scan found a stale sibling copy at
+`/data/projects/dp/asupersync` (`asupersync` `0.3.2` plus older member/package
+versions), while this repository is the newer `0.3.5` source of truth. This pass
+keeps all user-developed asupersync-family dependencies as in-repo
+`path`/workspace dependencies and found no external `path = "/dp"` or
+`/data/projects/...` dependency that needed retargeting.
+
+### Release workflow fix
+
+`Cargo.lock` is intentionally ignored in this repository, but the publish
+workflow runs locked packaging/publishing and computes release provenance over
+the lockfile. The workflow now generates the release lockfile in CI with
+`cargo generate-lockfile` before version verification and provenance capture.
+The release-provenance contract was updated to assert that step exists.
+
+### Validation
+
+Validation is still in progress for this pass. The focused
+`rust_crate_release_provenance_contract` lane passed after the workflow fix; the
+broad workspace check, clippy, full tests, npm checks, audits, and final release
+publish gates are tracked in the session closeout.
