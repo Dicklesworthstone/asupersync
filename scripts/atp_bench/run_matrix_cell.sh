@@ -253,7 +253,9 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
         openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$cert" -days 3 \
             -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" >/dev/null 2>&1
         tls_recv=(--server-cert "$cert" --server-key "$key"); tls_send=(--ca "$cert" --server-name "$HOST_IP")
-        auth_recv=(); auth_send=()  # quic carries TLS identity; symbol auth optional, keep default
+        # quic adds TLS identity ON TOP of the per-symbol auth posture; keep the
+        # key/lab flags so the encrypted tier stays crypto-symmetric vs rsync-ssh
+        # and the receiver does not fail closed for missing symbol auth.
     fi
 
     local extra_send=()
