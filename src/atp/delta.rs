@@ -463,6 +463,169 @@ pub struct ChunkManifestDiff {
     pub stale_bytes: u64,
 }
 
+/// Deterministic send mode for an incremental re-sync attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaResyncMode {
+    /// Sender and receiver manifests are byte-for-byte equivalent; no payload is needed.
+    AlreadyInSync,
+    /// Send only the listed content-addressed chunks, then commit the new manifest.
+    DeltaChunks,
+    /// Use the existing full-object RaptorQ path instead of the delta path.
+    FullObjectFallback,
+}
+
+/// Conservative reason the delta planner selected full-object fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaResyncFallbackReason {
+    /// The receiver had no prior Merkle manifest to diff against.
+    NoReceiverManifest,
+    /// The receiver's prior manifest references CAS chunks that are unavailable or corrupt.
+    ReceiverCasCoverageIncomplete,
+    /// The missing-chunk payload is at least as large as the full sender object.
+    DeltaNotSmallerThanFullObject,
+}
+
+/// End-to-end delta re-sync plan consumed by the CLI/transport wiring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeltaResyncPlan {
+    /// Selected transfer mode.
+    pub mode: DeltaResyncMode,
+    /// Populated only when `mode == FullObjectFallback`.
+    pub fallback_reason: Option<DeltaResyncFallbackReason>,
+    /// Current sender Merkle root.
+    pub sender_merkle_root: MerkleRoot,
+    /// Receiver prior Merkle root when one was supplied.
+    pub receiver_merkle_root: Option<MerkleRoot>,
+    /// Sender chunks that must be packed into the delta RaptorQ stream.
+    pub missing_chunks: Vec<CasChunkRef>,
+    /// Logical bytes represented by `missing_chunks`.
+    pub missing_bytes: u64,
+    /// Sender chunks already covered by the receiver manifest or receiver CAS.
+    pub shared_chunks: u64,
+    /// Receiver chunks not present in the sender manifest.
+    pub stale_chunks: Vec<CasChunkRef>,
+    /// Logical bytes represented by `stale_chunks`.
+    pub stale_bytes: u64,
+}
+
+impl DeltaResyncPlan {
+    /// Whether the plan sends chunk payloads through the delta RaptorQ stream.
+    #[must_use]
+    pub const fn uses_delta_chunks(&self) -> bool {
+        matches!(self.mode, DeltaResyncMode::DeltaChunks)
+    }
+
+    /// Whether callers should route to the existing full-object transfer.
+    #[must_use]
+    pub const fn requires_full_object_fallback(&self) -> bool {
+        matches!(self.mode, DeltaResyncMode::FullObjectFallback)
+    }
+
+    /// Content ids to request from the sender-side CAS for delta packing.
+    #[must_use]
+    pub fn missing_content_ids(&self) -> Vec<ContentId> {
+        self.missing_chunks
+            .iter()
+            .map(|chunk| chunk.content_id.clone())
+            .collect()
+    }
+}
+
+/// Plan an ATP incremental re-sync using prior manifest + receiver CAS state.
+///
+/// This is the fail-closed decision point for B-8.8 CLI wiring: no prior
+/// manifest, incomplete receiver CAS coverage, or a worst-case whole-file change
+/// deterministically selects the existing full-object path. Valid delta plans
+/// keep wire bytes isomorphic by sending only content-addressed chunks and
+/// leaving final whole-object/Merkle verification to the existing commit gate.
+#[must_use]
+pub fn plan_incremental_resync(
+    sender: &PersistentChunkManifest,
+    receiver: Option<&PersistentChunkManifest>,
+    receiver_store: &ContentAddressedChunkStore,
+) -> DeltaResyncPlan {
+    let receiver_merkle_root = receiver.map(|manifest| manifest.merkle_root.clone());
+    let Some(receiver) = receiver else {
+        return full_object_plan(
+            sender,
+            None,
+            DeltaResyncFallbackReason::NoReceiverManifest,
+        );
+    };
+
+    if receiver.verify_store_coverage(receiver_store).is_err() {
+        return full_object_plan(
+            sender,
+            Some(receiver),
+            DeltaResyncFallbackReason::ReceiverCasCoverageIncomplete,
+        );
+    }
+
+    if sender.merkle_root == receiver.merkle_root {
+        return DeltaResyncPlan {
+            mode: DeltaResyncMode::AlreadyInSync,
+            fallback_reason: None,
+            sender_merkle_root: sender.merkle_root.clone(),
+            receiver_merkle_root,
+            missing_chunks: Vec::new(),
+            missing_bytes: 0,
+            shared_chunks: sender.chunks.len() as u64,
+            stale_chunks: Vec::new(),
+            stale_bytes: 0,
+        };
+    }
+
+    let receiver_keys = manifest_chunk_keys(&receiver.chunks);
+    let sender_keys = manifest_chunk_keys(&sender.chunks);
+    let mut missing_chunks = Vec::new();
+    let mut missing_bytes = 0u64;
+    let mut shared_chunks = 0u64;
+
+    for chunk in &sender.chunks {
+        if receiver_keys.contains(&chunk.key()) || store_has_exact_chunk(receiver_store, chunk) {
+            shared_chunks += 1;
+            continue;
+        }
+        missing_bytes = missing_bytes.saturating_add(chunk.size_bytes);
+        missing_chunks.push(chunk.clone());
+    }
+
+    let mut stale_chunks = Vec::new();
+    let mut stale_bytes = 0u64;
+    for chunk in &receiver.chunks {
+        if !sender_keys.contains(&chunk.key()) {
+            stale_bytes = stale_bytes.saturating_add(chunk.size_bytes);
+            stale_chunks.push(chunk.clone());
+        }
+    }
+
+    if missing_bytes >= sender.total_size_bytes {
+        return DeltaResyncPlan {
+            mode: DeltaResyncMode::FullObjectFallback,
+            fallback_reason: Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject),
+            sender_merkle_root: sender.merkle_root.clone(),
+            receiver_merkle_root,
+            missing_chunks,
+            missing_bytes,
+            shared_chunks,
+            stale_chunks,
+            stale_bytes,
+        };
+    }
+
+    DeltaResyncPlan {
+        mode: DeltaResyncMode::DeltaChunks,
+        fallback_reason: None,
+        sender_merkle_root: sender.merkle_root.clone(),
+        receiver_merkle_root,
+        missing_chunks,
+        missing_bytes,
+        shared_chunks,
+        stale_chunks,
+        stale_bytes,
+    }
+}
+
 /// Delta manifest/store validation errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeltaError {
@@ -593,6 +756,38 @@ impl CasChunkRef {
 
 fn manifest_chunk_keys(chunks: &[CasChunkRef]) -> BTreeSet<ChunkKey> {
     chunks.iter().map(CasChunkRef::key).collect()
+}
+
+fn full_object_plan(
+    sender: &PersistentChunkManifest,
+    receiver: Option<&PersistentChunkManifest>,
+    reason: DeltaResyncFallbackReason,
+) -> DeltaResyncPlan {
+    DeltaResyncPlan {
+        mode: DeltaResyncMode::FullObjectFallback,
+        fallback_reason: Some(reason),
+        sender_merkle_root: sender.merkle_root.clone(),
+        receiver_merkle_root: receiver.map(|manifest| manifest.merkle_root.clone()),
+        missing_chunks: sender.chunks.clone(),
+        missing_bytes: sender.total_size_bytes,
+        shared_chunks: 0,
+        stale_chunks: receiver
+            .map(|manifest| manifest.chunks.clone())
+            .unwrap_or_default(),
+        stale_bytes: receiver
+            .map(|manifest| manifest.total_size_bytes)
+            .unwrap_or_default(),
+    }
+}
+
+fn store_has_exact_chunk(store: &ContentAddressedChunkStore, chunk: &CasChunkRef) -> bool {
+    let Some(payload) = store.get(&chunk.content_id) else {
+        return false;
+    };
+    let Ok(payload_len) = u64::try_from(payload.len()) else {
+        return false;
+    };
+    payload_len == chunk.size_bytes && ContentId::from_bytes(payload) == chunk.content_id
 }
 
 fn validate_chunk_layout(chunks: &[CasChunkRef]) -> Result<u64, DeltaError> {
@@ -873,5 +1068,141 @@ mod tests {
         assert_eq!(diff.stale_bytes, 5);
         assert_eq!(diff.missing_chunks[0].byte_offset, 0);
         assert_eq!(diff.missing_chunks[1].byte_offset, 9);
+    }
+
+    #[test]
+    fn resync_planner_falls_back_without_prior_manifest() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+        let receiver_store = ContentAddressedChunkStore::new();
+
+        let plan = plan_incremental_resync(&sender, None, &receiver_store);
+
+        assert!(plan.requires_full_object_fallback());
+        assert_eq!(
+            plan.fallback_reason,
+            Some(DeltaResyncFallbackReason::NoReceiverManifest)
+        );
+        assert_eq!(plan.missing_chunks, sender.chunks);
+        assert_eq!(plan.missing_bytes, sender.total_size_bytes);
+    }
+
+    #[test]
+    fn resync_planner_noops_when_manifest_and_cas_match() {
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let manifest = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+
+        let plan = plan_incremental_resync(&manifest, Some(&manifest), &receiver_store);
+
+        assert_eq!(plan.mode, DeltaResyncMode::AlreadyInSync);
+        assert_eq!(plan.fallback_reason, None);
+        assert!(plan.missing_chunks.is_empty());
+        assert_eq!(plan.shared_chunks, 2);
+    }
+
+    #[test]
+    fn resync_planner_schedules_only_receiver_missing_chunks() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![
+                b"alpha".as_slice(),
+                b"beta".as_slice(),
+                b"gamma".as_slice(),
+            ],
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+
+        let plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
+
+        assert!(plan.uses_delta_chunks());
+        assert_eq!(plan.fallback_reason, None);
+        assert_eq!(plan.shared_chunks, 2);
+        assert_eq!(plan.missing_chunks.len(), 1);
+        assert_eq!(plan.missing_chunks[0].content_id, ContentId::from_bytes(b"gamma"));
+        assert_eq!(plan.missing_content_ids(), vec![ContentId::from_bytes(b"gamma")]);
+        assert_eq!(plan.missing_bytes, 5);
+    }
+
+    #[test]
+    fn resync_planner_uses_receiver_cas_even_when_prior_layout_differs() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"old".as_slice()],
+        );
+        receiver_store.insert(b"beta").expect("receiver has beta in CAS");
+
+        let plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
+
+        assert_eq!(plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(plan.shared_chunks, 2);
+        assert!(plan.missing_chunks.is_empty());
+        assert_eq!(plan.missing_bytes, 0);
+        assert_eq!(plan.stale_chunks.len(), 1);
+    }
+
+    #[test]
+    fn resync_planner_falls_back_when_receiver_cas_does_not_cover_prior_manifest() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(&mut sender_store, "tree-a", vec![b"alpha".as_slice()]);
+        let receiver = ingest_manifest(&mut receiver_store, "tree-a", vec![b"alpha".as_slice()]);
+        let empty_receiver_store = ContentAddressedChunkStore::new();
+
+        let plan = plan_incremental_resync(&sender, Some(&receiver), &empty_receiver_store);
+
+        assert!(plan.requires_full_object_fallback());
+        assert_eq!(
+            plan.fallback_reason,
+            Some(DeltaResyncFallbackReason::ReceiverCasCoverageIncomplete)
+        );
+    }
+
+    #[test]
+    fn resync_planner_falls_back_when_delta_is_not_smaller_than_full_object() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![b"new-a".as_slice(), b"new-b".as_slice()],
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"old-a".as_slice(), b"old-b".as_slice()],
+        );
+
+        let plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
+
+        assert!(plan.requires_full_object_fallback());
+        assert_eq!(
+            plan.fallback_reason,
+            Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject)
+        );
+        assert_eq!(plan.missing_chunks, sender.chunks);
+        assert_eq!(plan.missing_bytes, sender.total_size_bytes);
     }
 }
