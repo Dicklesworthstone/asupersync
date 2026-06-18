@@ -9,17 +9,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 /// Default interval for path RTT probes.
 pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Default idle interval before emitting a keepalive decision.
 pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Default missed probe budget before a path is treated as liveness-expired.
+pub const DEFAULT_MAX_MISSED_PROBES: u8 = 3;
+
 /// Path quality beacon payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathBeacon {
     /// Beacon sequence number
     pub sequence: u64,
+    /// Reliable-control round sequence. Zero means legacy/disabled control.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub control_round_seq: u64,
     /// Timestamp when beacon was sent (microseconds since Unix epoch)
     pub send_timestamp: u64,
     /// Path identifier
@@ -113,6 +123,7 @@ impl PathBeacon {
 
         Self {
             sequence,
+            control_round_seq: 0,
             send_timestamp,
             path_id,
             beacon_type,
@@ -135,6 +146,19 @@ impl PathBeacon {
         Self::new(sequence, path_id, BeaconType::Response, measurement)
     }
 
+    /// Create a response beacon that echoes the original probe identity.
+    pub fn response_to(request: &Self, measurement: BeaconMeasurement) -> Self {
+        let mut response = Self::new(
+            request.sequence,
+            request.path_id,
+            BeaconType::Response,
+            measurement,
+        );
+        response.control_round_seq = request.control_round_seq;
+        response.send_timestamp = request.send_timestamp;
+        response
+    }
+
     /// Create keepalive beacon
     pub fn keepalive(sequence: u64, path_id: u64) -> Self {
         Self::new(
@@ -148,6 +172,19 @@ impl PathBeacon {
     /// Create path-quality probe beacon
     pub fn probe(sequence: u64, path_id: u64, measurement_data: BeaconMeasurement) -> Self {
         Self::new(sequence, path_id, BeaconType::Probe, measurement_data)
+    }
+
+    /// Attach a reliable-control round sequence to this beacon.
+    #[must_use]
+    pub fn with_control_round_seq(mut self, control_round_seq: u64) -> Self {
+        self.control_round_seq = control_round_seq;
+        self
+    }
+
+    /// Whether this beacon participates in WIRE-5 reliable-control handling.
+    #[must_use]
+    pub fn has_control_round(&self) -> bool {
+        self.control_round_seq != 0
     }
 
     /// Encode beacon to bytes
@@ -410,6 +447,27 @@ impl BeaconManager {
         Some(beacon)
     }
 
+    /// Create a response beacon that preserves the request correlation fields.
+    pub fn create_response_for_beacon(
+        &mut self,
+        request: &PathBeacon,
+        measurement: BeaconMeasurement,
+    ) -> Option<PathBeacon> {
+        if !self.is_beacon_type_enabled(BeaconType::Response) {
+            return None;
+        }
+
+        let beacon = PathBeacon::response_to(request, measurement);
+
+        let stats = self
+            .path_stats
+            .entry(request.path_id)
+            .or_insert_with(|| BeaconStats::new(request.path_id));
+        stats.record_sent(beacon.sequence);
+
+        Some(beacon)
+    }
+
     /// Create path probe beacon
     pub fn create_probe_beacon(
         &mut self,
@@ -482,7 +540,7 @@ impl BeaconManager {
             BeaconType::Periodic | BeaconType::Probe => {
                 // Send response beacon if enabled
                 let measurement = BeaconMeasurement::empty(); // Would populate with actual measurements
-                self.create_response_beacon(path_id, measurement)
+                self.create_response_for_beacon(&beacon, measurement)
             }
             BeaconType::Response => {
                 // Calculate RTT and update stats
@@ -557,6 +615,19 @@ pub struct BeaconScheduleAction {
     pub beacon: PathBeacon,
     /// How long the peer had been idle when the action was selected.
     pub idle_for: Duration,
+    /// Consecutive probe intervals that elapsed without peer activity.
+    pub missed_probes: u8,
+}
+
+/// Peer liveness state inferred from beacon/probe progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeaconPeerHealth {
+    /// Recent peer activity or a successful probe was observed.
+    Active,
+    /// At least one probe interval elapsed without peer activity.
+    Suspect,
+    /// The miss budget is exhausted; callers should fail closed.
+    Expired,
 }
 
 /// Keepalive/probe scheduler for unreliable DATAGRAM-capable paths.
@@ -570,10 +641,16 @@ pub struct BeaconScheduler {
     path_id: u64,
     keepalive_interval: Duration,
     probe_interval: Duration,
+    next_control_round_seq: u64,
+    last_received_beacon_round_seq: u64,
+    last_received_response_round_seq: u64,
     last_peer_activity: Instant,
     last_keepalive: Option<Instant>,
     last_probe: Option<Instant>,
+    pending_probe_since: Option<Instant>,
     latest_rtt: Option<Duration>,
+    missed_probes: u8,
+    max_missed_probes: u8,
 }
 
 impl BeaconScheduler {
@@ -601,11 +678,24 @@ impl BeaconScheduler {
             path_id,
             keepalive_interval,
             probe_interval,
+            next_control_round_seq: 1,
+            last_received_beacon_round_seq: 0,
+            last_received_response_round_seq: 0,
             last_peer_activity: now,
             last_keepalive: None,
             last_probe: None,
+            pending_probe_since: None,
             latest_rtt: None,
+            missed_probes: 0,
+            max_missed_probes: DEFAULT_MAX_MISSED_PROBES,
         }
+    }
+
+    /// Override the consecutive missed-probe budget.
+    #[must_use]
+    pub fn with_missed_probe_budget(mut self, max_missed_probes: u8) -> Self {
+        self.max_missed_probes = max_missed_probes.max(1);
+        self
     }
 
     /// Path ID tracked by this scheduler.
@@ -614,10 +704,45 @@ impl BeaconScheduler {
         self.path_id
     }
 
+    /// Whether this scheduler emits and accepts WIRE-5 control beacons.
+    #[must_use]
+    pub fn control_enabled(&self) -> bool {
+        self.next_control_round_seq != 0
+    }
+
+    /// Disable WIRE-5 control beacons. This mirrors seq=0 legacy peers.
+    pub fn disable_control(&mut self) {
+        self.next_control_round_seq = 0;
+    }
+
     /// Latest observed probe RTT.
     #[must_use]
     pub fn latest_rtt(&self) -> Option<Duration> {
         self.latest_rtt
+    }
+
+    /// Consecutive probe intervals without peer activity.
+    #[must_use]
+    pub fn missed_probes(&self) -> u8 {
+        self.missed_probes
+    }
+
+    /// Current peer liveness state.
+    #[must_use]
+    pub fn peer_health(&self) -> BeaconPeerHealth {
+        if self.missed_probes == 0 {
+            BeaconPeerHealth::Active
+        } else if self.missed_probes >= self.max_missed_probes {
+            BeaconPeerHealth::Expired
+        } else {
+            BeaconPeerHealth::Suspect
+        }
+    }
+
+    /// Whether callers should fail closed instead of committing data.
+    #[must_use]
+    pub fn peer_liveness_expired(&self) -> bool {
+        self.peer_health() == BeaconPeerHealth::Expired
     }
 
     /// Beacon accounting for this path.
@@ -629,6 +754,17 @@ impl BeaconScheduler {
     /// Mark inbound peer activity, suppressing idle keepalives.
     pub fn mark_peer_activity(&mut self, now: Instant) {
         self.last_peer_activity = now;
+        self.pending_probe_since = None;
+        self.missed_probes = 0;
+    }
+
+    fn allocate_control_round_seq(&mut self) -> Option<u64> {
+        let round_seq = self.next_control_round_seq;
+        if round_seq == 0 {
+            return None;
+        }
+        self.next_control_round_seq = round_seq.saturating_add(1);
+        Some(round_seq)
     }
 
     /// Return the next due keepalive/probe action, if any.
@@ -637,26 +773,47 @@ impl BeaconScheduler {
         now: Instant,
         measurement: BeaconMeasurement,
     ) -> Option<BeaconScheduleAction> {
+        if !self.control_enabled() {
+            return None;
+        }
+
+        self.record_missed_probe_if_due(now);
+
         let idle_for = elapsed_since(now, self.last_peer_activity);
         let keepalive_due = idle_for >= self.keepalive_interval
             && self
                 .last_keepalive
                 .is_none_or(|last| elapsed_since(now, last) >= self.keepalive_interval);
         if keepalive_due {
-            let beacon = self.manager.create_keepalive_beacon(self.path_id)?;
+            let round_seq = self.allocate_control_round_seq()?;
+            let beacon = self
+                .manager
+                .create_keepalive_beacon(self.path_id)?
+                .with_control_round_seq(round_seq);
             self.last_keepalive = Some(now);
-            return Some(BeaconScheduleAction { beacon, idle_for });
+            return Some(BeaconScheduleAction {
+                beacon,
+                idle_for,
+                missed_probes: self.missed_probes,
+            });
         }
 
         let probe_due = self
             .last_probe
             .is_none_or(|last| elapsed_since(now, last) >= self.probe_interval);
         if probe_due {
+            let round_seq = self.allocate_control_round_seq()?;
             let beacon = self
                 .manager
-                .create_probe_beacon(self.path_id, measurement)?;
+                .create_probe_beacon(self.path_id, measurement)?
+                .with_control_round_seq(round_seq);
             self.last_probe = Some(now);
-            return Some(BeaconScheduleAction { beacon, idle_for });
+            self.pending_probe_since = Some(now);
+            return Some(BeaconScheduleAction {
+                beacon,
+                idle_for,
+                missed_probes: self.missed_probes,
+            });
         }
 
         None
@@ -665,9 +822,66 @@ impl BeaconScheduler {
     /// Record a received peer response and update path RTT statistics.
     pub fn observe_probe_result(&mut self, now: Instant, rtt: Duration) {
         self.last_probe = Some(now);
+        self.pending_probe_since = None;
         self.latest_rtt = Some(rtt);
         self.mark_peer_activity(now);
         self.manager.record_path_rtt(self.path_id, rtt);
+    }
+
+    /// Process an inbound WIRE-5 beacon and return a response action if needed.
+    ///
+    /// Legacy peers serialize `control_round_seq=0`; those beacons are ignored
+    /// here so reliable-control admission is fail-closed instead of ambiguous.
+    pub fn process_inbound_beacon(
+        &mut self,
+        now: Instant,
+        beacon: PathBeacon,
+    ) -> Option<BeaconScheduleAction> {
+        if !beacon.has_control_round() {
+            return None;
+        }
+
+        let last_seen = match beacon.beacon_type {
+            BeaconType::Response => &mut self.last_received_response_round_seq,
+            BeaconType::Periodic
+            | BeaconType::Probe
+            | BeaconType::Keepalive
+            | BeaconType::Migration => &mut self.last_received_beacon_round_seq,
+        };
+        if beacon.control_round_seq <= *last_seen {
+            return None;
+        }
+        *last_seen = beacon.control_round_seq;
+
+        let rtt = (beacon.beacon_type == BeaconType::Response).then(|| beacon.age());
+        let response = self.manager.process_received_beacon(beacon);
+        self.mark_peer_activity(now);
+
+        if let Some(rtt) = rtt {
+            self.latest_rtt = Some(rtt);
+            self.last_probe = Some(now);
+        }
+
+        response.map(|beacon| BeaconScheduleAction {
+            beacon,
+            idle_for: Duration::ZERO,
+            missed_probes: self.missed_probes,
+        })
+    }
+
+    fn record_missed_probe_if_due(&mut self, now: Instant) {
+        let Some(pending_since) = self.pending_probe_since else {
+            return;
+        };
+        if elapsed_since(now, pending_since) < self.probe_interval {
+            return;
+        }
+
+        self.pending_probe_since = None;
+        self.missed_probes = self
+            .missed_probes
+            .saturating_add(1)
+            .min(self.max_missed_probes);
     }
 }
 
@@ -720,6 +934,7 @@ mod tests {
         assert_eq!(decoded.sequence, beacon.sequence);
         assert_eq!(decoded.path_id, beacon.path_id);
         assert_eq!(decoded.beacon_type, beacon.beacon_type);
+        assert_eq!(decoded.control_round_seq, 0);
     }
 
     #[test]
@@ -742,6 +957,22 @@ mod tests {
         assert_eq!(beacon.path_id, 42);
         assert_eq!(beacon.beacon_type, BeaconType::Probe);
         assert_eq!(beacon.metadata().priority, DatagramPriority::High);
+    }
+
+    #[test]
+    fn test_response_to_preserves_request_correlation() {
+        let mut request =
+            PathBeacon::probe(7, 42, BeaconMeasurement::empty()).with_control_round_seq(9);
+        request.send_timestamp = 1234;
+
+        let response = PathBeacon::response_to(&request, BeaconMeasurement::with_rtt(50_000, 5_000));
+
+        assert_eq!(response.sequence, request.sequence);
+        assert_eq!(response.path_id, request.path_id);
+        assert_eq!(response.control_round_seq, 9);
+        assert_eq!(response.send_timestamp, 1234);
+        assert_eq!(response.beacon_type, BeaconType::Response);
+        assert_eq!(response.measurement_data.srtt_us, Some(50_000));
     }
 
     #[test]
@@ -824,11 +1055,14 @@ mod tests {
             .next_action(now, BeaconMeasurement::empty())
             .expect("initial probe is due");
         assert_eq!(first.beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(first.beacon.control_round_seq, 1);
         assert_eq!(first.idle_for, Duration::ZERO);
+        assert_eq!(first.missed_probes, 0);
 
         let reply_at = now + Duration::from_millis(50);
         scheduler.observe_probe_result(reply_at, Duration::from_millis(50));
         assert_eq!(scheduler.latest_rtt(), Some(Duration::from_millis(50)));
+        assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Active);
         assert!(
             scheduler
                 .next_action(
@@ -845,6 +1079,126 @@ mod tests {
             )
             .expect("idle keepalive is due");
         assert_eq!(keepalive.beacon.beacon_type, BeaconType::Keepalive);
+        assert_eq!(keepalive.beacon.control_round_seq, 2);
         assert!(keepalive.idle_for >= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_beacon_scheduler_tracks_missed_probe_budget_and_recovery() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::with_intervals(
+            9,
+            now,
+            Duration::from_secs(30),
+            Duration::from_secs(2),
+        )
+        .with_missed_probe_budget(2);
+
+        let first = scheduler
+            .next_action(now, BeaconMeasurement::empty())
+            .expect("initial probe is due");
+        assert_eq!(first.beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Active);
+
+        let second = scheduler
+            .next_action(now + Duration::from_secs(2), BeaconMeasurement::empty())
+            .expect("missed probe should schedule a replacement probe");
+        assert_eq!(second.beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(second.missed_probes, 1);
+        assert_eq!(scheduler.missed_probes(), 1);
+        assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Suspect);
+
+        let third = scheduler
+            .next_action(now + Duration::from_secs(4), BeaconMeasurement::empty())
+            .expect("second miss should schedule a replacement probe");
+        assert_eq!(third.beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(third.missed_probes, 2);
+        assert!(scheduler.peer_liveness_expired());
+
+        let recovered_at = now + Duration::from_secs(4) + Duration::from_millis(75);
+        scheduler.observe_probe_result(recovered_at, Duration::from_millis(75));
+        assert_eq!(scheduler.latest_rtt(), Some(Duration::from_millis(75)));
+        assert_eq!(scheduler.missed_probes(), 0);
+        assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Active);
+    }
+
+    #[test]
+    fn test_beacon_scheduler_ignores_disabled_and_stale_control_beacons() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::with_intervals(
+            42,
+            now,
+            Duration::from_secs(10),
+            Duration::from_secs(2),
+        );
+
+        let legacy = PathBeacon::probe(1, 42, BeaconMeasurement::empty());
+        assert!(scheduler.process_inbound_beacon(now, legacy).is_none());
+
+        let fresh = PathBeacon::probe(2, 42, BeaconMeasurement::empty()).with_control_round_seq(3);
+        let response = scheduler
+            .process_inbound_beacon(now, fresh.clone())
+            .expect("fresh control beacon should be answered");
+        assert_eq!(response.beacon.beacon_type, BeaconType::Response);
+        assert_eq!(response.beacon.control_round_seq, 3);
+        assert!(scheduler.process_inbound_beacon(now, fresh).is_none());
+
+        let stale = PathBeacon::keepalive(3, 42).with_control_round_seq(2);
+        assert!(scheduler.process_inbound_beacon(now, stale).is_none());
+    }
+
+    #[test]
+    fn test_beacon_scheduler_can_disable_control_output() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::new(42, now);
+        scheduler.disable_control();
+
+        assert!(!scheduler.control_enabled());
+        assert!(
+            scheduler
+                .next_action(now + DEFAULT_PROBE_INTERVAL, BeaconMeasurement::empty())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_beacon_scheduler_peer_activity_resets_liveness_and_idle_window() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::with_intervals(
+            11,
+            now,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        );
+
+        let _first = scheduler
+            .next_action(now, BeaconMeasurement::empty())
+            .expect("initial probe is due");
+        let _second = scheduler
+            .next_action(now + Duration::from_secs(10), BeaconMeasurement::empty())
+            .expect("missed probe is due");
+        assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Suspect);
+
+        let peer_activity_at = now + Duration::from_secs(11);
+        scheduler.mark_peer_activity(peer_activity_at);
+        assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Active);
+        assert!(
+            scheduler
+                .next_action(
+                    peer_activity_at + Duration::from_secs(4),
+                    BeaconMeasurement::empty(),
+                )
+                .is_none(),
+            "recent peer activity should suppress keepalive and replacement probe"
+        );
+
+        let keepalive = scheduler
+            .next_action(
+                peer_activity_at + Duration::from_secs(6),
+                BeaconMeasurement::empty(),
+            )
+            .expect("idle keepalive is due after the reset window");
+        assert_eq!(keepalive.beacon.beacon_type, BeaconType::Keepalive);
+        assert!(keepalive.idle_for >= Duration::from_secs(5));
     }
 }
