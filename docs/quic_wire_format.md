@@ -130,3 +130,29 @@ The B2/B3 sender/receiver coroutines (`asupersync-arq-quic-epic-b0k8qo.2.2` /
 `encode` / `decode`. The conformance harness pins the golden header layout,
 round-trip across source/repair and ±auth, the empty and `u16::MAX` payload
 boundaries, every fail-closed negative, and metamorphic field-sensitivity.
+
+### Canonical symbol-envelope vector
+
+The H6 conformance harness also pins this authenticated vector so the optional
+tag offset cannot drift:
+
+| Field | Value |
+|-------|-------|
+| `magic` | `ATQS` |
+| `transfer_tag` | `0x0102030405060708` |
+| `entry` | `0x0a0b0c0d` |
+| `sbn` | `0x0e` |
+| `esi` | `0x0f101112` |
+| `repair` | `1` |
+| `payload_len` | `2` |
+| `auth_tag` | `00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f` |
+| `payload` | ASCII `rq` |
+
+Hex bytes:
+
+```text
+41 54 51 53 01 02 03 04 05 06 07 08 0a 0b 0c 0d
+0e 0f 10 11 12 01 00 02 00 01 02 03 04 05 06 07
+08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17
+18 19 1a 1b 1c 1d 1e 1f 72 71
+```

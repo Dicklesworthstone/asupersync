@@ -16,6 +16,10 @@ use asupersync::net::atp::transport_quic::{
 };
 
 const TAG_SIZE: usize = 32;
+const AUTH_GOLDEN_TAG: [u8; TAG_SIZE] = [
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+];
 
 fn sample(auth: bool, payload: &'static [u8]) -> QuicSymbolEnvelope {
     QuicSymbolEnvelope {
@@ -49,6 +53,44 @@ fn golden_header_layout() {
     assert_eq!(b[21], 0); // source symbol
     assert_eq!(&b[22..24], &(env.payload.len() as u16).to_be_bytes());
     assert_eq!(&b[24..], env.payload.as_ref());
+}
+
+#[test]
+fn authenticated_golden_vector_pins_tag_offset_and_payload_boundary() {
+    let env = QuicSymbolEnvelope {
+        transfer_tag: 0x0102_0304_0506_0708,
+        entry: 0x0A0B_0C0D,
+        sbn: 0x0E,
+        esi: 0x0F10_1112,
+        is_repair: true,
+        auth_tag: Some(AUTH_GOLDEN_TAG),
+        payload: Bytes::from_static(b"rq"),
+    };
+
+    let bytes = env.encode().unwrap();
+    #[rustfmt::skip]
+    let expected = [
+        0x41, 0x54, 0x51, 0x53, // "ATQS"
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // transfer_tag
+        0x0A, 0x0B, 0x0C, 0x0D, // entry
+        0x0E, // sbn
+        0x0F, 0x10, 0x11, 0x12, // esi
+        0x01, // repair
+        0x00, 0x02, // payload_len
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, // auth_tag
+        0x72, 0x71, // payload "rq"
+    ];
+
+    assert_eq!(bytes.as_ref(), &expected);
+    assert_eq!(
+        &bytes[ENVELOPE_HEADER_LEN..AUTH_ENVELOPE_HEADER_LEN],
+        &AUTH_GOLDEN_TAG
+    );
+    assert_eq!(&bytes[AUTH_ENVELOPE_HEADER_LEN..], b"rq");
+    assert_eq!(QuicSymbolEnvelope::decode(&bytes, true).unwrap(), env);
 }
 
 #[test]
@@ -103,6 +145,17 @@ fn decode_rejects_wrong_magic() {
 }
 
 #[test]
+fn decode_rejects_foreign_rq_transport_magic() {
+    let mut b = sample(false, b"xyz").encode().unwrap().to_vec();
+    b[0..4].copy_from_slice(b"ATRQ");
+    assert!(matches!(
+        QuicSymbolEnvelope::decode(&b, false),
+        Err(QuicSymbolEnvelopeError::BadMagic { found })
+            if found == u32::from_be_bytes(*b"ATRQ")
+    ));
+}
+
+#[test]
 fn decode_rejects_truncation_and_length_mismatch() {
     let b = sample(false, b"payload-bytes").encode().unwrap();
     // Below the header.
@@ -137,9 +190,21 @@ fn decode_rejects_invalid_repair_flag() {
 #[test]
 fn auth_posture_mismatch_fails_closed_both_directions() {
     let with_auth = sample(true, b"payload").encode().unwrap();
-    assert!(QuicSymbolEnvelope::decode(&with_auth, false).is_err());
+    assert!(matches!(
+        QuicSymbolEnvelope::decode(&with_auth, false),
+        Err(QuicSymbolEnvelopeError::LengthMismatch {
+            declared: 7,
+            available
+        }) if available == TAG_SIZE + 7
+    ));
     let without_auth = sample(false, b"payload").encode().unwrap();
-    assert!(QuicSymbolEnvelope::decode(&without_auth, true).is_err());
+    assert!(matches!(
+        QuicSymbolEnvelope::decode(&without_auth, true),
+        Err(QuicSymbolEnvelopeError::TooShort {
+            have,
+            need: AUTH_ENVELOPE_HEADER_LEN
+        }) if have == ENVELOPE_HEADER_LEN + 7
+    ));
 }
 
 #[test]
