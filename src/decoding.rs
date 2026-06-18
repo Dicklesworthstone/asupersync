@@ -409,7 +409,9 @@ impl DecodingPipeline {
         if self.config.verify_auth {
             match &self.auth_context {
                 Some(ctx) => {
-                    if ctx.verify_authenticated_symbol(&mut auth_symbol).is_err() {
+                    if ctx.verify_authenticated_symbol(&mut auth_symbol).is_err()
+                        || !auth_symbol.is_verified()
+                    {
                         return Ok(SymbolAcceptResult::Rejected(
                             RejectReason::AuthenticationFailed,
                         ));
@@ -2608,6 +2610,105 @@ mod tests {
         let ok = result == expected;
         crate::assert_with_log!(ok, "bad tag rejected", expected, result);
         crate::test_complete!("with_auth_rejects_bad_tag");
+    }
+
+    #[test]
+    fn source_first_with_auth_verifies_hmac_before_fast_path_completion() {
+        init_test("source_first_with_auth_verifies_hmac_before_fast_path_completion");
+        let config = encoding_config();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id = ObjectId::new_for_test(111);
+        let data = (0..700).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let security = crate::security::SecurityContext::for_testing(111);
+        let mut decoder = DecodingPipeline::with_auth(
+            DecodingConfig {
+                symbol_size: config.symbol_size,
+                max_block_size: config.max_block_size,
+                repair_overhead: 1.0,
+                min_overhead: 0,
+                max_buffered_symbols: 8192,
+                block_timeout: Duration::from_secs(30),
+                verify_auth: true,
+            },
+            security.clone(),
+        );
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data.len() as u64,
+                config.symbol_size,
+                1,
+                data.len().div_ceil(usize::from(config.symbol_size)) as u16,
+            ))
+            .expect("params");
+
+        let source_symbols = encoder
+            .encode_with_repair(object_id, &data, 0)
+            .map(|res| res.expect("encode source").into_symbol())
+            .collect::<Vec<_>>();
+
+        let mut completed = None;
+        for symbol in source_symbols {
+            let signed = security.sign_symbol(&symbol);
+            let tag = *signed.tag();
+            if let SymbolAcceptResult::BlockComplete { data, .. } = decoder
+                .feed(AuthenticatedSymbol::from_parts(signed.into_symbol(), tag))
+                .expect("feed signed source")
+            {
+                completed = Some(data);
+            }
+        }
+
+        assert_eq!(completed.expect("source-first completion"), data);
+        assert!(decoder.is_complete());
+        assert_eq!(decoder.skipped_verifications(), 0);
+        crate::test_complete!("source_first_with_auth_verifies_hmac_before_fast_path_completion");
+    }
+
+    #[test]
+    fn source_first_with_auth_rejects_permissive_hmac_mismatch() {
+        init_test("source_first_with_auth_rejects_permissive_hmac_mismatch");
+        let config = encoding_config();
+        let object_id = ObjectId::new_for_test(112);
+        let signer = crate::security::SecurityContext::for_testing(112);
+        let verifier = crate::security::SecurityContext::for_testing_with_mode(
+            113,
+            crate::security::AuthMode::Permissive,
+        );
+        let mut decoder = DecodingPipeline::with_auth(
+            DecodingConfig {
+                symbol_size: config.symbol_size,
+                max_block_size: config.max_block_size,
+                repair_overhead: 1.0,
+                min_overhead: 0,
+                max_buffered_symbols: 8192,
+                block_timeout: Duration::from_secs(30),
+                verify_auth: true,
+            },
+            verifier,
+        );
+        decoder
+            .set_object_params(ObjectParams::new(object_id, 512, config.symbol_size, 1, 2))
+            .expect("params");
+
+        let symbol = Symbol::new(
+            SymbolId::new(object_id, 0, 0),
+            vec![7u8; usize::from(config.symbol_size)],
+            SymbolKind::Source,
+        );
+        let signed = signer.sign_symbol(&symbol);
+        let tag = *signed.tag();
+        let result = decoder
+            .feed(AuthenticatedSymbol::from_parts(signed.into_symbol(), tag))
+            .expect("feed mismatched signed source");
+
+        assert_eq!(
+            result,
+            SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed)
+        );
+        assert!(!decoder.is_complete());
+        assert_eq!(decoder.progress().symbols_received, 0);
+        crate::test_complete!("source_first_with_auth_rejects_permissive_hmac_mismatch");
     }
 
     /// br-asupersync-b1fojq: the default decode configuration MUST be
