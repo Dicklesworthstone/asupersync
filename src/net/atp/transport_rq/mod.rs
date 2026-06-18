@@ -411,6 +411,16 @@ impl RqSprayPacer {
         Self { controller }
     }
 
+    fn configure(&mut self, pacing: RqSprayPacing) {
+        self.controller.configure_token_bucket(
+            pacing.max_rate_per_sec,
+            pacing.max_burst_size,
+            pacing.min_send_interval,
+        );
+        self.controller
+            .update_congestion_feedback(pacing.rtt, pacing.loss_detected);
+    }
+
     async fn before_send(&mut self, cx: &Cx) -> Result<(), RqError> {
         loop {
             let now = Instant::now();
@@ -1942,6 +1952,9 @@ pub async fn send_path(
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
     let mut round_tuning = adaptive.round_tuning(&config);
+    // One token bucket owns the whole transfer. Recreating it per source/repair
+    // spray would grant a fresh burst each time and overflow rate-capped qdiscs.
+    let mut pacer = RqSprayPacer::new(round_tuning.pacing);
     let mut round_started = Instant::now();
     let mut round_symbols_start = symbols_sent;
     spray_round(
@@ -1954,6 +1967,7 @@ pub async fn send_path(
         &mut encoders,
         &pending,
         &config,
+        &mut pacer,
         &round_tuning,
         symbol_auth.as_ref(),
         /* with_source */ true,
@@ -2042,6 +2056,7 @@ pub async fn send_path(
                 } else {
                     adaptive.round_tuning(&config)
                 };
+                pacer.configure(round_tuning.pacing);
                 if source_symbols.is_empty() {
                     round_started = Instant::now();
                     round_symbols_start = symbols_sent;
@@ -2058,6 +2073,7 @@ pub async fn send_path(
                         &mut encoders,
                         &pending,
                         &config,
+                        &mut pacer,
                         &round_tuning,
                         symbol_auth.as_ref(),
                         /* with_source */ false,
@@ -2077,7 +2093,7 @@ pub async fn send_path(
                         &encoders,
                         &source_symbols,
                         &config,
-                        &round_tuning,
+                        &mut pacer,
                         symbol_auth.as_ref(),
                     )
                     .await?;
@@ -2092,6 +2108,7 @@ pub async fn send_path(
                             &mut encoders,
                             &pending,
                             &config,
+                            &mut pacer,
                             &round_tuning,
                             symbol_auth.as_ref(),
                             /* with_source */ false,
@@ -2235,13 +2252,13 @@ async fn spray_round(
     encoders: &mut [EntryEncoder],
     pending: &BTreeSet<u32>,
     config: &RqConfig,
+    pacer: &mut RqSprayPacer,
     round_tuning: &RqRoundTuning,
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
     parallel_encode: bool,
 ) -> Result<(), RqError> {
     let batch = repair_batch_per_block(config);
-    let mut pacer = RqSprayPacer::new(round_tuning.pacing);
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let mut ring = EncodeAheadRing::default();
@@ -2319,7 +2336,7 @@ async fn spray_round(
                             enc.index,
                             sym,
                             config,
-                            &mut pacer,
+                            pacer,
                             symbol_auth,
                         )
                         .await?;
@@ -2388,7 +2405,7 @@ async fn spray_round(
                             produced.entry,
                             &produced.symbol,
                             config,
-                            &mut pacer,
+                            pacer,
                             symbol_auth,
                         )
                         .await?;
@@ -2415,7 +2432,7 @@ async fn spray_round(
                             produced.entry,
                             &produced.symbol,
                             config,
-                            &mut pacer,
+                            pacer,
                             symbol_auth,
                         )
                         .await?;
@@ -2463,10 +2480,9 @@ async fn spray_source_requests(
     encoders: &[EntryEncoder],
     requests: &[SourceSymbolRequest],
     config: &RqConfig,
-    round_tuning: &RqRoundTuning,
+    pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<(), RqError> {
-    let mut pacer = RqSprayPacer::new(round_tuning.pacing);
     for request in requests {
         let enc = encoders
             .iter()
@@ -2489,7 +2505,7 @@ async fn spray_source_requests(
             enc.index,
             &sym,
             config,
-            &mut pacer,
+            pacer,
             symbol_auth,
         )
         .await?;
