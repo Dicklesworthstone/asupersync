@@ -1722,11 +1722,11 @@ struct EntryEncoder {
     object_id: ObjectId,
     abs_path: PathBuf,
     size: usize,
-    /// Cumulative repair symbols already requested from the encoder (per block).
-    /// Feedback rounds request more and send only the newly-minted ones at their
-    /// TRUE encoder ESIs — a RaptorQ repair symbol's payload is bound to its ESI,
-    /// so it must never be relabeled.
-    repair_cursor: usize,
+    /// Cumulative repair symbols already requested from the encoder, indexed by
+    /// source block. Feedback rounds request more and send only the newly-minted
+    /// ones at their TRUE encoder ESIs — a RaptorQ repair symbol's payload is
+    /// bound to its ESI, so it must never be relabeled.
+    repair_cursors: Vec<usize>,
 }
 
 /// Receiver-side decoder state for one entry.
@@ -1752,6 +1752,8 @@ struct SourceBlockProgress {
     len: usize,
     k: usize,
     received: Vec<bool>,
+    pipeline_seeded: Vec<bool>,
+    auth_tags: Vec<Option<AuthenticationTag>>,
     received_count: usize,
     complete: bool,
 }
@@ -1916,7 +1918,7 @@ pub async fn send_path(
                 object_id: entry_object_id(&transfer_id, index),
                 abs_path: entry.abs_path.clone(),
                 size,
-                repair_cursor: 0,
+                repair_cursors: Vec::new(),
             }
         })
         .collect();
@@ -1930,6 +1932,7 @@ pub async fn send_path(
     let mut rr = 0usize;
     let mut dropper = 0u32;
     let mut feedback_rounds = 0u32;
+    let mut source_fec_fallback_active = false;
 
     // Parallel per-block encode is on by default, but only while the transfer is small enough that
     // the receiver's recv buffer can absorb the burst (see PARALLEL_ENCODE_MAX_BYTES); larger
@@ -2028,12 +2031,13 @@ pub async fn send_path(
                     control_wait,
                     total_bytes,
                 );
-                let source_fec_fallback = source_retransmit_needs_fec_fallback(
+                let source_fec_fallback_trigger = source_retransmit_needs_fec_fallback(
                     &config,
                     feedback_rounds,
                     source_symbols.len(),
                 );
-                round_tuning = if source_fec_fallback {
+                source_fec_fallback_active |= source_fec_fallback_trigger;
+                round_tuning = if source_fec_fallback_active {
                     adaptive.source_fec_fallback_tuning(&config)
                 } else {
                     adaptive.round_tuning(&config)
@@ -2077,7 +2081,7 @@ pub async fn send_path(
                         symbol_auth.as_ref(),
                     )
                     .await?;
-                    if source_fec_fallback {
+                    if source_fec_fallback_active {
                         spray_round(
                             cx,
                             &mut sockets,
@@ -2155,10 +2159,7 @@ fn source_retransmit_needs_fec_fallback(
     feedback_round: u32,
     requested_sources: usize,
 ) -> bool {
-    if config.repair_overhead > 1.0
-        || config.source_retransmit_rounds == 0
-        || requested_sources == 0
-    {
+    if config.repair_overhead > 1.0 || config.source_retransmit_rounds == 0 {
         return false;
     }
     let saturated_request = config.max_source_retransmit_requests != 0
@@ -2221,8 +2222,8 @@ fn encode_block_symbols(
 /// `repair_overhead` extra repair. Feedback rounds send only *newly minted*
 /// repair symbols, identified per block by the encoder's own (sbn, esi) — the
 /// repair payload is bound to its ESI, so it is emitted verbatim and never
-/// relabeled. The per-entry `repair_cursor` advances so each round's repair is
-/// fresh.
+/// relabeled. Per-block repair cursors advance so each round's repair is fresh
+/// for every source block in a pending entry.
 #[allow(clippy::too_many_arguments)]
 async fn spray_round(
     cx: &Cx,
@@ -2245,29 +2246,11 @@ async fn spray_round(
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let mut ring = EncodeAheadRing::default();
         let blocks = encode_ahead_blocks(enc.size, config)?;
-        let block_source_n = blocks.iter().map(|block| block.k).max().unwrap_or(1);
-
-        // Cumulative repair count requested from the encoder this round. The
-        // encoder always yields repair symbols at deterministic ESIs starting at
-        // each block's K'; requesting more just extends the tail. We skip the
-        // first `repair_cursor` repair symbols PER BLOCK (already sent in earlier
-        // rounds) and emit the rest at their TRUE ESIs.
-        let already = enc.repair_cursor;
-        let target_repair = if with_source {
-            initial_repair_target_per_block(block_source_n, round_tuning.repair_overhead)
-        } else {
-            repair_target_for_feedback_round(
-                block_source_n,
-                already,
-                batch,
-                round_tuning.repair_overhead,
-            )
-        };
-
-        let repair_count = target_repair.saturating_sub(already);
-        if !with_source && repair_count == 0 {
-            enc.repair_cursor = target_repair;
-            continue;
+        if enc.repair_cursors.len() > blocks.len() {
+            enc.repair_cursors.truncate(blocks.len());
+        }
+        if enc.repair_cursors.len() < blocks.len() {
+            enc.repair_cursors.resize(blocks.len(), 0);
         }
 
         let use_parallel_source_encode =
@@ -2292,26 +2275,30 @@ async fn spray_round(
             let par_batch = std::thread::available_parallelism()
                 .map_or(4, std::num::NonZeroUsize::get)
                 .clamp(2, 64);
-            for window in blocks.chunks(par_batch) {
+            for window_start in (0..blocks.len()).step_by(par_batch) {
                 cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+                let window_end = (window_start + par_batch).min(blocks.len());
+                let window = &blocks[window_start..window_end];
                 let mut handles = Vec::with_capacity(window.len());
-                for block in window {
+                for (window_offset, block) in window.iter().enumerate() {
                     // Disk reads are cheap relative to the RaptorQ solve, so read each block's
                     // source range here and hand the owned bytes to the pool task.
                     let block_bytes =
                         read_source_range(&enc.abs_path, block.start, block.len).await?;
                     let object_id = enc.object_id;
                     let sbn = block.sbn;
-                    let repair = target_repair;
+                    let block_index = window_start + window_offset;
+                    let repair =
+                        initial_repair_target_per_block(block.k, round_tuning.repair_overhead);
                     let cfg = enc_cfg.clone();
                     let handle = cx
                         .spawn_blocking(move |_child| {
                             encode_block_symbols(&cfg, object_id, sbn, &block_bytes, repair)
                         })
                         .map_err(|e| RqError::Coding(format!("encode spawn failed: {e:?}")))?;
-                    handles.push(handle);
+                    handles.push((block_index, repair, handle));
                 }
-                for mut handle in handles {
+                for (block_index, target_repair, mut handle) in handles {
                     let syms = match handle.join(cx).await {
                         Ok(Ok(syms)) => syms,
                         Ok(Err(e)) => return Err(RqError::Coding(e)),
@@ -2337,10 +2324,33 @@ async fn spray_round(
                         )
                         .await?;
                     }
+                    enc.repair_cursors[block_index] = target_repair;
                 }
             }
         } else {
-            for block in &blocks {
+            for (block_index, block) in blocks.iter().enumerate() {
+                // Cumulative repair count requested from the encoder for this
+                // block. The encoder always yields repair symbols at
+                // deterministic ESIs starting at the block's K'; requesting
+                // more just extends the tail. We skip the already-sent repair
+                // symbols for this block and emit the rest at their TRUE ESIs.
+                let already = enc.repair_cursors[block_index];
+                let target_repair = if with_source {
+                    initial_repair_target_per_block(block.k, round_tuning.repair_overhead)
+                } else {
+                    repair_target_for_feedback_round(
+                        block.k,
+                        already,
+                        batch,
+                        round_tuning.repair_overhead,
+                    )
+                };
+                let repair_count = target_repair.saturating_sub(already);
+                if !with_source && repair_count == 0 {
+                    enc.repair_cursors[block_index] = target_repair;
+                    continue;
+                }
+
                 // The encoder's `Symbol` output owns its payload buffer, so buffers
                 // allocated from `SymbolPool` are consumed rather than returned to
                 // the pool. Keep the M=1 encode-ahead path unpooled; round sizing,
@@ -2412,9 +2422,9 @@ async fn spray_round(
                         debug_assert!(ring.is_empty());
                     }
                 }
+                enc.repair_cursors[block_index] = target_repair;
             }
         }
-        enc.repair_cursor = target_repair;
     }
     Ok(())
 }
@@ -2947,6 +2957,8 @@ fn source_block_progress_for(
             len,
             k,
             received: vec![false; k],
+            pipeline_seeded: vec![false; k],
+            auth_tags: vec![None; k],
             received_count: 0,
             complete: false,
         });
@@ -3057,6 +3069,9 @@ async fn feed_symbol(
             return persist_source_symbol(dec, parsed, payload, symbol_size).await;
         }
     }
+    if dec.source_streaming && parsed.kind.is_repair() {
+        seed_source_streaming_pipeline(dec, symbol_size, symbol_auth).await?;
+    }
     if dec.pipeline.is_none() {
         return Ok(false);
     }
@@ -3157,6 +3172,109 @@ async fn feed_symbol(
     }
 }
 
+async fn seed_source_streaming_pipeline(
+    dec: &mut EntryDecoder,
+    symbol_size: u16,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<(), RqError> {
+    if dec.pipeline.is_none() {
+        return Ok(());
+    }
+    let symbol_size = usize::from(symbol_size);
+    let Some(mut reader) = crate::fs::File::open(&dec.staging_path).await.ok() else {
+        return Ok(());
+    };
+
+    for sbn in 0..dec.source_blocks.len() {
+        if dec.source_blocks[sbn].complete {
+            continue;
+        }
+
+        let k = dec.source_blocks[sbn].k;
+        for esi in 0..k {
+            if !dec.source_blocks[sbn].received[esi] || dec.source_blocks[sbn].pipeline_seeded[esi]
+            {
+                continue;
+            }
+
+            let Some(within_block) = esi.checked_mul(symbol_size) else {
+                return Err(RqError::Coding(format!(
+                    "entry {} source seed offset overflow",
+                    dec.index
+                )));
+            };
+            if within_block >= dec.source_blocks[sbn].len {
+                continue;
+            }
+
+            let take = symbol_size.min(dec.source_blocks[sbn].len - within_block);
+            let offset = dec.source_blocks[sbn]
+                .start
+                .checked_add(u64::try_from(within_block).unwrap_or(u64::MAX))
+                .ok_or_else(|| {
+                    RqError::Coding(format!("entry {} source seed offset overflow", dec.index))
+                })?;
+            let mut payload = vec![0u8; symbol_size];
+            reader.seek(std::io::SeekFrom::Start(offset)).await?;
+            reader.read_exact(&mut payload[..take]).await?;
+
+            let sbn_u8 = u8::try_from(sbn).map_err(|_| {
+                RqError::Coding(format!("entry {} source seed SBN overflow", dec.index))
+            })?;
+            let esi_u32 = u32::try_from(esi).map_err(|_| {
+                RqError::Coding(format!("entry {} source seed ESI overflow", dec.index))
+            })?;
+            let symbol = Symbol::new(
+                SymbolId::new(dec.object_id, sbn_u8, esi_u32),
+                payload,
+                SymbolKind::Source,
+            );
+            let auth_symbol = if symbol_auth.is_some() {
+                let tag = dec.source_blocks[sbn].auth_tags[esi].ok_or_else(|| {
+                    RqError::Authentication(format!(
+                        "entry {} source seed missing verified auth tag for sbn={sbn} esi={esi}",
+                        dec.index
+                    ))
+                })?;
+                AuthenticatedSymbol::from_parts(symbol, tag)
+            } else {
+                AuthenticatedSymbol::new_unauthenticated(symbol)
+            };
+            let result = dec
+                .pipeline
+                .as_mut()
+                .expect("checked above")
+                .feed_streaming_block(auth_symbol);
+            dec.source_blocks[sbn].pipeline_seeded[esi] = true;
+            match result {
+                Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
+                    persist_decoded_block(dec, block_sbn, &data).await?;
+                    if dec
+                        .pipeline
+                        .as_ref()
+                        .is_some_and(DecodingPipeline::is_complete)
+                    {
+                        dec.complete = true;
+                        dec.pipeline = None;
+                        return Ok(());
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    rqtrace!(
+                        "receiver: entry {} source seed error sbn={} esi={}: {err}",
+                        dec.index,
+                        sbn,
+                        esi
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn persist_source_symbol(
     dec: &mut EntryDecoder,
     parsed: &ParsedDatagram,
@@ -3209,6 +3327,7 @@ async fn persist_source_symbol(
             return Ok(false);
         }
         block.received[esi] = true;
+        block.auth_tags[esi] = parsed.auth_tag;
         block.received_count = block.received_count.saturating_add(1);
         if block.received_count == block.k {
             block.complete = true;
@@ -4357,6 +4476,89 @@ mod tests {
     }
 
     #[test]
+    fn signed_source_streaming_seeds_fec_decoder_from_staged_sources() {
+        let ctx = SecurityContext::for_testing(31339);
+        let object_id = entry_object_id("signed-source-stream-fec-seed", 0);
+        let symbol_size = 4u16;
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 8, symbol_size);
+        let mut pipeline = DecodingPipeline::with_auth(
+            DecodingConfig {
+                symbol_size,
+                max_block_size: 8,
+                repair_overhead: 1.0,
+                min_overhead: 0,
+                max_buffered_symbols: 0,
+                block_timeout: std::time::Duration::from_secs(0),
+                verify_auth: true,
+            },
+            ctx.clone(),
+        );
+        pipeline
+            .set_object_params(object_params_for(object_id, 8, symbol_size, 8))
+            .expect("set object params");
+        decoder.pipeline = Some(pipeline);
+
+        let (first, first_payload) =
+            signed_source_payload(&ctx, object_id, 0, data[..4].to_vec(), None);
+        assert!(
+            futures_lite::future::block_on(feed_symbol(
+                &mut decoder,
+                &first,
+                &first_payload,
+                symbol_size,
+                Some(&ctx),
+            ))
+            .expect("feed first source")
+        );
+        assert!(!decoder.complete);
+        assert_eq!(decoder.source_blocks[0].received_count, 1);
+        assert!(!decoder.source_blocks[0].pipeline_seeded[0]);
+
+        let pool = SymbolPool::new(PoolConfig::default());
+        let mut encoder = EncodingPipeline::new(
+            crate::config::EncodingConfig {
+                repair_overhead: 1.0,
+                max_block_size: 8,
+                symbol_size,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            pool,
+        );
+
+        for encoded in encoder.encode_single_block_repair_range(object_id, 0, &data, 0, 4) {
+            let sym = encoded.expect("repair encode").into_symbol();
+            let auth = ctx.sign_symbol(&sym);
+            let dg = encode_symbol_datagram(0xA77E, 0, &sym, Some(auth.tag()));
+            let parsed = parse_symbol_header(&dg, 0xA77E, true).expect("parse signed repair");
+            let payload = dg[parsed.header_len..parsed.header_len + parsed.payload_len].to_vec();
+            let _ = futures_lite::future::block_on(feed_symbol(
+                &mut decoder,
+                &parsed,
+                &payload,
+                symbol_size,
+                Some(&ctx),
+            ))
+            .expect("feed repair");
+            if decoder.complete {
+                break;
+            }
+        }
+
+        assert!(decoder.complete, "repair fallback should finish the block");
+        assert!(decoder.source_blocks[0].pipeline_seeded[0]);
+        drop(decoder.file.take());
+        assert_eq!(
+            std::fs::read(staging_path).expect("read repaired source stream"),
+            data
+        );
+    }
+
+    #[test]
     fn signed_datagram_feed_reaches_k512_decode_threshold() {
         let ctx = SecurityContext::for_testing(101);
         let object_id = entry_object_id("wire-k512", 0);
@@ -4526,7 +4728,7 @@ mod tests {
             object_id: entry_object_id("source-request", 7),
             abs_path: source_path,
             size: bytes.len(),
-            repair_cursor: 0,
+            repair_cursors: Vec::new(),
         };
 
         let first_block_tail = futures_lite::future::block_on(source_symbol_for_request(
@@ -4631,6 +4833,8 @@ mod tests {
         assert!(!source_retransmit_needs_fec_fallback(&config, 1, 16));
         assert!(source_retransmit_needs_fec_fallback(&config, 1, 17));
         assert!(source_retransmit_needs_fec_fallback(&config, 2, 1));
+        assert!(source_retransmit_needs_fec_fallback(&config, 2, 0));
+        assert!(source_retransmit_needs_fec_fallback(&config, 3, 0));
     }
 
     #[test]
@@ -4670,10 +4874,15 @@ mod tests {
     #[test]
     fn effective_block_size_targets_k512_for_normal_files() {
         let config = RqConfig::default();
+        let effective = effective_max_block_size_for_largest_entry(&config, 10 * 1024 * 1024)
+            .expect("10MiB should fit");
         assert_eq!(
-            effective_max_block_size_for_largest_entry(&config, 10 * 1024 * 1024)
-                .expect("10MiB should fit"),
-            512 * 1024
+            effective,
+            usize::from(config.symbol_size) * TARGET_SOURCE_SYMBOLS_PER_BLOCK
+        );
+        assert_eq!(
+            max_block_source_symbol_count(10 * 1024 * 1024, config.symbol_size, effective),
+            TARGET_SOURCE_SYMBOLS_PER_BLOCK
         );
     }
 
@@ -4681,11 +4890,19 @@ mod tests {
     fn effective_block_size_grows_only_to_fit_sbn_limit() {
         let config = RqConfig::default();
         let one_gib = 1024 * 1024 * 1024;
+        let symbol_size = usize::from(config.symbol_size);
+        let min_symbol_aligned_block = one_gib
+            .div_ceil(MAX_SOURCE_BLOCKS)
+            .max(symbol_size)
+            .div_ceil(symbol_size)
+            .saturating_mul(symbol_size);
+        let effective = effective_max_block_size_for_largest_entry(&config, one_gib)
+            .expect("1GiB should fit default transfer geometry");
         assert_eq!(
-            effective_max_block_size_for_largest_entry(&config, one_gib)
-                .expect("1GiB should fit default transfer geometry"),
-            4 * 1024 * 1024
+            effective, min_symbol_aligned_block,
+            "large entries should grow only enough to fit the u8 SBN limit"
         );
+        assert_eq!(one_gib.div_ceil(effective), MAX_SOURCE_BLOCKS);
     }
 
     #[test]
