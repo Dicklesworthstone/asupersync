@@ -16,7 +16,9 @@ pub use compression::{
 };
 pub use filter::{FilterAction, FilterDecision, FilterError, FilterRule, FilterSet};
 pub use metadata::{
-    EntryMetadata, FileKind, MetadataApplyReport, apply_entry_metadata, metadata_commitment,
+    DirtyPathSet, EntryMetadata, FileIdentity, FileKind, MetadataApplyReport, SimilaritySignature,
+    ZeroScanDecision, ZeroScanEntry, ZeroScanFingerprint, ZeroScanHashReason, ZeroScanPlan,
+    ZeroScanPolicy, ZeroScanPrefilter, apply_entry_metadata, metadata_commitment,
     read_entry_metadata,
 };
 pub use mirror::{

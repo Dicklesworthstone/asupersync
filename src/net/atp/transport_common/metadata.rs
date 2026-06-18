@@ -28,6 +28,7 @@
 //! rsync-style graceful degradation.
 
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -159,6 +160,438 @@ impl EntryMetadata {
         hash_opt_u32(hasher, self.gid);
         hash_opt_str(hasher, self.symlink_target.as_deref());
         hash_opt_str(hasher, self.hardlink_target.as_deref());
+    }
+}
+
+/// Stable filesystem identity for a regular file on platforms that expose it.
+///
+/// A rename within the same filesystem preserves this identity, letting the
+/// sender reuse the prior content plan without opening and chunk-hashing the
+/// renamed path. Callers should omit it on platforms where `(device, inode)` is
+/// not available or not stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct FileIdentity {
+    /// Device identifier from the filesystem.
+    pub device: u64,
+    /// Inode/file index on that device.
+    pub inode: u64,
+}
+
+impl FileIdentity {
+    /// Construct a filesystem identity.
+    #[must_use]
+    pub const fn new(device: u64, inode: u64) -> Self {
+        Self { device, inode }
+    }
+}
+
+/// Optional similarity sketch supplied by a prior manifest or filesystem journal.
+///
+/// The zero-scan prefilter never derives this by reading file contents; doing so
+/// would defeat its purpose. Instead, transports may carry forward a simhash or
+/// MinHash learned during a previous verified chunk pass and use it to select a
+/// strong delta base for renamed/copied files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimilaritySignature {
+    /// SimHash over a prior verified content/chunk sketch.
+    pub simhash: u64,
+    /// Optional MinHash/minimum-chunk-sketch value for exact tie-breaking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minhash: Option<u64>,
+}
+
+impl SimilaritySignature {
+    /// Construct a similarity signature.
+    #[must_use]
+    pub const fn new(simhash: u64, minhash: Option<u64>) -> Self {
+        Self { simhash, minhash }
+    }
+
+    fn distance_to(self, other: Self) -> u32 {
+        (self.simhash ^ other.simhash).count_ones()
+    }
+
+    fn matches_within(self, other: Self, max_hamming_distance: u32) -> bool {
+        self.minhash.zip(other.minhash).is_some_and(|(a, b)| a == b)
+            || self.distance_to(other) <= max_hamming_distance
+    }
+}
+
+/// Cheap, persistent identity used before content-defined chunking.
+///
+/// This is deliberately separate from [`EntryMetadata`]: it is sender-local
+/// planning state, not a wire manifest field. Default policy requires ctime to
+/// avoid trusting size+mtime alone on filesystems that can expose stronger
+/// change evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroScanFingerprint {
+    /// File kind represented by this fingerprint.
+    pub file_kind: FileKind,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Modification time, whole seconds since the unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_unix_secs: Option<i64>,
+    /// Modification time, sub-second nanoseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_nanos: Option<u32>,
+    /// Change time, whole seconds since the unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctime_unix_secs: Option<i64>,
+    /// Change time, sub-second nanoseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctime_nanos: Option<u32>,
+    /// Optional filesystem identity for rename detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<FileIdentity>,
+    /// Optional similarity sketch from prior verified chunk state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<SimilaritySignature>,
+}
+
+impl ZeroScanFingerprint {
+    /// Build a fingerprint from existing ATP metadata and a known content length.
+    #[must_use]
+    pub fn from_entry_metadata(size_bytes: u64, metadata: &EntryMetadata) -> Self {
+        Self {
+            file_kind: metadata.file_kind,
+            size_bytes,
+            mtime_unix_secs: metadata.mtime_unix_secs,
+            mtime_nanos: metadata.mtime_nanos,
+            ctime_unix_secs: None,
+            ctime_nanos: None,
+            identity: None,
+            similarity: None,
+        }
+    }
+
+    /// Attach ctime captured from local stat metadata.
+    #[must_use]
+    pub const fn with_ctime(mut self, secs: i64, nanos: u32) -> Self {
+        self.ctime_unix_secs = Some(secs);
+        self.ctime_nanos = Some(nanos);
+        self
+    }
+
+    /// Attach a filesystem identity captured from local stat metadata.
+    #[must_use]
+    pub const fn with_identity(mut self, identity: FileIdentity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    /// Attach a prior verified similarity signature.
+    #[must_use]
+    pub const fn with_similarity(mut self, signature: SimilaritySignature) -> Self {
+        self.similarity = Some(signature);
+        self
+    }
+
+    fn ctime_available(&self) -> bool {
+        self.ctime_unix_secs.is_some()
+    }
+
+    fn mtime_matches(&self, prior: &Self) -> bool {
+        self.mtime_unix_secs == prior.mtime_unix_secs
+            && self.mtime_nanos.unwrap_or(0) == prior.mtime_nanos.unwrap_or(0)
+    }
+
+    fn ctime_matches(&self, prior: &Self, policy: &ZeroScanPolicy) -> bool {
+        if policy.require_ctime && !(self.ctime_available() && prior.ctime_available()) {
+            return false;
+        }
+        match (self.ctime_unix_secs, prior.ctime_unix_secs) {
+            (Some(a), Some(b)) => {
+                a == b && self.ctime_nanos.unwrap_or(0) == prior.ctime_nanos.unwrap_or(0)
+            }
+            (None, None) => !policy.require_ctime,
+            _ => false,
+        }
+    }
+
+    fn same_filesystem_identity(&self, prior: &Self) -> bool {
+        self.identity
+            .zip(prior.identity)
+            .is_some_and(|(current, previous)| current == previous)
+    }
+
+    fn stat_identity_matches(&self, prior: &Self, policy: &ZeroScanPolicy) -> bool {
+        self.file_kind == prior.file_kind
+            && self.size_bytes == prior.size_bytes
+            && self.mtime_matches(prior)
+            && self.ctime_matches(prior, policy)
+            && match (self.identity, prior.identity) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            }
+    }
+
+    fn likely_same_prior_content(&self, prior: &Self, policy: &ZeroScanPolicy) -> bool {
+        if self.file_kind != prior.file_kind || self.size_bytes != prior.size_bytes {
+            return false;
+        }
+        if self.same_filesystem_identity(prior) || self.stat_identity_matches(prior, policy) {
+            return true;
+        }
+        self.similarity
+            .zip(prior.similarity)
+            .is_some_and(|(current, previous)| {
+                current.matches_within(previous, policy.max_similarity_hamming_distance)
+            })
+    }
+}
+
+/// One tree entry available to the zero-scan prefilter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroScanEntry {
+    /// Transfer-relative path.
+    pub rel_path: String,
+    /// Cheap stat/journal-derived identity for the entry.
+    pub fingerprint: ZeroScanFingerprint,
+}
+
+impl ZeroScanEntry {
+    /// Construct an entry.
+    #[must_use]
+    pub fn new(rel_path: impl Into<String>, fingerprint: ZeroScanFingerprint) -> Self {
+        Self {
+            rel_path: rel_path.into(),
+            fingerprint,
+        }
+    }
+}
+
+/// Optional filesystem-journal dirty set.
+///
+/// A clean entry is still stat-compared before it is skipped. A dirty hit always
+/// schedules chunk hashing even if size/mtime/ctime happen to match, preserving
+/// correctness when the journal reports a suspicious path.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirtyPathSet {
+    paths: BTreeSet<String>,
+}
+
+impl DirtyPathSet {
+    /// Construct an empty dirty set.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            paths: BTreeSet::new(),
+        }
+    }
+
+    /// Construct a dirty set from transfer-relative paths.
+    #[must_use]
+    pub fn from_paths(paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            paths: paths.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Mark a path as dirty.
+    pub fn insert(&mut self, rel_path: impl Into<String>) {
+        self.paths.insert(rel_path.into());
+    }
+
+    /// Whether a path was reported dirty by the filesystem journal.
+    #[must_use]
+    pub fn contains(&self, rel_path: &str) -> bool {
+        self.paths.contains(rel_path)
+    }
+
+    /// Number of dirty paths tracked.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    /// Whether the dirty set is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
+/// Zero-scan prefilter knobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroScanPolicy {
+    /// Require ctime on both prior and current entries before skipping hashing.
+    pub require_ctime: bool,
+    /// Maximum SimHash Hamming distance accepted for a prior-content match.
+    pub max_similarity_hamming_distance: u32,
+}
+
+impl Default for ZeroScanPolicy {
+    fn default() -> Self {
+        Self {
+            require_ctime: true,
+            max_similarity_hamming_distance: 3,
+        }
+    }
+}
+
+/// Why an entry still needs content-defined chunk hashing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZeroScanHashReason {
+    /// No prior entry or reusable prior content candidate exists.
+    NoPriorEntry,
+    /// Filesystem journal marked this path dirty.
+    DirtySetHit,
+    /// Same path exists but stat identity moved.
+    StatChanged,
+}
+
+/// Per-entry prefilter decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "decision")]
+pub enum ZeroScanDecision {
+    /// Same path and same stat identity: no chunk hashing and no content bytes.
+    Unchanged {
+        /// Current transfer-relative path.
+        rel_path: String,
+    },
+    /// Different path can reuse a verified prior content plan as delta base.
+    ReusePriorContent {
+        /// Current transfer-relative path.
+        rel_path: String,
+        /// Prior transfer-relative path to use as the delta/CAS base.
+        prior_rel_path: String,
+    },
+    /// This entry must be chunk-hashed and reconciled normally.
+    NeedsChunkHash {
+        /// Current transfer-relative path.
+        rel_path: String,
+        /// Why zero-scan could not skip hashing.
+        reason: ZeroScanHashReason,
+        /// Estimated content bytes this entry contributes to the lower-bound
+        /// transfer floor before CAS/delta reconciliation removes shared chunks.
+        size_bytes: u64,
+    },
+}
+
+impl ZeroScanDecision {
+    fn skipped_chunk_hash(&self) -> bool {
+        matches!(
+            self,
+            Self::Unchanged { .. } | Self::ReusePriorContent { .. }
+        )
+    }
+}
+
+/// Aggregate zero-scan plan output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroScanPlan {
+    /// One decision per current entry, in current-entry order.
+    pub decisions: Vec<ZeroScanDecision>,
+    /// Number of entries whose chunk hashing was skipped.
+    pub skipped_chunk_hashes: usize,
+    /// Number of entries that still require chunk hashing.
+    pub scheduled_chunk_hashes: usize,
+    /// Bytes that would have been hashed but were skipped by zero-scan.
+    pub skipped_chunk_hash_bytes: u64,
+    /// Lower bound on content bytes requiring normal chunk/hash processing.
+    pub estimated_content_bytes_floor: u64,
+}
+
+/// Pure zero-scan planner used before FastCDC/RaptorQ send preparation.
+pub struct ZeroScanPrefilter;
+
+impl ZeroScanPrefilter {
+    /// Compare a prior verified tree snapshot with the current tree snapshot.
+    ///
+    /// This function never opens files and never hashes content. It only decides
+    /// which entries can safely reuse prior verified content evidence and which
+    /// entries must proceed to the normal chunk-hashing path.
+    #[must_use]
+    pub fn plan(
+        prior: &[ZeroScanEntry],
+        current: &[ZeroScanEntry],
+        dirty_set: Option<&DirtyPathSet>,
+        policy: ZeroScanPolicy,
+    ) -> ZeroScanPlan {
+        let prior_by_path: BTreeMap<&str, &ZeroScanEntry> = prior
+            .iter()
+            .map(|entry| (entry.rel_path.as_str(), entry))
+            .collect();
+        let mut decisions = Vec::with_capacity(current.len());
+
+        for entry in current {
+            let dirty = dirty_set.is_some_and(|set| set.contains(&entry.rel_path));
+            let decision = match prior_by_path.get(entry.rel_path.as_str()) {
+                Some(_) if dirty => ZeroScanDecision::NeedsChunkHash {
+                    rel_path: entry.rel_path.clone(),
+                    reason: ZeroScanHashReason::DirtySetHit,
+                    size_bytes: entry.fingerprint.size_bytes,
+                },
+                Some(previous)
+                    if entry
+                        .fingerprint
+                        .stat_identity_matches(&previous.fingerprint, &policy) =>
+                {
+                    ZeroScanDecision::Unchanged {
+                        rel_path: entry.rel_path.clone(),
+                    }
+                }
+                Some(_) => ZeroScanDecision::NeedsChunkHash {
+                    rel_path: entry.rel_path.clone(),
+                    reason: ZeroScanHashReason::StatChanged,
+                    size_bytes: entry.fingerprint.size_bytes,
+                },
+                None => Self::best_prior_content_match(prior, entry, &policy).map_or_else(
+                    || ZeroScanDecision::NeedsChunkHash {
+                        rel_path: entry.rel_path.clone(),
+                        reason: ZeroScanHashReason::NoPriorEntry,
+                        size_bytes: entry.fingerprint.size_bytes,
+                    },
+                    |previous| ZeroScanDecision::ReusePriorContent {
+                        rel_path: entry.rel_path.clone(),
+                        prior_rel_path: previous.rel_path.clone(),
+                    },
+                ),
+            };
+            decisions.push(decision);
+        }
+
+        let mut skipped_chunk_hashes = 0usize;
+        let mut scheduled_chunk_hashes = 0usize;
+        let mut skipped_chunk_hash_bytes = 0u64;
+        let mut estimated_content_bytes_floor = 0u64;
+
+        for (entry, decision) in current.iter().zip(decisions.iter()) {
+            if decision.skipped_chunk_hash() {
+                skipped_chunk_hashes += 1;
+                skipped_chunk_hash_bytes =
+                    skipped_chunk_hash_bytes.saturating_add(entry.fingerprint.size_bytes);
+            } else if let ZeroScanDecision::NeedsChunkHash { size_bytes, .. } = decision {
+                scheduled_chunk_hashes += 1;
+                estimated_content_bytes_floor =
+                    estimated_content_bytes_floor.saturating_add(*size_bytes);
+            }
+        }
+
+        ZeroScanPlan {
+            decisions,
+            skipped_chunk_hashes,
+            scheduled_chunk_hashes,
+            skipped_chunk_hash_bytes,
+            estimated_content_bytes_floor,
+        }
+    }
+
+    fn best_prior_content_match<'a>(
+        prior: &'a [ZeroScanEntry],
+        entry: &ZeroScanEntry,
+        policy: &ZeroScanPolicy,
+    ) -> Option<&'a ZeroScanEntry> {
+        prior
+            .iter()
+            .filter(|previous| {
+                entry
+                    .fingerprint
+                    .likely_same_prior_content(&previous.fingerprint, policy)
+            })
+            .min_by(|a, b| a.rel_path.cmp(&b.rel_path))
     }
 }
 
@@ -529,6 +962,154 @@ mod tests {
             unix_mode: mode,
             ..Default::default()
         }
+    }
+
+    fn zero_scan_entry(
+        rel_path: &str,
+        size_bytes: u64,
+        mtime_secs: i64,
+        ctime_secs: Option<i64>,
+        identity: Option<FileIdentity>,
+    ) -> ZeroScanEntry {
+        let metadata = EntryMetadata {
+            mtime_unix_secs: Some(mtime_secs),
+            mtime_nanos: Some(0),
+            ..Default::default()
+        };
+        let mut fingerprint =
+            ZeroScanFingerprint::from_entry_metadata(size_bytes, &metadata).with_similarity(
+                SimilaritySignature::new(size_bytes.rotate_left(7), Some(size_bytes)),
+            );
+        if let Some(secs) = ctime_secs {
+            fingerprint = fingerprint.with_ctime(secs, 0);
+        }
+        if let Some(id) = identity {
+            fingerprint = fingerprint.with_identity(id);
+        }
+        ZeroScanEntry::new(rel_path, fingerprint)
+    }
+
+    #[test]
+    fn zero_scan_prefilter_skips_unchanged_tree() {
+        let prior = vec![
+            zero_scan_entry("alpha.bin", 10, 1_700_000_000, Some(1_700_000_010), None),
+            zero_scan_entry(
+                "nested/beta.bin",
+                20,
+                1_700_000_001,
+                Some(1_700_000_011),
+                None,
+            ),
+        ];
+        let current = prior.clone();
+
+        let plan = ZeroScanPrefilter::plan(&prior, &current, None, ZeroScanPolicy::default());
+
+        assert_eq!(plan.scheduled_chunk_hashes, 0);
+        assert_eq!(plan.skipped_chunk_hashes, 2);
+        assert_eq!(plan.skipped_chunk_hash_bytes, 30);
+        assert_eq!(plan.estimated_content_bytes_floor, 0);
+        assert!(
+            plan.decisions
+                .iter()
+                .all(|decision| matches!(decision, ZeroScanDecision::Unchanged { .. }))
+        );
+    }
+
+    #[test]
+    fn zero_scan_dirty_set_forces_chunk_hashing() {
+        let prior = vec![
+            zero_scan_entry("alpha.bin", 10, 1_700_000_000, Some(1_700_000_010), None),
+            zero_scan_entry(
+                "nested/beta.bin",
+                20,
+                1_700_000_001,
+                Some(1_700_000_011),
+                None,
+            ),
+        ];
+        let current = prior.clone();
+        let dirty = DirtyPathSet::from_paths(["nested/beta.bin"]);
+
+        let plan =
+            ZeroScanPrefilter::plan(&prior, &current, Some(&dirty), ZeroScanPolicy::default());
+
+        assert_eq!(plan.skipped_chunk_hashes, 1);
+        assert_eq!(plan.scheduled_chunk_hashes, 1);
+        assert_eq!(plan.estimated_content_bytes_floor, 20);
+        assert!(matches!(
+            plan.decisions[1],
+            ZeroScanDecision::NeedsChunkHash {
+                reason: ZeroScanHashReason::DirtySetHit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_scan_detects_rename_without_resending_content() {
+        let identity = FileIdentity::new(7, 42);
+        let prior = vec![zero_scan_entry(
+            "old-name.bin",
+            64,
+            1_700_000_000,
+            Some(1_700_000_010),
+            Some(identity),
+        )];
+        let current = vec![zero_scan_entry(
+            "new-name.bin",
+            64,
+            1_700_000_000,
+            Some(1_700_000_010),
+            Some(identity),
+        )];
+
+        let plan = ZeroScanPrefilter::plan(&prior, &current, None, ZeroScanPolicy::default());
+
+        assert_eq!(plan.scheduled_chunk_hashes, 0);
+        assert_eq!(plan.skipped_chunk_hashes, 1);
+        assert_eq!(plan.estimated_content_bytes_floor, 0);
+        assert_eq!(
+            plan.decisions,
+            vec![ZeroScanDecision::ReusePriorContent {
+                rel_path: "new-name.bin".to_string(),
+                prior_rel_path: "old-name.bin".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn zero_scan_requires_ctime_by_default() {
+        let prior = vec![zero_scan_entry(
+            "same-size-mtime.bin",
+            64,
+            1_700_000_000,
+            None,
+            None,
+        )];
+        let current = prior.clone();
+
+        let plan = ZeroScanPrefilter::plan(&prior, &current, None, ZeroScanPolicy::default());
+
+        assert_eq!(plan.scheduled_chunk_hashes, 1);
+        assert!(matches!(
+            plan.decisions[0],
+            ZeroScanDecision::NeedsChunkHash {
+                reason: ZeroScanHashReason::StatChanged,
+                ..
+            }
+        ));
+
+        let permissive = ZeroScanPolicy {
+            require_ctime: false,
+            ..ZeroScanPolicy::default()
+        };
+        let plan = ZeroScanPrefilter::plan(&prior, &current, None, permissive);
+        assert_eq!(plan.scheduled_chunk_hashes, 0);
+        assert!(matches!(
+            plan.decisions[0],
+            ZeroScanDecision::Unchanged { .. }
+        ));
     }
 
     #[test]
