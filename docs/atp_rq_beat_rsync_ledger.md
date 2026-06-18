@@ -257,6 +257,22 @@ to wire.
   localization):** install a heap profiler (heaptrack/valgrind massif — absent on the workers) OR add
   a 1-line instrumented log of peak `SymbolSet` len + in-flight incomplete-block count, on a 50M/bad
   run, to NAME the structure holding ~890k symbols before implementing the bound.
+- **★ HYPOTHESIS-2 (glibc arena fragmentation) REFUTED 2026-06-18 (zero-build test):** re-ran
+  100M/bad with `MALLOC_ARENA_MAX=1` on the receiver → Max RSS **893 MB, UNCHANGED** (vs 895 MB).
+  So the blowup is NOT multi-thread malloc-arena fragmentation. It is a genuine ~893 MB data
+  structure. Arithmetic puzzle: 893 MB ≈ 890k × 1 KB, but the receiver only RECEIVES ~103k symbols
+  for 100M (can't hold 9× what it got) ⇒ it is NOT raw retained symbols either. Confirmed by code:
+  SymbolSet = `DetHashMap<SymbolId, Symbol>` cleared only on block-complete; source-streaming writes
+  source to DISK (not the SymbolSet), so the SymbolSet should hold only repair (few, fb=3). Remaining
+  suspects to instrument: (a) `BlockDecoder.decoded: Option<Vec<u8>>` retained per block if
+  `retain_decoded_block` (could be O(file) if the receiver retains decoded blocks in RAM);
+  (b) the inactivation-decode working matrices (per-block K×K over GF256, ~360 KB for K512 — ×many
+  if not freed); (c) `try_decode_block` clones ALL of a block's symbols per decode ATTEMPT
+  (decoding.rs:672) — transient but peak-spiking if attempted often. **DECISIVE NEXT STEP (commit to
+  it):** add `SymbolSet::buffered_symbol_count()` + `DecodingPipeline::debug_mem_estimate()`
+  (buffered symbols, blocks-with-retained-decoded, total decoded bytes), rqtrace per feedback round in
+  the receive loop, build (`--features atp-cli`), run 50M/bad with ATP_RQ_TRACE → NAME the structure.
+  Then bound/free it, prove sha-identical + RSS bounded + 500M/bad converges.
 
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
