@@ -26,10 +26,10 @@
 //! it incrementally, then (1) compares every entry's streamed SHA-256 to the
 //! manifest and (2) rebuilds the flat object-graph merkle root from the
 //! per-entry digests and compares it to the manifest root. Only if both hold
-//! does it atomically rename the staging files into the destination and report
-//! `committed = true`. Any mismatch, short read, oversize entry, unreachable
-//! peer, or rejected handshake is a hard error — there is no success path that
-//! moves zero bytes.
+//! does it commit each entry with a per-entry atomic rename or link/create
+//! operation and report `committed = true`. Any mismatch, short read, oversize
+//! entry, unreachable peer, or rejected handshake is a hard error — there is no
+//! success path that moves zero bytes.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -282,7 +282,10 @@ pub struct TransferManifest {
 /// Receipt returned by the receiver in the `Proof` frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReceiveReceipt {
-    /// Whether the receiver atomically committed the transfer to its destination.
+    /// Whether the receiver committed every integrity-verified entry.
+    ///
+    /// Individual regular files use atomic rename from staging, but a multi-entry
+    /// transfer is not rollback-atomic across all destination paths.
     pub committed: bool,
     /// Total bytes received.
     pub bytes_received: u64,
@@ -747,6 +750,37 @@ where
     match crate::time::timeout(cx.now(), timeout, future).await {
         Ok(result) => result.map_err(TransportError::from),
         Err(_elapsed) => Err(TransportError::Timeout { operation, timeout }),
+    }
+}
+
+fn trace_tcp_metadata_skips(
+    cx: &Cx,
+    out_path: &Path,
+    skipped: &[(&'static str, String)],
+) {
+    if cx.trace_buffer().is_none() || skipped.is_empty() {
+        return;
+    }
+    let path_str = out_path.display().to_string();
+    for (field, reason) in skipped {
+        cx.trace_with_fields(
+            "atp_tcp_metadata_skipped",
+            &[
+                ("path", path_str.as_str()),
+                ("field", *field),
+                ("reason", reason.as_str()),
+            ],
+        );
+    }
+}
+
+async fn apply_entry_metadata_best_effort(cx: &Cx, out_path: &Path, meta: &EntryMetadata) {
+    match apply_entry_metadata(out_path, meta).await {
+        Ok(report) => trace_tcp_metadata_skips(cx, out_path, &report.skipped),
+        Err(err) => {
+            let skipped = [("apply", err.to_string())];
+            trace_tcp_metadata_skips(cx, out_path, &skipped);
+        }
     }
 }
 
@@ -1456,20 +1490,7 @@ pub async fn receive_connection(
                 if let Some(meta) = &entry.metadata {
                     if matches!(meta.file_kind, FileKind::Directory) {
                         crate::fs::create_dir_all(&out_path).await?;
-                        let report = apply_entry_metadata(&out_path, meta).await?;
-                        if cx.trace_buffer().is_some() {
-                            let path_str = out_path.display().to_string();
-                            for (field, reason) in &report.skipped {
-                                cx.trace_with_fields(
-                                    "atp_tcp_metadata_skipped",
-                                    &[
-                                        ("path", path_str.as_str()),
-                                        ("field", *field),
-                                        ("reason", reason.as_str()),
-                                    ],
-                                );
-                            }
-                        }
+                        apply_entry_metadata_best_effort(cx, &out_path, meta).await;
                         committed_paths.push(out_path);
                         continue;
                     }
@@ -1510,20 +1531,7 @@ pub async fn receive_connection(
                 // Apply captured metadata (mode/mtime/owner) best-effort; skips
                 // (e.g. chown without privilege) are traced, never fatal.
                 if let Some(meta) = &entry.metadata {
-                    let report = apply_entry_metadata(&out_path, meta).await?;
-                    if cx.trace_buffer().is_some() {
-                        let path_str = out_path.display().to_string();
-                        for (field, reason) in &report.skipped {
-                            cx.trace_with_fields(
-                                "atp_tcp_metadata_skipped",
-                                &[
-                                    ("path", path_str.as_str()),
-                                    ("field", *field),
-                                    ("reason", reason.as_str()),
-                                ],
-                            );
-                        }
-                    }
+                    apply_entry_metadata_best_effort(cx, &out_path, meta).await;
                 }
                 committed_paths.push(out_path);
             }
@@ -1901,6 +1909,18 @@ mod tests {
             crate::types::CancelReason::parent_cancelled(),
         ));
         assert!(matches!(err, TransportError::Cancelled));
+    }
+
+    #[test]
+    fn metadata_apply_error_is_best_effort_not_commit_fatal() {
+        let cx = Cx::for_testing();
+        let meta = EntryMetadata {
+            unix_mode: Some(0o600),
+            ..Default::default()
+        };
+        let missing = Path::new("/asupersync-tcp-metadata-best-effort-missing-file");
+
+        futures_lite::future::block_on(apply_entry_metadata_best_effort(&cx, missing, &meta));
     }
 
     #[test]
