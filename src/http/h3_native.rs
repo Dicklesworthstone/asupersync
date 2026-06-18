@@ -1720,6 +1720,19 @@ impl QpackBlockedStreamRecord {
     }
 }
 
+/// Cap on retained non-`Blocked` (Ready/Cancelled/Failed) records in the
+/// scheduler's `streams` map. `Blocked` records are bounded separately by
+/// SETTINGS_QPACK_BLOCKED_STREAMS and are never reaped (they are still active).
+///
+/// Without a cap the map is insert-only — every `submit_*` adds a per-stream
+/// record (success, Ready, Cancelled, or failure) and nothing removes them — so
+/// over a long-lived connection serving many short requests (monotonically
+/// increasing stream IDs) it grows without bound. We reap the OLDEST terminal
+/// records (lowest stream_id) first; on a live connection their Header
+/// Acknowledgement / Stream Cancellation has long since been processed. This
+/// bounds the map to `O(blocked_cap + MAX_RETAINED_NONBLOCKED_RECORDS)`.
+const MAX_RETAINED_NONBLOCKED_RECORDS: usize = 1024;
+
 /// QPACK blocked-stream scheduler for outbound field sections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QpackBlockedStreamScheduler {
@@ -1760,6 +1773,42 @@ impl QpackBlockedStreamScheduler {
             .count() as u64
     }
 
+    /// Total per-stream records currently retained (blocked + terminal). Bounded
+    /// by [`MAX_RETAINED_NONBLOCKED_RECORDS`] plus the live blocked set; exposed
+    /// so callers/tests can observe the scheduler's bounded memory.
+    #[must_use]
+    pub fn tracked_record_count(&self) -> usize {
+        self.streams.len()
+    }
+
+    /// Reap the oldest non-`Blocked` (terminal/ready) records once they exceed
+    /// [`MAX_RETAINED_NONBLOCKED_RECORDS`], bounding the `streams` map for
+    /// long-lived connections. Never removes `Blocked` records — they are still
+    /// active and are bounded separately by SETTINGS_QPACK_BLOCKED_STREAMS.
+    /// BTreeMap iteration is ascending by stream_id, so the oldest streams (whose
+    /// acknowledgement/cancellation has already been processed) are reaped first.
+    fn reap_excess_records(&mut self) {
+        let nonblocked = self
+            .streams
+            .values()
+            .filter(|record| record.status != QpackBlockedStreamStatus::Blocked)
+            .count();
+        if nonblocked <= MAX_RETAINED_NONBLOCKED_RECORDS {
+            return;
+        }
+        let excess = nonblocked - MAX_RETAINED_NONBLOCKED_RECORDS;
+        let victims: Vec<u64> = self
+            .streams
+            .iter()
+            .filter(|(_, record)| record.status != QpackBlockedStreamStatus::Blocked)
+            .take(excess)
+            .map(|(stream_id, _)| *stream_id)
+            .collect();
+        for stream_id in victims {
+            self.streams.remove(&stream_id);
+        }
+    }
+
     /// Lookup a stream record.
     #[must_use]
     pub fn record(&self, stream_id: u64) -> Option<&QpackBlockedStreamRecord> {
@@ -1781,6 +1830,8 @@ impl QpackBlockedStreamScheduler {
         stream_id: u64,
         field_section: &[u8],
     ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
+        // Bound the streams map before adding another per-stream record.
+        self.reap_excess_records();
         if self.streams.contains_key(&stream_id) {
             return self.fail(H3NativeError::StreamProtocol(
                 "qpack stream already scheduled",
@@ -1860,6 +1911,8 @@ impl QpackBlockedStreamScheduler {
         stream_id: u64,
         field_section: &[u8],
     ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
+        // Bound the streams map before adding another per-stream record.
+        self.reap_excess_records();
         if self.streams.contains_key(&stream_id) {
             return self.fail(H3NativeError::StreamProtocol(
                 "qpack stream already scheduled",
@@ -8080,6 +8133,70 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::InvalidFrame("unknown dynamic qpack reference for stream")
+        );
+    }
+
+    #[test]
+    fn qpack_blocked_scheduler_reaps_terminal_records_but_keeps_blocked() {
+        // Regression for the insert-only streams map (asupersync-...-i7afx1):
+        // terminal records must be reaped to bound memory on long-lived
+        // connections, while active Blocked records are always retained.
+        let mut scheduler = QpackBlockedStreamScheduler::new(64);
+
+        // One active blocked stream (highest id) must survive reaping.
+        let blocked_id = 1_000_000u64;
+        scheduler.streams.insert(
+            blocked_id,
+            QpackBlockedStreamRecord {
+                stream_id: blocked_id,
+                required_insert_count: 5,
+                base: 0,
+                status: QpackBlockedStreamStatus::Blocked,
+                blocked_reason: Some("waiting on inserts"),
+                protected_references: Vec::new(),
+                blocked_field_section: None,
+                first_failure: None,
+            },
+        );
+
+        // Far more terminal (failed) records than the retention cap.
+        let extra = MAX_RETAINED_NONBLOCKED_RECORDS + 100;
+        for stream_id in 0..extra as u64 {
+            scheduler.streams.insert(
+                stream_id,
+                QpackBlockedStreamRecord::failed(
+                    stream_id,
+                    None,
+                    H3NativeError::InvalidFrame("boom"),
+                ),
+            );
+        }
+
+        scheduler.reap_excess_records();
+
+        // Non-blocked records are bounded to the cap; the blocked stream stays.
+        let nonblocked = scheduler
+            .streams
+            .values()
+            .filter(|record| record.status != QpackBlockedStreamStatus::Blocked)
+            .count();
+        assert_eq!(nonblocked, MAX_RETAINED_NONBLOCKED_RECORDS);
+        assert_eq!(
+            scheduler.tracked_record_count(),
+            MAX_RETAINED_NONBLOCKED_RECORDS + 1
+        );
+        assert!(scheduler.record(blocked_id).is_some());
+        assert_eq!(scheduler.blocked_stream_count(), 1);
+
+        // Oldest terminal records reaped first; newest retained.
+        assert!(scheduler.record(0).is_none());
+        assert!(scheduler.record((extra - 1) as u64).is_some());
+
+        // Already at the cap: a further reap is a no-op (idempotent).
+        scheduler.reap_excess_records();
+        assert_eq!(
+            scheduler.tracked_record_count(),
+            MAX_RETAINED_NONBLOCKED_RECORDS + 1
         );
     }
 
