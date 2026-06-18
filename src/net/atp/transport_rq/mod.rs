@@ -1652,7 +1652,9 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                         )));
                     }
                 }
-                Ok(acc.saturating_add(entry.size))
+                acc.checked_add(entry.size).ok_or_else(|| {
+                    RqError::Frame("manifest declared size sum overflows u64".to_string())
+                })
             })?;
     if declared_total > config.max_transfer_bytes {
         return Err(RqError::TooLarge {
@@ -4906,6 +4908,22 @@ mod tests {
         assert!(matches!(
             validate_manifest(&manifest, &config),
             Err(RqError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_declared_sum_overflow() {
+        let config = RqConfig {
+            max_transfer_bytes: u64::MAX,
+            ..RqConfig::default()
+        };
+        let manifest = manifest_with(
+            vec![manifest_entry(0, u64::MAX), manifest_entry(1, 1)],
+            u64::MAX,
+        );
+        assert!(matches!(
+            validate_manifest(&manifest, &config),
+            Err(RqError::Frame(msg)) if msg.contains("declared size sum overflows")
         ));
     }
 
