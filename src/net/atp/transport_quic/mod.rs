@@ -807,11 +807,21 @@ pub fn quic_spray_pacing_decision_from_config(
     config: &QuicConfig,
     path: QuicPathSignalSample,
 ) -> QuicSprayPacingDecision {
+    quic_spray_pacing_decision_from_config_with_cpu(config, path, usize::MAX)
+}
+
+/// Build a C3/D1 pacing decision with an explicit CPU parallelism bound.
+#[must_use]
+pub fn quic_spray_pacing_decision_from_config_with_cpu(
+    config: &QuicConfig,
+    path: QuicPathSignalSample,
+    cpu_parallelism: usize,
+) -> QuicSprayPacingDecision {
     quic_spray_pacing_decision(QuicSprayPacingInput {
         path,
         symbol_size: config.symbol_size,
         max_datagram_size: config.max_datagram_size,
-        datagram_fanout: config.datagram_fanout,
+        datagram_fanout: quic_effective_datagram_fanout(config, cpu_parallelism),
         bandwidth_limit_bps: config.bwlimit_bps,
         machine_pressure: QuicMachinePressure {
             cpu_pressure: config.responsiveness_pressure,
@@ -857,6 +867,27 @@ pub struct QuicFanoutSymbolSlot {
     pub sbn: u8,
     /// Zero-based symbol ordinal within this block's scheduled run.
     pub symbol_index_in_block: usize,
+}
+
+/// Deterministic D1 fan-out plan for one symbol-spray epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicFanoutSprayPlan {
+    /// Bounded connection count used for this plan.
+    pub connection_count: usize,
+    /// Ordered symbol slots to spray.
+    pub slots: Vec<QuicFanoutSymbolSlot>,
+    /// Per-connection symbol counts for tracing and assertions.
+    pub per_connection_symbols: Vec<u64>,
+    /// Total symbols covered by the plan.
+    pub total_symbols: u64,
+}
+
+impl QuicFanoutSprayPlan {
+    /// Whether this epoch has no positive-symbol work.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
 }
 
 /// Deterministic block-interleaving scheduler for D1 QUIC fan-out.
@@ -941,6 +972,33 @@ impl Iterator for QuicBlockInterleavingScheduler {
         }
 
         None
+    }
+}
+
+/// Plan one bounded QUIC fan-out spray epoch from pending block work.
+#[must_use]
+pub fn quic_plan_fanout_spray(
+    config: &QuicConfig,
+    cpu_parallelism: usize,
+    blocks: &[QuicFanoutBlock],
+) -> QuicFanoutSprayPlan {
+    let connection_count = quic_effective_datagram_fanout(config, cpu_parallelism);
+    let mut per_connection_symbols = vec![0u64; connection_count];
+    let mut slots = Vec::new();
+
+    for slot in QuicBlockInterleavingScheduler::new(blocks, connection_count) {
+        if let Some(symbols) = per_connection_symbols.get_mut(slot.connection) {
+            *symbols = symbols.saturating_add(1);
+        }
+        slots.push(slot);
+    }
+
+    let total_symbols = slots.len().try_into().unwrap_or(u64::MAX);
+    QuicFanoutSprayPlan {
+        connection_count,
+        slots,
+        per_connection_symbols,
+        total_symbols,
     }
 }
 
@@ -6319,6 +6377,36 @@ mod tests {
     }
 
     #[test]
+    fn d1_quic_spray_pacing_uses_effective_fanout_bound() {
+        let config = QuicConfig {
+            datagram_fanout: 8,
+            max_active_connections: 4,
+            symbol_size: 1024,
+            max_spray_symbols_per_flush: 64,
+            ..trusted_quic_config()
+        };
+        let signal = pacing_signal(0.050, 64 * 1024, 0.0);
+
+        let config_bound = quic_spray_pacing_decision_from_config(&config, signal);
+        let cpu_bound = quic_spray_pacing_decision_from_config_with_cpu(&config, signal, 2);
+
+        assert_eq!(
+            config_bound.cwnd_share_symbols,
+            config_bound.cwnd_symbols / 4,
+            "default config path should clamp fanout to max_active_connections"
+        );
+        assert_eq!(
+            cpu_bound.cwnd_share_symbols,
+            cpu_bound.cwnd_symbols / 2,
+            "explicit CPU path should clamp fanout to available parallelism"
+        );
+        assert!(
+            cpu_bound.pacing_rate_bps > config_bound.pacing_rate_bps,
+            "fewer effective lanes should give each lane a larger safe pacing share"
+        );
+    }
+
+    #[test]
     fn d1_quic_block_interleaving_scheduler_feeds_every_lane_and_block() {
         let blocks = [
             QuicFanoutBlock {
@@ -6404,6 +6492,66 @@ mod tests {
         );
 
         assert!(QuicBlockInterleavingScheduler::new(&[], 4).is_empty());
+    }
+
+    #[test]
+    fn d1_quic_fanout_spray_plan_counts_lanes_and_synthetic_scaling() {
+        let config = QuicConfig {
+            datagram_fanout: 4,
+            max_active_connections: 4,
+            ..trusted_quic_config()
+        };
+        let blocks = [
+            QuicFanoutBlock {
+                entry: 0,
+                sbn: 0,
+                symbols: 4,
+            },
+            QuicFanoutBlock {
+                entry: 0,
+                sbn: 1,
+                symbols: 4,
+            },
+            QuicFanoutBlock {
+                entry: 1,
+                sbn: 0,
+                symbols: 4,
+            },
+        ];
+
+        let two_lane = quic_plan_fanout_spray(&config, 2, &blocks);
+        let four_lane = quic_plan_fanout_spray(&config, 4, &blocks);
+
+        assert_eq!(two_lane.connection_count, 2);
+        assert_eq!(four_lane.connection_count, 4);
+        assert_eq!(two_lane.total_symbols, 12);
+        assert_eq!(four_lane.total_symbols, 12);
+        assert_eq!(two_lane.per_connection_symbols, vec![6, 6]);
+        assert_eq!(four_lane.per_connection_symbols, vec![3, 3, 3, 3]);
+        assert!(
+            four_lane
+                .per_connection_symbols
+                .iter()
+                .all(|symbols| *symbols > 0),
+            "all effective fan-out lanes should receive symbol work"
+        );
+
+        let two_lane_rounds = two_lane
+            .per_connection_symbols
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let four_lane_rounds = four_lane
+            .per_connection_symbols
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        assert!(
+            four_lane_rounds < two_lane_rounds,
+            "synthetic same-workload completion rounds should improve with more lanes"
+        );
     }
 
     #[test]
