@@ -100,7 +100,10 @@ pub const DEFAULT_SYMBOL_SIZE: u16 = 1400;
 ///
 /// With 1 KiB symbols this bounds a block at ~8192 source symbols (well under
 /// the RFC 6330 K=56403 cap) and lets a single entry span up to 256 blocks (SBN
-/// is a `u8`), i.e. up to ~2 GiB per entry.
+/// is a `u8`), i.e. up to ~2 GiB per entry at this default block size. Entries
+/// larger than `256 * DEFAULT_MAX_BLOCK_SIZE` grow the effective block size (see
+/// [`effective_max_block_size_for_largest_entry`]) up to the RFC K cap, lifting
+/// the per-entry ceiling to ~20 GiB (E-12).
 pub const DEFAULT_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Target source-symbol count for the effective transfer block size.
@@ -114,6 +117,13 @@ const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 /// Byte ceiling for the normal streaming block-size target. Larger blocks are
 /// allowed only when the 256-block SBN wire limit requires them.
 const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
+/// RFC 6330 systematic-index cap on source symbols per block (K'_max). The
+/// effective block size is allowed to grow up to `RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK
+/// * symbol_size` for entries larger than `256 * configured_max`, lifting the
+/// per-entry object ceiling from `256 * configured_max` (~2 GiB at the 8 MiB default)
+/// to `256 * 56403 * symbol_size` (~20 GiB at 1400-byte symbols). This keeps the
+/// 256-block SBN limit satisfied (E-12) while never exceeding the decoder's K cap.
+const RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK: usize = 56403;
 /// Maximum encoded ATP-RQ symbols sent in one connected UDP batch per socket.
 const RQ_SEND_BATCH_PER_SOCKET: usize = 32;
 /// Maximum encoded ATP-RQ symbols queued globally before flushing all sockets.
@@ -1809,7 +1819,16 @@ pub(in crate::net::atp) fn effective_max_block_size_for_largest_entry(
 ) -> Result<usize, RqError> {
     let symbol_size = usize::from(config.symbol_size.max(1));
     let configured_max = config.max_block_size.max(symbol_size);
-    let max_supported = max_object_size(configured_max);
+    // E-12: the effective block size may grow ABOVE the configured default for entries larger than
+    // `256 * configured_max`, so the object still fits the 256-block u8-SBN limit. The hard ceiling is
+    // the RFC 6330 per-block source-symbol cap (K' <= 56403): block <= 56403 * symbol_size. This lifts
+    // the per-entry object ceiling from `256 * configured_max` (~2 GiB at the 8 MiB default) to
+    // `256 * 56403 * symbol_size` (~20 GiB at 1400-byte symbols). On perfect/good links a large entry
+    // reassembles via the source-first memcpy fast path (no O(K^2) solve), so the only cost of a bigger
+    // block is on lossy huge transfers — already the E-11 large-bad limitation, not a new regression.
+    let block_ceiling =
+        configured_max.max(RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK.saturating_mul(symbol_size));
+    let max_supported = max_object_size(block_ceiling);
     if max_entry_len > max_supported {
         return Err(RqError::TooLarge {
             size: max_entry_len as u64,
@@ -1826,9 +1845,12 @@ pub(in crate::net::atp) fn effective_max_block_size_for_largest_entry(
         .div_ceil(symbol_size)
         .saturating_mul(symbol_size);
 
+    // For entries within `256 * configured_max` (<= ~2 GiB), `min_for_block_limit <= configured_max`
+    // so this is IDENTICAL to the prior `.min(configured_max)` behaviour (byte-identical wire). Only
+    // entries above that grow the block toward `block_ceiling` to honour the 256-block limit.
     Ok(target
         .max(min_for_block_limit)
-        .min(configured_max)
+        .min(block_ceiling)
         .max(symbol_size))
 }
 
@@ -5299,6 +5321,48 @@ mod tests {
             "one symbol-aligned step smaller should exceed the SBN wire limit"
         );
         assert_eq!(one_gib.div_ceil(effective), MAX_SOURCE_BLOCKS);
+    }
+
+    #[test]
+    fn effective_block_size_grows_above_configured_max_for_huge_entries() {
+        // E-12: a 5 GiB entry exceeds the old hard ceiling (256 * 8 MiB = 2 GiB). It must now
+        // succeed by growing the effective block ABOVE the configured default, staying within the
+        // 256-block u8 SBN limit and the RFC K cap; beyond ~20 GiB it must still fail closed.
+        let config = RqConfig::default();
+        let symbol_size = usize::from(config.symbol_size);
+        let five_gib: usize = 5 * 1024 * 1024 * 1024;
+        let effective = effective_max_block_size_for_largest_entry(&config, five_gib)
+            .expect("5GiB must fit after E-12 (object ceiling lifted from 2 GiB to ~20 GiB)");
+        assert!(
+            effective > config.max_block_size,
+            "huge entry must grow the block above the 8 MiB configured default"
+        );
+        assert!(
+            five_gib.div_ceil(effective) <= MAX_SOURCE_BLOCKS,
+            "grown block must keep the entry within the 256-block u8 SBN limit"
+        );
+        assert!(
+            effective.div_ceil(symbol_size) <= RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK,
+            "grown block must not exceed the RFC 6330 K cap"
+        );
+        // Entries within the configured 2 GiB default ceiling are unaffected (byte-identical).
+        let one_gib: usize = 1024 * 1024 * 1024;
+        assert_eq!(
+            effective_max_block_size_for_largest_entry(&config, one_gib).unwrap(),
+            one_gib
+                .div_ceil(MAX_SOURCE_BLOCKS)
+                .max(symbol_size)
+                .div_ceil(symbol_size)
+                .saturating_mul(symbol_size)
+        );
+        // Beyond 256 * 56403 * symbol_size (~20 GiB) it must still fail closed.
+        let ceiling = RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK
+            .saturating_mul(symbol_size)
+            .saturating_mul(MAX_SOURCE_BLOCKS);
+        assert!(matches!(
+            effective_max_block_size_for_largest_entry(&config, ceiling + 1),
+            Err(RqError::TooLarge { .. })
+        ));
     }
 
     #[test]
