@@ -4888,25 +4888,30 @@ mod tests {
     }
 
     #[test]
-    fn effective_block_size_targets_k512_for_normal_files() {
+    fn effective_block_size_uses_streaming_target_for_normal_files() {
         let config = RqConfig::default();
+        let symbol_size = usize::from(config.symbol_size);
+        let expected_target = symbol_size
+            .saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK)
+            .min(TARGET_STREAMING_BLOCK_BYTES)
+            .min(config.max_block_size);
         let effective = effective_max_block_size_for_largest_entry(&config, 10 * 1024 * 1024)
             .expect("10MiB should fit");
-        assert_eq!(
-            effective,
-            usize::from(config.symbol_size) * TARGET_SOURCE_SYMBOLS_PER_BLOCK
-        );
+        assert_eq!(effective, expected_target);
         assert_eq!(
             max_block_source_symbol_count(10 * 1024 * 1024, config.symbol_size, effective),
-            TARGET_SOURCE_SYMBOLS_PER_BLOCK
+            expected_target.div_ceil(symbol_size)
         );
     }
 
     #[test]
     fn effective_block_size_grows_only_to_fit_sbn_limit() {
         let config = RqConfig::default();
-        let one_gib = 1024 * 1024 * 1024;
+        let one_gib: usize = 1024 * 1024 * 1024;
         let symbol_size = usize::from(config.symbol_size);
+        let streaming_target = symbol_size
+            .saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK)
+            .min(TARGET_STREAMING_BLOCK_BYTES);
         let min_symbol_aligned_block = one_gib
             .div_ceil(MAX_SOURCE_BLOCKS)
             .max(symbol_size)
@@ -4917,6 +4922,14 @@ mod tests {
         assert_eq!(
             effective, min_symbol_aligned_block,
             "large entries should grow only enough to fit the u8 SBN limit"
+        );
+        assert!(
+            effective > streaming_target,
+            "this fixture must exercise SBN-limit growth beyond the normal streaming target"
+        );
+        assert!(
+            one_gib.div_ceil(effective - symbol_size) > MAX_SOURCE_BLOCKS,
+            "one symbol-aligned step smaller should exceed the SBN wire limit"
         );
         assert_eq!(one_gib.div_ceil(effective), MAX_SOURCE_BLOCKS);
     }
