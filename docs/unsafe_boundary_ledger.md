@@ -27,6 +27,13 @@ matches. It records these site kinds:
 - `unsafe_impl`
 - `unsafe_trait`
 
+UNSAFE-2 catch-up on 2026-06-18 refreshed the ledger against committed
+`195add219024f19e5be0696e7aa6da5452b282ce`. That pass updated drifted
+line-number locators for existing rows and added rows for the standalone
+`atp` fd-limit resource boundary plus the Unix stream ancillary integration
+test. The worktree was dirty with peer-owned files, so the artifact again
+records committed `HEAD` only.
+
 ## Row Schema
 
 Each `sites[]` row must include:

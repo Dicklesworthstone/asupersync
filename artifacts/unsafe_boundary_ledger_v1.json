@@ -2,13 +2,14 @@
   "schema_version": 1,
   "artifact": "unsafe_boundary_ledger_v1",
   "generated_from": {
-    "source_revision": "104bc620d45e5261de9eb026b980a94dec9dbb58",
+    "source_revision": "195add219024f19e5be0696e7aa6da5452b282ce",
     "scan_mode": "committed_HEAD_only",
     "worktree_dirty_at_generation": true,
-    "scan_command": "git ls-tree -r --name-only HEAD -- '*.rs' plus syntax scan for allow(unsafe_code), unsafe blocks, unsafe fn, unsafe impl, unsafe trait; comments and string literals ignored for unsafe syntax matches",
+    "scan_command": "git ls-tree -r --name-only HEAD | filter *.rs plus syntax scan for allow(unsafe_code), unsafe blocks, unsafe fn, unsafe impl, unsafe trait; comments and string literals ignored for unsafe syntax matches",
     "notes": [
-      "The repository had peer-owned dirty source files at generation time; this ledger intentionally inventories committed HEAD so the artifact is reproducible from the commit that adds it.",
-      "UNSAFE-2 is responsible for converting this inventory into a failing live-source contract and for splitting broad file rows into narrower rows if needed."
+      "The repository had peer-owned dirty source files at generation time; this ledger inventories committed HEAD so the artifact is reproducible from the source revision recorded here.",
+      "UNSAFE-2 catch-up refreshed operation_locators to exact committed-source line numbers and added rows for src/bin/atp.rs and tests/net_unix_stream_ancillary.rs.",
+      "Passing the contract proves source/ledger locator alignment only; category evidence still controls any safety claim."
     ]
   },
   "required_row_fields": [
@@ -329,11 +330,11 @@
     }
   },
   "summary": {
-    "boundary_rows": 92,
-    "operation_count": 823,
+    "boundary_rows": 95,
+    "operation_count": 833,
     "operation_kind_counts": {
-      "allow_unsafe_code": 87,
-      "unsafe_block": 622,
+      "allow_unsafe_code": 90,
+      "unsafe_block": 629,
       "unsafe_fn": 94,
       "unsafe_impl": 20,
       "unsafe_trait": 0
@@ -347,9 +348,9 @@
       "env-var-mutation": 6,
       "filesystem-ffi": 3,
       "fuzz-target": 28,
-      "network-ffi": 1,
+      "network-ffi": 3,
       "observability-test-boundary": 1,
-      "platform-resource-metrics": 1,
+      "platform-resource-metrics": 2,
       "process-signal-ffi": 3,
       "reactor-ffi": 5,
       "secret-memory-security": 3,
@@ -1616,7 +1617,7 @@
         {
           "kind": "unsafe_block",
           "line": 163,
-          "pattern": "unsafe {"
+          "pattern": "unsafe { core::arch::x86_64::__cpuid(leaf) }"
         },
         {
           "kind": "allow_unsafe_code",
@@ -1626,6 +1627,32 @@
         {
           "kind": "unsafe_block",
           "line": 171,
+          "pattern": "unsafe {"
+        }
+      ]
+    },
+    {
+      "site_id": "unsafe-src-bin-atp-rs",
+      "path": "src/bin/atp.rs",
+      "category": "platform-resource-metrics",
+      "scope": "item-boundary",
+      "feature_or_platform_gate": "Unix targets; standalone atp startup fd-limit raise",
+      "why_safe_rust_is_insufficient": "The standalone atp binary raises RLIMIT_NOFILE at startup so large directory receives do not fail with EMFILE before the bounded receiver FD pool lands; safe Rust has no stable API for getrlimit/setrlimit.",
+      "safety_invariant": "getrlimit/setrlimit must use RLIMIT_NOFILE with a fully initialized rlimit value, pass only valid pointers for the duration of each libc call, check getrlimit success before reading the struct, and never set the soft limit above the kernel-reported hard limit.",
+      "expected_evidence": "cargo check -p asupersync for syntax plus central ATP CLI transfer verification; platform-specific execution of the fd-limit raise remains a Unix host boundary.",
+      "explicit_no_claims": [
+        "This row does not prove every Unix host permits raising RLIMIT_NOFILE or that the requested hard limit is sufficient for every transfer shape.",
+        "This row does not replace the planned bounded receiver FD pool and does not prove transfer throughput or memory behavior."
+      ],
+      "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 1739,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 1746,
           "pattern": "unsafe {"
         }
       ]
@@ -1651,32 +1678,32 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 827,
+          "line": 1078,
           "pattern": "let result = unsafe { libc::kill(pid, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1388,
+          "line": 1698,
           "pattern": "let term_result = unsafe { libc::kill(native_pid, libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1399,
+          "line": 1709,
           "pattern": "let check_result = unsafe { libc::kill(native_pid, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1408,
+          "line": 1718,
           "pattern": "let _ = unsafe { libc::kill(native_pid, libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1425,
+          "line": 1735,
           "pattern": "let errno = unsafe { *libc::__errno_location() };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1558,
+          "line": 1868,
           "pattern": "let signal_result = unsafe { libc::kill(native_pid, libc::SIGHUP) };"
         }
       ]
@@ -1697,22 +1724,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 1115,
+          "line": 1177,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 1228,
+          "line": 1290,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 1232,
+          "line": 1294,
           "pattern": "unsafe { std::env::set_var(\"RAPTORQ_ENCODING_SYMBOL_SIZE\", \"512\") };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1236,
+          "line": 1298,
           "pattern": "unsafe { std::env::remove_var(\"RAPTORQ_ENCODING_SYMBOL_SIZE\") };"
         }
       ]
@@ -1759,22 +1786,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 9554,
+          "line": 9558,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 9561,
+          "line": 9565,
           "pattern": "unsafe { std::env::set_var(\"SSL_CERT_FILE\", \"/definitely/not/a/postgres-ca.pem\") };"
         },
         {
           "kind": "unsafe_block",
-          "line": 9568,
+          "line": 9572,
           "pattern": "unsafe { std::env::set_var(\"SSL_CERT_FILE\", value) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 9572,
+          "line": 9576,
           "pattern": "unsafe { std::env::remove_var(\"SSL_CERT_FILE\") };"
         }
       ]
@@ -2046,58 +2073,94 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1740,
+          "line": 1975,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1754,
+          "line": 1989,
           "pattern": "let get_result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2102,
+          "line": 2337,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2119,
+          "line": 2354,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2153,
+          "line": 2388,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2170,
+          "line": 2405,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2205,
+          "line": 2441,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2243,
+          "line": 2455,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2285,
+          "line": 2469,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2330,
+          "line": 2507,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2344,
+          "line": 2549,
           "pattern": "let result = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 2594,
+          "pattern": "let result = unsafe {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 2608,
+          "pattern": "let result = unsafe {"
+        }
+      ]
+    },
+    {
+      "site_id": "unsafe-src-net-unix-stream-rs-recvmsg-ancillary",
+      "path": "src/net/unix/stream.rs",
+      "category": "network-ffi",
+      "scope": "item-boundary",
+      "feature_or_platform_gate": "Unix targets; Linux regression exercises partial SCM_RIGHTS MSG_CTRUNC",
+      "why_safe_rust_is_insufficient": "nix RecvMsg::cmsgs hides msg_controllen and returns ENOBUFS for MSG_CTRUNC, preventing safe recovery of kernel-installed fds on partial SCM_RIGHTS truncation.",
+      "safety_invariant": "recvmsg control parsing must walk only kernel-reported msg_controllen, surface every parsed SCM_RIGHTS fd exactly once to SocketAncillary, preserve MSG_CTRUNC, and never assume the control buffer holds more bytes than libc CMSG_* reports.",
+      "expected_evidence": "cargo check -p asupersync for syntax plus focused Unix ancillary regression recv_with_ancillary_surfaces_partial_truncation_fds_without_leak in central batch verification.",
+      "explicit_no_claims": [
+        "This row does not prove every Unix variant's CMSG layout; non-Linux hosts need their own focused run.",
+        "The cargo-check lane does not execute the partial-truncation regression."
+      ],
+      "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 841,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 861,
+          "pattern": "let (bytes, received_fds, truncated) = unsafe {"
         }
       ]
     },
@@ -2235,93 +2298,103 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 62,
+          "line": 64,
           "pattern": "let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 66,
+          "line": 68,
           "pattern": "let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 351,
+          "line": 277,
+          "pattern": "if unsafe { libc::setpgid(0, 0) } == 0 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 284,
+          "pattern": "if unsafe { libc::setsid() } >= 0 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 343,
+          "pattern": "let ret = unsafe { libc::kill(target, sig) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 494,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1226,
-          "pattern": "let ret = unsafe { libc::kill(pid, sig) };"
+          "line": 892,
+          "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1656,
+          "line": 1947,
           "pattern": "let _ = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2481,
+          "line": 2778,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2521,
+          "line": 2818,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2686,
+          "line": 3002,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2729,
+          "line": 3045,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3155,
+          "line": 3471,
           "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3167,
+          "line": 3483,
           "pattern": "let still_alive = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3178,
+          "line": 3494,
           "pattern": "let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3248,
+          "line": 3564,
           "pattern": "let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }"
         },
         {
           "kind": "unsafe_block",
-          "line": 3326,
+          "line": 3640,
           "pattern": "let our_pgid = unsafe { libc::getpgid(0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3334,
-          "pattern": "|| -> libc::pid_t { unsafe { libc::getpgid(isolated_pid.cast_signed()) } };"
+          "line": 3645,
+          "pattern": "let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3375,
-          "pattern": "|| -> libc::pid_t { unsafe { libc::getpgid(target_pid.cast_signed()) } };"
+          "line": 3699,
+          "pattern": "let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 3404,
-          "pattern": "let signal_result = unsafe { libc::kill(-target_pgid, libc::SIGUSR1) };"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 3427,
-          "pattern": "let child_alive = unsafe { libc::kill(isolated_pid.cast_signed(), 0) == 0 };"
+          "line": 3763,
+          "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
         }
       ]
     },
@@ -3376,22 +3449,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 4456,
+          "line": 4487,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 6049,
+          "line": 6080,
           "pattern": "unsafe { std::env::set_var(k, v) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 6054,
+          "line": 6085,
           "pattern": "unsafe { std::env::remove_var(k) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 6079,
+          "line": 6110,
           "pattern": "unsafe { std::env::remove_var(var) };"
         }
       ]
@@ -3412,37 +3485,37 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 448,
+          "line": 464,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 473,
+          "line": 489,
           "pattern": "unsafe { std::env::set_var(var, val) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 476,
+          "line": 492,
           "pattern": "unsafe { std::env::remove_var(var) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 488,
+          "line": 504,
           "pattern": "unsafe { std::env::set_var(k, v) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 493,
+          "line": 509,
           "pattern": "unsafe { std::env::remove_var(k) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 517,
+          "line": 533,
           "pattern": "unsafe { std::env::remove_var(var) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 782,
+          "line": 807,
           "pattern": "unsafe {"
         }
       ]
@@ -4180,22 +4253,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 714,
+          "line": 710,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 726,
+          "line": 722,
           "pattern": "let pre = unsafe { *bytes_ptr };"
         },
         {
           "kind": "unsafe_block",
-          "line": 733,
+          "line": 729,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 738,
+          "line": 734,
           "pattern": "let post = unsafe { *bytes_ptr };"
         }
       ]
@@ -4242,33 +4315,23 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 148,
+          "line": 151,
           "pattern": "#[allow(unsafe_code)] // Win32 Event HANDLE FFI."
         },
         {
           "kind": "unsafe_block",
-          "line": 150,
+          "line": 153,
           "pattern": "unsafe { windows_sys::Win32::System::Threading::SetEvent(self.0) != 0 }"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 153,
+          "line": 156,
           "pattern": "#[allow(unsafe_code)] // Win32 Event HANDLE FFI."
         },
         {
           "kind": "unsafe_block",
-          "line": 155,
+          "line": 158,
           "pattern": "unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) != 0 }"
-        },
-        {
-          "kind": "allow_unsafe_code",
-          "line": 165,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 166,
-          "pattern": "unsafe impl Send for WindowsEventHandle {}"
         },
         {
           "kind": "allow_unsafe_code",
@@ -4278,36 +4341,46 @@
         {
           "kind": "unsafe_impl",
           "line": 169,
+          "pattern": "unsafe impl Send for WindowsEventHandle {}"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 171,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 172,
           "pattern": "unsafe impl Sync for WindowsEventHandle {}"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 253,
+          "line": 256,
           "pattern": "#[allow(unsafe_code)] // signal_hook::low_level::register + Win32 FFI"
         },
         {
           "kind": "unsafe_block",
-          "line": 294,
+          "line": 297,
           "pattern": "let shutdown_event_raw = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 298,
+          "line": 301,
           "pattern": "let signal_pending_event_raw = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 301,
+          "line": 304,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 336,
+          "line": 339,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 371,
+          "line": 374,
           "pattern": "let rc = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };"
         }
       ]
@@ -4424,107 +4497,107 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 24,
+          "line": 25,
           "pattern": "#![allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_impl",
-          "line": 107,
+          "line": 108,
           "pattern": "unsafe impl<T: Send> Send for Mutex<T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 108,
+          "line": 109,
           "pattern": "unsafe impl<T: Send> Sync for Mutex<T> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 560,
+          "line": 561,
           "pattern": "unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}"
         },
         {
           "kind": "unsafe_block",
-          "line": 573,
+          "line": 574,
           "pattern": "unsafe { &*self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 580,
+          "line": 581,
           "pattern": "unsafe { &mut *self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_impl",
-          "line": 647,
+          "line": 648,
           "pattern": "unsafe impl<T, U: ?Sized + Sync> Sync for MappedMutexGuard<'_, T, U> {}"
         },
         {
           "kind": "unsafe_block",
-          "line": 662,
+          "line": 663,
           "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 669,
+          "line": 670,
           "pattern": "unsafe { self.data.as_mut() }"
-        },
-        {
-          "kind": "unsafe_impl",
-          "line": 732,
-          "pattern": "unsafe impl<T: Send> Send for OwnedMutexGuard<T> {}"
         },
         {
           "kind": "unsafe_impl",
           "line": 733,
+          "pattern": "unsafe impl<T: Send> Send for OwnedMutexGuard<T> {}"
+        },
+        {
+          "kind": "unsafe_impl",
+          "line": 734,
           "pattern": "unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}"
         },
         {
           "kind": "unsafe_block",
-          "line": 778,
+          "line": 779,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 796,
+          "line": 797,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 813,
+          "line": 814,
           "pattern": "unsafe { &*self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 820,
+          "line": 821,
           "pattern": "unsafe { &mut *self.mutex.data.get() }"
         },
         {
           "kind": "unsafe_impl",
-          "line": 846,
+          "line": 847,
           "pattern": "unsafe impl<T: Send, U: ?Sized + Send> Send for OwnedMappedMutexGuard<T, U> {}"
         },
         {
           "kind": "unsafe_impl",
-          "line": 847,
+          "line": 848,
           "pattern": "unsafe impl<T: Send, U: ?Sized + Sync> Sync for OwnedMappedMutexGuard<T, U> {}"
         },
         {
           "kind": "unsafe_block",
-          "line": 862,
+          "line": 863,
           "pattern": "unsafe { self.data.as_ref() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 869,
+          "line": 870,
           "pattern": "unsafe { self.data.as_mut() }"
         },
         {
           "kind": "unsafe_block",
-          "line": 895,
+          "line": 896,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 913,
+          "line": 914,
           "pattern": "let mutex = unsafe { std::ptr::read(&self.mutex) };"
         }
       ]
@@ -4545,7 +4618,7 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 4415,
+          "line": 4427,
           "pattern": "#[allow(unsafe_code)]"
         }
       ],
@@ -5635,6 +5708,32 @@
       ]
     },
     {
+      "site_id": "unsafe-tests-net-unix-stream-ancillary-rs",
+      "path": "tests/net_unix_stream_ancillary.rs",
+      "category": "network-ffi",
+      "scope": "test-boundary",
+      "feature_or_platform_gate": "Unix-only integration test for SCM_RIGHTS descriptor passing",
+      "why_safe_rust_is_insufficient": "The test must take ownership of a file descriptor received through SCM_RIGHTS with FromRawFd to prove the descriptor is a readable duplicate; safe Rust cannot construct File ownership from a raw descriptor without this boundary.",
+      "safety_invariant": "The received descriptor must come from exactly one SCM_RIGHTS message, be consumed exactly once by File::from_raw_fd, and then be closed by File drop without aliasing another owner of the same received fd.",
+      "expected_evidence": "cargo check -p asupersync for syntax plus central Unix ancillary integration test fd_passing_round_trip_via_scm_rights.",
+      "explicit_no_claims": [
+        "This row is test-only and does not prove production Unix ancillary parsing beyond the specific integration scenario.",
+        "This row does not prove non-Unix behavior; the test is cfg(unix)."
+      ],
+      "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 25,
+          "pattern": "#[allow(unsafe_code)] // from_raw_fd: take ownership of the descriptor passed over the socket"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 67,
+          "pattern": "let mut received_file = unsafe { std::fs::File::from_raw_fd(received[0]) };"
+        }
+      ]
+    },
+    {
       "site_id": "unsafe-tests-runtime-yield-now-vs-sleep-zero-distinction-audit-rs",
       "path": "tests/runtime_yield_now_vs_sleep_zero_distinction_audit.rs",
       "category": "test-or-lab-harness",
@@ -5953,32 +6052,6 @@
           "kind": "unsafe_block",
           "line": 539,
           "pattern": "unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), 0) };"
-        }
-      ]
-    },
-    {
-      "site_id": "unsafe-src-net-unix-stream-rs-recvmsg-ancillary",
-      "path": "src/net/unix/stream.rs",
-      "category": "network-ffi",
-      "scope": "item-boundary",
-      "feature_or_platform_gate": "Unix targets; Linux regression exercises partial SCM_RIGHTS MSG_CTRUNC",
-      "why_safe_rust_is_insufficient": "nix RecvMsg::cmsgs hides msg_controllen and returns ENOBUFS for MSG_CTRUNC, preventing safe recovery of kernel-installed fds on partial SCM_RIGHTS truncation.",
-      "safety_invariant": "recvmsg control parsing must walk only kernel-reported msg_controllen, surface every parsed SCM_RIGHTS fd exactly once to SocketAncillary, preserve MSG_CTRUNC, and never assume the control buffer holds more bytes than libc CMSG_* reports.",
-      "expected_evidence": "cargo check -p asupersync for syntax plus focused Unix ancillary regression recv_with_ancillary_surfaces_partial_truncation_fds_without_leak in central batch verification.",
-      "explicit_no_claims": [
-        "This row does not prove every Unix variant's CMSG layout; non-Linux hosts need their own focused run.",
-        "The cargo-check lane does not execute the partial-truncation regression."
-      ],
-      "operation_locators": [
-        {
-          "kind": "allow_unsafe_code",
-          "line": 841,
-          "pattern": "#[allow(unsafe_code)]"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 861,
-          "pattern": "let (bytes, received_fds, truncated) = unsafe {"
         }
       ]
     }
