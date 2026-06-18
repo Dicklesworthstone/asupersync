@@ -1323,47 +1323,6 @@ impl SymbolDeduplicator {
         true
     }
 
-    /// Rolls back a previously recorded symbol so a later retransmission can be
-    /// treated as unique again.
-    ///
-    /// Returns `true` when a recorded symbol was actually removed.
-    fn rollback_record(&self, object_id: ObjectId, symbol_id: SymbolId) -> bool {
-        let mut objects = self.objects.write();
-        let mut remove_object = false;
-        {
-            let Some(state) = objects.get_mut(&object_id) else {
-                return false;
-            };
-            if !state.seen.remove(&symbol_id) {
-                return false;
-            }
-            state.first_seen.remove(&symbol_id);
-            state.first_path.remove(&symbol_id);
-
-            if state.seen.is_empty() {
-                remove_object = true;
-            } else {
-                state.last_activity = state
-                    .first_seen
-                    .values()
-                    .copied()
-                    .max()
-                    .unwrap_or(state.created_at);
-            }
-        }
-        if remove_object {
-            objects.remove(&object_id);
-        }
-
-        drop(objects);
-        // Saturating decrement — a double-rollback (caller bug) must not
-        // wrap the counter to u64::MAX.
-        let _ = self
-            .unique_symbols
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
-        true
-    }
-
     /// Returns the path that first delivered a symbol.
     #[must_use]
     pub fn first_path(&self, object_id: ObjectId, symbol_id: SymbolId) -> Option<PathId> {
@@ -1471,15 +1430,11 @@ struct BufferedSymbol {
 
 struct ReorderProcessResult {
     ready: Vec<Symbol>,
-    rollback_dedup_record: bool,
 }
 
 impl ReorderProcessResult {
     fn accepted(ready: Vec<Symbol>) -> Self {
-        Self {
-            ready,
-            rollback_dedup_record: false,
-        }
+        Self { ready }
     }
 }
 
@@ -1958,8 +1913,6 @@ impl MultipathAggregator {
     /// Processes an incoming symbol from a path.
     pub fn process(&self, symbol: Symbol, path: PathId, now: Time) -> ProcessResult {
         self.total_processed.fetch_add(1, Ordering::Relaxed);
-        let object_id = symbol.object_id();
-        let symbol_id = symbol.id();
 
         // Record path activity
         if let Some(p) = self.paths.get(path) {
@@ -1987,9 +1940,6 @@ impl MultipathAggregator {
         } else {
             ReorderProcessResult::accepted(vec![symbol])
         };
-        if reorder_result.rollback_dedup_record {
-            let _ = self.dedup.rollback_record(object_id, symbol_id);
-        }
         ProcessResult {
             ready: reorder_result.ready,
             was_duplicate: false,
@@ -4608,6 +4558,119 @@ mod tests {
         );
 
         crate::test_complete!("aggregator_delivers_late_unique_symbol_after_gap_advance_once");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn aggregator_delivers_late_unique_symbol_after_timeout_advance_once() {
+        init_test("aggregator_delivers_late_unique_symbol_after_timeout_advance_once");
+        let config = AggregatorConfig {
+            reorder: ReordererConfig {
+                immediate_delivery: false,
+                max_sequence_gap: 10,
+                max_wait_time: Time::from_millis(5),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let aggregator = MultipathAggregator::new(config);
+        let path = aggregator.paths().create_path(
+            "test",
+            "localhost:8080",
+            PathCharacteristics::default(),
+        );
+
+        let seq0 = aggregator.process(Symbol::new_for_test(1, 0, 0, &[0]), path, Time::ZERO);
+        crate::assert_with_log!(
+            seq0.ready.len() == 1,
+            "seq0 delivered immediately",
+            1,
+            seq0.ready.len()
+        );
+
+        let seq2 = aggregator.process(
+            Symbol::new_for_test(1, 0, 2, &[2]),
+            path,
+            Time::from_millis(1),
+        );
+        crate::assert_with_log!(
+            seq2.ready.is_empty(),
+            "seq2 buffered while waiting for seq1",
+            true,
+            seq2.ready.is_empty()
+        );
+
+        let flushed = aggregator.flush(Time::from_millis(10));
+        crate::assert_with_log!(
+            flushed.len() == 1,
+            "timeout advances past missing seq1 and flushes seq2",
+            1,
+            flushed.len()
+        );
+        crate::assert_with_log!(
+            flushed[0].esi() == 2,
+            "timeout flush output is seq2",
+            2,
+            flushed[0].esi()
+        );
+
+        let late_seq1 = aggregator.process(
+            Symbol::new_for_test(1, 0, 1, &[1]),
+            path,
+            Time::from_millis(11),
+        );
+        crate::assert_with_log!(
+            !late_seq1.was_duplicate,
+            "late seq1 after timeout advance is unique on first arrival",
+            false,
+            late_seq1.was_duplicate
+        );
+        crate::assert_with_log!(
+            late_seq1.ready.len() == 1,
+            "late unique seq1 is delivered after timeout advance",
+            1,
+            late_seq1.ready.len()
+        );
+        crate::assert_with_log!(
+            late_seq1.ready[0].esi() == 1,
+            "late unique timeout output is seq1",
+            1,
+            late_seq1.ready[0].esi()
+        );
+
+        let duplicate_seq1 = aggregator.process(
+            Symbol::new_for_test(1, 0, 1, &[1]),
+            path,
+            Time::from_millis(12),
+        );
+        crate::assert_with_log!(
+            duplicate_seq1.was_duplicate,
+            "retransmitted timeout-late seq1 is still deduped",
+            true,
+            duplicate_seq1.was_duplicate
+        );
+        crate::assert_with_log!(
+            duplicate_seq1.ready.is_empty(),
+            "duplicate timeout-late seq1 produces no output",
+            true,
+            duplicate_seq1.ready.is_empty()
+        );
+
+        let stats = aggregator.dedup.stats();
+        crate::assert_with_log!(
+            stats.unique_symbols == 3,
+            "dedup tracks seq0 seq2 and timeout-late seq1 as unique",
+            3,
+            stats.unique_symbols
+        );
+        crate::assert_with_log!(
+            stats.duplicates_detected == 1,
+            "dedup rejects retransmitted timeout-late seq1",
+            1,
+            stats.duplicates_detected
+        );
+
+        crate::test_complete!("aggregator_delivers_late_unique_symbol_after_timeout_advance_once");
     }
 
     /// Flush timeout advances next_expected and drains consecutive.
