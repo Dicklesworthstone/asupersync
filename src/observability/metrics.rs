@@ -285,16 +285,52 @@ impl Histogram {
 #[derive(Debug)]
 pub struct Summary {
     name: String,
-    values: Mutex<Vec<f64>>,
+    samples: Mutex<SummarySamples>,
     sum: AtomicU64, // Stored as bits of f64
     count: AtomicU64,
+}
+
+const SUMMARY_SAMPLE_CAP: usize = 4096;
+
+#[derive(Debug)]
+struct SummarySamples {
+    values: Vec<f64>,
+    next: usize,
+}
+
+impl SummarySamples {
+    fn new() -> Self {
+        Self {
+            values: Vec::with_capacity(SUMMARY_SAMPLE_CAP),
+            next: 0,
+        }
+    }
+
+    fn observe(&mut self, value: f64) {
+        if self.values.len() < SUMMARY_SAMPLE_CAP {
+            self.values.push(value);
+            return;
+        }
+
+        self.values[self.next] = value;
+        self.next = (self.next + 1) % SUMMARY_SAMPLE_CAP;
+    }
+
+    fn snapshot(&self) -> Vec<f64> {
+        self.values.clone()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.values.len()
+    }
 }
 
 impl Summary {
     pub(crate) fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            values: Mutex::new(Vec::new()),
+            samples: Mutex::new(SummarySamples::new()),
             sum: AtomicU64::new(0.0f64.to_bits()),
             count: AtomicU64::new(0),
         }
@@ -307,10 +343,10 @@ impl Summary {
         if !value.is_finite() {
             return;
         }
-        self.values
+        self.samples
             .lock()
-            .expect("summary values mutex poisoned")
-            .push(value);
+            .expect("summary samples mutex poisoned")
+            .observe(value);
         self.count.fetch_add(1, Ordering::Relaxed);
 
         let mut current = self.sum.load(Ordering::Relaxed);
@@ -356,10 +392,10 @@ impl Summary {
         }
 
         let mut values = self
-            .values
+            .samples
             .lock()
-            .expect("summary values mutex poisoned")
-            .clone();
+            .expect("summary samples mutex poisoned")
+            .snapshot();
         if values.is_empty() {
             return None;
         }
@@ -374,6 +410,14 @@ impl Summary {
             last_index // Fallback to last index if calculation overflows
         };
         values.get(rank).copied()
+    }
+
+    #[cfg(test)]
+    fn sample_len(&self) -> usize {
+        self.samples
+            .lock()
+            .expect("summary samples mutex poisoned")
+            .len()
     }
 }
 
@@ -1212,6 +1256,23 @@ mod tests {
         assert_eq!(summary.quantile(0.5), Some(40.0));
         assert_eq!(summary.quantile(0.9), Some(160.0));
         assert_eq!(summary.quantile(0.99), Some(160.0));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn summary_bounds_quantile_sample() {
+        let summary = Summary::new("bounded_summary");
+        for value in 0..(SUMMARY_SAMPLE_CAP + 17) {
+            summary.observe(value as f64);
+        }
+
+        assert_eq!(summary.count(), (SUMMARY_SAMPLE_CAP + 17) as u64);
+        assert_eq!(summary.sample_len(), SUMMARY_SAMPLE_CAP);
+        assert_eq!(summary.quantile(0.0), Some(17.0));
+        assert_eq!(
+            summary.quantile(1.0),
+            Some((SUMMARY_SAMPLE_CAP + 16) as f64)
+        );
     }
 
     #[test]
