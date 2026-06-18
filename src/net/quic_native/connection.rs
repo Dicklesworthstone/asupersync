@@ -725,6 +725,22 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Process peer RESET_STREAM for a stream receive-side.
+    pub fn reset_stream_receive(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        error_code: u64,
+        final_size: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_stream_active_state()?;
+        self.streams
+            .reset_stream_receive(id, error_code, final_size)
+            .map_err(map_stream_table_error)?;
+        Ok(())
+    }
+
     /// Locally reset stream send-side (`RESET_STREAM`).
     pub fn reset_stream_send(
         &mut self,
@@ -1225,14 +1241,14 @@ impl NativeQuicConnection {
             }
             QuicFrame::ResetStream {
                 stream_id,
+                error_code,
                 final_size,
-                ..
             } => {
                 let id = StreamId(stream_id.value());
                 if self.streams.stream(id).is_err() {
                     self.accept_remote_stream(cx, id)?;
                 }
-                self.set_stream_final_size(cx, id, final_size.value())?;
+                self.reset_stream_receive(cx, id, error_code.value(), final_size.value())?;
                 Ok(())
             }
             QuicFrame::StopSending {
@@ -2084,6 +2100,52 @@ mod tests {
         assert_eq!(
             err,
             NativeQuicConnectionError::Stream(QuicStreamError::SendStopped { code: 77 })
+        );
+    }
+
+    #[test]
+    fn reset_stream_frame_aborts_receive_side_and_preserves_error_code() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let stream = conn.open_local_bidi(&cx).expect("open");
+        conn.receive_stream_bytes(&cx, stream, 0, Bytes::from_static(b"abc"), false)
+            .expect("buffer inbound bytes");
+
+        conn.process_frame(
+            &cx,
+            &QuicFrame::ResetStream {
+                stream_id: VarInt::from_u64_unchecked(stream.0),
+                error_code: VarInt::from_u64_unchecked(0x44),
+                final_size: VarInt::from_u64_unchecked(8),
+            },
+            PacketNumberSpace::ApplicationData,
+        )
+        .expect("reset stream");
+
+        let s = conn.streams().stream(stream).expect("stream");
+        assert_eq!(s.recv_reset, Some((0x44, 8)));
+        assert_eq!(s.final_size, Some(8));
+
+        let err = conn
+            .receive_stream_bytes(&cx, stream, 3, Bytes::from_static(b"d"), false)
+            .expect_err("STREAM frames after RESET_STREAM are rejected");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::Stream(QuicStreamError::ReceiveReset {
+                code: 0x44,
+                final_size: 8
+            })
+        );
+
+        let err = conn
+            .read_stream_bytes(&cx, stream, 8)
+            .expect_err("buffered data is discarded after RESET_STREAM");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::Stream(QuicStreamError::ReceiveReset {
+                code: 0x44,
+                final_size: 8
+            })
         );
     }
 

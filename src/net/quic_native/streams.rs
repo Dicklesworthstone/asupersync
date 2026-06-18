@@ -217,6 +217,13 @@ pub enum QuicStreamError {
         /// STOP_RECEIVING application error code.
         code: u64,
     },
+    /// Peer reset the receive side with RESET_STREAM.
+    ReceiveReset {
+        /// RESET_STREAM application error code.
+        code: u64,
+        /// Final stream size declared by the peer.
+        final_size: u64,
+    },
     /// Inconsistent RESET_STREAM final-size announcement.
     InconsistentReset {
         /// Previously declared final size.
@@ -251,6 +258,9 @@ impl fmt::Display for QuicStreamError {
             ),
             Self::SendStopped { code } => write!(f, "send stopped by peer: code={code}"),
             Self::ReceiveStopped { code } => write!(f, "receive side stopped: code={code}"),
+            Self::ReceiveReset { code, final_size } => {
+                write!(f, "receive side reset by peer: code={code}, final_size={final_size}")
+            }
             Self::InconsistentReset {
                 previous_final_size,
                 new_final_size,
@@ -324,6 +334,8 @@ pub struct QuicStream {
     pub stop_sending_error_code: Option<u64>,
     /// Optional local receive-stop error code.
     pub receive_stopped_error_code: Option<u64>,
+    /// Optional peer reset state `(error_code, final_size)`.
+    pub recv_reset: Option<(u64, u64)>,
     /// Buffered receive ranges keyed by start offset, value = exclusive end.
     recv_ranges: BTreeMap<u64, u64>,
     /// Buffered receive bytes keyed by absolute stream offset.
@@ -348,6 +360,7 @@ impl QuicStream {
             send_reset: None,
             stop_sending_error_code: None,
             receive_stopped_error_code: None,
+            recv_reset: None,
             recv_ranges: BTreeMap::new(),
             recv_chunks: BTreeMap::new(),
             pending_send_frames: VecDeque::new(),
@@ -419,6 +432,9 @@ impl QuicStream {
         len: u64,
         is_fin: bool,
     ) -> Result<u64, QuicStreamError> {
+        if let Some((code, final_size)) = self.recv_reset {
+            return Err(QuicStreamError::ReceiveReset { code, final_size });
+        }
         if let Some(code) = self.receive_stopped_error_code {
             return Err(QuicStreamError::ReceiveStopped { code });
         }
@@ -583,6 +599,31 @@ impl QuicStream {
     /// Locally stop receiving this stream.
     pub fn stop_receiving(&mut self, error_code: u64) {
         self.receive_stopped_error_code = Some(error_code);
+    }
+
+    /// Apply a peer RESET_STREAM to this stream's receive side.
+    pub fn reset_receive(
+        &mut self,
+        error_code: u64,
+        final_size: u64,
+    ) -> Result<u64, QuicStreamError> {
+        if let Some((_, previous_final_size)) = self.recv_reset
+            && previous_final_size != final_size
+        {
+            return Err(QuicStreamError::InconsistentReset {
+                previous_final_size,
+                new_final_size: final_size,
+            });
+        }
+        let flow_delta = self.recv_credit.consume_to(final_size)?;
+        if let Err(err) = self.set_final_size(final_size) {
+            self.recv_credit.release(flow_delta);
+            return Err(err);
+        }
+        self.recv_reset.get_or_insert((error_code, final_size));
+        self.recv_ranges.clear();
+        self.recv_chunks.clear();
+        Ok(flow_delta)
     }
 
     /// Locally reset the send side (`RESET_STREAM`).
@@ -1055,6 +1096,12 @@ impl StreamTable {
             return Err(StreamTableError::StreamNotReadable(id));
         }
         let stream = self.stream_mut(id)?;
+        if let Some((code, final_size)) = stream.recv_reset {
+            return Err(StreamTableError::Stream(QuicStreamError::ReceiveReset {
+                code,
+                final_size,
+            }));
+        }
         if let Some(code) = stream.receive_stopped_error_code {
             return Err(StreamTableError::Stream(QuicStreamError::ReceiveStopped {
                 code,
@@ -1144,6 +1191,28 @@ impl StreamTable {
         error_code: u64,
     ) -> Result<(), StreamTableError> {
         self.stream_mut(id)?.stop_receiving(error_code);
+        self.wake_reader(id);
+        Ok(())
+    }
+
+    /// Apply peer RESET_STREAM to a stream receive side and wake any blocked reader.
+    pub fn reset_stream_receive(
+        &mut self,
+        id: StreamId,
+        error_code: u64,
+        final_size: u64,
+    ) -> Result<(), StreamTableError> {
+        let prior_used = self.stream(id)?.recv_credit.used();
+        let connection_delta = final_size.saturating_sub(prior_used);
+        self.recv_connection_credit
+            .can_consume(connection_delta)
+            .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
+        let flow_delta = self
+            .stream_mut(id)?
+            .reset_receive(error_code, final_size)?;
+        self.recv_connection_credit
+            .consume(flow_delta)
+            .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
         self.wake_reader(id);
         Ok(())
     }
@@ -1520,6 +1589,41 @@ mod tests {
     }
 
     #[test]
+    fn reset_receive_discards_buffered_data_and_blocks_future_reads() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        tbl.accept_remote_stream(id).expect("accept");
+        tbl.receive_stream_bytes(id, 0, Bytes::from_static(b"abc"), false)
+            .expect("buffer data");
+
+        tbl.reset_stream_receive(id, 0x44, 8).expect("reset");
+        let s = tbl.stream(id).expect("stream");
+        assert_eq!(s.recv_reset, Some((0x44, 8)));
+        assert_eq!(s.final_size, Some(8));
+
+        let err = tbl
+            .receive_stream_segment(id, 3, 1, false)
+            .expect_err("post-reset stream frame rejected");
+        assert_eq!(
+            err,
+            StreamTableError::Stream(QuicStreamError::ReceiveReset {
+                code: 0x44,
+                final_size: 8
+            })
+        );
+        let err = tbl
+            .read_stream_bytes(id, 8)
+            .expect_err("post-reset buffered bytes discarded");
+        assert_eq!(
+            err,
+            StreamTableError::Stream(QuicStreamError::ReceiveReset {
+                code: 0x44,
+                final_size: 8
+            })
+        );
+    }
+
+    #[test]
     fn reset_send_final_size_must_cover_sent_bytes() {
         let mut tbl = StreamTable::new(StreamRole::Client, 1, 0, 32, 32);
         let id = tbl.open_local_bidi().expect("open");
@@ -1655,6 +1759,13 @@ mod tests {
             (
                 QuicStreamError::ReceiveStopped { code: 7 },
                 "receive side stopped",
+            ),
+            (
+                QuicStreamError::ReceiveReset {
+                    code: 9,
+                    final_size: 11,
+                },
+                "receive side reset",
             ),
             (
                 QuicStreamError::InconsistentReset {
