@@ -552,8 +552,8 @@ impl BondingHandshake {
 
     /// Negotiate a compatible agreement with a peer.
     pub fn negotiate(&self, peer: &Self) -> Result<BondingAgreement, ChannelBondingError> {
-        validate_protocol_range(self.min_protocol_version, self.max_protocol_version)?;
-        validate_protocol_range(peer.min_protocol_version, peer.max_protocol_version)?;
+        validate_handshake_offer(self)?;
+        validate_handshake_offer(peer)?;
         if self.supported_transports.is_empty() || peer.supported_transports.is_empty() {
             return Err(ChannelBondingError::NoCommonTransport);
         }
@@ -943,9 +943,7 @@ impl fmt::Display for ChannelBondingError {
 impl std::error::Error for ChannelBondingError {}
 
 fn validate_donor_index(donor_index: u32, donor_count: u32) -> Result<(), ChannelBondingError> {
-    if donor_count == 0 {
-        return Err(ChannelBondingError::InvalidDonorCount { donor_count });
-    }
+    validate_donor_count(donor_count)?;
     if donor_index >= donor_count {
         return Err(ChannelBondingError::InvalidDonorIndex {
             donor_index,
@@ -955,9 +953,28 @@ fn validate_donor_index(donor_index: u32, donor_count: u32) -> Result<(), Channe
     Ok(())
 }
 
+fn validate_donor_count(donor_count: u32) -> Result<(), ChannelBondingError> {
+    if donor_count == 0 {
+        return Err(ChannelBondingError::InvalidDonorCount { donor_count });
+    }
+    Ok(())
+}
+
 fn validate_protocol_range(min: u16, max: u16) -> Result<(), ChannelBondingError> {
-    if min > max {
+    if min == 0 || min > max {
         return Err(ChannelBondingError::InvalidProtocolRange { min, max });
+    }
+    Ok(())
+}
+
+fn validate_handshake_offer(offer: &BondingHandshake) -> Result<(), ChannelBondingError> {
+    validate_protocol_range(offer.min_protocol_version, offer.max_protocol_version)?;
+    validate_donor_count(offer.max_donor_count)?;
+    if offer.max_donor_count > MAX_STATIC_RESIDUE_DONORS {
+        return Err(ChannelBondingError::TooManyDonors {
+            donor_count: offer.max_donor_count,
+            max: MAX_STATIC_RESIDUE_DONORS,
+        });
     }
     Ok(())
 }
@@ -1366,6 +1383,44 @@ mod tests {
             err,
             ChannelBondingError::IncompatibleProtocolVersion { .. }
         ));
+    }
+
+    #[test]
+    fn handshake_refuses_invalid_version_zero_and_donor_ceiling() {
+        let donor = BondingHandshake::v1_static([BondTransport::DirectIp], 16, true);
+        let version_zero = BondingHandshake::v1_static([BondTransport::DirectIp], 16, true)
+            .with_protocol_range(0, BONDING_PROTOCOL_VERSION);
+        let err = version_zero.negotiate(&donor).expect_err("version zero");
+        assert_eq!(
+            err,
+            ChannelBondingError::InvalidProtocolRange {
+                min: 0,
+                max: BONDING_PROTOCOL_VERSION,
+            }
+        );
+
+        let zero_donors = BondingHandshake::v1_static([BondTransport::DirectIp], 0, true);
+        let err = zero_donors.negotiate(&donor).expect_err("zero donors");
+        assert_eq!(
+            err,
+            ChannelBondingError::InvalidDonorCount { donor_count: 0 }
+        );
+
+        let too_many_donors = BondingHandshake::v1_static(
+            [BondTransport::DirectIp],
+            MAX_STATIC_RESIDUE_DONORS + 1,
+            true,
+        );
+        let err = too_many_donors
+            .negotiate(&donor)
+            .expect_err("donor ceiling exceeds phase-a cap");
+        assert_eq!(
+            err,
+            ChannelBondingError::TooManyDonors {
+                donor_count: MAX_STATIC_RESIDUE_DONORS + 1,
+                max: MAX_STATIC_RESIDUE_DONORS,
+            }
+        );
     }
 
     #[test]
