@@ -28,6 +28,7 @@ against the latest SemVer-compatible dependency set.
 |------------|---------|--------|-------------------------|-------------|
 | `hkdf`     | 0.12    | 0.13   | prod (RustCrypto)       | none        |
 | `whoami`   | 1.6     | 2.x    | prod, `optional`        | 1 line      |
+| `sysinfo`  | 0.33    | 0.39   | prod                    | none        |
 
 **hkdf 0.12 → 0.13.** This was effectively a **dead-dependency realignment**.
 The QUIC key schedule (`src/net/atp/handshake/key_schedule.rs`) was previously
@@ -49,10 +50,20 @@ best-effort benchmark metadata and `BenchmarkEnvironment::collect()` shouldn't
 abort just because OS-distro detection failed, the call site degrades gracefully:
 `whoami::distro().unwrap_or_else(|_| "unknown".to_string())`.
 
+**sysinfo 0.33 → 0.39.** Production dep, ~20 call sites across 5 files
+(`runtime/resource_monitor.rs`, `atp/daemon_control.rs`,
+`atp/logging/failure_bundle.rs`, `bin/atpd.rs`, `atp/benchmark/mod.rs`). Changelog
+audit of 0.34→0.39 confirmed **none** of the breaking changes touch the APIs in
+use: the 0.34 `ProcessesToUpdate` + `remove_dead` bool is already adopted in the
+code; 0.35 `open_files` and 0.38 `Disk::file_system` aren't used; 0.37/0.39 only
+raise MSRV (asupersync builds on nightly). Clean zero-code bump.
+
 ### Validation
 
-- `cargo check --features benchmark-adapters` (covers the whoami `distro()` call
-  site + hkdf 0.13 resolution). See the commit for the result.
+- `cargo check --features benchmark-adapters` (whoami `distro()` + hkdf 0.13) —
+  Finished, 0 errors (after the whoami fallible fix).
+- `cargo check --lib --bins --features "atpd-daemon,benchmark-adapters"` (all five
+  sysinfo call-site files incl. the `atpd` daemon binary) — Finished, 0 errors.
 
 ### Deferred majors — roadmap for the next pass
 
@@ -61,9 +72,8 @@ These were intentionally left for a follow-up pass; each needs targeted research
 
 | Dependency  | From   | To     | Where / gating                                  | Notes |
 |-------------|--------|--------|-------------------------------------------------|-------|
-| `sysinfo`   | 0.33   | 0.39   | prod, `Cargo.toml:413` (not optional)           | sysinfo churns its API every minor; audit call sites before bumping. |
-| `sqlparser` | 0.52   | 0.62   | prod, `optional`, `sqlite` feature              | AST matching in `src/database/sqlite.rs` (`ast::Statement`, `SQLiteDialect`, `Parser`, `is_pragma_statement`). `Statement` enum variants/fields shift between releases — audit the match arms. |
-| `sqlx`      | 0.8.6  | 0.9.0  | **dev-dep**, `Cargo.toml:505` (mysql ref impl)  | MySQL binary-protocol differential conformance test only — cannot affect the runtime. |
+| `sqlparser` | 0.52   | 0.62   | prod, `optional`, `sqlite` feature              | AST matching in `src/database/sqlite.rs` (`ast::Statement`, `SQLiteDialect`, `Parser`, `is_pragma_statement`). `Statement` enum variants/fields shift between releases — audit the match arms. This is the only remaining **production** major. |
+| `sqlx`      | 0.8.6  | 0.9.0  | **dev-dep**, `Cargo.toml:505` (mysql ref impl)  | MySQL binary-protocol differential conformance test only — cannot affect the runtime. **`cargo audit` flags a pre-existing RUSTSEC-2023-0071 (Marvin Attack on `rsa`) reaching the tree via `sqlx-mysql 0.8.6`; `rsa` has no fixed release, so bumping sqlx→0.9 (which may drop/gate `rsa`) is the path to clear it.** |
 | `redis`     | 0.26   | 1.2    | **dev-dep**, `Cargo.toml:507` (RESP3 ref impl)  | RESP3 push-dispatch differential conformance test only. |
 | `raptorq`   | 1.7.0  | 2.0    | **dev-dep**, `Cargo.toml:509` (RFC6330 ref)     | RaptorQ byte-level interop test only. |
 | `hyper`     | 0.14   | 1.x    | `conformance/Cargo.toml` only                   | The core runtime + `asupersync-tokio-compat` already use hyper 1.x; only the conformance harness lags. |
