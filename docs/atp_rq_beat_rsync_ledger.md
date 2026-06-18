@@ -197,6 +197,19 @@ to wire.
   get true perfect-link attribution before picking the lever (candidates shift toward B-2 GSO +
   per-super-packet MAC and B-10 parallel decode, NOT E-10). Negative-evidence WIN: profiling stopped
   us implementing the wrong lever.
+- **★ REFINED 2026-06-18 (clean idle-Contabo perf + code read):** idle receiver `perf record` = 44%
+  syscalls (14% `futex_wait`→schedule→ctx-switch + epoll/timers), **2.75M voluntary context-switches
+  for a 50M transfer (~74 PER SYMBOL)**, 14% CPU, NO hot user function (top symbols <1%, diffuse
+  spinlocks). Code read: `crate::fs::File` WRITE is INLINE (`poll_write` direct syscall, file.rs:202
+  pattern); only `seek` dispatches to the blocking pool (`with_inner`→`spawn_blocking_io`, file.rs:40).
+  ⇒ perfect-link wall = **DIFFUSE runtime per-symbol synchronization** (reactor epoll wakeups + pacing
+  timerfd + channel hops + obligation/region locks + the per-symbol seek dispatch), NOT write bytes.
+  **`write_all_at` REFUTED as a clear win** (write already inline; one pwrite-dispatch ≈ same dispatch
+  count as seek+inline-write). Real levers: (a) **B-1 mmap staging** → reconstruct = pure memory
+  stores, eliminates ALL file-op dispatches (radical, unsafe+ledger); (b) **batch the whole per-symbol
+  pipeline** (recv→verify→feed→write in batches) to amortize the ~74 ctx-switch/symbol; (c) cut
+  reactor/timer wakeups per symbol. **Next:** build a NON-stripped release + `perf --call-graph dwarf`
+  to NAME the dominant ctx-switch source before implementing (stripped profile gives only the shape).
 
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
