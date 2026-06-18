@@ -41,6 +41,14 @@ const PATH_SIGNAL_EMA_ALPHA: f64 = 0.20;
 const MIN_PATH_RTT_S: f64 = 0.000_001;
 const MAX_PATH_RTT_S: f64 = 60.0;
 const MAX_PATH_LOSS_RATE: f64 = 0.999;
+/// Conservative cold-start pacing floor used before path evidence is usable.
+///
+/// This is deliberately below the historic RQ fixed cap: malformed feedback or
+/// thin samples must fail closed to a bounded trickle, never fail open to a
+/// line-rate burst.
+pub const DEFAULT_COLD_START_PACING_BYTES_PER_S: f64 = 8.0 * 1024.0 * 1024.0;
+/// Default raw-datagram burst bound for token-bucket spray pacing.
+pub const DEFAULT_MAX_PACING_BURST_DATAGRAMS: u32 = 32;
 
 #[must_use]
 fn fanout_gain(fanout: usize) -> f64 {
@@ -155,6 +163,29 @@ pub struct BlockPlan {
     pub overhead: f64,
     /// UDP fan-out (sockets to spray across).
     pub fanout: usize,
+}
+
+/// Token-bucket-ready pacing target derived from a path estimate and block plan.
+///
+/// `raw_pacing_bits_per_s` is the value a caller can pass to
+/// `CongestionController::configure_for_path_rate`. `useful_pacing_bytes_per_s`
+/// is the expected payload throughput after repair overhead and decode CPU
+/// limits are applied, for trace/replay assertions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateMatchedPacingPlan {
+    /// Block/FEC/fanout plan used to derive this pacing target.
+    pub block: BlockPlan,
+    /// Raw over-the-wire spray rate, in bits per second.
+    pub raw_pacing_bits_per_s: u64,
+    /// Useful payload rate after repair overhead and coding CPU limits.
+    pub useful_pacing_bytes_per_s: f64,
+    /// Raw datagrams per second implied by `raw_pacing_bits_per_s`.
+    pub datagrams_per_s: u32,
+    /// Maximum datagrams released back-to-back by the token bucket.
+    pub max_burst_datagrams: u32,
+    /// True when evidence was too thin or malformed and the conservative floor
+    /// was used instead of the online path estimate.
+    pub cold_start: bool,
 }
 
 /// Deterministic diagnostic view of the adaptive controller's latest epoch.
@@ -385,6 +416,67 @@ pub fn goodput_bps(
     network_useful.min(coding_rate)
 }
 
+/// Convert an online path estimate into a rate-matched datagram pacing target.
+///
+/// This is the E-7/F5 bridge from `PathEstimate` to the datagram token bucket:
+/// it uses the calibrated FEC overhead from [`optimal_block`], paces the raw
+/// spray so `λ/(1+ε)` is not above useful network capacity, and drops further
+/// when decode CPU is the bottleneck. Before evidence is usable it returns a
+/// deterministic cold-start floor rather than a zero or line-rate burst.
+#[must_use]
+pub fn rate_matched_pacing_plan(
+    est: &PathEstimate,
+    policy: &AdaptivePolicy,
+    symbol_size: u16,
+    cold_start_bytes_per_s: f64,
+    max_burst_datagrams: u32,
+) -> RateMatchedPacingPlan {
+    let symbol_bytes = u32::from(symbol_size.max(1));
+    let cold_start_bytes_per_s = finite_positive_or(
+        cold_start_bytes_per_s,
+        DEFAULT_COLD_START_PACING_BYTES_PER_S,
+    );
+    let max_burst_datagrams = max_burst_datagrams.max(1);
+
+    if !estimate_can_drive_pacing(est, policy) {
+        let block = BlockPlan {
+            k: *policy.arm_grid_k.first().unwrap_or(&1024),
+            overhead: 0.0,
+            fanout: *policy.arm_grid_fanout.first().unwrap_or(&1),
+        };
+        return pacing_plan_from_rates(
+            block,
+            cold_start_bytes_per_s,
+            cold_start_bytes_per_s,
+            symbol_bytes,
+            max_burst_datagrams,
+            true,
+        );
+    }
+
+    let block = optimal_block(est, policy, symbol_size);
+    let lambda_bytes_per_s = est.bw_median_bps.max(0.0) * fanout_gain(block.fanout);
+    let overhead_factor = 1.0 + block.overhead.max(0.0);
+    let network_useful_bytes_per_s = lambda_bytes_per_s / overhead_factor;
+    let coding_useful_bytes_per_s =
+        responsive_coding_bytes_per_s(est, policy, block.k, symbol_size);
+    let useful_bytes_per_s = coding_useful_bytes_per_s
+        .map_or(network_useful_bytes_per_s, |coding| {
+            network_useful_bytes_per_s.min(coding)
+        })
+        .max(1.0);
+    let raw_bytes_per_s = (useful_bytes_per_s * overhead_factor).min(lambda_bytes_per_s.max(1.0));
+
+    pacing_plan_from_rates(
+        block,
+        raw_bytes_per_s,
+        useful_bytes_per_s,
+        symbol_bytes,
+        max_burst_datagrams,
+        false,
+    )
+}
+
 /// Choose the per-block plan at the network/coding crossing point (§2.4).
 ///
 /// Picks the grid `K` maximizing [`goodput_bps`] (with `ε = ε*(K)`), subject to
@@ -432,6 +524,72 @@ pub fn optimal_block(est: &PathEstimate, policy: &AdaptivePolicy, symbol_size: u
         }
     }
     best
+}
+
+fn estimate_can_drive_pacing(est: &PathEstimate, policy: &AdaptivePolicy) -> bool {
+    est.samples >= policy.min_samples_to_activate
+        && est.rtt_s.is_finite()
+        && est.rtt_s >= MIN_PATH_RTT_S
+        && est.bw_median_bps.is_finite()
+        && est.bw_median_bps > 0.0
+        && est.loss_p_bar.is_finite()
+}
+
+fn responsive_coding_bytes_per_s(
+    est: &PathEstimate,
+    policy: &AdaptivePolicy,
+    k: u32,
+    symbol_size: u16,
+) -> Option<f64> {
+    let decode_symbols_per_s = est.decode_symbols_per_s_at(k);
+    if !decode_symbols_per_s.is_finite() || decode_symbols_per_s <= 0.0 {
+        return None;
+    }
+    let cores = finite_positive_or(policy.cores, 1.0);
+    let cpu_cap = finite_positive_or(policy.cpu_responsiveness_cap, 0.1).clamp(0.01, 1.0);
+    Some(decode_symbols_per_s * f64::from(symbol_size.max(1)) * cores * cpu_cap)
+}
+
+fn pacing_plan_from_rates(
+    block: BlockPlan,
+    raw_bytes_per_s: f64,
+    useful_bytes_per_s: f64,
+    symbol_bytes: u32,
+    max_burst_datagrams: u32,
+    cold_start: bool,
+) -> RateMatchedPacingPlan {
+    let raw_bytes_per_s = finite_positive_or(raw_bytes_per_s, 1.0);
+    let useful_pacing_bytes_per_s = finite_positive_or(useful_bytes_per_s, 1.0);
+    let raw_pacing_bits_per_s = bytes_per_s_to_bits_per_s(raw_bytes_per_s);
+    let bits_per_datagram = u64::from(symbol_bytes).saturating_mul(8).max(1);
+    let datagrams_per_s =
+        (raw_pacing_bits_per_s / bits_per_datagram).clamp(1, u64::from(u32::MAX)) as u32;
+
+    RateMatchedPacingPlan {
+        block,
+        raw_pacing_bits_per_s,
+        useful_pacing_bytes_per_s,
+        datagrams_per_s,
+        max_burst_datagrams,
+        cold_start,
+    }
+}
+
+fn bytes_per_s_to_bits_per_s(bytes_per_s: f64) -> u64 {
+    let bits_per_s = finite_positive_or(bytes_per_s, 1.0) * 8.0;
+    if bits_per_s >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        bits_per_s.ceil() as u64
+    }
+}
+
+fn finite_positive_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback.max(1.0)
+    }
 }
 
 // ─── EXP3 bandit controller over (K, N) arms (no-regret hedge) ───────────────
@@ -910,6 +1068,83 @@ mod tests {
             plan.k <= 1024,
             "slow CPU should pick a small block, got K={}",
             plan.k
+        );
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_cold_starts_on_thin_or_malformed_evidence() {
+        let policy = AdaptivePolicy::default();
+        let thin = PathEstimate {
+            samples: 1,
+            bw_median_bps: f64::INFINITY,
+            rtt_s: f64::NAN,
+            ..est(0.02, 50_000_000.0)
+        };
+
+        let plan = rate_matched_pacing_plan(&thin, &policy, 1200, 1_250_000.0, 0);
+
+        assert!(plan.cold_start);
+        assert_eq!(plan.raw_pacing_bits_per_s, 10_000_000);
+        assert_eq!(plan.datagrams_per_s, 1041);
+        assert_eq!(plan.max_burst_datagrams, 1);
+        assert_eq!(plan.block.overhead, 0.0);
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_reports_overhead_adjusted_useful_rate() {
+        let mut policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        policy.max_overhead = 0.50;
+        let plan =
+            rate_matched_pacing_plan(&est(0.05, 12_000_000.0), &policy, 1200, 1_000_000.0, 32);
+
+        assert!(!plan.cold_start);
+        assert!(
+            plan.block.overhead > 0.05,
+            "expected calibrated FEC overhead"
+        );
+        assert!(plan.raw_pacing_bits_per_s > 0);
+        let raw_bytes_per_s = plan.raw_pacing_bits_per_s as f64 / 8.0;
+        assert!(
+            plan.useful_pacing_bytes_per_s < raw_bytes_per_s,
+            "repair overhead must lower useful rate: useful={} raw={}",
+            plan.useful_pacing_bytes_per_s,
+            raw_bytes_per_s
+        );
+        assert!(plan.datagrams_per_s > 0);
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_drops_to_decode_cpu_capacity() {
+        let policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![4096],
+            arm_grid_fanout: vec![1],
+            cores: 1.0,
+            cpu_responsiveness_cap: 0.50,
+            ..AdaptivePolicy::default()
+        };
+        let decode_bound = PathEstimate {
+            dec_symbols_per_s: 2_000.0,
+            coding_gamma: 1.0,
+            ..est(0.01, 100_000_000.0)
+        };
+
+        let plan = rate_matched_pacing_plan(&decode_bound, &policy, 1000, 1_000_000.0, 16);
+
+        assert!(!plan.cold_start);
+        assert!(
+            plan.useful_pacing_bytes_per_s <= 1_000_000.0,
+            "CPU cap should reduce useful pacing to <= 0.5 * 2000 * 1000 B/s, got {}",
+            plan.useful_pacing_bytes_per_s
+        );
+        assert!(
+            plan.raw_pacing_bits_per_s < 100_000_000 * 8,
+            "decode-bound path must not spray at full measured path rate"
         );
     }
 
