@@ -143,6 +143,9 @@ impl DecodeProof {
 
         // Hash configuration (deterministic field order)
         hasher.update((self.config.k as u32).to_le_bytes());
+        hasher.update((self.config.s as u32).to_le_bytes());
+        hasher.update((self.config.h as u32).to_le_bytes());
+        hasher.update((self.config.l as u32).to_le_bytes());
         hasher.update((self.config.symbol_size as u32).to_le_bytes());
         hasher.update(self.config.seed.to_le_bytes());
         hasher.update(self.config.object_id.as_u128().to_le_bytes());
@@ -3181,6 +3184,24 @@ mod tests {
             proof1.content_hash().as_bytes(),
             proof2.content_hash().as_bytes()
         );
+    }
+
+    #[test]
+    fn content_hash_binds_full_decode_config_dimensions() {
+        let base = make_test_config();
+        let base_hash = built_test_proof(base.clone()).content_hash();
+
+        let mut changed_s = base.clone();
+        changed_s.s += 1;
+        assert_ne!(base_hash, built_test_proof(changed_s).content_hash());
+
+        let mut changed_h = base.clone();
+        changed_h.h += 1;
+        assert_ne!(base_hash, built_test_proof(changed_h).content_hash());
+
+        let mut changed_l = base;
+        changed_l.l += 1;
+        assert_ne!(base_hash, built_test_proof(changed_l).content_hash());
     }
 
     #[test]
