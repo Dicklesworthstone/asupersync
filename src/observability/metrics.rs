@@ -290,6 +290,11 @@ pub struct Summary {
     count: AtomicU64,
 }
 
+/// Maximum retained observations per summary for quantile estimation.
+///
+/// `count` and `sum` remain exact for all observations; only the quantile
+/// sample is bounded so a hot summary cannot grow memory or scrape work
+/// without limit.
 const SUMMARY_SAMPLE_CAP: usize = 4096;
 
 #[derive(Debug)]
@@ -320,7 +325,6 @@ impl SummarySamples {
         self.values.clone()
     }
 
-    #[cfg(test)]
     fn len(&self) -> usize {
         self.values.len()
     }
@@ -385,6 +389,21 @@ impl Summary {
         &self.name
     }
 
+    /// Returns the number of observations retained for quantile estimation.
+    #[must_use]
+    pub fn retained_sample_count(&self) -> usize {
+        self.samples
+            .lock()
+            .expect("summary samples mutex poisoned")
+            .len()
+    }
+
+    /// Returns the maximum number of retained quantile observations.
+    #[must_use]
+    pub const fn retained_sample_capacity() -> usize {
+        SUMMARY_SAMPLE_CAP
+    }
+
     /// Returns an exact quantile from the observed values.
     pub fn quantile(&self, q: f64) -> Option<f64> {
         if !(0.0..=1.0).contains(&q) {
@@ -414,10 +433,7 @@ impl Summary {
 
     #[cfg(test)]
     fn sample_len(&self) -> usize {
-        self.samples
-            .lock()
-            .expect("summary samples mutex poisoned")
-            .len()
+        self.retained_sample_count()
     }
 }
 
@@ -1266,13 +1282,37 @@ mod tests {
             summary.observe(value as f64);
         }
 
+        assert_eq!(Summary::retained_sample_capacity(), SUMMARY_SAMPLE_CAP);
         assert_eq!(summary.count(), (SUMMARY_SAMPLE_CAP + 17) as u64);
         assert_eq!(summary.sample_len(), SUMMARY_SAMPLE_CAP);
+        assert_eq!(summary.retained_sample_count(), SUMMARY_SAMPLE_CAP);
         assert_eq!(summary.quantile(0.0), Some(17.0));
         assert_eq!(
             summary.quantile(1.0),
             Some((SUMMARY_SAMPLE_CAP + 16) as f64)
         );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn summary_export_keeps_exact_count_sum_after_sample_wrap() {
+        let mut metrics = Metrics::new();
+        let summary = metrics.summary("bounded_summary_export");
+        let total = SUMMARY_SAMPLE_CAP + 257;
+
+        for value in 0..total {
+            summary.observe(value as f64);
+        }
+
+        let expected_sum = ((total - 1) * total / 2) as f64;
+        assert_eq!(summary.retained_sample_count(), SUMMARY_SAMPLE_CAP);
+        assert_eq!(summary.count(), total as u64);
+        assert_eq!(summary.sum(), expected_sum);
+
+        let output = metrics.export_prometheus();
+        assert!(output.contains("bounded_summary_export{quantile=\"0.5\"}"));
+        assert!(output.contains(&format!("bounded_summary_export_sum {expected_sum}")));
+        assert!(output.contains(&format!("bounded_summary_export_count {total}")));
     }
 
     #[test]
