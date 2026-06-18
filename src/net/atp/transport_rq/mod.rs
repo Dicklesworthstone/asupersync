@@ -3234,7 +3234,7 @@ async fn feed_symbol(
         }
     }
     if dec.source_streaming && parsed.kind.is_repair() {
-        seed_source_streaming_pipeline(dec, symbol_size, symbol_auth).await?;
+        seed_source_streaming_pipeline(dec, parsed.sbn, symbol_size, symbol_auth).await?;
     }
     if dec.pipeline.is_none() {
         return Ok(false);
@@ -3342,6 +3342,7 @@ async fn feed_symbol(
 
 async fn seed_source_streaming_pipeline(
     dec: &mut EntryDecoder,
+    target_sbn: u8,
     symbol_size: u16,
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<(), RqError> {
@@ -3354,6 +3355,16 @@ async fn seed_source_streaming_pipeline(
     };
 
     for sbn in 0..dec.source_blocks.len() {
+        // E-11 fix: seed ONLY the block this repair symbol targets. The previous code re-seeded
+        // EVERY incomplete block's received source back into the in-memory pipeline on each repair,
+        // making receiver RSS O(file) (≈9× the file — measured 895 MB for 100 MB) → at 500M ≈ 4.5 GB
+        // → swap → the 500M/bad TIMEOUT. A block is seeded when its OWN repair arrives; blocks that
+        // converge via source never enter the pipeline. Bounds in-memory seeded source to the few
+        // FEC blocks actually being decoded. (Byte-identical: same symbols fed to the same block's
+        // decode, just not pre-loaded for blocks that don't yet have repair.)
+        if sbn != usize::from(target_sbn) {
+            continue;
+        }
         if dec.source_blocks[sbn].complete {
             continue;
         }

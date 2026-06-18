@@ -245,6 +245,18 @@ to wire.
   this redirected the lever from parallel-decode (wrong) to bounded-memory (right). **Next:** localize
   the 895MB (code-read the receiver retention + a heap profile / RSS-vs-blocks-in-flight measurement),
   then implement windowed/bounded retention, prove sha-identical + RSS bounded + 500M/bad converges.
+- **★ HYPOTHESIS-1 (seed-all-blocks) REFUTED 2026-06-18 (fix-and-measure):** changed
+  `seed_source_streaming_pipeline` to seed ONLY the repair symbol's own block (`parsed.sbn`) instead
+  of every incomplete block. Byte-identical (rq lib tests exit 0; 100M/bad sha OK, fb=4). But
+  **100M/bad Max RSS UNCHANGED: 895MB → 910MB** ⇒ the seed-all loop was NOT the 895MB driver (at 2%
+  loss few blocks were incomplete at first-repair, so seed-all loaded little). The per-block-seed
+  change is kept (correct + strictly less work + plausibly helps the high-loss broken regime where
+  more blocks are incomplete) but is NOT the E-11 fix. **The O(file) driver is still unlocalized** —
+  candidates: the pipeline `SymbolSet` holding all received REPAIR symbols (no eviction; the receiver
+  passes `max_buffered_symbols:0`), the inbound recv path, or runtime/allocator. **Next (real
+  localization):** install a heap profiler (heaptrack/valgrind massif — absent on the workers) OR add
+  a 1-line instrumented log of peak `SymbolSet` len + in-flight incomplete-block count, on a 50M/bad
+  run, to NAME the structure holding ~890k symbols before implementing the bound.
 
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
