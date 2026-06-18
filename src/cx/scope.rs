@@ -1359,7 +1359,8 @@ impl<P: Policy> Scope<'_, P> {
         .with_remote_cap_handle(remote_cap)
         .with_blocking_pool_handle(blocking_pool)
         .with_evidence_sink(evidence_sink)
-        .with_macaroon_handle(macaroon);
+        .with_macaroon_handle(macaroon)
+        .with_default_http_client_slot_from(parent_cx);
         let _ = child_cx.apply_child_capability_budget(
             self.capability_budget,
             CapabilityBudgetRequirements::NONE,

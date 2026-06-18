@@ -142,6 +142,35 @@ fn noop_waker() -> Waker {
 
 /// Grouped handle fields shared behind a single `Arc` to reduce per-clone
 /// refcount operations from ~13 to 1 for this bundle.
+#[derive(Clone)]
+struct DefaultHttpClientSlot {
+    inner: Arc<std::sync::OnceLock<crate::http::h1::HttpClient>>,
+}
+
+impl Default for DefaultHttpClientSlot {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+}
+
+impl std::fmt::Debug for DefaultHttpClientSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefaultHttpClientSlot")
+            .field("initialized", &self.inner.get().is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DefaultHttpClientSlot {
+    fn get_or_init(&self) -> crate::http::h1::HttpClient {
+        self.inner
+            .get_or_init(crate::http::h1::HttpClient::new)
+            .clone()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CxHandles {
     io_driver: Option<IoDriverHandle>,
@@ -161,6 +190,9 @@ struct CxHandles {
     /// Pending-spawn counter for THIS Cx's region (cloned under the state
     /// lock at Cx build time; credits gate region close per A1.2).
     pending_spawns: Option<Arc<crate::record::region::PendingSpawnCounter>>,
+    /// Runtime-scoped default HTTP client slot. It is lazy so Cx creation does
+    /// not allocate a pool unless the high-level HTTP facade is used.
+    default_http_client: DefaultHttpClientSlot,
     #[cfg(feature = "messaging-fabric")]
     fabric_capabilities: Arc<FabricCapabilityRegistry>,
 }
@@ -881,6 +913,7 @@ impl<Caps> Cx<Caps> {
                 macaroon: None,
                 spawn_gateway: None,
                 pending_spawns: None,
+                default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
             }),
@@ -983,6 +1016,7 @@ impl<Caps> Cx<Caps> {
                 macaroon: None,
                 spawn_gateway: None,
                 pending_spawns: None,
+                default_http_client: DefaultHttpClientSlot::default(),
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
             }),
@@ -1270,6 +1304,31 @@ impl<Caps> Cx<Caps> {
     ) -> Self {
         Arc::make_mut(&mut self.handles).pending_spawns = counter;
         self
+    }
+
+    /// Share the parent's lazy runtime-default HTTP client slot with this Cx.
+    ///
+    /// Child contexts inherit the slot rather than allocating their own, so
+    /// `Client::default_for_runtime(cx)` remains runtime-scoped while still
+    /// constructing the actual pooled client only on first use.
+    #[must_use]
+    pub(crate) fn with_default_http_client_slot_from<ParentCaps>(
+        mut self,
+        parent: &Cx<ParentCaps>,
+    ) -> Self {
+        Arc::make_mut(&mut self.handles).default_http_client =
+            parent.handles.default_http_client.clone();
+        self
+    }
+
+    /// Return the runtime's lazily initialized default HTTP client.
+    #[inline]
+    #[must_use]
+    pub(crate) fn default_http_client(&self) -> crate::http::h1::HttpClient
+    where
+        Caps: cap::HasIo,
+    {
+        self.handles.default_http_client.get_or_init()
     }
 
     #[inline]
@@ -4377,6 +4436,7 @@ where
             handles.blocking_pool = parent.blocking_pool_handle();
             handles.evidence_sink = parent.evidence_sink_handle();
             handles.macaroon = parent.macaroon_handle();
+            handles.default_http_client = parent.handles.default_http_client.clone();
             if let Some(pressure) = parent.pressure_handle() {
                 handles.pressure = Some(pressure);
             }

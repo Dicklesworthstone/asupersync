@@ -3652,6 +3652,41 @@ mod tests {
     }
 
     #[test]
+    fn default_for_runtime_reuses_lazy_cx_slot() {
+        let cx = crate::cx::Cx::for_testing_with_io();
+
+        let first = crate::http::Client::default_for_runtime(&cx);
+        let second = crate::http::Client::default_for_runtime(&cx);
+
+        assert!(
+            std::sync::Arc::ptr_eq(&first.pool, &second.pool),
+            "runtime default client calls on one Cx must share the pool"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&first.idle_connections, &second.idle_connections),
+            "runtime default client calls on one Cx must share idle state"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&first.cookies, &second.cookies),
+            "runtime default client calls on one Cx must share cookie state"
+        );
+    }
+
+    #[test]
+    fn default_for_runtime_is_not_process_global() {
+        let first_cx = crate::cx::Cx::for_testing_with_io();
+        let second_cx = crate::cx::Cx::for_testing_with_io();
+
+        let first = crate::http::Client::default_for_runtime(&first_cx);
+        let second = crate::http::Client::default_for_runtime(&second_cx);
+
+        assert!(
+            !std::sync::Arc::ptr_eq(&first.pool, &second.pool),
+            "independent Cx roots must not share a process-global default client"
+        );
+    }
+
+    #[test]
     fn client_request_builder_collects_fluent_options() {
         let client = HttpClient::new();
         let builder = client

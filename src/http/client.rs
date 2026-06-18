@@ -84,9 +84,9 @@ impl super::h1::HttpClient {
     /// [module docs](self) for *why* there is deliberately no free
     /// `Client::get()`).
     ///
-    /// The returned value is a cheap-clone handle over a freshly initialized
-    /// shared pool; clone it to share that pool across call sites rather than
-    /// calling this accessor repeatedly.
+    /// The returned value is a cheap-clone handle over a runtime-owned shared
+    /// pool. The underlying client is built lazily on the first call for this
+    /// runtime context, then cloned on subsequent calls.
     ///
     /// # Examples
     ///
@@ -104,13 +104,6 @@ impl super::h1::HttpClient {
     where
         Caps: HasIo,
     {
-        // `cx` is a capability witness: the `Caps: HasIo` bound is the proof,
-        // so the handle itself is intentionally discarded. We deliberately do
-        // NOT gate on `cx.io().is_some()`: the client's send path uses
-        // runtime-provided sockets and a `Cx` may legitimately carry I/O
-        // authority at the type level without an eagerly-wired io_cap handle
-        // (e.g. `Cx::for_testing`).
-        let _ = cx;
-        Self::new()
+        cx.default_http_client()
     }
 }
