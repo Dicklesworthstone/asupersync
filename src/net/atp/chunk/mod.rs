@@ -7,6 +7,7 @@
 //! - **sparse-image**: Hole-aware chunking for sparse files and VM images
 //! - **artifact**: Reproducible chunking focused on build artifacts and proof strength
 //! - **stream**: Rolling manifest chunking for real-time streaming scenarios
+//! - **reconcile**: Rateless IBLT set reconciliation for delta transfers
 //!
 //! Each profile balances different trade-offs between throughput, deduplication efficiency,
 //! proof strength, and use-case-specific requirements.
@@ -20,6 +21,7 @@ pub mod bulk_file;
 pub mod dedupe;
 pub mod media;
 pub mod profiles;
+pub mod reconcile;
 pub mod sparse_image;
 pub mod stream;
 pub mod sync_tree;
