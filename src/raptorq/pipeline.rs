@@ -1549,7 +1549,10 @@ mod tests {
         let mut config = RaptorQConfig::default();
         config.security.auth_key_seed = Some(7); // operator demands authentication
         assert!(config.security.reject_unauthenticated);
-        let mut receiver = RaptorQReceiver::new(config, stream, None, None);
+        let mut metrics = Metrics::new();
+        let auth_rejected = metrics.counter("raptorq.auth_rejected");
+        let symbols_received = metrics.counter("raptorq.symbols_received");
+        let mut receiver = RaptorQReceiver::new(config, stream, None, Some(metrics));
 
         let result = receiver.receive_object(&cx, &params);
         assert!(
@@ -1557,6 +1560,16 @@ mod tests {
             "unsigned symbols must fail closed when a key is configured"
         );
         assert_eq!(result.unwrap_err().kind(), ErrorKind::CorruptedSymbol);
+        assert_eq!(
+            auth_rejected.get(),
+            1,
+            "fail-closed unsigned symbol rejection must be counted"
+        );
+        assert_eq!(
+            symbols_received.get(),
+            0,
+            "unauthenticated symbols must be rejected before decode acceptance"
+        );
     }
 
     #[test]
@@ -1624,11 +1637,14 @@ mod tests {
             AuthenticatedSymbol::from_parts(corrupted.into_symbol(), AuthenticationTag::zero()),
         );
         let stream = VecStream::new(symbols);
+        let mut metrics = Metrics::new();
+        let auth_rejected = metrics.counter("raptorq.auth_rejected");
+        let symbols_received = metrics.counter("raptorq.symbols_received");
         let mut receiver = RaptorQReceiver::new(
             RaptorQConfig::default(),
             stream,
             Some(SecurityContext::for_testing(42)),
-            None,
+            Some(metrics),
         );
 
         let err = receiver
@@ -1636,6 +1652,16 @@ mod tests {
             .expect_err("strict auth should fail closed on a bad target tag");
 
         assert_eq!(err.kind(), ErrorKind::CorruptedSymbol);
+        assert_eq!(
+            auth_rejected.get(),
+            1,
+            "strict bad-tag rejection must be counted"
+        );
+        assert_eq!(
+            symbols_received.get(),
+            0,
+            "bad tags must be rejected before decode acceptance"
+        );
     }
 
     #[test]
