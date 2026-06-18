@@ -120,6 +120,8 @@ pub enum RoutingResult {
         connection_id: ConnectionId,
         /// Remote address that originated the first datagram.
         peer_addr: SocketAddr,
+        /// Original Initial packet that triggered connection creation.
+        triggering_packet: ReceivedPacket,
         /// Initial outgoing packets for handshake response.
         outgoing_packets: Vec<OutgoingPacket>,
     },
@@ -301,7 +303,7 @@ impl ConnectionRouter {
                 outgoing_packets,
             })
         } else if routing_info.kind == PacketRoutingKind::Initial {
-            let new_connection_id = self.allocate_connection_id();
+            let new_connection_id = connection_id;
 
             cx.trace(&format!(
                 "New connection attempt from {} assigned ID {new_connection_id:?}",
@@ -311,6 +313,7 @@ impl ConnectionRouter {
             Ok(RoutingResult::NewConnection {
                 connection_id: new_connection_id,
                 peer_addr: packet.src_addr,
+                triggering_packet: packet,
                 outgoing_packets: Vec::new(),
             })
         } else {
@@ -1243,6 +1246,59 @@ mod tests {
             match router.route_packet(&cx, packet).await.expect("route") {
                 RoutingResult::NewConnection { peer_addr, .. } => assert_eq!(peer_addr, src_addr),
                 other => panic!("expected new connection, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_new_initial_reroutes_after_connection_creation() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let dst_cid = ConnectionId::new(&[0xda, 0x7a, 0x00, 0x01]).expect("cid");
+            let src_addr: SocketAddr = "127.0.0.1:4436".parse().unwrap();
+            let packet = ReceivedPacket {
+                src_addr,
+                data: encode_long_packet(dst_cid, LongPacketType::Initial, 7, QuicFrame::Ping),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+
+            let triggering_packet = match router.route_packet(&cx, packet).await.expect("route") {
+                RoutingResult::NewConnection {
+                    connection_id,
+                    peer_addr,
+                    triggering_packet,
+                    outgoing_packets,
+                } => {
+                    assert_eq!(connection_id, dst_cid);
+                    assert_eq!(peer_addr, src_addr);
+                    assert!(outgoing_packets.is_empty());
+                    triggering_packet
+                }
+                other => panic!("expected new connection, got {other:?}"),
+            };
+
+            router
+                .create_connection(&cx, dst_cid, src_addr, true)
+                .await
+                .expect("connection creation should succeed");
+
+            match router
+                .route_packet(&cx, triggering_packet)
+                .await
+                .expect("reroute")
+            {
+                RoutingResult::Routed {
+                    connection_id,
+                    outgoing_packets,
+                } => {
+                    assert_eq!(connection_id, dst_cid);
+                    assert_eq!(outgoing_packets.len(), 1);
+                    assert_eq!(outgoing_packets[0].dst_addr, src_addr);
+                    assert!(!outgoing_packets[0].data.is_empty());
+                }
+                other => panic!("expected triggering Initial to reroute, got {other:?}"),
             }
         });
     }

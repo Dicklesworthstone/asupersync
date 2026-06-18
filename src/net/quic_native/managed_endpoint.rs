@@ -9,6 +9,8 @@
 //! It represents the deployable QUIC endpoint that ATP can use for object transfer.
 
 use crate::cx::Cx;
+use crate::net::quic_core::ConnectionId;
+use crate::net::quic_native::ReceivedPacket;
 use crate::net::quic_native::connection_manager::AcceptedNativeQuicConnection;
 use crate::net::quic_native::{
     ConnectionRouter, ConnectionRouterError, ConnectionRouterStats, NativeQuicConnectionConfig,
@@ -331,6 +333,7 @@ impl ManagedQuicEndpoint {
                 RoutingResult::NewConnection {
                     connection_id,
                     peer_addr,
+                    triggering_packet,
                     outgoing_packets: mut packets,
                 } => {
                     // Check connection limit
@@ -356,6 +359,13 @@ impl ManagedQuicEndpoint {
 
                     cx.trace(&format!("Created new connection {connection_id:?}"));
                     outgoing_packets.append(&mut packets);
+                    self.reroute_triggering_new_connection_packet(
+                        cx,
+                        connection_id,
+                        triggering_packet,
+                        &mut outgoing_packets,
+                    )
+                    .await?;
                 }
                 RoutingResult::Drop { reason } => {
                     cx.trace(&format!("Dropped packet: {reason}"));
@@ -370,6 +380,44 @@ impl ManagedQuicEndpoint {
                 "Sent {} outgoing packets ({} bytes)",
                 result.packets_processed, result.bytes_processed
             ));
+        }
+
+        Ok(())
+    }
+
+    async fn reroute_triggering_new_connection_packet(
+        &mut self,
+        cx: &Cx,
+        expected_connection_id: ConnectionId,
+        triggering_packet: ReceivedPacket,
+        outgoing_packets: &mut Vec<OutgoingPacket>,
+    ) -> Result<(), ManagedEndpointError> {
+        match self
+            .connection_router
+            .route_packet(cx, triggering_packet)
+            .await?
+        {
+            RoutingResult::Routed {
+                connection_id,
+                outgoing_packets: mut packets,
+            } => {
+                if connection_id != expected_connection_id {
+                    cx.trace(&format!(
+                        "Triggering Initial rerouted to {connection_id:?}, expected {expected_connection_id:?}"
+                    ));
+                }
+                outgoing_packets.append(&mut packets);
+            }
+            RoutingResult::NewConnection { connection_id, .. } => {
+                cx.trace(&format!(
+                    "Triggering Initial still appeared as new connection {connection_id:?} after creation"
+                ));
+            }
+            RoutingResult::Drop { reason } => {
+                cx.trace(&format!(
+                    "Triggering Initial dropped after connection creation: {reason}"
+                ));
+            }
         }
 
         Ok(())
