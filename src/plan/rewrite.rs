@@ -820,6 +820,9 @@ pub(crate) fn check_side_conditions(
         RewriteRule::RaceAssoc | RewriteRule::RaceCommute | RewriteRule::DedupRaceJoin
     );
     if affects_race_loser_drain {
+        if !checker.cancel_safe(after) {
+            return Err("race rewrite result is not cancel-safe".to_string());
+        }
         if !checker.rewrite_preserves_loser_drain(before, after) {
             return Err("rewrite violates loser-drain preservation".to_string());
         }

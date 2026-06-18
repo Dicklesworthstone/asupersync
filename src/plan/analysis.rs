@@ -314,7 +314,9 @@ impl BudgetEffect {
     /// - does not remove a deadline
     /// - does not increase the minimum polls required
     /// - does not increase (or unbound) the maximum polls when previously bounded
+    /// - does not increase the concurrency envelope
     /// - does not loosen the deadline guarantee
+    /// - does not loosen the worst-case deadline guarantee
     #[must_use]
     pub fn is_not_worse_than(self, before: Self) -> bool {
         if before.has_deadline && !self.has_deadline {
@@ -329,10 +331,19 @@ impl BudgetEffect {
                 _ => return false,
             }
         }
+        if self.parallelism > before.parallelism {
+            return false;
+        }
         // Deadline must be at least as tight
         if !self
             .min_deadline
             .is_at_least_as_tight_as(before.min_deadline)
+        {
+            return false;
+        }
+        if !self
+            .max_deadline
+            .is_at_least_as_tight_as(before.max_deadline)
         {
             return false;
         }
@@ -1261,8 +1272,9 @@ impl<'a> SideConditionChecker<'a> {
 
     /// Returns true when a rewrite preserves the loser-drain property.
     ///
-    /// A rewrite is safe if it does not move to a less-safe cancel state and
-    /// does not introduce new obligation leak candidates on the cancel path.
+    /// A rewrite is safe only when the rewritten shape is absolutely cancel-safe,
+    /// does not move to a less-safe cancel state, and does not introduce new
+    /// obligation leak candidates on the cancel path.
     #[must_use]
     pub fn rewrite_preserves_loser_drain(&self, before: PlanId, after: PlanId) -> bool {
         let Some(before_a) = self.analysis.get(before) else {
@@ -1271,6 +1283,11 @@ impl<'a> SideConditionChecker<'a> {
         let Some(after_a) = self.analysis.get(after) else {
             return false;
         };
+        // Relative safety is not enough: MayOrphan -> MayOrphan would preserve
+        // ordering in the lattice while still failing the loser-drain guarantee.
+        if !after_a.cancel.is_safe() {
+            return false;
+        }
         // Degrading to a less-safe cancel state is forbidden.
         if after_a.cancel > before_a.cancel {
             return false;
@@ -2108,6 +2125,48 @@ mod tests {
             max_deadline: DeadlineMicros::UNBOUNDED,
         };
         assert!(after.is_not_worse_than(before));
+    }
+
+    #[test]
+    fn budget_monotonicity_rejects_increased_parallelism() {
+        let before = BudgetEffect {
+            min_polls: 4,
+            max_polls: Some(8),
+            has_deadline: false,
+            parallelism: 1,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
+        };
+        let after = BudgetEffect {
+            min_polls: 4,
+            max_polls: Some(8),
+            has_deadline: false,
+            parallelism: 2,
+            min_deadline: DeadlineMicros::UNBOUNDED,
+            max_deadline: DeadlineMicros::UNBOUNDED,
+        };
+        assert!(!after.is_not_worse_than(before));
+    }
+
+    #[test]
+    fn budget_monotonicity_rejects_looser_max_deadline() {
+        let before = BudgetEffect {
+            min_polls: 4,
+            max_polls: Some(8),
+            has_deadline: true,
+            parallelism: 1,
+            min_deadline: DeadlineMicros::from_micros(1_000),
+            max_deadline: DeadlineMicros::from_micros(2_000),
+        };
+        let after = BudgetEffect {
+            min_polls: 4,
+            max_polls: Some(8),
+            has_deadline: true,
+            parallelism: 1,
+            min_deadline: DeadlineMicros::from_micros(1_000),
+            max_deadline: DeadlineMicros::from_micros(3_000),
+        };
+        assert!(!after.is_not_worse_than(before));
     }
 
     // ---- Summary ----
@@ -2974,6 +3033,36 @@ mod tests {
         let checker = SideConditionChecker::new(&dag);
         // r2 introduces leak_on_cancel that r1 doesn't have ⇒ reject
         assert!(!checker.rewrite_preserves_loser_drain(r1, r2));
+    }
+
+    #[test]
+    fn loser_drain_rejects_relative_may_orphan_after() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let d = dag.leaf("d");
+        let inner_before = dag.race(vec![a, b]);
+        let inner_after = dag.race(vec![c, d]);
+        let before = dag.race(vec![inner_before, c]);
+        let after = dag.race(vec![a, inner_after]);
+        let root = dag.join(vec![before, after]);
+        dag.set_root(root);
+
+        let checker = SideConditionChecker::new(&dag);
+        assert_eq!(
+            checker
+                .analysis
+                .get(before)
+                .expect("before analysis")
+                .cancel,
+            CancelSafety::MayOrphan
+        );
+        assert_eq!(
+            checker.analysis.get(after).expect("after analysis").cancel,
+            CancelSafety::MayOrphan
+        );
+        assert!(!checker.rewrite_preserves_loser_drain(before, after));
     }
 
     #[test]
