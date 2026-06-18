@@ -115,6 +115,16 @@ cpu_pct_from_time() {
     [ -f "$1" ] || { printf ''; return; }
     awk -F: '/Percent of CPU this job got/ { gsub(/[^0-9]/, "", $2); print $2 }' "$1" | tail -n 1
 }
+# Sum of voluntary + involuntary context switches from a /usr/bin/time -v file.
+# Cheap proxy for syscall/scheduler pressure: the per-symbol sendto spray on a
+# clean fast link shows up here, so Phase-2 can quantify why atp's per-packet
+# overhead loses on the "perfect" cell (vs rsync's few large TCP writes).
+# Both "Voluntary..." and "Involuntary..." lines contain "voluntary context
+# switches", so the case-insensitive match sums both.
+ctx_switches_from_time() {
+    [ -f "$1" ] || { printf ''; return; }
+    awk -F: 'tolower($0) ~ /voluntary context switches/ { gsub(/[^0-9]/, "", $2); s += $2 } END { print s + 0 }' "$1"
+}
 extract_metric() {
     local key="$1"; shift
     grep -h -E "\"?${key}\"?[[:space:]]*[:=]" "$@" 2>/dev/null | tail -n 1 \
@@ -286,6 +296,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     S_PEAK="$(max_rss_kb_from_time "$st")"; R_PEAK="$(max_rss_kb_from_time "$rt")"
     S_AVG="$(awk '{print $2}' "$s_out" 2>/dev/null)"; R_AVG="$(awk '{print $2}' "$r_out" 2>/dev/null)"
     CPU="$(cpu_pct_from_time "$st")"
+    S_CTX="$(ctx_switches_from_time "$st")"
     ROUNDS="$(extract_metric feedback_rounds "$sl" "$rl" "$st" "$rt")"
     STATUS_CODE=$((ss + rs))
     DEST="$recv_dir/$(basename "$WL_PATH")"
@@ -337,6 +348,7 @@ EOF
 
     WALL="$(elapsed_s "$start" "$finish")"
     S_PEAK="$(max_rss_kb_from_time "$st")"; CPU="$(cpu_pct_from_time "$st")"
+    S_CTX="$(ctx_switches_from_time "$st")"
     R_PEAK="$(awk '{print $1}' "$r_out" 2>/dev/null)"; R_AVG="$(awk '{print $2}' "$r_out" 2>/dev/null)"
     S_AVG="$(awk '{print $2}' "$s_out" 2>/dev/null)"
     ROUNDS=""
@@ -347,7 +359,7 @@ EOF
 setup_link
 
 DEST=""
-WALL=""; S_PEAK=""; R_PEAK=""; S_AVG=""; R_AVG=""; CPU=""; ROUNDS=""; STATUS_CODE=1; TIMED_OUT=false
+WALL=""; S_PEAK=""; R_PEAK=""; S_AVG=""; R_AVG=""; CPU=""; S_CTX=""; ROUNDS=""; STATUS_CODE=1; TIMED_OUT=false
 case "$METHOD" in
     atp-rq-lab)             run_atp lab rq ;;
     atp-rq-auth)            run_atp key rq ;;
@@ -388,6 +400,19 @@ if [ "$KIND" = "tree" ] && [ -f "${WL_PATH}.manifest.jsonl" ]; then
     SIZE_BYTES="$(python3 -c 'import json,sys; print(sum(json.loads(l).get("size",0) for l in open(sys.argv[1]) if l.strip()))' "${WL_PATH}.manifest.jsonl")"
 fi
 
+# Per-packet floor: the minimal one-sendto-per-symbol datagram count for the atp
+# methods (ceil(size / symbol_size)). Combined with wall_s this exposes atp's
+# per-packet syscall overhead on rate-capped low-latency links — the "perfect"
+# cell where atp loses to rsync's few large TCP writes. 0 for rsync (big writes).
+EST_DGRAMS=0
+case "$METHOD" in
+    atp-*)
+        if [ "${SIZE_BYTES:-0}" -gt 0 ] && [ "${SYMBOL_SIZE:-0}" -gt 0 ]; then
+            EST_DGRAMS=$(( (SIZE_BYTES + SYMBOL_SIZE - 1) / SYMBOL_SIZE ))
+        fi
+        ;;
+esac
+
 PEAK_RSS_KB="$(imax "$S_PEAK" "$R_PEAK")"
 AVG_RSS_KB="$(imax "$S_AVG" "$R_AVG")"
 
@@ -400,7 +425,7 @@ ROW_REP="$REP" ROW_NETEM="$NETEM_JSON" ROW_WALL="${WALL:-0}" ROW_PEAK="${PEAK_RS
 ROW_AVG="${AVG_RSS_KB:-0}" ROW_SP="${S_PEAK:-0}" ROW_RP="${R_PEAK:-0}" ROW_SA="${S_AVG:-0}" \
 ROW_RA="${R_AVG:-0}" ROW_CPU="${CPU:-0}" ROW_ROUNDS="${ROUNDS:-0}" ROW_SRC="$SRC_SHA" \
 ROW_DST="$DST_SHA" ROW_SHA_OK="$SHA_OK" ROW_TO="$TIMED_OUT" ROW_SC="${STATUS_CODE:-1}" \
-ROW_STATUS="$STATUS" ROW_CASE="$CASE_DIR" \
+ROW_STATUS="$STATUS" ROW_CASE="$CASE_DIR" ROW_CTX="${S_CTX:-0}" ROW_ESTPKT="${EST_DGRAMS:-0}" \
 python3 - >>"$RESULTS" <<'PY'
 import json, os
 
@@ -444,6 +469,8 @@ row = {
     "sender_avg_rss_kb": num("ROW_SA"),
     "receiver_avg_rss_kb": num("ROW_RA"),
     "sender_cpu_pct": num("ROW_CPU"),
+    "sender_ctx_switches": num("ROW_CTX"),
+    "est_min_datagrams": num("ROW_ESTPKT"),
     "feedback_rounds": num("ROW_ROUNDS"),
     "source_sha": e("ROW_SRC", ""),
     "dest_sha": e("ROW_DST", ""),
