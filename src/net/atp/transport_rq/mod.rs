@@ -177,6 +177,8 @@ const RQ_BW_EMA_ALPHA: f64 = 0.35;
 const RQ_LOSS_BAR_MULTIPLIER: f64 = 1.75;
 const RQ_PENDING_PRESSURE_LOSS_FLOOR: f64 = 0.05;
 const RQ_REGIME_SHIFT_LOSS_DELTA: f64 = 0.20;
+const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
+const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
 
 /// Packets pulled from the UDP socket per receive-pump turn.
 ///
@@ -518,6 +520,20 @@ impl RqAdaptiveSendState {
                 self.loss_ema > 0.0,
             ),
         }
+    }
+
+    fn source_fec_fallback_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
+        let mut tuning = self.round_tuning(config);
+        let k = fixed_block_k(config);
+        let loss_bar = self.loss_bar.max(self.loss_ema).max(0.01);
+        let overhead = adaptive::overhead_for_target(
+            k,
+            loss_bar,
+            RQ_SOURCE_FEC_FALLBACK_ALPHA,
+            RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+        );
+        tuning.repair_overhead = tuning.repair_overhead.max(1.0 + overhead).max(1.03);
+        tuning
     }
 
     fn observe_need_more(
@@ -2012,7 +2028,16 @@ pub async fn send_path(
                     control_wait,
                     total_bytes,
                 );
-                round_tuning = adaptive.round_tuning(&config);
+                let source_fec_fallback = source_retransmit_needs_fec_fallback(
+                    &config,
+                    feedback_rounds,
+                    source_symbols.len(),
+                );
+                round_tuning = if source_fec_fallback {
+                    adaptive.source_fec_fallback_tuning(&config)
+                } else {
+                    adaptive.round_tuning(&config)
+                };
                 if source_symbols.is_empty() {
                     round_started = Instant::now();
                     round_symbols_start = symbols_sent;
@@ -2052,6 +2077,24 @@ pub async fn send_path(
                         symbol_auth.as_ref(),
                     )
                     .await?;
+                    if source_fec_fallback {
+                        spray_round(
+                            cx,
+                            &mut sockets,
+                            &mut rr,
+                            &mut symbols_sent,
+                            &mut dropper,
+                            tag,
+                            &mut encoders,
+                            &pending,
+                            &config,
+                            &round_tuning,
+                            symbol_auth.as_ref(),
+                            /* with_source */ false,
+                            parallel_encode,
+                        )
+                        .await?;
+                    }
                 }
             }
             other => {
@@ -2105,6 +2148,22 @@ fn source_retransmit_request_limit(config: &RqConfig, feedback_round: u32) -> Op
     } else {
         None
     }
+}
+
+fn source_retransmit_needs_fec_fallback(
+    config: &RqConfig,
+    feedback_round: u32,
+    requested_sources: usize,
+) -> bool {
+    if config.repair_overhead > 1.0
+        || config.source_retransmit_rounds == 0
+        || requested_sources == 0
+    {
+        return false;
+    }
+    let saturated_request = config.max_source_retransmit_requests != 0
+        && requested_sources >= config.max_source_retransmit_requests;
+    saturated_request || feedback_round >= config.source_retransmit_rounds
 }
 
 /// Above this total transfer size the parallel per-block encode is disabled and the sequential
@@ -2644,9 +2703,7 @@ pub async fn receive_connection(
     })?;
     let staging_dir = create_receive_staging_dir(dest_dir, &manifest.transfer_id).await?;
     let _staging_guard = RqStagingDirGuard::new(staging_dir.clone());
-    let source_streaming = config.repair_overhead <= 1.0
-        && config.source_retransmit_rounds > 0
-        && !symbol_auth_enabled;
+    let source_streaming = config.repair_overhead <= 1.0 && config.source_retransmit_rounds > 0;
 
     // Per-entry decoders.
     let mut decoders: Vec<EntryDecoder> = manifest
@@ -2727,6 +2784,7 @@ pub async fn receive_connection(
             &mut udp,
             tag,
             symbol_auth_enabled,
+            symbol_auth.as_ref(),
             &mut rbuf,
             &mut decoders,
             symbol_size,
@@ -2745,6 +2803,7 @@ pub async fn receive_connection(
                     &mut udp,
                     tag,
                     symbol_auth_enabled,
+                    symbol_auth.as_ref(),
                     &mut rbuf,
                     config.round_tail_drain,
                     &mut decoders,
@@ -2956,6 +3015,7 @@ async fn feed_symbol(
     parsed: &ParsedDatagram,
     payload: &[u8],
     symbol_size: u16,
+    symbol_auth: Option<&SecurityContext>,
 ) -> Result<bool, RqError> {
     if dec.complete {
         return Ok(false);
@@ -2966,21 +3026,53 @@ async fn feed_symbol(
         // emitted symbols are symbol_size bytes.)
         return Ok(false);
     }
-    if dec.source_streaming && parsed.kind.is_source() && parsed.auth_tag.is_none() {
-        return persist_source_symbol(dec, parsed, payload, symbol_size).await;
+    let mut pipeline_auth = None;
+    if dec.source_streaming && parsed.kind.is_source() {
+        if let Some(tag) = parsed.auth_tag {
+            let Some(context) = symbol_auth else {
+                return Ok(false);
+            };
+            let sym = Symbol::new(
+                SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
+                payload.to_vec(),
+                parsed.kind,
+            );
+            let mut auth = AuthenticatedSymbol::from_parts(sym, tag);
+            if context.verify_authenticated_symbol(&mut auth).is_err() {
+                rqtrace!(
+                    "receiver: entry {} rejected source-streamed sbn={} esi={} auth tag",
+                    dec.index,
+                    parsed.sbn,
+                    parsed.esi
+                );
+                return Ok(false);
+            }
+            if auth.is_verified() {
+                return persist_source_symbol(dec, parsed, payload, symbol_size).await;
+            }
+            pipeline_auth = Some(auth);
+        } else if symbol_auth.is_some() {
+            return Ok(false);
+        } else {
+            return persist_source_symbol(dec, parsed, payload, symbol_size).await;
+        }
     }
     if dec.pipeline.is_none() {
         return Ok(false);
     }
-    let sym = Symbol::new(
-        SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
-        payload.to_vec(),
-        parsed.kind,
-    );
-    let auth = if let Some(tag) = parsed.auth_tag {
-        AuthenticatedSymbol::from_parts(sym, tag)
+    let auth = if let Some(auth) = pipeline_auth {
+        auth
     } else {
-        AuthenticatedSymbol::new_unauthenticated(sym)
+        let sym = Symbol::new(
+            SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
+            payload.to_vec(),
+            parsed.kind,
+        );
+        if let Some(tag) = parsed.auth_tag {
+            AuthenticatedSymbol::from_parts(sym, tag)
+        } else {
+            AuthenticatedSymbol::new_unauthenticated(sym)
+        }
     };
     let result = dec
         .pipeline
@@ -3419,6 +3511,7 @@ async fn feed_datagram_to_decoders(
     n: usize,
     tag: u64,
     auth_required: bool,
+    symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
 ) -> Result<bool, RqError> {
@@ -3428,13 +3521,21 @@ async fn feed_datagram_to_decoders(
     let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
         return Ok(false);
     };
-    feed_symbol(&mut decoders[pos], &parsed, payload, symbol_size).await
+    feed_symbol(
+        &mut decoders[pos],
+        &parsed,
+        payload,
+        symbol_size,
+        symbol_auth,
+    )
+    .await
 }
 
 async fn feed_datagram_batch_to_decoders(
     batch: &crate::net::UdpRecvBatch,
     tag: u64,
     auth_required: bool,
+    symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
 ) -> Result<u64, RqError> {
@@ -3445,6 +3546,7 @@ async fn feed_datagram_batch_to_decoders(
             packet.payload.len(),
             tag,
             auth_required,
+            symbol_auth,
             decoders,
             symbol_size,
         )
@@ -3469,6 +3571,7 @@ async fn pump_until_control<S>(
     udp: &mut UdpSocket,
     tag: u64,
     auth_required: bool,
+    symbol_auth: Option<&SecurityContext>,
     rbuf: &mut [u8],
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
@@ -3539,6 +3642,7 @@ where
                     &batch,
                     tag,
                     auth_required,
+                    symbol_auth,
                     decoders,
                     symbol_size,
                 )
@@ -3573,6 +3677,7 @@ where
                         &tail,
                         tag,
                         auth_required,
+                        symbol_auth,
                         decoders,
                         symbol_size,
                     )
@@ -3613,6 +3718,7 @@ async fn drain_round_tail(
     udp: &mut UdpSocket,
     tag: u64,
     auth_required: bool,
+    symbol_auth: Option<&SecurityContext>,
     rbuf: &mut [u8],
     quiet_window: Duration,
     decoders: &mut [EntryDecoder],
@@ -3658,7 +3764,17 @@ async fn drain_round_tail(
             return Ok(drained);
         };
 
-        if feed_datagram_to_decoders(rbuf, n, tag, auth_required, decoders, symbol_size).await? {
+        if feed_datagram_to_decoders(
+            rbuf,
+            n,
+            tag,
+            auth_required,
+            symbol_auth,
+            decoders,
+            symbol_size,
+        )
+        .await?
+        {
             drained += 1;
             *symbols_accepted = (*symbols_accepted).saturating_add(1);
             quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
@@ -4114,6 +4230,132 @@ mod tests {
         assert!(received.is_verified());
     }
 
+    fn source_streaming_test_decoder(
+        object_id: ObjectId,
+        staging_path: PathBuf,
+        size: u64,
+        symbol_size: u16,
+    ) -> EntryDecoder {
+        EntryDecoder {
+            index: 0,
+            object_id,
+            size,
+            pipeline: None,
+            complete: false,
+            staging_path,
+            file: None,
+            bytes_written: 0,
+            max_block_size: usize::try_from(size).expect("test size fits usize"),
+            source_streaming: true,
+            source_blocks: source_block_progress_for(
+                size,
+                usize::try_from(size).expect("test size fits usize"),
+                symbol_size,
+            )
+            .expect("test source blocks"),
+        }
+    }
+
+    fn signed_source_payload(
+        ctx: &SecurityContext,
+        object_id: ObjectId,
+        esi: u32,
+        data: Vec<u8>,
+        tag: Option<AuthenticationTag>,
+    ) -> (ParsedDatagram, Vec<u8>) {
+        let sym = Symbol::new(SymbolId::new(object_id, 0, esi), data, SymbolKind::Source);
+        let signed = ctx.sign_symbol(&sym);
+        let auth_tag = tag.as_ref().unwrap_or_else(|| signed.tag());
+        let dg = encode_symbol_datagram(0xA77E, 0, &sym, Some(auth_tag));
+        let parsed = parse_symbol_header(&dg, 0xA77E, true).expect("parse signed source datagram");
+        let payload = dg[parsed.header_len..parsed.header_len + parsed.payload_len].to_vec();
+        (parsed, payload)
+    }
+
+    #[test]
+    fn signed_source_streaming_persists_after_hmac_verification() {
+        let ctx = SecurityContext::for_testing(31337);
+        let object_id = entry_object_id("signed-source-stream", 0);
+        let symbol_size = 4u16;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder = source_streaming_test_decoder(object_id, staging_path.clone(), 8, 4);
+
+        let (first, first_payload) =
+            signed_source_payload(&ctx, object_id, 0, vec![1, 2, 3, 4], None);
+        let accepted = futures_lite::future::block_on(feed_symbol(
+            &mut decoder,
+            &first,
+            &first_payload,
+            symbol_size,
+            Some(&ctx),
+        ))
+        .expect("feed first source symbol");
+        assert!(accepted);
+        assert!(!decoder.complete);
+        assert!(decoder.file.is_some());
+
+        let (second, second_payload) =
+            signed_source_payload(&ctx, object_id, 1, vec![5, 6, 7, 8], None);
+        let accepted = futures_lite::future::block_on(feed_symbol(
+            &mut decoder,
+            &second,
+            &second_payload,
+            symbol_size,
+            Some(&ctx),
+        ))
+        .expect("feed second source symbol");
+        assert!(accepted);
+        assert!(decoder.complete);
+        assert_eq!(decoder.bytes_written, 8);
+
+        drop(decoder.file.take());
+        assert_eq!(
+            std::fs::read(staging_path).expect("read staged source stream"),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[test]
+    fn signed_source_streaming_rejects_bad_tag_before_persist() {
+        let ctx = SecurityContext::for_testing(31338);
+        let object_id = entry_object_id("signed-source-stream-bad-tag", 0);
+        let symbol_size = 4u16;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 4, symbol_size);
+
+        let good = ctx.sign_symbol(&Symbol::new(
+            SymbolId::new(object_id, 0, 0),
+            vec![1, 2, 3, 4],
+            SymbolKind::Source,
+        ));
+        let mut bad_tag = *good.tag().as_bytes();
+        bad_tag[0] ^= 0x80;
+        let (parsed, payload) = signed_source_payload(
+            &ctx,
+            object_id,
+            0,
+            vec![1, 2, 3, 4],
+            Some(AuthenticationTag::from_bytes(bad_tag)),
+        );
+
+        let accepted = futures_lite::future::block_on(feed_symbol(
+            &mut decoder,
+            &parsed,
+            &payload,
+            symbol_size,
+            Some(&ctx),
+        ))
+        .expect("feed tampered source symbol");
+        assert!(!accepted);
+        assert!(!decoder.complete);
+        assert_eq!(decoder.bytes_written, 0);
+        assert!(decoder.file.is_none());
+        assert!(!staging_path.exists());
+    }
+
     #[test]
     fn signed_datagram_feed_reaches_k512_decode_threshold() {
         let ctx = SecurityContext::for_testing(101);
@@ -4374,6 +4616,49 @@ mod tests {
         };
 
         assert_eq!(source_retransmit_request_limit(&config, 1), None);
+    }
+
+    #[test]
+    fn source_retransmit_falls_back_to_fec_when_saturated_or_final_round() {
+        let config = RqConfig {
+            repair_overhead: 1.0,
+            source_retransmit_rounds: 2,
+            max_source_retransmit_requests: 17,
+            ..RqConfig::default()
+        };
+
+        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 0));
+        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 16));
+        assert!(source_retransmit_needs_fec_fallback(&config, 1, 17));
+        assert!(source_retransmit_needs_fec_fallback(&config, 2, 1));
+    }
+
+    #[test]
+    fn source_retransmit_fec_fallback_uses_adaptive_overhead() {
+        let config = RqConfig {
+            symbol_size: 1024,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(99, &config, 4);
+        state.loss_ema = 0.03;
+        state.loss_bar = 0.05;
+
+        let tuning = state.source_fec_fallback_tuning(&config);
+        let expected = adaptive::overhead_for_target(
+            fixed_block_k(&config),
+            0.05,
+            RQ_SOURCE_FEC_FALLBACK_ALPHA,
+            RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+        );
+
+        assert!(
+            tuning.repair_overhead >= 1.0 + expected,
+            "fallback must apply adaptive FEC overhead: got {}, expected at least {}",
+            tuning.repair_overhead,
+            1.0 + expected
+        );
     }
 
     #[test]
