@@ -1357,6 +1357,13 @@ impl NativeQuicConnection {
         MAX_INBOUND_DATAGRAMS
     }
 
+    /// Remaining inbound DATAGRAM payload slots before receive-side
+    /// backpressure is reported.
+    #[must_use]
+    pub fn inbound_datagram_remaining_capacity(&self) -> usize {
+        MAX_INBOUND_DATAGRAMS.saturating_sub(self.inbound_datagrams.len())
+    }
+
     /// Total DATAGRAM frames accepted into the receive queue.
     #[must_use]
     pub fn datagrams_received(&self) -> u64 {
@@ -2857,6 +2864,61 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn inbound_datagram_queue_full_backpressures_without_evicting_survivors() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        assert_eq!(conn.inbound_datagram_capacity(), MAX_INBOUND_DATAGRAMS);
+        assert_eq!(
+            conn.inbound_datagram_remaining_capacity(),
+            MAX_INBOUND_DATAGRAMS
+        );
+
+        for idx in 0..MAX_INBOUND_DATAGRAMS {
+            let payload = Bytes::from(vec![(idx % 251) as u8]);
+            conn.process_frame(
+                &cx,
+                &QuicFrame::Datagram { data: payload },
+                PacketNumberSpace::ApplicationData,
+            )
+            .expect("within-capacity datagram accepted");
+        }
+
+        assert_eq!(conn.pending_datagram_count(), MAX_INBOUND_DATAGRAMS);
+        assert_eq!(conn.inbound_datagram_remaining_capacity(), 0);
+        assert_eq!(conn.datagrams_received(), MAX_INBOUND_DATAGRAMS as u64);
+        assert_eq!(conn.datagrams_dropped_on_receive(), 0);
+
+        let err = conn
+            .process_frame(
+                &cx,
+                &QuicFrame::Datagram {
+                    data: Bytes::from_static(b"overflow"),
+                },
+                PacketNumberSpace::ApplicationData,
+            )
+            .expect_err("full inbound datagram queue must report backpressure");
+        assert_eq!(
+            err,
+            NativeQuicConnectionError::DatagramReceiveQueueFull {
+                capacity: MAX_INBOUND_DATAGRAMS
+            }
+        );
+        assert_eq!(conn.pending_datagram_count(), MAX_INBOUND_DATAGRAMS);
+        assert_eq!(conn.datagrams_received(), MAX_INBOUND_DATAGRAMS as u64);
+        assert_eq!(conn.datagrams_dropped_on_receive(), 0);
+
+        for idx in 0..MAX_INBOUND_DATAGRAMS {
+            let payload = conn.recv_datagram().expect("survivor preserved");
+            assert_eq!(payload.as_ref(), &[(idx % 251) as u8]);
+        }
+        assert!(conn.recv_datagram().is_none());
+        assert_eq!(
+            conn.inbound_datagram_remaining_capacity(),
+            MAX_INBOUND_DATAGRAMS
+        );
+    }
+
     // --- Gap 10: NativeQuicConnectionError Display/From impls ---
 
     #[test]
@@ -2902,10 +2964,14 @@ mod tests {
 
     #[test]
     fn display_datagram_receive_queue_full() {
-        let err = NativeQuicConnectionError::DatagramReceiveQueueFull { capacity: 256 };
+        let err = NativeQuicConnectionError::DatagramReceiveQueueFull {
+            capacity: MAX_INBOUND_DATAGRAMS,
+        };
         assert_eq!(
             format!("{err}"),
-            "inbound datagram receive queue full: capacity=256; drain buffered payloads before processing more"
+            format!(
+                "inbound datagram receive queue full: capacity={MAX_INBOUND_DATAGRAMS}; drain buffered payloads before processing more"
+            )
         );
     }
 
