@@ -63,6 +63,12 @@ pub struct RecoveryContext {
 struct TransferRecoveryState {
     /// Chunk states being reconstructed
     chunk_states: HashMap<ChunkId, ChunkState>,
+    /// Chunk sizes observed for each recovered chunk.
+    chunk_sizes: HashMap<ChunkId, u64>,
+    /// Offered transfer size recovered from the journal, when present.
+    total_size: Option<u64>,
+    /// First timestamp observed for this transfer.
+    created_at: Option<u64>,
     /// Last seen commit intent timestamp
     commit_intent_time: Option<u64>,
     /// Whether this transfer was committed
@@ -125,8 +131,14 @@ impl RecoveryContext {
         self.seen_records.insert(fingerprint);
 
         match record {
-            JournalRecord::Offer { transfer_id, .. } => {
-                self.ensure_transfer(transfer_id);
+            JournalRecord::Offer {
+                transfer_id,
+                total_size,
+                timestamp,
+                ..
+            } => {
+                let transfer = self.ensure_transfer(transfer_id);
+                transfer.record_offer(*total_size, *timestamp);
                 Ok(true)
             }
             JournalRecord::Accept { transfer_id, .. } => {
@@ -136,37 +148,69 @@ impl RecoveryContext {
             JournalRecord::ChunkReceived {
                 transfer_id,
                 chunk_offset,
+                chunk_size,
+                timestamp,
                 ..
             } => {
                 let transfer = self.ensure_transfer(transfer_id);
-                Self::update_chunk_state(transfer, *chunk_offset, ChunkState::Received)?;
+                Self::update_chunk_state(
+                    transfer,
+                    *chunk_offset,
+                    *chunk_size,
+                    *timestamp,
+                    ChunkState::Received,
+                )?;
                 Ok(true)
             }
             JournalRecord::ChunkVerified {
                 transfer_id,
                 chunk_offset,
+                chunk_size,
+                timestamp,
                 ..
             } => {
                 let transfer = self.ensure_transfer(transfer_id);
-                Self::update_chunk_state(transfer, *chunk_offset, ChunkState::Verified)?;
+                Self::update_chunk_state(
+                    transfer,
+                    *chunk_offset,
+                    *chunk_size,
+                    *timestamp,
+                    ChunkState::Verified,
+                )?;
                 Ok(true)
             }
             JournalRecord::ChunkWritten {
                 transfer_id,
                 chunk_offset,
+                chunk_size,
+                timestamp,
                 ..
             } => {
                 let transfer = self.ensure_transfer(transfer_id);
-                Self::update_chunk_state(transfer, *chunk_offset, ChunkState::Written)?;
+                Self::update_chunk_state(
+                    transfer,
+                    *chunk_offset,
+                    *chunk_size,
+                    *timestamp,
+                    ChunkState::Written,
+                )?;
                 Ok(true)
             }
             JournalRecord::RepairDecode {
                 transfer_id,
                 chunk_offset,
+                chunk_size,
+                timestamp,
                 ..
             } => {
                 let transfer = self.ensure_transfer(transfer_id);
-                Self::update_chunk_state(transfer, *chunk_offset, ChunkState::RepairDerived)?;
+                Self::update_chunk_state(
+                    transfer,
+                    *chunk_offset,
+                    *chunk_size,
+                    *timestamp,
+                    ChunkState::RepairDerived,
+                )?;
                 Ok(true)
             }
             JournalRecord::CommitIntent {
@@ -178,8 +222,14 @@ impl RecoveryContext {
                 transfer.commit_intent_time = Some(*timestamp);
                 Ok(true)
             }
-            JournalRecord::CommitComplete { transfer_id, .. } => {
+            JournalRecord::CommitComplete {
+                transfer_id,
+                committed_size,
+                timestamp,
+                ..
+            } => {
                 let transfer = self.ensure_transfer(transfer_id);
+                transfer.record_offer(*committed_size, *timestamp);
                 transfer.is_committed = true;
                 Self::commit_all_chunks(transfer);
                 Ok(true)
@@ -214,7 +264,10 @@ impl RecoveryContext {
 
         for (transfer_id, transfer_state) in self.transfers {
             if !transfer_state.chunk_states.is_empty() {
-                let mut bitmap = ChunkBitmap::new(transfer_id.clone(), 0, 4096, 0); // ubs:ignore - required to insert both key and bitmap value into map
+                let (total_size, chunk_size, created_at) =
+                    transfer_state.recovered_bitmap_geometry();
+                let mut bitmap =
+                    ChunkBitmap::new(transfer_id.clone(), total_size, chunk_size, created_at);
                 for (chunk_id, state) in transfer_state.chunk_states {
                     let _ = bitmap.update_chunk_state(chunk_id.as_u64(), state, 0, None);
                     stats.chunks_recovered += 1;
@@ -232,6 +285,9 @@ impl RecoveryContext {
             .entry(transfer_id.to_string())
             .or_insert_with(|| TransferRecoveryState {
                 chunk_states: HashMap::new(),
+                chunk_sizes: HashMap::new(),
+                total_size: None,
+                created_at: None,
                 commit_intent_time: None,
                 is_committed: false,
                 is_cancelled: false,
@@ -241,6 +297,8 @@ impl RecoveryContext {
     fn update_chunk_state(
         transfer: &mut TransferRecoveryState,
         chunk_offset: u64,
+        chunk_size: u64,
+        timestamp: u64,
         new_state: ChunkState,
     ) -> Result<(), RecoveryError> {
         let chunk_id = ChunkId::from_u64(chunk_offset);
@@ -258,6 +316,7 @@ impl RecoveryContext {
             });
         }
 
+        transfer.record_chunk_geometry(chunk_id, chunk_size, timestamp);
         transfer.chunk_states.insert(chunk_id, new_state);
         Ok(())
     }
@@ -344,6 +403,63 @@ impl RecoveryContext {
     }
 }
 
+impl TransferRecoveryState {
+    fn record_offer(&mut self, total_size: u64, timestamp: u64) {
+        self.total_size = Some(self.total_size.unwrap_or(total_size).max(total_size));
+        self.created_at.get_or_insert(timestamp);
+    }
+
+    fn record_chunk_geometry(&mut self, chunk_id: ChunkId, chunk_size: u64, timestamp: u64) {
+        if chunk_size > 0 {
+            self.chunk_sizes.entry(chunk_id).or_insert(chunk_size);
+        }
+        self.created_at.get_or_insert(timestamp);
+    }
+
+    fn recovered_bitmap_geometry(&self) -> (u64, u64, u64) {
+        let chunk_size = self.recovered_chunk_size().unwrap_or(4096);
+        let max_recovered_end = self
+            .chunk_sizes
+            .iter()
+            .filter_map(|(chunk_id, chunk_size)| chunk_id.as_u64().checked_add(*chunk_size))
+            .max()
+            .unwrap_or(0);
+        let total_size = self
+            .total_size
+            .unwrap_or(max_recovered_end)
+            .max(max_recovered_end);
+        let created_at = self.created_at.unwrap_or(0);
+
+        (total_size, chunk_size, created_at)
+    }
+
+    fn recovered_chunk_size(&self) -> Option<u64> {
+        let max_size = self.chunk_sizes.values().copied().max()?;
+        if self
+            .chunk_sizes
+            .keys()
+            .all(|chunk_id| chunk_id.as_u64() % max_size == 0)
+        {
+            return Some(max_size);
+        }
+
+        self.chunk_sizes
+            .iter()
+            .flat_map(|(chunk_id, chunk_size)| [chunk_id.as_u64(), *chunk_size])
+            .filter(|value| *value > 0)
+            .reduce(gcd_u64)
+    }
+}
+
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let next = a % b;
+        a = b;
+        b = next;
+    }
+    a
+}
+
 /// Perform complete crash recovery for a journal and bitmap pair.
 pub async fn recover_journal_and_bitmap(
     cx: &Cx,
@@ -399,14 +515,7 @@ pub async fn recover_journal_and_bitmap(
     };
 
     for entry in entries {
-        match context.process_record(&entry, auth_key) {
-            Ok(_) => {}
-            Err(RecoveryError::InvalidStateTransition { .. }) => {
-                // Log but continue - invalid transitions might be from corrupted records
-                context.stats.corrupted_skipped += 1;
-            }
-            Err(e) => return Err(e),
-        }
+        process_recovery_record(&mut context, &entry, auth_key)?;
     }
 
     let (bitmaps, stats) = context.finalize();
@@ -431,6 +540,24 @@ pub async fn recover_journal_and_bitmap(
     ));
 
     Ok((journal, bitmaps))
+}
+
+fn process_recovery_record(
+    context: &mut RecoveryContext,
+    record: &JournalRecord,
+    auth_key: &AuthKey,
+) -> Result<(), RecoveryError> {
+    match context.process_record(record, auth_key) {
+        Ok(_) => Ok(()),
+        Err(RecoveryError::InvalidStateTransition { .. } | RecoveryError::InvalidSignature) => {
+            // Skip individual corrupted or unverifiable records but keep replaying
+            // later records so a single bad append does not discard the valid
+            // committed prefix recovered before it.
+            context.stats.corrupted_skipped += 1;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Load an existing chunk bitmap from disk.
@@ -644,6 +771,117 @@ mod tests {
         let (_, stats) = ctx.finalize();
         assert_eq!(stats.total_records, 2);
         assert_eq!(stats.duplicates_skipped, 1);
+    }
+
+    #[test]
+    fn recovery_replay_skips_invalid_signature_without_discarding_valid_prefix() {
+        let mut ctx = RecoveryContext::new();
+        let auth_key = test_auth_key();
+        let transfer_id = "prefix-survives".to_string();
+
+        let valid_offer = signed_record(JournalRecord::Offer {
+            transfer_id: transfer_id.clone(),
+            object_id: test_object_id(b"prefix-survives"),
+            manifest_root: test_root(3),
+            total_size: 2048,
+            timestamp: 1000,
+            auth_tag: unsigned_tag(),
+        });
+        process_recovery_record(&mut ctx, &valid_offer, &auth_key).unwrap();
+
+        let valid_received = signed_record(JournalRecord::ChunkReceived {
+            transfer_id: transfer_id.clone(),
+            chunk_offset: 0,
+            chunk_size: 1024,
+            chunk_hash: [1; 32],
+            timestamp: 1100,
+            auth_tag: unsigned_tag(),
+        });
+        process_recovery_record(&mut ctx, &valid_received, &auth_key).unwrap();
+
+        let invalid_signature = JournalRecord::ChunkVerified {
+            transfer_id: "tampered".to_string(),
+            chunk_offset: 0,
+            chunk_size: 1024,
+            verified_hash: [9; 32],
+            timestamp: 1200,
+            auth_tag: unsigned_tag(),
+        };
+        process_recovery_record(&mut ctx, &invalid_signature, &auth_key).unwrap();
+
+        let valid_verified = signed_record(JournalRecord::ChunkVerified {
+            transfer_id: transfer_id.clone(),
+            chunk_offset: 0,
+            chunk_size: 1024,
+            verified_hash: [2; 32],
+            timestamp: 1300,
+            auth_tag: unsigned_tag(),
+        });
+        process_recovery_record(&mut ctx, &valid_verified, &auth_key).unwrap();
+
+        let (bitmaps, stats) = ctx.finalize();
+        let bitmap = bitmaps.get(&transfer_id).expect("valid prefix recovered");
+
+        assert_eq!(stats.total_records, 4);
+        assert_eq!(stats.corrupted_skipped, 1);
+        assert_eq!(bitmap.get_chunk_state(0), Some(ChunkState::Verified));
+        assert!(!bitmaps.contains_key("tampered"));
+    }
+
+    #[test]
+    fn recovery_finalize_preserves_recovered_bitmap_geometry() {
+        let mut ctx = RecoveryContext::new();
+        let transfer_id = "geometry".to_string();
+
+        assert!(
+            process_test_record(
+                &mut ctx,
+                JournalRecord::Offer {
+                    transfer_id: transfer_id.clone(),
+                    object_id: test_object_id(b"geometry"),
+                    manifest_root: test_root(4),
+                    total_size: 2500,
+                    timestamp: 1000,
+                    auth_tag: unsigned_tag(),
+                }
+            )
+            .unwrap()
+        );
+
+        for (offset, chunk_size, timestamp) in
+            [(0, 1024, 1100), (1024, 1024, 1200), (2048, 452, 1300)]
+        {
+            assert!(
+                process_test_record(
+                    &mut ctx,
+                    JournalRecord::ChunkReceived {
+                        transfer_id: transfer_id.clone(),
+                        chunk_offset: offset,
+                        chunk_size,
+                        chunk_hash: [chunk_size as u8; 32],
+                        timestamp,
+                        auth_tag: unsigned_tag(),
+                    }
+                )
+                .unwrap()
+            );
+        }
+
+        let (bitmaps, stats) = ctx.finalize();
+        let bitmap = bitmaps.get(&transfer_id).expect("bitmap recovered");
+        let bitmap_stats = bitmap.get_stats();
+
+        assert_eq!(stats.transfers_recovered, 1);
+        assert_eq!(stats.chunks_recovered, 3);
+        assert_eq!(bitmap_stats.total_size, 2500);
+        assert_eq!(bitmap_stats.chunk_size, 1024);
+        assert_eq!(bitmap_stats.total_chunks, 3);
+
+        let decoded =
+            ChunkBitmap::deserialize_from_bytes(&bitmap.serialize_to_bytes()).expect("round-trip");
+        assert_eq!(decoded.total_size(), 2500);
+        assert_eq!(decoded.chunk_size(), 1024);
+        assert_eq!(decoded.entry_count(), 3);
     }
 
     #[tokio::test]
