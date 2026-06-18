@@ -16,6 +16,7 @@ pub mod cache;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod cache_seeding_integration_tests;
 pub mod daemon_control;
+pub mod delta;
 pub mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
