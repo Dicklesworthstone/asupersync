@@ -16,7 +16,7 @@ use super::frame::{
     WindowUpdateFrame, parse_frame,
 };
 use super::hpack::{self, Header};
-use super::settings::Settings;
+use super::settings::{DEFAULT_INITIAL_WINDOW_SIZE, Settings};
 use super::stream::{Stream, StreamState, StreamStore};
 
 /// Connection preface that clients must send.
@@ -345,7 +345,8 @@ impl Connection {
     #[must_use]
     pub fn client_with_time_getter(settings: Settings, time_getter: fn() -> Time) -> Self {
         let max_header_list_size = settings.max_header_list_size;
-        let initial_window = settings.initial_window_size;
+        let initial_send_window = DEFAULT_INITIAL_WINDOW_SIZE;
+        let initial_recv_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
         decoder.set_max_header_list_size(max_header_list_size as usize);
         // The decoder rejects any peer dynamic-table-size update above
@@ -360,7 +361,12 @@ impl Connection {
             local_settings: settings,
             remote_settings: Settings::default(),
             received_settings: false,
-            streams: StreamStore::new(true, initial_window, max_header_list_size),
+            streams: StreamStore::new_with_local_recv_window(
+                true,
+                initial_send_window,
+                initial_recv_window,
+                max_header_list_size,
+            ),
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
@@ -392,7 +398,8 @@ impl Connection {
     #[must_use]
     pub fn server_with_time_getter(settings: Settings, time_getter: fn() -> Time) -> Self {
         let max_header_list_size = settings.max_header_list_size;
-        let initial_window = settings.initial_window_size;
+        let initial_send_window = DEFAULT_INITIAL_WINDOW_SIZE;
+        let initial_recv_window = settings.initial_window_size;
         let mut decoder = hpack::Decoder::new();
         decoder.set_max_header_list_size(max_header_list_size as usize);
         // The decoder rejects any peer dynamic-table-size update above
@@ -407,7 +414,12 @@ impl Connection {
             local_settings: settings,
             remote_settings: Settings::default(),
             received_settings: false,
-            streams: StreamStore::new(false, initial_window, max_header_list_size),
+            streams: StreamStore::new_with_local_recv_window(
+                false,
+                initial_send_window,
+                initial_recv_window,
+                max_header_list_size,
+            ),
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
@@ -2566,6 +2578,37 @@ mod tests {
         assert_eq!(conn.remote_settings().initial_window_size, 32768);
     }
 
+    #[test]
+    fn local_initial_window_sizes_receive_side_not_peer_send_side() {
+        let mut settings = Settings::server();
+        settings.initial_window_size = 32_768;
+        let mut conn = Connection::server(settings);
+
+        let stream1 = conn.streams.get_or_create(1).unwrap();
+        assert_eq!(
+            stream1.send_window(),
+            i32::try_from(DEFAULT_INITIAL_WINDOW_SIZE).unwrap(),
+            "peer send window starts at the RFC default until peer SETTINGS arrives"
+        );
+        assert_eq!(
+            stream1.recv_window(),
+            32_768,
+            "local SETTINGS_INITIAL_WINDOW_SIZE must initialize our receive window"
+        );
+
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![
+            Setting::InitialWindowSize(100_000),
+        ])))
+        .unwrap();
+        let stream3 = conn.streams.get_or_create(3).unwrap();
+        assert_eq!(stream3.send_window(), 100_000);
+        assert_eq!(
+            stream3.recv_window(),
+            32_768,
+            "peer SETTINGS_INITIAL_WINDOW_SIZE must not rewrite our receive window"
+        );
+    }
+
     /// Regression: peer's MaxConcurrentStreams must constrain stream creation,
     /// not just be stored in remote_settings. Without forwarding to StreamStore,
     /// the local side could exceed the peer's limit (RFC 7540 §5.1.2 violation).
@@ -3855,6 +3898,28 @@ mod tests {
         assert_eq!(conn.remote_settings().max_concurrent_streams, 50);
         assert_eq!(conn.remote_settings().initial_window_size, 32768);
         assert_eq!(conn.remote_settings().max_frame_size, 32768);
+    }
+
+    #[test]
+    fn local_initial_window_configures_receive_not_peer_send_window() {
+        let conn_settings = Settings {
+            initial_window_size: 32_768,
+            ..Settings::default()
+        };
+        let mut conn = Connection::server(conn_settings);
+
+        let stream_id = conn.streams.allocate_stream_id().unwrap();
+        let stream = conn.streams.get(stream_id).unwrap();
+        assert_eq!(
+            stream.send_window(),
+            settings::DEFAULT_INITIAL_WINDOW_SIZE as i32
+        );
+        assert_eq!(stream.recv_window(), 32_768);
+
+        conn.streams.set_initial_window_size(100_000).unwrap();
+        let stream = conn.streams.get(stream_id).unwrap();
+        assert_eq!(stream.send_window(), 100_000);
+        assert_eq!(stream.recv_window(), 32_768);
     }
 
     #[test]

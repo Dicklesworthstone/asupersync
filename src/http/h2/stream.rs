@@ -14,6 +14,7 @@ use super::error::{ErrorCode, H2Error};
 use super::frame::PrioritySpec;
 #[cfg(test)]
 use super::hpack::Header;
+#[cfg(test)]
 use super::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 
 /// Maximum accumulated header fragment size multiplier.
@@ -224,17 +225,33 @@ impl Stream {
     /// Create a new stream in idle state.
     #[must_use]
     pub fn new(id: u32, initial_window_size: u32, max_header_list_size: u32) -> Self {
+        Self::new_with_recv_window(
+            id,
+            initial_window_size,
+            initial_window_size,
+            max_header_list_size,
+        )
+    }
+
+    /// Create a new stream with separate peer-send and local-receive windows.
+    #[must_use]
+    pub fn new_with_recv_window(
+        id: u32,
+        initial_send_window_size: u32,
+        initial_recv_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
         let initial_send_window =
-            i32::try_from(initial_window_size).expect("initial window size exceeds i32");
-        let default_recv_window =
-            i32::try_from(DEFAULT_INITIAL_WINDOW_SIZE).expect("default window size exceeds i32");
+            i32::try_from(initial_send_window_size).expect("initial send window size exceeds i32");
+        let initial_recv_window = i32::try_from(initial_recv_window_size)
+            .expect("initial receive window size exceeds i32");
         Self {
             id,
             state: StreamState::Idle,
             send_window: initial_send_window,
-            recv_window: default_recv_window,
+            recv_window: initial_recv_window,
             initial_send_window,
-            initial_recv_window: default_recv_window,
+            initial_recv_window,
             priority: PrioritySpec {
                 exclusive: false,
                 dependency: 0,
@@ -279,6 +296,24 @@ impl Stream {
         stream
     }
 
+    /// Create a new reserved (remote) stream with a local receive window.
+    #[must_use]
+    pub fn new_reserved_remote_with_recv_window(
+        id: u32,
+        initial_send_window_size: u32,
+        initial_recv_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let mut stream = Self::new_with_recv_window(
+            id,
+            initial_send_window_size,
+            initial_recv_window_size,
+            max_header_list_size,
+        );
+        stream.state = StreamState::ReservedRemote;
+        stream
+    }
+
     /// Create a new reserved (local) stream.
     #[must_use]
     pub fn new_reserved_local(
@@ -287,6 +322,24 @@ impl Stream {
         max_header_list_size: u32,
     ) -> Self {
         let mut stream = Self::new(id, initial_window_size, max_header_list_size);
+        stream.state = StreamState::ReservedLocal;
+        stream
+    }
+
+    /// Create a new reserved (local) stream with a local receive window.
+    #[must_use]
+    pub fn new_reserved_local_with_recv_window(
+        id: u32,
+        initial_send_window_size: u32,
+        initial_recv_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let mut stream = Self::new_with_recv_window(
+            id,
+            initial_send_window_size,
+            initial_recv_window_size,
+            max_header_list_size,
+        );
         stream.state = StreamState::ReservedLocal;
         stream
     }
@@ -829,6 +882,8 @@ pub struct StreamStore {
     max_concurrent_streams: u32,
     /// Initial window size for new streams.
     initial_window_size: u32,
+    /// Initial receive window size advertised by our local SETTINGS.
+    initial_recv_window_size: u32,
     /// Maximum header list size for new streams.
     max_header_list_size: u32,
     /// Whether this is a client (for stream ID assignment).
@@ -839,6 +894,22 @@ impl StreamStore {
     /// Create a new stream store.
     #[must_use]
     pub fn new(is_client: bool, initial_window_size: u32, max_header_list_size: u32) -> Self {
+        Self::new_with_local_recv_window(
+            is_client,
+            initial_window_size,
+            initial_window_size,
+            max_header_list_size,
+        )
+    }
+
+    /// Create a new stream store with separate peer-send and local-receive windows.
+    #[must_use]
+    pub fn new_with_local_recv_window(
+        is_client: bool,
+        initial_window_size: u32,
+        initial_recv_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
         Self {
             streams: Vec::new(),
             base_id: 1,
@@ -847,6 +918,7 @@ impl StreamStore {
             next_server_stream_id: 2,
             max_concurrent_streams: u32::MAX,
             initial_window_size,
+            initial_recv_window_size,
             max_header_list_size,
             is_client,
         }
@@ -1080,6 +1152,12 @@ impl StreamStore {
         self.initial_window_size
     }
 
+    /// Get the local initial receive window size.
+    #[must_use]
+    pub fn initial_recv_window_size(&self) -> u32 {
+        self.initial_recv_window_size
+    }
+
     /// Get a stream by ID. O(1) — single bounds check + indirection.
     #[must_use]
     pub fn get(&self, id: u32) -> Option<&Stream> {
@@ -1175,7 +1253,12 @@ impl StreamStore {
                 self.next_client_stream_id = id.saturating_add(2);
             }
 
-            let stream = Stream::new(id, self.initial_window_size, self.max_header_list_size);
+            let stream = Stream::new_with_recv_window(
+                id,
+                self.initial_window_size,
+                self.initial_recv_window_size,
+                self.max_header_list_size,
+            );
             self.insert_stream(id, stream)?;
         }
         self.get_mut(id).ok_or_else(|| {
@@ -1217,8 +1300,12 @@ impl StreamStore {
             self.next_client_stream_id = id.saturating_add(2);
         }
 
-        let stream =
-            Stream::new_reserved_remote(id, self.initial_window_size, self.max_header_list_size);
+        let stream = Stream::new_reserved_remote_with_recv_window(
+            id,
+            self.initial_window_size,
+            self.initial_recv_window_size,
+            self.max_header_list_size,
+        );
         self.insert_stream(id, stream)?;
         self.get_mut(id).ok_or_else(|| {
             H2Error::connection(
@@ -1232,6 +1319,7 @@ impl StreamStore {
     pub fn reserve_local_stream(&mut self) -> Result<u32, H2Error> {
         let id = self.allocate_stream_id()?;
         let initial_window_size = self.initial_window_size;
+        let initial_recv_window_size = self.initial_recv_window_size;
         let max_header_list_size = self.max_header_list_size;
         let stream = self.get_mut(id).ok_or_else(|| {
             H2Error::connection(
@@ -1239,7 +1327,12 @@ impl StreamStore {
                 "allocated stream missing from store",
             )
         })?;
-        *stream = Stream::new_reserved_local(id, initial_window_size, max_header_list_size);
+        *stream = Stream::new_reserved_local_with_recv_window(
+            id,
+            initial_window_size,
+            initial_recv_window_size,
+            max_header_list_size,
+        );
         Ok(id)
     }
 
@@ -1291,7 +1384,12 @@ impl StreamStore {
             id
         };
 
-        let stream = Stream::new(id, self.initial_window_size, self.max_header_list_size);
+        let stream = Stream::new_with_recv_window(
+            id,
+            self.initial_window_size,
+            self.initial_recv_window_size,
+            self.max_header_list_size,
+        );
         self.insert_stream(id, stream)?;
         Ok(id)
     }
@@ -1424,6 +1522,33 @@ mod tests {
         let id3 = store.allocate_stream_id().unwrap();
         assert_eq!(id3, 5);
         assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn stream_store_preserves_local_initial_receive_window() {
+        let mut store = StreamStore::new_with_local_recv_window(
+            true,
+            65_535,
+            32_768,
+            DEFAULT_MAX_HEADER_LIST_SIZE,
+        );
+
+        let id = store.allocate_stream_id().unwrap();
+        let stream = store.get(id).unwrap();
+        assert_eq!(stream.send_window(), 65_535);
+        assert_eq!(stream.recv_window(), 32_768);
+        assert_eq!(stream.initial_recv_window, 32_768);
+        assert_eq!(store.initial_recv_window_size(), 32_768);
+
+        store.set_initial_window_size(100_000).unwrap();
+        let stream = store.get(id).unwrap();
+        assert_eq!(stream.send_window(), 100_000);
+        assert_eq!(
+            stream.recv_window(),
+            32_768,
+            "peer SETTINGS_INITIAL_WINDOW_SIZE must not rewrite our receive window"
+        );
+        assert_eq!(stream.initial_recv_window, 32_768);
     }
 
     /// br-asupersync-jq82r4: a server receiving a client-initiated stream
@@ -2347,6 +2472,51 @@ mod tests {
         // Decrease window size
         store.set_initial_window_size(50_000).unwrap();
         assert_eq!(store.get(id).unwrap().send_window(), 50_000);
+    }
+
+    #[test]
+    fn local_recv_window_is_not_replaced_by_peer_send_window_update() {
+        let local_initial_window = 32_768;
+        let peer_initial_window = 100_000;
+        let mut store = StreamStore::new_with_local_recv_window(
+            true,
+            local_initial_window,
+            local_initial_window,
+            DEFAULT_MAX_HEADER_LIST_SIZE,
+        );
+
+        let first_id = store.allocate_stream_id().unwrap();
+        let first = store.get(first_id).unwrap();
+        assert_eq!(
+            first.send_window(),
+            i32::try_from(local_initial_window).unwrap()
+        );
+        assert_eq!(
+            first.recv_window(),
+            i32::try_from(local_initial_window).unwrap()
+        );
+        assert_eq!(
+            first.initial_recv_window,
+            i32::try_from(local_initial_window).unwrap()
+        );
+
+        store.set_initial_window_size(peer_initial_window).unwrap();
+        let second_id = store.allocate_stream_id().unwrap();
+        let second = store.get(second_id).unwrap();
+
+        assert_eq!(
+            second.send_window(),
+            i32::try_from(peer_initial_window).unwrap()
+        );
+        assert_eq!(
+            second.recv_window(),
+            i32::try_from(local_initial_window).unwrap()
+        );
+        assert_eq!(
+            second.initial_recv_window,
+            i32::try_from(local_initial_window).unwrap()
+        );
+        assert_eq!(store.initial_recv_window_size(), local_initial_window);
     }
 
     #[test]
