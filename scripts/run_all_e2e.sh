@@ -341,6 +341,7 @@ declare -A SUITES=(
     [doctor-frankensuite-export]="test_doctor_frankensuite_export_e2e.sh"
     [doctor-e2e-proof-lane]="run_doctor_e2e.sh"
     [phase6]="run_phase6_e2e.sh"
+    [server-stack]="run_server_stack_e2e.sh"
 )
 
 # Canonical artifact roots for manifest indexing.
@@ -373,6 +374,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [doctor-frankensuite-export]="target/e2e-results/doctor_frankensuite_export"
     [doctor-e2e-proof-lane]="target/e2e-results/doctor_e2e_proof_lane"
     [phase6]="target/phase6-e2e"
+    [server-stack]="target/e2e-results/server_stack"
 )
 
 # Summary file patterns used to discover suite artifacts deterministically.
@@ -405,6 +407,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [doctor-frankensuite-export]="summary.json"
     [doctor-e2e-proof-lane]="summary.json"
     [phase6]="summary_*.json"
+    [server-stack]="summary.json"
 )
 
 # Artifact directory patterns used when summary path is not emitted.
