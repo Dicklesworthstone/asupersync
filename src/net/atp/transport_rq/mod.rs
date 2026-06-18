@@ -1244,6 +1244,15 @@ fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError>
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
 }
 
+fn parse_and_validate_manifest_frame(
+    frame: &Frame,
+    config: &RqConfig,
+) -> Result<TransferManifest, RqError> {
+    let manifest: TransferManifest = parse_json(frame)?;
+    validate_manifest(&manifest, config)?;
+    Ok(manifest)
+}
+
 /// Derive the per-entry RaptorQ [`ObjectId`] deterministically from the transfer
 /// id and entry index, so sender and receiver agree without extra signaling.
 fn entry_object_id(transfer_id: &str, index: u32) -> ObjectId {
@@ -3500,8 +3509,7 @@ pub async fn receive_connection(
             expected: "ObjectManifest",
         });
     }
-    let manifest: TransferManifest = parse_json(&manifest_frame)?;
-    validate_manifest(&manifest, &config)?;
+    let manifest = parse_and_validate_manifest_frame(&manifest_frame, &config)?;
     let symbol_size = hello.symbol_size;
     let receiver_max_block_size = usize::try_from(hello.max_block_size).map_err(|_| {
         RqError::Frame(format!(
@@ -5357,6 +5365,19 @@ mod tests {
     fn validate_manifest_accepts_sane_bounds() {
         let manifest = manifest_with(vec![manifest_entry(0, 100), manifest_entry(1, 200)], 300);
         assert!(validate_manifest(&manifest, &RqConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn parse_manifest_frame_validates_before_receiver_state() {
+        let mut entries = vec![manifest_entry(0, 10), manifest_entry(1, 20)];
+        entries[1].rel_path = entries[0].rel_path.clone();
+        let manifest = manifest_with(entries, 30);
+        let frame = json_frame(FrameType::ObjectManifest, &manifest).expect("manifest frame");
+
+        assert!(matches!(
+            parse_and_validate_manifest_frame(&frame, &RqConfig::default()),
+            Err(RqError::Frame(msg)) if msg.contains("duplicate manifest rel_path")
+        ));
     }
 
     #[test]
