@@ -31,6 +31,13 @@ fn send_and_drain(payloads: &[Vec<u8>], connected_sender: bool) {
             .collect::<Vec<_>>();
         let report = sender.send_batch_to(&packets).await.unwrap();
         assert_eq!(report.packets_processed, PACKETS_PER_BATCH);
+        assert_eq!(report.bytes_processed, PACKETS_PER_BATCH * PAYLOAD_BYTES);
+        if connected_sender && cfg!(target_os = "linux") {
+            assert!(report.native_send_batch_used);
+        }
+        if !connected_sender {
+            assert!(report.fallback_used);
+        }
 
         let mut received = 0usize;
         while received < PACKETS_PER_BATCH {
