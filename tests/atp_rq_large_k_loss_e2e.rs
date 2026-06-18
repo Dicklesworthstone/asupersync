@@ -4,12 +4,12 @@
 //! The existing `atp_rq_loopback_e2e` tests cap source blocks at 64 KiB (K <= 64)
 //! because a large K x K GF(256) matrix solve is extremely slow in a debug
 //! (unoptimized) build. This suite pushes to the **largest debug-tractable
-//! regime — K = 512** (a 512 KiB block at the default 1024-byte symbol size) —
-//! which is exactly the block size `asupersync-ro853b` traced its cross-machine
-//! non-convergence at. It exercises the FULL transport path (sender multi-socket
-//! fan-out -> real loopback UDP symbols -> single-socket receiver -> per-block
-//! K=512 decode -> verify -> atomic commit), not just the in-process decoder
-//! feed, both clean and under heavy symbol loss.
+//! regime — K = 512** (512 default-sized RQ symbols per source block) — which
+//! is exactly the source-symbol count `asupersync-ro853b` traced its
+//! cross-machine non-convergence at. It exercises the FULL transport path
+//! (sender multi-socket fan-out -> real loopback UDP symbols -> single-socket
+//! receiver -> per-block K=512 decode -> verify -> atomic commit), not just the
+//! in-process decoder feed, both clean and under heavy symbol loss.
 //!
 //! These are the regression baseline a future two-task / continuous-drain
 //! receiver rewrite (ro853b) must preserve.
@@ -37,12 +37,22 @@ fn unique_tmp(label: &str) -> PathBuf {
     ))
 }
 
-/// Config with a 512 KiB max block. At the default 1024-byte symbol size this
-/// yields K = 512 source symbols per block — 8x the existing tests and the exact
-/// block K `ro853b` traced. Still tractable (if slow) in a debug build.
+const K512_SOURCE_SYMBOLS: usize = 512;
+
+fn k512_max_block_size() -> usize {
+    usize::from(RqConfig::default().symbol_size) * K512_SOURCE_SYMBOLS
+}
+
+fn k512_single_block_payload_len() -> usize {
+    k512_max_block_size() - 1
+}
+
+/// Config with a max block sized for exactly 512 default-sized source symbols.
+/// The byte size follows `RqConfig::default().symbol_size`, so this remains a
+/// K=512 gate when the production symbol payload changes.
 fn k512_config() -> RqConfig {
     RqConfig {
-        max_block_size: 512 * 1024,
+        max_block_size: k512_max_block_size(),
         ..RqConfig::default()
     }
     .allow_unauthenticated_for_trusted_transport()
@@ -102,9 +112,9 @@ fn k512_single_block_roundtrip_is_byte_identical() {
     std::fs::create_dir_all(&src_dir).unwrap();
     std::fs::create_dir_all(&dst_dir).unwrap();
 
-    // 524_000 bytes -> ceil(524000 / 1024) = 512 source symbols => K = 512, one
-    // block (<= 512 KiB max_block_size), with the final symbol tail-padded.
-    let data = payload(524_000);
+    // Fill one source block just short of its byte ceiling. This keeps K=512
+    // while following the current default RQ symbol size.
+    let data = payload(k512_single_block_payload_len());
     let src_file = src_dir.join("k512.bin");
     std::fs::write(&src_file, &data).unwrap();
 
@@ -133,7 +143,7 @@ fn k512_single_block_recovers_under_heavy_loss() {
     std::fs::create_dir_all(&src_dir).unwrap();
     std::fs::create_dir_all(&dst_dir).unwrap();
 
-    let data = payload(524_000); // K = 512, one block
+    let data = payload(k512_single_block_payload_len());
     let src_file = src_dir.join("k512_lossy.bin");
     std::fs::write(&src_file, &data).unwrap();
 
@@ -180,10 +190,12 @@ fn large_k_multiblock_roundtrip_is_byte_identical() {
     std::fs::create_dir_all(&src_dir).unwrap();
     std::fs::create_dir_all(&dst_dir).unwrap();
 
-    // ~1.04 MiB across 512 KiB blocks => 3 source blocks (two full K=512 blocks +
-    // a smaller tail block). Exercises multi-block SBN routing + cross-block
-    // assembly AT large K, the c8m8ha multi-block path under the ro853b regime.
-    let data = payload(1_092_000);
+    // Three source blocks: two full K=512 blocks plus a smaller tail block.
+    // Exercises multi-block SBN routing + cross-block assembly at large K, the
+    // c8m8ha multi-block path under the ro853b regime.
+    let data = payload(
+        k512_max_block_size() * 2 + usize::from(RqConfig::default().symbol_size) / 2,
+    );
     let src_file = src_dir.join("multik.bin");
     std::fs::write(&src_file, &data).unwrap();
 
