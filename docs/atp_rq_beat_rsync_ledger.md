@@ -136,6 +136,38 @@ to wire.
 - **One-line:** netem delay 50-100ms; atp `--streams {1,4,8,16}` vs rsync; same link.
 - **Result:** _pending_
 
+### E-3.1 · Perfect-link overhead reduction analysis (rate-capped low-latency)
+- **Question:** why does ATP lose the "perfect" matrix cell even after the harness is rate-capped?
+  The answer must be an atp-vs-rsync explanation, not "old atp vs new atp".
+- **Model:** on a 1 gbit / 2 ms / 0-loss path, the bandwidth-delay product is only about
+  250 KiB. Tuned rsync streams large writes through TCP/ssh and amortizes kernel crossings,
+  crypto framing, ACK handling, and checksum work across large buffers. ATP-rq currently moves
+  a transfer as many small, independently authenticated UDP symbols. For a 50 MiB payload at
+  1024-byte symbols, that is roughly 51k data datagrams before any repair/control traffic. At
+  line rate, packets are no longer "free": one-send-per-symbol plus one-recv-per-symbol reactor
+  wakeups, per-datagram HMAC, per-symbol bookkeeping, and feedback/control frames can dominate
+  the wall even when the link itself has enough bandwidth.
+- **Primary levers:** E-6.2 is the syscall lever (`sendmmsg`/`recvmmsg`, UDP GSO/GRO where
+  available); E-1 is the pacing lever (avoid burst loss without adding idle gaps); E-3 is the
+  pipe-fill lever (streams help only when BDP/cwnd is the limiter); adaptive block/symbol planning
+  should select the largest safe symbol and lowest repair overhead on loss-free cells.
+- **Non-levers:** do not re-enable rsync compression for incompressible generated data; do not
+  compare atp-lab to rsync-over-ssh; do not headline reductions vs prior ATP. If the matrix cell is
+  `nocrypto`, compare atp-lab only to rsync-daemon. If it is `auth` or `encrypted`, keep the
+  crypto tier symmetric.
+- **Expected signal:** after E-6.2, the perfect-cell packet/syscall counters should fall faster than
+  wall time; if wall remains above rsync with low CPU and low syscall rate, the remaining gap is
+  likely protocol framing/control overhead. If CPU stays high in per-symbol auth/bookkeeping frames,
+  reduce per-symbol work or increase safe payload per syscall before chasing more streams.
+- **Measurement admission:** Phase-2 should add per-cell `packets_sent`, `send_syscalls`,
+  `recv_syscalls`, `payload_bytes_per_syscall`, and sender/receiver CPU% to the matrix JSONL before
+  declaring any perfect-link conclusion. A result with `sha_ok=false`, missing syscall counters, or
+  crypto-asymmetric peers is inadmissible.
+- **Result (2026-06-18, cod_7):** analysis only; no benchmark executed. This records the
+  perfect-link reduction map for E-6.2/E-3 so future agents stop treating uncapped or low-latency
+  rsync wins as a vague ATP failure. The concrete next code lever remains UDP batching/GSO in
+  `src/net/udp.rs`, already claimed by cod_1.
+
 ### E-4 · max_block_size sweep (is decode superlinear in K?)
 - **Hypothesis:** default 8MiB ⇒ K=8192; if `decode_block` is superlinear in K, smaller blocks
   cut solve cost AND widen encode/decode parallelism (more independent blocks). If decode is
