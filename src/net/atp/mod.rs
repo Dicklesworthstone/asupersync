@@ -16,7 +16,9 @@
 //! - Cx-first APIs with explicit capability boundaries
 
 #[path = "bonding/mod.rs"]
-pub mod bonding;
+#[doc(hidden)]
+pub mod bonding_impl;
+pub use bonding_impl as bonding;
 pub mod channel_bonding;
 pub mod chunk;
 pub mod crypto;
@@ -43,7 +45,6 @@ pub mod transport_tcp;
 // Re-export key types for H3 adapter
 pub use protocol::{AtpFrame, FrameType};
 
-pub use bonding::*;
 pub use chunk::*;
 // Datagram module exports CongestionAlgorithm, avoid glob
 // pub use datagram::*;

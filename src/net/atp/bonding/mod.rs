@@ -9,14 +9,20 @@
 //! Phase A (`z01bbr.1`) locks that invariant with types before any data-path code:
 //!
 //! * A1 ([`descriptor`]) — the shared [`BondTransferDescriptor`] + the donor
-//!   byte-match (merkle) proof. **(this module)**
+//!   byte-match (merkle) proof.
 //! * A2 ([`esi`]) — ESI partition function + disjointness/coverage.
-//! * A3 — `DonorAssignment` + security model + key distribution (`z01bbr.1.3`).
+//! * A3 ([`assignment`]) — [`DonorAssignment`] + security model + key distribution.
 //! * A4 — bonded handshake version + capability negotiation (`z01bbr.1.4`).
 
+pub mod assignment;
 pub mod descriptor;
 pub mod esi;
 
+pub use assignment::{
+    BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondedSymbolAuthVerdict,
+    BondedSymbolRejectReason, DonorAssignment, DonorAssignmentError, EsiWindow,
+    MAX_BONDING_DONORS, verify_bonded_symbol_tag,
+};
 pub use descriptor::{BondEntry, BondProofError, BondTransferDescriptor};
 pub use esi::{
     DonorEsiStream, EsiPartition, EsiPartitionError, donor_esi_stream, esi_for_donor, owns_esi,
