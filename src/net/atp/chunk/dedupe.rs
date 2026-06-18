@@ -50,7 +50,7 @@ impl CdcEngine {
         Self
     }
 
-    /// Compute content-defined chunk boundaries using rolling hash.
+    /// Compute content-defined chunk boundaries using FastCDC-style gear hash.
     pub fn compute_cdc_boundaries(
         &mut self,
         data: &[u8],
@@ -62,63 +62,61 @@ impl CdcEngine {
             return Ok(Vec::new());
         }
 
+        let data_len = Self::usize_to_u64(data.len(), "CDC input length")?;
         let mut chunks = Vec::new();
         let mut rolling_hash = RollingHash::new(params.window_size);
         let mut last_boundary = 0u64;
 
-        // Use normalization constant to compute boundary mask
+        // FastCDC uses a stricter mask before the target size and a looser mask
+        // after it, which keeps average chunks near the requested range without
+        // forcing every chunk to the maximum size.
         let mask_bits = Self::compute_mask_bits_from_constant(params.normalization_constant);
-        let boundary_mask = (1u64 << mask_bits) - 1;
-        let target_chunk_size = params.min_chunk_size;
+        let normal_mask = Self::boundary_mask(mask_bits);
+        let small_mask = Self::boundary_mask(mask_bits.saturating_add(1).min(63));
+        let large_mask = Self::boundary_mask(mask_bits.saturating_sub(1).max(1));
+        let target_chunk_size =
+            params.min_chunk_size + (params.max_chunk_size - params.min_chunk_size) / 2;
 
-        // Initialize rolling hash with first window
-        let initial_window = data.len().min(params.window_size);
-        for &byte in &data[..initial_window] {
+        for (i, &byte) in data.iter().enumerate() {
             rolling_hash.update(byte);
-        }
 
-        // Scan for boundaries
-        for (i, &byte) in data.iter().enumerate().skip(params.window_size) {
-            // Update rolling hash
-            let old_byte = data[i - params.window_size];
-            rolling_hash.roll(old_byte, byte);
-
-            let current_pos = i as u64 + 1;
+            let current_pos = Self::usize_to_u64(i, "CDC boundary index")?
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ChunkingProfileError::InvalidChunkParameters(format!(
+                        "CDC boundary position overflow at index {i}"
+                    ))
+                })?;
             let chunk_size = current_pos - last_boundary;
 
-            // Check for boundary conditions
-            let hash_boundary = (rolling_hash.hash() & boundary_mask) == 0;
-            let min_size_reached = chunk_size >= params.min_chunk_size;
-            let target_size_reached = chunk_size >= target_chunk_size;
-            let max_size_reached = chunk_size >= params.max_chunk_size;
-            let structural_boundary =
-                target_size_reached && Self::is_structural_boundary(data, current_pos as usize);
-
-            if min_size_reached && (hash_boundary || structural_boundary || max_size_reached) {
-                // Create chunk data for the completed chunk
-                let chunk_data = &data[last_boundary as usize..current_pos as usize];
-                let content_hash = Self::compute_content_hash(chunk_data);
-
-                chunks.push(CdcChunkData {
-                    byte_offset: last_boundary,
-                    size_bytes: current_pos - last_boundary,
-                    content_hash,
-                });
-
+            if Self::should_cut_chunk(
+                data,
+                i + 1,
+                chunk_size,
+                rolling_hash.hash(),
+                params,
+                target_chunk_size,
+                small_mask,
+                normal_mask,
+                large_mask,
+            ) {
+                Self::push_chunk(&mut chunks, data, last_boundary, current_pos)?;
                 last_boundary = current_pos;
+                rolling_hash.reset();
             }
         }
 
         // Add final chunk if needed
-        if last_boundary < data.len() as u64 {
-            let chunk_data = &data[last_boundary as usize..];
-            let content_hash = Self::compute_content_hash(chunk_data);
-
-            chunks.push(CdcChunkData {
-                byte_offset: last_boundary,
-                size_bytes: data.len() as u64 - last_boundary,
-                content_hash,
-            });
+        if last_boundary < data_len {
+            let final_size = data_len - last_boundary;
+            if final_size < params.min_chunk_size && !chunks.is_empty() {
+                let previous_start = chunks.last().map(|chunk| chunk.byte_offset).unwrap_or(0);
+                if data_len - previous_start <= params.max_chunk_size {
+                    chunks.pop();
+                    last_boundary = previous_start;
+                }
+            }
+            Self::push_chunk(&mut chunks, data, last_boundary, data_len)?;
         }
 
         Ok(chunks)
@@ -144,6 +142,39 @@ impl CdcEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn should_cut_chunk(
+        data: &[u8],
+        current_pos: usize,
+        chunk_size: u64,
+        hash: u64,
+        params: &CdcParameters,
+        target_chunk_size: u64,
+        small_mask: u64,
+        normal_mask: u64,
+        large_mask: u64,
+    ) -> bool {
+        if chunk_size < params.min_chunk_size {
+            return false;
+        }
+        if chunk_size >= params.max_chunk_size {
+            return true;
+        }
+        if Self::is_structural_boundary(data, current_pos) {
+            return true;
+        }
+
+        let mask = if chunk_size < target_chunk_size {
+            small_mask
+        } else if chunk_size == target_chunk_size {
+            normal_mask
+        } else {
+            large_mask
+        };
+
+        (hash & mask) == 0
+    }
+
     fn is_structural_boundary(data: &[u8], current_pos: usize) -> bool {
         current_pos > 0
             && current_pos <= data.len()
@@ -164,6 +195,50 @@ impl CdcEngine {
         bits
     }
 
+    fn boundary_mask(bits: u32) -> u64 {
+        if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        }
+    }
+
+    fn push_chunk(
+        chunks: &mut Vec<CdcChunkData>,
+        data: &[u8],
+        start: u64,
+        end: u64,
+    ) -> Result<(), ChunkingProfileError> {
+        let start_index = Self::u64_to_usize(start, "CDC chunk start")?;
+        let end_index = Self::u64_to_usize(end, "CDC chunk end")?;
+        let chunk_data = &data[start_index..end_index];
+        let content_hash = Self::compute_content_hash(chunk_data);
+
+        chunks.push(CdcChunkData {
+            byte_offset: start,
+            size_bytes: end - start,
+            content_hash,
+        });
+
+        Ok(())
+    }
+
+    fn usize_to_u64(value: usize, label: &str) -> Result<u64, ChunkingProfileError> {
+        u64::try_from(value).map_err(|_| {
+            ChunkingProfileError::InvalidChunkParameters(format!(
+                "{label} {value} exceeds u64::MAX"
+            ))
+        })
+    }
+
+    fn u64_to_usize(value: u64, label: &str) -> Result<usize, ChunkingProfileError> {
+        usize::try_from(value).map_err(|_| {
+            ChunkingProfileError::InvalidChunkParameters(format!(
+                "{label} {value} exceeds usize::MAX"
+            ))
+        })
+    }
+
     /// Compute SHA-256 hash of chunk data.
     fn compute_content_hash(data: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
@@ -172,59 +247,57 @@ impl CdcEngine {
     }
 }
 
-/// Rolling hash for content-defined chunking.
+const GEAR_TABLE: [u64; 256] = build_gear_table();
+
+const fn build_gear_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut index = 0usize;
+    while index < 256 {
+        table[index] = splitmix64((index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        index += 1;
+    }
+    table
+}
+
+const fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut mixed = value;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
+}
+
+/// Gear hash for FastCDC content-defined chunking.
 pub struct RollingHash {
-    window_size: usize,
-    window: Vec<u8>,
-    position: usize,
-    hash_a: u64,
-    hash_b: u64,
+    hash: u64,
 }
 
 impl RollingHash {
-    /// Create new rolling hash with given window size.
-    pub fn new(window_size: usize) -> Self {
-        let window_size = std::cmp::max(1, window_size);
-        Self {
-            window_size,
-            window: vec![0; window_size],
-            position: 0,
-            hash_a: 0,
-            hash_b: 0,
-        }
+    /// Create new gear hash. The window size is retained in the API because
+    /// callers provide it as part of the CDC profile, but FastCDC gear hashing
+    /// advances one byte at a time and does not need to subtract an old byte.
+    pub fn new(_window_size: usize) -> Self {
+        Self { hash: 0 }
     }
 
-    /// Add byte to rolling hash (for initial window).
+    /// Add byte to the gear hash.
     pub fn update(&mut self, byte: u8) {
-        if self.position < self.window_size {
-            self.window[self.position] = byte; // ubs:ignore
-            self.hash_a = self.hash_a.wrapping_add(byte as u64);
-            self.hash_b = self.hash_b.wrapping_add(self.hash_a);
-            self.position += 1;
-        }
+        self.hash = (self.hash << 1).wrapping_add(GEAR_TABLE[usize::from(byte)]);
     }
 
-    /// Roll the hash by removing old_byte and adding new_byte.
-    pub fn roll(&mut self, old_byte: u8, new_byte: u8) {
-        // Update hash values using Adler-style rolling hash
-        self.hash_a = self
-            .hash_a
-            .wrapping_sub(old_byte as u64)
-            .wrapping_add(new_byte as u64);
-        self.hash_b = self
-            .hash_b
-            .wrapping_sub((self.window_size as u64).wrapping_mul(old_byte as u64))
-            .wrapping_add(self.hash_a);
-
-        // Update window
-        let idx = self.position % self.window_size;
-        self.window[idx] = new_byte; // ubs:ignore
-        self.position += 1;
+    /// Advance the gear hash. The old byte is intentionally ignored.
+    pub fn roll(&mut self, _old_byte: u8, new_byte: u8) {
+        self.update(new_byte);
     }
 
     /// Get current hash value.
     pub fn hash(&self) -> u64 {
-        (self.hash_b << 32) | (self.hash_a & 0xFFFFFFFF)
+        self.hash
+    }
+
+    /// Reset the gear hash at a chunk boundary.
+    pub fn reset(&mut self) {
+        self.hash = 0;
     }
 }
 
@@ -751,6 +824,94 @@ mod active_tests {
             min_proof_strength: ProofStrength::Basic,
             require_same_algorithm: true,
         }
+    }
+
+    fn fastcdc_params() -> CdcParameters {
+        CdcParameters {
+            window_size: 64,
+            min_chunk_size: 512,
+            max_chunk_size: 4096,
+            normalization_constant: 0x1021,
+        }
+    }
+
+    fn fastcdc_fixture(record_count: usize) -> Vec<u8> {
+        let mut data = Vec::new();
+        for record_index in 0..record_count {
+            data.extend_from_slice(format!("record-{record_index:04}:").as_bytes());
+            for payload_index in 0..80 {
+                data.push(b'a' + ((record_index + payload_index) % 26) as u8);
+            }
+            data.push(b'\n');
+        }
+        data
+    }
+
+    fn chunk_hash_set(chunks: &[CdcChunkData]) -> std::collections::BTreeSet<[u8; 32]> {
+        chunks.iter().map(|chunk| chunk.content_hash).collect()
+    }
+
+    #[test]
+    fn gear_hash_matches_known_vector() {
+        let mut hash = RollingHash::new(64);
+        for &byte in b"asupersync-fastcdc" {
+            hash.update(byte);
+        }
+
+        assert_eq!(hash.hash(), 0x5240_b854_273d_098e);
+    }
+
+    #[test]
+    fn fastcdc_chunks_cover_input_byte_exactly() {
+        let mut engine = CdcEngine::new();
+        let params = fastcdc_params();
+        let data = fastcdc_fixture(220);
+
+        let chunks = engine.compute_cdc_boundaries(&data, &params).unwrap();
+
+        assert!(!chunks.is_empty());
+        let mut reconstructed = Vec::new();
+        let mut expected_offset = 0u64;
+        for chunk in &chunks {
+            assert_eq!(chunk.byte_offset, expected_offset);
+            assert!(chunk.size_bytes <= params.max_chunk_size);
+
+            let start = usize::try_from(chunk.byte_offset).unwrap();
+            let end = usize::try_from(chunk.byte_offset + chunk.size_bytes).unwrap();
+            reconstructed.extend_from_slice(&data[start..end]);
+            expected_offset += chunk.size_bytes;
+        }
+
+        assert_eq!(expected_offset, data.len() as u64);
+        assert_eq!(reconstructed, data);
+    }
+
+    #[test]
+    fn fastcdc_resynchronizes_after_prefix_and_insert() {
+        let mut engine = CdcEngine::new();
+        let params = fastcdc_params();
+        let original = fastcdc_fixture(420);
+
+        let mut prefixed = b"new-header-line\n".to_vec();
+        prefixed.extend_from_slice(&original);
+
+        let insert_at = original.len() / 2;
+        let mut inserted = original[..insert_at].to_vec();
+        inserted.extend_from_slice(b"inserted-record:payload payload payload\n");
+        inserted.extend_from_slice(&original[insert_at..]);
+
+        let original_chunks = engine.compute_cdc_boundaries(&original, &params).unwrap();
+        let prefixed_chunks = engine.compute_cdc_boundaries(&prefixed, &params).unwrap();
+        let inserted_chunks = engine.compute_cdc_boundaries(&inserted, &params).unwrap();
+
+        let original_hashes = chunk_hash_set(&original_chunks);
+        let prefixed_hashes = chunk_hash_set(&prefixed_chunks);
+        let inserted_hashes = chunk_hash_set(&inserted_chunks);
+        let prefix_common = original_hashes.intersection(&prefixed_hashes).count();
+        let insert_common = original_hashes.intersection(&inserted_hashes).count();
+
+        assert!(prefix_common * 3 >= original_hashes.len() * 2);
+        assert!(insert_common * 2 >= original_hashes.len());
     }
 
     #[test]
