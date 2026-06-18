@@ -18,6 +18,7 @@ use profiles::ChunkingProfile as ChunkingProfileTrait;
 
 pub mod artifact;
 pub mod bulk_file;
+pub mod cas;
 pub mod dedupe;
 pub mod media;
 pub mod profiles;
