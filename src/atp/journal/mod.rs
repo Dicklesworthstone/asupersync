@@ -7,6 +7,7 @@
 pub mod append_journal;
 pub mod chunk_bitmap;
 pub mod commit_policy;
+pub mod delta_cas;
 pub mod platform_caps;
 pub mod range_tracker;
 pub mod recovery;
@@ -25,6 +26,10 @@ pub use append_journal::{
 };
 pub use chunk_bitmap::{ChunkBitmap, ChunkState};
 pub use commit_policy::{AtomicPolicy, CommitPolicy, FsyncPolicy};
+pub use delta_cas::{
+    DeltaCasError, DeltaCasStore, DeltaCasWrite, DeltaChunkId, DeltaChunkRef, DeltaManifestDiff,
+    DeltaMerkleManifest, DeltaSubtreeRange,
+};
 pub use platform_caps::{FilesystemFeatures, PlatformCapabilities};
 pub use range_tracker::{ChunkRange, RangeTracker, SparseRange};
 pub use recovery::{
