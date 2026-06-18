@@ -355,6 +355,7 @@ struct NativeReceiveTraceCounters {
     datagrams_dropped_on_receive: u64,
     pending_datagrams: usize,
     inbound_datagram_capacity: usize,
+    inbound_datagram_available: usize,
 }
 
 impl NativeReceiveTraceCounters {
@@ -368,6 +369,7 @@ impl NativeReceiveTraceCounters {
             datagrams_dropped_on_receive: link.conn.datagrams_dropped_on_receive(),
             pending_datagrams: link.conn.pending_datagram_count(),
             inbound_datagram_capacity: link.conn.inbound_datagram_capacity(),
+            inbound_datagram_available: link.conn.inbound_datagram_remaining_capacity(),
         }
     }
 
@@ -391,10 +393,7 @@ impl NativeReceiveTraceCounters {
         let datagrams_dropped_on_receive_text = self.datagrams_dropped_on_receive.to_string();
         let pending_datagrams_text = self.pending_datagrams.to_string();
         let inbound_datagram_capacity_text = self.inbound_datagram_capacity.to_string();
-        let inbound_datagram_available_text = self
-            .inbound_datagram_capacity
-            .saturating_sub(self.pending_datagrams)
-            .to_string();
+        let inbound_datagram_available_text = self.inbound_datagram_available.to_string();
         cx.trace_with_fields(
             "atp_quic.receive.decoded",
             &[
@@ -608,9 +607,11 @@ impl QuicLink {
         loop {
             let pending_datagrams = self.conn.pending_datagram_count();
             let datagram_capacity = self.conn.inbound_datagram_capacity();
-            if pending_datagrams >= datagram_capacity {
+            let remaining_capacity = self.conn.inbound_datagram_remaining_capacity();
+            if remaining_capacity == 0 {
                 let pending_datagrams_text = pending_datagrams.to_string();
                 let datagram_capacity_text = datagram_capacity.to_string();
+                let remaining_capacity_text = remaining_capacity.to_string();
                 let total_processed_text = total_processed.to_string();
                 cx.trace_with_fields(
                     "atp_quic.receive.datagram_queue_full",
@@ -618,12 +619,16 @@ impl QuicLink {
                         ("pending_datagrams", pending_datagrams_text.as_str()),
                         ("reorder_occupancy", pending_datagrams_text.as_str()),
                         ("inbound_datagram_capacity", datagram_capacity_text.as_str()),
+                        (
+                            "inbound_datagram_available",
+                            remaining_capacity_text.as_str(),
+                        ),
                         ("packets_processed", total_processed_text.as_str()),
                     ],
                 );
                 return Ok(total_processed);
             }
-            let receive_limit = INBOUND_PUMP_BATCH.min(datagram_capacity - pending_datagrams);
+            let receive_limit = INBOUND_PUMP_BATCH.min(remaining_capacity);
             let received = match crate::time::timeout(
                 cx.now(),
                 next_timeout,
@@ -1954,6 +1959,7 @@ mod tests {
             datagrams_dropped_on_receive: 0,
             pending_datagrams: 3,
             inbound_datagram_capacity: 1024,
+            inbound_datagram_available: 1021,
         };
         let decode_stats = crate::net::atp::transport_quic::QuicDecodeStats {
             decode_count: 4,
