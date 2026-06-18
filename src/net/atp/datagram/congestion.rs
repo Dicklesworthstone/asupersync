@@ -304,6 +304,34 @@ impl CongestionController {
         self.state.tokens = self.state.tokens.min(f64::from(self.config.max_burst_size));
     }
 
+    /// Configure token-bucket pacing from a measured *path rate* in bits/second.
+    ///
+    /// Convenience for the raw-datagram spray path: translate a path-bandwidth
+    /// estimate (e.g. the adaptive controller's `bw_*_bps` / a netem `rate` cap)
+    /// into a per-datagram token bucket so the sender paces to the link instead
+    /// of bursting. The datagram rate is `path_bps / (8 * symbol_size_bytes)`,
+    /// clamped to `[1, u32::MAX]` so a zero/garbage estimate can never wedge the
+    /// pacer at a zero rate.
+    ///
+    /// `max_burst_datagrams` is the load-bearing knob: it bounds how many
+    /// datagrams a single spray round may release back-to-back. Sized to the
+    /// receiver / shaped-qdisc absorb depth (a few dozen datagrams), it prevents
+    /// the failure an *unpaced* spray hits on a fast, low-latency link — the
+    /// kernel netem/tbf buffer fills, tail-drops the overflow, and the fountain
+    /// never source-completes. Pair with [`Self::try_consume_send_budget`] /
+    /// [`Self::time_until_send_budget`] in the per-datagram send loop.
+    pub fn configure_for_path_rate(
+        &mut self,
+        path_bps: u64,
+        symbol_size_bytes: u32,
+        max_burst_datagrams: u32,
+    ) {
+        let bits_per_datagram = u64::from(symbol_size_bytes.max(1)).saturating_mul(8).max(1);
+        let datagrams_per_sec = (path_bps / bits_per_datagram).clamp(1, u64::from(u32::MAX));
+        let rate = u32::try_from(datagrams_per_sec).unwrap_or(u32::MAX);
+        self.configure_token_bucket(rate, max_burst_datagrams.max(1), Duration::ZERO);
+    }
+
     /// Try to consume one raw-datagram send budget unit.
     ///
     /// Returns `true` when the caller may emit one datagram immediately. Returns
@@ -704,6 +732,61 @@ mod tests {
         assert!(controller.time_until_send_budget(now) > Duration::ZERO);
         assert_eq!(controller.total_queue_depth(), 0);
         assert_eq!(controller.get_stats().sent_count, 2);
+    }
+
+    #[test]
+    fn configure_for_path_rate_bounds_burst_and_paces_to_datagram_rate() {
+        let mut controller = CongestionController::new(CongestionConfig::default());
+        // 96 kbit/s over 1200-byte datagrams = 9600 bit/datagram => 10 datagrams/sec.
+        controller.configure_for_path_rate(96_000, 1200, 4);
+        let now = Instant::now();
+
+        // A single spray burst is bounded by max_burst_datagrams (the qdisc guard).
+        let mut burst = 0u32;
+        while controller.try_consume_send_budget(now) {
+            burst += 1;
+            assert!(burst <= 4, "burst {burst} exceeded the configured bound");
+        }
+        assert_eq!(burst, 4, "burst should drain exactly the bounded token count");
+
+        // Drained: the pacer now gates, and the hint is ~1/rate (100 ms at 10 dps).
+        assert!(!controller.try_consume_send_budget(now));
+        let wait = controller.time_until_send_budget(now);
+        assert!(wait > Duration::ZERO);
+        assert!(wait <= Duration::from_millis(150), "wait {wait:?} too long for 10 dps");
+    }
+
+    #[test]
+    fn configure_for_path_rate_faster_link_refills_sooner() {
+        let now = Instant::now();
+        let mut slow = CongestionController::new(CongestionConfig::default());
+        slow.configure_for_path_rate(96_000, 1200, 1); // 10 datagrams/sec
+        let mut fast = CongestionController::new(CongestionConfig::default());
+        fast.configure_for_path_rate(9_600_000, 1200, 1); // 1000 datagrams/sec
+
+        // Drain the single-token burst on each, then compare refill latency.
+        assert!(slow.try_consume_send_budget(now));
+        assert!(fast.try_consume_send_budget(now));
+        assert!(fast.time_until_send_budget(now) < slow.time_until_send_budget(now));
+    }
+
+    #[test]
+    fn configure_for_path_rate_clamps_degenerate_rate_to_one_dps() {
+        let mut controller = CongestionController::new(CongestionConfig::default());
+        // A zero / garbage path estimate must not wedge the pacer at a zero rate.
+        controller.configure_for_path_rate(0, 1200, 8);
+        let now = Instant::now();
+
+        for _ in 0..8 {
+            controller.try_consume_send_budget(now);
+        }
+        assert!(!controller.try_consume_send_budget(now));
+        let wait = controller.time_until_send_budget(now);
+        assert!(wait > Duration::ZERO);
+        assert!(
+            wait <= Duration::from_millis(1100),
+            "rate clamp should yield ~1 dps, got {wait:?}"
+        );
     }
 
     #[test]
