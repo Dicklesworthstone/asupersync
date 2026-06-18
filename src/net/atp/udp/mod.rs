@@ -283,6 +283,7 @@ impl AtpUdpSocket {
             total.packets_processed += report.packets_processed;
             total.bytes_processed += report.bytes_processed;
             total.fallback_used |= report.fallback_used;
+            total.native_send_batch_used |= report.native_send_batch_used;
             self.pressure.send_batches += 1;
 
             if let Some(error) = report.error {

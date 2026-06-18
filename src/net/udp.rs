@@ -1471,7 +1471,8 @@ impl UdpSocket {
                     .await;
             }
 
-            self.send_batch_to_portable(packets, packets.len() > 1).await
+            self.send_batch_to_portable(packets, packets.len() > 1)
+                .await
         }
     }
 
@@ -1544,7 +1545,7 @@ impl UdpSocket {
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
     ) -> io::Result<Option<UdpBatchIoReport>> {
-        if packets.len() <= 1 || packets.len() > UDP_MAX_SENDMMSG_BATCH {
+        if packets.len() <= 1 {
             return Ok(None);
         }
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
@@ -1558,32 +1559,49 @@ impl UdpSocket {
             return Ok(None);
         }
 
-        let iovs = packets
-            .iter()
-            .map(|packet| [IoSlice::new(packet.payload)])
-            .collect::<Vec<_>>();
-        let addrs = vec![None; packets.len()];
-        let mut headers = nix::sys::socket::MultiHeaders::<()>::preallocate(packets.len(), None);
-        let cmsgs: &[nix::sys::socket::ControlMessage<'_>] = &[];
-        let results = match nix::sys::socket::sendmmsg(
-            self.inner.as_raw_fd(),
-            &mut headers,
-            &iovs,
-            &addrs,
-            cmsgs,
-            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
-        ) {
-            Ok(results) => results,
-            Err(_) => return Ok(None),
-        };
-
         let mut report = UdpBatchIoReport {
             native_send_batch_used: true,
             ..UdpBatchIoReport::default()
         };
-        for result in results {
-            report.packets_processed += 1;
-            report.bytes_processed += result.bytes;
+        for chunk in packets.chunks(UDP_MAX_SENDMMSG_BATCH) {
+            let iovs = chunk
+                .iter()
+                .map(|packet| [IoSlice::new(packet.payload)])
+                .collect::<Vec<_>>();
+            let addrs = vec![None; chunk.len()];
+            let mut headers = nix::sys::socket::MultiHeaders::<()>::preallocate(chunk.len(), None);
+            let cmsgs: &[nix::sys::socket::ControlMessage<'_>] = &[];
+            let results = match nix::sys::socket::sendmmsg(
+                self.inner.as_raw_fd(),
+                &mut headers,
+                &iovs,
+                &addrs,
+                cmsgs,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(results) => results,
+                Err(_) if report.packets_processed == 0 => return Ok(None),
+                Err(err) => {
+                    report.error = Some(err.to_string());
+                    return Ok(Some(report));
+                }
+            };
+
+            let mut sent_in_chunk = 0usize;
+            for result in results {
+                sent_in_chunk += 1;
+                report.packets_processed += 1;
+                report.bytes_processed += result.bytes;
+            }
+            if sent_in_chunk < chunk.len() {
+                if sent_in_chunk == 0 && report.packets_processed == 0 {
+                    return Ok(None);
+                }
+                if sent_in_chunk == 0 {
+                    report.error = Some("native sendmmsg made no progress".to_string());
+                }
+                return Ok(Some(report));
+            }
         }
 
         Ok(Some(report))
@@ -1978,6 +1996,35 @@ mod tests {
     }
 
     #[test]
+    fn udp_send_batch_plan_chunks_large_sendmmsg_batches() {
+        let dst = socket_addr("127.0.0.1:9003");
+        let payloads = vec![vec![1u8; 16]; UDP_MAX_SENDMMSG_BATCH + 7];
+        let packets = payloads
+            .iter()
+            .map(|payload| UdpOutboundDatagram {
+                dst_addr: dst,
+                payload,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = UdpSendBatchPlan::for_packets(
+            &packets,
+            UdpSendAccelerationCapabilities {
+                sendmmsg: UdpCapability::Supported,
+                gso: UdpCapability::Unsupported,
+                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+            },
+            UdpSendBatchStrategy::default(),
+        );
+
+        assert_eq!(plan.path, UdpSendBatchPath::Sendmmsg);
+        assert_eq!(plan.datagrams, UDP_MAX_SENDMMSG_BATCH + 7);
+        assert_eq!(plan.estimated_syscalls, 2);
+        assert_eq!(plan.gso_segment_bytes, None);
+    }
+
+    #[test]
     fn udp_send_batch_plan_empty_batch_has_no_syscalls() {
         let plan = UdpSendBatchPlan::for_packets(
             &[],
@@ -2305,7 +2352,10 @@ mod tests {
             ];
             let sent = sender.send_batch_to(&packets).await.unwrap();
             assert_eq!(sent.packets_processed, 2);
-            assert_eq!(sent.bytes_processed, b"native-one".len() + b"native-two".len());
+            assert_eq!(
+                sent.bytes_processed,
+                b"native-one".len() + b"native-two".len()
+            );
 
             if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
                 assert!(sent.native_send_batch_used);
