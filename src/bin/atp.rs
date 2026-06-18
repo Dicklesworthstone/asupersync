@@ -42,8 +42,8 @@ use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
 use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_rq::{
-    self, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD, DEFAULT_ROUND_TAIL_DRAIN_MS,
-    DEFAULT_SYMBOL_SIZE, DEFAULT_UDP_FANOUT, RqConfig,
+    self, DEFAULT_MAX_BLOCK_SIZE, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD,
+    DEFAULT_ROUND_TAIL_DRAIN_MS, DEFAULT_SYMBOL_SIZE, DEFAULT_UDP_FANOUT, RqConfig,
 };
 use asupersync::net::atp::transport_tcp::{
     self, DEFAULT_MAX_TRANSFER_BYTES, ReceiveReport, SendReport, TransferConfig, TransportError,
@@ -163,6 +163,9 @@ struct SendArgs {
     /// Number of UDP sockets to spray across (rq only).
     #[arg(long, default_value_t = DEFAULT_UDP_FANOUT)]
     streams: usize,
+    /// Maximum RaptorQ source-block size in bytes (rq/quic only).
+    #[arg(long, default_value_t = DEFAULT_MAX_BLOCK_SIZE)]
+    max_block_size: usize,
     /// Round-0 repair overhead factor, >= 1.0 (rq only).
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
     repair_overhead: f64,
@@ -233,6 +236,9 @@ struct RecvArgs {
     /// RaptorQ symbol size in bytes (rq only; must match the sender).
     #[arg(long, default_value_t = DEFAULT_SYMBOL_SIZE)]
     symbol_size: u16,
+    /// Maximum RaptorQ source-block size in bytes (rq/quic only; must match the sender).
+    #[arg(long, default_value_t = DEFAULT_MAX_BLOCK_SIZE)]
+    max_block_size: usize,
     /// Round-0 repair overhead factor (rq only).
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
     repair_overhead: f64,
@@ -267,14 +273,17 @@ fn rq_config(
     max_bytes: u64,
     symbol_size: u16,
     streams: usize,
+    max_block_size: usize,
     repair_overhead: f64,
     tail_drain_ms: u64,
     rq_auth_key_hex: Option<&str>,
     rq_allow_unauthenticated_lab: bool,
 ) -> Result<RqConfig, String> {
+    let max_block_size = normalize_max_block_size(symbol_size, max_block_size)?;
     let config = RqConfig {
         symbol_size,
         udp_fanout: streams.max(1),
+        max_block_size,
         repair_overhead: repair_overhead.max(1.0),
         max_transfer_bytes: max_bytes,
         max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
@@ -283,6 +292,13 @@ fn rq_config(
     };
     let auth = resolve_rq_auth_choice(rq_auth_key_hex, rq_allow_unauthenticated_lab, false)?;
     config_with_rq_auth(config, &auth)
+}
+
+fn normalize_max_block_size(symbol_size: u16, max_block_size: usize) -> Result<usize, String> {
+    if max_block_size == 0 {
+        return Err("--max-block-size must be greater than 0".to_string());
+    }
+    Ok(max_block_size.max(usize::from(symbol_size.max(1))))
 }
 
 // ─── QUIC (`--transport quic`) TLS material + config ─────────────────────────
@@ -390,6 +406,7 @@ fn quic_config_send(
 
     let base = QuicConfig {
         symbol_size: args.symbol_size,
+        max_block_size: normalize_max_block_size(args.symbol_size, args.max_block_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         max_transfer_bytes: args.max_bytes,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
@@ -429,6 +446,7 @@ fn quic_config_recv(
 
     let base = QuicConfig {
         symbol_size: args.symbol_size,
+        max_block_size: normalize_max_block_size(args.symbol_size, args.max_block_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         max_transfer_bytes: args.max_bytes,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
@@ -785,6 +803,7 @@ fn send_to_addr_with_transport(
                 args.max_bytes,
                 args.symbol_size,
                 args.streams,
+                args.max_block_size,
                 args.repair_overhead,
                 args.rq_tail_drain_ms,
                 args.rq_auth_key_hex.as_deref(),
@@ -984,6 +1003,8 @@ fn spawn_remote_receiver(
         args.workers.max(1).to_string(),
         "--symbol-size".to_string(),
         args.symbol_size.to_string(),
+        "--max-block-size".to_string(),
+        args.max_block_size.to_string(),
         "--repair-overhead".to_string(),
         args.repair_overhead.to_string(),
         "--rq-tail-drain-ms".to_string(),
@@ -1217,6 +1238,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 args.max_bytes,
                 args.symbol_size,
                 1,
+                args.max_block_size,
                 args.repair_overhead,
                 args.rq_tail_drain_ms,
                 args.rq_auth_key_hex.as_deref(),
@@ -1442,14 +1464,54 @@ mod tests {
 
     #[test]
     fn direct_rq_requires_auth_or_explicit_lab_override() {
-        let missing = match rq_config(1024, 1024, 1, 1.0, 2, None, false) {
+        let missing = match rq_config(1024, 1024, 1, 512 * 1024, 1.0, 2, None, false) {
             Ok(_) => panic!("direct rq without auth must fail closed"),
             Err(err) => err,
         };
         assert!(missing.contains("requires symbol authentication"));
 
-        assert!(rq_config(1024, 1024, 1, 1.0, 2, Some(VALID_KEY_HEX), false).is_ok());
-        assert!(rq_config(1024, 1024, 1, 1.0, 2, None, true).is_ok());
+        assert!(
+            rq_config(
+                1024,
+                1024,
+                1,
+                512 * 1024,
+                1.0,
+                2,
+                Some(VALID_KEY_HEX),
+                false
+            )
+            .is_ok()
+        );
+        assert!(rq_config(1024, 1024, 1, 512 * 1024, 1.0, 2, None, true).is_ok());
+    }
+
+    #[test]
+    fn rq_config_applies_max_block_size_for_e4_sweeps() {
+        let config = rq_config(
+            10 * 1024 * 1024,
+            1024,
+            4,
+            512 * 1024,
+            1.0,
+            2,
+            Some(VALID_KEY_HEX),
+            false,
+        )
+        .expect("authenticated rq config should build");
+
+        assert_eq!(config.max_block_size, 512 * 1024);
+        assert_eq!(config.max_block_size / usize::from(config.symbol_size), 512);
+    }
+
+    #[test]
+    fn max_block_size_rejects_zero_and_floors_to_symbol_size() {
+        assert_eq!(
+            normalize_max_block_size(1024, 0),
+            Err("--max-block-size must be greater than 0".to_string())
+        );
+        assert_eq!(normalize_max_block_size(1024, 512), Ok(1024));
+        assert_eq!(normalize_max_block_size(1024, 512 * 1024), Ok(512 * 1024));
     }
 
     #[test]
