@@ -252,6 +252,24 @@ to wire.
   pipeline** (recv→verify→feed→write in batches) to amortize the ~74 ctx-switch/symbol; (c) cut
   reactor/timer wakeups per symbol. **Next:** build a NON-stripped release + `perf --call-graph dwarf`
   to NAME the dominant ctx-switch source before implementing (stripped profile gives only the shape).
+- **★★ CONFIRMED + LEVER PICKED 2026-06-18 (idle-109 strace, byte-identical sha=YES):** 20 MB perfect
+  loopback receiver under `strace -f -e lseek,write`: **16,509 lseeks** (≈1 per source symbol; ~15k
+  symbols) + 29,103 writes. So per-symbol seek dispatch is REAL and scales linearly → **~400k seek-
+  dispatches for 500M**, each a blocking-pool round-trip (channel send + thread wakeup + syscall +
+  return) — this IS the diffuse ctx-switch storm of the REFINED note, and the super-linear wall (every
+  dispatch contends the blocking pool). **NEW finding — arrival order:** lseek offsets are **89.6%
+  forward / 10.4% backward**; first offsets `0,11200,22400,…,1400,12600,…,2800,14000` =
+  **8 interleaved monotonic substreams** (one per `--streams 8`, each striding +8 symbols). ⇒ Two
+  cheaper levers are REFUTED by this data: (i) a **contiguous write-combine buffer** coalesces almost
+  nothing (consecutive arrivals are +8 symbols apart, never adjacent); (ii) a **per-block `Vec` buffer**
+  would hold ~the whole file (all blocks fill in parallel across the 8 streams) → REGRESSES the E-11
+  bad-large RSS. **Only mmap wins both frontiers:** scattered offsets → plain memcpy into file-backed
+  pages = ZERO seek-dispatch (perfect-link CPU) + reclaimable page-cache instead of anon-heap (bad-large
+  RSS). **Design (bead .25, libc — already a dep, fn-scope `#[allow(unsafe_code)]` + unsafe-ledger
+  rows):** `ensure_entry_staging_file` pre-sizes via `set_len(entry.size)` then `libc::mmap` MAP_SHARED
+  RW; `persist_source_symbol`/`persist_decoded_block` `copy_from_slice` into the mapping (inline, no
+  await); commit does `libc::msync`+`munmap` (dispatch the msync to the blocking pool) then rename; SHA
+  can read straight from the mapping (no read syscalls). Probe: `/data/tmp/atp_strace_order_probe.sh`.
 
 ### E-11 ★★ CRITICAL · bad/broken-regime SUPER-LINEAR scaling → 500M+/bad TIMES OUT (>30min)
 - **Symptom (full matrix, 2026-06-18):** 50M/bad converges in 76s (fb=3) but **500M/bad TIMES OUT
