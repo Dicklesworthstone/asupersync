@@ -18,20 +18,24 @@ bit-for-bit SHA-256 verification of every single transfer.
   - ssh transport tuned: `-T -x -o Compression=no -c aes128-gcm@openssh.com`
     (fastest AEAD cipher commonly available; no TTY, no X11).
   - **`rsyncd` daemon mode** is also measured: plaintext TCP, no ssh crypto at
-    all. `atp-rq` is the RaptorQ/UDP ATP candidate, `atp-tcp` is the legacy
-    ATP control row, `rsyncd` is the plaintext rsync ceiling, and
-    rsync-over-ssh is the realistic-usage row. This is stated in the report
-    rather than hidden.
+    all. `atp-quic` is the QUIC/TLS ATP row, `atp-rq` is the authenticated
+    RaptorQ/UDP ATP row, `atp-tcp` is the plaintext legacy ATP control row,
+    `rsyncd` is the plaintext rsync ceiling, and rsync-over-ssh is the
+    authenticated/encrypted rsync row. This is stated in the report rather than
+    hidden.
 - **3 measured runs + 1 warmup** per (tool × payload). Each cell writes to a
   unique receiver directory under `/root/atp-bench/recv/<run-id>/...`; the
   harness retains artifacts instead of deleting prior runs.
 - **Verification**: a SHA-256 manifest is generated at payload creation; after
   EVERY transfer the receiver runs `sha256sum -c` over the manifest. A failed
   verification fails the run (recorded, not discarded).
-- **RQ symbol authentication**: `atp-rq` uses a 32-byte symbol-auth key. The
-  harness generates one with `atp rq-keygen` per run unless
+- **RQ/QUIC symbol authentication**: `atp-rq` and `atp-quic` use a 32-byte
+  symbol-auth key. The harness generates one with `atp rq-keygen` per run unless
   `--atp-rq-auth-key-hex` is supplied; the key is injected through
   `ATP_RQ_AUTH_KEY_HEX` and is not written to `conditions.json`.
+- **Crypto-symmetric reporting**: `report.py` only headlines apples-to-apples
+  speedup pairs: `atp-quic`/`atp-rq` against rsync-over-ssh, and the plaintext
+  `atp-tcp` control against `rsyncd`.
 
 ## Metrics captured
 
@@ -44,6 +48,7 @@ bit-for-bit SHA-256 verification of every single transfer.
 | Per-core utilization | `mpstat -P ALL 1` during run | sender |
 | Responsiveness guard | 1-min loadavg sampled; run fails if > configured cap × cores | both |
 | Throughput | payload bytes / wall | derived |
+| feedback_rounds | ATP sender JSON | ATP rows |
 
 ## Files
 
@@ -60,11 +65,10 @@ bit-for-bit SHA-256 verification of every single transfer.
   verifies hashes, writes `results.jsonl`.
 - `report.py` — aggregates `results.jsonl` → markdown comparison report.
 
-## ATP RQ knobs
+## ATP RQ/QUIC knobs
 
-`atp-rq` is included by default and should be treated as the primary ATP row.
-The TCP row remains useful as a regression/control comparison while RQ/QUIC
-work continues.
+`atp-quic` and `atp-rq` are included by default. The TCP row remains useful as a
+plaintext regression/control comparison while RQ/QUIC work continues.
 
 ```bash
 --atp-rq-streams 8
@@ -72,14 +76,24 @@ work continues.
 --atp-rq-repair-overhead 1.15
 --atp-rq-tail-drain-ms 2
 --atp-rq-auth-key-hex <64-char-hex> # optional; default is per-run generated
+--atp-quic-server-name <name-or-ip> # optional; default is receiver host/IP
+--atp-quic-handshake-timeout-ms 30000
 ```
 
-Those values are recorded in `conditions.json` for every run. Sweep them when
-working on throughput: larger symbols reduce coding overhead, more streams can
-help fill the path, and repair overhead trades network bytes for fewer decode
-round trips. Tail drain is the receiver-side quiet window after each fountain
-round marker; increasing it can prevent false `NeedMore` rounds on high-RTT
-paths where TCP control beats queued UDP symbols to user space.
+Those values are recorded in `conditions.json` for every run. `atp-quic` reuses
+the RQ symbol size, repair overhead, tail-drain, and symbol-auth key so the
+encrypted ATP row exercises the same FEC/auth posture under QUIC/TLS. Sweep them
+when working on throughput: larger symbols reduce coding overhead, more streams
+can help fill the RQ path, and repair overhead trades network bytes for fewer
+decode round trips. Tail drain is the receiver-side quiet window after each
+fountain round marker; increasing it can prevent false `NeedMore` rounds on
+high-RTT paths where control traffic beats queued symbols to user space.
+
+When `atp-quic` is requested, `run_bench.sh` generates a short-lived self-signed
+certificate/key on the receiver under `<base>/runs/<run-id>/quic_tls/`, copies
+the certificate to the sender as the CA trust root, and passes `--server-cert`,
+`--server-key`, `--ca`, and `--server-name` explicitly. The key is never copied
+off the receiver.
 
 `run_bench.sh` also accepts `--run-id <A-Za-z0-9._->` and
 `--base <remote-dir>`. Supplying a run id makes reruns easy to correlate across
@@ -115,7 +129,7 @@ scripts/atp_bench/run_bench.sh \
   --base /home/ubuntu/atp-bench \
   --atp-binary target/release/atp \
   --payloads 512k,1m,10m,100m,1g,tree \
-  --tools atp-rq,atp-tcp,rsync-ssh,rsyncd \
+  --tools atp-quic,atp-rq,atp-tcp,rsync-ssh,rsyncd \
   --atp-rq-streams 8 \
   --atp-rq-symbol-size 1024 \
   --atp-rq-repair-overhead 1.15 \

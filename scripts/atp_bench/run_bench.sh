@@ -9,7 +9,7 @@ set -euo pipefail
 SENDER="" SENDER_KEY="" RECEIVER="" RECEIVER_KEY=""
 ATP_BINARY="target/release/atp"
 PAYLOADS="512k,1m,10m,100m,1g,tree"
-TOOLS="atp-rq,atp-tcp,rsync-ssh,rsyncd"
+TOOLS="atp-quic,atp-rq,atp-tcp,rsync-ssh,rsyncd"
 RUNS=3
 OUT="artifacts/atp_bench/$(date +%Y-%m-%d)"
 ATP_PORT=8472
@@ -21,6 +21,8 @@ ATP_RQ_SYMBOL_SIZE=1024
 ATP_RQ_REPAIR_OVERHEAD=1.001
 ATP_RQ_TAIL_DRAIN_MS=2
 ATP_RQ_AUTH_KEY_HEX=""
+ATP_QUIC_SERVER_NAME=""
+ATP_QUIC_HANDSHAKE_TIMEOUT_MS=30000
 MAX_LOAD_PER_CORE=1.5
 MAX_SENDER_RSS_MB=0
 MAX_RECEIVER_RSS_MB=0
@@ -43,6 +45,8 @@ while [[ $# -gt 0 ]]; do
         --atp-rq-repair-overhead) ATP_RQ_REPAIR_OVERHEAD="$2"; shift 2;;
         --atp-rq-tail-drain-ms) ATP_RQ_TAIL_DRAIN_MS="$2"; shift 2;;
         --atp-rq-auth-key-hex) ATP_RQ_AUTH_KEY_HEX="$2"; shift 2;;
+        --atp-quic-server-name) ATP_QUIC_SERVER_NAME="$2"; shift 2;;
+        --atp-quic-handshake-timeout-ms) ATP_QUIC_HANDSHAKE_TIMEOUT_MS="$2"; shift 2;;
         --max-load-per-core) MAX_LOAD_PER_CORE="$2"; shift 2;;
         --max-sender-rss-mb) MAX_SENDER_RSS_MB="$2"; shift 2;;
         --max-receiver-rss-mb) MAX_RECEIVER_RSS_MB="$2"; shift 2;;
@@ -63,6 +67,10 @@ ssh_hostname() {
 }
 RECEIVER_IP=$(ssh_hostname "$RECEIVER")
 RECEIVER_IP="${RECEIVER_IP:-${RECEIVER##*@}}"
+ATP_QUIC_SERVER_NAME="${ATP_QUIC_SERVER_NAME:-$RECEIVER_IP}"
+QUIC_TLS_DIR="$BASE/runs/$RUN_ID/quic_tls"
+QUIC_CERT="$QUIC_TLS_DIR/server.pem"
+QUIC_KEY="$QUIC_TLS_DIR/server.key"
 
 mkdir -p "$OUT"
 RESULTS="$OUT/results.jsonl"
@@ -80,13 +88,25 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 "${SSH_S[@]}" "chmod +x $BASE/atp $BASE/*.sh"
 "${SSH_R[@]}" "chmod +x $BASE/atp $BASE/*.sh"
 
-if [[ ",$TOOLS," == *",atp-rq,"* ]]; then
+if [[ ",$TOOLS," == *",atp-rq,"* || ",$TOOLS," == *",atp-quic,"* ]]; then
     if [[ -z "$ATP_RQ_AUTH_KEY_HEX" ]]; then
-        note "generating per-run ATP RQ symbol-auth key"
+        note "generating per-run ATP RQ/QUIC symbol-auth key"
         ATP_RQ_AUTH_KEY_HEX=$("${SSH_S[@]}" "$BASE/atp rq-keygen")
     fi
     [[ "$ATP_RQ_AUTH_KEY_HEX" =~ ^[0-9A-Fa-f]{64}$ ]] \
         || { echo "ATP RQ auth key must be 64 hex characters" >&2; exit 2; }
+fi
+
+if [[ ",$TOOLS," == *",atp-quic,"* ]]; then
+    note "generating per-run ATP QUIC TLS certificate"
+    "${SSH_R[@]}" "mkdir -p $QUIC_TLS_DIR
+san_type=DNS
+case '$ATP_QUIC_SERVER_NAME' in *:*) san_type=IP;; *[!0-9.]*) san_type=DNS;; *) san_type=IP;; esac
+openssl req -x509 -newkey ed25519 -nodes -keyout $QUIC_KEY -out $QUIC_CERT -days 3 -subj '/CN=$ATP_QUIC_SERVER_NAME' -addext \"subjectAltName=\${san_type}:$ATP_QUIC_SERVER_NAME\" >/dev/null 2>&1 || \
+openssl req -x509 -newkey rsa:2048 -nodes -keyout $QUIC_KEY -out $QUIC_CERT -days 3 -subj '/CN=$ATP_QUIC_SERVER_NAME' -addext \"subjectAltName=\${san_type}:$ATP_QUIC_SERVER_NAME\" >/dev/null 2>&1
+test -s $QUIC_CERT && test -s $QUIC_KEY" \
+        || { echo "failed to generate QUIC TLS certificate on receiver" >&2; exit 1; }
+    "${SSH_R[@]}" "cat $QUIC_CERT" | "${SSH_S[@]}" "mkdir -p $QUIC_TLS_DIR && cat > $QUIC_CERT"
 fi
 
 # Sender→receiver ssh trust for rsync-ssh (sender's root key onto receiver).
@@ -107,7 +127,7 @@ RTT=$("${SSH_S[@]}" "ping -c 10 -q $RECEIVER_IP 2>/dev/null | tail -1" || echo "
 SENDER_CORES=$("${SSH_S[@]}" nproc)
 RECEIVER_CORES=$("${SSH_R[@]}" nproc)
 cat > "$OUT/conditions.json" <<EOF
-{"date":"$(date -u +%FT%TZ)","run_id":"$RUN_ID","sender":"$SENDER","receiver":"$RECEIVER","rtt":"$RTT","sender_cores":$SENDER_CORES,"receiver_cores":$RECEIVER_CORES,"tools":"$TOOLS","payloads":"$PAYLOADS","runs":$RUNS,"atp_rq_streams":$ATP_RQ_STREAMS,"atp_rq_symbol_size":$ATP_RQ_SYMBOL_SIZE,"atp_rq_repair_overhead":$ATP_RQ_REPAIR_OVERHEAD,"atp_rq_tail_drain_ms":$ATP_RQ_TAIL_DRAIN_MS,"atp_rq_auth":"per-run-env-key","max_load_per_core":$MAX_LOAD_PER_CORE,"max_sender_rss_mb":$MAX_SENDER_RSS_MB,"max_receiver_rss_mb":$MAX_RECEIVER_RSS_MB}
+{"date":"$(date -u +%FT%TZ)","run_id":"$RUN_ID","sender":"$SENDER","receiver":"$RECEIVER","rtt":"$RTT","sender_cores":$SENDER_CORES,"receiver_cores":$RECEIVER_CORES,"tools":"$TOOLS","payloads":"$PAYLOADS","runs":$RUNS,"atp_rq_streams":$ATP_RQ_STREAMS,"atp_rq_symbol_size":$ATP_RQ_SYMBOL_SIZE,"atp_rq_repair_overhead":$ATP_RQ_REPAIR_OVERHEAD,"atp_rq_tail_drain_ms":$ATP_RQ_TAIL_DRAIN_MS,"atp_rq_auth":"per-run-env-key","atp_quic_tls":"per-run-self-signed","atp_quic_server_name":"$ATP_QUIC_SERVER_NAME","atp_quic_handshake_timeout_ms":$ATP_QUIC_HANDSHAKE_TIMEOUT_MS,"max_load_per_core":$MAX_LOAD_PER_CORE,"max_sender_rss_mb":$MAX_SENDER_RSS_MB,"max_receiver_rss_mb":$MAX_RECEIVER_RSS_MB}
 EOF
 note "RTT: $RTT"
 
@@ -162,6 +182,10 @@ run_transfer() { # tool payload run_idx -> appends one JSON line to RESULTS
             "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh '$BASE/atp recv' $run_dir/sampler.jsonl >/dev/null 2>&1 & echo \$! > $run_dir/sampler.pid
 nohup /usr/bin/time -v -o $run_dir/recv_time.txt env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport rq --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
             sleep 1 ;;
+        atp-quic)
+            "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh '$BASE/atp recv' $run_dir/sampler.jsonl >/dev/null 2>&1 & echo \$! > $run_dir/sampler.pid
+nohup /usr/bin/time -v -o $run_dir/recv_time.txt env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport quic --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS --server-cert $QUIC_CERT --server-key $QUIC_KEY --quic-handshake-timeout-ms $ATP_QUIC_HANDSHAKE_TIMEOUT_MS > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
+            sleep 1 ;;
         atp-tcp)
             "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh '$BASE/atp recv' $run_dir/sampler.jsonl >/dev/null 2>&1 & echo \$! > $run_dir/sampler.pid
 nohup /usr/bin/time -v -o $run_dir/recv_time.txt $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport tcp > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
@@ -179,6 +203,8 @@ nohup /usr/bin/time -v -o $run_dir/recv_time.txt $BASE/atp recv $run_dest --list
     case "$tool" in
         atp-rq)
             sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport rq --streams $ATP_RQ_STREAMS --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS") ;;
+        atp-quic)
+            sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport quic --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS --ca $QUIC_CERT --server-name '$ATP_QUIC_SERVER_NAME' --quic-handshake-timeout-ms $ATP_QUIC_HANDSHAKE_TIMEOUT_MS") ;;
         atp-tcp)
             sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport tcp") ;;
         rsync-ssh)

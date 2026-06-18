@@ -21,14 +21,63 @@ def fmt_bytes(n):
     return f"{n:.1f} TB"
 
 
+def cv_pct(values):
+    if len(values) < 2:
+        return 0.0
+    mean = statistics.mean(values)
+    if mean <= 0:
+        return 0.0
+    return statistics.stdev(values) / mean * 100.0
+
+
+def crypto_symmetric_pairs(tools):
+    pairs = []
+    tool_set = set(tools)
+    if "rsync-ssh" in tool_set:
+        for atp in ("atp-quic", "atp-rq"):
+            if atp in tool_set:
+                pairs.append((atp, "rsync-ssh"))
+    if "rsyncd" in tool_set:
+        for atp in ("atp-tcp",):
+            if atp in tool_set:
+                pairs.append((atp, "rsyncd"))
+    return pairs
+
+
+def load_jsonl(path):
+    rows = []
+    with open(path, encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, start=1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"{path}:{lineno}: invalid JSON: {exc}") from exc
+    return rows
+
+
+def load_json(path):
+    with open(path, encoding="utf-8") as fh:
+        try:
+            return json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"{path}: invalid JSON: {exc}") from exc
+
+
+def resource_guard_ok(row):
+    ok = row["resource_guard"].get("ok")
+    return isinstance(ok, bool) and ok
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
-    rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+    rows = load_jsonl(sys.argv[1])
     conditions = {}
     if len(sys.argv) > 2:
-        conditions = json.load(open(sys.argv[2]))
+        conditions = load_json(sys.argv[2])
 
     print("# ATP vs rsync — real-internet benchmark report\n")
     if conditions:
@@ -43,9 +92,10 @@ def main():
                 f"symbol size {conditions.get('atp_rq_symbol_size')} bytes, "
                 f"repair overhead {conditions.get('atp_rq_repair_overhead')}\n"
             )
-    print("Note: `atp-rq` is the RaptorQ/UDP ATP candidate; `atp-tcp` is the\n"
-          "legacy ATP control row. `rsyncd` is the plaintext rsync ceiling, and\n"
-          "`rsync-ssh` is the realistic-usage rsync row.\n")
+    print("Note: `atp-quic` is the QUIC/TLS ATP row; `atp-rq` is the\n"
+          "authenticated RaptorQ/UDP ATP row; `atp-tcp` is the plaintext legacy\n"
+          "ATP control row. `rsyncd` is the plaintext rsync ceiling, and\n"
+          "`rsync-ssh` is the authenticated/encrypted rsync row.\n")
 
     # Group measured runs.
     groups = defaultdict(list)
@@ -66,8 +116,8 @@ def main():
             tools.append(t)
 
     print("## Wall clock / throughput (mean of measured runs)\n")
-    print("| Payload | Size | " + " | ".join(f"{t} wall (s) | {t} MB/s" for t in tools) + " |")
-    print("|---" * (2 + 2 * len(tools)) + "|")
+    print("| Payload | Size | " + " | ".join(f"{t} wall (s) | {t} cv_pct | {t} MB/s" for t in tools) + " |")
+    print("|---" * (2 + 3 * len(tools)) + "|")
     for p in payloads:
         size = None
         cells = []
@@ -81,20 +131,20 @@ def main():
                 mean_wall = statistics.mean(walls)
                 mbps = (size / 1048576) / mean_wall if mean_wall > 0 else 0
                 spread = f" ±{statistics.stdev(walls):.2f}" if len(walls) > 1 else ""
-                cells.append(f"{mean_wall:.2f}{spread} | {mbps:.1f}")
+                cells.append(f"{mean_wall:.2f}{spread} | {cv_pct(walls):.1f} | {mbps:.1f}")
             else:
-                cells.append("FAIL | —")
+                cells.append("FAIL | — | —")
         print(f"| {p} | {fmt_bytes(size or 0)} | " + " | ".join(cells) + " |")
 
     print("\n## Resources (mean of measured runs)\n")
     print("| Payload | Tool | Sender peak RSS | Recv peak RSS | Sender CPU s (u+s) | "
-          "Cycles (G) | Instr (G) | Avg core util % | Peak load1 (recv) |")
-    print("|---|---|---|---|---|---|---|---|---|")
+          "Cycles (G) | Instr (G) | Avg core util % | Peak load1 (recv) | Feedback rounds |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for p in payloads:
         for t in tools:
             runs = [r for r in groups.get((p, t), []) if r.get("verify_ok")]
             if not runs:
-                print(f"| {p} | {t} | FAILED VERIFY OR NO RUNS | | | | | | |")
+                print(f"| {p} | {t} | FAILED VERIFY OR NO RUNS | | | | | | | |")
                 continue
 
             def mean_of(path, scale=1.0):
@@ -119,6 +169,7 @@ def main():
             ins = mean_of(["sender", "instructions"], 1e9)
             util = mean_of(["sender", "avg_core_util_pct"])
             load = mean_of(["receiver_sampler", "peak_load1"])
+            rounds = mean_of(["sender", "feedback_rounds"])
 
             def cell(value, fmt):
                 return fmt.format(value) if value is not None else "—"
@@ -130,7 +181,8 @@ def main():
                   f"| {cell(cyc, '{:.2f}')} "
                   f"| {cell(ins, '{:.2f}')} "
                   f"| {cell(util, '{:.0f}')} "
-                  f"| {cell(load, '{:.2f}')} |")
+                  f"| {cell(load, '{:.2f}')} "
+                  f"| {cell(rounds, '{:.1f}')} |")
 
     print("\n## Resource Guard\n")
     load_cap = conditions.get("max_load_per_core")
@@ -159,7 +211,7 @@ def main():
                 if not runs:
                     print(f"| {p} | {t} | 0/0 | - | MISSING |")
                     continue
-                passed = sum(1 for r in runs if r["resource_guard"].get("ok") is True)
+                passed = sum(1 for r in runs if resource_guard_ok(r))
                 worst = None
                 for r in runs:
                     for check in r["resource_guard"].get("checks", []):
@@ -186,23 +238,25 @@ def main():
                     worst_cell = f"{name}: {observed:.3g} / {limit:.3g} {unit}"
                 print(f"| {p} | {t} | {passed}/{len(runs)} | {worst_cell} | {status} |")
 
-    print("\n## Speedup (rsync wall / atp wall; >1 means atp is faster)\n")
-    atp_tools = [t for t in tools if t.startswith("atp")]
-    rsync_tools = [t for t in tools if not t.startswith("atp")]
-    if atp_tools and rsync_tools:
-        print("| Payload | " + " | ".join(f"{a} vs {r}" for a in atp_tools for r in rsync_tools) + " |")
-        print("|---" * (1 + len(atp_tools) * len(rsync_tools)) + "|")
+    print("\n## Crypto-symmetric speedup (rsync wall / atp wall; >1 means atp is faster)\n")
+    print("Only apples-to-apples pairs are shown: `atp-quic`/`atp-rq` against "
+          "`rsync-ssh`, and the plaintext `atp-tcp` control against `rsyncd`.\n")
+    pairs = crypto_symmetric_pairs(tools)
+    if pairs:
+        print("| Payload | " + " | ".join(f"{a} vs {r}" for a, r in pairs) + " |")
+        print("|---" * (1 + len(pairs)) + "|")
         for p in payloads:
             cells = []
-            for a in atp_tools:
-                for r in rsync_tools:
-                    wa = [x["sender"]["wall_s"] for x in groups.get((p, a), []) if x.get("verify_ok")]
-                    wr = [x["sender"]["wall_s"] for x in groups.get((p, r), []) if x.get("verify_ok")]
-                    if wa and wr:
-                        cells.append(f"{statistics.mean(wr) / statistics.mean(wa):.2f}x")
-                    else:
-                        cells.append("—")
+            for a, r in pairs:
+                wa = [x["sender"]["wall_s"] for x in groups.get((p, a), []) if x.get("verify_ok")]
+                wr = [x["sender"]["wall_s"] for x in groups.get((p, r), []) if x.get("verify_ok")]
+                if wa and wr:
+                    cells.append(f"{statistics.mean(wr) / statistics.mean(wa):.2f}x")
+                else:
+                    cells.append("—")
             print(f"| {p} | " + " | ".join(cells) + " |")
+    else:
+        print("No crypto-symmetric ATP/rsync pairs were present in the result set.")
 
     print("\n## Verification\n")
     total = len([r for r in rows if r["run"] != 0])
