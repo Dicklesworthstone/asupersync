@@ -371,10 +371,13 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                 // instead of being phantom controls.
                 let symbol_verified =
                     if let Some(ctx) = self.security.as_ref().or(config_security.as_ref()) {
-                        ctx.verify_authenticated_symbol(&mut auth_symbol)
-                            .map_err(|err| {
-                                Error::new(ErrorKind::CorruptedSymbol).with_message(err.to_string())
-                            })?;
+                        if let Err(err) = ctx.verify_authenticated_symbol(&mut auth_symbol) {
+                            if let Some(ref mut m) = self.metrics {
+                                m.counter("raptorq.auth_rejected").increment();
+                            }
+                            return Err(Error::new(ErrorKind::CorruptedSymbol)
+                                .with_message(err.to_string()));
+                        }
                         auth_symbol.is_verified()
                     } else {
                         false
@@ -387,6 +390,9 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                 // symbol is a hard failure rather than a silently-accepted one.
                 // We fail CLOSED before feeding it into the decode matrix.
                 if reject_unauthenticated && has_auth_material && !symbol_verified {
+                    if let Some(ref mut m) = self.metrics {
+                        m.counter("raptorq.auth_rejected").increment();
+                    }
                     return Err(Error::new(ErrorKind::CorruptedSymbol).with_message(
                         "symbol rejected: reject_unauthenticated=true and symbol \
                          did not authenticate",
@@ -405,6 +411,9 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                         }
                     }
                     SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed) => {
+                        if let Some(ref mut m) = self.metrics {
+                            m.counter("raptorq.auth_rejected").increment();
+                        }
                         return Err(Error::new(ErrorKind::CorruptedSymbol)
                             .with_message("symbol authentication failed during receive"));
                     }
