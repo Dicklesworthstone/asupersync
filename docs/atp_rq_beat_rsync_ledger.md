@@ -113,9 +113,29 @@ optimally-tuned rsync-over-ssh on the same netem link, and/or atp-lab vs rsync-d
   transfer. FIXED to compute BOTH sides via the same `tree_digest`. Validated end-to-end on idle-109: a
   fresh 2000-file power-law tree, **atp_e14** (E-9+E-14 `raise_fd_limit`) over perfect loopback →
   **1.29 s, recv peak RSS 11.4 MB, all 2000 files, SRC tree_digest == DST tree_digest (byte-identical)**.
-  atp handles deeply-nested trees correctly + fast; the tree blank was purely the harness. NEXT: re-run
-  tree cells through the fixed netns harness w/ atp_e14 + rsync for the beyond-reproach tree scorecard
-  (the matrix ran atp_e9, which lacks E-14 → EMFILE on big trees).
+  atp handles deeply-nested trees correctly + fast; the tree blank was purely the harness.
+  **★ TREE SCORECARD 2026-06-18** (idle-109 netns+netem, atp_e14 rq-auth vs rsync-ssh aes128gcm, 3 reps
+  median, sha via tree_digest BOTH sides = all `OK/OK` byte-identical; harness `/tmp/atp_tree_bench.sh`;
+  note: 109 also runs RCH compiles so absolute walls are contended, but the atp-vs-rsync RATIO is valid
+  since both run on the same box):
+
+  | regime | workload | atp wall | rsync wall | atp/rsync | recv RSS atp/rsync | verdict |
+  |---|---|--:|--:|--:|--:|---|
+  | perfect | tree_small (2000 f) | 1.11 s | 0.51 s | 2.17× | 11.7/11.3 MB | rsync 2.2× |
+  | good    | tree_small | 2.12 s | 2.02 s | 1.05× | 11.9/12.3 MB | ~tie |
+  | bad     | tree_small | 19.13 s | 6.82 s | 2.80× | 12.1/12.9 MB | rsync 2.8× |
+  | perfect | tree_big (400 f) | 1.21 s | 0.61 s | 1.98× | 8.3/12.9 MB | rsync 2.0× (atp 1.5× less RSS) |
+  | good    | tree_big | 1.84 s | 2.42 s | **0.76×** | 8.3/13.8 MB | **atp WINS 1.31× + 1.67× less RSS** |
+  | bad     | tree_big | 30.3 s | 14.3 s | 2.12× | 18.9/13.8 MB | rsync 2.1× (atp 1.4× MORE RSS) |
+
+  Honest nuance: atp's good-regime advantage carries to trees (**tree_big good = atp WINS 1.31× + 1.67×
+  less RSS**; tree_small good ties), but atp LOSES **perfect** (clean/fast, rsync raw-pipelines small
+  files ~2×) and **bad** (atp's per-entry × loss-recovery overhead compounds, 2–2.8×, + FEC retention
+  pushes tree_big-bad RSS above rsync). atp's single-small-FILE dominance (2.9–4.9×) does NOT carry to
+  many-small-files-in-a-TREE: 2000 files = 2000 separate RaptorQ objects + manifest entries + staging
+  files, each paying per-object handshake/auth/spray overhead, vs rsync's one pipelined connection. =
+  new gap **E-15 (tree per-entry overhead)**. The matrix's own tree cells used atp_e9 (no E-14) so they
+  EMFILE'd; this scorecard supersedes them with atp_e14.
 
 ## REFUTED / NEGATIVE (do NOT re-chase unless retry-condition fires)
 
