@@ -141,6 +141,13 @@ impl ChunkSetReconciliation {
         self.receiver_missing.is_empty() && self.receiver_stale.is_empty()
     }
 
+    /// True when the receiver lacks at least one sender chunk and B-8.4 should
+    /// schedule a delta chunk transfer.
+    #[must_use]
+    pub fn requires_chunk_transfer(&self) -> bool {
+        !self.receiver_missing.is_empty()
+    }
+
     /// Estimated IBLT wire bytes divided by the sender-fingerprint baseline.
     #[must_use]
     pub fn wire_ratio_vs_naive_sender_fingerprints(&self) -> Option<f64> {
@@ -468,6 +475,7 @@ mod tests {
         assert_eq!(result.symmetric_difference_chunks(), 24);
         assert!(result.receiver_stale.is_empty());
         assert!(!result.is_noop());
+        assert!(result.requires_chunk_transfer());
     }
 
     #[test]
@@ -528,6 +536,7 @@ mod tests {
 
         assert!(result.is_noop());
         assert_eq!(result.symmetric_difference_chunks(), 0);
+        assert!(!result.requires_chunk_transfer());
         assert!(result.wire_ratio_vs_naive_sender_fingerprints().is_some());
     }
 }
