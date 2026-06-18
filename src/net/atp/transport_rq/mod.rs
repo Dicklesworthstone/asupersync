@@ -74,7 +74,7 @@ use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::atp::transport_common::{
     EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
 };
-use crate::net::{TcpListener, TcpStream, UdpBufferConfig, UdpSocket};
+use crate::net::{TcpListener, TcpStream, UdpBufferConfig, UdpOutboundDatagram, UdpSocket};
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::security::tag::TAG_SIZE;
 use crate::security::{AuthenticationTag, SecurityContext};
@@ -114,6 +114,10 @@ const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 /// Byte ceiling for the normal streaming block-size target. Larger blocks are
 /// allowed only when the 256-block SBN wire limit requires them.
 const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum encoded ATP-RQ symbols sent in one connected UDP batch per socket.
+const RQ_SEND_BATCH_PER_SOCKET: usize = 32;
+/// Maximum encoded ATP-RQ symbols queued globally before flushing all sockets.
+const RQ_SEND_BATCH_GLOBAL_SYMBOLS: usize = 64;
 
 /// Default round-0 repair multiplier.
 ///
@@ -435,6 +439,110 @@ impl RqSprayPacer {
             cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         }
     }
+}
+
+struct RqPendingSendBatch {
+    by_socket: Vec<Vec<Vec<u8>>>,
+    queued: usize,
+}
+
+impl RqPendingSendBatch {
+    fn new(fanout: usize) -> Self {
+        let fanout = fanout.max(1);
+        Self {
+            by_socket: (0..fanout).map(|_| Vec::new()).collect(),
+            queued: 0,
+        }
+    }
+
+    fn fanout(&self) -> usize {
+        self.by_socket.len()
+    }
+
+    fn push(&mut self, socket_index: usize, payload: Vec<u8>) {
+        let index = socket_index % self.fanout();
+        self.by_socket[index].push(payload);
+        self.queued += 1;
+    }
+
+    fn should_flush(&self) -> bool {
+        self.queued >= RQ_SEND_BATCH_GLOBAL_SYMBOLS
+            || self
+                .by_socket
+                .iter()
+                .any(|payloads| payloads.len() >= RQ_SEND_BATCH_PER_SOCKET)
+    }
+
+    async fn flush(
+        &mut self,
+        sockets: &mut [UdpSocket],
+        symbols_sent: &mut u64,
+    ) -> Result<(), RqError> {
+        debug_assert_eq!(self.by_socket.len(), sockets.len().max(1));
+        if self.queued == 0 {
+            return Ok(());
+        }
+
+        let symbols_before_flush = *symbols_sent;
+        for (socket_index, payloads) in self.by_socket.iter_mut().enumerate() {
+            if payloads.is_empty() {
+                continue;
+            }
+
+            let socket = sockets.get_mut(socket_index).ok_or_else(|| {
+                RqError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "RQ send batch socket index out of range",
+                ))
+            })?;
+            let dst_addr = socket.peer_addr()?;
+            let expected = payloads.len();
+            let report = {
+                let packets = payloads
+                    .iter()
+                    .map(|payload| UdpOutboundDatagram { dst_addr, payload })
+                    .collect::<Vec<_>>();
+                socket.send_batch_to(&packets).await?
+            };
+
+            *symbols_sent = symbols_sent
+                .saturating_add(u64::try_from(report.packets_processed).unwrap_or(u64::MAX));
+            if report.packets_processed != expected {
+                let reason = report.error.unwrap_or_else(|| {
+                    format!(
+                        "partial RQ UDP send batch: sent {} of {expected}",
+                        report.packets_processed
+                    )
+                });
+                return Err(RqError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    reason,
+                )));
+            }
+
+            payloads.clear();
+        }
+
+        self.queued = 0;
+        if send_progress_crossed_yield_boundary(symbols_before_flush, *symbols_sent) {
+            crate::runtime::yield_now().await;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn queued_count(&self) -> usize {
+        self.queued
+    }
+
+    #[cfg(test)]
+    fn socket_batch_len(&self, socket_index: usize) -> usize {
+        self.by_socket[socket_index].len()
+    }
+}
+
+fn send_progress_crossed_yield_boundary(before: u64, after: u64) -> bool {
+    after > before && before / 64 != after / 64
 }
 
 struct RqAdaptiveSendState {
@@ -2325,22 +2433,20 @@ async fn spray_round(
                             )));
                         }
                     };
-                    for sym in &syms {
-                        send_symbol_datagram(
-                            cx,
-                            sockets,
-                            rr,
-                            symbols_sent,
-                            dropper,
-                            tag,
-                            enc.index,
-                            sym,
-                            config,
-                            pacer,
-                            symbol_auth,
-                        )
-                        .await?;
-                    }
+                    send_symbol_datagrams(
+                        cx,
+                        sockets,
+                        rr,
+                        symbols_sent,
+                        dropper,
+                        tag,
+                        enc.index,
+                        &syms,
+                        config,
+                        pacer,
+                        symbol_auth,
+                    )
+                    .await?;
                     enc.repair_cursors[block_index] = target_repair;
                 }
             }
@@ -2385,6 +2491,7 @@ async fn spray_round(
                 );
                 let block_bytes = read_source_range(&enc.abs_path, block.start, block.len).await?;
 
+                let mut send_batch = RqPendingSendBatch::new(sockets.len());
                 if with_source {
                     for encoded in pipeline.encode_single_block_with_repair(
                         enc.object_id,
@@ -2395,7 +2502,7 @@ async fn spray_round(
                         let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
                         ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
                         let produced = ring.pop().expect("M=1 ring drains immediately");
-                        send_symbol_datagram(
+                        queue_symbol_datagram(
                             cx,
                             sockets,
                             rr,
@@ -2407,6 +2514,7 @@ async fn spray_round(
                             config,
                             pacer,
                             symbol_auth,
+                            &mut send_batch,
                         )
                         .await?;
                         debug_assert!(ring.is_empty());
@@ -2422,7 +2530,7 @@ async fn spray_round(
                         let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
                         ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
                         let produced = ring.pop().expect("M=1 ring drains immediately");
-                        send_symbol_datagram(
+                        queue_symbol_datagram(
                             cx,
                             sockets,
                             rr,
@@ -2434,11 +2542,13 @@ async fn spray_round(
                             config,
                             pacer,
                             symbol_auth,
+                            &mut send_batch,
                         )
                         .await?;
                         debug_assert!(ring.is_empty());
                     }
                 }
+                send_batch.flush(sockets, symbols_sent).await?;
                 enc.repair_cursors[block_index] = target_repair;
             }
         }
@@ -2483,6 +2593,7 @@ async fn spray_source_requests(
     pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<(), RqError> {
+    let mut send_batch = RqPendingSendBatch::new(sockets.len());
     for request in requests {
         let enc = encoders
             .iter()
@@ -2495,7 +2606,7 @@ async fn spray_source_requests(
             })?;
         let sym = source_symbol_for_request(enc, *request, config).await?;
 
-        send_symbol_datagram(
+        queue_symbol_datagram(
             cx,
             sockets,
             rr,
@@ -2507,9 +2618,11 @@ async fn spray_source_requests(
             config,
             pacer,
             symbol_auth,
+            &mut send_batch,
         )
         .await?;
     }
+    send_batch.flush(sockets, symbols_sent).await?;
     rqtrace!(
         "sender: retransmitted {} requested source symbols",
         requests.len()
@@ -2518,7 +2631,42 @@ async fn spray_source_requests(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn send_symbol_datagram(
+async fn send_symbol_datagrams(
+    cx: &Cx,
+    sockets: &mut [UdpSocket],
+    rr: &mut usize,
+    symbols_sent: &mut u64,
+    dropper: &mut u32,
+    tag: u64,
+    entry: u32,
+    symbols: &[Symbol],
+    config: &RqConfig,
+    pacer: &mut RqSprayPacer,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<(), RqError> {
+    let mut send_batch = RqPendingSendBatch::new(sockets.len());
+    for sym in symbols {
+        queue_symbol_datagram(
+            cx,
+            sockets,
+            rr,
+            symbols_sent,
+            dropper,
+            tag,
+            entry,
+            sym,
+            config,
+            pacer,
+            symbol_auth,
+            &mut send_batch,
+        )
+        .await?;
+    }
+    send_batch.flush(sockets, symbols_sent).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn queue_symbol_datagram(
     cx: &Cx,
     sockets: &mut [UdpSocket],
     rr: &mut usize,
@@ -2530,6 +2678,7 @@ async fn send_symbol_datagram(
     config: &RqConfig,
     pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
+    send_batch: &mut RqPendingSendBatch,
 ) -> Result<(), RqError> {
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     if config.debug_drop_one_in > 0 {
@@ -2543,13 +2692,12 @@ async fn send_symbol_datagram(
     let auth = symbol_auth.map(|ctx| ctx.sign_symbol(sym));
     let dgram =
         encode_symbol_datagram(tag, entry, sym, auth.as_ref().map(AuthenticatedSymbol::tag));
-    let fanout = sockets.len().max(1);
-    let sock = &mut sockets[*rr % fanout];
+    let fanout = send_batch.fanout();
+    let socket_index = *rr % fanout;
     *rr = rr.wrapping_add(1);
-    sock.send(&dgram).await?;
-    *symbols_sent += 1;
-    if *symbols_sent % 64 == 0 {
-        crate::runtime::yield_now().await;
+    send_batch.push(socket_index, dgram);
+    if send_batch.should_flush() {
+        send_batch.flush(sockets, symbols_sent).await?;
     }
     Ok(())
 }
@@ -3982,6 +4130,42 @@ mod tests {
             u32::try_from(RQ_COLD_START_BURST_SYMBOLS).unwrap()
         );
         assert_eq!(pacing.min_send_interval, Duration::ZERO);
+    }
+
+    #[test]
+    fn rq_pending_send_batch_groups_by_round_robin_socket() {
+        let mut batch = RqPendingSendBatch::new(4);
+        for i in 0..RQ_SEND_BATCH_GLOBAL_SYMBOLS {
+            batch.push(i % 4, vec![u8::try_from(i).unwrap_or(u8::MAX)]);
+        }
+
+        assert_eq!(batch.queued_count(), RQ_SEND_BATCH_GLOBAL_SYMBOLS);
+        assert!(batch.should_flush());
+        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_GLOBAL_SYMBOLS / 4);
+        assert_eq!(batch.socket_batch_len(1), RQ_SEND_BATCH_GLOBAL_SYMBOLS / 4);
+        assert_eq!(batch.socket_batch_len(2), RQ_SEND_BATCH_GLOBAL_SYMBOLS / 4);
+        assert_eq!(batch.socket_batch_len(3), RQ_SEND_BATCH_GLOBAL_SYMBOLS / 4);
+    }
+
+    #[test]
+    fn rq_pending_send_batch_flushes_on_single_socket_bound() {
+        let mut batch = RqPendingSendBatch::new(4);
+        for i in 0..RQ_SEND_BATCH_PER_SOCKET {
+            batch.push(0, vec![u8::try_from(i).unwrap_or(u8::MAX)]);
+        }
+
+        assert_eq!(batch.queued_count(), RQ_SEND_BATCH_PER_SOCKET);
+        assert!(batch.should_flush());
+        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET);
+        assert_eq!(batch.socket_batch_len(1), 0);
+    }
+
+    #[test]
+    fn rq_batched_send_yields_when_progress_crosses_boundary() {
+        assert!(!send_progress_crossed_yield_boundary(0, 63));
+        assert!(send_progress_crossed_yield_boundary(63, 64));
+        assert!(send_progress_crossed_yield_boundary(60, 96));
+        assert!(!send_progress_crossed_yield_boundary(64, 96));
     }
 
     #[test]
