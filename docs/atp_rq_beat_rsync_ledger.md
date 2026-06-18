@@ -402,6 +402,20 @@ to wire.
   → K≈14k → ~196 MB matrix/block, bad); (b) ★ MULTI-OBJECT split: chunk a huge entry into ≤2 GB
   RaptorQ sub-objects (keeps K sane), transfer + reassemble — the right fix, a real feature. The 5G
   matrix rows are recorded `error` (correctly excluded from headline); re-run 5G only after the fix.
+  **★ REFINEMENT 2026-06-18 (code read of `effective_max_block_size_for_largest_entry`):** the 2 GB
+  ceiling is exactly `max_object_size(configured_max) = configured_max(8 MiB) × MAX_SOURCE_BLOCKS(256)`,
+  enforced by the early `if max_entry_len > max_supported { TooLarge }` + the final `.min(configured_max)`
+  cap on block growth. The earlier "option (a) is bad (K balloon)" verdict MISSED the source-first
+  memcpy fast path: on perfect/good links the receiver gets all K source symbols and
+  `try_complete_from_source_symbols` reassembles by memcpy — the O(K²) inactivation solve runs ONLY for
+  blocks missing source symbols (lossy links). So option (a) — let `max_block_size` grow above
+  `configured_max` up to the RFC-K ceiling (K≤56403 ⇒ ≤~79 MB/block ⇒ ≤~20 GB object) — makes
+  **5G/perfect+good WORK cheaply (memcpy)**, and only the LOSSY-huge case pays the K≈14k matrix (which is
+  already the E-11 large-bad limitation, NOT a new regression — 500M/bad already times out). So (a) is a
+  legitimate well-scoped STOPGAP (raises the hard ceiling 2 GB→~20 GB) analogous to the E-14 RLIMIT
+  stopgap; (b) multi-object stays the proper fix for keeping K sane on lossy huge transfers. NEXT: try
+  (a) — drop the `.min(configured_max)` cap + raise `max_object_size` to the RFC-K ceiling — then measure
+  5G/perfect on idle-109 (wall + RSS + byte-identical); byte-identical for ≤2 GB files (no change there).
 - **★ E-14 · large-TREE FD exhaustion (real atp bug, found 2026-06-18).** Manual atp tree_small
   transfer (2000 files, 6.2 MB total, loopback no-loss) → receiver dies **"Too many open files
   (os error 24)"**, sender then "Connection refused". The receiver keeps an OPEN staging FD PER
