@@ -69,10 +69,13 @@ raise MSRV (asupersync builds on nightly). Clean zero-code bump.
 
 These were intentionally left for a follow-up pass; each needs targeted research
 + migration + a feature-specific build. Risk ordering reflects production impact.
+**`sqlparser` was completed in pass 2 (see the 2026-06-18 section below); every
+remaining item is a dev-dependency or the conformance sub-crate and cannot affect
+the production runtime.**
 
 | Dependency  | From   | To     | Where / gating                                  | Notes |
 |-------------|--------|--------|-------------------------------------------------|-------|
-| `sqlparser` | 0.52   | 0.62   | prod, `optional`, `sqlite` feature              | AST matching in `src/database/sqlite.rs` (`ast::Statement`, `SQLiteDialect`, `Parser`, `is_pragma_statement`). `Statement` enum variants/fields shift between releases — audit the match arms. This is the only remaining **production** major. |
+| `sqlparser` ✅ | 0.52   | 0.62   | prod, `optional`, `sqlite` feature              | **DONE in pass 2.** `Statement::SetVariable` was unified into `Statement::Set(Set)`; migrated the two match sites in `src/database/sqlite.rs`. See the 2026-06-18 section below. This was the only remaining **production** major. |
 | `sqlx`      | 0.8.6  | 0.9.0  | **dev-dep**, `Cargo.toml:505` (mysql ref impl)  | MySQL binary-protocol differential conformance test only — cannot affect the runtime. **`cargo audit` flags a pre-existing RUSTSEC-2023-0071 (Marvin Attack on `rsa`) reaching the tree via `sqlx-mysql 0.8.6`; `rsa` has no fixed release, so bumping sqlx→0.9 (which may drop/gate `rsa`) is the path to clear it.** |
 | `redis`     | 0.26   | 1.2    | **dev-dep**, `Cargo.toml:507` (RESP3 ref impl)  | RESP3 push-dispatch differential conformance test only. |
 | `raptorq`   | 1.7.0  | 2.0    | **dev-dep**, `Cargo.toml:509` (RFC6330 ref)     | RaptorQ byte-level interop test only. |
@@ -85,3 +88,56 @@ are reference implementations for differential/conformance testing and cannot
 break the production runtime. Migrating them updates test harness code only.
 
 ### Franken inter-dependency pins — untouched (per scope)
+
+---
+
+## 2026-06-18 — asupersync — third-party dependency bumps (pass 2)
+
+Scope: the deferred **production** major from pass 1. Franken inter-dependency
+pins remain untouched (coordinated separately). `Cargo.lock` is still gitignored
+(see pass 1), so only the `Cargo.toml` requirement edit is a committable artifact.
+
+### Major bump applied this pass
+
+| Dependency  | From | To   | Kind                        | Code change |
+|-------------|------|------|-----------------------------|-------------|
+| `sqlparser` | 0.52 | 0.62 | prod, `optional` (`sqlite`) | 2 sites     |
+
+**sqlparser 0.52 → 0.62.** Used only by the secure SQL-surface validator
+(`src/database/sqlite.rs`, behind the `sqlite` feature), which parses each
+statement with `SQLiteDialect` and rejects PRAGMA / ATTACH·DETACH /
+transaction-control / SET-as-PRAGMA forms on the checked surface
+(asupersync-dn5hn8). The only break across the ten intervening minor releases:
+the various `SET ...` statement forms were unified — `Statement::SetVariable
+{ variables, .. }` was removed in favor of a single `Statement::Set(Set)` variant,
+where `Set` is an enum whose assignment arms (`SingleAssignment { variable }`,
+`ParenthesizedAssignments { variables }`, `MultipleAssignments { assignments }`)
+carry the target name(s) as `ObjectName`.
+
+Migration (2 sites):
+- `check_parsed_statements`: the defensive `Statement::SetVariable { .. } if
+  is_pragma_statement(..)` arm became `Statement::Set(_) if is_pragma_statement(..)`.
+- `is_pragma_statement`: rewritten as `let Statement::Set(set) = .. else { false }`
+  + a match over the three assignment arms, returning `true` when any target
+  `ObjectName` stringifies to a `PRAGMA`-prefixed name. (rustc suggested renaming
+  to `ShowVariable`, which is semantically wrong — `SHOW` ≠ `SET` — and was not
+  used.)
+
+Real SQLite PRAGMAs still parse as `Statement::Pragma` under `SQLiteDialect`; the
+SET branch only matters for parser-drift / non-SQLite-dialect paths, which is
+exactly why the guard is kept defensive.
+
+### Validation
+
+- `cargo test --features sqlite --lib database::sqlite::tests::test_sqlparser`
+  (cold, 9m56s via rch) — all 4 surface-violation tests pass:
+  `test_sqlparser_blocks_pragma`, `test_sqlparser_blocks_attach_detach`,
+  `test_sqlparser_blocks_transaction_control`,
+  `test_sqlparser_comment_bypass_protection`.
+
+### Remaining after pass 2
+
+Only **dev-dependencies / the conformance sub-crate**: `sqlx` 0.8→0.9 (also clears
+the pre-existing RUSTSEC-2023-0071 `rsa`/Marvin advisory in the MySQL conformance
+test), `redis` 0.26→1.2, `raptorq` 1→2, conformance `hyper` 0.14→1.x +
+`env_logger` 0.10→0.11. None can affect the production runtime.

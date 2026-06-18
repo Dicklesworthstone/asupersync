@@ -238,10 +238,11 @@ fn check_parsed_statements(
                 return Some(SqlSurfaceViolation::Pragma);
             }
             // Older sqlparser versions and non-SQLite dialect paths represented
-            // some session-control forms as SetVariable. Keep this defensive
-            // guard so future parser drift does not silently reopen PRAGMA-like
-            // checked-surface control statements.
-            Statement::SetVariable { .. } if is_pragma_statement(statement) => {
+            // some session-control forms as `SET` assignments (now unified under
+            // `Statement::Set`). Keep this defensive guard so future parser drift
+            // does not silently reopen PRAGMA-like checked-surface control
+            // statements.
+            Statement::Set(_) if is_pragma_statement(statement) => {
                 return Some(SqlSurfaceViolation::Pragma);
             }
             // ATTACH/DETACH statements are always blocked
@@ -269,14 +270,27 @@ fn check_parsed_statements(
 
 /// Check if a statement is a PRAGMA (SQLite-specific)
 fn is_pragma_statement(statement: &sqlparser::ast::Statement) -> bool {
-    use sqlparser::ast::Statement;
+    use sqlparser::ast::{ObjectName, Set, Statement};
 
-    // SQLite PRAGMA statements may be parsed as SetVariable or other forms
-    if let Statement::SetVariable { variables, .. } = statement {
-        // Check if variable name starts with pragma-like patterns
-        return variables.to_string().to_uppercase().starts_with("PRAGMA");
+    // sqlparser unified the various `SET ...` forms under `Statement::Set(Set)`.
+    // SQLite PRAGMAs normally parse as `Statement::Pragma`, but keep this guard so
+    // any PRAGMA-like assignment form (parser drift / non-SQLite dialect paths) is
+    // still classified as checked-surface PRAGMA control.
+    fn name_is_pragma(name: &ObjectName) -> bool {
+        name.to_string().to_uppercase().starts_with("PRAGMA")
     }
-    false
+
+    let Statement::Set(set) = statement else {
+        return false;
+    };
+    match set {
+        Set::SingleAssignment { variable, .. } => name_is_pragma(variable),
+        Set::ParenthesizedAssignments { variables, .. } => variables.iter().any(name_is_pragma),
+        Set::MultipleAssignments { assignments } => {
+            assignments.iter().any(|a| name_is_pragma(&a.name))
+        }
+        _ => false,
+    }
 }
 
 /// Fallback keyword detection when SQL parsing fails
