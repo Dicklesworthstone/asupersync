@@ -117,12 +117,12 @@ const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 /// Byte ceiling for the normal streaming block-size target. Larger blocks are
 /// allowed only when the 256-block SBN wire limit requires them.
 const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
-/// RFC 6330 systematic-index cap on source symbols per block (K'_max). The
-/// effective block size is allowed to grow up to `RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK
-/// * symbol_size` for entries larger than `256 * configured_max`, lifting the
-/// per-entry object ceiling from `256 * configured_max` (~2 GiB at the 8 MiB default)
-/// to `256 * 56403 * symbol_size` (~20 GiB at 1400-byte symbols). This keeps the
-/// 256-block SBN limit satisfied (E-12) while never exceeding the decoder's K cap.
+/// RFC 6330 systematic-index cap on source symbols per block (K'_max). The effective
+/// block size may grow up to `RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK` symbols' worth of
+/// bytes for entries larger than `256 * configured_max`, lifting the per-entry object
+/// ceiling from `256 * configured_max` (~2 GiB at the 8 MiB default) to ~20 GiB at
+/// 1400-byte symbols. This keeps the 256-block SBN limit satisfied (E-12) while never
+/// exceeding the decoder's K cap.
 const RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK: usize = 56403;
 /// Maximum encoded ATP-RQ symbols sent in one connected UDP batch per socket.
 const RQ_SEND_BATCH_PER_SOCKET: usize = 32;

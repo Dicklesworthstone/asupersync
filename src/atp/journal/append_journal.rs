@@ -1779,12 +1779,10 @@ impl AppendJournal {
             }
         }
 
-        let status = terminal_status.unwrap_or_else(|| {
-            if entries.is_empty() {
-                TransferResumeStatus::Unknown
-            } else {
-                TransferResumeStatus::Resumable
-            }
+        let status = terminal_status.unwrap_or(if entries.is_empty() {
+            TransferResumeStatus::Unknown
+        } else {
+            TransferResumeStatus::Resumable
         });
 
         let (durable_chunks, durable_bytes, contiguous_prefix_bytes) =

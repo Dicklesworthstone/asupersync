@@ -478,8 +478,8 @@ impl AtpTransferPlanner {
         &self,
         cx: &Cx,
         transfer_type: TransferType,
-        source_path: &PathBuf,
-        destination_path: &PathBuf,
+        source_path: &Path,
+        destination_path: &Path,
         options: PlannerOptions,
     ) -> Result<AtpTransferPlan, PlannerError> {
         let plan_id = self.generate_plan_id();
@@ -600,7 +600,7 @@ impl AtpTransferPlanner {
     async fn analyze_object_graph(
         &self,
         _cx: &Cx,
-        source_path: &PathBuf,
+        source_path: &Path,
     ) -> Result<ObjectGraphSummary, PlannerError> {
         if !source_path.exists() {
             return Err(PlannerError::InvalidInput(format!(
@@ -763,7 +763,7 @@ impl AtpTransferPlanner {
 
     fn check_resume_state(
         source_path: &Path,
-        destination_path: &PathBuf,
+        destination_path: &Path,
         object_graph: &ObjectGraphSummary,
         chunk_size: u32,
         options: &PlannerOptions,
