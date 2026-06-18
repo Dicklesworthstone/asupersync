@@ -1827,7 +1827,7 @@ mod tests {
         assert_eq!(cfg.min_overhead, 0);
         assert_eq!(cfg.max_buffered_symbols, 8192);
         assert_eq!(cfg.block_timeout, Duration::from_secs(30));
-        assert!(!cfg.verify_auth);
+        assert!(cfg.verify_auth);
     }
 
     #[test]

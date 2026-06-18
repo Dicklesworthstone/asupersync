@@ -12,6 +12,10 @@
 //! ```
 
 use asupersync::config::EncodingConfig;
+use asupersync::lab::ldfi::HittingSetBudget;
+use asupersync::lab::ldfi_trace::{
+    LdfiReport, TraceLineageConfig, blind_chaos_single_fault_count, ldfi_report, support_graph_for,
+};
 use asupersync::lab::scenario::Scenario;
 use asupersync::lab::scenario_runner::{
     ScenarioExplorationResult, ScenarioRunResult, ScenarioRunner, ScenarioRunnerError,
@@ -25,10 +29,6 @@ use asupersync::trace::{
     IncidentOracleKind, IncidentReplayMinimizationConfig, IncidentReplayMinimizationReport,
     IncidentReplayMinimizationVerdict, IncidentReplayOracle, IncidentReplayPackage,
     IncidentReplaySourceRole, ScenarioElement, TraceMinimizer, minimize_incident_replay_package,
-};
-use asupersync::lab::ldfi::HittingSetBudget;
-use asupersync::lab::ldfi_trace::{
-    LdfiReport, TraceLineageConfig, blind_chaos_single_fault_count, ldfi_report, support_graph_for,
 };
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -1207,10 +1207,10 @@ fn run_ldfi(
         .ok_or_else(|| format!("unknown outcome kind '{outcome_kind}'"))?;
     let graph = support_graph_for(trace, TraceLineageConfig::default(), |ev| {
         ev.kind == kind
-            && match outcome_contains {
-                Some(sub) => matches!(&ev.data, TraceData::Message(m) if m.contains(sub)),
-                None => true,
-            }
+            && outcome_contains.map_or(
+                true,
+                |sub| matches!(&ev.data, TraceData::Message(m) if m.contains(sub)),
+            )
     });
     if graph.is_empty() {
         return Err(format!(
@@ -1221,7 +1221,7 @@ fn run_ldfi(
     Ok(ldfi_report(&result, blind_chaos_single_fault_count(trace)))
 }
 
-fn cmd_ldfi(args: LdfiArgs, json: bool) -> Result<(), String> {
+fn cmd_ldfi(args: &LdfiArgs, json: bool) -> Result<(), String> {
     if args.depth == 0 {
         return Err("--depth must be at least 1".to_string());
     }
@@ -1243,10 +1243,9 @@ fn cmd_ldfi(args: LdfiArgs, json: bool) -> Result<(), String> {
     if json {
         println!("{}", pretty_json_or(&report, ""));
     } else {
-        let certificate = match report.coverage_certificate {
-            Some(k) => format!(", coverage certificate: no <= {k}-fault counterexample"),
-            None => String::new(),
-        };
+        let certificate = report.coverage_certificate.map_or_else(String::new, |k| {
+            format!(", coverage certificate: no <= {k}-fault counterexample")
+        });
         println!(
             "LDFI: {} fault hypothes(es) vs {} blind-chaos single-fault experiments, depth {}{}",
             report.hypotheses.len(),
@@ -1276,7 +1275,7 @@ fn main() -> ExitCode {
         Command::Minimize(args) => cmd_minimize(args, cli.json),
         Command::Demo(args) => cmd_demo(args, cli.json),
         Command::TraceRecover(args) => cmd_trace_recover(args, cli.json),
-        Command::Ldfi(args) => cmd_ldfi(args, cli.json),
+        Command::Ldfi(args) => cmd_ldfi(&args, cli.json),
     };
 
     match result {
@@ -1321,9 +1320,12 @@ mod tests {
         ok_b.increment(&b);
 
         let trace = vec![
-            TraceEvent::io_result(1, Time::ZERO, 10, 4).with_logical_time(LogicalTime::Vector(send)),
-            TraceEvent::io_ready(2, Time::ZERO, 20, 1).with_logical_time(LogicalTime::Vector(ack_a)),
-            TraceEvent::io_ready(3, Time::ZERO, 30, 1).with_logical_time(LogicalTime::Vector(ack_b)),
+            TraceEvent::io_result(1, Time::ZERO, 10, 4)
+                .with_logical_time(LogicalTime::Vector(send)),
+            TraceEvent::io_ready(2, Time::ZERO, 20, 1)
+                .with_logical_time(LogicalTime::Vector(ack_a)),
+            TraceEvent::io_ready(3, Time::ZERO, 30, 1)
+                .with_logical_time(LogicalTime::Vector(ack_b)),
             TraceEvent::user_trace(10, Time::ZERO, "delivered-a")
                 .with_logical_time(LogicalTime::Vector(ok_a)),
             TraceEvent::user_trace(11, Time::ZERO, "delivered-b")

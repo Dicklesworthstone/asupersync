@@ -87,9 +87,9 @@ pub enum Severity {
 pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Time ────────────────────────────────────────────────────────────
     AmbientFinding {
-        file: "time/driver.rs",
-        line: 38,
-        evidence_pattern: "std::time::Instant::now()",
+        file: "time/sleep.rs",
+        line: 48,
+        evidence_pattern: "Instant::now",
         category: AmbientCategory::Time,
         severity: Severity::Low,
         description: "WallClock epoch initialization",
@@ -119,7 +119,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     },
     AmbientFinding {
         file: "runtime/blocking_pool.rs",
-        line: 972,
+        line: 1165,
         evidence_pattern: "thread::Builder::new()",
         category: AmbientCategory::Spawn,
         severity: Severity::Low,
@@ -133,7 +133,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── IO ──────────────────────────────────────────────────────────────
     AmbientFinding {
         file: "web/debug.rs",
-        line: 134,
+        line: 166,
         evidence_pattern: "TcpListener::bind",
         category: AmbientCategory::Io,
         severity: Severity::Medium,

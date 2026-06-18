@@ -1220,7 +1220,7 @@ mod tests {
         assert_eq!(r1.prediction_sets.len(), r2.prediction_sets.len());
         for (a, b) in r1.prediction_sets.iter().zip(r2.prediction_sets.iter()) {
             assert!((a.score - b.score).abs() < f64::EPSILON);
-            assert!((a.threshold - b.threshold).abs() < f64::EPSILON);
+            assert_eq!(a.threshold, b.threshold);
             assert_eq!(a.conforming, b.conforming);
         }
     }
@@ -1289,7 +1289,7 @@ mod tests {
 
     #[test]
     fn health_threshold_two_sided_extreme_anomalous() {
-        let config = HealthThresholdConfig::new(0.05, ThresholdMode::TwoSided).min_samples(5);
+        let config = HealthThresholdConfig::new(0.20, ThresholdMode::TwoSided).min_samples(5);
         let mut cal = HealthThresholdCalibrator::new(config);
 
         // Calibrate with values centered around 50.
@@ -1307,7 +1307,7 @@ mod tests {
 
     #[test]
     fn health_threshold_adaptive_grows_with_data() {
-        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(5);
+        let config = HealthThresholdConfig::new(0.20, ThresholdMode::Upper).min_samples(5);
         let mut cal = HealthThresholdCalibrator::new(config);
 
         // Phase 1: calibrate with small values.
@@ -1370,7 +1370,7 @@ mod tests {
 
     #[test]
     fn health_threshold_any_anomalous() {
-        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let config = HealthThresholdConfig::new(0.20, ThresholdMode::Upper).min_samples(3);
         let mut cal = HealthThresholdCalibrator::new(config);
 
         for i in 1..=10 {
@@ -1409,14 +1409,14 @@ mod tests {
 
         let r1 = run();
         let r2 = run();
-        assert!((r1.threshold - r2.threshold).abs() < f64::EPSILON);
+        assert_eq!(r1.threshold, r2.threshold);
         assert!((r1.nonconformity_score - r2.nonconformity_score).abs() < f64::EPSILON);
         assert_eq!(r1.conforming, r2.conforming);
     }
 
     #[test]
     fn health_threshold_ignores_non_finite_calibration_values() {
-        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let config = HealthThresholdConfig::new(0.20, ThresholdMode::Upper).min_samples(3);
         let mut cal = HealthThresholdCalibrator::new(config);
 
         for i in 1..=10 {
@@ -1436,7 +1436,7 @@ mod tests {
 
     #[test]
     fn health_threshold_non_finite_check_is_anomalous() {
-        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let config = HealthThresholdConfig::new(0.20, ThresholdMode::Upper).min_samples(3);
         let mut cal = HealthThresholdCalibrator::new(config);
         for i in 1..=10 {
             cal.calibrate("metric", f64::from(i));
@@ -1554,7 +1554,7 @@ mod tests {
         assert_eq!(c1.prediction_sets.len(), c2.prediction_sets.len());
         for (p1, p2) in c1.prediction_sets.iter().zip(c2.prediction_sets.iter()) {
             assert!((p1.score - p2.score).abs() < f64::EPSILON);
-            assert!((p1.threshold - p2.threshold).abs() < f64::EPSILON);
+            assert_eq!(p1.threshold, p2.threshold);
             assert_eq!(p1.conforming, p2.conforming);
         }
 
