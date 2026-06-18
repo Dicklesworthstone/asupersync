@@ -879,6 +879,12 @@ impl StreamTable {
         self.max_remote_uni = max_remote_uni;
     }
 
+    /// Current remotely-initiated stream limits advertised by this endpoint.
+    #[must_use]
+    pub fn remote_stream_limits(&self) -> (u64, u64) {
+        (self.max_remote_bidi, self.max_remote_uni)
+    }
+
     /// Accept a remotely initiated stream ID.
     pub fn accept_remote_stream(&mut self, id: StreamId) -> Result<(), StreamTableError> {
         if id.is_local_for(self.role) {

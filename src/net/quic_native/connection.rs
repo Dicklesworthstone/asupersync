@@ -10,7 +10,7 @@
 use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
-use crate::net::atp::protocol::varint::VarInt;
+use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt};
 use crate::net::quic_core::TransportParameters;
 use std::collections::VecDeque;
 use std::fmt;
@@ -526,8 +526,27 @@ impl NativeQuicConnection {
     /// `MAX_STREAMS`). Bounds memory against a peer that opens unbounded
     /// streams; defaults to [`DEFAULT_MAX_REMOTE_STREAMS`] per direction.
     pub fn set_remote_stream_limits(&mut self, max_remote_bidi: u64, max_remote_uni: u64) {
+        let max_remote_bidi = max_remote_bidi.min(VARINT_MAX);
+        let max_remote_uni = max_remote_uni.min(VARINT_MAX);
+        let (old_bidi, old_uni) = self.streams.remote_stream_limits();
         self.streams
             .set_remote_stream_limits(max_remote_bidi, max_remote_uni);
+        if self.transport.state() == QuicConnectionState::Established {
+            if max_remote_bidi > old_bidi {
+                self.queue_max_streams_frame(max_remote_bidi, true);
+            }
+            if max_remote_uni > old_uni {
+                self.queue_max_streams_frame(max_remote_uni, false);
+            }
+        }
+    }
+
+    fn queue_max_streams_frame(&mut self, maximum_streams: u64, bidirectional: bool) {
+        self.pending_control_frames
+            .push_back(QuicFrame::MaxStreams {
+                maximum_streams: VarInt::from_u64_unchecked(maximum_streams),
+                bidirectional,
+            });
     }
 
     /// Account bytes written to a stream.
@@ -2862,6 +2881,37 @@ mod tests {
             err,
             NativeQuicConnectionError::StreamTable(StreamTableError::StreamLimitExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn increasing_remote_stream_limits_emits_max_streams_frames() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+
+        conn.set_remote_stream_limits(256, 512);
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("control frames should generate");
+
+        assert_eq!(
+            frames,
+            vec![
+                QuicFrame::MaxStreams {
+                    maximum_streams: VarInt::from_u64_unchecked(256),
+                    bidirectional: true,
+                },
+                QuicFrame::MaxStreams {
+                    maximum_streams: VarInt::from_u64_unchecked(512),
+                    bidirectional: false,
+                },
+            ]
+        );
+
+        conn.set_remote_stream_limits(128, 128);
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("lowering limits should not emit MAX_STREAMS");
+        assert!(frames.is_empty());
     }
 
     #[test]
