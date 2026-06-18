@@ -25,7 +25,8 @@ use asupersync::net::atp::transport_quic::native_link::{
     QuicClientTls, QuicServerTls, bind_server_endpoint, receive_on_endpoint,
 };
 use asupersync::net::atp::transport_quic::{
-    QuicConfig, QuicTransportError, ReceiveReport, SendReport, send_path,
+    DEFAULT_MAX_BLOCK_SIZE, DEFAULT_SYMBOL_SIZE, QuicConfig, QuicTransportError, ReceiveReport,
+    SendReport, send_path,
 };
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
 use asupersync::security::SecurityContext;
@@ -147,6 +148,7 @@ struct Configs {
 // Loopback transfers complete in well under a second; tight timeouts keep any
 // regression from hanging the suite for the 60s production default.
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_BOUNDED_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 
 fn tighten_timeouts(cfg: &mut QuicConfig) {
     cfg.idle_timeout = TEST_TIMEOUT;
@@ -155,9 +157,16 @@ fn tighten_timeouts(cfg: &mut QuicConfig) {
 }
 
 fn assert_default_bounded_k512(cfg: &QuicConfig) {
-    assert_eq!(cfg.symbol_size, 1024);
-    assert_eq!(cfg.max_block_size, 512 * 1024);
-    assert_eq!(cfg.max_block_size / usize::from(cfg.symbol_size), 512);
+    assert_eq!(cfg.symbol_size, DEFAULT_SYMBOL_SIZE);
+    assert_eq!(cfg.max_block_size, DEFAULT_MAX_BLOCK_SIZE);
+    assert_eq!(
+        cfg.max_block_size / usize::from(cfg.symbol_size),
+        DEFAULT_BOUNDED_SOURCE_SYMBOLS_PER_BLOCK
+    );
+    assert_eq!(
+        DEFAULT_MAX_BLOCK_SIZE,
+        usize::from(DEFAULT_SYMBOL_SIZE) * DEFAULT_BOUNDED_SOURCE_SYMBOLS_PER_BLOCK
+    );
 }
 
 fn authenticated_configs(seed: u64) -> Configs {
