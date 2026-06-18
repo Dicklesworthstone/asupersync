@@ -3,6 +3,7 @@
 //! Intelligent path selection and congestion adaptation based on transport metrics.
 
 use super::metrics::{AtpTransportMetrics, PathPerformanceClass, PathRecommendation};
+use crate::net::atp::loss::{LossDetectionMethod, LossDetectionResult, LossRecommendation};
 use crate::net::atp::protocol::outcome::{AtpOutcome, TransportError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -22,6 +23,8 @@ pub struct AtpTransferBrain {
     paths: HashMap<String, PathState>,
     /// Transfer policies and preferences.
     policy: TransferPolicy,
+    /// Latest bounded loss-detector pressure that should force FEC repair.
+    loss_repair_pressure: Option<LossRepairPressure>,
     /// Decision history for learning.
     decision_history: DecisionHistory,
     /// Last brain update.
@@ -115,6 +118,23 @@ impl Default for TransferPolicy {
             relay_candidates: Vec::new(),
         }
     }
+}
+
+/// Bounded FEC pressure derived from the ATP loss detector.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LossRepairPressure {
+    /// Recommended repair/FEC rate, clamped to the transfer-brain safe range.
+    pub fec_rate: f64,
+    /// Loss-detector confidence, clamped to a finite 0.0..=1.0 range.
+    pub confidence: f64,
+    /// Aggregate number of losses represented by the detector result.
+    pub lost_packet_count: u64,
+    /// Number of lost-packet samples represented by the detector result.
+    pub lost_packet_samples: usize,
+    /// Estimated lost bytes represented by the detector result.
+    pub lost_bytes: u64,
+    /// Detection mode that produced the pressure.
+    pub detection_method: LossDetectionMethod,
 }
 
 /// Transfer Brain decisions for a transfer operation.
@@ -330,6 +350,7 @@ impl AtpTransferBrain {
         Self {
             paths: HashMap::new(),
             policy,
+            loss_repair_pressure: None,
             decision_history: DecisionHistory {
                 decisions: Vec::new(),
                 outcomes: HashMap::new(),
@@ -475,10 +496,7 @@ impl AtpTransferBrain {
             } else {
                 DecisionReasonCode::RepairDisabled
             },
-            detail: format!(
-                "repair={} threshold={:.6} fec_rate={:?}",
-                enable_repair, self.policy.repair_loss_threshold, fec_rate
-            ),
+            detail: self.repair_decision_detail(enable_repair, fec_rate),
         });
 
         // Determine if relay should be used
@@ -593,6 +611,44 @@ impl AtpTransferBrain {
         recommendations
     }
 
+    /// Feed the latest ATP loss-detector result into repair/FEC decision-making.
+    ///
+    /// This is a pure decision hook: it does not retransmit by itself and it never
+    /// permits an unbounded or non-finite FEC rate into the transport decision.
+    pub fn apply_loss_detection_result(
+        &mut self,
+        result: &LossDetectionResult,
+    ) -> Option<LossRepairPressure> {
+        let Some(fec_rate) = fec_rate_from_loss_detection(result) else {
+            if result.lost_packets.is_empty() {
+                self.loss_repair_pressure = None;
+            }
+            return None;
+        };
+
+        let pressure = LossRepairPressure {
+            fec_rate,
+            confidence: finite_unit(result.confidence),
+            lost_packet_count: result.lost_packet_count,
+            lost_packet_samples: result.lost_packets.len(),
+            lost_bytes: result.lost_bytes,
+            detection_method: result.detection_method,
+        };
+        self.loss_repair_pressure = Some(pressure);
+        Some(pressure)
+    }
+
+    /// Return the currently latched loss-driven repair pressure.
+    #[must_use]
+    pub fn loss_repair_pressure(&self) -> Option<LossRepairPressure> {
+        self.loss_repair_pressure
+    }
+
+    /// Clear the latched loss-driven repair pressure after a clean control round.
+    pub fn clear_loss_repair_pressure(&mut self) {
+        self.loss_repair_pressure = None;
+    }
+
     // Private helper methods
 
     fn calculate_path_ranking(&self, metrics: &AtpTransportMetrics) -> f64 {
@@ -638,6 +694,10 @@ impl AtpTransferBrain {
             return false;
         }
 
+        if self.loss_repair_pressure.is_some() {
+            return true;
+        }
+
         path_ids.iter().any(|path_id| {
             if let Some(state) = self.paths.get(path_id) {
                 state.metrics.loss_rate > self.policy.repair_loss_threshold
@@ -654,8 +714,34 @@ impl AtpTransferBrain {
             .map(|state| state.metrics.loss_rate)
             .fold(0.0, f64::max);
 
-        // FEC rate should be slightly higher than loss rate
-        (max_loss_rate * 1.5).clamp(0.05, 0.3)
+        let path_rate = bounded_fec_rate(max_loss_rate * 1.5);
+        let pressure_rate = self.loss_repair_pressure.map(|pressure| pressure.fec_rate);
+
+        path_rate
+            .into_iter()
+            .chain(pressure_rate)
+            .fold(0.05, f64::max)
+            .clamp(0.05, 0.3)
+    }
+
+    fn repair_decision_detail(&self, enable_repair: bool, fec_rate: Option<f64>) -> String {
+        match self.loss_repair_pressure {
+            Some(pressure) => format!(
+                "repair={} threshold={:.6} fec_rate={:?} loss_pressure_rate={:.6} loss_pressure_confidence={:.6} lost_packet_count={} lost_packet_samples={} lost_bytes={}",
+                enable_repair,
+                self.policy.repair_loss_threshold,
+                fec_rate,
+                pressure.fec_rate,
+                pressure.confidence,
+                pressure.lost_packet_count,
+                pressure.lost_packet_samples,
+                pressure.lost_bytes
+            ),
+            None => format!(
+                "repair={} threshold={:.6} fec_rate={:?}",
+                enable_repair, self.policy.repair_loss_threshold, fec_rate
+            ),
+        }
     }
 
     fn should_use_relay(&self, path_ids: &[String]) -> bool {
@@ -1025,6 +1111,41 @@ fn finite_unit(value: f64) -> f64 {
     }
 }
 
+fn bounded_fec_rate(rate: f64) -> Option<f64> {
+    if rate.is_finite() && rate > 0.0 {
+        Some(rate.clamp(0.05, 0.3))
+    } else {
+        None
+    }
+}
+
+fn fec_rate_from_loss_detection(result: &LossDetectionResult) -> Option<f64> {
+    let explicit_rate = result
+        .recommendations
+        .iter()
+        .filter_map(|recommendation| match recommendation {
+            LossRecommendation::EnableFec { rate } => bounded_fec_rate(*rate),
+            _ => None,
+        })
+        .max_by(|left, right| left.total_cmp(right));
+
+    let confidence = finite_unit(result.confidence);
+    let represented_losses = result
+        .lost_packet_count
+        .max(result.lost_packets.len() as u64);
+    let sample_rate = if represented_losses == 0 || confidence == 0.0 {
+        None
+    } else {
+        let sample_pressure = represented_losses.min(128) as f64 / 128.0;
+        bounded_fec_rate(sample_pressure * confidence.max(0.5))
+    };
+
+    explicit_rate
+        .into_iter()
+        .chain(sample_rate)
+        .max_by(|left, right| left.total_cmp(right))
+}
+
 fn calculate_performance_ratio(predicted: Duration, actual: Duration) -> f64 {
     let predicted_nanos = predicted.as_nanos();
     let actual_nanos = actual.as_nanos();
@@ -1160,6 +1281,86 @@ mod tests {
         // Should enable repair due to high loss rate (0.08 > 0.05 threshold)
         assert!(decision.enable_repair);
         assert!(decision.fec_rate.is_some());
+    }
+
+    #[test]
+    fn loss_detection_result_forces_bounded_repair_pressure_on_clean_path() {
+        let mut brain = AtpTransferBrain::new();
+        brain.update_path_metrics(create_test_metrics("clean_path", 0.0, 50_000, 0.95));
+
+        let pressure = brain
+            .apply_loss_detection_result(&LossDetectionResult {
+                lost_packets: Vec::new(),
+                lost_packet_count: 0,
+                lost_bytes: 8_192,
+                detection_method: LossDetectionMethod::PacketThreshold,
+                confidence: 0.85,
+                recommendations: vec![LossRecommendation::EnableFec { rate: 0.42 }],
+            })
+            .expect("explicit FEC recommendation should latch pressure");
+
+        assert_eq!(pressure.fec_rate, 0.3);
+        assert_eq!(brain.loss_repair_pressure(), Some(pressure));
+
+        let decision = brain
+            .make_transfer_decision(
+                "loss_pressure_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+
+        assert!(decision.enable_repair);
+        assert_eq!(decision.fec_rate, Some(0.3));
+        assert!(decision.reason_vector.iter().any(|reason| {
+            reason.code == DecisionReasonCode::RepairEnabled
+                && reason.detail.contains("loss_pressure_rate=0.300000")
+                && reason.detail.contains("lost_bytes=8192")
+        }));
+    }
+
+    #[test]
+    fn empty_or_non_finite_loss_detection_clears_repair_pressure() {
+        let mut brain = AtpTransferBrain::new();
+        brain.update_path_metrics(create_test_metrics("clean_path", 0.0, 50_000, 0.95));
+
+        assert!(
+            brain
+                .apply_loss_detection_result(&LossDetectionResult {
+                    lost_packets: Vec::new(),
+                    lost_packet_count: 0,
+                    lost_bytes: 4_096,
+                    detection_method: LossDetectionMethod::PacketThreshold,
+                    confidence: 1.0,
+                    recommendations: vec![LossRecommendation::EnableFec { rate: 0.1 }],
+                })
+                .is_some()
+        );
+
+        assert!(
+            brain
+                .apply_loss_detection_result(&LossDetectionResult {
+                    lost_packets: Vec::new(),
+                    lost_packet_count: 0,
+                    lost_bytes: 0,
+                    detection_method: LossDetectionMethod::PacketThreshold,
+                    confidence: f64::NAN,
+                    recommendations: vec![LossRecommendation::EnableFec { rate: f64::NAN }],
+                })
+                .is_none()
+        );
+        assert_eq!(brain.loss_repair_pressure(), None);
+
+        let decision = brain
+            .make_transfer_decision(
+                "clean_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+
+        assert!(!decision.enable_repair);
+        assert_eq!(decision.fec_rate, None);
     }
 
     #[test]

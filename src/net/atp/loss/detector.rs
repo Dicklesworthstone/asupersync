@@ -254,6 +254,12 @@ pub struct LossDetectionMetrics {
 pub struct LossDetectionResult {
     /// Newly detected lost packets.
     pub lost_packets: Vec<LostPacketInfo>,
+    /// Total number of packets/datagrams represented by this result.
+    ///
+    /// `lost_packets` may be sample-capped for bounded memory when the input is
+    /// aggregate datagram loss evidence; this count preserves the actual loss
+    /// pressure for transfer-brain decisions.
+    pub lost_packet_count: u64,
     /// Total lost bytes.
     pub lost_bytes: u64,
     /// Detection method used.
@@ -308,6 +314,23 @@ pub enum LossRecommendation {
     SwitchCongestionControl { algorithm: String },
     /// Enable forward error correction.
     EnableFec { rate: f64 },
+}
+
+/// Compact loss pressure signal consumed by transfer scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TransferLossSignal {
+    /// Estimated loss pressure in the interval, clamped to `[0.0, 1.0]`.
+    pub loss_pressure: f64,
+    /// Optional FEC/repair rate hint derived from detector recommendations.
+    pub repair_rate_hint: Option<f64>,
+    /// Optional congestion-window reduction factor.
+    pub cwnd_reduction_factor: Option<f64>,
+    /// Optional pacing rate hint in bytes per second.
+    pub pacing_rate_hint: Option<u64>,
+    /// Whether the detector recommended moving to BBR-like control.
+    pub prefer_bbr: bool,
+    /// Detector confidence for this signal, clamped to `[0.0, 1.0]`.
+    pub confidence: f64,
 }
 
 impl AtpLossDetector {
@@ -459,6 +482,7 @@ impl AtpLossDetector {
         let recommendations = self.generate_recommendations(&lost_packets, detection_method);
         let result = LossDetectionResult {
             lost_packets,
+            lost_packet_count: lost_datagrams,
             lost_bytes: bytes_in_flight.min(
                 bytes_in_flight
                     .checked_mul(lost_datagrams)
@@ -618,6 +642,7 @@ impl AtpLossDetector {
         let recommendations = self.generate_recommendations(&lost_packets, detection_method);
 
         AtpOutcome::ok(LossDetectionResult {
+            lost_packet_count: lost_packets.len() as u64,
             lost_packets,
             lost_bytes,
             detection_method,
@@ -1030,11 +1055,83 @@ impl LossDetectionResult {
     fn empty() -> Self {
         Self {
             lost_packets: Vec::new(),
+            lost_packet_count: 0,
             lost_bytes: 0,
             detection_method: LossDetectionMethod::PacketThreshold,
             confidence: 1.0,
             recommendations: Vec::new(),
         }
+    }
+
+    /// Convert this result into transfer-brain loss pressure.
+    ///
+    /// `sent_units` is the packet/datagram denominator for the detector window.
+    /// A zero denominator deliberately yields zero pressure while still carrying
+    /// recommendation hints, so fail-closed callers can avoid divide-by-zero
+    /// amplification.
+    #[must_use]
+    pub fn transfer_signal(&self, sent_units: u64) -> TransferLossSignal {
+        let observed_pressure = if sent_units == 0 {
+            0.0
+        } else {
+            self.lost_packet_count.min(sent_units) as f64 / sent_units as f64
+        };
+
+        let mut recommendation_pressure = 0.0_f64;
+        let mut repair_rate_hint = None;
+        let mut cwnd_reduction_factor = None;
+        let mut pacing_rate_hint = None;
+        let mut prefer_bbr = false;
+
+        for recommendation in &self.recommendations {
+            match recommendation {
+                LossRecommendation::ReduceCongestionWindow { factor } => {
+                    let factor = finite_unit(*factor);
+                    cwnd_reduction_factor = Some(
+                        cwnd_reduction_factor.map_or(factor, |current: f64| current.min(factor)),
+                    );
+                    recommendation_pressure = recommendation_pressure.max(1.0 - factor);
+                }
+                LossRecommendation::IncreaseReorderingThreshold { .. } => {}
+                LossRecommendation::EnablePacing { rate } => {
+                    pacing_rate_hint =
+                        Some(pacing_rate_hint.map_or(*rate, |current: u64| current.min(*rate)));
+                    recommendation_pressure = recommendation_pressure.max(0.05);
+                }
+                LossRecommendation::SwitchCongestionControl { algorithm } => {
+                    prefer_bbr |= algorithm.eq_ignore_ascii_case("bbr");
+                    recommendation_pressure = recommendation_pressure.max(0.20);
+                }
+                LossRecommendation::EnableFec { rate } => {
+                    let rate = finite_unit(*rate);
+                    repair_rate_hint =
+                        Some(repair_rate_hint.map_or(rate, |current: f64| current.max(rate)));
+                    recommendation_pressure = recommendation_pressure.max(rate);
+                }
+            }
+        }
+
+        let loss_pressure = observed_pressure.max(recommendation_pressure);
+        let confidence = finite_unit(self.confidence);
+        let repair_rate_hint = repair_rate_hint
+            .or_else(|| (loss_pressure > 0.0).then_some((loss_pressure * 1.5).clamp(0.05, 0.30)));
+
+        TransferLossSignal {
+            loss_pressure: finite_unit(loss_pressure),
+            repair_rate_hint,
+            cwnd_reduction_factor,
+            pacing_rate_hint,
+            prefer_bbr,
+            confidence,
+        }
+    }
+}
+
+fn finite_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
@@ -1171,7 +1268,12 @@ mod tests {
         );
 
         assert_eq!(result.lost_packets.len(), 10);
+        assert_eq!(result.lost_packet_count, 10);
         assert_eq!(result.lost_bytes, 12_000);
+        let signal = result.transfer_signal(100);
+        assert_eq!(signal.loss_pressure, 0.5);
+        assert_eq!(signal.cwnd_reduction_factor, Some(0.5));
+        assert_eq!(signal.repair_rate_hint, Some(0.3));
         assert!(result.recommendations.iter().any(|recommendation| {
             matches!(
                 recommendation,
