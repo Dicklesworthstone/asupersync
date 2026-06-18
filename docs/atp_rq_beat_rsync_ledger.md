@@ -228,6 +228,23 @@ to wire.
   bigger K = slower per-block solve — there's an optimum; E-4).
 - **Next:** focused 500M/bad run with ATP_RQ_TRACE on an IDLE machine → measure decode time vs
   feedback-round time vs memory to confirm H1/H2/H3 before implementing. Profile-first.
+- **★ DIAGNOSED 2026-06-18 (100M/bad, idle worker 109.123.245.77, /usr/bin/time -v):** wall 96.7s,
+  sha OK, **fb=3**, receiver **CPU%=29%** (User 28.2s / Sys 6.4s of 96.7s wall), **Max RSS 895 MB for
+  a 100 MB file (≈9× blowup)**. ⇒ **E-11 is MEMORY-BOUND, not decode-bound (H1 REFUTED as primary —
+  29% CPU) nor feedback-bound (H2 REFUTED — fb=3).** The receiver retains ~9× the file size in
+  symbols; at 500M that is ~4.5 GB → swap/thrash → the 500M/bad TIMEOUT; at 5G → ~45 GB → OOM. So
+  **parallel decode (B-10) is NOT the primary lever for E-11** (it would only speed the 29% CPU
+  fraction). **THE lever = bound the FEC/pipeline symbol retention (H3).** Likely mechanism (needs
+  code-read confirm): `seed_source_streaming_pipeline` seeds incomplete blocks' source back INTO the
+  in-memory DecodingPipeline, and/or the pipeline `SymbolStore` holds received symbols for ALL
+  in-flight incomplete blocks simultaneously (round-0 sprays across all ~1000 blocks → all hold
+  symbols until each completes). E-8.2 ("bounded retention") is marked done but clearly does NOT bound
+  this FEC/lossy path. **Fix direction:** cap in-flight incomplete blocks (windowed spray/decode so
+  peak retention is O(window), not O(file)); free per-block pipeline memory aggressively once a block
+  is on disk; OR spray block-by-block so blocks complete + free before the next. Profile-first WIN:
+  this redirected the lever from parallel-decode (wrong) to bounded-memory (right). **Next:** localize
+  the 895MB (code-read the receiver retention + a heap profile / RSS-vs-blocks-in-flight measurement),
+  then implement windowed/bounded retention, prove sha-identical + RSS bounded + 500M/bad converges.
 
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
