@@ -16,7 +16,21 @@ use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
 use std::io;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use std::io::IoSlice;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -129,8 +143,18 @@ pub struct UdpBatchCapabilities {
 impl Default for UdpBatchCapabilities {
     #[inline]
     fn default() -> Self {
+        Self::for_platform(UdpPlatform::current())
+    }
+}
+
+impl UdpBatchCapabilities {
+    /// Return batching capabilities exposed by this build target.
+    #[inline]
+    #[must_use]
+    pub const fn for_platform(platform: UdpPlatform) -> Self {
+        let native_send_batch = matches!(platform, UdpPlatform::Linux);
         Self {
-            native_send_batch: false,
+            native_send_batch,
             native_recv_batch: false,
             portable_send_batch: true,
             portable_recv_batch: true,
@@ -908,6 +932,8 @@ pub struct UdpBatchIoReport {
     pub bytes_processed: usize,
     /// True when this operation used the portable loop fallback.
     pub fallback_used: bool,
+    /// True when this operation used an OS-native send batching syscall.
+    pub native_send_batch_used: bool,
     /// Stringified error that stopped a partial batch.
     pub error: Option<String>,
 }
@@ -1434,27 +1460,150 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut report = UdpBatchIoReport {
-                fallback_used: packets.len() > 1,
-                ..UdpBatchIoReport::default()
-            };
-
-            for packet in packets {
-                match self.send_to(packet.payload, packet.dst_addr).await {
-                    Ok(sent) => {
-                        report.packets_processed += 1;
-                        report.bytes_processed += sent;
-                    }
-                    Err(err) if report.packets_processed == 0 => return Err(err),
-                    Err(err) => {
-                        report.error = Some(err.to_string());
-                        break;
-                    }
+            if let Some(native_report) = self.try_send_batch_to_connected_native(packets)? {
+                if native_report.packets_processed == packets.len() {
+                    return Ok(native_report);
                 }
+
+                let tail = &packets[native_report.packets_processed..];
+                return self
+                    .finish_send_batch_after_native_partial(native_report, tail)
+                    .await;
             }
 
-            Ok(report)
+            self.send_batch_to_portable(packets, packets.len() > 1).await
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn finish_send_batch_after_native_partial(
+        &mut self,
+        mut report: UdpBatchIoReport,
+        tail: &[UdpOutboundDatagram<'_>],
+    ) -> io::Result<UdpBatchIoReport> {
+        if tail.is_empty() {
+            return Ok(report);
+        }
+
+        match self.send_batch_to_portable(tail, true).await {
+            Ok(tail_report) => {
+                report.packets_processed += tail_report.packets_processed;
+                report.bytes_processed += tail_report.bytes_processed;
+                report.fallback_used |= tail_report.fallback_used;
+                report.native_send_batch_used |= tail_report.native_send_batch_used;
+                report.error = tail_report.error;
+                Ok(report)
+            }
+            Err(err) if report.packets_processed > 0 => {
+                report.fallback_used = true;
+                report.error = Some(err.to_string());
+                Ok(report)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn send_batch_to_portable(
+        &mut self,
+        packets: &[UdpOutboundDatagram<'_>],
+        fallback_used: bool,
+    ) -> io::Result<UdpBatchIoReport> {
+        let mut report = UdpBatchIoReport {
+            fallback_used,
+            ..UdpBatchIoReport::default()
+        };
+
+        for packet in packets {
+            match self.send_to(packet.payload, packet.dst_addr).await {
+                Ok(sent) => {
+                    report.packets_processed += 1;
+                    report.bytes_processed += sent;
+                }
+                Err(err) if report.packets_processed == 0 => return Err(err),
+                Err(err) => {
+                    report.error = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd"
+        )
+    ))]
+    fn try_send_batch_to_connected_native(
+        &mut self,
+        packets: &[UdpOutboundDatagram<'_>],
+    ) -> io::Result<Option<UdpBatchIoReport>> {
+        if packets.len() <= 1 || packets.len() > UDP_MAX_SENDMMSG_BATCH {
+            return Ok(None);
+        }
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+
+        let Ok(peer_addr) = self.inner.peer_addr() else {
+            return Ok(None);
+        };
+        if !packets.iter().all(|packet| packet.dst_addr == peer_addr) {
+            return Ok(None);
+        }
+
+        let iovs = packets
+            .iter()
+            .map(|packet| [IoSlice::new(packet.payload)])
+            .collect::<Vec<_>>();
+        let addrs = vec![None; packets.len()];
+        let mut headers = nix::sys::socket::MultiHeaders::<()>::preallocate(packets.len(), None);
+        let cmsgs: &[nix::sys::socket::ControlMessage<'_>] = &[];
+        let results = match nix::sys::socket::sendmmsg(
+            self.inner.as_raw_fd(),
+            &mut headers,
+            &iovs,
+            &addrs,
+            cmsgs,
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+        ) {
+            Ok(results) => results,
+            Err(_) => return Ok(None),
+        };
+
+        let mut report = UdpBatchIoReport {
+            native_send_batch_used: true,
+            ..UdpBatchIoReport::default()
+        };
+        for result in results {
+            report.packets_processed += 1;
+            report.bytes_processed += result.bytes;
+        }
+
+        Ok(Some(report))
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd"
+        ))
+    ))]
+    fn try_send_batch_to_connected_native(
+        &mut self,
+        packets: &[UdpOutboundDatagram<'_>],
+    ) -> io::Result<Option<UdpBatchIoReport>> {
+        let _ = packets;
+        Ok(None)
     }
 
     /// Receive one readiness-driven packet, then drain any immediately-ready packets.
@@ -1512,6 +1661,7 @@ impl UdpSocket {
                     packets_processed: 1,
                     bytes_processed: bytes_read,
                     fallback_used: max_packets > 1,
+                    native_send_batch_used: false,
                     error: None,
                 },
             };
@@ -1754,7 +1904,10 @@ mod tests {
             assert_eq!(capabilities.address_family, UdpAddressFamily::Ipv4);
             assert!(capabilities.batching.portable_send_batch);
             assert!(capabilities.batching.portable_recv_batch);
-            assert!(!capabilities.batching.native_send_batch);
+            assert_eq!(
+                capabilities.batching.native_send_batch,
+                matches!(UdpPlatform::current(), UdpPlatform::Linux)
+            );
             assert!(!capabilities.batching.native_recv_batch);
         });
     }
@@ -2128,6 +2281,49 @@ mod tests {
                     .map(|packet| packet.payload.as_slice())
                     .collect::<Vec<_>>(),
                 vec![b"one".as_slice(), b"two".as_slice()]
+            );
+        });
+    }
+
+    #[test]
+    fn udp_connected_batch_send_prefers_native_sendmmsg_on_linux() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            sender.connect(receiver_addr).await.unwrap();
+
+            let packets = [
+                UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload: b"native-one",
+                },
+                UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload: b"native-two",
+                },
+            ];
+            let sent = sender.send_batch_to(&packets).await.unwrap();
+            assert_eq!(sent.packets_processed, 2);
+            assert_eq!(sent.bytes_processed, b"native-one".len() + b"native-two".len());
+
+            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
+                assert!(sent.native_send_batch_used);
+                assert!(!sent.fallback_used);
+            } else {
+                assert!(!sent.native_send_batch_used);
+                assert!(sent.fallback_used);
+            }
+
+            let received = receiver.recv_batch_from(2, 32).await.unwrap();
+            assert_eq!(received.report.packets_processed, 2);
+            assert_eq!(
+                received
+                    .packets
+                    .iter()
+                    .map(|packet| packet.payload.as_slice())
+                    .collect::<Vec<_>>(),
+                vec![b"native-one".as_slice(), b"native-two".as_slice()]
             );
         });
     }
