@@ -148,6 +148,19 @@ pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// receiver bookkeeping derived from attacker-controlled control-plane JSON.
 const MAX_MANIFEST_ENTRIES: usize = 4 * 1024 * 1024;
 
+/// E-15 tree coalescing: files strictly smaller than this become candidates for
+/// packing into a combined RaptorQ object. Files at or above it stay single-file
+/// objects (they already amortize per-object overhead over enough bytes).
+const PACK_THRESHOLD: u64 = 256 * 1024;
+
+/// E-15 tree coalescing: target size for a combined RaptorQ object. The packer
+/// greedily fills a pack with small files until adding the next would exceed this
+/// (a pack always holds at least one file, so a lone file larger than the target
+/// but smaller than [`PACK_THRESHOLD`] still forms its own pack). Roughly one
+/// RaptorQ object's worth of bytes — large enough to collapse the per-object
+/// runtime overhead, small enough that a lost symbol does not span the whole tree.
+const PACK_TARGET: u64 = 8 * 1024 * 1024;
+
 /// Default bound on fountain feedback rounds before failing closed.
 pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
 
@@ -1244,6 +1257,12 @@ const RQ_STREAM_HASH_BUFFER_SIZE: usize = 1024 * 1024;
 struct RqSourceEntry {
     rel_path: String,
     abs_path: PathBuf,
+    /// Logical files packed into this combined RaptorQ object (E-15 coalescing).
+    /// Empty = a normal single-file entry whose content IS the file at `abs_path`
+    /// (prior behavior, byte-identical wire). Non-empty = `abs_path` points at a
+    /// temp file holding the concatenation of these members in `offset` order, and
+    /// the receiver splits it back into the member files on commit.
+    members: Vec<PackedMember>,
 }
 
 async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry>), RqError> {
@@ -1262,6 +1281,7 @@ async fn collect_entries(root: &Path) -> Result<(String, bool, Vec<RqSourceEntry
             vec![RqSourceEntry {
                 rel_path: root_name,
                 abs_path: root.to_path_buf(),
+                members: Vec::new(),
             }],
         ));
     }
@@ -1314,11 +1334,193 @@ fn collect_dir<'a>(
                 out.push(RqSourceEntry {
                     rel_path: rel,
                     abs_path: path,
+                    members: Vec::new(),
                 });
             }
         }
         Ok(())
     })
+}
+
+/// E-15 tree coalescing (send side): greedily pack sub-threshold files into fewer,
+/// larger combined RaptorQ objects.
+///
+/// `entries` arrives in manifest (sorted `rel_path`) order. Files whose size is
+/// `< PACK_THRESHOLD` are binned greedily, in order, into packs that hold at most
+/// `PACK_TARGET` bytes (a pack always holds at least one file). A pack of **two or
+/// more** files is materialized as a temp file holding the byte concatenation of
+/// its members in order; the resulting [`RqSourceEntry`] points at that temp file
+/// and carries the [`PackedMember`] offset/len/sha table. A pack of exactly one
+/// file (a lone leftover small file, or a single small file with no neighbor) is
+/// emitted unchanged (no temp, empty `members`) so it stays byte-identical to the
+/// non-packing wire. Files `>= PACK_THRESHOLD` are always emitted unchanged.
+///
+/// Returns `(new_entries, logical_digests, tempdir)` where `logical_digests` holds
+/// one [`EntryDigest`] per **logical file** (members flattened) — the input to the
+/// LOGICAL merkle root. For the no-packing case `logical_digests` equals the
+/// per-file digests the caller would have computed itself, so the merkle root is
+/// byte-identical to prior transfers. `tempdir` (if any) owns every materialized
+/// pack temp file and MUST be kept alive until the spray loop has finished reading
+/// them; dropping it removes the temp files.
+///
+/// # Errors
+///
+/// Returns [`RqError::Source`] if a source file cannot be hashed or a pack temp
+/// file cannot be created/written.
+async fn pack_small_files(
+    entries: Vec<RqSourceEntry>,
+) -> Result<(Vec<RqSourceEntry>, Vec<EntryDigest>, Option<tempfile::TempDir>), RqError> {
+    let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
+
+    // Group consecutive small files into packs. Each `Vec<usize>` is a list of
+    // indices into `entries` (the original sorted order is preserved so member
+    // offsets and the logical-digest order are deterministic).
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut current_bytes: u64 = 0;
+    for (idx, entry) in entries.iter().enumerate() {
+        // Hash here purely to learn the size cheaply? No — hashing twice would
+        // double the disk read. Instead size is read from metadata; the content
+        // sha is computed once below (for packed members) or by the caller's
+        // per-object loop (for unpacked entries via the temp/real abs_path).
+        let size = crate::fs::metadata(&entry.abs_path)
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))?
+            .len();
+        if size >= PACK_THRESHOLD {
+            // Flush any in-progress small-file group, then emit this large file
+            // as its own (unpacked) singleton group.
+            if !current.is_empty() {
+                groups.push(std::mem::take(&mut current));
+                current_bytes = 0;
+            }
+            groups.push(vec![idx]);
+            continue;
+        }
+        // Small file: would adding it overflow the current pack? Start a fresh
+        // pack if so (but never split a pack to empty — a single oversized-for-
+        // -target small file still forms its own pack).
+        if !current.is_empty() && current_bytes.saturating_add(size) > PACK_TARGET {
+            groups.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current.push(idx);
+        current_bytes = current_bytes.saturating_add(size);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+
+    // If no group holds 2+ files, packing would do nothing useful. Return the
+    // entries unchanged and compute per-file logical digests (byte-identical to
+    // the caller's prior per-file digest pass).
+    let packs_anything = groups.iter().any(|g| g.len() >= 2);
+    if !packs_anything {
+        let mut logical_digests = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let (size, content_id, content_sha256) =
+                hash_file_streaming(&entry.abs_path, &mut hash_buf)
+                    .await
+                    .map_err(|e| RqError::Source(e.into_message()))?;
+            logical_digests.push(EntryDigest {
+                rel_path: entry.rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            });
+        }
+        return Ok((entries, logical_digests, None));
+    }
+
+    let tempdir = tempfile::Builder::new()
+        .prefix(".atp-rq-pack-")
+        .tempdir()
+        .map_err(RqError::Io)?;
+
+    let mut new_entries: Vec<RqSourceEntry> = Vec::with_capacity(groups.len());
+    let mut logical_digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());
+
+    for (pack_idx, group) in groups.iter().enumerate() {
+        if group.len() < 2 {
+            // Singleton (a lone small file or a >= threshold file): emit unchanged
+            // and push its own logical digest. Byte-identical to today.
+            let entry = &entries[group[0]];
+            let (size, content_id, content_sha256) =
+                hash_file_streaming(&entry.abs_path, &mut hash_buf)
+                    .await
+                    .map_err(|e| RqError::Source(e.into_message()))?;
+            logical_digests.push(EntryDigest {
+                rel_path: entry.rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            });
+            new_entries.push(entry.clone());
+            continue;
+        }
+
+        // 2+ small files → materialize a combined object.
+        let pack_path = tempdir.path().join(format!("pack-{pack_idx}"));
+        let mut pack_file = crate::fs::File::create(&pack_path)
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", pack_path.display())))?;
+        let mut members: Vec<PackedMember> = Vec::with_capacity(group.len());
+        let mut offset: u64 = 0;
+        for &member_idx in group {
+            let entry = &entries[member_idx];
+            // Hash the member with the SAME streaming helper the rest of the
+            // transport uses, so its size / content_id / sha are byte-identical
+            // to a non-packed transfer of the same file.
+            let (len, content_id, content_sha256) =
+                hash_file_streaming(&entry.abs_path, &mut hash_buf)
+                    .await
+                    .map_err(|e| RqError::Source(e.into_message()))?;
+            // Copy the member bytes into the pack temp file at the running offset.
+            let mut src = crate::fs::File::open(&entry.abs_path)
+                .await
+                .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))?;
+            loop {
+                let (returned, n) = src
+                    .read_into_vec(std::mem::take(&mut hash_buf))
+                    .await
+                    .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))?;
+                hash_buf = returned;
+                if n == 0 {
+                    break;
+                }
+                pack_file
+                    .write_all(&hash_buf[..n])
+                    .await
+                    .map_err(|e| RqError::Source(format!("{}: {e}", pack_path.display())))?;
+            }
+            members.push(PackedMember {
+                rel_path: entry.rel_path.clone(),
+                offset,
+                len,
+                sha256_hex: hex_encode(&content_sha256),
+            });
+            logical_digests.push(EntryDigest {
+                rel_path: entry.rel_path.clone(),
+                size: len,
+                content_id,
+                content_sha256,
+            });
+            offset = offset.saturating_add(len);
+        }
+        pack_file
+            .flush()
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", pack_path.display())))?;
+        drop(pack_file);
+
+        new_entries.push(RqSourceEntry {
+            rel_path: format!(".atp-pack-{pack_idx}"),
+            abs_path: pack_path,
+            members,
+        });
+    }
+
+    Ok((new_entries, logical_digests, Some(tempdir)))
 }
 
 /// Reduce an attacker-controlled `root_name` to a single safe path component
@@ -1413,6 +1615,42 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                         "duplicate manifest rel_path: {}",
                         entry.rel_path
                     )));
+                }
+                // E-15: a packed object carries a member offset table. Validate it
+                // off the wire (member paths, contiguity, and that the member lens
+                // tile the object exactly) so a hostile/malformed packed manifest
+                // fails closed before any decoder is allocated. The synthetic object
+                // `rel_path` (`.atp-pack-N`) is never committed; the member logical
+                // paths are what land on disk and must be unique + safe.
+                if !entry.members.is_empty() {
+                    let mut expected_offset = 0u64;
+                    for member in &entry.members {
+                        validate_manifest_rel_path(&member.rel_path)?;
+                        if !seen_rel_paths.insert(member.rel_path.as_str()) {
+                            return Err(RqError::Frame(format!(
+                                "duplicate packed member rel_path: {}",
+                                member.rel_path
+                            )));
+                        }
+                        if member.offset != expected_offset {
+                            return Err(RqError::Frame(format!(
+                                "packed member {} offset {} is not contiguous (expected {expected_offset})",
+                                member.rel_path, member.offset
+                            )));
+                        }
+                        expected_offset = expected_offset.checked_add(member.len).ok_or_else(|| {
+                            RqError::Frame(format!(
+                                "packed member {} length overflow",
+                                member.rel_path
+                            ))
+                        })?;
+                    }
+                    if expected_offset != entry.size {
+                        return Err(RqError::Frame(format!(
+                            "packed members cover {expected_offset} bytes but object {} declares {}",
+                            entry.rel_path, entry.size
+                        )));
+                    }
                 }
                 Ok(acc.saturating_add(entry.size))
             })?;
@@ -1965,8 +2203,20 @@ pub async fn send_path(
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
 
-    let (root_name, is_directory, entries) = collect_entries(source).await?;
+    let (root_name, is_directory, raw_entries) = collect_entries(source).await?;
+    // E-15: coalesce sub-threshold files into fewer/larger combined RaptorQ
+    // objects. `entries` are the OBJECTS to spray (a packed entry's `abs_path`
+    // points at a temp file holding the member concatenation); `logical_digests`
+    // are the per-LOGICAL-FILE digests that drive the merkle root. For the
+    // no-packing case `entries == raw_entries` and `logical_digests` equals the
+    // per-file digests, so everything is byte-identical to a prior transfer. The
+    // temp dir owns every pack temp file and must outlive the spray loop below.
+    let (entries, logical_digests, _pack_tempdir) = pack_small_files(raw_entries).await?;
+
     let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
+    // Per-OBJECT digests: size + sha of each entry's `abs_path` (the temp file for
+    // packed entries). These feed the manifest entry size/sha (object-level verify)
+    // and the effective block size — they describe the RaptorQ objects on the wire.
     let mut digests = Vec::with_capacity(entries.len());
     let mut total_bytes = 0u64;
     for entry in &entries {
@@ -1993,16 +2243,19 @@ pub async fn send_path(
     }
     config.max_block_size = effective_transfer_max_block_size(&config, &digests)?;
 
-    let merkle_root_hex = flat_merkle_root_from_digests(&digests);
-    let manifest_entries: Vec<ManifestEntry> = digests
+    // Merkle root is over the LOGICAL files (members flattened), identical on both
+    // sides regardless of how files were packed into objects.
+    let merkle_root_hex = flat_merkle_root_from_digests(&logical_digests);
+    let manifest_entries: Vec<ManifestEntry> = entries
         .iter()
+        .zip(digests.iter())
         .enumerate()
-        .map(|(i, digest)| ManifestEntry {
+        .map(|(i, (entry, digest))| ManifestEntry {
             index: u32::try_from(i).unwrap_or(u32::MAX),
             rel_path: digest.rel_path.clone(),
             size: digest.size,
             sha256_hex: hex_encode(&digest.content_sha256),
-            members: Vec::new(),
+            members: entry.members.clone(),
         })
         .collect();
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
@@ -3764,8 +4017,41 @@ fn object_params_for(
     )
 }
 
+/// Read the byte range a packed member occupies from its staging file.
+///
+/// Thin `u64` wrapper over [`read_source_range`] for [`PackedMember`] offsets;
+/// fails closed if the offset/length overflow `usize` or the staging file is
+/// shorter than `offset + len` (a short read).
+///
+/// # Errors
+///
+/// Returns [`RqError::Coding`] on an out-of-range offset/length, or
+/// [`RqError::Source`] on a seek/read failure.
+async fn read_member_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, RqError> {
+    let offset = usize::try_from(offset).map_err(|_| {
+        RqError::Coding(format!(
+            "{}: packed member offset does not fit usize: {offset}",
+            path.display()
+        ))
+    })?;
+    let len = usize::try_from(len).map_err(|_| {
+        RqError::Coding(format!(
+            "{}: packed member length does not fit usize: {len}",
+            path.display()
+        ))
+    })?;
+    read_source_range(path, offset, len).await
+}
+
 /// Verify every entry (SHA-256 + rebuilt merkle root) and, on success, atomically
 /// write them to `dest_dir`.
+///
+/// E-15: an entry with non-empty `members` is a combined RaptorQ object; its
+/// staging file is split into the member byte ranges, each member is verified
+/// against its own SHA-256, and on commit the member files (not the packed
+/// object) are written into place. The merkle root is rebuilt over the LOGICAL
+/// files (members flattened), matching the sender's logical root. Verification is
+/// fully separated from commit so a sha/merkle mismatch writes NOTHING.
 async fn verify_and_commit(
     manifest: &TransferManifest,
     decoders: &mut [EntryDecoder],
@@ -3784,8 +4070,26 @@ async fn verify_and_commit(
 
     let mut sha_ok = true;
     let mut received: u64 = 0;
-    let mut digests: Vec<EntryDigest> = Vec::with_capacity(manifest.entries.len());
-    let mut staging_paths: Vec<PathBuf> = Vec::with_capacity(manifest.entries.len());
+    // `logical_digests` holds one digest per LOGICAL file (members flattened) and
+    // drives the merkle check, matching the sender's logical root.
+    let mut logical_digests: Vec<EntryDigest> = Vec::with_capacity(manifest.entries.len());
+    // One commit plan per entry: rename the staging file (unpacked) or split it
+    // into member files (packed). Built only during verification; nothing is
+    // written until the sha+merkle gate passes.
+    enum EntryCommit {
+        /// Unpacked entry: rename its staging file to a single destination.
+        Rename {
+            rel_path: String,
+            staging_path: PathBuf,
+        },
+        /// Packed entry: split the staging file into member byte ranges.
+        Split {
+            staging_path: PathBuf,
+            members: Vec<PackedMember>,
+        },
+    }
+    let mut commits: Vec<EntryCommit> = Vec::with_capacity(manifest.entries.len());
+    let mut logical_files: u64 = 0;
     let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
     for e in &manifest.entries {
         let Some(decoder) = decoders.iter().find(|d| d.index == e.index) else {
@@ -3800,6 +4104,8 @@ async fn verify_and_commit(
         if !decoder.complete {
             sha_ok = false;
         }
+        // Object-level integrity: the staging file's size + SHA-256 must match the
+        // manifest entry. This applies to packed objects too (the concatenation).
         let (size, content_id, content_sha256) =
             hash_file_streaming(&decoder.staging_path, &mut hash_buf)
                 .await
@@ -3808,16 +4114,51 @@ async fn verify_and_commit(
         if size != e.size || hex_encode(&content_sha256) != e.sha256_hex {
             sha_ok = false;
         }
-        digests.push(EntryDigest {
-            rel_path: e.rel_path.clone(),
-            size,
-            content_id,
-            content_sha256,
-        });
-        staging_paths.push(decoder.staging_path.clone());
+
+        if e.members.is_empty() {
+            // Normal single-file entry: its content IS the file (byte-identical to
+            // the prior wire). Its own digest is the logical digest; rename on commit.
+            logical_digests.push(EntryDigest {
+                rel_path: e.rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            });
+            logical_files = logical_files.saturating_add(1);
+            commits.push(EntryCommit::Rename {
+                rel_path: e.rel_path.clone(),
+                staging_path: decoder.staging_path.clone(),
+            });
+        } else {
+            // E-15 packed object: split the staging file into member byte ranges,
+            // verify each member's own SHA-256, and build a per-member logical
+            // digest. The packed object itself is not committed.
+            for member in &e.members {
+                let bytes =
+                    read_member_range(&decoder.staging_path, member.offset, member.len).await?;
+                let member_sha: [u8; 32] = Sha256::digest(&bytes).into();
+                if hex_encode(&member_sha) != member.sha256_hex {
+                    sha_ok = false;
+                }
+                let member_content_id = crate::atp::object::ObjectId::content(
+                    crate::atp::object::ContentId::from_bytes(&bytes),
+                );
+                logical_digests.push(EntryDigest {
+                    rel_path: member.rel_path.clone(),
+                    size: member.len,
+                    content_id: member_content_id,
+                    content_sha256: member_sha,
+                });
+                logical_files = logical_files.saturating_add(1);
+            }
+            commits.push(EntryCommit::Split {
+                staging_path: decoder.staging_path.clone(),
+                members: e.members.clone(),
+            });
+        }
     }
 
-    let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex;
+    let merkle_ok = flat_merkle_root_from_digests(&logical_digests) == manifest.merkle_root_hex;
 
     let committed = sha_ok && merkle_ok;
     let mut committed_paths: Vec<String> = Vec::new();
@@ -3826,37 +4167,103 @@ async fn verify_and_commit(
         // single safe component so a hostile (absolute / separator-bearing)
         // value cannot escape `dest_dir`.
         let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
-        let commit_targets: Vec<(&ManifestEntry, &PathBuf, PathBuf)> = manifest
-            .entries
-            .iter()
-            .zip(staging_paths.iter())
-            .map(|(entry, staging_path)| {
-                let out_path = if manifest.is_directory {
-                    join_relative(&base, &entry.rel_path)?
-                } else {
-                    base.clone()
-                };
-                Ok((entry, staging_path, out_path))
-            })
-            .collect::<Result<_, RqError>>()?;
 
-        for (_, _, out_path) in &commit_targets {
+        // Resolve every LOGICAL destination path, rejecting any symlink prefix,
+        // before writing anything.
+        enum CommitWrite {
+            Rename {
+                staging_path: PathBuf,
+                out_path: PathBuf,
+            },
+            Member {
+                staging_path: PathBuf,
+                offset: u64,
+                len: u64,
+                out_path: PathBuf,
+            },
+        }
+        let mut writes: Vec<CommitWrite> = Vec::with_capacity(logical_digests.len());
+        for commit in &commits {
+            match commit {
+                EntryCommit::Rename {
+                    rel_path,
+                    staging_path,
+                } => {
+                    let out_path = if manifest.is_directory {
+                        join_relative(&base, rel_path)?
+                    } else {
+                        base.clone()
+                    };
+                    writes.push(CommitWrite::Rename {
+                        staging_path: staging_path.clone(),
+                        out_path,
+                    });
+                }
+                EntryCommit::Split {
+                    staging_path,
+                    members,
+                } => {
+                    // A packed object only ever occurs inside a directory transfer
+                    // (the single-file path never packs), so members join under base.
+                    for member in members {
+                        let out_path = join_relative(&base, &member.rel_path)?;
+                        writes.push(CommitWrite::Member {
+                            staging_path: staging_path.clone(),
+                            offset: member.offset,
+                            len: member.len,
+                            out_path,
+                        });
+                    }
+                }
+            }
+        }
+
+        for write in &writes {
+            let out_path = match write {
+                CommitWrite::Rename { out_path, .. } | CommitWrite::Member { out_path, .. } => {
+                    out_path
+                }
+            };
             reject_destination_symlink_prefix(&base, out_path).await?;
         }
 
-        for (_, staging_path, out_path) in commit_targets {
-            if let Some(parent) = out_path.parent() {
-                crate::fs::create_dir_all(parent).await?;
+        for write in writes {
+            match write {
+                CommitWrite::Rename {
+                    staging_path,
+                    out_path,
+                } => {
+                    if let Some(parent) = out_path.parent() {
+                        crate::fs::create_dir_all(parent).await?;
+                    }
+                    crate::fs::rename(&staging_path, &out_path).await?;
+                    committed_paths.push(out_path.display().to_string());
+                }
+                CommitWrite::Member {
+                    staging_path,
+                    offset,
+                    len,
+                    out_path,
+                } => {
+                    if let Some(parent) = out_path.parent() {
+                        crate::fs::create_dir_all(parent).await?;
+                    }
+                    // Re-read the verified member byte range from the packed staging
+                    // file and write it into place (the packed object is consumed,
+                    // not renamed). Members are bounded by PACK_TARGET, so this is
+                    // O(member) memory.
+                    let bytes = read_member_range(&staging_path, offset, len).await?;
+                    crate::fs::write(&out_path, &bytes).await?;
+                    committed_paths.push(out_path.display().to_string());
+                }
             }
-            crate::fs::rename(staging_path, &out_path).await?;
-            committed_paths.push(out_path.display().to_string());
         }
     }
 
     Ok(ReceiveReceipt {
         committed,
         bytes_received: received,
-        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        files: u32::try_from(logical_files).unwrap_or(u32::MAX),
         sha_ok,
         merkle_ok,
         symbols_accepted,
@@ -5752,5 +6159,380 @@ mod tests {
         let p2 = object_params_for(ObjectId::new(0, 0), 20 * 1024 * 1024, 1024, 8 * 1024 * 1024);
         assert_eq!(p2.source_blocks, 3);
         assert_eq!(p2.symbols_per_block, 8192);
+    }
+
+    // ─── E-15 tree coalescing (pack / split) ───────────────────────────────
+
+    fn source_entry(dir: &Path, rel: &str, bytes: &[u8]) -> RqSourceEntry {
+        let abs = dir.join(rel);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(&abs, bytes).expect("write source file");
+        RqSourceEntry {
+            rel_path: rel.to_string(),
+            abs_path: abs,
+            members: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pack_small_files_records_offsets_lens_and_member_sha() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Three small files (< PACK_THRESHOLD) -> one combined object.
+        let a = vec![0xAAu8; 100];
+        let b = vec![0xBBu8; 250];
+        let c = vec![0xCCu8; 7];
+        let entries = vec![
+            source_entry(dir.path(), "d/a", &a),
+            source_entry(dir.path(), "d/b", &b),
+            source_entry(dir.path(), "z/c", &c),
+        ];
+
+        let (packed, logical_digests, tempdir) =
+            futures_lite::future::block_on(pack_small_files(entries)).expect("pack");
+        let _tempdir = tempdir.expect("a pack temp dir was produced");
+
+        assert_eq!(packed.len(), 1, "three small files coalesce into one object");
+        let pack = &packed[0];
+        assert_eq!(pack.rel_path, ".atp-pack-0");
+        assert_eq!(pack.members.len(), 3);
+
+        // Members appear in sorted (manifest) order with contiguous offsets.
+        assert_eq!(pack.members[0].rel_path, "d/a");
+        assert_eq!(pack.members[0].offset, 0);
+        assert_eq!(pack.members[0].len, 100);
+        assert_eq!(pack.members[1].rel_path, "d/b");
+        assert_eq!(pack.members[1].offset, 100);
+        assert_eq!(pack.members[1].len, 250);
+        assert_eq!(pack.members[2].rel_path, "z/c");
+        assert_eq!(pack.members[2].offset, 350);
+        assert_eq!(pack.members[2].len, 7);
+
+        // Per-member sha matches the file content.
+        assert_eq!(pack.members[0].sha256_hex, hex_encode(&Sha256::digest(&a)));
+        assert_eq!(pack.members[1].sha256_hex, hex_encode(&Sha256::digest(&b)));
+        assert_eq!(pack.members[2].sha256_hex, hex_encode(&Sha256::digest(&c)));
+
+        // The temp object is the concatenation in offset order.
+        let on_disk = std::fs::read(&pack.abs_path).expect("read pack object");
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&a);
+        expected.extend_from_slice(&b);
+        expected.extend_from_slice(&c);
+        assert_eq!(on_disk, expected, "pack object is the member concatenation");
+
+        // Logical digests cover every logical file (members flattened).
+        assert_eq!(logical_digests.len(), 3);
+        let logical_root = flat_merkle_root_from_digests(&logical_digests);
+        // Same set of {rel_path, content} -> same root as the unpacked files.
+        let direct: Vec<EntryDigest> = [("d/a", &a), ("d/b", &b), ("z/c", &c)]
+            .into_iter()
+            .map(|(rel, bytes)| EntryDigest {
+                rel_path: rel.to_string(),
+                size: bytes.len() as u64,
+                content_id: crate::atp::object::ObjectId::content(
+                    crate::atp::object::ContentId::from_bytes(bytes),
+                ),
+                content_sha256: Sha256::digest(bytes).into(),
+            })
+            .collect();
+        assert_eq!(
+            logical_root,
+            flat_merkle_root_from_digests(&direct),
+            "logical merkle root is invariant to packing"
+        );
+    }
+
+    #[test]
+    fn pack_small_files_leaves_large_files_unpacked_and_root_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Two files >= PACK_THRESHOLD: neither is packed, nothing materialized.
+        let big1 = vec![1u8; PACK_THRESHOLD as usize];
+        let big2 = vec![2u8; PACK_THRESHOLD as usize + 13];
+        let entries = vec![
+            source_entry(dir.path(), "big1", &big1),
+            source_entry(dir.path(), "big2", &big2),
+        ];
+
+        let (packed, logical_digests, tempdir) =
+            futures_lite::future::block_on(pack_small_files(entries)).expect("pack");
+        assert!(tempdir.is_none(), "no packing => no temp dir");
+        assert_eq!(packed.len(), 2);
+        assert!(packed.iter().all(|e| e.members.is_empty()));
+        assert_eq!(packed[0].rel_path, "big1");
+        assert_eq!(packed[1].rel_path, "big2");
+        assert_eq!(logical_digests.len(), 2);
+        // Byte-identical to the per-file digest path the caller would build.
+        assert_eq!(logical_digests[0].size, big1.len() as u64);
+        assert_eq!(logical_digests[1].size, big2.len() as u64);
+    }
+
+    #[test]
+    fn pack_small_files_single_small_file_is_not_packed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entries = vec![source_entry(dir.path(), "only", b"tiny")];
+        let (packed, logical_digests, tempdir) =
+            futures_lite::future::block_on(pack_small_files(entries)).expect("pack");
+        assert!(tempdir.is_none(), "a lone small file is not packed");
+        assert_eq!(packed.len(), 1);
+        assert!(packed[0].members.is_empty());
+        assert_eq!(packed[0].rel_path, "only");
+        assert_eq!(logical_digests.len(), 1);
+    }
+
+    /// End-to-end (in-process) split: build a packed manifest + a staging file
+    /// holding the member concatenation, then verify_and_commit must split it
+    /// into the member files on disk, byte-identical.
+    #[test]
+    fn verify_and_commit_splits_packed_object_into_members() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let staging_dir = dest.path().join(".atp-rq-test-staging");
+        std::fs::create_dir_all(&staging_dir).expect("staging dir");
+
+        let a = b"first-member-bytes".to_vec();
+        let b = b"second member, a little longer".to_vec();
+        let mut object = Vec::new();
+        object.extend_from_slice(&a);
+        object.extend_from_slice(&b);
+        let staging_path = staging_dir.join("0");
+        std::fs::write(&staging_path, &object).expect("write packed staging object");
+
+        let members = vec![
+            PackedMember {
+                rel_path: "dir/a.txt".to_string(),
+                offset: 0,
+                len: a.len() as u64,
+                sha256_hex: hex_encode(&Sha256::digest(&a)),
+            },
+            PackedMember {
+                rel_path: "dir/sub/b.txt".to_string(),
+                offset: a.len() as u64,
+                len: b.len() as u64,
+                sha256_hex: hex_encode(&Sha256::digest(&b)),
+            },
+        ];
+
+        // Merkle root over the LOGICAL files (what the sender computes).
+        let logical: Vec<EntryDigest> = [("dir/a.txt", &a), ("dir/sub/b.txt", &b)]
+            .into_iter()
+            .map(|(rel, bytes)| EntryDigest {
+                rel_path: rel.to_string(),
+                size: bytes.len() as u64,
+                content_id: crate::atp::object::ObjectId::content(
+                    crate::atp::object::ContentId::from_bytes(bytes),
+                ),
+                content_sha256: Sha256::digest(bytes).into(),
+            })
+            .collect();
+        let merkle_root_hex = flat_merkle_root_from_digests(&logical);
+        let object_sha = hex_encode(&Sha256::digest(&object));
+
+        let manifest = TransferManifest {
+            transfer_id: "rqtransfer1".to_string(),
+            root_name: "payload".to_string(),
+            is_directory: true,
+            total_bytes: object.len() as u64,
+            merkle_root_hex,
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: ".atp-pack-0".to_string(),
+                size: object.len() as u64,
+                sha256_hex: object_sha,
+                members,
+            }],
+        };
+        let mut decoders = vec![EntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size: object.len() as u64,
+            pipeline: None,
+            complete: true,
+            staging_path,
+            file: None,
+            bytes_written: object.len() as u64,
+            max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+            source_streaming: false,
+            source_blocks: Vec::new(),
+        }];
+
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+        ))
+        .expect("verify_and_commit");
+
+        assert!(receipt.committed, "packed transfer must commit: {receipt:?}");
+        assert!(receipt.sha_ok);
+        assert!(receipt.merkle_ok);
+        assert_eq!(receipt.files, 2, "two LOGICAL files delivered");
+
+        let out_a = dest.path().join("payload/dir/a.txt");
+        let out_b = dest.path().join("payload/dir/sub/b.txt");
+        assert_eq!(std::fs::read(&out_a).expect("member a"), a);
+        assert_eq!(std::fs::read(&out_b).expect("member b"), b);
+        // The synthetic packed object name must not appear on disk.
+        assert!(!dest.path().join("payload/.atp-pack-0").exists());
+    }
+
+    #[test]
+    fn validate_manifest_checks_packed_member_table() {
+        // A well-formed packed manifest entry is accepted.
+        let good_members = vec![
+            PackedMember {
+                rel_path: "dir/a".to_string(),
+                offset: 0,
+                len: 10,
+                sha256_hex: "aa".repeat(32),
+            },
+            PackedMember {
+                rel_path: "dir/b".to_string(),
+                offset: 10,
+                len: 5,
+                sha256_hex: "bb".repeat(32),
+            },
+        ];
+        let ok_entry = ManifestEntry {
+            index: 0,
+            rel_path: ".atp-pack-0".to_string(),
+            size: 15,
+            sha256_hex: "cc".repeat(32),
+            members: good_members.clone(),
+        };
+        assert!(validate_manifest(&manifest_with(vec![ok_entry], 15), &RqConfig::default()).is_ok());
+
+        // Non-contiguous offsets fail closed.
+        let mut gap = good_members.clone();
+        gap[1].offset = 11;
+        let entry = ManifestEntry {
+            index: 0,
+            rel_path: ".atp-pack-0".to_string(),
+            size: 15,
+            sha256_hex: "cc".repeat(32),
+            members: gap,
+        };
+        assert!(matches!(
+            validate_manifest(&manifest_with(vec![entry], 15), &RqConfig::default()),
+            Err(RqError::Frame(m)) if m.contains("not contiguous")
+        ));
+
+        // Member lengths must tile the object exactly.
+        let entry = ManifestEntry {
+            index: 0,
+            rel_path: ".atp-pack-0".to_string(),
+            size: 99,
+            sha256_hex: "cc".repeat(32),
+            members: good_members.clone(),
+        };
+        assert!(matches!(
+            validate_manifest(&manifest_with(vec![entry], 99), &RqConfig::default()),
+            Err(RqError::Frame(m)) if m.contains("members cover")
+        ));
+
+        // An unsafe member rel_path fails closed.
+        let mut evil = good_members;
+        evil[1].rel_path = "../escape".to_string();
+        let entry = ManifestEntry {
+            index: 0,
+            rel_path: ".atp-pack-0".to_string(),
+            size: 15,
+            sha256_hex: "cc".repeat(32),
+            members: evil,
+        };
+        assert!(matches!(
+            validate_manifest(&manifest_with(vec![entry], 15), &RqConfig::default()),
+            Err(RqError::Source(m)) if m.contains("unsafe manifest rel_path")
+        ));
+    }
+
+    /// A corrupted member sha must fail closed: nothing is committed/written.
+    #[test]
+    fn verify_and_commit_rejects_packed_object_with_wrong_member_sha() {
+        let dest = tempfile::tempdir().expect("dest dir");
+        let staging_dir = dest.path().join(".atp-rq-test-staging");
+        std::fs::create_dir_all(&staging_dir).expect("staging dir");
+
+        let a = b"member-one".to_vec();
+        let b = b"member-two".to_vec();
+        let mut object = Vec::new();
+        object.extend_from_slice(&a);
+        object.extend_from_slice(&b);
+        let staging_path = staging_dir.join("0");
+        std::fs::write(&staging_path, &object).expect("write packed staging object");
+
+        // Build a correct logical merkle root, but lie about member b's sha so
+        // the per-member check fails (object sha + merkle stay self-consistent).
+        let logical: Vec<EntryDigest> = [("a.txt", &a), ("b.txt", &b)]
+            .into_iter()
+            .map(|(rel, bytes)| EntryDigest {
+                rel_path: rel.to_string(),
+                size: bytes.len() as u64,
+                content_id: crate::atp::object::ObjectId::content(
+                    crate::atp::object::ContentId::from_bytes(bytes),
+                ),
+                content_sha256: Sha256::digest(bytes).into(),
+            })
+            .collect();
+        let merkle_root_hex = flat_merkle_root_from_digests(&logical);
+
+        let manifest = TransferManifest {
+            transfer_id: "rqtransfer1".to_string(),
+            root_name: "payload".to_string(),
+            is_directory: true,
+            total_bytes: object.len() as u64,
+            merkle_root_hex,
+            entries: vec![ManifestEntry {
+                index: 0,
+                rel_path: ".atp-pack-0".to_string(),
+                size: object.len() as u64,
+                sha256_hex: hex_encode(&Sha256::digest(&object)),
+                members: vec![
+                    PackedMember {
+                        rel_path: "a.txt".to_string(),
+                        offset: 0,
+                        len: a.len() as u64,
+                        sha256_hex: hex_encode(&Sha256::digest(&a)),
+                    },
+                    PackedMember {
+                        rel_path: "b.txt".to_string(),
+                        offset: a.len() as u64,
+                        len: b.len() as u64,
+                        // WRONG sha for member b.
+                        sha256_hex: "ff".repeat(32),
+                    },
+                ],
+            }],
+        };
+        let mut decoders = vec![EntryDecoder {
+            index: 0,
+            object_id: entry_object_id(&manifest.transfer_id, 0),
+            size: object.len() as u64,
+            pipeline: None,
+            complete: true,
+            staging_path,
+            file: None,
+            bytes_written: object.len() as u64,
+            max_block_size: DEFAULT_MAX_BLOCK_SIZE,
+            source_streaming: false,
+            source_blocks: Vec::new(),
+        }];
+
+        let receipt = futures_lite::future::block_on(verify_and_commit(
+            &manifest,
+            &mut decoders,
+            dest.path(),
+            0,
+            0,
+        ))
+        .expect("verify_and_commit returns a receipt");
+
+        assert!(!receipt.committed, "wrong member sha must fail closed");
+        assert!(!receipt.sha_ok);
+        // Nothing written into place.
+        assert!(!dest.path().join("payload/a.txt").exists());
+        assert!(!dest.path().join("payload/b.txt").exists());
     }
 }
