@@ -211,6 +211,24 @@ to wire.
   reactor/timer wakeups per symbol. **Next:** build a NON-stripped release + `perf --call-graph dwarf`
   to NAME the dominant ctx-switch source before implementing (stripped profile gives only the shape).
 
+### E-11 ★★ CRITICAL · bad/broken-regime SUPER-LINEAR scaling → 500M+/bad TIMES OUT (>30min)
+- **Symptom (full matrix, 2026-06-18):** 50M/bad converges in 76s (fb=3) but **500M/bad TIMES OUT
+  at the 1800s cell cap, sha_ok=false** — 10× the data → >23× the time (super-linear). atp does NOT
+  complete a large file over a bad link in reasonable time. (5G/bad and 5G/broken will time out too.)
+  This is the #1 blocker to "beat rsync on a bad link AT SCALE" — rsync does 500M/50mbit in ~minutes.
+- **Hypotheses (rank):** (H1) ★ single-core RaptorQ DECODE wall — 500M @ max_block_size 512KB ≈ 1000
+  blocks; under 2% loss many blocks need the O(K²) inactivation solve; ~0.8 MB/s decode → 500MB ≈
+  625s+ just for decode if a meaningful fraction go FEC; compounds with (H2). (H2) feedback-round work
+  is O(blocks) per round and rounds grow → O(blocks × rounds) bookkeeping at 1000 blocks. (H3) FEC
+  symbol-retention memory grows O(file) (50M/bad already hit 483MB) → at 500M ≈ GBs → pressure.
+- **Levers (high EV):** **B-10 parallel per-block decode** (blocks independent → decode on the
+  blocking pool concurrently; directly attacks H1; coordinate w/ peer 317hxr.7.3) + **B-5 adaptive
+  FEC/source-retransmit** so fewer blocks fall to the expensive solve + **bounded FEC retention**
+  (cap symbol memory, attacks H3). Also revisit max_block_size (bigger blocks = fewer blocks but
+  bigger K = slower per-block solve — there's an optimum; E-4).
+- **Next:** focused 500M/bad run with ATP_RQ_TRACE on an IDLE machine → measure decode time vs
+  feedback-round time vs memory to confirm H1/H2/H3 before implementing. Profile-first.
+
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
 advanced math), /alien-graveyard (buried primitives). Each entry: idea · math/CS family · EV · risk ·
