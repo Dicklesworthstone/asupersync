@@ -313,6 +313,24 @@ to wire.
   → K≈14k → ~196 MB matrix/block, bad); (b) ★ MULTI-OBJECT split: chunk a huge entry into ≤2 GB
   RaptorQ sub-objects (keeps K sane), transfer + reassemble — the right fix, a real feature. The 5G
   matrix rows are recorded `error` (correctly excluded from headline); re-run 5G only after the fix.
+- **★ E-14 · large-TREE FD exhaustion (real atp bug, found 2026-06-18).** Manual atp tree_small
+  transfer (2000 files, 6.2 MB total, loopback no-loss) → receiver dies **"Too many open files
+  (os error 24)"**, sender then "Connection refused". The receiver keeps an OPEN staging FD PER
+  ENTRY (`EntryDecoder.file`), and the sprayer feeds all entries concurrently → 2000 simultaneous
+  open files > default `ulimit -n` 1024 → EMFILE. rsync transfers 2000 files fine (open/close per
+  file). ⇒ atp **fails any single transfer with >~1000 files** = a real "any-workload" blocker (the
+  user explicitly wanted deeply-nested power-law trees). **Fix:** bound concurrent open staging FDs —
+  open-write-close per entry, OR an LRU FD pool, OR process entries in a bounded window (ties to the
+  in-flight-windowing idea); the benchmark can also raise `ulimit -n` as a stopgap to get valid tree
+  numbers for ≤N-file trees. **Tree dimension also has a HARNESS verify bug** (separate): rsync tree
+  cells report `sha_mismatch` because `run_matrix_cell.sh`'s `manifest_tree_digest` (paths from
+  gen_tree manifest) vs `tree_digest($DEST)` (`find . -type f` relpaths under DEST/<root_name>) use
+  different canonical path forms → never match even when bytes are correct. Fix the canonical form
+  (same relpath root) before trusting ANY tree row. ⇒ **TREE dimension currently un-scorable** (atp
+  EMFILE + rsync verify-mismatch); single-file dims (500K–500M × 4 regimes) remain VALID + are the
+  headline. Net: the gauntlet surfaced THREE real atp gaps — E-11 (alloc/dispatch churn, bad-large +
+  perfect), E-12 (>2 GB object), E-14 (>1000-file tree FD) — all genuine "beat rsync everywhere"
+  blockers, each now precisely characterized.
 
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
