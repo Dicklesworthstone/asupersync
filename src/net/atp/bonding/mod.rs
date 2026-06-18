@@ -17,6 +17,7 @@
 pub mod assignment;
 pub mod descriptor;
 pub mod esi;
+pub mod handshake;
 
 pub use assignment::{
     BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondedSymbolAuthVerdict,
@@ -26,4 +27,8 @@ pub use assignment::{
 pub use descriptor::{BondEntry, BondProofError, BondTransferDescriptor};
 pub use esi::{
     DonorEsiStream, EsiPartition, EsiPartitionError, donor_esi_stream, esi_for_donor, owns_esi,
+};
+pub use handshake::{
+    BONDING_HANDSHAKE_VERSION, BondTransport, BondingAgreement, BondingAssignmentMode,
+    BondingHandshake, BondingHandshakeError,
 };
