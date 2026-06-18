@@ -1436,7 +1436,11 @@ impl QpackDecoderFeedbackState {
         Ok(())
     }
 
-    fn apply_insert_count_increment(&mut self, increment: u64) -> Result<(), H3NativeError> {
+    fn apply_insert_count_increment(
+        &mut self,
+        increment: u64,
+        insertion_counter: u64,
+    ) -> Result<(), H3NativeError> {
         if increment == 0 {
             return self.fail(H3NativeError::InvalidFrame(
                 "qpack decoder feedback increment must be non-zero",
@@ -1447,6 +1451,16 @@ impl QpackDecoderFeedbackState {
                 "qpack known received count overflow",
             ));
         };
+        // RFC 9204 §4.4.3: the Known Received Count must never exceed the number
+        // of entries the encoder has actually inserted. A peer that drives it past
+        // the insertion counter could prematurely flip blocked streams to Ready
+        // (unblock gates on required_insert_count <= known_received_count), so this
+        // is a decoder-stream error, not a silently-accepted advance.
+        if next > insertion_counter {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack known received count exceeds encoder insert count",
+            ));
+        }
         self.known_received_count = next;
         Ok(())
     }
@@ -1487,7 +1501,10 @@ pub fn qpack_apply_decoder_instruction(
             feedback.apply_stream_cancellation(context, *stream_id)
         }
         QpackDecoderInstruction::InsertCountIncrement { increment } => {
-            feedback.apply_insert_count_increment(*increment)
+            feedback.apply_insert_count_increment(
+                *increment,
+                context.dynamic_table().insertion_counter(),
+            )
         }
     }
 }
@@ -7490,9 +7507,17 @@ mod tests {
 
     #[test]
     fn qpack_decoder_feedback_insert_count_increment_boundaries() {
-        let mut context = QpackContext::new(128);
-        let mut feedback = QpackDecoderFeedbackState::new();
+        let mut context = QpackContext::new(4096);
+        // The encoder has inserted three entries; the Known Received Count may
+        // advance up to three but RFC 9204 §4.4.3 forbids it going beyond.
+        for i in 0..3 {
+            context
+                .insert_dynamic_entry(format!("k{i}"), format!("v{i}"))
+                .expect("insert dynamic entry");
+        }
+        assert_eq!(context.dynamic_table().insertion_counter(), 3);
 
+        let mut feedback = QpackDecoderFeedbackState::new();
         qpack_apply_decoder_instruction(
             &mut feedback,
             &mut context,
@@ -7507,32 +7532,43 @@ mod tests {
             H3QpackMode::DynamicTableAllowed,
             &QpackDecoderInstruction::InsertCountIncrement { increment: 2 },
         )
-        .expect("increment many");
+        .expect("advance to the insert boundary");
         assert_eq!(feedback.known_received_count(), 3);
-        qpack_apply_decoder_instruction(
-            &mut feedback,
-            &mut context,
-            H3QpackMode::DynamicTableAllowed,
-            &QpackDecoderInstruction::InsertCountIncrement {
-                increment: u64::MAX - 3,
-            },
-        )
-        .expect("reach max boundary");
-        assert_eq!(feedback.known_received_count(), u64::MAX);
 
+        // Overshoot one past the insertion counter -> decoder-stream error.
         let err = qpack_apply_decoder_instruction(
             &mut feedback,
             &mut context,
             H3QpackMode::DynamicTableAllowed,
             &QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
         )
-        .expect_err("overflow");
+        .expect_err("known received count beyond inserts must be rejected");
         assert_eq!(
             err,
-            H3NativeError::InvalidFrame("qpack known received count overflow")
+            H3NativeError::InvalidFrame("qpack known received count exceeds encoder insert count")
         );
-        assert_eq!(feedback.known_received_count(), u64::MAX);
+        assert_eq!(
+            feedback.known_received_count(),
+            3,
+            "a rejected increment must not advance the count"
+        );
         assert_eq!(feedback.first_error(), Some(&err));
+
+        // A huge increment from zero is bounded by inserts just the same (the old
+        // u64::MAX path is now an overshoot, not a saturating accept).
+        let mut huge = QpackDecoderFeedbackState::new();
+        let err = qpack_apply_decoder_instruction(
+            &mut huge,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::InsertCountIncrement { increment: u64::MAX },
+        )
+        .expect_err("overshoot via a huge increment");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack known received count exceeds encoder insert count")
+        );
+        assert_eq!(huge.known_received_count(), 0);
 
         let mut zero = QpackDecoderFeedbackState::new();
         let err = qpack_apply_decoder_instruction(
@@ -8056,6 +8092,12 @@ mod tests {
             QpackBlockedStreamStatus::Blocked
         );
 
+        // A second insertion lets the Known Received Count (2) legitimately exceed
+        // the field section's required insert count (1) without overshooting the
+        // encoder's insertion counter (RFC 9204 §4.4.3).
+        context
+            .insert_dynamic_entry("x-boundary-2".to_string(), "boundary-2".to_string())
+            .expect("insert second dynamic entry");
         let mut greater_feedback = QpackDecoderFeedbackState::new();
         qpack_apply_decoder_instruction(
             &mut greater_feedback,
