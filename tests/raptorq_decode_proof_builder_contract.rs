@@ -8,6 +8,7 @@
 //!   - `DecodeProof::builder` / `DecodeProofBuilder::set_received`
 //!   - `DecodeProofBuilder::{peeling_mut, elimination_mut}`
 //!   - `DecodeProofBuilder::{set_success, set_failure, build}`
+//!
 //! The sibling recorder crates exercise the trace value types in isolation;
 //! this crate pins how the BUILDER threads them into a finished `DecodeProof`
 //! and enforces the safety guards on its terminal transitions.
@@ -163,7 +164,9 @@ fn set_success_records_count_and_deterministic_content_hash() {
                 );
                 source_payload_hash
             }
-            other => panic!("expected Success outcome, got {other:?}"),
+            ProofOutcome::Failure { reason } => {
+                panic!("expected Success outcome, got Failure({reason:?})")
+            }
         }
     };
 

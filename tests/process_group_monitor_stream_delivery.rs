@@ -165,7 +165,9 @@ fn closed_monitor_rolls_back_then_retry_delivers_the_same_events_once() {
                 "the undelivered batch must carry every pending event"
             );
         }
-        other => panic!("expected Closed, got {other:?}"),
+        GroupMonitorDeliveryError::Cancelled(reason) => {
+            panic!("expected Closed, got Cancelled({reason:?})")
+        }
     }
     assert!(err.to_string().contains("closed"));
 

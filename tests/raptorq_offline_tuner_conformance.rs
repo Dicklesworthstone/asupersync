@@ -270,7 +270,7 @@ fn emit_profile_pack_projection_is_consistent() {
     union.insert(pack.selected_tuning_candidate_id.clone());
     assert_eq!(
         union, all_ids,
-        "rejected ∪ {{selected}} must equal the full candidate set"
+        "selected and rejected ids must cover the full candidate set"
     );
 
     // Auto-window bounds. The addmul window is always ordered. The mul window is

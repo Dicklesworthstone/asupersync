@@ -99,7 +99,7 @@ fn peer_cred_on_pair_reports_this_process() {
         // by this process, that is our own pid.
         #[cfg(target_os = "linux")]
         {
-            let me = std::process::id() as i32;
+            let me = i32::try_from(std::process::id()).expect("process id fits pid_t");
             assert_eq!(ca.pid, Some(me), "peer pid is this process");
             assert_eq!(cb.pid, ca.pid, "both ends agree on the peer pid");
         }

@@ -361,11 +361,11 @@ fn redact_path_components(path: &str) -> String {
 }
 
 fn is_sensitive_file_component(lower: &str) -> bool {
+    let extension = std::path::Path::new(lower)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str);
     lower.starts_with("id_")
-        || lower.ends_with(".key")
-        || lower.ends_with(".pem")
-        || lower.ends_with(".p12")
-        || lower.ends_with(".pfx")
+        || matches!(extension, Some("key" | "pem" | "p12" | "pfx"))
         || lower.contains("password")
         || lower.contains("passwd")
         || lower.contains("secret")

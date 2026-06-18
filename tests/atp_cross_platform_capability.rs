@@ -452,10 +452,7 @@ fn detect_router_assist() -> CapabilityStatus {
 }
 
 fn detect_tailscale() -> CapabilityStatus {
-    if std::env::var("TAILSCALE_IP")
-        .ok()
-        .is_some_and(|ip| !ip.trim().is_empty())
-    {
+    if std::env::var("TAILSCALE_IP").is_ok_and(|ip| !ip.trim().is_empty()) {
         return supported("TAILSCALE_IP environment variable is set", BTreeMap::new());
     }
 

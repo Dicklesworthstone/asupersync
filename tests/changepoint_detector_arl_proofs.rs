@@ -58,8 +58,14 @@ impl Lcg {
     /// Symmetric jitter in `[-range, +range]` micro-units.
     fn jitter(&mut self, range: i64) -> i64 {
         debug_assert!(range > 0);
-        let span = (range as u64) * 2 + 1;
-        (self.next_u64() % span) as i64 - range
+        let range_u64 = u64::try_from(range).expect("jitter range must be positive");
+        let span = range_u64
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .expect("jitter span must fit u64");
+        let offset =
+            i64::try_from(self.next_u64() % span).expect("jitter offset must fit i64");
+        offset - range
     }
 }
 
@@ -383,14 +389,15 @@ fn monitor_replay_trace_is_byte_identical() {
     let mut rng = Lcg::new(0x5EED);
     let stream: Vec<(RuntimeMetricSeries, MetricSample)> = (0..120)
         .map(|i| {
+            let half_step = i64::from(i / 2);
             if i % 2 == 0 {
-                let ramp = 10 * SCALE + (i / 2) as i64 * 250_000 + rng.jitter(200_000);
+                let ramp = 10 * SCALE + half_step * 250_000 + rng.jitter(200_000);
                 (
                     RuntimeMetricSeries::ReadyQueueDepth,
                     MetricSample::from_micro_units(ramp),
                 )
             } else {
-                let fall = 20 * SCALE - (i / 2) as i64 * 250_000 + rng.jitter(200_000);
+                let fall = 20 * SCALE - half_step * 250_000 + rng.jitter(200_000);
                 (
                     RuntimeMetricSeries::DrainRate,
                     MetricSample::from_micro_units(fall),

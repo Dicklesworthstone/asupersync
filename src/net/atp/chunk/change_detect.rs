@@ -160,9 +160,11 @@ pub fn simhash64(features: impl IntoIterator<Item = u64>) -> u64 {
     hash
 }
 
-/// SimHash over a file's FastCDC chunk-id set. Each 32-byte chunk content hash is
-/// folded to a `u64` feature (its leading 8 bytes), so a file's identity is the
-/// distribution of its chunk-ids — order-independent and robust to local edits.
+/// SimHash over a file's FastCDC chunk-id set.
+///
+/// Each 32-byte chunk content hash is folded to a `u64` feature (its leading 8
+/// bytes), so a file's identity is the distribution of its chunk-ids —
+/// order-independent and robust to local edits.
 #[must_use]
 pub fn simhash_of_chunk_ids<'a>(chunk_ids: impl IntoIterator<Item = &'a [u8; 32]>) -> u64 {
     simhash64(chunk_ids.into_iter().map(|id| {
@@ -189,10 +191,11 @@ pub struct RenameMatch {
     pub similarity: f64,
 }
 
-/// Find the prior file whose SimHash is most similar to `current_simhash`, if any
-/// clears `min_similarity`. Use it to delta a renamed/copied file against its
-/// nearest prior instead of re-sending it whole. Returns `None` when nothing is
-/// similar enough (the file is genuinely new → send it).
+/// Find the prior file whose SimHash is most similar to `current_simhash`.
+///
+/// The match must clear `min_similarity`. Use it to delta a renamed/copied file
+/// against its nearest prior instead of re-sending it whole. Returns `None` when
+/// nothing is similar enough (the file is genuinely new → send it).
 #[must_use]
 pub fn best_rename_source<'a>(
     current_simhash: u64,
