@@ -6,7 +6,9 @@ use crate::types::Time;
 use std::sync::{Arc, Mutex};
 
 use super::pbft::{PbftConfig, PbftConsensus, PbftMessage, PbftNode, PbftTransport};
-use super::types::{ConsensusRequest, ReplicaId, SequenceNumber, ViewNumber};
+use super::types::{
+    ConsensusBatch, ConsensusRequest, MessageDigest, ReplicaId, SequenceNumber, ViewNumber,
+};
 
 /// Deterministic transport for testing PBFT.
 #[derive(Debug)]
@@ -133,6 +135,25 @@ fn test_pbft_node_creation() {
 }
 
 #[test]
+fn pbft_node_rejects_non_numeric_or_out_of_set_replica_id() {
+    let config = PbftConfig::new(4, 1).unwrap();
+
+    let non_numeric = PbftNode::new(
+        ReplicaId::new("node-a".to_string()),
+        config.clone(),
+        MockTransport::new(),
+    );
+    assert!(non_numeric.is_err());
+
+    let out_of_set = PbftNode::new(
+        ReplicaId::new("4".to_string()),
+        config,
+        MockTransport::new(),
+    );
+    assert!(out_of_set.is_err());
+}
+
+#[test]
 fn test_pbft_consensus_creation() {
     let replica_id = ReplicaId::new("1".to_string());
     let config = PbftConfig::new(4, 1).unwrap();
@@ -243,6 +264,126 @@ fn test_primary_election() {
     assert_eq!(ViewNumber::new(2).primary(4), 2);
     assert_eq!(ViewNumber::new(3).primary(4), 3);
     assert_eq!(ViewNumber::new(4).primary(4), 0); // Wraps around
+    assert_eq!(ViewNumber::new(4).primary(0), 0); // Fails closed instead of panicking
+}
+
+fn test_batch(payload: &'static [u8]) -> ConsensusBatch {
+    ConsensusBatch::new(vec![ConsensusRequest::new(
+        "client-1".to_string(),
+        Time::from_millis(0),
+        payload.to_vec(),
+    )])
+}
+
+fn preprepare_for(
+    view: ViewNumber,
+    sequence: SequenceNumber,
+    batch: ConsensusBatch,
+    replica_id: ReplicaId,
+) -> PbftMessage {
+    let digest = MessageDigest::of(&batch).expect("batch digest");
+    PbftMessage::PrePrepare {
+        view,
+        sequence,
+        digest,
+        batch,
+        replica_id,
+    }
+}
+
+#[test]
+fn preprepare_from_non_primary_fails_closed() {
+    let transport = MockTransport::new();
+    let sent_messages = Arc::clone(&transport.sent_messages);
+    let node = PbftNode::new(
+        ReplicaId::new("1".to_string()),
+        PbftConfig::new(4, 1).unwrap(),
+        transport,
+    )
+    .unwrap();
+    let cx = Cx::for_testing();
+
+    let message = preprepare_for(
+        ViewNumber::new(0),
+        SequenceNumber::new(1),
+        test_batch(b"op-1"),
+        ReplicaId::new("2".to_string()),
+    );
+    assert!(poll_ready(node.process_message(&cx, message)).is_err());
+    assert!(
+        sent_messages.lock().unwrap().is_empty(),
+        "rejecting a non-primary pre-prepare must not broadcast prepare"
+    );
+}
+
+#[test]
+fn preprepare_equivocation_fails_closed_without_overwrite() {
+    let node = PbftNode::new(
+        ReplicaId::new("1".to_string()),
+        PbftConfig::new(4, 1).unwrap(),
+        MockTransport::new(),
+    )
+    .unwrap();
+    let cx = Cx::for_testing();
+
+    let first = preprepare_for(
+        ViewNumber::new(0),
+        SequenceNumber::new(1),
+        test_batch(b"op-1"),
+        ReplicaId::new("0".to_string()),
+    );
+    poll_ready(node.process_message(&cx, first)).expect("first pre-prepare accepted");
+
+    let equivocated = preprepare_for(
+        ViewNumber::new(0),
+        SequenceNumber::new(1),
+        test_batch(b"op-2"),
+        ReplicaId::new("0".to_string()),
+    );
+    assert!(
+        poll_ready(node.process_message(&cx, equivocated)).is_err(),
+        "different digest for the same view/sequence must fail closed"
+    );
+}
+
+#[test]
+fn prepare_and_commit_reject_self_and_out_of_set_senders() {
+    let node = PbftNode::new(
+        ReplicaId::new("1".to_string()),
+        PbftConfig::new(4, 1).unwrap(),
+        MockTransport::new(),
+    )
+    .unwrap();
+    let cx = Cx::for_testing();
+    let view = ViewNumber::new(0);
+    let sequence = SequenceNumber::new(1);
+    let batch = test_batch(b"op-1");
+    let digest = MessageDigest::of(&batch).expect("batch digest");
+
+    let preprepare = PbftMessage::PrePrepare {
+        view,
+        sequence,
+        digest: digest.clone(),
+        batch,
+        replica_id: ReplicaId::new("0".to_string()),
+    };
+    poll_ready(node.process_message(&cx, preprepare)).expect("pre-prepare accepted");
+
+    let self_prepare = PbftMessage::Prepare {
+        view,
+        sequence,
+        digest: digest.clone(),
+        replica_id: ReplicaId::new("1".to_string()),
+    };
+    assert!(poll_ready(node.process_message(&cx, self_prepare)).is_err());
+
+    let out_of_set_commit = PbftMessage::Commit {
+        view,
+        sequence,
+        digest,
+        replica_id: ReplicaId::new("4".to_string()),
+    };
+    assert!(poll_ready(node.process_message(&cx, out_of_set_commit)).is_err());
 }
 
 #[test]

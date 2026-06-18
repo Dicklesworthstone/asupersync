@@ -103,6 +103,7 @@ pub enum PbftMessage {
         sequence: SequenceNumber,
         digest: MessageDigest,
         batch: ConsensusBatch,
+        replica_id: ReplicaId,
     },
     /// Replica agrees with ordering (prepare phase).
     Prepare {
@@ -223,6 +224,8 @@ pub trait PbftTransport: Send + Sync {
 pub struct PbftNode<T: PbftTransport> {
     /// Replica identifier for this node.
     replica_id: ReplicaId,
+    /// Canonical numeric index for this replica in the configured replica set.
+    replica_index: usize,
     /// Configuration parameters.
     config: PbftConfig,
     /// Current state.
@@ -237,6 +240,7 @@ impl<T: PbftTransport> PbftNode<T> {
         if !config.is_valid() {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
+        let replica_index = parse_replica_index(&replica_id, config.replica_count)?;
 
         let state = PbftState {
             view: ViewNumber::new(0),
@@ -256,6 +260,7 @@ impl<T: PbftTransport> PbftNode<T> {
 
         Ok(Self {
             replica_id,
+            replica_index,
             config,
             state: Arc::new(Mutex::new(state)),
             transport,
@@ -266,12 +271,7 @@ impl<T: PbftTransport> PbftNode<T> {
     pub fn is_primary(&self) -> bool {
         let state = self.state.lock().unwrap();
         let primary_idx = state.view.primary(self.config.replica_count);
-        // For simplicity, assume replica IDs are "0", "1", "2", etc.
-        self.replica_id
-            .as_str()
-            .parse::<usize>()
-            .unwrap_or(usize::MAX)
-            == primary_idx
+        self.replica_index == primary_idx
     }
 
     /// Submit a client request for consensus.
@@ -311,14 +311,37 @@ impl<T: PbftTransport> PbftNode<T> {
             let sequence = state.sequence;
             let view = state.view;
 
-            // Advance sequence number
-            state.sequence = state.sequence.next();
-
             (batch, sequence, view)
         };
 
-        // Send pre-prepare message
-        self.send_preprepare(cx, view, sequence, batch).await
+        let result = self.send_preprepare(cx, view, sequence, batch.clone()).await;
+        let mut state = self.state.lock().unwrap();
+        match result {
+            Ok(()) => {
+                if state.sequence == sequence {
+                    state.sequence = state.sequence.next();
+                }
+                Ok(())
+            }
+            Err(err) => {
+                if state.sequence == sequence.next() {
+                    state.sequence = sequence;
+                }
+                if let Ok(digest) = MessageDigest::of(&batch) {
+                    if state
+                        .log
+                        .get(&sequence)
+                        .is_some_and(|entry| entry.view == view && entry.digest == digest)
+                    {
+                        state.log.remove(&sequence);
+                    }
+                }
+                for request in batch.requests.iter().rev() {
+                    state.pending_requests.push_front(request.clone());
+                }
+                Err(err)
+            }
+        }
     }
 
     /// Send pre-prepare message as primary.
@@ -334,6 +357,11 @@ impl<T: PbftTransport> PbftNode<T> {
         // Create log entry
         {
             let mut state = self.state.lock().unwrap();
+            if state.log.contains_key(&sequence) {
+                return Err(Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
+                    "PBFT pre-prepare sequence {sequence} already has a log entry"
+                )));
+            }
             let entry = LogEntry {
                 batch: batch.clone(),
                 digest: digest.clone(),
@@ -351,6 +379,7 @@ impl<T: PbftTransport> PbftNode<T> {
             sequence,
             digest,
             batch,
+            replica_id: self.replica_id.clone(),
         };
 
         // Broadcast pre-prepare to all replicas
@@ -372,8 +401,9 @@ impl<T: PbftTransport> PbftNode<T> {
                 sequence,
                 digest,
                 batch,
+                replica_id,
             } => {
-                self.handle_preprepare(cx, view, sequence, digest, batch)
+                self.handle_preprepare(cx, view, sequence, digest, batch, replica_id)
                     .await
             }
             PbftMessage::Prepare {
@@ -421,12 +451,31 @@ impl<T: PbftTransport> PbftNode<T> {
         sequence: SequenceNumber,
         digest: MessageDigest,
         batch: ConsensusBatch,
+        replica_id: ReplicaId,
     ) -> Result<()> {
+        self.validate_preprepare_primary(view, &replica_id)?;
         // Validate view and primary
         {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
             if view != state.view {
                 return Err(Error::new(ErrorKind::InvalidInput));
+            }
+            if sequence <= state.last_executed {
+                return Err(Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
+                    "PBFT pre-prepare sequence {sequence} is at or below executed watermark {}",
+                    state.last_executed
+                )));
+            }
+
+            if let Some(entry) = state.log.get_mut(&sequence) {
+                if entry.view != view || entry.digest != digest {
+                    return Err(Error::new(ErrorKind::InvalidStateTransition).with_message(
+                        format!("PBFT pre-prepare equivocation for {sequence} in {view}"),
+                    ));
+                }
+                if entry.preprepared {
+                    return Ok(());
+                }
             }
         }
 
@@ -436,19 +485,24 @@ impl<T: PbftTransport> PbftNode<T> {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
 
-        // Create log entry
+        // Create or mark the log entry without overwriting accumulated messages.
         {
             let mut state = self.state.lock().unwrap();
-            let entry = LogEntry {
-                batch,
-                digest: digest.clone(),
-                view,
-                preprepared: true,
-                prepare_msgs: HashMap::new(),
-                commit_msgs: HashMap::new(),
-                result: None,
-            };
-            state.log.insert(sequence, entry);
+            if let Some(entry) = state.log.get_mut(&sequence) {
+                entry.batch = batch;
+                entry.preprepared = true;
+            } else {
+                let entry = LogEntry {
+                    batch,
+                    digest: digest.clone(),
+                    view,
+                    preprepared: true,
+                    prepare_msgs: HashMap::new(),
+                    commit_msgs: HashMap::new(),
+                    result: None,
+                };
+                state.log.insert(sequence, entry);
+            }
         }
 
         // Send prepare message
@@ -477,6 +531,7 @@ impl<T: PbftTransport> PbftNode<T> {
         digest: MessageDigest,
         replica_id: ReplicaId,
     ) -> Result<()> {
+        self.validate_remote_replica(&replica_id)?;
         let should_commit = {
             let mut state = self.state.lock().unwrap();
 
@@ -495,8 +550,8 @@ impl<T: PbftTransport> PbftNode<T> {
             };
             entry.prepare_msgs.insert(replica_id, msg);
 
-            // Check if we have enough prepares (2f+1 including our own)
-            entry.prepare_msgs.len() + 1 >= self.config.quorum_size()
+            // Check if we have enough prepares (2f+1 including our own).
+            entry.preprepared && entry.prepare_msgs.len() + 1 >= self.config.quorum_size()
         };
 
         // Send commit message if we have quorum
@@ -529,8 +584,10 @@ impl<T: PbftTransport> PbftNode<T> {
         digest: MessageDigest,
         replica_id: ReplicaId,
     ) -> Result<()> {
+        self.validate_remote_replica(&replica_id)?;
         let should_execute = {
             let mut state = self.state.lock().unwrap();
+            let next_to_execute = state.last_executed.next();
 
             // Find log entry
             let entry = match state.log.get_mut(&sequence) {
@@ -547,9 +604,11 @@ impl<T: PbftTransport> PbftNode<T> {
             };
             entry.commit_msgs.insert(replica_id, msg);
 
-            // Check if we have enough commits (2f+1 including our own)
-            entry.commit_msgs.len() + 1 >= self.config.quorum_size()
-                && sequence == state.last_executed.next()
+            let prepared =
+                entry.preprepared && entry.prepare_msgs.len() + 1 >= self.config.quorum_size();
+            let committed = entry.commit_msgs.len() + 1 >= self.config.quorum_size();
+
+            prepared && committed && sequence == next_to_execute && entry.result.is_none()
         };
 
         // Execute the batch if we have quorum and it's the next in sequence
@@ -565,17 +624,28 @@ impl<T: PbftTransport> PbftNode<T> {
         let batch = {
             let mut state = self.state.lock().unwrap();
 
-            // Mark as executed first
+            if sequence != state.last_executed.next() {
+                return Ok(());
+            }
+
+            let batch = {
+                let entry = state.log.get_mut(&sequence).ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
+                        "PBFT cannot execute missing log entry for {sequence}"
+                    ))
+                })?;
+                if entry.result.is_some() {
+                    return Ok(());
+                }
+                let batch = entry.batch.clone();
+
+                // For simplicity, just simulate execution
+                let result = Outcome::Ok(b"executed".to_vec());
+                entry.result = Some(result);
+                batch
+            };
+
             state.last_executed = sequence;
-
-            // Get the batch
-            let entry = state.log.get_mut(&sequence).unwrap();
-            let batch = entry.batch.clone();
-
-            // For simplicity, just simulate execution
-            let result = Outcome::Ok(b"executed".to_vec());
-            entry.result = Some(result);
-
             batch
         };
 
@@ -593,6 +663,27 @@ impl<T: PbftTransport> PbftNode<T> {
         #[cfg(not(feature = "tracing-integration"))]
         let _ = batch_size;
 
+        Ok(())
+    }
+
+    fn validate_remote_replica(&self, replica_id: &ReplicaId) -> Result<()> {
+        let index = parse_replica_index(replica_id, self.config.replica_count)?;
+        if index == self.replica_index {
+            return Err(Error::new(ErrorKind::InvalidInput).with_message(format!(
+                "PBFT rejected self-authored remote quorum message from {replica_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_preprepare_primary(&self, view: ViewNumber, replica_id: &ReplicaId) -> Result<()> {
+        let index = parse_replica_index(replica_id, self.config.replica_count)?;
+        let expected = view.primary(self.config.replica_count);
+        if index != expected {
+            return Err(Error::new(ErrorKind::InvalidInput).with_message(format!(
+                "PBFT rejected pre-prepare from {replica_id}; primary for {view} is replica:{expected}"
+            )));
+        }
         Ok(())
     }
 
@@ -633,6 +724,20 @@ impl<T: PbftTransport> PbftNode<T> {
              fault tolerance under primary failure)",
         ))
     }
+}
+
+fn parse_replica_index(replica_id: &ReplicaId, replica_count: usize) -> Result<usize> {
+    let index = replica_id.as_str().parse::<usize>().map_err(|_| {
+        Error::new(ErrorKind::InvalidInput).with_message(format!(
+            "PBFT replica id {replica_id} must be a numeric index"
+        ))
+    })?;
+    if index >= replica_count {
+        return Err(Error::new(ErrorKind::InvalidInput).with_message(format!(
+            "PBFT replica id {replica_id} is outside configured replica set size {replica_count}"
+        )));
+    }
+    Ok(index)
 }
 
 /// High-level PBFT consensus interface.

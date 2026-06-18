@@ -38,7 +38,11 @@ impl ViewNumber {
     }
 
     pub fn primary(&self, replica_count: usize) -> usize {
-        (self.0 as usize) % replica_count
+        if replica_count == 0 {
+            0
+        } else {
+            (self.0 as usize) % replica_count
+        }
     }
 
     pub fn next(self) -> Self {
