@@ -105,9 +105,17 @@ optimally-tuned rsync-over-ssh on the same netem link, and/or atp-lab vs rsync-d
   per-symbol file-op dispatch (E-10 perfect super-linear CPU/sync + E-11 bad-large RSS), now beaded as
   the highest-EV lever `.25` (mmap staging). (3) **The E-9 fix holds across the matrix** — bad/broken at
   500K/5M/50M all converge sha-identical (they're in the scored table); the only non-convergence left is
-  500M-bad/broken (TIMEOUT = E-11 at scale) and 5G (E-12). Tree workloads need a separate valid run
-  (E-14 fix landed in `atp.rs` `raise_fd_limit`, but the matrix binary predates it + the harness has a
-  manifest-vs-DEST relpath-root verify mismatch) — tracked, not yet scored.
+  500M-bad/broken (TIMEOUT = E-11 at scale) and 5G (E-12). Tree workloads: matrix COMPLETED 196/196 but
+  ALL tree cells (atp AND rsync) scored `sha_mismatch` — ROOT-CAUSED 2026-06-18 to a **harness
+  tree-verify bug** (NOT a transport bug): `run_matrix_cell.sh` computed SRC via `manifest_tree_digest`
+  (Python `"\n".join`, no trailing newline + codepoint sort) but DST via `tree_digest` (bash `printf`
+  per line w/ trailing newline + locale `sort`), so SRC could never equal DST even for a byte-identical
+  transfer. FIXED to compute BOTH sides via the same `tree_digest`. Validated end-to-end on idle-109: a
+  fresh 2000-file power-law tree, **atp_e14** (E-9+E-14 `raise_fd_limit`) over perfect loopback →
+  **1.29 s, recv peak RSS 11.4 MB, all 2000 files, SRC tree_digest == DST tree_digest (byte-identical)**.
+  atp handles deeply-nested trees correctly + fast; the tree blank was purely the harness. NEXT: re-run
+  tree cells through the fixed netns harness w/ atp_e14 + rsync for the beyond-reproach tree scorecard
+  (the matrix ran atp_e9, which lacks E-14 → EMFILE on big trees).
 
 ## REFUTED / NEGATIVE (do NOT re-chase unless retry-condition fires)
 

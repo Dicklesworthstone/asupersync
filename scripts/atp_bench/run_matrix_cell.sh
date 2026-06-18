@@ -361,7 +361,12 @@ esac
 SRC_SHA=""; DST_SHA=""; SHA_OK=false
 if [ -d "$WL_PATH" ]; then
     KIND="tree"
-    if [ -f "${WL_PATH}.manifest.jsonl" ]; then SRC_SHA="$(manifest_tree_digest "${WL_PATH}.manifest.jsonl")"; else SRC_SHA="$(tree_digest "$WL_PATH")"; fi
+    # SRC and DST must be computed by the SAME function so identical trees hash identically.
+    # The manifest digest used a different byte layout (no trailing newline + Python codepoint
+    # sort vs bash locale `sort`), so it never matched tree_digest's output even for a perfect
+    # transfer -> every tree cell (atp AND rsync) was scored sha_mismatch. Compare the actual
+    # source tree to the actual destination tree via tree_digest on both sides instead.
+    SRC_SHA="$(tree_digest "$WL_PATH")"
     DST_SHA="$(tree_digest "$DEST")"
 else
     KIND="file"
