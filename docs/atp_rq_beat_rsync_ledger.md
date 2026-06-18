@@ -95,7 +95,7 @@ optimally-tuned rsync-over-ssh on the same netem link, and/or atp-lab vs rsync-d
   | 500M | good    | 1.392 | 0.72×     | 0.611 (1.6× less) | 1 | rsync 1.39× (E-11) |
   | 500M | bad     | — | — | — | — | **TIMEOUT (E-11 large-bad: RSS blowup + decode wall)** |
   | 500M | broken  | — | — | — | — | **TIMEOUT (E-11 large-bad)** |
-  | 5G   | all     | — | — | — | — | **ERROR (E-12: >2GB object exceeds u8-SBN/256-block limit)** |
+  | 5G   | all     | — | — | — | — | was ERROR (E-12); **FIXED — 5GiB now transfers byte-identical, 347s/139MB recv (perfect loopback)** |
 
   Per-regime geomean wall ATP/rsync (valid cells): **bad 1.111 · broken 0.564 (1.77× win) · good 0.601
   (1.66× win) · perfect 1.657**. Three beyond-reproach truths: (1) **atp WINS decisively on every small
@@ -436,7 +436,17 @@ to wire.
   stopgap; (b) multi-object stays the proper fix for keeping K sane on lossy huge transfers. NEXT: try
   (a) — drop the `.min(configured_max)` cap + raise `max_object_size` to the RFC-K ceiling — then measure
   5G/perfect on idle-109 (wall + RSS + byte-identical); byte-identical for ≤2 GB files (no change there).
-- **★ E-14 · large-TREE FD exhaustion (real atp bug, found 2026-06-18).** Manual atp tree_small
+  **✓ FIXED + PROVEN 2026-06-18 (commit on main+master).** Implemented option (a): added
+  `RAPTORQ_MAX_SOURCE_SYMBOLS_PER_BLOCK = 56403` and changed `effective_max_block_size_for_largest_entry`
+  to grow the block above `configured_max` up to `K_cap * symbol_size` (block_ceiling), raising the
+  object ceiling from `256 * configured_max` (~2 GiB) to `256 * 56403 * symbol_size` (~20 GiB).
+  Byte-identical for ≤2 GiB by construction; unit tests 68/0 (incl. new
+  `effective_block_size_grows_above_configured_max_for_huge_entries`: 5 GiB fits, 1 GiB unchanged,
+  >20 GiB still `TooLarge`). E2E on idle-109: a **5 GiB single file** (previously hard `TooLarge` at
+  ~5.8 s) now transfers **byte-identical** (src sha == dst sha, committed/merkle/sha_ok all true),
+  wall 347 s (≈14.5 MB/s = the E-10 perfect-link CPU wall, source-first memcpy at K≈14980, 1 feedback
+  round, 3.84M symbols), recv peak RSS 139 MB. So 5G now WORKS on perfect/good; lossy-huge stays the
+  E-11 limitation. Multi-object split (b) remains future work only if lossy huge-file K-sanity matters.
   transfer (2000 files, 6.2 MB total, loopback no-loss) → receiver dies **"Too many open files
   (os error 24)"**, sender then "Connection refused". The receiver keeps an OPEN staging FD PER
   ENTRY (`EntryDecoder.file`), and the sprayer feeds all entries concurrently → 2000 simultaneous
