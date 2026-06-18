@@ -270,6 +270,27 @@ to wire.
   RW; `persist_source_symbol`/`persist_decoded_block` `copy_from_slice` into the mapping (inline, no
   await); commit does `libc::msync`+`munmap` (dispatch the msync to the blocking pool) then rename; SHA
   can read straight from the mapping (no read syscalls). Probe: `/data/tmp/atp_strace_order_probe.sh`.
+- **★★★ IMPLEMENTED + REFUTED 2026-06-18 (idle-109 before/after, byte-identical sha=OK; REVERTED).**
+  Built the full mmap-staging change (`StagingMmap` RAII over `libc::mmap`/`munmap`, `copy_from_slice`
+  in `persist_source_symbol`/`persist_decoded_block`, fn-scope `#[allow(unsafe_code)]` + unsafe-ledger
+  rows) — lib + 67 transport_rq unit tests GREEN, byte-identical. Then measured atp_e14 (seek path)
+  vs atp_mmap on a perfect 50M loopback (3 reps): **lseek 16,509 → 6** (per-symbol seek dispatch IS
+  eliminated, mechanism confirmed) BUT **wall 3.48s → 3.42s (~2%, negligible)** and **peak RSS 8.1 MB
+  → 60.1 MB (REGRESSED 7×)**. Two hard conclusions: (1) **the per-symbol seek dispatch was NOT the
+  perfect-link wall** — removing it (16509→6) barely moved wall ⇒ E-10's "seek storm = the wall"
+  hypothesis is REFUTED; the wall is the *rest* of the diffuse per-symbol cost (reactor epoll wakeups,
+  pacing timerfd, channel hops, obligation/region locks, decode), exactly the "diffuse runtime sync,
+  NOT write bytes" of the REFINED note. (2) **mmap REGRESSES RSS** — `MAP_SHARED` mapped pages count as
+  process resident memory, converting free page-cache (not in RSS) into RSS, so it directly harms the
+  headline "atp uses less memory" win AND does nothing for the E-11 bad-large blowup (which is symbol
+  RETENTION + decode buffers, not staging writes — mmap only ADDS the mapped file on top). **Reverted**
+  (code + ledger to HEAD; experiment saved `/data/tmp/mmap_experiment_e10_refuted.diff` + git stash).
+  **Retry-condition:** only revisit mmap if (a) the OTHER per-symbol costs (reactor/pacing/channel/
+  obligation) are batched/amortized first so the staging write is actually on the critical path, AND
+  (b) RSS is controlled with `madvise(MADV_DONTNEED)` after each region write. Net: the real
+  perfect-link lever is **batching the whole recv→verify→feed→write pipeline + cutting per-symbol
+  reactor/timer wakeups (E-10 lever b/c)**, NOT the staging write mechanism. Negative-evidence WIN:
+  the before/after caught a plausible-but-wrong lever that strace alone (16509 lseeks) had "confirmed".
 
 ### E-11 ★★ CRITICAL · bad/broken-regime SUPER-LINEAR scaling → 500M+/bad TIMES OUT (>30min)
 - **Symptom (full matrix, 2026-06-18):** 50M/bad converges in 76s (fb=3) but **500M/bad TIMES OUT
