@@ -1205,6 +1205,63 @@ pub fn quic_plan_fanout_dispatch(
     }
 }
 
+/// Derive the initial source+proactive-repair symbol work from a transfer
+/// manifest.
+///
+/// This is the Phase-D bridge between the source preflight and the fan-out
+/// scheduler: it turns the effective per-entry block geometry into the exact
+/// number of symbol slots the round-0 spray will offer, without reading source
+/// bytes or changing the wire format.
+pub fn quic_initial_fanout_blocks_for_manifest(
+    manifest: &TransferManifest,
+    config: &QuicConfig,
+) -> Result<Vec<QuicFanoutBlock>, QuicTransportError> {
+    config.validate()?;
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let max_block = config.max_block_size.max(1);
+    let mut blocks = Vec::new();
+    for entry in &manifest.entries {
+        let block_count = block_count_for_len(entry.size, config)?;
+        for block_index in 0..block_count {
+            let block_start =
+                u64::try_from(block_index)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::try_from(max_block).unwrap_or(u64::MAX));
+            let block_len = usize::try_from((entry.size - block_start).min(max_block as u64))
+                .unwrap_or(usize::MAX);
+            let source_symbols = block_len.div_ceil(symbol_size).max(1);
+            let repair_symbols = initial_repair_per_block(block_len, config);
+            blocks.push(QuicFanoutBlock {
+                entry: entry.index,
+                sbn: u8::try_from(block_index).map_err(|_| QuicTransportError::TooLarge {
+                    size: entry.size,
+                    max: u64::try_from(max_block)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(u64::from(u8::MAX) + 1),
+                })?,
+                symbols: source_symbols.saturating_add(repair_symbols),
+            });
+        }
+    }
+    Ok(blocks)
+}
+
+/// Plan the round-0 QUIC fan-out dispatch from a manifest and effective config.
+pub fn quic_plan_initial_fanout_dispatch(
+    config: &QuicConfig,
+    cpu_parallelism: usize,
+    manifest: &TransferManifest,
+    lane_bindings: &[QuicFanoutLaneBinding],
+) -> Result<QuicFanoutDispatchPlan, QuicTransportError> {
+    let blocks = quic_initial_fanout_blocks_for_manifest(manifest, config)?;
+    Ok(quic_plan_fanout_dispatch(
+        config,
+        cpu_parallelism,
+        &blocks,
+        lane_bindings,
+    ))
+}
+
 /// Emit stable per-connection spray counts for D1 fan-out diagnostics.
 pub fn trace_quic_fanout_spray_counts(cx: &Cx, round: u64, counts: &[u64]) {
     let round = round.to_string();
@@ -1220,6 +1277,32 @@ pub fn trace_quic_fanout_spray_counts(cx: &Cx, round: u64, counts: &[u64]) {
                 ("connection", &connection),
                 ("connections", &connections),
                 ("symbols", &symbols),
+            ],
+        );
+    }
+}
+
+/// Emit stable per-lane dispatch fields for a planned fan-out spray epoch.
+pub fn trace_quic_fanout_dispatch_plan(cx: &Cx, round: u64, plan: &QuicFanoutDispatchPlan) {
+    let round = round.to_string();
+    let connections = plan.connection_count.to_string();
+    let total_symbols = plan.total_symbols.to_string();
+    for batch in &plan.batches {
+        let logical_connection = batch.logical_connection.to_string();
+        let physical_connection = batch.physical_connection.to_string();
+        let migration_generation = batch.migration_generation.to_string();
+        let symbols = batch.symbol_count().to_string();
+        cx.trace_with_fields(
+            "atp_quic.spray.fanout_dispatch",
+            &[
+                ("transport", "quic"),
+                ("round", &round),
+                ("logical_connection", &logical_connection),
+                ("physical_connection", &physical_connection),
+                ("migration_generation", &migration_generation),
+                ("connections", &connections),
+                ("symbols", &symbols),
+                ("total_symbols", &total_symbols),
             ],
         );
     }
@@ -4636,6 +4719,9 @@ where
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
     validate_quic_manifest(&prepared.manifest, &config)?;
+    let fanout_plan =
+        quic_plan_initial_fanout_dispatch(&config, usize::MAX, &prepared.manifest, &[])?;
+    trace_quic_fanout_dispatch_plan(cx, 0, &fanout_plan);
     let symbol_auth = config.symbol_auth_context()?;
     let symbol_auth_enabled = symbol_auth.is_some();
     let mut control = NativeQuicFrameTransport::open(cx, conn)?;
@@ -5514,6 +5600,9 @@ pub async fn send_path(
     let prepared = prepare_source_manifest(cx, source, &config).await?;
     let config = prepared.effective_config(&config);
     config.validate()?;
+    let fanout_plan =
+        quic_plan_initial_fanout_dispatch(&config, usize::MAX, &prepared.manifest, &[])?;
+    trace_quic_fanout_dispatch_plan(cx, 0, &fanout_plan);
     #[cfg(feature = "tls")]
     {
         native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id).await
@@ -6962,6 +7051,146 @@ mod tests {
                 assert_eq!(slot.sbn, 3);
             }
         }
+    }
+
+    #[test]
+    fn d1_quic_initial_fanout_blocks_match_round_zero_source_and_repair_geometry() {
+        let config = QuicConfig {
+            symbol_size: 100,
+            max_datagram_size: 160,
+            max_block_size: 250,
+            repair_overhead: 1.20,
+            ..trusted_quic_config()
+        };
+        let manifest = manifest_from_entries(
+            "payload",
+            false,
+            &[
+                ("alpha.bin".to_string(), vec![1_u8; 500]),
+                ("empty.bin".to_string(), Vec::new()),
+            ],
+        );
+
+        let blocks =
+            quic_initial_fanout_blocks_for_manifest(&manifest, &config).expect("initial blocks");
+
+        assert_eq!(
+            blocks,
+            vec![
+                QuicFanoutBlock {
+                    entry: 0,
+                    sbn: 0,
+                    symbols: 4,
+                },
+                QuicFanoutBlock {
+                    entry: 0,
+                    sbn: 1,
+                    symbols: 4,
+                },
+            ],
+            "each 250-byte block has three source symbols plus one proactive repair symbol"
+        );
+    }
+
+    #[test]
+    fn d1_quic_initial_fanout_dispatch_uses_manifest_geometry_and_migration_bindings() {
+        let config = QuicConfig {
+            datagram_fanout: 3,
+            max_active_connections: 3,
+            symbol_size: 128,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let manifest = manifest_from_entries(
+            "payload",
+            false,
+            &[("alpha.bin".to_string(), vec![7_u8; 768])],
+        );
+
+        let dispatch = quic_plan_initial_fanout_dispatch(
+            &config,
+            3,
+            &manifest,
+            &[QuicFanoutLaneBinding {
+                logical_connection: 2,
+                physical_connection: 7,
+                migration_generation: 3,
+            }],
+        )
+        .expect("dispatch plan");
+
+        assert_eq!(dispatch.connection_count, 3);
+        assert_eq!(dispatch.total_symbols, 6);
+        assert_eq!(
+            dispatch
+                .batches
+                .iter()
+                .map(QuicFanoutConnectionBatch::symbol_count)
+                .collect::<Vec<_>>(),
+            vec![2, 2, 2],
+            "three 256-byte blocks with two source symbols each should feed every lane evenly"
+        );
+        assert_eq!(dispatch.batches[2].physical_connection, 7);
+        assert_eq!(dispatch.batches[2].migration_generation, 3);
+    }
+
+    #[test]
+    fn d1_quic_fanout_dispatch_trace_emits_logical_physical_and_total_fields() {
+        let cx = Cx::for_testing();
+        let collector = crate::observability::LogCollector::new(8)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_diagnostic_context(crate::observability::DiagnosticContext::new());
+        cx.set_log_collector(collector.clone());
+        let plan = QuicFanoutDispatchPlan {
+            connection_count: 2,
+            total_symbols: 5,
+            batches: vec![
+                QuicFanoutConnectionBatch {
+                    logical_connection: 0,
+                    physical_connection: 0,
+                    migration_generation: 0,
+                    slots: vec![QuicFanoutSymbolSlot {
+                        connection: 0,
+                        entry: 1,
+                        sbn: 0,
+                        symbol_index_in_block: 0,
+                    }],
+                },
+                QuicFanoutConnectionBatch {
+                    logical_connection: 1,
+                    physical_connection: 9,
+                    migration_generation: 4,
+                    slots: vec![
+                        QuicFanoutSymbolSlot {
+                            connection: 1,
+                            entry: 1,
+                            sbn: 0,
+                            symbol_index_in_block: 1,
+                        };
+                        4
+                    ],
+                },
+            ],
+        };
+
+        trace_quic_fanout_dispatch_plan(&cx, 13, &plan);
+
+        let entries = collector
+            .peek()
+            .into_iter()
+            .filter(|entry| entry.message() == "atp_quic.spray.fanout_dispatch")
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].get_field("round"), Some("13"));
+        assert_eq!(entries[0].get_field("logical_connection"), Some("0"));
+        assert_eq!(entries[0].get_field("physical_connection"), Some("0"));
+        assert_eq!(entries[0].get_field("symbols"), Some("1"));
+        assert_eq!(entries[0].get_field("total_symbols"), Some("5"));
+        assert_eq!(entries[1].get_field("logical_connection"), Some("1"));
+        assert_eq!(entries[1].get_field("physical_connection"), Some("9"));
+        assert_eq!(entries[1].get_field("migration_generation"), Some("4"));
+        assert_eq!(entries[1].get_field("symbols"), Some("4"));
     }
 
     #[test]
@@ -9638,6 +9867,54 @@ mod tests {
         assert!(
             matches!(result, Err(QuicTransportError::Config(_))),
             "expected a fail-closed Config error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn send_path_valid_source_traces_initial_fanout_dispatch_before_client_tls() {
+        let cx = Cx::for_testing();
+        let collector = crate::observability::LogCollector::new(16)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_diagnostic_context(crate::observability::DiagnosticContext::new());
+        cx.set_log_collector(collector.clone());
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("payload.bin");
+        std::fs::write(&source, varied_bytes(768, 31)).expect("write source");
+        let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let config = QuicConfig {
+            datagram_fanout: 3,
+            max_active_connections: 3,
+            symbol_size: 128,
+            max_datagram_size: 192,
+            max_block_size: 256,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+
+        let result = block_on(send_path(&cx, addr, &source, config, "sender"));
+
+        assert!(
+            matches!(result, Err(QuicTransportError::Config(_))),
+            "valid-source send_path should still fail closed without client TLS, got {result:?}"
+        );
+        let dispatch_entries = collector
+            .peek()
+            .into_iter()
+            .filter(|entry| entry.message() == "atp_quic.spray.fanout_dispatch")
+            .collect::<Vec<_>>();
+        assert_eq!(dispatch_entries.len(), 3);
+        assert_eq!(
+            dispatch_entries
+                .iter()
+                .map(|entry| entry.get_field("symbols"))
+                .collect::<Vec<_>>(),
+            vec![Some("2"), Some("2"), Some("2")],
+            "round-0 preflight should keep all three configured QUIC fan-out lanes fed"
+        );
+        assert!(
+            dispatch_entries
+                .iter()
+                .all(|entry| entry.get_field("total_symbols") == Some("6"))
         );
     }
 
