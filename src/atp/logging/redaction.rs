@@ -158,7 +158,14 @@ fn field_matches_pattern(field_path: &str, pattern: &str) -> bool {
             .any(|segment| segment_matches_simple_pattern(segment, pattern));
     }
 
-    false
+    if pattern.contains('*') {
+        return wildcard_matches(field_path, pattern);
+    }
+
+    // Unsupported custom syntax is treated as fail-closed. A custom rule that
+    // this lightweight matcher cannot interpret must redact rather than silently
+    // leak a sensitive field.
+    true
 }
 
 fn segment_matches_simple_pattern(segment: &str, pattern: &str) -> bool {
@@ -167,6 +174,23 @@ fn segment_matches_simple_pattern(segment: &str, pattern: &str) -> bool {
         || base_segment
             .strip_suffix(pattern)
             .is_some_and(|prefix| prefix.ends_with('_'))
+}
+
+fn wildcard_matches(text: &str, pattern: &str) -> bool {
+    let normalized = pattern.trim_end_matches('$').replace(r"\.", ".");
+    let mut rest = text;
+    let mut last_part = "";
+
+    for part in normalized.split('*').filter(|part| !part.is_empty()) {
+        let Some(idx) = rest.find(part) else {
+            return false;
+        };
+        let next = idx + part.len();
+        rest = &rest[next..];
+        last_part = part;
+    }
+
+    last_part.is_empty() || normalized.ends_with('*') || text.ends_with(last_part)
 }
 
 /// Redact patterns within string values
@@ -308,11 +332,22 @@ fn is_sensitive_path(text: &str) -> bool {
 fn redact_path_components(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').collect();
     let mut result = Vec::new();
+    let mut redact_next_user = false;
 
     for part in parts {
-        if part.contains("home") || part.contains("Users") {
+        if redact_next_user && !part.is_empty() {
             result.push("[USER]");
-        } else if part.contains(".key") || part.contains(".pem") || part.contains("secret") {
+            redact_next_user = false;
+            continue;
+        }
+
+        let lower = part.to_ascii_lowercase();
+        if lower == "home" || part == "Users" {
+            result.push(part);
+            redact_next_user = true;
+        } else if lower == ".ssh" || lower == ".gnupg" || lower == "private" || lower == "secrets" {
+            result.push("[SENSITIVE_DIR]");
+        } else if is_sensitive_file_component(&lower) {
             result.push("[SENSITIVE_FILE]");
         } else if part.len() > 20 && part.chars().all(|c| c.is_ascii_alphanumeric()) {
             // Likely a hash or ID
@@ -323,6 +358,17 @@ fn redact_path_components(path: &str) -> String {
     }
 
     result.join("/")
+}
+
+fn is_sensitive_file_component(lower: &str) -> bool {
+    lower.starts_with("id_")
+        || lower.ends_with(".key")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+        || lower.contains("password")
+        || lower.contains("passwd")
+        || lower.contains("secret")
 }
 
 /// Detect hash patterns
@@ -441,5 +487,60 @@ mod tests {
             redacted,
             vec!["data.file_path".to_string(), "data.path".to_string()]
         );
+    }
+
+    #[test]
+    fn sensitive_path_content_masks_username_and_key_basename() {
+        let mut value = json!({
+            "message": "failed to read /home/alice/.ssh/id_ed25519 during transfer"
+        });
+
+        let redacted =
+            redact_json_value(&mut value, &super::super::default_redaction_rules(), "data");
+        let message = value["message"].as_str().expect("message stays string");
+
+        assert!(message.contains("/home/[USER]/[SENSITIVE_DIR]/[SENSITIVE_FILE]"));
+        assert!(!message.contains("alice"));
+        assert!(!message.contains(".ssh"));
+        assert!(!message.contains("id_ed25519"));
+        assert_eq!(redacted, vec!["data.message".to_string()]);
+    }
+
+    #[test]
+    fn wildcard_custom_field_pattern_matches_nested_token_field() {
+        let rules = [RedactionRule {
+            field_pattern: "user.*token".to_string(),
+            redaction_type: RedactionType::AuthToken,
+            replacement: "[REDACTED_TOKEN]".to_string(),
+        }];
+        let mut value = json!({
+            "user": {
+                "access_token": "plain-value-that-must-not-leak"
+            },
+            "other": "safe"
+        });
+
+        let redacted = redact_json_value(&mut value, &rules, "data");
+
+        assert_eq!(value["user"]["access_token"], "[REDACTED_TOKEN]");
+        assert_eq!(value["other"], "safe");
+        assert_eq!(redacted, vec!["data.user.access_token".to_string()]);
+    }
+
+    #[test]
+    fn unsupported_custom_field_pattern_fails_closed() {
+        let rules = [RedactionRule {
+            field_pattern: "secret[0-9]".to_string(),
+            redaction_type: RedactionType::AuthToken,
+            replacement: "[REDACTED_CUSTOM]".to_string(),
+        }];
+        let mut value = json!({
+            "public_note": "not a token"
+        });
+
+        let redacted = redact_json_value(&mut value, &rules, "data");
+
+        assert_eq!(value["public_note"], "[REDACTED_CUSTOM]");
+        assert_eq!(redacted, vec!["data.public_note".to_string()]);
     }
 }
