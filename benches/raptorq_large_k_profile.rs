@@ -92,6 +92,68 @@ fn large_k_scenarios() -> [LargeKScenario; 6] {
     ]
 }
 
+const E4_FIXED_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+const E4_LOSS_FRACTION: f64 = 0.02;
+const E4_MIN_EXTRA_REPAIR: usize = 32;
+const E4_MAX_REPAIR_SYMBOLS: usize = 512;
+const E4_DECODE_K_VALUES: [usize; 4] = [256, 1024, 4096, 8192];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecodeVsKResult {
+    k: usize,
+    symbol_size: usize,
+    total_bytes: usize,
+    source_symbols: usize,
+    received_source_symbols: usize,
+    missing_source_symbols: usize,
+    repair_symbols: usize,
+    total_received_symbols: usize,
+    overhead_basis_points: u64,
+}
+
+impl DecodeVsKResult {
+    fn new(
+        k: usize,
+        symbol_size: usize,
+        total_bytes: usize,
+        received_source_symbols: usize,
+        repair_symbols: usize,
+    ) -> Self {
+        let missing_source_symbols = k.saturating_sub(received_source_symbols);
+        let total_received_symbols = received_source_symbols.saturating_add(repair_symbols);
+        let overhead_symbols = total_received_symbols.saturating_sub(k);
+        let overhead_basis_points = if k == 0 {
+            0
+        } else {
+            u64::try_from(overhead_symbols.saturating_mul(10_000) / k).unwrap_or(u64::MAX)
+        };
+
+        Self {
+            k,
+            symbol_size,
+            total_bytes,
+            source_symbols: k,
+            received_source_symbols,
+            missing_source_symbols,
+            repair_symbols,
+            total_received_symbols,
+            overhead_basis_points,
+        }
+    }
+
+    fn benchmark_id(self) -> String {
+        format!(
+            "k{}_sym{}_total{}_missing{}_repair{}_overhead{}bp",
+            self.k,
+            self.symbol_size,
+            self.total_bytes,
+            self.missing_source_symbols,
+            self.repair_symbols,
+            self.overhead_basis_points
+        )
+    }
+}
+
 fn generate_test_data(size: usize, seed: u64) -> Vec<u8> {
     let mut data = vec![0u8; size];
     let mut rng_state = seed;
@@ -133,46 +195,50 @@ struct FixedTotalDecodeScenario {
     symbol_size: usize,
     total_bytes: usize,
     seed: u64,
+    result: DecodeVsKResult,
     received_symbols: Vec<ReceivedSymbol>,
     expected_source_symbols: Vec<Vec<u8>>,
 }
 
 fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
-    const TOTAL_BYTES: usize = 4 * 1024 * 1024;
-    const LOSS_FRACTION: f64 = 0.02;
-    const MIN_EXTRA_REPAIR: usize = 32;
-    const MAX_REPAIR_SYMBOLS: usize = 512;
+    assert_eq!(
+        E4_FIXED_TOTAL_BYTES % k,
+        0,
+        "fixed total bytes must divide K"
+    );
 
-    assert_eq!(TOTAL_BYTES % k, 0, "fixed total bytes must divide K");
-
-    let symbol_size = TOTAL_BYTES / k;
+    let symbol_size = E4_FIXED_TOTAL_BYTES / k;
     let seed = 0xE400_0000_u64 ^ k as u64;
     let source_symbols = generate_source_symbols(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source_symbols, symbol_size, seed)
         .expect("encoder creation failed");
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
-    let loss_pattern = create_scattered_loss_pattern(k, LOSS_FRACTION, seed ^ 0x5EED);
-    let mut received_symbols = Vec::with_capacity(k + MIN_EXTRA_REPAIR);
+    let loss_pattern = create_scattered_loss_pattern(k, E4_LOSS_FRACTION, seed ^ 0x5EED);
+    let mut received_symbols = Vec::with_capacity(k + E4_MIN_EXTRA_REPAIR);
+    let mut received_source_symbols = 0usize;
 
     for (i, &lost) in loss_pattern.iter().enumerate() {
         if !lost {
             let esi = u32::try_from(i).expect("source ESI must fit in u32");
             received_symbols.push(ReceivedSymbol::source(esi, source_symbols[i].clone()));
+            received_source_symbols += 1;
         }
     }
 
     let params = decoder.params();
     let required_symbols = params.l - params.k_prime.saturating_sub(params.k);
     let initial_repairs =
-        required_symbols.saturating_sub(received_symbols.len()) + MIN_EXTRA_REPAIR;
+        required_symbols.saturating_sub(received_symbols.len()) + E4_MIN_EXTRA_REPAIR;
     let mut decoded_source = None;
+    let mut repair_symbols = 0usize;
 
-    for i in 0..MAX_REPAIR_SYMBOLS {
+    for i in 0..E4_MAX_REPAIR_SYMBOLS {
         let repair_esi = u32::try_from(k + i).expect("repair ESI must fit in u32");
         let repair_data = encoder.repair_symbol(repair_esi);
         let (columns, coefficients) = decoder
             .repair_equation(repair_esi)
             .expect("repair equation creation failed");
+        repair_symbols += 1;
         received_symbols.push(ReceivedSymbol::repair(
             repair_esi,
             columns,
@@ -194,7 +260,7 @@ fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
     let decoded_source = decoded_source.unwrap_or_else(|| {
         panic!(
             "fixed-total decode scenario did not become solvable for K={} after {} repair symbols",
-            k, MAX_REPAIR_SYMBOLS
+            k, E4_MAX_REPAIR_SYMBOLS
         )
     });
     assert_eq!(
@@ -202,13 +268,57 @@ fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
         "fixed-total decode scenario must round-trip"
     );
 
+    let result = DecodeVsKResult::new(
+        k,
+        symbol_size,
+        E4_FIXED_TOTAL_BYTES,
+        received_source_symbols,
+        repair_symbols,
+    );
+    assert_eq!(
+        result.total_received_symbols,
+        received_symbols.len(),
+        "E-4 result envelope must match the decoded input"
+    );
+
     FixedTotalDecodeScenario {
         k,
         symbol_size,
-        total_bytes: TOTAL_BYTES,
+        total_bytes: E4_FIXED_TOTAL_BYTES,
         seed,
+        result,
         received_symbols,
         expected_source_symbols: source_symbols,
+    }
+}
+
+#[cfg(test)]
+mod e4_decode_vs_k_tests {
+    use super::*;
+
+    #[test]
+    fn decode_vs_k_result_reports_missing_repair_and_overhead() {
+        let result = DecodeVsKResult::new(1024, 4096, E4_FIXED_TOTAL_BYTES, 1004, 52);
+
+        assert_eq!(result.source_symbols, 1024);
+        assert_eq!(result.received_source_symbols, 1004);
+        assert_eq!(result.missing_source_symbols, 20);
+        assert_eq!(result.repair_symbols, 52);
+        assert_eq!(result.total_received_symbols, 1056);
+        assert_eq!(result.overhead_basis_points, 312);
+        assert_eq!(
+            result.benchmark_id(),
+            "k1024_sym4096_total4194304_missing20_repair52_overhead312bp"
+        );
+    }
+
+    #[test]
+    fn decode_vs_k_values_keep_fixed_total_divisible() {
+        assert!(
+            E4_DECODE_K_VALUES
+                .iter()
+                .all(|k| E4_FIXED_TOTAL_BYTES % k == 0)
+        );
     }
 }
 
@@ -218,14 +328,10 @@ fn bench_e4_decode_vs_k_fixed_total_bytes(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.warm_up_time(Duration::from_secs(2));
 
-    for &k in &[256usize, 1024, 4096, 8192] {
+    for &k in &E4_DECODE_K_VALUES {
         let scenario = build_fixed_total_decode_scenario(k);
         group.throughput(Throughput::Bytes(scenario.total_bytes as u64));
-
-        let bench_name = format!(
-            "k{}_sym{}_total{}",
-            scenario.k, scenario.symbol_size, scenario.total_bytes
-        );
+        let bench_name = scenario.result.benchmark_id();
 
         group.bench_with_input(
             BenchmarkId::new("decode_block_path", &bench_name),
@@ -241,6 +347,10 @@ fn bench_e4_decode_vs_k_fixed_total_bytes(c: &mut Criterion) {
                         decoded.source.len(),
                         scenario.expected_source_symbols.len(),
                         "decoded source symbol count mismatch"
+                    );
+                    assert_eq!(
+                        decoded.source, scenario.expected_source_symbols,
+                        "decoded source symbols must match exactly"
                     );
                     black_box(decoded);
                 });
