@@ -2363,7 +2363,7 @@ mod tests {
         let reference_config =
             RaptorqRsObjectTransmissionInformation::new(transfer_length, symbol_size_u16, 1, 1, 1);
         let reference_encoder =
-            RaptorqRsSourceBlockEncoder::new2(0, &reference_config, &source_bytes);
+            RaptorqRsSourceBlockEncoder::new(0, &reference_config, &source_bytes);
         let expected_reference_esi_start =
             u32::try_from(encoder.params().k_prime).expect("K' must fit in u32");
         let public_repair_esi_start = u32::try_from(k).expect("K must fit in u32");

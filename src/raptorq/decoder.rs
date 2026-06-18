@@ -3859,8 +3859,6 @@ mod tests {
         );
         let mut decoder = RaptorqRsDecoder::new(config);
         let dropped: BTreeSet<_> = drop_indices.iter().copied().collect();
-        let repair_payload_id_delta = u32::try_from(encoder.params().k_prime - encoder.params().k)
-            .expect("repair ESI delta must fit in u32 for raptorq-rs");
 
         for (esi, data) in source.iter().enumerate() {
             if !dropped.contains(&esi) {
@@ -3876,11 +3874,8 @@ mod tests {
         let k_u32 = u32::try_from(source.len()).expect("K must fit in u32");
         for repair_offset in 0..repair_count {
             let esi = k_u32 + u32::try_from(repair_offset).expect("repair index must fit in u32");
-            let reference_esi = esi
-                .checked_add(repair_payload_id_delta)
-                .expect("repair ESI must fit in raptorq-rs payload id space");
             let packet = RaptorqRsEncodingPacket::new(
-                RaptorqRsPayloadId::new(0, reference_esi),
+                RaptorqRsPayloadId::new(0, esi),
                 encoder.repair_symbol(esi),
             );
             if let Some(decoded) = decoder.decode(packet) {
