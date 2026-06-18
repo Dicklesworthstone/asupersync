@@ -67,7 +67,7 @@ the migration in the child bead closeout.
 | `sync-internal-cell` | manual Send/Sync and interior mutable primitives | Loom, lab, or deterministic concurrency tests covering aliasing, drop, and wake protocol invariants. |
 | `secret-memory-security` | zeroization and timing-security operations | Tests that prove the unsafe exists for security semantics and does not expose invalid references. |
 | `database-test-or-ffi-boundary` | database protocol audit or invalid-data construction | Test-only confinement and sanitization/rejection assertions. |
-| `network-ffi` | sockets and raw streams | Socket ownership and nonblocking setup tests. |
+| `network-ffi` | sockets, raw streams, and Unix ancillary control buffers | Socket ownership, nonblocking setup, and descriptor ownership/truncation tests. |
 | `browser-boundary` | browser/wasm interop | Wasm/browser boundary tests or documented host limitation. |
 | `compat-boundary` | satellite compatibility crate shims | Opt-in compatibility tests; must not weaken core runtime no-Tokio claims. |
 | `conformance-boundary` | conformance binaries and vendor comparison helpers | Conformance-only tests; must not be cited as default production proof. |
@@ -92,6 +92,17 @@ New unsafe code is acceptable only when all of these are true:
 5. The proof lane or test evidence does not overclaim. Test-only, fuzz,
    conformance, compat, and platform-specific rows must say what they do not
    prove.
+
+Network FFI note for `src/net/unix/stream.rs`: the
+`unsafe-src-net-unix-stream-rs-recvmsg-ancillary` row covers the raw `recvmsg`
+control-buffer parser used to avoid leaking kernel-installed `SCM_RIGHTS` file
+descriptors when `MSG_CTRUNC` is set. Review must verify that parsing is bounded
+by kernel-reported `msg_controllen`, every parsed fd is surfaced exactly once to
+`SocketAncillary`, and truncation remains visible to callers. The focused
+regression evidence is
+`recv_with_ancillary_surfaces_partial_truncation_fds_without_leak`; syntax-only
+`cargo check -p asupersync` does not execute it, and Linux evidence does not
+prove every Unix CMSG layout.
 
 breakage rehearsal for unsafe review changes:
 

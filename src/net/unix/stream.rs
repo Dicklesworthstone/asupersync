@@ -21,12 +21,12 @@ use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::unix::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
-use nix::errno::Errno;
-use nix::sys::socket::{self, ControlMessage, ControlMessageOwned, MsgFlags};
+use nix::sys::socket::{self, ControlMessage, MsgFlags};
 use parking_lot::Mutex;
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::Shutdown;
+use std::os::unix::io::RawFd;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
@@ -819,64 +819,13 @@ fn send_with_ancillary_impl(
 
 /// Receives data with ancillary data using recvmsg.
 fn recv_with_ancillary_impl(
-    fd: std::os::unix::io::RawFd,
+    fd: RawFd,
     buf: &mut [u8],
     ancillary: &mut crate::net::unix::SocketAncillary,
 ) -> io::Result<usize> {
-    let mut iov = [IoSliceMut::new(buf)];
-
-    // `recvmsg` returns a value that borrows the control-message buffer. Keep that borrow
-    // scoped so we can update `ancillary` after parsing the received control messages.
     let (bytes, received_fds, truncated) = {
         let cmsg_buf = ancillary.prepare_for_recv();
-        let msg = socket::recvmsg::<()>(fd, &mut iov, Some(cmsg_buf), MsgFlags::empty())
-            .map_err(nix_to_io)?;
-
-        let mut received_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
-        let mut truncated = false;
-
-        match msg.cmsgs() {
-            Ok(iter) => {
-                for cmsg in iter {
-                    if let ControlMessageOwned::ScmRights(fds) = cmsg {
-                        received_fds.extend_from_slice(&fds);
-                    }
-                }
-            }
-            Err(Errno::ENOBUFS) => {
-                // nix 0.31.3 `RecvMsg::cmsgs()` returns `Err(ENOBUFS)` whenever
-                // MSG_CTRUNC is set (src/sys/socket/mod.rs:706-708) — for ANY
-                // truncation, partial or total. So this branch is taken even on
-                // PARTIAL truncation, where the kernel has already installed the
-                // SCM_RIGHTS fds that fit into our fd table (and dropped the
-                // rest). Because the iterator never runs, those installed fds
-                // are not surfaced and never closed.
-                //
-                // KNOWN BUG (br-asupersync-unix-scm-rights-ctrunc-fd-leak): on
-                // partial truncation we leak the installed fds — a peer that
-                // repeatedly oversends fds can exhaust our fd table (DoS).
-                // Recovering them requires walking the raw control buffer
-                // (bounded by the kernel's msg_controllen, which nix's RecvMsg
-                // does not expose) via a raw libc::recvmsg + unsafe CMSG_*
-                // parsing; tracked separately so it lands with a proper unsafe
-                // boundary ledger entry rather than as an ad-hoc fd-juggle.
-                truncated = true;
-            }
-            Err(errno) => {
-                return Err(io::Error::from_raw_os_error(errno as i32));
-            }
-        }
-
-        // Defense in depth: also flag truncation directly from MSG_CTRUNC so a
-        // caller always observes is_truncated() == true rather than silently
-        // assuming it received every fd. (With nix 0.31.3 the ENOBUFS branch
-        // above already covers the truncated cases; this stays correct if a
-        // future nix relaxes cmsgs() to iterate the fds-that-fit.)
-        if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
-            truncated = true;
-        }
-
-        Ok::<_, io::Error>((msg.bytes, received_fds, truncated))
+        recvmsg_with_raw_ancillary(fd, buf, cmsg_buf)
     }?;
 
     if !received_fds.is_empty() {
@@ -887,6 +836,77 @@ fn recv_with_ancillary_impl(
     }
 
     Ok(bytes)
+}
+
+#[allow(unsafe_code)]
+fn recvmsg_with_raw_ancillary(
+    fd: RawFd,
+    buf: &mut [u8],
+    cmsg_buf: &mut [u8],
+) -> io::Result<(usize, Vec<RawFd>, bool)> {
+    let mut iov = libc::iovec {
+        iov_base: buf.as_mut_ptr().cast(),
+        iov_len: buf.len(),
+    };
+    let (control_ptr, control_len) = if cmsg_buf.is_empty() {
+        (std::ptr::null_mut(), 0)
+    } else {
+        (cmsg_buf.as_mut_ptr().cast(), cmsg_buf.len())
+    };
+
+    // SAFETY: `iov` points at the caller-provided mutable data buffer for the
+    // duration of the syscall, `cmsg_buf` is initialized and writable for
+    // `control_len` bytes, and parsing walks only headers accepted by libc's
+    // CMSG_* helpers bounded by the kernel-written `msg_controllen`.
+    let (bytes, received_fds, truncated) = unsafe {
+        let mut msg = std::mem::zeroed::<libc::msghdr>();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control_ptr;
+        msg.msg_controllen = control_len;
+
+        let bytes = loop {
+            let rc = libc::recvmsg(fd, &mut msg, 0);
+            if rc >= 0 {
+                break usize::try_from(rc).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "recvmsg byte count overflow")
+                })?;
+            }
+
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(err);
+        };
+
+        let mut received_fds = Vec::new();
+        let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+        while !cmsg.is_null() {
+            let header = &*cmsg;
+            if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+                let header_len = libc::CMSG_LEN(0) as usize;
+                let cmsg_len = header.cmsg_len as usize;
+                if cmsg_len >= header_len {
+                    let payload_len = cmsg_len - header_len;
+                    let fd_count = payload_len / std::mem::size_of::<RawFd>();
+                    let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
+                    for index in 0..fd_count {
+                        let received_fd = std::ptr::read_unaligned(data.add(index));
+                        if received_fd >= 0 {
+                            received_fds.push(received_fd);
+                        }
+                    }
+                }
+            }
+            cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
+        }
+
+        let truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
+        (bytes, received_fds, truncated)
+    };
+
+    Ok((bytes, received_fds, truncated))
 }
 
 #[cfg(test)]
@@ -1305,6 +1325,81 @@ mod tests {
         drop(pipe_write);
 
         crate::test_complete!("recv_with_ancillary_reports_truncation_via_msg_ctrunc");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recv_with_ancillary_surfaces_partial_truncation_fds_without_leak() {
+        use crate::net::unix::{AncillaryMessage, SocketAncillary, ancillary_space_for_fds};
+        use std::os::unix::io::AsRawFd;
+
+        fn open_fd_count() -> usize {
+            std::fs::read_dir("/proc/self/fd")
+                .expect("read /proc/self/fd")
+                .count()
+        }
+
+        init_test("recv_with_ancillary_surfaces_partial_truncation_fds_without_leak");
+        let before = open_fd_count();
+
+        {
+            let (sender, receiver) = UnixStream::pair().expect("UnixStream::pair");
+            let pipes: Vec<_> = (0..8).map(|_| nix::unistd::pipe().expect("pipe")).collect();
+            let send_fds: Vec<_> = pipes
+                .iter()
+                .map(|(read_end, _write_end)| read_end.as_raw_fd())
+                .collect();
+
+            let mut send_ancillary = SocketAncillary::new(0);
+            send_ancillary.add_fds(&send_fds);
+            let sent = send_with_ancillary_impl(sender.as_raw_fd(), b"x", &mut send_ancillary)
+                .expect("send_with_ancillary_impl");
+            crate::assert_with_log!(sent == 1, "sent one byte", 1, sent);
+
+            let mut recv_buf = [0u8; 8];
+            let mut recv_ancillary = SocketAncillary::new(ancillary_space_for_fds(1));
+            let received =
+                recv_with_ancillary_impl(receiver.as_raw_fd(), &mut recv_buf, &mut recv_ancillary)
+                    .expect("recv_with_ancillary_impl");
+            crate::assert_with_log!(received == 1, "received one byte", 1, received);
+            crate::assert_with_log!(
+                recv_ancillary.is_truncated(),
+                "partial SCM_RIGHTS truncation must be flagged",
+                true,
+                recv_ancillary.is_truncated()
+            );
+
+            let mut delivered_fds = Vec::new();
+            for msg in recv_ancillary.messages() {
+                let AncillaryMessage::ScmRights(fds) = msg;
+                delivered_fds.extend(fds);
+            }
+            crate::assert_with_log!(
+                !delivered_fds.is_empty(),
+                "partial truncation should surface fitted fds",
+                true,
+                !delivered_fds.is_empty()
+            );
+            crate::assert_with_log!(
+                delivered_fds.len() < send_fds.len(),
+                "receive buffer should not fit every sent fd",
+                true,
+                delivered_fds.len() < send_fds.len()
+            );
+
+            for fd in delivered_fds {
+                nix::unistd::close(fd).expect("close delivered fd");
+            }
+        }
+
+        let after = open_fd_count();
+        crate::assert_with_log!(
+            after <= before + 1,
+            "partial truncation must not leak fds",
+            before,
+            after
+        );
+        crate::test_complete!("recv_with_ancillary_surfaces_partial_truncation_fds_without_leak");
     }
 
     #[test]

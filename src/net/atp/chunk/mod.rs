@@ -8,6 +8,7 @@
 //! - **artifact**: Reproducible chunking focused on build artifacts and proof strength
 //! - **stream**: Rolling manifest chunking for real-time streaming scenarios
 //! - **reconcile**: Rateless IBLT set reconciliation for delta transfers
+//! - **delta-stream**: Missing chunk packing for RaptorQ symbol transfer
 //!
 //! Each profile balances different trade-offs between throughput, deduplication efficiency,
 //! proof strength, and use-case-specific requirements.
@@ -20,6 +21,7 @@ pub mod artifact;
 pub mod bulk_file;
 pub mod cas;
 pub mod dedupe;
+pub mod delta_stream;
 pub mod media;
 pub mod profiles;
 pub mod reconcile;

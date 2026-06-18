@@ -5955,6 +5955,32 @@
           "pattern": "unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), 0) };"
         }
       ]
+    },
+    {
+      "site_id": "unsafe-src-net-unix-stream-rs-recvmsg-ancillary",
+      "path": "src/net/unix/stream.rs",
+      "category": "network-ffi",
+      "scope": "item-boundary",
+      "feature_or_platform_gate": "Unix targets; Linux regression exercises partial SCM_RIGHTS MSG_CTRUNC",
+      "why_safe_rust_is_insufficient": "nix RecvMsg::cmsgs hides msg_controllen and returns ENOBUFS for MSG_CTRUNC, preventing safe recovery of kernel-installed fds on partial SCM_RIGHTS truncation.",
+      "safety_invariant": "recvmsg control parsing must walk only kernel-reported msg_controllen, surface every parsed SCM_RIGHTS fd exactly once to SocketAncillary, preserve MSG_CTRUNC, and never assume the control buffer holds more bytes than libc CMSG_* reports.",
+      "expected_evidence": "cargo check -p asupersync for syntax plus focused Unix ancillary regression recv_with_ancillary_surfaces_partial_truncation_fds_without_leak in central batch verification.",
+      "explicit_no_claims": [
+        "This row does not prove every Unix variant's CMSG layout; non-Linux hosts need their own focused run.",
+        "The cargo-check lane does not execute the partial-truncation regression."
+      ],
+      "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 841,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 861,
+          "pattern": "let (bytes, received_fds, truncated) = unsafe {"
+        }
+      ]
     }
   ]
 }
