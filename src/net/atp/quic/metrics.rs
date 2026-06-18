@@ -190,6 +190,259 @@ impl PathPerformanceClass {
     }
 }
 
+/// One sampled row from the G3 saturating-load benchmark harness.
+///
+/// The transport does not read `/proc`, cgroups, or host load directly. The
+/// benchmark sampler owns those platform reads and feeds this normalized row to
+/// the guard so policy evaluation stays deterministic and artifact-friendly.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SaturatingLoadSample {
+    /// Milliseconds since the benchmark began.
+    pub elapsed_ms: u64,
+    /// Baseline resident set size before the transfer pressure window.
+    pub baseline_rss_bytes: u64,
+    /// Current resident set size for the sampled process group.
+    pub rss_bytes: u64,
+    /// One-minute load average sampled by the harness.
+    pub loadavg_1m: f64,
+    /// CPU pressure in `[0.0, 1.0]`, where `1.0` means fully saturated.
+    pub cpu_pressure: f64,
+    /// Observed useful transfer rate for correlation with pressure spikes.
+    pub goodput_bps: u64,
+}
+
+/// Static limits for the G3 bounded-memory and responsiveness guard.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SaturatingLoadGuardConfig {
+    /// Maximum RSS growth allowed over the baseline during peak throughput.
+    pub rss_growth_ceiling_bytes: u64,
+    /// Maximum one-minute load average allowed during the pressure window.
+    pub loadavg_cap: f64,
+    /// Maximum normalized CPU pressure allowed during the pressure window.
+    pub cpu_pressure_cap: f64,
+    /// Minimum number of samples required before a green verdict is possible.
+    pub min_samples: usize,
+}
+
+impl SaturatingLoadGuardConfig {
+    /// Build a guard config, clamping invalid host-pressure caps fail closed.
+    #[must_use]
+    pub fn new(
+        rss_growth_ceiling_bytes: u64,
+        loadavg_cap: f64,
+        cpu_pressure_cap: f64,
+        min_samples: usize,
+    ) -> Self {
+        Self {
+            rss_growth_ceiling_bytes: rss_growth_ceiling_bytes.max(1),
+            loadavg_cap: finite_positive_cap(loadavg_cap),
+            cpu_pressure_cap: finite_unit_cap(cpu_pressure_cap),
+            min_samples: min_samples.max(1),
+        }
+    }
+}
+
+/// Fail-closed reason from [`SaturatingLoadGuardReport`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SaturatingLoadGuardViolation {
+    /// Not enough sampler rows were present to trust the artifact.
+    InsufficientSamples {
+        /// Rows observed.
+        observed: usize,
+        /// Rows required by policy.
+        required: usize,
+    },
+    /// Peak RSS growth exceeded the bounded-memory ceiling.
+    RssGrowthExceeded {
+        /// Peak resident growth over baseline.
+        observed_bytes: u64,
+        /// Configured ceiling.
+        cap_bytes: u64,
+    },
+    /// Peak load average exceeded the machine-responsiveness ceiling.
+    LoadAverageExceeded {
+        /// Peak observed one-minute load average.
+        observed: f64,
+        /// Configured cap.
+        cap: f64,
+    },
+    /// Peak CPU pressure exceeded the machine-responsiveness ceiling.
+    CpuPressureExceeded {
+        /// Peak observed normalized CPU pressure.
+        observed: f64,
+        /// Configured cap.
+        cap: f64,
+    },
+}
+
+/// Machine-readable G3 verdict for benchmark artifacts and pacing feedback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SaturatingLoadGuardReport {
+    /// Number of samples evaluated.
+    pub sample_count: usize,
+    /// Largest RSS growth over the sample baseline.
+    pub peak_rss_growth_bytes: u64,
+    /// Average RSS across the sample window.
+    pub avg_rss_bytes: u64,
+    /// Peak one-minute load average.
+    pub peak_loadavg_1m: f64,
+    /// Average one-minute load average.
+    pub avg_loadavg_1m: f64,
+    /// Peak normalized CPU pressure.
+    pub peak_cpu_pressure: f64,
+    /// Average normalized CPU pressure.
+    pub avg_cpu_pressure: f64,
+    /// Highest observed useful transfer rate, for correlating peak throughput
+    /// with memory/load stability in the artifact.
+    pub peak_goodput_bps: u64,
+    /// Normalized pressure in `[0.0, 1.0]` suitable for
+    /// `QuicConfig::responsiveness_pressure`.
+    pub pacer_responsiveness_pressure: f64,
+    /// Whether the benchmark artifact satisfies G3.
+    pub passed: bool,
+    /// Fail-closed reasons. Empty only when `passed` is true.
+    pub violations: Vec<SaturatingLoadGuardViolation>,
+}
+
+impl SaturatingLoadGuardReport {
+    /// Evaluate G3 bounded-memory and host-responsiveness samples.
+    #[must_use]
+    pub fn evaluate(config: SaturatingLoadGuardConfig, samples: &[SaturatingLoadSample]) -> Self {
+        let mut violations = Vec::new();
+        if samples.len() < config.min_samples {
+            violations.push(SaturatingLoadGuardViolation::InsufficientSamples {
+                observed: samples.len(),
+                required: config.min_samples,
+            });
+        }
+
+        let sample_count = samples.len();
+        let mut peak_rss_growth_bytes = 0_u64;
+        let mut total_rss_bytes = 0_u128;
+        let mut peak_loadavg_1m = 0.0_f64;
+        let mut total_loadavg_1m = 0.0_f64;
+        let mut peak_cpu_pressure = 0.0_f64;
+        let mut total_cpu_pressure = 0.0_f64;
+        let mut peak_goodput_bps = 0_u64;
+
+        for sample in samples {
+            let rss_growth = sample.rss_bytes.saturating_sub(sample.baseline_rss_bytes);
+            peak_rss_growth_bytes = peak_rss_growth_bytes.max(rss_growth);
+            total_rss_bytes = total_rss_bytes.saturating_add(u128::from(sample.rss_bytes));
+
+            let loadavg = finite_nonnegative(sample.loadavg_1m);
+            peak_loadavg_1m = peak_loadavg_1m.max(loadavg);
+            total_loadavg_1m += loadavg;
+
+            let cpu_pressure = clamp_unit_or_one(sample.cpu_pressure);
+            peak_cpu_pressure = peak_cpu_pressure.max(cpu_pressure);
+            total_cpu_pressure += cpu_pressure;
+            peak_goodput_bps = peak_goodput_bps.max(sample.goodput_bps);
+        }
+
+        let avg_rss_bytes = if sample_count == 0 {
+            0
+        } else {
+            u64::try_from(total_rss_bytes / sample_count as u128).unwrap_or(u64::MAX)
+        };
+        let avg_loadavg_1m = if sample_count == 0 {
+            0.0
+        } else {
+            total_loadavg_1m / sample_count as f64
+        };
+        let avg_cpu_pressure = if sample_count == 0 {
+            0.0
+        } else {
+            total_cpu_pressure / sample_count as f64
+        };
+
+        if peak_rss_growth_bytes > config.rss_growth_ceiling_bytes {
+            violations.push(SaturatingLoadGuardViolation::RssGrowthExceeded {
+                observed_bytes: peak_rss_growth_bytes,
+                cap_bytes: config.rss_growth_ceiling_bytes,
+            });
+        }
+        if peak_loadavg_1m > config.loadavg_cap {
+            violations.push(SaturatingLoadGuardViolation::LoadAverageExceeded {
+                observed: peak_loadavg_1m,
+                cap: config.loadavg_cap,
+            });
+        }
+        if peak_cpu_pressure > config.cpu_pressure_cap {
+            violations.push(SaturatingLoadGuardViolation::CpuPressureExceeded {
+                observed: peak_cpu_pressure,
+                cap: config.cpu_pressure_cap,
+            });
+        }
+
+        let rss_pressure = ratio_to_unit(
+            peak_rss_growth_bytes as f64,
+            config.rss_growth_ceiling_bytes as f64,
+        );
+        let load_pressure = ratio_to_unit(peak_loadavg_1m, config.loadavg_cap);
+        let cpu_pressure = ratio_to_unit(peak_cpu_pressure, config.cpu_pressure_cap);
+        let passed = violations.is_empty();
+        let raw_pressure = rss_pressure.max(load_pressure).max(cpu_pressure).min(1.0);
+        let pacer_responsiveness_pressure = if passed { raw_pressure } else { 1.0 };
+
+        Self {
+            sample_count,
+            peak_rss_growth_bytes,
+            avg_rss_bytes,
+            peak_loadavg_1m,
+            avg_loadavg_1m,
+            peak_cpu_pressure,
+            avg_cpu_pressure,
+            peak_goodput_bps,
+            pacer_responsiveness_pressure,
+            passed,
+            violations,
+        }
+    }
+}
+
+fn finite_nonnegative(value: f64) -> f64 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        f64::INFINITY
+    }
+}
+
+fn finite_positive_cap(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        f64::EPSILON
+    }
+}
+
+fn finite_unit_cap(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(f64::EPSILON, 1.0)
+    } else {
+        f64::EPSILON
+    }
+}
+
+fn clamp_unit_or_one(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+fn ratio_to_unit(numerator: f64, denominator: f64) -> f64 {
+    if !numerator.is_finite() {
+        return 1.0;
+    }
+    if !denominator.is_finite() || denominator <= 0.0 {
+        return if numerator <= 0.0 { 0.0 } else { 1.0 };
+    }
+    (numerator / denominator).clamp(0.0, 1.0)
+}
+
 /// ATP Transport Metrics Collector
 ///
 /// Collects and exposes QUIC transport metrics for ATP Transfer Brain consumption.
@@ -598,6 +851,121 @@ mod tests {
         assert_eq!(
             PathPerformanceClass::from_metrics(&metrics),
             PathPerformanceClass::Poor
+        );
+    }
+
+    #[test]
+    fn saturating_load_guard_accepts_flat_rss_and_responsive_host() {
+        let config = SaturatingLoadGuardConfig::new(8 * 1024 * 1024, 8.0, 0.85, 3);
+        let baseline = 128 * 1024 * 1024;
+        let samples = [
+            SaturatingLoadSample {
+                elapsed_ms: 0,
+                baseline_rss_bytes: baseline,
+                rss_bytes: baseline + 1024 * 1024,
+                loadavg_1m: 2.0,
+                cpu_pressure: 0.20,
+                goodput_bps: 700 * 1024 * 1024,
+            },
+            SaturatingLoadSample {
+                elapsed_ms: 200,
+                baseline_rss_bytes: baseline,
+                rss_bytes: baseline + 2 * 1024 * 1024,
+                loadavg_1m: 3.5,
+                cpu_pressure: 0.40,
+                goodput_bps: 930 * 1024 * 1024,
+            },
+            SaturatingLoadSample {
+                elapsed_ms: 400,
+                baseline_rss_bytes: baseline,
+                rss_bytes: baseline + 2 * 1024 * 1024,
+                loadavg_1m: 4.0,
+                cpu_pressure: 0.50,
+                goodput_bps: 920 * 1024 * 1024,
+            },
+        ];
+
+        let report = SaturatingLoadGuardReport::evaluate(config, &samples);
+
+        assert!(report.passed, "{report:?}");
+        assert!(report.violations.is_empty());
+        assert_eq!(report.sample_count, 3);
+        assert_eq!(report.peak_rss_growth_bytes, 2 * 1024 * 1024);
+        assert_eq!(report.peak_goodput_bps, 930 * 1024 * 1024);
+        assert!(
+            report.pacer_responsiveness_pressure > 0.0
+                && report.pacer_responsiveness_pressure < 1.0
+        );
+    }
+
+    #[test]
+    fn saturating_load_guard_fails_closed_on_rss_load_and_cpu_pressure() {
+        let config = SaturatingLoadGuardConfig::new(4 * 1024 * 1024, 4.0, 0.70, 2);
+        let baseline = 64 * 1024 * 1024;
+        let samples = [
+            SaturatingLoadSample {
+                elapsed_ms: 0,
+                baseline_rss_bytes: baseline,
+                rss_bytes: baseline + 1024 * 1024,
+                loadavg_1m: 3.0,
+                cpu_pressure: 0.30,
+                goodput_bps: 100,
+            },
+            SaturatingLoadSample {
+                elapsed_ms: 200,
+                baseline_rss_bytes: baseline,
+                rss_bytes: baseline + 12 * 1024 * 1024,
+                loadavg_1m: 5.5,
+                cpu_pressure: 0.95,
+                goodput_bps: 200,
+            },
+        ];
+
+        let report = SaturatingLoadGuardReport::evaluate(config, &samples);
+
+        assert!(!report.passed);
+        assert_eq!(report.pacer_responsiveness_pressure, 1.0);
+        assert!(report.violations.iter().any(|violation| matches!(
+            violation,
+            SaturatingLoadGuardViolation::RssGrowthExceeded {
+                observed_bytes,
+                cap_bytes
+            } if *observed_bytes == 12 * 1024 * 1024 && *cap_bytes == 4 * 1024 * 1024
+        )));
+        assert!(report.violations.iter().any(|violation| matches!(
+            violation,
+            SaturatingLoadGuardViolation::LoadAverageExceeded { observed, cap }
+                if (*observed - 5.5).abs() < f64::EPSILON && (*cap - 4.0).abs() < f64::EPSILON
+        )));
+        assert!(report.violations.iter().any(|violation| matches!(
+            violation,
+            SaturatingLoadGuardViolation::CpuPressureExceeded { observed, cap }
+                if (*observed - 0.95).abs() < f64::EPSILON && (*cap - 0.70).abs() < f64::EPSILON
+        )));
+    }
+
+    #[test]
+    fn saturating_load_guard_requires_enough_samples() {
+        let config = SaturatingLoadGuardConfig::new(1024, 1.0, 0.5, 3);
+        let sample = SaturatingLoadSample {
+            elapsed_ms: 0,
+            baseline_rss_bytes: 4096,
+            rss_bytes: 4096,
+            loadavg_1m: 0.1,
+            cpu_pressure: 0.1,
+            goodput_bps: 1,
+        };
+
+        let report = SaturatingLoadGuardReport::evaluate(config, &[sample]);
+
+        assert!(!report.passed);
+        assert_eq!(report.pacer_responsiveness_pressure, 1.0);
+        assert_eq!(
+            report.violations,
+            vec![SaturatingLoadGuardViolation::InsufficientSamples {
+                observed: 1,
+                required: 3
+            }]
         );
     }
 
