@@ -186,6 +186,82 @@ to wire.
 - **Why it matters:** this is the gap to "beat rsync on a PERFECT link." It is an I/O-shape problem,
   not an algorithmic one — high EV, low risk (isomorphic). Profile-first before implementing.
 
+## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
+Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
+advanced math), /alien-graveyard (buried primitives). Each entry: idea · math/CS family · EV · risk ·
+proof-obligation · fallback. Discipline: try, gate on the rigorous harness (byte-identical sha +
+beyond-reproach vs optimal rsync), keep wins, ledger losses with a retry-condition. "Crazy is fine —
+we can revert." Ranked by EV for "beat rsync across the WHOLE matrix."
+
+### FRONTIER 1 — perfect / high-bandwidth link (atp is CPU/syscall-bound: 50M 3.51s vs rsync 0.91s)
+- **B-1 ★ io_uring + mmap zero-copy data plane.** Family: OS/extreme-opt. Sender mmaps the source;
+  symbols are slices (no read syscalls). Receiver mmaps the staging file; source-first reconstruct is
+  pure memcpy into the mapping (no write syscalls — page cache flushes). UDP via io_uring (the repo has
+  the `io-uring` feature) with registered buffers + SQPOLL → near-zero per-datagram syscall cost.
+  EV: VERY HIGH (this is exactly how to match rsync's kernel efficiency). Risk: med (unsafe + io_uring
+  lifecycle → unsafe-ledger entry). Proof: byte-identical sha; strace shows write/lseek/sendto counts
+  collapse. Fallback: the portable seek+write path (E-10).
+- **B-2 ★ GSO (UDP_SEGMENT) send + GRO recv + per-SUPER-PACKET MAC.** Family: coding + extreme-opt.
+  One sendmsg emits a 64 KB super-packet the kernel segments into MTU datagrams → ~45× fewer send
+  syscalls; UDP_GRO coalesces on recv. CRUCIALLY: authenticate ONCE per super-packet (HMAC over the
+  64 KB) instead of per ~1 KB symbol → ~45× fewer MAC ops (rsync-over-ssh only does per-stream AEAD, so
+  atp's per-symbol HMAC is its handicap — this erases it). EV: VERY HIGH. Risk: med (unsafe sockopt +
+  ledger; udp.rs already has the GSO planner scaffold ee2906704). Proof: sha; MAC-op count drops.
+  Fallback: sendmmsg batching (already wired).
+- **B-3 PGO + BOLT + target-cpu=native for the atp binary.** Family: extreme-opt build. Profile-guided
+  + post-link optimization of the hot encode/decode/HMAC/memcpy paths. EV: med (10-20% free on the
+  CPU-bound path). Risk: low (build-only, byte-identical). Proof: sha + before/after wall. Fallback: drop.
+- **B-4 Bigger symbol_size (1024→1400 MTU; jumbo via GSO).** Fewer symbols ⇒ fewer per-symbol HMAC +
+  syscalls + bookkeeping (−37% symbol count at 1400). Source-first already uses 1400; make it the
+  default everywhere; with GSO explore larger logical symbols. EV: med. Risk: low. Proof: sha.
+
+### FRONTIER 2 — bad / lossy / spotty link (E-9 now CONVERGES; make it WIN, not just finish)
+- **B-5 ★ AdaptiveController default-on (E-7 / WIRE-1).** Family: online-learning (EXP3 bandit) +
+  tail-risk (CVaR) + info-theory (ε* ≈ 1/(1−p) toward erasure capacity). Pick k/fanout/FEC-overhead
+  per measured loss/RTT to converge in the FEWEST rounds (rsync degrades badly under loss — this is
+  atp's structural edge). EV: VERY HIGH (the "adaptive to any connection" mandate). Risk: med (needs
+  the deterministic conservative fallback). Proof: sha + rounds↓ + wall↓ vs rsync on bad regime.
+- **B-6 Coded / compressed feedback (Bloom-filter ACK).** Family: coding/info-theory. NeedMore lists
+  needed symbols; on high loss this control grows. Send a Bloom/IBLT of RECEIVED ESIs instead → O(1)
+  control regardless of loss. EV: med (helps very-lossy + bonding). Risk: low. Proof: sha + control
+  bytes↓. Fallback: explicit list (current).
+- **B-7 Model-predictive spray pacing (MPC/PID over decode-queue depth).** Family: control theory.
+  Keep the receiver's decode queue at the optimal depth (not starved, not overflowing → the 261 MB
+  blowup + incast). EV: med-high. Risk: med. Proof: sha + bounded RSS + wall.
+
+### FRONTIER 3 — ★ THE RSYNC-KILLER: delta transfer (rsync's raison d'être; atp must beat it)
+- **B-8 ★★ FastCDC content-defined chunking + RaptorQ delta.** Family: alien-graveyard (CDC) + coding.
+  rsync's whole reason to exist is delta-transfer (only send what changed). Today atp sends the WHOLE
+  file, so the current matrix uses rsync --whole-file (fair) — but for the INCREMENTAL case (a file
+  that changed slightly) rsync's rolling-hash delta WINS massively. To be "better in EVERY way": the
+  receiver content-defined-chunks (FastCDC) its OLD copy; sends the set of chunk hashes it has; the
+  sender CDC-chunks the NEW file, and RaptorQ-encodes ONLY the chunks the receiver lacks. This beats
+  rsync's O(n) rolling-hash + weak/strong-hash scan with content-defined boundaries + fountain coding
+  of the changed regions (and bonding can pull the changed chunks from N donors!). EV: ★★ HIGHEST for
+  the incremental dimension rsync dominates. Risk: high (new subsystem). Proof: sha + bytes-on-wire ≈
+  changed-fraction; beat rsync delta on a 1%-changed 1 GB file. Generalizes E-5 (resume). → wants beads.
+- **B-9 zstd compression per block (rsync -z parity+).** Family: info-theory (rate-distortion). For
+  compressible data, compress source before encoding (matrix uses incompressible random → off, but real
+  data benefits). EV: med (workload-dependent). Risk: low. Proof: sha after decompress.
+
+### FRONTIER 4 — cross-cutting (the decode wall, trees, huge files)
+- **B-10 ★ Parallel per-block decode (F6.3 / 317hxr.7.3).** Family: numerical-LA + parallelism. The
+  single-core decode wall (~0.8 MB/s) caps lossy + bonding throughput. Blocks are independent → solve
+  on the blocking pool concurrently. EV: HIGH (unblocks bonding C6 + lossy speed). Risk: med. Proof:
+  sha + decode MB/s scales with cores.
+- **B-11 Power-law TREE scheduling (optimal-transport / submodular).** Family: scheduling. For deep
+  trees of many files, order spray to maximize early per-file completions (smallest-first / priority);
+  pipeline manifest + spray. EV: med (the tree matrix dimension). Risk: low. Proof: sha-set + wall.
+- **B-12 huge pages + NUMA-aware buffers for the memcpy/GF256 path.** Family: extreme-opt. EV: low-med.
+  Risk: low. Proof: sha + wall.
+- **B-13 (moon-shot) AF_XDP / kernel-bypass UDP.** Family: extreme-opt. Ultimate syscall elimination
+  for datacenter NICs. EV: high-ceiling / niche. Risk: very high (root, NIC support). Defer; note only.
+
+**Execution order (EV×confidence/effort, profile-gated):** E-10 (batched I/O, do now) → B-10 (parallel
+decode) → B-2 (GSO+super-packet MAC) → B-1 (io_uring+mmap) → B-5 (adaptive default-on) → B-8 (delta,
+the rsync-killer, own bead-set). Each: profile → implement one lever → prove sha-identical → measure
+vs optimal rsync → keep or ledger-with-retry.
+
 ### E-0 · PROFILE: where does the 113.85s actually go? (BLOCKS all others)
 - **Hypothesis:** the F3 100M wall is dominated by feedback-round latency + solve-on-incomplete
   blocks (caused by burst-induced drops), NOT by sender encode (already parallel) nor raw GF256.
