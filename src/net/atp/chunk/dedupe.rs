@@ -41,6 +41,36 @@ pub struct CdcChunkData {
     pub content_hash: [u8; 32],
 }
 
+/// Conservative lower bound for incremental re-sync bytes-on-wire.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeltaFloorEstimate {
+    pub receiver_unique_chunk_count: usize,
+    pub sender_unique_chunk_count: usize,
+    pub shared_chunk_count: usize,
+    pub sender_missing_chunk_count: usize,
+    pub receiver_stale_chunk_count: usize,
+    pub sender_missing_bytes: u64,
+    pub receiver_stale_bytes: u64,
+    pub symmetric_difference_bytes: u64,
+    pub estimated_floor_bytes_on_wire: u64,
+    pub observed_gap_to_floor: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ChunkSetKey {
+    content_hash: [u8; 32],
+    size_bytes: u64,
+}
+
+impl From<&CdcChunkData> for ChunkSetKey {
+    fn from(chunk: &CdcChunkData) -> Self {
+        Self {
+            content_hash: chunk.content_hash,
+            size_bytes: chunk.size_bytes,
+        }
+    }
+}
+
 /// Content-defined chunking engine with rolling hash boundary detection.
 pub struct CdcEngine;
 
@@ -120,6 +150,53 @@ impl CdcEngine {
         }
 
         Ok(chunks)
+    }
+
+    /// Estimate the absolute information floor for a re-sync where the receiver
+    /// already has `receiver_existing` chunks and the sender wants
+    /// `sender_target`. The floor is the unique target chunk bytes absent from
+    /// the receiver's content-addressed set; any real protocol can only exceed
+    /// it with manifest/reconciliation/FEC/auth overhead.
+    pub fn estimate_delta_floor(
+        receiver_existing: &[CdcChunkData],
+        sender_target: &[CdcChunkData],
+        observed_bytes_on_wire: Option<u64>,
+    ) -> DeltaFloorEstimate {
+        let receiver_set: BTreeSet<ChunkSetKey> =
+            receiver_existing.iter().map(ChunkSetKey::from).collect();
+        let sender_set: BTreeSet<ChunkSetKey> =
+            sender_target.iter().map(ChunkSetKey::from).collect();
+
+        let shared_chunk_count = sender_set.intersection(&receiver_set).count();
+        let sender_missing_chunk_count = sender_set.difference(&receiver_set).count();
+        let receiver_stale_chunk_count = receiver_set.difference(&sender_set).count();
+        let sender_missing_bytes = sender_set
+            .difference(&receiver_set)
+            .fold(0u64, |sum, chunk| sum.saturating_add(chunk.size_bytes));
+        let receiver_stale_bytes = receiver_set
+            .difference(&sender_set)
+            .fold(0u64, |sum, chunk| sum.saturating_add(chunk.size_bytes));
+        let symmetric_difference_bytes = sender_missing_bytes.saturating_add(receiver_stale_bytes);
+        let observed_gap_to_floor = observed_bytes_on_wire.and_then(|observed| {
+            if sender_missing_bytes == 0 {
+                None
+            } else {
+                Some(observed as f64 / sender_missing_bytes as f64)
+            }
+        });
+
+        DeltaFloorEstimate {
+            receiver_unique_chunk_count: receiver_set.len(),
+            sender_unique_chunk_count: sender_set.len(),
+            shared_chunk_count,
+            sender_missing_chunk_count,
+            receiver_stale_chunk_count,
+            sender_missing_bytes,
+            receiver_stale_bytes,
+            symmetric_difference_bytes,
+            estimated_floor_bytes_on_wire: sender_missing_bytes,
+            observed_gap_to_floor,
+        }
     }
 
     fn validate_params(params: &CdcParameters) -> Result<(), ChunkingProfileError> {
@@ -851,6 +928,14 @@ mod active_tests {
         chunks.iter().map(|chunk| chunk.content_hash).collect()
     }
 
+    fn test_cdc_chunk(byte_offset: u64, data: &[u8]) -> CdcChunkData {
+        CdcChunkData {
+            byte_offset,
+            size_bytes: data.len() as u64,
+            content_hash: CdcEngine::compute_content_hash(data),
+        }
+    }
+
     #[test]
     fn gear_hash_matches_known_vector() {
         let mut hash = RollingHash::new(64);
@@ -912,6 +997,47 @@ mod active_tests {
 
         assert!(prefix_common * 3 >= original_hashes.len() * 2);
         assert!(insert_common * 2 >= original_hashes.len());
+    }
+
+    #[test]
+    fn delta_floor_zero_when_receiver_already_has_target_chunks() {
+        let chunks = vec![
+            test_cdc_chunk(0, b"alpha"),
+            test_cdc_chunk(5, b"beta"),
+            test_cdc_chunk(9, b"gamma"),
+        ];
+
+        let estimate = CdcEngine::estimate_delta_floor(&chunks, &chunks, Some(0));
+
+        assert_eq!(estimate.receiver_unique_chunk_count, 3);
+        assert_eq!(estimate.sender_unique_chunk_count, 3);
+        assert_eq!(estimate.shared_chunk_count, 3);
+        assert_eq!(estimate.sender_missing_chunk_count, 0);
+        assert_eq!(estimate.estimated_floor_bytes_on_wire, 0);
+        assert_eq!(estimate.observed_gap_to_floor, None);
+    }
+
+    #[test]
+    fn delta_floor_counts_unique_missing_target_chunks_once() {
+        let old_a = test_cdc_chunk(0, b"alpha");
+        let old_b = test_cdc_chunk(5, b"beta");
+        let new_c = test_cdc_chunk(5, b"carrot");
+        let duplicate_new_c = test_cdc_chunk(11, b"carrot");
+
+        let estimate = CdcEngine::estimate_delta_floor(
+            &[old_a.clone(), old_b],
+            &[old_a, new_c, duplicate_new_c],
+            Some(18),
+        );
+
+        assert_eq!(estimate.shared_chunk_count, 1);
+        assert_eq!(estimate.sender_missing_chunk_count, 1);
+        assert_eq!(estimate.receiver_stale_chunk_count, 1);
+        assert_eq!(estimate.sender_missing_bytes, 6);
+        assert_eq!(estimate.receiver_stale_bytes, 4);
+        assert_eq!(estimate.symmetric_difference_bytes, 10);
+        assert_eq!(estimate.estimated_floor_bytes_on_wire, 6);
+        assert_eq!(estimate.observed_gap_to_floor, Some(3.0));
     }
 
     #[test]
