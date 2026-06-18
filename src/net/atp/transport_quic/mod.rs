@@ -980,6 +980,73 @@ impl QuicFanoutSprayPlan {
     }
 }
 
+/// Binding from a logical fan-out lane to a physical QUIC connection.
+///
+/// A migrated path changes the physical connection/generation, not the logical
+/// symbol lane. Symbols keep their original object/block/ESI identity, so a
+/// migration cannot make the receiver treat retransmitted symbols as new data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicFanoutLaneBinding {
+    /// Logical lane index emitted by [`QuicBlockInterleavingScheduler`].
+    pub logical_connection: usize,
+    /// Physical connection index currently serving this lane.
+    pub physical_connection: usize,
+    /// Monotonic migration generation for this lane.
+    pub migration_generation: u64,
+}
+
+impl QuicFanoutLaneBinding {
+    /// Identity binding for a non-migrated lane.
+    #[must_use]
+    pub const fn identity(connection: usize) -> Self {
+        Self {
+            logical_connection: connection,
+            physical_connection: connection,
+            migration_generation: 0,
+        }
+    }
+}
+
+/// Symbol work assigned to one logical fan-out lane / physical connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicFanoutConnectionBatch {
+    /// Logical lane index.
+    pub logical_connection: usize,
+    /// Physical QUIC connection currently carrying this lane.
+    pub physical_connection: usize,
+    /// Migration generation for replay/trace assertions.
+    pub migration_generation: u64,
+    /// Ordered symbol slots for this connection.
+    pub slots: Vec<QuicFanoutSymbolSlot>,
+}
+
+impl QuicFanoutConnectionBatch {
+    /// Number of symbols assigned to this connection in the epoch.
+    #[must_use]
+    pub fn symbol_count(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+/// Per-connection dispatch view of a fan-out spray epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicFanoutDispatchPlan {
+    /// Bounded logical connection count used for this plan.
+    pub connection_count: usize,
+    /// One deterministic batch per logical connection.
+    pub batches: Vec<QuicFanoutConnectionBatch>,
+    /// Total symbols covered by the plan.
+    pub total_symbols: u64,
+}
+
+impl QuicFanoutDispatchPlan {
+    /// Whether this epoch has no positive-symbol work.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total_symbols == 0
+    }
+}
+
 /// Deterministic block-interleaving scheduler for D1 QUIC fan-out.
 ///
 /// The scheduler streams one symbol slot at a time. It round-robins across
@@ -1089,6 +1156,52 @@ pub fn quic_plan_fanout_spray(
         slots,
         per_connection_symbols,
         total_symbols,
+    }
+}
+
+/// Plan a D1/D2 per-connection dispatch epoch with optional migrated lane
+/// bindings.
+///
+/// `lane_bindings` may remap a logical fan-out lane to a new physical QUIC
+/// connection after migration. Out-of-range bindings are ignored, so stale
+/// migration receipts cannot create extra lanes or bypass the configured fan-out
+/// bound.
+#[must_use]
+pub fn quic_plan_fanout_dispatch(
+    config: &QuicConfig,
+    cpu_parallelism: usize,
+    blocks: &[QuicFanoutBlock],
+    lane_bindings: &[QuicFanoutLaneBinding],
+) -> QuicFanoutDispatchPlan {
+    let spray = quic_plan_fanout_spray(config, cpu_parallelism, blocks);
+    let mut bindings = (0..spray.connection_count)
+        .map(QuicFanoutLaneBinding::identity)
+        .collect::<Vec<_>>();
+    for binding in lane_bindings {
+        if let Some(slot) = bindings.get_mut(binding.logical_connection) {
+            *slot = *binding;
+        }
+    }
+
+    let mut batches = bindings
+        .iter()
+        .map(|binding| QuicFanoutConnectionBatch {
+            logical_connection: binding.logical_connection,
+            physical_connection: binding.physical_connection,
+            migration_generation: binding.migration_generation,
+            slots: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    for slot in spray.slots {
+        if let Some(batch) = batches.get_mut(slot.connection) {
+            batch.slots.push(slot);
+        }
+    }
+
+    QuicFanoutDispatchPlan {
+        connection_count: spray.connection_count,
+        batches,
+        total_symbols: spray.total_symbols,
     }
 }
 
@@ -6761,6 +6874,94 @@ mod tests {
             four_lane_rounds < two_lane_rounds,
             "synthetic same-workload completion rounds should improve with more lanes"
         );
+    }
+
+    #[test]
+    fn d1_quic_fanout_dispatch_groups_slots_by_connection() {
+        let config = QuicConfig {
+            datagram_fanout: 3,
+            max_active_connections: 3,
+            ..trusted_quic_config()
+        };
+        let blocks = [
+            QuicFanoutBlock {
+                entry: 0,
+                sbn: 0,
+                symbols: 3,
+            },
+            QuicFanoutBlock {
+                entry: 1,
+                sbn: 0,
+                symbols: 3,
+            },
+        ];
+
+        let dispatch = quic_plan_fanout_dispatch(&config, 3, &blocks, &[]);
+
+        assert_eq!(dispatch.connection_count, 3);
+        assert_eq!(dispatch.total_symbols, 6);
+        assert_eq!(dispatch.batches.len(), 3);
+        assert!(!dispatch.is_empty());
+        for batch in &dispatch.batches {
+            assert_eq!(batch.logical_connection, batch.physical_connection);
+            assert_eq!(batch.migration_generation, 0);
+            assert_eq!(batch.symbol_count(), 2);
+            assert!(
+                batch
+                    .slots
+                    .iter()
+                    .all(|slot| slot.connection == batch.logical_connection),
+                "dispatch batches must preserve the scheduler's logical lane"
+            );
+        }
+    }
+
+    #[test]
+    fn d1_quic_fanout_dispatch_remaps_migrated_physical_connection_only() {
+        let config = QuicConfig {
+            datagram_fanout: 2,
+            max_active_connections: 2,
+            ..trusted_quic_config()
+        };
+        let blocks = [QuicFanoutBlock {
+            entry: 7,
+            sbn: 3,
+            symbols: 4,
+        }];
+        let dispatch = quic_plan_fanout_dispatch(
+            &config,
+            2,
+            &blocks,
+            &[
+                QuicFanoutLaneBinding {
+                    logical_connection: 1,
+                    physical_connection: 9,
+                    migration_generation: 2,
+                },
+                QuicFanoutLaneBinding {
+                    logical_connection: 99,
+                    physical_connection: 99,
+                    migration_generation: 99,
+                },
+            ],
+        );
+
+        assert_eq!(dispatch.connection_count, 2);
+        assert_eq!(dispatch.total_symbols, 4);
+        assert_eq!(dispatch.batches[0].physical_connection, 0);
+        assert_eq!(dispatch.batches[0].migration_generation, 0);
+        assert_eq!(dispatch.batches[1].physical_connection, 9);
+        assert_eq!(dispatch.batches[1].migration_generation, 2);
+        assert_eq!(dispatch.batches[0].symbol_count(), 2);
+        assert_eq!(dispatch.batches[1].symbol_count(), 2);
+
+        for batch in &dispatch.batches {
+            for slot in &batch.slots {
+                assert_eq!(slot.connection, batch.logical_connection);
+                assert_eq!(slot.entry, 7);
+                assert_eq!(slot.sbn, 3);
+            }
+        }
     }
 
     #[test]
