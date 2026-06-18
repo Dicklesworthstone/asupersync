@@ -92,11 +92,11 @@ fn ours_parse_info_wire(wire: &[u8]) -> BTreeMap<String, String> {
 
 fn redis_rs_parse_info_wire(wire: &[u8]) -> BTreeMap<String, String> {
     let value = parse_redis_value(wire).expect("redis-rs should parse INFO wire");
-    let info: InfoDict = from_redis_value(&value).expect("redis-rs should build InfoDict");
+    let info: InfoDict = from_redis_value(value).expect("redis-rs should build InfoDict");
     info.iter()
         .map(|(key, value)| {
-            let value: String =
-                from_redis_value(value).expect("redis-rs InfoDict entries should stay strings");
+            let value: String = from_redis_value(value.clone())
+                .expect("redis-rs InfoDict entries should stay strings");
             (key.clone(), value)
         })
         .collect()

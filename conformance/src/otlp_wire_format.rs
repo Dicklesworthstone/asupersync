@@ -1382,6 +1382,7 @@ fn encode_resource_attribute(key: &str, value: &str) -> Vec<u8> {
 
     let attribute = KeyValue {
         key: key.to_string(),
+        key_strindex: 0,
         value: Some(AnyValue {
             value: Some(AnyValueKind::StringValue(value.to_string())),
         }),
@@ -1773,6 +1774,7 @@ fn convert_to_otlp_events(events: &[SpanEvent]) -> Vec<OtlpEvent> {
         let attributes = event.attributes.iter()
             .map(|(key, value)| opentelemetry_proto::tonic::common::v1::KeyValue {
                 key: key.clone(),
+                key_strindex: 0,
                 value: Some(opentelemetry_proto::tonic::common::v1::AnyValue {
                     value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(value.clone())),
                 }),
@@ -1839,6 +1841,7 @@ fn convert_to_otlp_links(links: &[SpanLinkData]) -> Vec<OtlpSpanLink> {
         let attributes = link.attributes.iter()
             .map(|(key, value)| opentelemetry_proto::tonic::common::v1::KeyValue {
                 key: key.to_string(),
+                key_strindex: 0,
                 value: Some(opentelemetry_proto::tonic::common::v1::AnyValue {
                     value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(value.to_string())),
                 }),

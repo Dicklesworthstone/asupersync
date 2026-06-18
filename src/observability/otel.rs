@@ -5425,6 +5425,7 @@ pub mod span_semantics {
                 .iter()
                 .map(|(key, value)| KeyValue {
                     key: key.clone(),
+                    key_strindex: 0,
                     value: Some(attribute_value_to_any_value(value)),
                 })
                 .collect();
@@ -5456,7 +5457,9 @@ pub mod span_semantics {
             ProtoValue::IntValue(value) => Some(AttributeValue::Int(*value)),
             ProtoValue::DoubleValue(value) => Some(AttributeValue::Float(*value)),
             ProtoValue::ArrayValue(values) => attribute_array_value_from_any_values(&values.values),
-            ProtoValue::KvlistValue(_) | ProtoValue::BytesValue(_) => None,
+            ProtoValue::KvlistValue(_)
+            | ProtoValue::BytesValue(_)
+            | ProtoValue::StringValueStrindex(_) => None,
         }
     }
 
@@ -7768,6 +7771,7 @@ pub mod otlp_request_builder {
     fn key_value(key: impl Into<String>, value: impl Into<String>) -> KeyValue {
         KeyValue {
             key: key.into(),
+            key_strindex: 0,
             value: Some(string_value(&value.into())),
         }
     }
@@ -8130,6 +8134,7 @@ mod otlp_wire_format_tests {
     fn key_value(key: impl Into<String>, value: impl Into<String>) -> KeyValue {
         KeyValue {
             key: key.into(),
+            key_strindex: 0,
             value: Some(string_value(&value.into())),
         }
     }
@@ -8673,6 +8678,7 @@ mod otlp_wire_format_tests {
             let resource = Resource {
                 attributes: vec![KeyValue {
                     key: "service.name".to_string(),
+                    key_strindex: 0,
                     value: Some(AnyValue {
                         value: Some(
                             opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
@@ -8707,6 +8713,7 @@ mod otlp_wire_format_tests {
                     attributes: span.attributes.iter().map(|(k, v)| {
                         KeyValue {
                             key: k.clone(),
+                            key_strindex: 0,
                             value: Some(AnyValue {
                                 value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(v.clone())),
                             }),
@@ -8719,6 +8726,7 @@ mod otlp_wire_format_tests {
                             attributes: attrs.iter().map(|(k, v)| {
                                 KeyValue {
                                     key: k.clone(),
+                                    key_strindex: 0,
                                     value: Some(AnyValue {
                                         value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(v.clone())),
                                     }),

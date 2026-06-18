@@ -198,9 +198,9 @@ mod conformance_tests {
             vec![0.5, 1.5, 3.0, 7.5, 15.0],
             vec![0.1, 0.9, 1.1, 1.9, 2.1, 4.9, 5.1, 9.9, 10.1, 20.0],
             // Edge cases
-            vec![],                                           // Empty
-            vec![1.0, 1.0, 1.0],                              // Exact boundary values
-            vec![f64::MIN_POSITIVE, f64::MAX, f64::INFINITY], // Extreme values
+            vec![],                            // Empty
+            vec![1.0, 1.0, 1.0],               // Exact boundary values
+            vec![f64::MIN_POSITIVE, f64::MAX], // Extreme finite values
         ];
 
         for values in test_values {
@@ -536,7 +536,11 @@ mod conformance_tests {
 
         // Test infinity
         special_hist.observe(f64::INFINITY);
-        assert_eq!(special_hist.count(), 1);
+        assert_eq!(
+            special_hist.count(),
+            0,
+            "non-finite observations must be rejected before counting"
+        );
         assert_eq!(
             special_hist.sum(),
             0.0,
@@ -544,8 +548,8 @@ mod conformance_tests {
         );
         assert_eq!(
             special_hist.bucket_counts().last().copied(),
-            Some(1),
-            "infinity still counts in the +Inf bucket"
+            Some(0),
+            "rejected infinity must not increment the +Inf bucket"
         );
 
         special_hist.reset();

@@ -33,6 +33,7 @@ mod tests {
     fn key_value(key: impl Into<String>, value: ProtoValue) -> KeyValue {
         KeyValue {
             key: key.into(),
+            key_strindex: 0,
             value: Some(AnyValue { value: Some(value) }),
         }
     }
@@ -70,6 +71,7 @@ mod tests {
     fn empty_value_attr(key: impl Into<String>) -> KeyValue {
         KeyValue {
             key: key.into(),
+            key_strindex: 0,
             value: None,
         }
     }

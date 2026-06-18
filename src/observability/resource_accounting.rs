@@ -1089,8 +1089,10 @@ mod tests {
             acc.obligation_committed(kind);
         }
 
-        assert_eq!(acc.obligations_reserved_total(), 5);
-        assert_eq!(acc.obligations_committed_total(), 5);
+        let obligation_kind_count =
+            u64::try_from(ALL_OBLIGATION_KINDS.len()).expect("obligation kind count fits in u64");
+        assert_eq!(acc.obligations_reserved_total(), obligation_kind_count);
+        assert_eq!(acc.obligations_committed_total(), obligation_kind_count);
         assert_eq!(acc.obligations_pending(), 0);
     }
 

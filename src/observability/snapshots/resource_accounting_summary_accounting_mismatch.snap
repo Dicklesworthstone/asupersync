@@ -12,6 +12,7 @@ Obligations:
   lease       : reserved=1      committed=0      aborted=0      leaked=0      pending=1
   io_op       : reserved=0      committed=0      aborted=0      leaked=0      pending=0
   semaphore_permit: reserved=0      committed=0      aborted=0      leaked=0      pending=0
+  transaction : reserved=0      committed=0      aborted=0      leaked=0      pending=0
   Total pending: 0  Peak: 1
   Derived pending: 1  Accounting mismatch: yes
   Cleanup complete: no
