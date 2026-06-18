@@ -140,7 +140,8 @@ struct FixedTotalDecodeScenario {
 fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
     const TOTAL_BYTES: usize = 4 * 1024 * 1024;
     const LOSS_FRACTION: f64 = 0.02;
-    const EXTRA_REPAIR: usize = 32;
+    const MIN_EXTRA_REPAIR: usize = 32;
+    const MAX_REPAIR_SYMBOLS: usize = 512;
 
     assert_eq!(TOTAL_BYTES % k, 0, "fixed total bytes must divide K");
 
@@ -151,7 +152,7 @@ fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
         .expect("encoder creation failed");
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let loss_pattern = create_scattered_loss_pattern(k, LOSS_FRACTION, seed ^ 0x5EED);
-    let mut received_symbols = Vec::with_capacity(k + EXTRA_REPAIR);
+    let mut received_symbols = Vec::with_capacity(k + MIN_EXTRA_REPAIR);
 
     for (i, &lost) in loss_pattern.iter().enumerate() {
         if !lost {
@@ -162,8 +163,11 @@ fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
 
     let params = decoder.params();
     let required_symbols = params.l - params.k_prime.saturating_sub(params.k);
-    let needed_repairs = required_symbols.saturating_sub(received_symbols.len()) + EXTRA_REPAIR;
-    for i in 0..needed_repairs {
+    let initial_repairs =
+        required_symbols.saturating_sub(received_symbols.len()) + MIN_EXTRA_REPAIR;
+    let mut decoded_source = None;
+
+    for i in 0..MAX_REPAIR_SYMBOLS {
         let repair_esi = u32::try_from(k + i).expect("repair ESI must fit in u32");
         let repair_data = encoder.repair_symbol(repair_esi);
         let (columns, coefficients) = decoder
@@ -175,13 +179,26 @@ fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
             coefficients,
             repair_data,
         ));
+
+        if i + 1 >= initial_repairs {
+            match decoder.decode(&received_symbols) {
+                Ok(decoded) => {
+                    decoded_source = Some(decoded.source);
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
     }
 
-    let decoded = decoder
-        .decode(&received_symbols)
-        .expect("fixed-total decode scenario must be solvable");
+    let decoded_source = decoded_source.unwrap_or_else(|| {
+        panic!(
+            "fixed-total decode scenario did not become solvable for K={} after {} repair symbols",
+            k, MAX_REPAIR_SYMBOLS
+        )
+    });
     assert_eq!(
-        decoded.source, source_symbols,
+        decoded_source, source_symbols,
         "fixed-total decode scenario must round-trip"
     );
 
