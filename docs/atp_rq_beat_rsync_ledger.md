@@ -606,7 +606,15 @@ vs optimal rsync → keep or ledger-with-retry.
   > rsync; widen the `--streams` count until the NIC/loss saturates.
 - **Falsifiability:** if a single paced UDP stream already saturates → multi-stream adds nothing.
 - **One-line:** netem delay 50-100ms; atp `--streams {1,4,8,16}` vs rsync; same link.
-- **Result:** _pending_
+- **Result:** _pending benchmark_
+- **Harness update (2026-06-18, asupersync-dnc0fx):** `scripts/atp_bench/matrix_bench.sh`
+  now has `--streams CSV` for ATP-RQ stream sweeps; rsync and other non-RQ methods remain
+  single-baseline rows. `run_matrix_cell.sh` emits `atp_rq_streams`/`stream_count` for ATP-RQ
+  rows, and `score_matrix.py` groups medians plus admitted ATP-vs-rsync ratios by stream count.
+  No benchmark was run in Phase-1/code-first mode. Admission predicate for the orchestrator
+  sweep: high-BDP/rate-capped netns cells with `--streams 1,2,4,8`, crypto-symmetric tier,
+  optimally tuned rsync, at least 3 reps, `sha_ok=true`, wall, cv_pct, sender+receiver peak RSS,
+  and ATP feedback_rounds recorded.
 
 ### E-3.1 · Perfect-link overhead reduction analysis (rate-capped low-latency)
 - **Question:** why does ATP lose the "perfect" matrix cell even after the harness is rate-capped?

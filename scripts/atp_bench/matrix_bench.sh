@@ -18,6 +18,7 @@ RUN_CELL_CMD=""
 WORKLOADS="500K,5M,50M,500M,5G,tree_small,tree_big"
 REGIMES="perfect,good,bad,broken"
 TIERS="nocrypto,auth,encrypted"
+STREAMS_SWEEP="8"
 
 usage() {
   cat <<'USAGE'
@@ -37,13 +38,15 @@ Options:
   --workloads CSV           workload list
   --regimes CSV             regime list
   --tiers CSV               crypto tier list
+  --streams CSV             ATP-RQ stream counts to sweep (default: 8)
   --reps N                  default reps per method/cell
   --help                    show this help
 
 Execution env for --run-cell-command:
   ATP_MATRIX_WORKLOAD, ATP_MATRIX_WORKLOAD_PATH, ATP_MATRIX_REGIME,
   ATP_MATRIX_TIER, ATP_MATRIX_METHOD, ATP_MATRIX_REP, ATP_MATRIX_RESULTS,
-  ATP_MATRIX_NETEM_JSON, ATP_MATRIX_RUN_ID, ATP_MATRIX_GIT_HEAD.
+  ATP_MATRIX_STREAMS, ATP_MATRIX_NETEM_JSON, ATP_MATRIX_RUN_ID,
+  ATP_MATRIX_GIT_HEAD.
 USAGE
 }
 
@@ -98,6 +101,10 @@ while [[ $# -gt 0 ]]; do
       TIERS="${2:?missing CSV}"
       shift 2
       ;;
+    --streams)
+      STREAMS_SWEEP="${2:?missing CSV}"
+      shift 2
+      ;;
     --reps)
       REPS_DEFAULT="${2:?missing reps}"
       shift 2
@@ -114,6 +121,19 @@ done
 
 [[ "${REPS_DEFAULT}" =~ ^[0-9]+$ ]] || die "--reps must be an integer"
 [[ "${REPS_DEFAULT}" -ge 1 ]] || die "--reps must be >= 1"
+
+method_uses_stream_sweep() {
+  [[ "$1" == atp-rq-* ]]
+}
+
+validate_streams() {
+  local -n streams_ref="$1"
+  local stream
+  for stream in "${streams_ref[@]}"; do
+    [[ "${stream}" =~ ^[0-9]+$ ]] || die "--streams values must be integers"
+    [[ "${stream}" -ge 1 ]] || die "--streams values must be >= 1"
+  done
+}
 
 split_csv() {
   local value="$1"
@@ -264,24 +284,30 @@ generate_workload() {
 }
 
 cell_done() {
-  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5"
+  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" streams="$6"
   [[ -f "${RESULTS_JSONL}" ]] || return 1
-  python3 - "$RESULTS_JSONL" "$workload" "$regime" "$tier" "$method" "$rep" <<'PY'
+  python3 - "$RESULTS_JSONL" "$workload" "$regime" "$tier" "$method" "$rep" "$streams" <<'PY'
 import json
 import sys
 
-path, workload, regime, tier, method, rep = sys.argv[1:7]
+path, workload, regime, tier, method, rep, streams = sys.argv[1:8]
+requires_stream_match = method.startswith("atp-rq-")
 with open(path, encoding="utf-8") as fh:
     for line in fh:
         if not line.strip():
             continue
         row = json.loads(line)
+        row_streams = row.get("atp_rq_streams", row.get("stream_count"))
+        stream_match = not requires_stream_match or (
+            row_streams is not None and str(row_streams) == streams
+        )
         if (
             str(row.get("workload")) == workload
             and str(row.get("regime")) == regime
             and str(row.get("crypto_tier", row.get("tier"))) == tier
             and str(row.get("method")) == method
             and str(row.get("rep")) == rep
+            and stream_match
             and str(row.get("status", "ok")).lower() == "ok"
         ):
             raise SystemExit(0)
@@ -290,10 +316,14 @@ PY
 }
 
 write_plan_row() {
-  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7"
+  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7" streams="$8"
   local netem
   netem="$(netem_json "${regime}")"
-  printf '{"schema":"atp-bench-matrix-plan-v1","run_id":%s,"git_head":%s,"workload":%s,"workload_path":%s,"regime":%s,"crypto_tier":%s,"method":%s,"rep":%s,"netem":%s}\n' \
+  local atp_streams_json="null"
+  if method_uses_stream_sweep "${method}"; then
+    atp_streams_json="${streams}"
+  fi
+  printf '{"schema":"atp-bench-matrix-plan-v1","run_id":%s,"git_head":%s,"workload":%s,"workload_path":%s,"regime":%s,"crypto_tier":%s,"method":%s,"rep":%s,"stream_count":%s,"atp_rq_streams":%s,"netem":%s}\n' \
     "$(json_escape "${RUN_ID}")" \
     "$(json_escape "${git}")" \
     "$(json_escape "${workload}")" \
@@ -302,6 +332,8 @@ write_plan_row() {
     "$(json_escape "${tier}")" \
     "$(json_escape "${method}")" \
     "${rep}" \
+    "${streams}" \
+    "${atp_streams_json}" \
     "${netem}"
 }
 
@@ -332,9 +364,9 @@ PY
 }
 
 run_cell() {
-  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7"
-  if cell_done "${workload}" "${regime}" "${tier}" "${method}" "${rep}"; then
-    printf 'skip existing %s %s %s %s rep=%s\n' "${workload}" "${regime}" "${tier}" "${method}" "${rep}" >&2
+  local workload="$1" regime="$2" tier="$3" method="$4" rep="$5" path="$6" git="$7" streams="$8"
+  if cell_done "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${streams}"; then
+    printf 'skip existing %s %s %s %s streams=%s rep=%s\n' "${workload}" "${regime}" "${tier}" "${method}" "${streams}" "${rep}" >&2
     return
   fi
   [[ -n "${RUN_CELL_CMD}" ]] || die "--execute requires --run-cell-command"
@@ -344,6 +376,7 @@ run_cell() {
   export ATP_MATRIX_TIER="${tier}"
   export ATP_MATRIX_METHOD="${method}"
   export ATP_MATRIX_REP="${rep}"
+  export ATP_MATRIX_STREAMS="${streams}"
   export ATP_MATRIX_RESULTS="${RESULTS_JSONL}"
   export ATP_MATRIX_NETEM_JSON
   ATP_MATRIX_NETEM_JSON="$(netem_json "${regime}")"
@@ -353,10 +386,12 @@ run_cell() {
 }
 
 main() {
-  local workloads regimes tiers
+  local workloads regimes tiers streams
   split_csv "${WORKLOADS}" workloads
   split_csv "${REGIMES}" regimes
   split_csv "${TIERS}" tiers
+  split_csv "${STREAMS_SWEEP}" streams
+  validate_streams streams
 
   mkdir -p "${OUT_DIR}"
   : >"${PLAN_JSONL}"
@@ -376,12 +411,19 @@ main() {
         local reps
         reps="$(reps_for_cell "${workload}" "${regime}")"
         for method in "${methods[@]}"; do
+          local method_streams=("${streams[@]}")
+          if ! method_uses_stream_sweep "${method}"; then
+            method_streams=(1)
+          fi
           local rep
-          for ((rep = 1; rep <= reps; rep++)); do
-            write_plan_row "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${path}" "${git}" >>"${PLAN_JSONL}"
-            if [[ "${DRY_RUN}" -eq 0 ]]; then
-              run_cell "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${path}" "${git}"
-            fi
+          local stream_count
+          for stream_count in "${method_streams[@]}"; do
+            for ((rep = 1; rep <= reps; rep++)); do
+              write_plan_row "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${path}" "${git}" "${stream_count}" >>"${PLAN_JSONL}"
+              if [[ "${DRY_RUN}" -eq 0 ]]; then
+                run_cell "${workload}" "${regime}" "${tier}" "${method}" "${rep}" "${path}" "${git}" "${stream_count}"
+              fi
+            done
           done
         done
       done

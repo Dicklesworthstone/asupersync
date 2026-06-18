@@ -24,6 +24,7 @@ class Sample:
     regime: str
     tier: str
     method: str
+    stream_count: int | None
     rep: int
     wall_s: float
     peak_rss_kb: float | None
@@ -97,6 +98,16 @@ def as_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
+def as_int(value: Any) -> int | None:
+    number = as_float(value)
+    if number is None:
+        return None
+    whole = int(number)
+    if whole != number:
+        return None
+    return whole
+
+
 def classify_method(method: str) -> str:
     lower = method.lower()
     if lower.startswith(RSYNC_PREFIXES) or "rsync" in lower:
@@ -144,11 +155,22 @@ def load_samples(path: Path) -> list[Sample]:
             if not method:
                 raise ValueError(f"{path}:{line_no}: missing method")
             rep_value = pick(row, "rep", "repeat", "iteration")
+            stream_count = as_int(
+                pick(
+                    row,
+                    "atp_rq_streams",
+                    "stream_count",
+                    "streams",
+                    "rq.streams",
+                    "conditions.atp_rq_streams",
+                )
+            )
             sample = Sample(
                 workload=str(pick(row, "workload", "payload", "case") or "unknown"),
                 regime=str(pick(row, "regime", "network", "netem.name") or "unknown"),
                 tier=str(pick(row, "crypto_tier", "tier", "crypto") or "unknown"),
                 method=method,
+                stream_count=stream_count,
                 rep=int(rep_value or 0),
                 wall_s=wall,
                 peak_rss_kb=as_float(
@@ -203,21 +225,31 @@ def cv_pct(values: list[float]) -> float:
     return float(statistics.stdev(values) / mean * 100.0)
 
 
-def summarize(samples: list[Sample]) -> tuple[dict[tuple[str, str, str, str], dict[str, Any]], list[Sample]]:
-    grouped: dict[tuple[str, str, str, str], list[Sample]] = defaultdict(list)
+SummaryKey = tuple[str, str, str, str, str]
+
+
+def stream_key(sample: Sample) -> str:
+    if classify_method(sample.method) == "atp" and sample.stream_count is not None:
+        return str(sample.stream_count)
+    return ""
+
+
+def summarize(samples: list[Sample]) -> tuple[dict[SummaryKey, dict[str, Any]], list[Sample]]:
+    grouped: dict[SummaryKey, list[Sample]] = defaultdict(list)
     failures: list[Sample] = []
     for sample in samples:
-        key = (sample.workload, sample.regime, sample.tier, sample.method)
+        key = (sample.workload, sample.regime, sample.tier, sample.method, stream_key(sample))
         grouped[key].append(sample)
         if sample.status not in {"ok", "passed", "pass"} or not sample.sha_ok:
             failures.append(sample)
 
-    summary: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    summary: dict[SummaryKey, dict[str, Any]] = {}
     for key, group in grouped.items():
         ok_group = [s for s in group if s.status in {"ok", "passed", "pass"} and s.sha_ok]
         if not ok_group:
             summary[key] = {
                 "method_class": classify_method(key[3]),
+                "stream_count": key[4] or None,
                 "reps": len(group),
                 "ok_reps": 0,
                 "wall_median_s": None,
@@ -246,6 +278,7 @@ def summarize(samples: list[Sample]) -> tuple[dict[tuple[str, str, str, str], di
         feedback_values = [s.feedback_rounds for s in ok_group if s.feedback_rounds is not None]
         summary[key] = {
             "method_class": classify_method(key[3]),
+            "stream_count": key[4] or None,
             "reps": len(group),
             "ok_reps": len(ok_group),
             "wall_median_s": median(walls),
@@ -263,15 +296,15 @@ def summarize(samples: list[Sample]) -> tuple[dict[tuple[str, str, str, str], di
 
 
 def matched_pairs(
-    summary: dict[tuple[str, str, str, str], dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    summary: dict[SummaryKey, dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     by_cell: dict[tuple[str, str, str], list[tuple[str, dict[str, Any]]]] = defaultdict(list)
     for key, stats in summary.items():
-        workload, regime, tier, method = key
+        workload, regime, tier, method, _stream = key
         by_cell[(workload, regime, tier)].append((method, stats))
 
     pairs: list[dict[str, Any]] = []
-    excluded: list[dict[str, str]] = []
+    excluded: list[dict[str, Any]] = []
     for (workload, regime, tier), methods in sorted(by_cell.items()):
         atp = [
             (method, stats)
@@ -295,6 +328,7 @@ def matched_pairs(
                             "regime": regime,
                             "tier": tier,
                             "atp_method": atp_method,
+                            "atp_streams": atp_stats["stream_count"],
                             "rsync_method": rsync_method,
                             "reason": reason,
                         }
@@ -330,6 +364,7 @@ def matched_pairs(
                         "regime": regime,
                         "tier": tier,
                         "atp_method": atp_method,
+                        "atp_streams": atp_stats["stream_count"],
                         "rsync_method": rsync_method,
                         "atp_wall_s": atp_stats["wall_median_s"],
                         "rsync_wall_s": rsync_stats["wall_median_s"],
@@ -360,9 +395,9 @@ def fmt(value: Any, digits: int = 3) -> str:
 
 
 def render_markdown(
-    summary: dict[tuple[str, str, str, str], dict[str, Any]],
+    summary: dict[SummaryKey, dict[str, Any]],
     pairs: list[dict[str, Any]],
-    excluded_pairs: list[dict[str, str]],
+    excluded_pairs: list[dict[str, Any]],
     failures: list[Sample],
 ) -> str:
     lines = [
@@ -372,21 +407,22 @@ def render_markdown(
         "",
         "## Per-cell method medians",
         "",
-        "| workload | regime | tier | method | reps | ok | status | median wall s | cv pct | sender peak RSS KB | receiver peak RSS KB | combined peak RSS KB | feedback rounds |",
-        "|---|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|",
+        "| workload | regime | tier | method | ATP streams | reps | ok | status | median wall s | cv pct | sender peak RSS KB | receiver peak RSS KB | combined peak RSS KB | feedback rounds |",
+        "|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|",
     ]
-    for (workload, regime, tier, method), stats in sorted(summary.items()):
+    for (workload, regime, tier, method, _stream), stats in sorted(summary.items()):
         status = "OK"
         if stats["ok_reps"] == 0:
             status = "FAIL"
         elif stats["failed"]:
             status = "PARTIAL"
         lines.append(
-            "| {workload} | {regime} | {tier} | {method} | {reps} | {ok} | {status} | {wall} | {cv} | {sender_rss} | {receiver_rss} | {rss} | {rounds} |".format(
+            "| {workload} | {regime} | {tier} | {method} | {streams} | {reps} | {ok} | {status} | {wall} | {cv} | {sender_rss} | {receiver_rss} | {rss} | {rounds} |".format(
                 workload=workload,
                 regime=regime,
                 tier=tier,
                 method=method,
+                streams=fmt(stats["stream_count"], 0),
                 reps=stats["reps"],
                 ok=stats["ok_reps"],
                 status=status,
@@ -406,17 +442,18 @@ def render_markdown(
             "",
             "Only crypto-symmetric, same-cell ATP-vs-rsync pairs are admitted here.",
             "",
-            "| workload | regime | tier | ATP method | rsync method | wall ratio ATP/rsync | speedup rsync/ATP | sender RSS ratio | receiver RSS ratio | combined peak RSS ratio | ATP feedback rounds |",
-            "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|",
+            "| workload | regime | tier | ATP method | ATP streams | rsync method | wall ratio ATP/rsync | speedup rsync/ATP | sender RSS ratio | receiver RSS ratio | combined peak RSS ratio | ATP feedback rounds |",
+            "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for pair in pairs:
         lines.append(
-            "| {workload} | {regime} | {tier} | {atp} | {rsync} | {wall} | {speedup} | {sender_rss} | {receiver_rss} | {rss} | {rounds} |".format(
+            "| {workload} | {regime} | {tier} | {atp} | {streams} | {rsync} | {wall} | {speedup} | {sender_rss} | {receiver_rss} | {rss} | {rounds} |".format(
                 workload=pair["workload"],
                 regime=pair["regime"],
                 tier=pair["tier"],
                 atp=pair["atp_method"],
+                streams=fmt(pair["atp_streams"], 0),
                 rsync=pair["rsync_method"],
                 wall=fmt(pair["wall_ratio_atp_over_rsync"]),
                 speedup=fmt(pair["speedup_rsync_over_atp"]),
@@ -438,13 +475,13 @@ def render_markdown(
     if excluded_pairs:
         lines.extend(
             [
-                "| workload | regime | tier | ATP method | rsync method | reason |",
-                "|---|---|---|---|---|---|",
+                "| workload | regime | tier | ATP method | ATP streams | rsync method | reason |",
+                "|---|---|---|---|---:|---|---|",
             ]
         )
         for pair in excluded_pairs:
             lines.append(
-                f"| {pair['workload']} | {pair['regime']} | {pair['tier']} | {pair['atp_method']} | {pair['rsync_method']} | {pair['reason']} |"
+                f"| {pair['workload']} | {pair['regime']} | {pair['tier']} | {pair['atp_method']} | {fmt(pair.get('atp_streams'), 0)} | {pair['rsync_method']} | {pair['reason']} |"
             )
     else:
         lines.append("No asymmetric ATP/rsync pairs were present.")
@@ -453,13 +490,13 @@ def render_markdown(
     if failures:
         lines.extend(
             [
-                "| workload | regime | tier | method | rep | status | sha ok |",
-                "|---|---|---|---|---:|---|---|",
+                "| workload | regime | tier | method | ATP streams | rep | status | sha ok |",
+                "|---|---|---|---|---:|---:|---|---|",
             ]
         )
         for failure in failures:
             lines.append(
-                f"| {failure.workload} | {failure.regime} | {failure.tier} | {failure.method} | {failure.rep} | {failure.status} | {failure.sha_ok} |"
+                f"| {failure.workload} | {failure.regime} | {failure.tier} | {failure.method} | {fmt(failure.stream_count, 0)} | {failure.rep} | {failure.status} | {failure.sha_ok} |"
             )
     else:
         lines.append("No failed SHA or incomplete rows were present.")
@@ -469,17 +506,18 @@ def render_markdown(
 
 def run_self_test() -> int:
     rows = [
-        Sample("50M", "bad", "auth", "atp-rq-auth", 1, 10.0, 100.0, None, 40.0, 100.0, None, None, 1.0, True, "ok"),
-        Sample("50M", "bad", "auth", "atp-rq-auth", 2, 12.0, 120.0, None, 60.0, 120.0, None, None, 1.0, True, "ok"),
-        Sample("50M", "bad", "auth", "rsync-ssh-aes128gcm", 1, 20.0, 200.0, None, 90.0, 200.0, None, None, None, True, "ok"),
-        Sample("50M", "bad", "auth", "rsync-ssh-aes128gcm", 2, 22.0, 220.0, None, 110.0, 220.0, None, None, None, True, "ok"),
-        Sample("50M", "bad", "auth", "atp-rq-auth", 3, 11.0, 110.0, None, 55.0, 110.0, None, None, 2.0, False, "mismatch"),
-        Sample("50M", "bad", "auth", "atp-rq-lab", 1, 9.0, 90.0, None, 35.0, 90.0, None, None, 0.0, True, "ok"),
+        Sample("50M", "bad", "auth", "atp-rq-auth", 4, 1, 10.0, 100.0, None, 40.0, 100.0, None, None, 1.0, True, "ok"),
+        Sample("50M", "bad", "auth", "atp-rq-auth", 4, 2, 12.0, 120.0, None, 60.0, 120.0, None, None, 1.0, True, "ok"),
+        Sample("50M", "bad", "auth", "rsync-ssh-aes128gcm", None, 1, 20.0, 200.0, None, 90.0, 200.0, None, None, None, True, "ok"),
+        Sample("50M", "bad", "auth", "rsync-ssh-aes128gcm", None, 2, 22.0, 220.0, None, 110.0, 220.0, None, None, None, True, "ok"),
+        Sample("50M", "bad", "auth", "atp-rq-auth", 4, 3, 11.0, 110.0, None, 55.0, 110.0, None, None, 2.0, False, "mismatch"),
+        Sample("50M", "bad", "auth", "atp-rq-lab", 1, 1, 9.0, 90.0, None, 35.0, 90.0, None, None, 0.0, True, "ok"),
     ]
     summary, failures = summarize(rows)
     pairs, excluded_pairs = matched_pairs(summary)
     assert failures and failures[0].sha_ok is False
     assert pairs and round(pairs[0]["wall_ratio_atp_over_rsync"], 3) == 0.524
+    assert pairs[0]["atp_streams"] == "4"
     assert excluded_pairs and excluded_pairs[0]["atp_method"] == "atp-rq-lab"
     assert round(pairs[0]["receiver_peak_rss_ratio_atp_over_rsync"], 3) == 0.524
     assert "ATP vs rsync" in render_markdown(summary, pairs, excluded_pairs, failures)

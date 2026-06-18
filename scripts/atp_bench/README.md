@@ -142,6 +142,26 @@ python3 scripts/atp_bench/report.py artifacts/atp_bench/<date>/results.jsonl \
   > artifacts/atp_bench/<date>/report.md
 ```
 
+For the netns matrix harness high-BDP UDP fan-out sweep, keep rsync as the
+single-stream baseline and sweep ATP-RQ streams explicitly:
+
+```bash
+scripts/atp_bench/matrix_bench.sh \
+  --workloads 50M,500M \
+  --regimes good,bad \
+  --tiers auth \
+  --streams 1,2,4,8 \
+  --reps 3
+
+python3 scripts/atp_bench/score_matrix.py \
+  artifacts/atp_bench_matrix/<run-id>/results.jsonl \
+  --out-md artifacts/atp_bench_matrix/<run-id>/scorecard.md
+```
+
+ATP-RQ result rows carry `atp_rq_streams`/`stream_count`, and the scorecard
+groups medians and admitted ATP-vs-rsync ratios by stream count. Non-RQ rows,
+including tuned rsync, stay single-baseline rows for apples-to-apples scoring.
+
 Fleet etiquette: prefer `hz1` as sender (hz2 is the highest-priority rch build
 worker); the responsiveness guard aborts a run series if either machine's
 loadavg exceeds 1.5× its core count.

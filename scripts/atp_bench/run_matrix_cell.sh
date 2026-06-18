@@ -30,7 +30,7 @@ set -euo pipefail
 #
 # Inputs (exported by matrix_bench.sh's run_cell):
 #   ATP_MATRIX_WORKLOAD ATP_MATRIX_WORKLOAD_PATH ATP_MATRIX_REGIME
-#   ATP_MATRIX_TIER ATP_MATRIX_METHOD ATP_MATRIX_REP ATP_MATRIX_RESULTS
+#   ATP_MATRIX_TIER ATP_MATRIX_METHOD ATP_MATRIX_REP ATP_MATRIX_STREAMS ATP_MATRIX_RESULTS
 #   ATP_MATRIX_NETEM_JSON ATP_MATRIX_RUN_ID ATP_MATRIX_GIT_HEAD
 # Tunables (env): BIN, WORKERS, STREAMS, SYMBOL_SIZE, MAX_BYTES, RQ_AUTH_KEY_HEX,
 #   HOST_IP, NS_IP, CIDR, ATP_MATRIX_TIMEOUT, RSS_SAMPLE_INTERVAL, REMOTE_USER,
@@ -60,6 +60,7 @@ GIT_HEAD="${ATP_MATRIX_GIT_HEAD:-unknown}"
 BIN="${BIN:-/tmp/atp_bench/atp}"
 WORKERS="${WORKERS:-4}"
 STREAMS="${STREAMS:-8}"
+STREAMS="${ATP_MATRIX_STREAMS:-$STREAMS}"
 SYMBOL_SIZE="${SYMBOL_SIZE:-1200}"
 MAX_BYTES="${MAX_BYTES:-6442450944}"
 RQ_AUTH_KEY_HEX="${RQ_AUTH_KEY_HEX:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff}"
@@ -426,6 +427,7 @@ ROW_AVG="${AVG_RSS_KB:-0}" ROW_SP="${S_PEAK:-0}" ROW_RP="${R_PEAK:-0}" ROW_SA="$
 ROW_RA="${R_AVG:-0}" ROW_CPU="${CPU:-0}" ROW_ROUNDS="${ROUNDS:-0}" ROW_SRC="$SRC_SHA" \
 ROW_DST="$DST_SHA" ROW_SHA_OK="$SHA_OK" ROW_TO="$TIMED_OUT" ROW_SC="${STATUS_CODE:-1}" \
 ROW_STATUS="$STATUS" ROW_CASE="$CASE_DIR" ROW_CTX="${S_CTX:-0}" ROW_ESTPKT="${EST_DGRAMS:-0}" \
+ROW_STREAMS="${STREAMS:-0}" \
 python3 - >>"$RESULTS" <<'PY'
 import json, os
 
@@ -480,7 +482,10 @@ row = {
     "status": e("ROW_STATUS", "error"),
     "case_dir": e("ROW_CASE", ""),
 }
+if row["method"].startswith("atp-rq-"):
+    row["atp_rq_streams"] = num("ROW_STREAMS", 0)
+    row["stream_count"] = row["atp_rq_streams"]
 print(json.dumps(row, sort_keys=True, separators=(",", ":")))
 PY
 
-log "DONE wall=${WALL:-?}s status=${STATUS} sha_ok=${SHA_OK} rounds=${ROUNDS:-?} peak_rss_kb=${PEAK_RSS_KB:-?}"
+log "DONE wall=${WALL:-?}s status=${STATUS} sha_ok=${SHA_OK} rounds=${ROUNDS:-?} peak_rss_kb=${PEAK_RSS_KB:-?} streams=${STREAMS:-n/a}"
