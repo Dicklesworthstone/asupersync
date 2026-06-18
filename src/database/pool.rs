@@ -1746,20 +1746,6 @@ impl<M: ConnectionManager> std::ops::DerefMut for PooledConnection<'_, M> {
 impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
     fn drop(&mut self) {
         if let Some(mut conn) = self.conn.take() {
-            // br-asupersync-qydi3j: Decrement client connection count when returning/discarding
-            if let Some(client_id) = &self.client_id {
-                if self.pool.config.enforce_client_quotas {
-                    let mut inner = self.pool.inner.lock();
-                    if let Some(count) = inner.client_connections.get_mut(client_id) {
-                        *count = count.saturating_sub(1);
-                        if *count == 0 {
-                            inner.client_connections.remove(client_id);
-                        }
-                    }
-                    drop(inner);
-                }
-            }
-
             // br-asupersync-5bv5sr: gate the return-to-pool path on the
             // manager's release-time health check. Backends that detect a
             // poisoned protocol state, an open transaction, or any other
@@ -1767,36 +1753,40 @@ impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
             // override `release_check` to return `false`; we then route
             // the connection through `safe_discard_connection` so it's closed
             // rather than handed back to a fresh caller.
+            //
+            // br-asupersync-db-pool-drop-unhealthy-double-decrement-b18gr5: the
+            // per-client quota is decremented by EXACTLY ONE owner per branch.
+            // `return_connection` does NOT touch `client_connections`, so the
+            // healthy path decrements inline here; `safe_discard_connection`
+            // decrements internally on a successful disconnect (and preserves the
+            // count on failure, since the connection is still alive), so the
+            // unhealthy path must NOT decrement inline. The previous code
+            // decremented inline UNCONDITIONALLY and then let
+            // `safe_discard_connection` decrement again, double-counting the
+            // release whenever a client held >1 connection and the unhealthy
+            // disconnect succeeded; the failure path then needed a +1 restore.
             if self.pool.manager.release_check(&mut conn) {
+                // br-asupersync-qydi3j: healthy return decrements the client quota.
+                if let Some(client_id) = &self.client_id {
+                    if self.pool.config.enforce_client_quotas {
+                        let mut inner = self.pool.inner.lock();
+                        if let Some(count) = inner.client_connections.get_mut(client_id) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                inner.client_connections.remove(client_id);
+                            }
+                        }
+                        drop(inner);
+                    }
+                }
                 self.pool
                     .return_connection(conn, self.created_at, self.client_id.clone());
             } else {
-                // br-asupersync-sxhome: Use safe discard to handle disconnect failures
-                // If disconnect fails, client count was already decremented above,
-                // so we need to restore it
-                if !self
-                    .pool
-                    .safe_discard_connection(conn, self.client_id.clone())
-                {
-                    // Disconnect failed - restore client connection count that was decremented above
-                    if let Some(ref client_id) = self.client_id {
-                        if self.pool.config.enforce_client_quotas {
-                            let mut inner = self.pool.inner.lock();
-                            let count = inner
-                                .client_connections
-                                .entry(client_id.clone())
-                                .or_insert(0);
-                            *count += 1;
-                            crate::tracing_compat::warn!(
-                                event = "database_pool_disconnect_failure",
-                                operation = "pooled_connection_drop",
-                                client_id = %client_id,
-                                action = "restore_client_count",
-                                "disconnect failed while dropping pooled connection"
-                            );
-                        }
-                    }
-                }
+                // br-asupersync-sxhome: safe discard owns the per-client quota for
+                // this path (decrement-on-success / preserve-on-failure), so there
+                // is no inline decrement and no restore compensation to do.
+                self.pool
+                    .safe_discard_connection(conn, self.client_id.clone());
             }
         }
     }
@@ -4699,6 +4689,76 @@ mod tests {
         );
 
         crate::test_complete!("drop_routes_unhealthy_to_discard_via_release_check");
+    }
+
+    /// br-asupersync-db-pool-drop-unhealthy-double-decrement-b18gr5: dropping an
+    /// unhealthy connection (release_check=false → safe_discard) must decrement
+    /// the per-client quota EXACTLY ONCE. The buggy code decremented inline AND
+    /// again inside safe_discard_connection, so a client holding 2 connections
+    /// dropped to 0 after releasing one (over-count → premature entry removal /
+    /// quota corruption).
+    #[test]
+    fn drop_unhealthy_decrements_client_quota_exactly_once() {
+        init_test("drop_unhealthy_decrements_client_quota_exactly_once");
+
+        struct UnhealthyOnReleaseManager {
+            inner: TestManager,
+            unhealthy: Arc<AtomicBool>,
+        }
+
+        impl ConnectionManager for UnhealthyOnReleaseManager {
+            type Connection = TestConnection;
+            type Error = TestError;
+
+            fn connect(&self) -> Result<Self::Connection, Self::Error> {
+                self.inner.connect()
+            }
+
+            fn is_valid(&self, conn: &Self::Connection) -> bool {
+                self.inner.is_valid(conn)
+            }
+
+            fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+                !self.unhealthy.load(Ordering::SeqCst)
+            }
+
+            fn disconnect(&self, conn: Self::Connection) {
+                self.inner.disconnect(conn);
+            }
+        }
+
+        let unhealthy = Arc::new(AtomicBool::new(false));
+        let manager = UnhealthyOnReleaseManager {
+            inner: TestManager::new(),
+            unhealthy: unhealthy.clone(),
+        };
+        // Default max_connections_per_client = 3, so one client may hold 2.
+        let pool = DbPool::new(manager, DbPoolConfig::with_max_size(4));
+        let client = "client-a";
+        let client_count =
+            || pool.inner.lock().client_connections.get(client).copied().unwrap_or(0);
+
+        // Hold TWO connections for the same client at once.
+        let c1 = pool.get_for_client(client).expect("acquire 1");
+        let c2 = pool.get_for_client(client).expect("acquire 2");
+        assert_eq!(client_count(), 2, "client should hold 2 connections");
+
+        // Unhealthy release routes the drop through safe_discard_connection
+        // (disconnect succeeds). Releasing ONE must drop the quota 2 -> 1.
+        unhealthy.store(true, Ordering::SeqCst);
+        drop(c2);
+        assert_eq!(
+            client_count(),
+            1,
+            "unhealthy drop must decrement the client quota exactly once \
+             (regression: the double-decrement bug dropped it to 0)"
+        );
+
+        // Releasing the survivor drops 1 -> 0 and removes the entry.
+        drop(c1);
+        assert_eq!(client_count(), 0, "last connection released");
+
+        crate::test_complete!("drop_unhealthy_decrements_client_quota_exactly_once");
     }
 
     /// br-asupersync-5bv5sr: default release_check returns true, so
