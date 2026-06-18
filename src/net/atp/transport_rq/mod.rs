@@ -1716,6 +1716,7 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
             max: config.max_transfer_bytes,
         });
     }
+    validate_manifest_sha256_hex("manifest merkle_root_hex", &manifest.merkle_root_hex)?;
     if manifest.entries.len() > MAX_MANIFEST_ENTRIES {
         return Err(RqError::Frame(format!(
             "manifest declares {} entries (max {MAX_MANIFEST_ENTRIES})",
@@ -1768,6 +1769,7 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                         entry.rel_path
                     )));
                 }
+                validate_manifest_sha256_hex("manifest entry sha256_hex", &entry.sha256_hex)?;
                 if let Some(fragment) = &entry.fragment {
                     if !entry.members.is_empty() {
                         return Err(RqError::Frame(format!(
@@ -1776,6 +1778,10 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                         )));
                     }
                     validate_manifest_rel_path(&fragment.rel_path)?;
+                    validate_manifest_sha256_hex(
+                        "manifest fragment sha256_hex",
+                        &fragment.sha256_hex,
+                    )?;
                     if fragment.shard_count == 0 || fragment.shard_index >= fragment.shard_count {
                         return Err(RqError::Frame(format!(
                             "fragment {} has invalid shard {}/{}",
@@ -1841,6 +1847,10 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                     let mut expected_offset = 0u64;
                     for member in &entry.members {
                         validate_manifest_rel_path(&member.rel_path)?;
+                        validate_manifest_sha256_hex(
+                            "manifest packed member sha256_hex",
+                            &member.sha256_hex,
+                        )?;
                         if !seen_logical_rel_paths.insert(member.rel_path.clone()) {
                             return Err(RqError::Frame(format!(
                                 "duplicate packed member rel_path: {}",
@@ -1920,6 +1930,13 @@ fn validate_manifest(manifest: &TransferManifest, config: &RqConfig) -> Result<(
                 group.logical_size
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_manifest_sha256_hex(label: &str, value: &str) -> Result<(), RqError> {
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(RqError::Frame(format!("{label} must be 64 hex characters")));
     }
     Ok(())
 }
@@ -5487,6 +5504,59 @@ mod tests {
                 "transfer_id {transfer_id:?} should fail closed"
             );
         }
+    }
+
+    #[test]
+    fn validate_manifest_rejects_malformed_hash_fields() {
+        let mut bad_root = manifest_with(vec![manifest_entry(0, 10)], 10);
+        bad_root.merkle_root_hex = "0".repeat(63);
+        assert!(matches!(
+            validate_manifest(&bad_root, &RqConfig::default()),
+            Err(RqError::Frame(msg)) if msg.contains("manifest merkle_root_hex")
+        ));
+
+        let mut bad_entry = manifest_entry(0, 10);
+        bad_entry.sha256_hex = "zz".repeat(32);
+        assert!(matches!(
+            validate_manifest(&manifest_with(vec![bad_entry], 10), &RqConfig::default()),
+            Err(RqError::Frame(msg)) if msg.contains("manifest entry sha256_hex")
+        ));
+
+        let mut bad_fragment = ManifestEntry {
+            index: 0,
+            rel_path: ".atp-fragment-0-0".to_string(),
+            size: 10,
+            sha256_hex: "00".repeat(32),
+            members: Vec::new(),
+            fragment: Some(LargeObjectFragment {
+                rel_path: "huge.bin".to_string(),
+                shard_index: 0,
+                shard_count: 1,
+                logical_offset: 0,
+                len: 10,
+                logical_size: 10,
+                sha256_hex: "f".repeat(63),
+            }),
+        };
+        let mut fragment_manifest = manifest_with(vec![bad_fragment.clone()], 10);
+        fragment_manifest.is_directory = false;
+        assert!(matches!(
+            validate_manifest(&fragment_manifest, &RqConfig::default()),
+            Err(RqError::Frame(msg)) if msg.contains("manifest fragment sha256_hex")
+        ));
+
+        bad_fragment.fragment = None;
+        bad_fragment.rel_path = ".atp-pack-0".to_string();
+        bad_fragment.members = vec![PackedMember {
+            rel_path: "packed/member".to_string(),
+            offset: 0,
+            len: 10,
+            sha256_hex: "not-hex".to_string(),
+        }];
+        assert!(matches!(
+            validate_manifest(&manifest_with(vec![bad_fragment], 10), &RqConfig::default()),
+            Err(RqError::Frame(msg)) if msg.contains("manifest packed member sha256_hex")
+        ));
     }
 
     #[cfg(unix)]
