@@ -3189,19 +3189,56 @@ mod tests {
     #[test]
     fn content_hash_binds_full_decode_config_dimensions() {
         let base = make_test_config();
-        let base_hash = built_test_proof(base.clone()).content_hash();
+        let base_proof = built_test_proof(base.clone());
+        let base_hash = base_proof.content_hash();
 
         let mut changed_s = base.clone();
         changed_s.s += 1;
-        assert_ne!(base_hash, built_test_proof(changed_s).content_hash());
+        let changed_s_proof = built_test_proof(changed_s);
+        assert_ne!(
+            base_hash,
+            changed_s_proof.content_hash(),
+            "proof attestation hash must bind LDPC symbol count s"
+        );
+        assert!(
+            compare_proofs(&base_proof, &changed_s_proof)
+                .expect_err("full-config mismatch must fail replay comparison")
+                .to_string()
+                .contains("config"),
+            "hash binding must stay aligned with compare_proofs for s"
+        );
 
         let mut changed_h = base.clone();
         changed_h.h += 1;
-        assert_ne!(base_hash, built_test_proof(changed_h).content_hash());
+        let changed_h_proof = built_test_proof(changed_h);
+        assert_ne!(
+            base_hash,
+            changed_h_proof.content_hash(),
+            "proof attestation hash must bind HDPC symbol count h"
+        );
+        assert!(
+            compare_proofs(&base_proof, &changed_h_proof)
+                .expect_err("full-config mismatch must fail replay comparison")
+                .to_string()
+                .contains("config"),
+            "hash binding must stay aligned with compare_proofs for h"
+        );
 
         let mut changed_l = base;
         changed_l.l += 1;
-        assert_ne!(base_hash, built_test_proof(changed_l).content_hash());
+        let changed_l_proof = built_test_proof(changed_l);
+        assert_ne!(
+            base_hash,
+            changed_l_proof.content_hash(),
+            "proof attestation hash must bind intermediate symbol count l"
+        );
+        assert!(
+            compare_proofs(&base_proof, &changed_l_proof)
+                .expect_err("full-config mismatch must fail replay comparison")
+                .to_string()
+                .contains("config"),
+            "hash binding must stay aligned with compare_proofs for l"
+        );
     }
 
     #[test]
