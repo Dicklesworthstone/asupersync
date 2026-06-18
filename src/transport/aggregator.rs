@@ -1543,6 +1543,25 @@ impl SymbolReorderer {
     }
 
     fn process_with_status(&self, symbol: Symbol, path: PathId, now: Time) -> ReorderProcessResult {
+        self.process_with_late_policy(symbol, path, now, false)
+    }
+
+    fn process_unique_with_status(
+        &self,
+        symbol: Symbol,
+        path: PathId,
+        now: Time,
+    ) -> ReorderProcessResult {
+        self.process_with_late_policy(symbol, path, now, true)
+    }
+
+    fn process_with_late_policy(
+        &self,
+        symbol: Symbol,
+        path: PathId,
+        now: Time,
+        deliver_late_unique: bool,
+    ) -> ReorderProcessResult {
         if self.config.immediate_delivery {
             return ReorderProcessResult::accepted(vec![symbol]);
         }
@@ -1619,6 +1638,17 @@ impl SymbolReorderer {
                 state.next_expected = seq.wrapping_add(1);
             }
             state.last_delivery = now;
+            drop(objects);
+            return ReorderProcessResult::accepted(ready);
+        }
+
+        // A standalone reorderer cannot distinguish a late duplicate from a late
+        // unique symbol, so it preserves the strict historical drop behavior.
+        // MultipathAggregator calls the unique-symbol path after dedup succeeds,
+        // where late RaptorQ symbols are still useful to the decoder.
+        if deliver_late_unique {
+            ready.push(symbol);
+            self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
             drop(objects);
             return ReorderProcessResult::accepted(ready);
         }
@@ -1915,14 +1945,13 @@ impl MultipathAggregator {
 
         // Process through reorderer if enabled
         let reorder_result = if self.config.enable_reordering {
-            self.reorderer.process_with_status(symbol, path, now)
+            self.reorderer.process_unique_with_status(symbol, path, now)
         } else {
             ReorderProcessResult::accepted(vec![symbol])
         };
         if reorder_result.rollback_dedup_record {
             let _ = self.dedup.rollback_record(object_id, symbol_id);
         }
-
         ProcessResult {
             ready: reorder_result.ready,
             was_duplicate: false,
@@ -4284,6 +4313,104 @@ mod tests {
         );
 
         crate::test_complete!("aggregator_buffer_full_forces_flush");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn aggregator_delivers_late_unique_symbol_after_gap_advance_once() {
+        init_test("aggregator_delivers_late_unique_symbol_after_gap_advance_once");
+        let config = AggregatorConfig {
+            reorder: ReordererConfig {
+                immediate_delivery: false,
+                max_sequence_gap: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let aggregator = MultipathAggregator::new(config);
+        let path = aggregator.paths().create_path(
+            "test",
+            "localhost:8080",
+            PathCharacteristics::default(),
+        );
+
+        let seq0 = aggregator.process(Symbol::new_for_test(1, 0, 0, &[0]), path, Time::ZERO);
+        crate::assert_with_log!(
+            seq0.ready.len() == 1,
+            "seq0 delivered immediately",
+            1,
+            seq0.ready.len()
+        );
+
+        let seq2 = aggregator.process(
+            Symbol::new_for_test(1, 0, 2, &[2]),
+            path,
+            Time::from_millis(1),
+        );
+        crate::assert_with_log!(
+            seq2.ready.len() == 1,
+            "large gap advances past missing seq1 and delivers seq2",
+            1,
+            seq2.ready.len()
+        );
+
+        let late_seq1 = aggregator.process(
+            Symbol::new_for_test(1, 0, 1, &[1]),
+            path,
+            Time::from_millis(2),
+        );
+        crate::assert_with_log!(
+            !late_seq1.was_duplicate,
+            "late seq1 is unique on first arrival",
+            false,
+            late_seq1.was_duplicate
+        );
+        crate::assert_with_log!(
+            late_seq1.ready.len() == 1,
+            "late unique seq1 is still delivered to fungible decoder",
+            1,
+            late_seq1.ready.len()
+        );
+        crate::assert_with_log!(
+            late_seq1.ready[0].esi() == 1,
+            "late unique output is seq1",
+            1,
+            late_seq1.ready[0].esi()
+        );
+
+        let duplicate_seq1 = aggregator.process(
+            Symbol::new_for_test(1, 0, 1, &[1]),
+            path,
+            Time::from_millis(3),
+        );
+        crate::assert_with_log!(
+            duplicate_seq1.was_duplicate,
+            "retransmitted late seq1 is still deduped",
+            true,
+            duplicate_seq1.was_duplicate
+        );
+        crate::assert_with_log!(
+            duplicate_seq1.ready.is_empty(),
+            "duplicate late seq1 produces no output",
+            true,
+            duplicate_seq1.ready.is_empty()
+        );
+
+        let stats = aggregator.dedup.stats();
+        crate::assert_with_log!(
+            stats.unique_symbols == 3,
+            "dedup tracks seq0 seq2 and late seq1 as unique",
+            3,
+            stats.unique_symbols
+        );
+        crate::assert_with_log!(
+            stats.duplicates_detected == 1,
+            "dedup rejects retransmitted late seq1",
+            1,
+            stats.duplicates_detected
+        );
+
+        crate::test_complete!("aggregator_delivers_late_unique_symbol_after_gap_advance_once");
     }
 
     /// Flush timeout advances next_expected and drains consecutive.
