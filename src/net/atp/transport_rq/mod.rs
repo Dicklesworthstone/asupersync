@@ -1378,8 +1378,9 @@ fn collect_dir<'a>(
 ///
 /// `entries` arrives in manifest (sorted `rel_path`) order. Files whose size is
 /// `< PACK_THRESHOLD` are binned greedily, in order, into packs that hold at most
-/// `PACK_TARGET` bytes (a pack always holds at least one file). A pack of **two or
-/// more** files is materialized as a temp file holding the byte concatenation of
+/// `PACK_TARGET.min(max_object_size(config.max_block_size))` bytes (a pack always
+/// holds at least one file). A pack of **two or more** files is materialized as a
+/// temp file holding the byte concatenation of
 /// its members in order; the resulting [`RqSourceEntry`] points at that temp file
 /// and carries the [`PackedMember`] offset/len/sha table. A pack of exactly one
 /// file (a lone leftover small file, or a single small file with no neighbor) is
@@ -1400,6 +1401,7 @@ fn collect_dir<'a>(
 /// file cannot be created/written.
 async fn pack_small_files(
     entries: Vec<RqSourceEntry>,
+    config: &RqConfig,
 ) -> Result<
     (
         Vec<RqSourceEntry>,
@@ -1409,6 +1411,15 @@ async fn pack_small_files(
     RqError,
 > {
     let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
+    // Packed objects are intentionally not split by E-12, so a pack must stay
+    // inside the configured one-object SBN envelope. If a single small file is
+    // larger than this cap it remains unpacked and `split_large_entries` handles
+    // it as ranged objects.
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let pack_target = PACK_TARGET.min(
+        u64::try_from(max_object_size(config.max_block_size.max(symbol_size)))
+            .unwrap_or(u64::MAX),
+    );
 
     // Group consecutive small files into packs. Each `Vec<usize>` is a list of
     // indices into `entries` (the original sorted order is preserved so member
@@ -1438,7 +1449,7 @@ async fn pack_small_files(
         // Small file: would adding it overflow the current pack? Start a fresh
         // pack if so (but never split a pack to empty — a single oversized-for-
         // -target small file still forms its own pack).
-        if !current.is_empty() && current_bytes.saturating_add(size) > PACK_TARGET {
+        if !current.is_empty() && current_bytes.saturating_add(size) > pack_target {
             groups.push(std::mem::take(&mut current));
             current_bytes = 0;
         }
@@ -2448,7 +2459,8 @@ pub async fn send_path(
     // no-packing case `entries == raw_entries` and `logical_digests` equals the
     // per-file digests, so everything is byte-identical to a prior transfer. The
     // temp dir owns every pack temp file and must outlive the spray loop below.
-    let (packed_entries, logical_digests, _pack_tempdir) = pack_small_files(raw_entries).await?;
+    let (packed_entries, logical_digests, _pack_tempdir) =
+        pack_small_files(raw_entries, &config).await?;
     let entries = split_large_entries(packed_entries, &logical_digests, &config).await?;
 
     let mut hash_buf = vec![0u8; RQ_STREAM_HASH_BUFFER_SIZE];
@@ -6907,8 +6919,9 @@ mod tests {
             source_entry(dir.path(), "z/c", &c),
         ];
 
+        let config = RqConfig::default();
         let (packed, logical_digests, tempdir) =
-            futures_lite::future::block_on(pack_small_files(entries)).expect("pack");
+            futures_lite::future::block_on(pack_small_files(entries, &config)).expect("pack");
         let _tempdir = tempdir.expect("a pack temp dir was produced");
 
         assert_eq!(
@@ -6977,8 +6990,9 @@ mod tests {
             source_entry(dir.path(), "big2", &big2),
         ];
 
+        let config = RqConfig::default();
         let (packed, logical_digests, tempdir) =
-            futures_lite::future::block_on(pack_small_files(entries)).expect("pack");
+            futures_lite::future::block_on(pack_small_files(entries, &config)).expect("pack");
         assert!(tempdir.is_none(), "no packing => no temp dir");
         assert_eq!(packed.len(), 2);
         assert!(packed.iter().all(|e| e.members.is_empty()));
@@ -6994,13 +7008,50 @@ mod tests {
     fn pack_small_files_single_small_file_is_not_packed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let entries = vec![source_entry(dir.path(), "only", b"tiny")];
+        let config = RqConfig::default();
         let (packed, logical_digests, tempdir) =
-            futures_lite::future::block_on(pack_small_files(entries)).expect("pack");
+            futures_lite::future::block_on(pack_small_files(entries, &config)).expect("pack");
         assert!(tempdir.is_none(), "a lone small file is not packed");
         assert_eq!(packed.len(), 1);
         assert!(packed[0].members.is_empty());
         assert_eq!(packed[0].rel_path, "only");
         assert_eq!(logical_digests.len(), 1);
+    }
+
+    #[test]
+    fn pack_small_files_respects_configured_object_ceiling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let too_large_for_one_object = vec![0xA5u8; MAX_SOURCE_BLOCKS + 44];
+        let tail = vec![0x5Au8; 20];
+        let entries = vec![
+            source_entry(dir.path(), "needs-split", &too_large_for_one_object),
+            source_entry(dir.path(), "tail", &tail),
+        ];
+        let config = RqConfig {
+            symbol_size: 1,
+            max_block_size: 1,
+            ..RqConfig::default()
+        };
+
+        let (packed, logical_digests, tempdir) =
+            futures_lite::future::block_on(pack_small_files(entries, &config)).expect("pack");
+
+        assert!(
+            tempdir.is_none(),
+            "packing must not create an unsplittable object above the configured ceiling"
+        );
+        assert_eq!(packed.len(), 2);
+        assert!(packed.iter().all(|entry| entry.members.is_empty()));
+
+        let split =
+            futures_lite::future::block_on(split_large_entries(packed, &logical_digests, &config))
+                .expect("E-12 split after E-15 pack cap");
+        assert_eq!(
+            split.iter().filter(|entry| entry.fragment.is_some()).count(),
+            2,
+            "the over-ceiling small file remains available for ranged object splitting"
+        );
+        assert!(split.iter().all(|entry| entry.members.is_empty()));
     }
 
     /// End-to-end (in-process) split: build a packed manifest + a staging file
