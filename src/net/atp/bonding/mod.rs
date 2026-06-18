@@ -10,10 +10,14 @@
 //!
 //! * A1 ([`descriptor`]) — the shared [`BondTransferDescriptor`] + the donor
 //!   byte-match (merkle) proof. **(this module)**
-//! * A2 — ESI partition function + disjointness/coverage (`z01bbr.1.2`).
+//! * A2 ([`esi`]) — ESI partition function + disjointness/coverage.
 //! * A3 — `DonorAssignment` + security model + key distribution (`z01bbr.1.3`).
 //! * A4 — bonded handshake version + capability negotiation (`z01bbr.1.4`).
 
 pub mod descriptor;
+pub mod esi;
 
 pub use descriptor::{BondEntry, BondProofError, BondTransferDescriptor};
+pub use esi::{
+    DonorEsiStream, EsiPartition, EsiPartitionError, donor_esi_stream, esi_for_donor, owns_esi,
+};

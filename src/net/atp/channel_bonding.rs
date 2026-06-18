@@ -347,6 +347,87 @@ impl DonorAssignment {
     }
 }
 
+/// Encrypted control plane used to distribute the shared donor auth key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BondAuthControlPlane {
+    /// SSH control connection.
+    Ssh,
+    /// Tailscale/WireGuard control connection.
+    Tailscale,
+}
+
+/// Donor-local location for shared symbol-auth key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BondAuthKeyLocation {
+    /// Environment variable containing key material.
+    EnvVar(String),
+    /// File containing key material.
+    KeyFile(String),
+    /// Explicitly rejected: argv is visible through process listings on shared hosts.
+    Argv(String),
+}
+
+/// Reference to the shared symbol-auth key for a bonded transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BondAuthKeyRef {
+    /// Stable key identifier; never raw key material.
+    pub key_id: String,
+    /// Encrypted control plane that delivered the key material.
+    pub control_plane: BondAuthControlPlane,
+    /// Donor-local key material location.
+    pub location: BondAuthKeyLocation,
+}
+
+impl BondAuthKeyRef {
+    /// Validate the key reference and fail closed on unsafe delivery.
+    pub fn validate(&self) -> Result<(), ChannelBondingError> {
+        if self.key_id.trim().is_empty() {
+            return Err(ChannelBondingError::MissingAuthKeyId);
+        }
+        match &self.location {
+            BondAuthKeyLocation::EnvVar(name) => {
+                if name.trim().is_empty() {
+                    return Err(ChannelBondingError::MissingAuthKeyLocation);
+                }
+            }
+            BondAuthKeyLocation::KeyFile(path) => {
+                if path.trim().is_empty() {
+                    return Err(ChannelBondingError::MissingAuthKeyLocation);
+                }
+            }
+            BondAuthKeyLocation::Argv(_) => {
+                return Err(ChannelBondingError::InsecureAuthKeyDelivery);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Fail-closed security model for bonded donor symbols.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BondingSecurityModel {
+    /// Shared symbol-auth key reference.
+    pub auth_key: BondAuthKeyRef,
+    /// Receiver verifies each symbol tag before decode.
+    pub auth_before_decode: bool,
+    /// Receiver commits only after final SHA-256 and Merkle verification.
+    pub fail_closed_on_merkle_mismatch: bool,
+}
+
+impl BondingSecurityModel {
+    /// Validate that both auth and final content integrity remain enabled.
+    pub fn validate(&self) -> Result<(), ChannelBondingError> {
+        self.auth_key.validate()?;
+        if !self.auth_before_decode {
+            return Err(ChannelBondingError::AuthBeforeDecodeDisabled);
+        }
+        if !self.fail_closed_on_merkle_mismatch {
+            return Err(ChannelBondingError::MerkleFailClosedDisabled);
+        }
+        Ok(())
+    }
+}
+
 /// Half-open ESI window `[start, end)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EsiWindow {
@@ -436,6 +517,39 @@ impl BondingHandshake {
         }
     }
 
+    /// Set an inclusive bonding protocol version range.
+    #[must_use]
+    pub const fn with_protocol_range(
+        mut self,
+        min_protocol_version: u16,
+        max_protocol_version: u16,
+    ) -> Self {
+        self.min_protocol_version = min_protocol_version;
+        self.max_protocol_version = max_protocol_version;
+        self
+    }
+
+    /// Advertise receiver-allocated dynamic ESI windows.
+    #[must_use]
+    pub const fn with_dynamic_windows(mut self, supported: bool) -> Self {
+        self.supports_dynamic_windows = supported;
+        self
+    }
+
+    /// Advertise partial-transfer resume metadata.
+    #[must_use]
+    pub const fn with_resume(mut self, supported: bool) -> Self {
+        self.supports_resume = supported;
+        self
+    }
+
+    /// Advertise a forward-compatible extension token.
+    #[must_use]
+    pub fn with_extension_capability(mut self, capability: impl Into<String>) -> Self {
+        self.extension_capabilities.insert(capability.into());
+        self
+    }
+
     /// Negotiate a compatible agreement with a peer.
     pub fn negotiate(&self, peer: &Self) -> Result<BondingAgreement, ChannelBondingError> {
         validate_protocol_range(self.min_protocol_version, self.max_protocol_version)?;
@@ -499,6 +613,14 @@ pub struct BondingAgreement {
     pub auth_required: bool,
     /// Negotiated donor-count ceiling.
     pub max_donor_count: u32,
+}
+
+impl BondingAgreement {
+    /// Whether this agreement permits a transport family.
+    #[must_use]
+    pub fn supports_transport(&self, transport: BondTransport) -> bool {
+        self.supported_transports.contains(&transport)
+    }
 }
 
 /// ESI allocation mode selected by negotiation.
@@ -711,6 +833,16 @@ pub enum ChannelBondingError {
         /// Actual merkle root.
         actual: String,
     },
+    /// Shared symbol-auth key id is empty.
+    MissingAuthKeyId,
+    /// Shared symbol-auth key location is empty.
+    MissingAuthKeyLocation,
+    /// Shared symbol-auth key was configured for argv delivery.
+    InsecureAuthKeyDelivery,
+    /// Receiver auth-before-decode was disabled.
+    AuthBeforeDecodeDisabled,
+    /// Final Merkle/SHA fail-closed verification was disabled.
+    MerkleFailClosedDisabled,
 }
 
 impl fmt::Display for ChannelBondingError {
@@ -791,6 +923,19 @@ impl fmt::Display for ChannelBondingError {
                 f,
                 "merkle root mismatch: expected {expected:?}, actual {actual:?}"
             ),
+            Self::MissingAuthKeyId => f.write_str("bonding auth key id must not be empty"),
+            Self::MissingAuthKeyLocation => {
+                f.write_str("bonding auth key location must not be empty")
+            }
+            Self::InsecureAuthKeyDelivery => {
+                f.write_str("bonding auth key must not be delivered through argv")
+            }
+            Self::AuthBeforeDecodeDisabled => {
+                f.write_str("channel bonding requires auth-before-decode")
+            }
+            Self::MerkleFailClosedDisabled => {
+                f.write_str("channel bonding requires fail-closed Merkle/SHA verification")
+            }
         }
     }
 }
@@ -974,6 +1119,8 @@ fn parse_hex_32(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::{AuthenticatedSymbol, SecurityContext};
+    use crate::types::{Symbol, SymbolId, SymbolKind};
 
     fn sample_proof() -> BondDonorByteProof {
         BondDonorByteProof::from_entries(vec![
@@ -1148,13 +1295,14 @@ mod tests {
 
     #[test]
     fn handshake_degrades_to_static_residue_when_dynamic_missing() {
-        let mut receiver = BondingHandshake::v1_static(
+        let receiver = BondingHandshake::v1_static(
             [BondTransport::DirectIp, BondTransport::Tailscale],
             16,
             true,
-        );
-        receiver.supports_dynamic_windows = true;
-        receiver.supports_resume = true;
+        )
+        .with_dynamic_windows(true)
+        .with_resume(true)
+        .with_extension_capability("phase-e.dynamic-window-v1");
         let donor = BondingHandshake::v1_static([BondTransport::Tailscale], 8, false);
 
         let agreement = receiver.negotiate(&donor).expect("compatible");
@@ -1170,15 +1318,47 @@ mod tests {
             agreement.supported_transports,
             BTreeSet::from([BondTransport::Tailscale])
         );
+        assert!(agreement.supports_transport(BondTransport::Tailscale));
+        assert!(!agreement.supports_transport(BondTransport::DirectIp));
+    }
+
+    #[test]
+    fn handshake_selects_dynamic_windows_when_both_peers_support_them() {
+        let receiver = BondingHandshake::v1_static([BondTransport::DirectIp], 16, true)
+            .with_dynamic_windows(true)
+            .with_resume(true)
+            .with_extension_capability("receiver-private-future");
+        let donor = BondingHandshake::v1_static([BondTransport::DirectIp], 12, true)
+            .with_dynamic_windows(true)
+            .with_resume(true)
+            .with_extension_capability("donor-private-future");
+
+        let agreement = receiver.negotiate(&donor).expect("compatible");
+
+        assert_eq!(
+            agreement.assignment_mode,
+            BondingAssignmentMode::DynamicWindows
+        );
+        assert!(agreement.resume_supported);
+        assert_eq!(agreement.max_donor_count, 12);
+        assert!(agreement.supports_transport(BondTransport::DirectIp));
+    }
+
+    #[test]
+    fn handshake_ignores_unknown_extensions_but_refuses_no_common_transport() {
+        let receiver = BondingHandshake::v1_static([BondTransport::DirectIp], 16, true)
+            .with_extension_capability("unknown.receiver.future");
+        let donor = BondingHandshake::v1_static([BondTransport::Tailscale], 16, true)
+            .with_extension_capability("unknown.donor.future");
+
+        let err = receiver.negotiate(&donor).expect_err("no common transport");
+        assert_eq!(err, ChannelBondingError::NoCommonTransport);
     }
 
     #[test]
     fn handshake_refuses_incompatible_versions() {
-        let receiver = BondingHandshake {
-            min_protocol_version: 2,
-            max_protocol_version: 2,
-            ..BondingHandshake::v1_static([BondTransport::DirectIp], 16, true)
-        };
+        let receiver = BondingHandshake::v1_static([BondTransport::DirectIp], 16, true)
+            .with_protocol_range(2, 2);
         let donor = BondingHandshake::v1_static([BondTransport::DirectIp], 16, true);
 
         let err = receiver.negotiate(&donor).expect_err("version mismatch");
@@ -1186,5 +1366,59 @@ mod tests {
             err,
             ChannelBondingError::IncompatibleProtocolVersion { .. }
         ));
+    }
+
+    #[test]
+    fn security_model_rejects_argv_and_disabled_fail_closed_layers() {
+        let mut model = BondingSecurityModel {
+            auth_key: BondAuthKeyRef {
+                key_id: "bond-key-1".to_string(),
+                control_plane: BondAuthControlPlane::Ssh,
+                location: BondAuthKeyLocation::EnvVar("ATP_BOND_AUTH_KEY".to_string()),
+            },
+            auth_before_decode: true,
+            fail_closed_on_merkle_mismatch: true,
+        };
+        model.validate().expect("valid security model");
+
+        model.auth_key.location = BondAuthKeyLocation::Argv("--bond-key=secret".to_string());
+        assert_eq!(
+            model.validate().unwrap_err(),
+            ChannelBondingError::InsecureAuthKeyDelivery
+        );
+
+        model.auth_key.location = BondAuthKeyLocation::EnvVar("ATP_BOND_AUTH_KEY".to_string());
+        model.auth_before_decode = false;
+        assert_eq!(
+            model.validate().unwrap_err(),
+            ChannelBondingError::AuthBeforeDecodeDisabled
+        );
+
+        model.auth_before_decode = true;
+        model.fail_closed_on_merkle_mismatch = false;
+        assert_eq!(
+            model.validate().unwrap_err(),
+            ChannelBondingError::MerkleFailClosedDisabled
+        );
+    }
+
+    #[test]
+    fn wrong_donor_auth_key_rejects_symbol_before_decode() {
+        let signer = SecurityContext::for_testing(0xA11CE);
+        let verifier = SecurityContext::for_testing(0xB0B);
+        let symbol = Symbol::new(
+            SymbolId::new_for_test(7, 0, 3),
+            b"bonded repair".to_vec(),
+            SymbolKind::Repair,
+        );
+        let signed = signer.sign_symbol(&symbol);
+        let tag = *signed.tag();
+        let mut received = AuthenticatedSymbol::from_parts(signed.into_symbol(), tag);
+
+        let err = verifier
+            .verify_authenticated_symbol(&mut received)
+            .expect_err("wrong shared donor key must reject symbol");
+        assert!(err.is_invalid_tag());
+        assert!(!received.is_verified());
     }
 }
