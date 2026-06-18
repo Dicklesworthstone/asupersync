@@ -155,6 +155,36 @@ to wire.
   (the correct, content-addressed check). Add a multi-block MIXED-completion regression test (the
   existing `signed_source_streaming_seeds_fec_decoder_from_staged_sources` only covers single-block
   all-FEC). Then re-run the bad-regime matrix to confirm convergence.
+- **★ FIXED + CONFIRMED (2026-06-17, commit pending):** applied BOTH fixes — `persist_decoded_block`
+  now marks `source_blocks[sbn].complete` + counts bytes once (so a late source retransmit for an
+  already-FEC'd block is ignored by `persist_source_symbol`'s existing `block.complete` guard) AND
+  unifies completion (entry complete iff every block done via source OR FEC); `verify_and_commit`
+  now gates on the content-addressed file size+SHA-256, not the `bytes_written` proxy. Two new
+  regression tests (single-block FEC-then-late-source; multi-block MIXED completion). Gates: rq lib
+  tests **67/0**, clippy `-D warnings` **0**, fmt **0**. EMPIRICAL: rate-capped AUTH **bad 50M
+  (50mbit/80±20ms/2%) now commits sha OK/OK, fb=2** — was 0/3 MISS pre-fix (the hardest case:
+  ~100 blocks, mixed source+FEC, all correct). (The same matrix run hit a Contabo `/tmp`
+  No-space-left condition that corrupted the bad-5M and good-50M cells — good-50M showed rsync ALSO
+  MISS, i.e. environmental, not atp; a clean full re-run is pending disk cleanup.)
+
+### E-10 ★ HYPOTHESIS · perfect-link wall = per-SYMBOL seek+write syscalls (receiver) + per-symbol read (sender)
+- **Symptom (F-POS-3):** perfect 1gbit/2ms/0% 50M = atp 3.51s vs rsync 0.91s (3.9× slower), with
+  **fb=0** (source-first converges, NO loss, NO decode). 50MB/3.51s = **14 MB/s** — far below memcpy
+  / SSD / HMAC throughput. So the wall is NOT loss, NOT decode, NOT GF(256).
+- **Hypothesis:** `persist_source_symbol` (mod.rs:3493-3494) does `file.seek(offset)` + `write_all`
+  PER ~1KB SYMBOL → ~51k seek+write syscalls for 50MB. `seed_source_streaming_pipeline` (mod.rs:3386)
+  reads source back per-symbol too. rsync does large sequential writes. This per-symbol syscall storm
+  is the likely 14 MB/s ceiling. (Sender disk-streaming spray may have the symmetric per-symbol read.)
+- **Experiment (after E-9 lands):** profile the receiver on a perfect-link 50M (strace -c for
+  seek/write counts; perf for self-time). If `write`/`pwrite`/`lseek` dominate → confirmed.
+- **Fix candidates (extreme-opt batching / alien-artifact certified-rewrite, byte-identical):**
+  (a) buffer contiguous source symbols and write per-BLOCK (≤512KB) instead of per-symbol — source
+  symbols arrive ~in ESI order in round 0, so accumulate a block then one `write_all`; (b) use
+  positioned vectored writes (pwritev) to coalesce; (c) a BufWriter over the staging file with
+  block-aligned flushes; (d) sender: read each block once into memory and slice symbols (one read per
+  block, not per symbol). MUST stay byte-identical (sha) — pure I/O batching, no wire change.
+- **Why it matters:** this is the gap to "beat rsync on a PERFECT link." It is an I/O-shape problem,
+  not an algorithmic one — high EV, low risk (isomorphic). Profile-first before implementing.
 
 ### E-0 · PROFILE: where does the 113.85s actually go? (BLOCKS all others)
 - **Hypothesis:** the F3 100M wall is dominated by feedback-round latency + solve-on-incomplete
