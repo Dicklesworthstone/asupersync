@@ -185,6 +185,18 @@ to wire.
   block, not per symbol). MUST stay byte-identical (sha) — pure I/O batching, no wire change.
 - **Why it matters:** this is the gap to "beat rsync on a PERFECT link." It is an I/O-shape problem,
   not an algorithmic one — high EV, low risk (isomorphic). Profile-first before implementing.
+- **★ PROFILED 2026-06-17 → E-10 NOT CONFIRMED (do not chase yet).** Local loopback 50M receiver
+  `strace -c` (csd): `futex` 83% + `sched_yield` 4% (sync), `write` 2.5% + `lseek` 1.3% (E-10 target
+  = only ~3.8%), `recvfrom` 0.55%. So per-symbol seek+write is NOT the dominant cost. BUT the profile
+  is **LOAD-POLLUTED**: csd is a heavily-shared machine; the futex/sched_yield storm (~208k futex,
+  ~125k yield for ~37k symbols) = CPU oversubscription (runtime workers blocking on starved cores),
+  not an atp algorithmic defect (the rq `yield_now` is boundary-gated cooperative yield, not a spin).
+  Wall here was 50.99s vs 3.51s on idle Contabo netns → 14× load inflation, invalid for attribution.
+  **Retry-condition for E-10:** only if a CLEAN idle-machine profile shows `write`+`lseek` ≥10%.
+  **Action:** re-profile the receiver AND sender on an IDLE machine (Contabo, after disk cleanup) to
+  get true perfect-link attribution before picking the lever (candidates shift toward B-2 GSO +
+  per-super-packet MAC and B-10 parallel decode, NOT E-10). Negative-evidence WIN: profiling stopped
+  us implementing the wrong lever.
 
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
