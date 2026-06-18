@@ -1670,7 +1670,7 @@ impl UdpSocket {
                 &mut headers,
                 &iovs,
                 &addrs,
-                &cmsgs,
+                cmsgs,
                 nix::sys::socket::MsgFlags::MSG_DONTWAIT,
             ) {
                 Ok(results) => results,

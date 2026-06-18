@@ -18,8 +18,8 @@
 //! - `P == L - W` with `L >= W`   (PI-symbol count well-formed)
 //! - `B == W - S` with `W >= S`   (non-LDPC LT-symbol count well-formed)
 //! - `S, H, W, P, B >= 1`
-//! - `W > 2`                       (LT tuple generator precondition; see
-//!                                  `try_tuple` / `tuple_indices`)
+//! - `W > 2` (LT tuple generator precondition; see
+//!   `try_tuple` / `tuple_indices`)
 //! - `P1 = next_prime_ge(P)` exists, is prime, and `>= P`
 //! - `K'` fits in `u32` (ESI domain)
 //! - `for_source_block` agrees with `try_for_source_block`

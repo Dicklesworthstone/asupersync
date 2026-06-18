@@ -274,12 +274,12 @@ fn certified_rewrite_preserves_outcome_across_shapes() {
 
     // No rule: race over heterogeneous children (winner = the index-0 join).
     let _ = assert_equivalent!("race_join_timeout", |p| {
-        let a = p.leaf(async { 1u32 });
-        let b = p.leaf(async { 2u32 });
-        let j = p.join([a, b]);
-        let c = p.leaf(async { 3u32 });
-        let t = p.timeout(c, Duration::from_secs(60));
-        p.race([j, t])
+        let first_leaf = p.leaf(async { 1u32 });
+        let second_leaf = p.leaf(async { 2u32 });
+        let joined = p.join([first_leaf, second_leaf]);
+        let third_leaf = p.leaf(async { 3u32 });
+        let timed = p.timeout(third_leaf, Duration::from_secs(60));
+        p.race([joined, timed])
     });
 
     // TimeoutMin fires inside a join arm; the join is otherwise flat.

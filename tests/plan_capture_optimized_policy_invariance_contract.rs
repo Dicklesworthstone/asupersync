@@ -236,12 +236,12 @@ fn no_rewrite_mixed_shape_agrees() {
     // policy (no nested timeout, no nested join, race children canonical), so the
     // outcome is the index-0 winner — the join — identically.
     let cons = assert_aggressive_agrees!("race_join_timeout", |p| {
-        let a = p.leaf(async { 1u32 });
-        let b = p.leaf(async { 2u32 });
-        let j = p.join([a, b]);
-        let c = p.leaf(async { 3u32 });
-        let t = p.timeout(c, Duration::from_secs(60));
-        p.race([j, t])
+        let first_leaf = p.leaf(async { 1u32 });
+        let second_leaf = p.leaf(async { 2u32 });
+        let joined = p.join([first_leaf, second_leaf]);
+        let third_leaf = p.leaf(async { 3u32 });
+        let timed = p.timeout(third_leaf, Duration::from_secs(60));
+        p.race([joined, timed])
     });
     assert!(!cons.rewritten);
     assert_eq!(cons.value, PlanValue::Vector(vec![1, 2]));

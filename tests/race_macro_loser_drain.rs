@@ -15,7 +15,7 @@
 //! suspension point, in response to observed cancellation**. A dropped future
 //! never advances past where it was parked, so that code never executes; a
 //! drained future is polled once more after `abort`, observes its task's
-//! cancellation via [`Cx::current`]`().checkpoint()`, runs its post-cancel
+//! cancellation via `Cx::current().checkpoint()`, runs its post-cancel
 //! resolution, and returns.
 //!
 //! Each loser here parks (self-waking) until its own task is cancelled, then
