@@ -1643,7 +1643,36 @@ mod tests {
     }
 }
 
+/// Raise the soft open-file-descriptor limit to the hard limit at startup.
+///
+/// The RaptorQ receiver opens one staging file per manifest entry and keeps it
+/// open while the transfer is in flight, so a directory transfer with thousands
+/// of files would otherwise exceed the default soft limit (commonly 1024) and
+/// fail with EMFILE ("Too many open files") — see bead
+/// `asupersync-atp-dataplane-redesign-317hxr.26` (E-14). Raising the soft limit
+/// to the hard limit is the standard stopgap; the complete fix is a bounded FD
+/// pool in the receiver. Best-effort: any error is ignored.
+#[allow(unsafe_code)]
+fn raise_fd_limit() {
+    // SAFETY: `getrlimit`/`setrlimit` are invoked with the valid `RLIMIT_NOFILE`
+    // resource identifier and a fully-initialized, non-aliased `rlimit` value
+    // that lives for the duration of each call; the kernel only reads/writes
+    // through the supplied pointer, and both return codes are checked before the
+    // struct is used or written back.
+    unsafe {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut lim) == 0 && lim.rlim_cur < lim.rlim_max {
+            lim.rlim_cur = lim.rlim_max;
+            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim);
+        }
+    }
+}
+
 fn main() -> ExitCode {
+    raise_fd_limit();
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Send(args) => run_send(args),
