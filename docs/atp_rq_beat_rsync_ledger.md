@@ -136,6 +136,25 @@ optimally-tuned rsync-over-ssh on the same netem link, and/or atp-lab vs rsync-d
   files, each paying per-object handshake/auth/spray overhead, vs rsync's one pipelined connection. =
   new gap **E-15 (tree per-entry overhead)**. The matrix's own tree cells used atp_e9 (no E-14) so they
   EMFILE'd; this scorecard supersedes them with atp_e14.
+  **★ E-15 PROFILED 2026-06-18 (local strace -c -f, syscall counts load-independent; 109 ssh was
+  dropping):** receiver of a 2000-file tree vs a SAME-BYTES (6.68 MB) single file —
+  **wall 7.03 s vs 1.21 s = 5.8× slower for the tree**. Dominant cost is RUNTIME SYNC, not FS:
+  `futex` 81% of time, **133,874 calls for the tree vs 18,911 for the single file (7.1×)** — each of
+  2000 files is its own RaptorQ OBJECT spinning up its own decode pipeline / tasks / channel hops /
+  commit, so per-entry coordination drives 7× the futex/sched_yield/epoll traffic. FS syscalls are
+  SECONDARY and scale with file count: `statx` 16,877 (~8/file — `reject_destination_symlink_prefix`
+  walks each path component), `mkdir` 6,620 (~3/file, per-entry `create_dir_all`), `openat`/`close`
+  ~2/file (staging), `rename` 2,000 (1/file, commit). ⇒ **E-15 lever CONFIRMED high-value:** coalescing
+  sub-threshold small files into FEWER/larger RaptorQ objects collapses BOTH the 7× sync multiplier AND
+  the per-entry FS ops, so a coalesced tree transfers like the same-byte single file (~5.8× faster
+  here) — which would flip atp's perfect/bad tree losses into wins/ties. DESIGN: a send-side "pack"
+  layer groups sub-threshold entries (e.g. <~256 KB) into combined RaptorQ objects with an
+  intra-object offset table in the manifest; the receiver splits each combined object back into its
+  files by offset on commit (byte-identical, tree_digest both sides). Big architectural change to HOT
+  transport_rq — scope carefully, reserve the file, MUST NOT regress the good-regime tree WIN
+  (tree_big-good 1.31×). Cheaper secondary win available independently: cut the ~8 statx/file in
+  `reject_destination_symlink_prefix` (cache validated dir prefixes across entries) — small (statx is
+  only 1.26% of time) but trivial + safe.
 
 ## REFUTED / NEGATIVE (do NOT re-chase unless retry-condition fires)
 
