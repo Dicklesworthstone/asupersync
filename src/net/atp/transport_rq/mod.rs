@@ -377,9 +377,9 @@ struct RqRoundTuning {
 
 #[derive(Debug, Clone, Copy)]
 struct RqSprayPacing {
-    max_rate_per_sec: u32,
+    path_rate_bps: u64,
+    datagram_bytes: u32,
     max_burst_size: u32,
-    min_send_interval: Duration,
     rtt: Option<Duration>,
     loss_detected: bool,
 }
@@ -397,25 +397,25 @@ impl RqSprayPacing {
 
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn from_rate(
-        rate_bps: u64,
+        rate_bytes_per_sec: u64,
         symbol_size: u16,
         burst_symbols: usize,
         rtt: Option<Duration>,
         loss_detected: bool,
     ) -> Self {
-        let pacing_rate_bps = rate_bps.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
+        let pacing_rate_bytes_per_sec =
+            rate_bytes_per_sec.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
         let symbol_bytes = u64::from(symbol_size.max(1))
             .saturating_add(u64::try_from(AUTH_DGRAM_HEADER).unwrap_or(u64::MAX));
-        let max_rate_per_sec = pacing_rate_bps
-            .div_ceil(symbol_bytes.max(1))
-            .clamp(1, u64::from(u32::MAX)) as u32;
+        let datagram_bytes = u32::try_from(symbol_bytes).unwrap_or(u32::MAX).max(1);
+        let path_rate_bps = pacing_rate_bytes_per_sec.saturating_mul(8);
         let max_burst_size = u32::try_from(burst_symbols.max(1))
             .unwrap_or(u32::MAX)
             .max(1);
         Self {
-            max_rate_per_sec,
+            path_rate_bps,
+            datagram_bytes,
             max_burst_size,
-            min_send_interval: Duration::ZERO,
             rtt,
             loss_detected,
         }
@@ -429,20 +429,20 @@ struct RqSprayPacer {
 impl RqSprayPacer {
     fn new(pacing: RqSprayPacing) -> Self {
         let mut controller = CongestionController::new(CongestionConfig::default());
-        controller.configure_token_bucket(
-            pacing.max_rate_per_sec,
+        controller.configure_for_path_rate(
+            pacing.path_rate_bps,
+            pacing.datagram_bytes,
             pacing.max_burst_size,
-            pacing.min_send_interval,
         );
         controller.update_congestion_feedback(pacing.rtt, pacing.loss_detected);
         Self { controller }
     }
 
     fn configure(&mut self, pacing: RqSprayPacing) {
-        self.controller.configure_token_bucket(
-            pacing.max_rate_per_sec,
+        self.controller.configure_for_path_rate(
+            pacing.path_rate_bps,
+            pacing.datagram_bytes,
             pacing.max_burst_size,
-            pacing.min_send_interval,
         );
         self.controller
             .update_congestion_feedback(pacing.rtt, pacing.loss_detected);
@@ -4617,7 +4617,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rq_pacing_converts_byte_rate_to_token_bucket_datagrams() {
+    fn rq_pacing_carries_path_rate_for_congestion_controller() {
         let pacing = RqSprayPacing::from_rate(
             RQ_COLD_START_PACING_BPS,
             1024,
@@ -4629,14 +4629,14 @@ mod tests {
             1024_u64.saturating_add(u64::try_from(AUTH_DGRAM_HEADER).unwrap_or(u64::MAX));
 
         assert_eq!(
-            pacing.max_rate_per_sec,
-            u32::try_from(RQ_COLD_START_PACING_BPS.div_ceil(symbol_bytes)).unwrap()
+            pacing.path_rate_bps,
+            RQ_COLD_START_PACING_BPS.saturating_mul(8)
         );
+        assert_eq!(pacing.datagram_bytes, u32::try_from(symbol_bytes).unwrap());
         assert_eq!(
             pacing.max_burst_size,
             u32::try_from(RQ_COLD_START_BURST_SYMBOLS).unwrap()
         );
-        assert_eq!(pacing.min_send_interval, Duration::ZERO);
     }
 
     #[test]
