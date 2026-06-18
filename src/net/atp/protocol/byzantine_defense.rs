@@ -124,6 +124,19 @@ impl DefendedFrameProcessor {
             return Err(ByzantineDefenseError::FrameRateLimited { peer_id });
         }
 
+        if frame.frame_type() == FrameType::ObjectManifest {
+            if let Some(manifest_size) = self.extract_manifest_size(frame) {
+                if !self.resource_manager.validate_manifest_size(manifest_size) {
+                    self.resource_manager.frame_processed(&peer_id);
+                    return Err(ResourceError::ManifestSizeExceeded {
+                        size: manifest_size,
+                        limit: self.resource_manager.limits().max_manifest_size,
+                    }
+                    .into());
+                }
+            }
+        }
+
         // Check memory requirements based on frame type
         let memory_needed = self.estimate_frame_memory(frame);
         if !self
@@ -144,18 +157,7 @@ impl DefendedFrameProcessor {
         let mut started_object_request = false;
         let mut started_session = false;
         match frame.frame_type() {
-            FrameType::ObjectManifest => {
-                if let Some(manifest_size) = self.extract_manifest_size(frame) {
-                    if !self.resource_manager.validate_manifest_size(manifest_size) {
-                        self.cleanup_frame_processing(&peer_id, memory_needed);
-                        return Err(ResourceError::ManifestSizeExceeded {
-                            size: manifest_size,
-                            limit: self.resource_manager.limits().max_manifest_size,
-                        }
-                        .into());
-                    }
-                }
-            }
+            FrameType::ObjectManifest => {}
             FrameType::ObjectRequest => {
                 if !self.resource_manager.request_object(peer_id) {
                     self.cleanup_frame_processing(&peer_id, memory_needed);
@@ -998,6 +1000,40 @@ mod tests {
                 ResourceError::MemoryLimitExceeded { .. }
             ))
         ));
+    }
+
+    #[test]
+    fn manifest_size_cap_rejects_before_memory_allocation() {
+        let mut processor = DefendedFrameProcessor::new();
+        let peer_id = PeerId::from_label("oversized-manifest-peer");
+
+        processor.resource_manager.update_limits(
+            crate::net::atp::protocol::resource_manager::ResourceLimits {
+                max_memory_per_peer: 24,
+                max_manifest_size: 16,
+                ..Default::default()
+            },
+        );
+
+        let frame = manifest_frame(32);
+
+        assert!(matches!(
+            processor.process_frame(peer_id, &frame),
+            Err(ByzantineDefenseError::ResourceLimitExceeded(
+                ResourceError::ManifestSizeExceeded {
+                    size: 32,
+                    limit: 16
+                }
+            ))
+        ));
+
+        let usage = processor
+            .resource_manager
+            .peer_usage(&peer_id)
+            .expect("rate-limit history keeps peer visible after rejection");
+        assert_eq!(usage.memory_usage, 0);
+        assert_eq!(usage.pending_frames, 0);
+        assert_eq!(usage.recent_frame_count, 1);
     }
 
     #[test]
