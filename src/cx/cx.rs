@@ -697,17 +697,30 @@ impl FullCx {
             .flatten()
     }
 
-    /// Sets the current task context for the duration of the guard.
+    /// Installs `cx` as the current ambient task context for the
+    /// duration of the returned guard.
     ///
     /// Pushes a new frame onto the thread-local stack with the FULL
     /// capability mask. For installations that should narrow the
     /// ambient view (e.g. when handing control to untrusted code
     /// that should not see full caps), use
     /// [`Cx::set_current_restricted`] instead.
+    ///
+    /// This is the public ambient-install primitive: the scheduler
+    /// calls it once per poll to mirror a task's owned `Cx` into the
+    /// thread-local, and first-party bridges such as
+    /// `asupersync-tokio-compat` call it from *outside* this crate to
+    /// make a held `Cx` visible to tokio-shaped code that reaches for
+    /// [`Cx::current`]. It is capability-safe — the caller can only
+    /// install a `Cx` it already holds, so no authority is minted out
+    /// of band (unlike the `test-internals`-gated standalone
+    /// constructors); narrow the ambient view with
+    /// [`Cx::set_current_restricted`]. Because the compat bridge ships
+    /// as a separate crate, this must be `pub` at the crate boundary
+    /// rather than `pub(crate)` (asupersync#49).
     #[inline]
     #[must_use]
-    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
-    pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
+    pub fn set_current(cx: Option<Self>) -> CurrentCxGuard {
         let pushed = CURRENT_CX_STACK.with(|stack| match cx {
             Some(cx) => {
                 stack.borrow_mut().push(CurrentCxFrame {

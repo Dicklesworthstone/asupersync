@@ -62,6 +62,13 @@ impl Default for RatelessIbltConfig {
 }
 
 impl RatelessIbltConfig {
+    /// Return a copy sized from an expected symmetric-difference cardinality.
+    #[must_use]
+    pub fn with_estimated_delta(mut self, symmetric_difference_chunks: usize) -> Self {
+        self.initial_cell_count = recommended_cell_count(symmetric_difference_chunks);
+        self
+    }
+
     fn validate(&self) -> Result<(), ChunkingProfileError> {
         if self.initial_cell_count == 0 {
             return Err(ChunkingProfileError::InvalidChunkParameters(
@@ -119,6 +126,30 @@ pub struct ChunkSetReconciliation {
     pub estimated_wire_bytes: usize,
     /// Sender-side naive "upload all fingerprints" baseline bytes.
     pub naive_sender_fingerprint_bytes: usize,
+}
+
+impl ChunkSetReconciliation {
+    /// Total decoded symmetric-difference cardinality.
+    #[must_use]
+    pub fn symmetric_difference_chunks(&self) -> usize {
+        self.receiver_missing.len() + self.receiver_stale.len()
+    }
+
+    /// True when sender and receiver already have identical chunk-id sets.
+    #[must_use]
+    pub fn is_noop(&self) -> bool {
+        self.receiver_missing.is_empty() && self.receiver_stale.is_empty()
+    }
+
+    /// Estimated IBLT wire bytes divided by the sender-fingerprint baseline.
+    #[must_use]
+    pub fn wire_ratio_vs_naive_sender_fingerprints(&self) -> Option<f64> {
+        if self.naive_sender_fingerprint_bytes == 0 {
+            None
+        } else {
+            Some(self.estimated_wire_bytes as f64 / self.naive_sender_fingerprint_bytes as f64)
+        }
+    }
 }
 
 /// Reconcile CDC chunk outputs directly.
@@ -209,6 +240,23 @@ where
         "IBLT decode failed after {} rateless rounds from {} initial cells",
         config.max_rounds, config.initial_cell_count
     )))
+}
+
+/// Reconcile raw SHA-256 chunk hashes without first wrapping them.
+pub fn reconcile_chunk_hashes<I, J>(
+    sender_hashes: I,
+    receiver_hashes: J,
+    config: &RatelessIbltConfig,
+) -> Result<ChunkSetReconciliation, ChunkingProfileError>
+where
+    I: IntoIterator<Item = [u8; 32]>,
+    J: IntoIterator<Item = [u8; 32]>,
+{
+    reconcile_chunk_sets(
+        sender_hashes.into_iter().map(ChunkFingerprint::from),
+        receiver_hashes.into_iter().map(ChunkFingerprint::from),
+        config,
+    )
 }
 
 fn recommended_cell_count(symmetric_difference_chunks: usize) -> usize {
@@ -417,7 +465,9 @@ mod tests {
 
         assert!(result.rounds > 1);
         assert_eq!(result.receiver_missing.len(), 24);
+        assert_eq!(result.symmetric_difference_chunks(), 24);
         assert!(result.receiver_stale.is_empty());
+        assert!(!result.is_noop());
     }
 
     #[test]
@@ -434,6 +484,13 @@ mod tests {
         assert_eq!(estimate.symmetric_difference_chunks, 3);
         assert_eq!(estimate.naive_sender_fingerprint_bytes, 96);
         assert!(estimate.recommended_initial_cells >= 8);
+
+        let config = RatelessIbltConfig::default()
+            .with_estimated_delta(estimate.symmetric_difference_chunks);
+        assert_eq!(
+            config.initial_cell_count,
+            estimate.recommended_initial_cells
+        );
     }
 
     #[test]
@@ -461,5 +518,16 @@ mod tests {
             BTreeSet::from([ChunkFingerprint(sender_only.content_hash)])
         );
         assert!(result.receiver_stale.is_empty());
+    }
+
+    #[test]
+    fn raw_hash_reconcile_reports_noop_for_equal_sets() {
+        let hashes = [fingerprint(1).0, fingerprint(2).0, fingerprint(3).0];
+        let result = reconcile_chunk_hashes(hashes, hashes, &RatelessIbltConfig::default())
+            .expect("identical sets should decode as noop");
+
+        assert!(result.is_noop());
+        assert_eq!(result.symmetric_difference_chunks(), 0);
+        assert!(result.wire_ratio_vs_naive_sender_fingerprints().is_some());
     }
 }
