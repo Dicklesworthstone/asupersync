@@ -3285,10 +3285,14 @@ async fn feed_symbol(
         }
         Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
             persist_decoded_block(dec, block_sbn, &data).await?;
-            if dec
-                .pipeline
-                .as_ref()
-                .is_some_and(DecodingPipeline::is_complete)
+            // `persist_decoded_block` may have already completed the entry via the source-block
+            // tracker (mixed source+FEC, E-9). Otherwise fall back to the pipeline's own view
+            // (the all-FEC / non-source-streaming path).
+            if dec.complete
+                || dec
+                    .pipeline
+                    .as_ref()
+                    .is_some_and(DecodingPipeline::is_complete)
             {
                 dec.complete = true;
                 dec.pipeline = None;
@@ -3413,10 +3417,14 @@ async fn seed_source_streaming_pipeline(
             match result {
                 Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
                     persist_decoded_block(dec, block_sbn, &data).await?;
-                    if dec
-                        .pipeline
-                        .as_ref()
-                        .is_some_and(DecodingPipeline::is_complete)
+                    // `persist_decoded_block` may have completed the entry (mixed source+FEC, E-9)
+                    // and already dropped the pipeline; stop seeding so the next loop iteration does
+                    // not touch a `None` pipeline.
+                    if dec.complete
+                        || dec
+                            .pipeline
+                            .as_ref()
+                            .is_some_and(DecodingPipeline::is_complete)
                     {
                         dec.complete = true;
                         dec.pipeline = None;
@@ -3633,10 +3641,36 @@ async fn persist_decoded_block(
     };
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     file.write_all(data).await?;
-    dec.bytes_written = dec
-        .bytes_written
-        .checked_add(u64::try_from(data.len()).unwrap_or(u64::MAX))
-        .ok_or_else(|| RqError::Coding(format!("entry {} byte counter overflow", dec.index)))?;
+    // E-9 fix: `source_blocks[sbn].complete` is the single source of truth for both completion
+    // and byte accounting. A block decoded via FEC here can LATER also receive its final source
+    // symbols via retransmit; if we do not mark it complete now, `persist_source_symbol` would
+    // count this block's bytes a SECOND time (its `received_count == k` path), driving
+    // `bytes_written` past the entry size and causing `verify_and_commit` to FALSELY reject a
+    // byte-correct transfer as a "per-entry SHA-256 mismatch". Count the block exactly once and
+    // mark it done so any late source symbol for it is ignored by `persist_source_symbol`.
+    let block_idx = usize::from(block_sbn);
+    let already_complete = dec
+        .source_blocks
+        .get(block_idx)
+        .is_some_and(|block| block.complete);
+    if !already_complete {
+        dec.bytes_written = dec
+            .bytes_written
+            .checked_add(u64::try_from(data.len()).unwrap_or(u64::MAX))
+            .ok_or_else(|| RqError::Coding(format!("entry {} byte counter overflow", dec.index)))?;
+    }
+    if let Some(block) = dec.source_blocks.get_mut(block_idx) {
+        block.complete = true;
+    }
+    // When every source block is on disk (via source OR FEC) the entry is complete. This unifies
+    // the previously-desynced completion trackers (`source_blocks[].complete` vs
+    // `pipeline.is_complete()`) for the mixed source+FEC case, which is what NEITHER tracker fired
+    // for before (→ the bad-regime non-convergence). Empty `source_blocks` = non-source-streaming
+    // path, whose completion is still owned by `pipeline.is_complete()` at the call sites.
+    if !dec.source_blocks.is_empty() && dec.source_blocks.iter().all(|block| block.complete) {
+        dec.complete = true;
+        dec.pipeline = None;
+    }
     Ok(())
 }
 
@@ -3699,7 +3733,12 @@ async fn verify_and_commit(
             sha_ok = false;
             continue;
         };
-        if !decoder.complete || decoder.bytes_written != e.size {
+        // Gate on the CONTENT-ADDRESSED truth (actual file size + SHA-256, checked just below),
+        // NOT on the `bytes_written` side counter. `bytes_written` is kept for diagnostics but is
+        // not load-bearing for the commit decision: a byte-correct file with a transiently
+        // miscounted counter must commit (E-9 false-rejection). An incomplete or incorrect file is
+        // still rejected by the size+hash check that follows — that is the authoritative gate.
+        if !decoder.complete {
             sha_ok = false;
         }
         let (size, content_id, content_sha256) =
@@ -4756,6 +4795,139 @@ mod tests {
             std::fs::read(staging_path).expect("read repaired source stream"),
             data
         );
+    }
+
+    // E-9 regression: a block completed via FEC (persist_decoded_block) must not be counted a
+    // second time when a late source retransmit for the same block arrives. Pre-fix, FEC left
+    // source_blocks[sbn].complete=false, so the late source's received_count==k path added
+    // block.len to bytes_written AGAIN → bytes_written != size → verify_and_commit falsely rejected
+    // a BYTE-CORRECT transfer as "per-entry SHA-256 mismatch" (the bad-regime non-convergence).
+    #[test]
+    fn e9_single_block_fec_then_late_source_does_not_double_count() {
+        let ctx = SecurityContext::for_testing(54321);
+        let object_id = entry_object_id("e9-mixed-no-double-count", 0);
+        let symbol_size = 4u16;
+        let data = vec![10u8, 20, 30, 40, 50, 60, 70, 80]; // 8 bytes, k=2 @ symbol_size 4
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 8, symbol_size);
+
+        // One real source symbol arrives (esi=0): block not yet complete.
+        let (p0, pl0) = signed_source_payload(&ctx, object_id, 0, data[..4].to_vec(), None);
+        assert!(
+            futures_lite::future::block_on(feed_symbol(
+                &mut decoder,
+                &p0,
+                &pl0,
+                symbol_size,
+                Some(&ctx),
+            ))
+            .expect("feed source 0")
+        );
+        assert!(!decoder.complete);
+        assert_eq!(decoder.source_blocks[0].received_count, 1);
+
+        // FEC completes the block (decoder emits the full block).
+        futures_lite::future::block_on(persist_decoded_block(&mut decoder, 0, &data))
+            .expect("persist decoded block");
+        assert!(decoder.complete, "FEC completion finishes the single-block entry");
+        assert_eq!(decoder.bytes_written, 8, "block counted exactly once after FEC");
+        assert!(
+            decoder.source_blocks[0].complete,
+            "FEC must mark the source block complete (E-9)"
+        );
+
+        // A LATE source retransmit for esi=1 arrives AFTER FEC completion. Pre-fix this drove
+        // received_count to k and DOUBLE-counted bytes_written to 16. It must be ignored now.
+        let (p1, pl1) = signed_source_payload(&ctx, object_id, 1, data[4..].to_vec(), None);
+        let _ = futures_lite::future::block_on(feed_symbol(
+            &mut decoder,
+            &p1,
+            &pl1,
+            symbol_size,
+            Some(&ctx),
+        ));
+        assert_eq!(
+            decoder.bytes_written, 8,
+            "late source must NOT double-count bytes_written (E-9)"
+        );
+
+        drop(decoder.file.take());
+        assert_eq!(std::fs::read(&staging_path).expect("read staged"), data);
+    }
+
+    // E-9 regression (multi-block MIXED completion — the realistic bad-regime case): block 0 via
+    // FEC, block 1 via source, plus a late source retransmit for the already-FEC'd block 0. The
+    // entry must complete with bytes_written == size (each block counted ONCE) and byte-identical
+    // content. This directly exercises the source_blocks[sbn].complete guard that protects the
+    // multi-block path (where dec.complete is still false after the first block, so feed_symbol's
+    // dec.complete short-circuit does not hide the double-count).
+    #[test]
+    fn e9_multiblock_mixed_completion_counts_each_block_once() {
+        let object_id = entry_object_id("e9-multiblock-mixed", 0);
+        let symbol_size = 4u16;
+        let data = vec![1u8, 2, 3, 4, 5, 6, 7, 8]; // 8 bytes; max_block_size 4 -> 2 blocks, k=1 each
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder = EntryDecoder {
+            index: 0,
+            object_id,
+            size: 8,
+            pipeline: None,
+            complete: false,
+            staging_path: staging_path.clone(),
+            file: None,
+            bytes_written: 0,
+            max_block_size: 4,
+            source_streaming: true,
+            source_blocks: source_block_progress_for(8, 4, symbol_size)
+                .expect("two source blocks"),
+        };
+        assert_eq!(decoder.source_blocks.len(), 2);
+
+        // Block 0 completes via FEC.
+        futures_lite::future::block_on(persist_decoded_block(&mut decoder, 0, &data[0..4]))
+            .expect("persist decoded block 0");
+        assert!(decoder.source_blocks[0].complete);
+        assert!(!decoder.complete, "block 1 still pending");
+        assert_eq!(decoder.bytes_written, 4);
+
+        // A LATE source retransmit for the already-FEC'd block 0 must be ignored (no double count).
+        let late = ParsedDatagram {
+            entry: 0,
+            sbn: 0,
+            esi: 0,
+            kind: SymbolKind::Source,
+            auth_tag: None,
+            payload_len: 4,
+            header_len: 0,
+        };
+        let accepted =
+            futures_lite::future::block_on(persist_source_symbol(&mut decoder, &late, &data[0..4], symbol_size))
+                .expect("late source");
+        assert!(!accepted, "late source for a completed block is ignored (E-9)");
+        assert_eq!(decoder.bytes_written, 4, "no double count for block 0");
+
+        // Block 1 completes via source.
+        let b1 = ParsedDatagram {
+            entry: 0,
+            sbn: 1,
+            esi: 0,
+            kind: SymbolKind::Source,
+            auth_tag: None,
+            payload_len: 4,
+            header_len: 0,
+        };
+        assert!(
+            futures_lite::future::block_on(persist_source_symbol(&mut decoder, &b1, &data[4..8], symbol_size))
+                .expect("block 1 source")
+        );
+        assert!(decoder.complete, "all blocks complete -> entry complete");
+        assert_eq!(decoder.bytes_written, 8, "each block counted once; bytes_written == size");
+
+        drop(decoder.file.take());
+        assert_eq!(std::fs::read(&staging_path).expect("read staged"), data);
     }
 
     #[test]
