@@ -7,6 +7,7 @@ pub mod compression;
 pub mod filter;
 pub mod metadata;
 pub mod mirror;
+pub mod multi_object;
 pub mod progress;
 pub mod streaming;
 
@@ -23,6 +24,10 @@ pub use metadata::{
 };
 pub use mirror::{
     MirrorEntryKind, MirrorError, MirrorExtra, MirrorPolicy, MirrorReport, mirror_dest,
+};
+pub use multi_object::{
+    ATP_RQ_DEFAULT_MULTI_OBJECT_BLOCK_SIZE, ATP_RQ_MAX_SOURCE_BLOCKS_PER_OBJECT, MultiObjectPlan,
+    MultiObjectShard, MultiObjectSplitConfig, MultiObjectSplitError, plan_multi_object_split,
 };
 pub use progress::{
     PlanEntry, PlanError, ProgressSnapshot, TransferPlan, TransferProgress, plan_transfer,
