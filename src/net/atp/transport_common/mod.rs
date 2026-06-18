@@ -8,6 +8,7 @@ pub mod filter;
 pub mod metadata;
 pub mod mirror;
 pub mod multi_object;
+pub mod multisource;
 pub mod progress;
 pub mod streaming;
 
@@ -28,6 +29,11 @@ pub use mirror::{
 pub use multi_object::{
     ATP_RQ_DEFAULT_MULTI_OBJECT_BLOCK_SIZE, ATP_RQ_MAX_SOURCE_BLOCKS_PER_OBJECT, MultiObjectPlan,
     MultiObjectShard, MultiObjectSplitConfig, MultiObjectSplitError, plan_multi_object_split,
+};
+pub use multisource::{
+    MultiSourceAuth, MultiSourceFetchPlan, MultiSourceObjectRef, MultiSourcePeer,
+    MultiSourcePlanError, MultiSourceSelectionConfig, MultiSourceSourcePlan,
+    MultiSourceStopCommand, MultiSourceStopReason, MultiSourceSymbolBias, plan_multi_source_fetch,
 };
 pub use progress::{
     PlanEntry, PlanError, ProgressSnapshot, TransferPlan, TransferProgress, plan_transfer,
