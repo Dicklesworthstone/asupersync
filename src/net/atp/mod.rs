@@ -15,6 +15,7 @@
 //! - Platform-agnostic with explicit capability detection
 //! - Cx-first APIs with explicit capability boundaries
 
+pub mod channel_bonding;
 pub mod chunk;
 pub mod crypto;
 pub mod datagram;
