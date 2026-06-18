@@ -273,6 +273,24 @@ to wire.
   (buffered symbols, blocks-with-retained-decoded, total decoded bytes), rqtrace per feedback round in
   the receive loop, build (`--features atp-cli`), run 50M/bad with ATP_RQ_TRACE → NAME the structure.
   Then bound/free it, prove sha-identical + RSS bounded + 500M/bad converges.
+- **★★ E-11 ROOT CAUSE NAMED 2026-06-18 (heaptrack, unstripped build, 50M/bad):** peak LIVE heap =
+  **218 MB** (4.4× the 50M file) via **1,142,482 allocation calls ≈ 32 allocations PER SYMBOL**. The
+  `time -v` RSS (483 MB @50M, 895 @100M = 9×) = that live set PLUS churned memory glibc never returned
+  (which is why MALLOC_ARENA_MAX=1 didn't help — it's churn, not arena count). ⇒ **E-11 is an
+  ALLOCATION-CHURN problem**, not a single retained structure. Prime churn sources (code): (a)
+  `decoding.rs:672` + `:774` `symbols_for_block(sbn).cloned().collect()` — CLONES ALL of a block's
+  symbols (k clones) on EVERY decode ATTEMPT; if attempted repeatedly near threshold → O(k × attempts)
+  churn (≈hundreds of k allocs); (b) per-datagram `payload.to_vec()` + `Symbol`/`AuthenticatedSymbol`
+  allocations in the recv path (mod.rs:2766 churns 55k+); (c) HashMap growth in SymbolSet.
+  **★ KEY: this ONE cause feeds BOTH frontiers** — the per-symbol alloc/free storm is also a big part
+  of the perfect-link diffuse-CPU/sync cost (E-0/E-10). **THE lever (highest EV, helps everything):
+  cut per-symbol allocations** — (1) decode only when the threshold is actually reached (not per
+  symbol) + reuse/borrow the collected symbols instead of `cloned().collect()` per attempt; (2) pool &
+  reuse symbol payload buffers (a `SymbolPool` already exists on the encoder side — wire one on the
+  receiver) instead of `payload.to_vec()` per datagram; (3) reserve SymbolSet capacity. Profile-first
+  WIN: 3 wrong memory hypotheses (seed-all, arena, large-K) refuted; heaptrack named the real cause.
+  **Next:** target (a) first (biggest, in decoding.rs) — sha-isomorphic, unit-test byte-identical,
+  re-heaptrack + re-time 50M/bad (expect alloc count ↓↓, RSS ↓, and perfect-50M wall ↓ too).
 
 ## ★★★ BOLD EXPERIMENT SLATE — dream-big optimization frontier (crush rsync EVERYWHERE)
 Mined from /extreme-software-optimization (profile-first, isomorphic), /alien-artifact-coding (EV-first
