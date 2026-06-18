@@ -132,6 +132,9 @@ struct SendArgs {
     /// Maximum transfer size in bytes.
     #[arg(long, default_value_t = DEFAULT_MAX_TRANSFER_BYTES)]
     max_bytes: u64,
+    /// Sender bandwidth cap in bytes per second (quic/auto only).
+    #[arg(long = "bwlimit", value_name = "BPS")]
+    bwlimit_bps: Option<u64>,
     /// Worker threads for the local runtime.
     #[arg(long, default_value_t = 4)]
     workers: usize,
@@ -301,6 +304,29 @@ fn normalize_max_block_size(symbol_size: u16, max_block_size: usize) -> Result<u
     Ok(max_block_size.max(usize::from(symbol_size.max(1))))
 }
 
+fn normalize_bwlimit_bps(bwlimit_bps: Option<u64>) -> Result<Option<u64>, String> {
+    match bwlimit_bps {
+        Some(0) => Err("--bwlimit must be greater than 0".to_string()),
+        Some(cap) => Ok(Some(cap)),
+        None => Ok(None),
+    }
+}
+
+fn validate_requested_bwlimit_transport(
+    requested: Transport,
+    bwlimit_bps: Option<u64>,
+) -> Result<(), String> {
+    let bwlimit_bps = normalize_bwlimit_bps(bwlimit_bps)?;
+    if bwlimit_bps.is_some() && matches!(requested, Transport::Tcp | Transport::Rq) {
+        return Err(format!(
+            "--bwlimit is currently wired only for --transport quic or auto; \
+             --transport {} would ignore the cap",
+            requested.cli_arg()
+        ));
+    }
+    Ok(())
+}
+
 // ─── QUIC (`--transport quic`) TLS material + config ─────────────────────────
 
 /// Load a PEM certificate chain (one or more certificates) from `path`.
@@ -409,6 +435,7 @@ fn quic_config_send(
         max_block_size: normalize_max_block_size(args.symbol_size, args.max_block_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         max_transfer_bytes: args.max_bytes,
+        bwlimit_bps: normalize_bwlimit_bps(args.bwlimit_bps)?,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
         ..QuicConfig::default()
     };
@@ -588,6 +615,7 @@ fn resolve(target: &str) -> Result<SocketAddr, String> {
 }
 
 fn run_send(args: SendArgs) -> Result<(), String> {
+    validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
     // `--dry-run` computes the transfer plan from the source and prints it
     // without resolving the target or opening any socket (rsync `--dry-run`).
     if args.dry_run {
@@ -758,6 +786,15 @@ fn send_to_addr_with_transport(
     transport: Transport,
     addr: SocketAddr,
 ) -> Result<serde_json::Value, String> {
+    let bwlimit_bps = normalize_bwlimit_bps(args.bwlimit_bps)?;
+    if bwlimit_bps.is_some() && transport != Transport::Quic {
+        return Err(format!(
+            "--bwlimit is currently wired only for quic; {} fallback skipped \
+             to avoid ignoring the cap",
+            transport.cli_arg()
+        ));
+    }
+
     let source = args.source.clone();
     let peer_id = args.peer_id.clone();
     match transport {
@@ -892,6 +929,7 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
                 .to_string(),
         );
     }
+    validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
 
     // Both the RQ and QUIC transports carry per-symbol HMAC auth; SSH bootstrap
     // generates a fresh per-transfer key when none was supplied and feeds it to
@@ -1512,6 +1550,52 @@ mod tests {
         );
         assert_eq!(normalize_max_block_size(1024, 512), Ok(1024));
         assert_eq!(normalize_max_block_size(1024, 512 * 1024), Ok(512 * 1024));
+    }
+
+    #[test]
+    fn bwlimit_rejects_zero_and_non_quic_concrete_transports() {
+        assert_eq!(normalize_bwlimit_bps(None), Ok(None));
+        assert_eq!(
+            normalize_bwlimit_bps(Some(256 * 1024)),
+            Ok(Some(256 * 1024))
+        );
+        assert_eq!(
+            normalize_bwlimit_bps(Some(0)),
+            Err("--bwlimit must be greater than 0".to_string())
+        );
+
+        assert!(validate_requested_bwlimit_transport(Transport::Quic, Some(1)).is_ok());
+        assert!(validate_requested_bwlimit_transport(Transport::Auto, Some(1)).is_ok());
+        assert!(
+            validate_requested_bwlimit_transport(Transport::Tcp, Some(1))
+                .expect_err("tcp must not silently ignore bwlimit")
+                .contains("would ignore the cap")
+        );
+        assert!(
+            validate_requested_bwlimit_transport(Transport::Rq, Some(1))
+                .expect_err("rq must not silently ignore bwlimit")
+                .contains("would ignore the cap")
+        );
+    }
+
+    #[test]
+    fn send_parser_accepts_rsync_style_bwlimit_flag() {
+        let cli = Cli::parse_from([
+            "atp",
+            "send",
+            "./src",
+            "receiver.example:8472",
+            "--transport",
+            "quic",
+            "--bwlimit",
+            "262144",
+        ]);
+
+        let Command::Send(args) = cli.command else {
+            panic!("expected send command");
+        };
+        assert_eq!(args.transport, Transport::Quic);
+        assert_eq!(args.bwlimit_bps, Some(262_144));
     }
 
     #[test]
