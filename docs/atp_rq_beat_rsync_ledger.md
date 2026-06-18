@@ -44,6 +44,28 @@ optimally-tuned rsync-over-ssh on the same netem link, and/or atp-lab vs rsync-d
   is entered only when symbols are DROPPED.
 - **F-POS-2 · F3 parallel per-block encode landed** (commit 4c665fe6a) — 164.75→113.85s (1.45×),
   byte-identical. Removes the *sender* single-core encode wall (CPU 99%→125%).
+- **F-POS-3 ★ BEYOND-REPROACH rate-capped AUTH scorecard** (2026-06-17, binary v6=HEAD code:
+  qdisc-guard a6fceb948 + token-bucket pacing 71684f836 + send-batches 6bb42359c + sendmmsg
+  1be226210 + FEC-fallback fix 6acf22391). Tier=AUTH: **atp `--rq-auth-key-hex` (HMAC) vs
+  rsync-over-ssh aes128-gcm `--whole-file --inplace --no-compress`** (crypto-SYMMETRIC). netns+veth,
+  netem rate+delay+jitter+loss on BOTH ends, REPS=3 median, sha-256 verified, peak+avg RSS. Harness
+  `/tmp/loss_bench_rated.sh` (Contabo 212.90.121.76, WD Z4J8VF). **NEVER compared to old atp.**
+
+  | regime (rate/delay/loss) | size | atp wall | rsync wall | atp peakRSS | sha | fb | verdict |
+  |---|---|--:|--:|--:|---|--:|---|
+  | perfect 1gbit/2ms/0% | 5M | 0.41s | 0.41s | 8.2 MB | OK | 0 | tie |
+  | perfect 1gbit/2ms/0% | 50M | **3.51s** | **0.91s** | 9.5 MB | OK | 0 | **rsync 3.9× (atp CPU-bound)** |
+  | good 200mbit/25ms/0.1% | 5M | **0.61s** | **1.81s** | 7.9 MB | OK | 1 | **atp WINS 3.0×** |
+  | good 200mbit/25ms/0.1% | 50M | 3.71s | 3.81s | 9.1 MB | OK | 1 | atp marginally faster |
+  | bad 50mbit/80±20ms/2% | 5M | 18.3s | 6.7s | 27.8 MB | **MISS** | 2 | **atp FAILS (1/3 reps OK)** |
+  | bad 50mbit/80±20ms/2% | 50M | 100.6s | 17.3s | 261 MB | **MISS** | ? | **atp FAILS (0/3 reps)** |
+
+  Three measured truths: (1) **atp WINS on realistic/good links** (the headline beyond-reproach win:
+  good-5M 3.0×; good-50M tie) and holds receiver RSS ~8–9 MB (rsync-class or better). (2) **atp
+  LOSES perfect high-bw 50M (3.9×)** — fb=0 (source-first converges, no loss), so it is **CPU-bound**
+  on encode + per-symbol HMAC + spray, NOT loss-bound (50MB/3.51s = 14 MB/s). (3) **atp FAILS the bad
+  regime (sha MISS)** — see N-3 / E-9 below; fail-CLOSED (never commits bad data) but does not
+  converge. cv not yet computed (REPS=3); bad-cell wall is noise-dominated by the failing reps.
 
 ## REFUTED / NEGATIVE (do NOT re-chase unless retry-condition fires)
 
@@ -87,6 +109,52 @@ Stays opt-in items (do NOT default-on): mirror.rs delete (safety), metadata spec
 to wire.
 
 ## OPEN HYPOTHESES (experiment queue — profile-first)
+
+### E-9 ★★ CRITICAL · bad-regime non-convergence → `per-entry SHA-256 mismatch` (BLOCKS "any link")
+- **Symptom (measured, F-POS-3):** bad regime (50mbit / 80±20 ms jitter / 2% loss). bad-5M:
+  rep1/rep2 fail `integrity verification failed: per-entry SHA-256 mismatch`, rep3 OK
+  (`committed:true, sha_ok, feedback_rounds:2, symbols_accepted:3745`). bad-50M: 0/3 reps converge,
+  all `per-entry SHA-256 mismatch`, peak RSS balloons to 261 MB. **PROBABILISTIC** (rep3 passed same
+  regime) ⇒ NOT a deterministic decoder bug; a convergence/assembly-under-loss+jitter defect.
+- **Key distinction:** failure is `per-entry SHA-256 mismatch` (integrity), NOT `NoConvergence`
+  (the 16-round budget). So the receiver BELIEVES a block/entry is complete, decodes/assembles, and
+  the bytes are wrong/incomplete → fail-CLOSED (safe; never commits bad data — the u5owrm guard
+  works). The bug is upstream: a block is marked complete when it is not, OR a reordered/duplicate
+  symbol poisons the source-first memcpy fast path (`try_complete_from_source_symbols`,
+  decoding.rs:736), OR pacing under jitter drops symbols then a premature completeness count fires.
+- **Hypotheses (rank):** (H1) source-first fast path memcpys K source symbols but a
+  reordered/dup symbol with same ESI but different/empty payload is counted as "present" → wrong
+  memcpy; jitter (80±20 ms) maximizes reorder. (H2) bounded recv DATAGRAM queue (256 drop-oldest)
+  drops a source symbol after it was counted present → hole filled with stale/zero. (H3) multi-block
+  completeness: one block zero-filled on give-up but whole-file committed → per-entry SHA catches it.
+  (H4) jitter-induced reorder crosses a block boundary → symbol attributed to wrong block.
+- **Next action (RUNTIME, not code-first-blind — this is closed-loop receiver behavior):** read the
+  receiver assembly+commit path (mod.rs receive session ~3000–3070 + verify_and_commit + decoding.rs
+  try_complete_from_source_symbols). Add a deterministic loopback repro with netem reorder (the F1
+  lossy harness `scripts/atp_e2e_lossy.sh` + a reorder knob) that reproduces the mismatch, THEN fix
+  + prove the same repro converges. **Do NOT dispatch a blind code-first agent** (runtime UB risk).
+- **Why it matters:** the user goal is "beat rsync over ANY connection, good or bad." atp currently
+  cannot complete a transfer on the bad regime at all. This is the #1 blocker, ahead of perfect-link
+  throughput (E-0/E-6) which is "lose by 3.9×" vs this "fail entirely."
+- **★ ROOT CAUSE CONFIRMED (2026-06-17, ATP_RQ_TRACE, loss 10% / 5M / REPS=3):** MISS correlates
+  with `src-completes > 0` (mixed source+FEC completion); the one rep with `src-completes == 0`
+  (ALL blocks via FEC) COMMITTED OK. Mechanism: a block decoded via FEC calls `persist_decoded_block`
+  (mod.rs:3636 `bytes_written += data.len()`); the SAME block can LATER reach `received_count == k`
+  from late source-retransmits via `persist_source_symbol` (mod.rs:3498 `bytes_written += block.len`)
+  because `persist_decoded_block` never sets `source_blocks[sbn].complete`. ⇒ `bytes_written` is
+  **DOUBLE-COUNTED** for any block completed by both paths → `verify_and_commit` (mod.rs:3702)
+  `decoder.bytes_written != e.size` → `sha_ok = false` → returned as the MISLEADING reason
+  `"per-entry SHA-256 mismatch"` (mod.rs:3769). **THE FILE CONTENT IS CORRECT** (verify also hashes
+  the file; the hash matches — it's the byte *counter* that is wrong). So this is a **FALSE REJECTION
+  of good data**, NOT corruption — atp's fail-closed integrity is fully intact (it never commits bad
+  bytes; here it wrongly rejects *good* bytes). NOT a reorder bug, NOT a decoder bug, NOT an auth gap.
+- **Fix direction (targeted, low-risk):** count each block's bytes exactly once across both
+  completion paths — e.g. a per-block `written: Vec<bool>` set by whichever path lands first, with
+  `bytes_written`/`dec.complete` derived from it; and/or drop the fragile `bytes_written != e.size`
+  proxy in `verify_and_commit` and gate solely on the already-computed actual file size + SHA-256
+  (the correct, content-addressed check). Add a multi-block MIXED-completion regression test (the
+  existing `signed_source_streaming_seeds_fec_decoder_from_staged_sources` only covers single-block
+  all-FEC). Then re-run the bad-regime matrix to confirm convergence.
 
 ### E-0 · PROFILE: where does the 113.85s actually go? (BLOCKS all others)
 - **Hypothesis:** the F3 100M wall is dominated by feedback-round latency + solve-on-incomplete
