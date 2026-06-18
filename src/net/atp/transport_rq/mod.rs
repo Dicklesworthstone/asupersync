@@ -1012,6 +1012,25 @@ struct HelloAck {
     reason: Option<String>,
 }
 
+/// One logical file packed into a combined RaptorQ object (E-15 coalescing).
+///
+/// When [`ManifestEntry::members`] is non-empty the entry's content is the byte
+/// concatenation of its members in `offset` order; the receiver splits the decoded
+/// object back into the member files on commit. This amortizes the per-object
+/// runtime overhead (decode pipeline / tasks / commit) that makes many-small-file
+/// trees slow (profiled: ~81% runtime sync, 5.8× a same-byte single file).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackedMember {
+    /// Path of this file relative to the transfer root.
+    pub rel_path: String,
+    /// Byte offset of this file within the combined object content.
+    pub offset: u64,
+    /// Byte length of this file.
+    pub len: u64,
+    /// Lowercase hex SHA-256 of this file's content (per-member integrity check).
+    pub sha256_hex: String,
+}
+
 /// One file within a transfer manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManifestEntry {
@@ -1023,6 +1042,12 @@ pub struct ManifestEntry {
     pub size: u64,
     /// Lowercase hex SHA-256 of the entry content.
     pub sha256_hex: String,
+    /// Files packed into this entry (E-15 coalescing). Empty = a normal single-file
+    /// entry whose content IS the file (prior wire format, byte-identical). Non-empty
+    /// = this entry is a combined object and these members are extracted by offset on
+    /// receive. `skip_serializing_if` keeps the no-packing wire byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<PackedMember>,
 }
 
 /// Transfer manifest carried in the `ObjectManifest` frame.
@@ -1977,6 +2002,7 @@ pub async fn send_path(
             rel_path: digest.rel_path.clone(),
             size: digest.size,
             sha256_hex: hex_encode(&digest.content_sha256),
+            members: Vec::new(),
         })
         .collect();
     let transfer_id = transfer_id_hex(&merkle_root_hex, total_bytes, manifest_entries.len());
@@ -4403,7 +4429,49 @@ mod tests {
             rel_path: format!("f{index}"),
             size,
             sha256_hex: "0".repeat(64),
+            members: Vec::new(),
         }
+    }
+
+    #[test]
+    fn manifest_entry_members_serde_backward_compat() {
+        // E-15 S1: a pre-packing manifest entry (no `members`) must deserialize to empty
+        // members AND re-serialize WITHOUT a `members` field, so the no-packing wire stays
+        // byte-identical to before E-15.
+        let old_json = r#"{"index":0,"rel_path":"f0","size":10,"sha256_hex":"00"}"#;
+        let parsed: ManifestEntry =
+            serde_json::from_str(old_json).expect("deserialize pre-packing entry");
+        assert!(parsed.members.is_empty(), "missing members => empty");
+        let reser = serde_json::to_string(&parsed).expect("serialize");
+        assert!(
+            !reser.contains("members"),
+            "empty members must be skipped (byte-identical no-packing wire): {reser}"
+        );
+        // A packed entry round-trips with its member offset table intact.
+        let packed = ManifestEntry {
+            index: 1,
+            rel_path: ".atp-pack-0".to_string(),
+            size: 20,
+            sha256_hex: "ab".repeat(32),
+            members: vec![
+                PackedMember {
+                    rel_path: "dir/a".to_string(),
+                    offset: 0,
+                    len: 10,
+                    sha256_hex: "aa".repeat(32),
+                },
+                PackedMember {
+                    rel_path: "dir/b".to_string(),
+                    offset: 10,
+                    len: 10,
+                    sha256_hex: "bb".repeat(32),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&packed).expect("serialize packed");
+        assert!(json.contains("members"), "packed entry serializes members");
+        let back: ManifestEntry = serde_json::from_str(&json).expect("round-trip packed");
+        assert_eq!(back, packed, "packed entry round-trips byte-identical");
     }
 
     #[test]
@@ -4544,6 +4612,7 @@ mod tests {
                 rel_path,
                 size,
                 sha256_hex,
+                members: Vec::new(),
             }],
         };
         let mut decoders = vec![EntryDecoder {
