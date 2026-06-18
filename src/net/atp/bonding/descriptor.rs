@@ -33,6 +33,7 @@
 //! `DonorAssignment` + key distribution (`z01bbr.1.3`), A4 handshake negotiation
 //! (`z01bbr.1.4`), then the donate/receive data path.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -108,6 +109,25 @@ pub struct BondTransferDescriptor {
 /// cannot prove byte-identical content must not spray symbols into the fountain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BondProofError {
+    /// Two descriptor entries reuse the same manifest index.
+    DuplicateEntryIndex {
+        /// Reused entry index.
+        index: u32,
+    },
+    /// Two descriptor entries reuse the same transfer-relative path.
+    DuplicateEntryPath {
+        /// Reused transfer-relative path.
+        rel_path: String,
+    },
+    /// Descriptor entry sizes overflowed `u64`.
+    TotalBytesOverflow,
+    /// Descriptor total_bytes does not equal the sum of entry sizes.
+    TotalBytesMismatch {
+        /// Descriptor-declared total.
+        expected: u64,
+        /// Sum of entry sizes.
+        actual: u64,
+    },
     /// The local copy is missing an entry the descriptor requires.
     MissingEntry {
         /// Transfer-relative path of the absent entry.
@@ -142,6 +162,17 @@ pub enum BondProofError {
 impl core::fmt::Display for BondProofError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::DuplicateEntryIndex { index } => {
+                write!(f, "bonded descriptor: duplicate entry index {index}")
+            }
+            Self::DuplicateEntryPath { rel_path } => {
+                write!(f, "bonded descriptor: duplicate entry path {rel_path}")
+            }
+            Self::TotalBytesOverflow => f.write_str("bonded descriptor: total bytes overflow"),
+            Self::TotalBytesMismatch { expected, actual } => write!(
+                f,
+                "bonded descriptor: total bytes mismatch (expected {expected}, actual {actual})"
+            ),
             Self::MissingEntry { rel_path } => {
                 write!(f, "bonded descriptor: local copy missing entry {rel_path}")
             }
@@ -212,6 +243,38 @@ impl BondTransferDescriptor {
         self == other
     }
 
+    /// Validate descriptor-only invariants before comparing any donor proof.
+    pub fn validate(&self) -> Result<(), BondProofError> {
+        let mut indices = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        let mut total_bytes = 0u64;
+        for entry in &self.entries {
+            if !indices.insert(entry.index) {
+                return Err(BondProofError::DuplicateEntryIndex { index: entry.index });
+            }
+            if !paths.insert(entry.rel_path.clone()) {
+                return Err(BondProofError::DuplicateEntryPath {
+                    rel_path: entry.rel_path.clone(),
+                });
+            }
+            if safe_entry_path(Path::new("."), &entry.rel_path).is_none() {
+                return Err(BondProofError::UnsafePath {
+                    rel_path: entry.rel_path.clone(),
+                });
+            }
+            total_bytes = total_bytes
+                .checked_add(entry.size)
+                .ok_or(BondProofError::TotalBytesOverflow)?;
+        }
+        if total_bytes != self.total_bytes {
+            return Err(BondProofError::TotalBytesMismatch {
+                expected: self.total_bytes,
+                actual: total_bytes,
+            });
+        }
+        Ok(())
+    }
+
     /// Pure donor proof: given per-entry digests recomputed over the LOCAL copy,
     /// verify this donor holds the descriptor's exact bytes.
     ///
@@ -221,6 +284,7 @@ impl BondTransferDescriptor {
     /// receiver applies the identical check before committing, so this is the same
     /// fail-closed gate as `transport_rq`'s `verify_and_commit`.
     pub fn verify_local_digests(&self, digests: &[EntryDigest]) -> Result<(), BondProofError> {
+        self.validate()?;
         for entry in &self.entries {
             let Some(digest) = digests.iter().find(|d| d.rel_path == entry.rel_path) else {
                 return Err(BondProofError::MissingEntry {
@@ -355,6 +419,40 @@ mod tests {
         let desc = descriptor_for(FILES);
         let digests: Vec<EntryDigest> = FILES.iter().map(|(_, p, b)| digest_for(p, b)).collect();
         assert!(desc.verify_local_digests(&digests).is_ok());
+    }
+
+    #[test]
+    fn descriptor_validate_rejects_duplicate_index_path_and_bad_total() {
+        let desc = descriptor_for(FILES);
+        desc.validate().expect("baseline descriptor");
+
+        let mut duplicate_index = desc.clone();
+        duplicate_index.entries[1].index = duplicate_index.entries[0].index;
+        assert!(matches!(
+            duplicate_index.validate().unwrap_err(),
+            BondProofError::DuplicateEntryIndex { .. }
+        ));
+
+        let mut duplicate_path = desc.clone();
+        duplicate_path.entries[1].rel_path = duplicate_path.entries[0].rel_path.clone();
+        assert!(matches!(
+            duplicate_path.validate().unwrap_err(),
+            BondProofError::DuplicateEntryPath { .. }
+        ));
+
+        let mut unsafe_path = desc.clone();
+        unsafe_path.entries[0].rel_path = "../escape".to_string();
+        assert!(matches!(
+            unsafe_path.verify_local_digests(&[]).unwrap_err(),
+            BondProofError::UnsafePath { .. }
+        ));
+
+        let mut bad_total = desc;
+        bad_total.total_bytes += 1;
+        assert!(matches!(
+            bad_total.verify_local_digests(&[]).unwrap_err(),
+            BondProofError::TotalBytesMismatch { .. }
+        ));
     }
 
     #[test]
