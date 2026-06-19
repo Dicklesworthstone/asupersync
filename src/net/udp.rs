@@ -50,6 +50,7 @@ pub const UDP_RENDEZVOUS_MAX_ATTEMPTS: u8 = 32;
 /// Maximum packet size accepted by recv_batch_from to prevent DoS via unbounded allocation.
 pub const UDP_MAX_PACKET_SIZE: usize = 1024 * 1024; // 1MB per packet
 /// Maximum batch size accepted by recv_batch_from to prevent DoS via unbounded allocation.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const UDP_MAX_BATCH_SIZE: usize = 1000;
 /// Default UDP GSO segment size used by send-batch planning.
 pub const UDP_DEFAULT_GSO_SEGMENT_BYTES: usize = 1200;
@@ -1626,7 +1627,10 @@ impl UdpSocket {
         self.try_sendmmsg_batch_to_connected_native(packets)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(target_os = "linux", target_os = "android")
+    ))]
     fn try_send_gso_batch_to_connected_native(
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
@@ -1661,7 +1665,10 @@ impl UdpSocket {
                 .map(|packet| [IoSlice::new(packet.buffer.as_slice())])
                 .collect::<Vec<_>>();
             let addrs = vec![None; chunk.len()];
-            let mut headers = nix::sys::socket::MultiHeaders::<()>::preallocate(chunk.len(), None);
+            let mut headers = nix::sys::socket::MultiHeaders::<()>::preallocate(
+                chunk.len(),
+                Some(nix::cmsg_space!(u16)),
+            );
             let cmsgs = [nix::sys::socket::ControlMessage::UdpGsoSegments(
                 &segment_bytes,
             )];
@@ -1708,6 +1715,15 @@ impl UdpSocket {
         Ok(Some(report))
     }
 
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd"
+        )
+    ))]
     fn try_sendmmsg_batch_to_connected_native(
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
