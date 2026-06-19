@@ -28,7 +28,10 @@
 //! assert!(result.is_err());
 //! ```
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
@@ -259,6 +262,58 @@ impl SecurePath {
             }
         }
     }
+
+    fn prepare_write_path<P: AsRef<Path>>(
+        &self,
+        user_path: P,
+    ) -> Result<ValidatedPath, PathSecurityError> {
+        let validated = self.validate_path(user_path)?;
+        self.prepare_validated_write_path(&validated)
+    }
+
+    fn prepare_validated_write_path(
+        &self,
+        validated: &ValidatedPath,
+    ) -> Result<ValidatedPath, PathSecurityError> {
+        if let Some(parent) = validated.as_path().parent() {
+            fs::create_dir_all(parent).map_err(|e| PathSecurityError::CanonicalizationFailed {
+                path: validated.original_path().to_string(),
+                source: e,
+            })?;
+        }
+
+        let revalidated = self.validate_path(validated.original_path())?;
+        if let Some(parent) = revalidated.as_path().parent() {
+            let canonical_parent =
+                parent
+                    .canonicalize()
+                    .map_err(|e| PathSecurityError::CanonicalizationFailed {
+                        path: validated.original_path().to_string(),
+                        source: e,
+                    })?;
+            if !canonical_parent.starts_with(&self.allowed_base) {
+                return Err(PathSecurityError::OutsideAllowedBounds {
+                    path: canonical_parent.display().to_string(),
+                    allowed_base: self.allowed_base.display().to_string(),
+                });
+            }
+        }
+
+        Ok(revalidated)
+    }
+}
+
+fn create_no_follow_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    options.open(path)
+}
+
+fn write_all_no_follow(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = create_no_follow_file(path)?;
+    file.write_all(bytes)
 }
 
 fn normalize_lexically(path: &Path) -> PathBuf {
@@ -295,14 +350,8 @@ impl SecurePath {
         user_path: P,
         content: C,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let validated = self.validate_path(user_path)?;
-
-        // Ensure parent directory exists
-        if let Some(parent) = validated.as_path().parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(validated.as_path(), content.as_ref())?;
+        let validated = self.prepare_write_path(user_path)?;
+        write_all_no_follow(validated.as_path(), content.as_ref().as_bytes())?;
         Ok(())
     }
 
@@ -322,14 +371,8 @@ impl SecurePath {
         user_path: P,
         bytes: B,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let validated = self.validate_path(user_path)?;
-
-        // Ensure parent directory exists
-        if let Some(parent) = validated.as_path().parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(validated.as_path(), bytes.as_ref())?;
+        let validated = self.prepare_write_path(user_path)?;
+        write_all_no_follow(validated.as_path(), bytes.as_ref())?;
         Ok(())
     }
 
@@ -340,15 +383,11 @@ impl SecurePath {
         dst: P2,
     ) -> Result<u64, Box<dyn std::error::Error>> {
         let validated_src = self.validate_path(src)?;
-        let validated_dst = self.validate_path(dst)?;
+        let validated_dst = self.prepare_write_path(dst)?;
 
-        // Ensure destination parent directory exists
-        if let Some(parent) = validated_dst.as_path().parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let bytes_copied = fs::copy(validated_src.as_path(), validated_dst.as_path())?;
-        Ok(bytes_copied)
+        let bytes = fs::read(validated_src.as_path())?;
+        write_all_no_follow(validated_dst.as_path(), &bytes)?;
+        Ok(bytes.len() as u64)
     }
 }
 
@@ -482,5 +521,45 @@ mod tests {
         // Verify the file was created
         let content = secure_path.read_to_string("nested/dirs/file.txt").unwrap();
         assert_eq!(content, "content");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_preparation_revalidates_parent_after_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        let secure_path = SecurePath::new(temp_dir.path()).unwrap();
+        let validated = secure_path.validate_path("staged/file.txt").unwrap();
+
+        std::os::unix::fs::symlink(outside_dir.path(), temp_dir.path().join("staged")).unwrap();
+
+        let error = secure_path
+            .prepare_validated_write_path(&validated)
+            .expect_err("parent symlink swap must be rejected");
+        match error {
+            PathSecurityError::OutsideAllowedBounds { path, allowed_base } => {
+                assert!(path.starts_with(&outside_dir.path().display().to_string()));
+                assert_eq!(
+                    allowed_base,
+                    secure_path.base_directory().display().to_string()
+                );
+            }
+            other => panic!("Expected OutsideAllowedBounds, got {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_follow_write_rejects_final_symlink_swap() {
+        let temp_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        let link_path = temp_dir.path().join("target.txt");
+        let escaped_path = outside_dir.path().join("escaped.txt");
+        std::os::unix::fs::symlink(&escaped_path, &link_path).unwrap();
+
+        let error =
+            write_all_no_follow(&link_path, b"blocked").expect_err("symlink write must fail");
+        assert_eq!(error.raw_os_error(), Some(libc::ELOOP));
+        assert!(!escaped_path.exists());
     }
 }
