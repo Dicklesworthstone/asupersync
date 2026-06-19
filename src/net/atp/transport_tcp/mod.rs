@@ -1975,6 +1975,7 @@ async fn commit_verified_staging(
                     let _ = crate::fs::remove_file(&out_path).await;
                     crate::net::atp::transport_common::metadata::recreate_fifo(&out_path, mode)
                         .await?;
+                    apply_entry_metadata_best_effort(cx, &out_path, meta).await;
                     committed_paths.push(out_path);
                     continue;
                 }
@@ -3338,6 +3339,7 @@ pub async fn receive_connection(
                                 &out_path, mode,
                             )
                             .await?;
+                            apply_entry_metadata_best_effort(cx, &out_path, meta).await;
                             committed_paths.push(out_path);
                             continue;
                         }

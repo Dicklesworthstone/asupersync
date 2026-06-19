@@ -1,10 +1,10 @@
 //! Transport-agnostic filesystem-metadata fidelity for ATP manifests.
 //!
 //! Epic `b0k8qo` phase J1: a sync tool that silently drops permissions, mtimes,
-//! and symlinks is strictly worse than rsync. This module lets any ATP transport
-//! capture per-entry filesystem metadata on the sender, carry it in the manifest,
-//! and re-apply it on the receiver atomically with the file commit — gated by a
-//! [`MetadataPolicy`] (reused from [`crate::atp::object`]).
+//! symlinks, and xattrs is strictly worse than rsync. This module lets any ATP
+//! transport capture per-entry filesystem metadata on the sender, carry it in the
+//! manifest, and re-apply it on the receiver atomically with the file commit —
+//! gated by a [`MetadataPolicy`] (reused from [`crate::atp::object`]).
 //!
 //! # Why a separate metadata commitment
 //!
@@ -129,6 +129,11 @@ pub struct EntryMetadata {
     /// primary (which sorts earlier and is committed first).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardlink_target: Option<String>,
+    /// Extended attributes captured from the entry when the metadata policy asks
+    /// for xattr preservation. Attribute names are manifest strings and values
+    /// are byte-identical payloads.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub xattrs: BTreeMap<String, Vec<u8>>,
 }
 
 impl EntryMetadata {
@@ -144,6 +149,7 @@ impl EntryMetadata {
             && self.gid.is_none()
             && self.symlink_target.is_none()
             && self.hardlink_target.is_none()
+            && self.xattrs.is_empty()
     }
 
     /// Append this entry's canonical, domain-separated encoding to `hasher`. The
@@ -160,6 +166,7 @@ impl EntryMetadata {
         hash_opt_u32(hasher, self.gid);
         hash_opt_str(hasher, self.symlink_target.as_deref());
         hash_opt_str(hasher, self.hardlink_target.as_deref());
+        hash_xattrs(hasher, &self.xattrs);
     }
 }
 
@@ -626,6 +633,16 @@ fn hash_opt_i64(hasher: &mut Sha256, v: Option<i64>) {
     }
 }
 
+fn hash_xattrs(hasher: &mut Sha256, xattrs: &BTreeMap<String, Vec<u8>>) {
+    hasher.update((xattrs.len() as u64).to_be_bytes());
+    for (name, value) in xattrs {
+        hasher.update((name.len() as u64).to_be_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+}
+
 /// Compute the metadata commitment over `(rel_path, metadata)` pairs, or `None`
 /// when every entry is [`EntryMetadata::is_bare`].
 ///
@@ -712,7 +729,8 @@ pub async fn read_entry_metadata(
     // For a non-preserved symlink, stat through the link so the entry reflects
     // its target (the streaming hash also follows the link); otherwise use the
     // path's own metadata.
-    let effective = if lmeta.is_symlink() {
+    let read_xattrs_through_symlink = lmeta.is_symlink();
+    let effective = if read_xattrs_through_symlink {
         crate::fs::metadata(abs_path)
             .await
             .map_err(|e| StreamingError::new(format!("{}: {e}", abs_path.display())))?
@@ -750,7 +768,45 @@ pub async fn read_entry_metadata(
         meta.uid = Some(inner.uid());
         meta.gid = Some(inner.gid());
     }
+    if policy.preserve_extended_attributes {
+        meta.xattrs = read_xattrs_best_effort(abs_path, read_xattrs_through_symlink).await;
+    }
     Ok(meta)
+}
+
+#[cfg(unix)]
+async fn read_xattrs_best_effort(
+    abs_path: &Path,
+    deref_symlink: bool,
+) -> BTreeMap<String, Vec<u8>> {
+    let path_buf = abs_path.to_path_buf();
+    crate::runtime::spawn_blocking(move || {
+        let listed = if deref_symlink {
+            xattr::list_deref(&path_buf)
+        } else {
+            xattr::list(&path_buf)
+        };
+        let Ok(names) = listed else {
+            return BTreeMap::new();
+        };
+
+        let mut attrs = BTreeMap::new();
+        for name in names {
+            let Some(name_str) = name.to_str().map(str::to_owned) else {
+                continue;
+            };
+            let value = if deref_symlink {
+                xattr::get_deref(&path_buf, &name)
+            } else {
+                xattr::get(&path_buf, &name)
+            };
+            if let Ok(Some(value)) = value {
+                attrs.insert(name_str, value);
+            }
+        }
+        attrs
+    })
+    .await
 }
 
 /// Non-unix capture: file kind only (regular vs directory), no platform
@@ -811,10 +867,11 @@ pub async fn inode_key_if_regular(_abs_path: &Path) -> Result<Option<(u64, u64)>
 
 /// Apply captured metadata to a committed regular file at `out_path`.
 ///
-/// Applies in a safe order — times, then ownership, then mode last — so a
-/// restrictive mode (e.g. `0o444`) does not block the earlier steps. Ownership
-/// failures (typically `EPERM` without privilege) are recorded as skipped, not
-/// fatal. Symlink entries are created by the caller's commit step, not here.
+/// Applies in a safe order — times, then xattrs, then ownership, then mode last
+/// — so a restrictive mode (e.g. `0o444`) does not block the earlier steps.
+/// Ownership failures (typically `EPERM` without privilege) and unsupported
+/// xattrs are recorded as skipped, not fatal. Symlink entries are created by the
+/// caller's commit step, not here.
 ///
 /// # Errors
 ///
@@ -837,41 +894,68 @@ pub async fn apply_entry_metadata(
         (Some(u), Some(g)) => Some((u, g)),
         _ => None,
     };
+    let xattrs = (!meta.xattrs.is_empty()).then(|| meta.xattrs.clone());
 
-    let blocking: (Option<Result<(), String>>, Option<Result<(), String>>) =
-        crate::runtime::spawn_blocking(move || {
-            let time_res = mtime_secs.map(|secs| {
-                let secs_u64 = u64::try_from(secs)
-                    .map_err(|_| "pre-epoch mtime not representable".to_string())?;
-                // `secs`/`mtime_nanos` arrive off-wire and are untrusted. Normalise
-                // the sub-second part into [0, 1e9) (mirroring the read path's
-                // `rem_euclid`) so an out-of-range value can't carry into the
-                // seconds count, and add via `checked_add` so a crafted huge `secs`
-                // (up to i64::MAX, which passes the u64 conversion) degrades to a
-                // skipped mtime instead of panicking the blocking pool by
-                // overflowing `SystemTime` (DoS via a malicious manifest).
-                let nanos = mtime_nanos % 1_000_000_000;
-                let when = UNIX_EPOCH
-                    .checked_add(Duration::new(secs_u64, nanos))
-                    .ok_or_else(|| "mtime out of representable range".to_string())?;
-                let times = std::fs::FileTimes::new().set_modified(when);
-                std::fs::File::open(&path_buf)
-                    .and_then(|f| f.set_times(times))
-                    .map_err(|e| e.to_string())
-            });
-            let owner_res = owner.map(|(u, g)| {
-                std::os::unix::fs::chown(&path_buf, Some(u), Some(g)).map_err(|e| e.to_string())
-            });
-            (time_res, owner_res)
-        })
-        .await;
+    type BlockingMetadataApply = (
+        Option<Result<(), String>>,
+        Option<Vec<(String, Result<(), String>)>>,
+        Option<Result<(), String>>,
+    );
+
+    let blocking: BlockingMetadataApply = crate::runtime::spawn_blocking(move || {
+        let time_res = mtime_secs.map(|secs| {
+            let secs_u64 =
+                u64::try_from(secs).map_err(|_| "pre-epoch mtime not representable".to_string())?;
+            // `secs`/`mtime_nanos` arrive off-wire and are untrusted. Normalise
+            // the sub-second part into [0, 1e9) (mirroring the read path's
+            // `rem_euclid`) so an out-of-range value can't carry into the
+            // seconds count, and add via `checked_add` so a crafted huge `secs`
+            // (up to i64::MAX, which passes the u64 conversion) degrades to a
+            // skipped mtime instead of panicking the blocking pool by
+            // overflowing `SystemTime` (DoS via a malicious manifest).
+            let nanos = mtime_nanos % 1_000_000_000;
+            let when = UNIX_EPOCH
+                .checked_add(Duration::new(secs_u64, nanos))
+                .ok_or_else(|| "mtime out of representable range".to_string())?;
+            let times = std::fs::FileTimes::new().set_modified(when);
+            std::fs::File::open(&path_buf)
+                .and_then(|f| f.set_times(times))
+                .map_err(|e| e.to_string())
+        });
+        let xattr_res = xattrs.map(|attrs| {
+            attrs
+                .into_iter()
+                .map(|(name, value)| {
+                    let result = xattr::set(&path_buf, &name, &value).map_err(|e| e.to_string());
+                    (name, result)
+                })
+                .collect()
+        });
+        let owner_res = owner.map(|(u, g)| {
+            std::os::unix::fs::chown(&path_buf, Some(u), Some(g)).map_err(|e| e.to_string())
+        });
+        (time_res, xattr_res, owner_res)
+    })
+    .await;
 
     match blocking.0 {
         Some(Ok(())) => report.mark_applied("mtime"),
         Some(Err(e)) => report.mark_skipped("mtime", e),
         None => {}
     }
-    match blocking.1 {
+    if let Some(results) = blocking.1 {
+        let mut any_applied = false;
+        for (name, result) in results {
+            match result {
+                Ok(()) => any_applied = true,
+                Err(e) => report.mark_skipped("xattr", format!("{name}: {e}")),
+            }
+        }
+        if any_applied {
+            report.mark_applied("xattr");
+        }
+    }
+    match blocking.2 {
         Some(Ok(())) => report.mark_applied("owner"),
         Some(Err(e)) => report.mark_skipped("owner", e),
         None => {}
@@ -906,6 +990,9 @@ pub async fn apply_entry_metadata(
     }
     if meta.uid.is_some() || meta.gid.is_some() {
         report.mark_skipped("owner", "ownership unsupported on this platform");
+    }
+    if !meta.xattrs.is_empty() {
+        report.mark_skipped("xattr", "extended attributes unsupported on this platform");
     }
     Ok(report)
 }
@@ -1162,6 +1249,33 @@ mod tests {
     }
 
     #[test]
+    fn changing_xattrs_changes_the_commitment() {
+        let mut base = meta(Some(0o644));
+        base.xattrs
+            .insert("user.asupersync.alpha".to_string(), b"one".to_vec());
+        let mut changed = base.clone();
+        changed
+            .xattrs
+            .insert("user.asupersync.alpha".to_string(), b"two".to_vec());
+        assert_ne!(
+            metadata_commitment(&[("f", &base)]),
+            metadata_commitment(&[("f", &changed)]),
+            "xattr value changes must move the metadata commitment"
+        );
+
+        let mut renamed = base.clone();
+        renamed.xattrs.clear();
+        renamed
+            .xattrs
+            .insert("user.asupersync.beta".to_string(), b"one".to_vec());
+        assert_ne!(
+            metadata_commitment(&[("f", &base)]),
+            metadata_commitment(&[("f", &renamed)]),
+            "xattr name changes must move the metadata commitment"
+        );
+    }
+
+    #[test]
     fn presence_distinguishes_absent_from_zero() {
         let absent = EntryMetadata {
             unix_mode: Some(0o644),
@@ -1191,6 +1305,7 @@ mod tests {
             gid: Some(1000),
             symlink_target: Some("../t".to_string()),
             hardlink_target: None,
+            xattrs: BTreeMap::from([("user.asupersync.note".to_string(), b"hello".to_vec())]),
         };
         let js = serde_json::to_string(&m).expect("ser");
         let back: EntryMetadata = serde_json::from_str(&js).expect("de");

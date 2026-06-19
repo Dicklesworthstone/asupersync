@@ -3,8 +3,9 @@
 //!
 //! A sync tool that silently drops permissions, mtimes, and symlinks is strictly
 //! worse than rsync. This e2e moves a real tree carrying assorted unix modes, a
-//! preserved mtime, and a symlink across a loopback TCP socket, then asserts
-//! every metadata field arrives byte-identical — gated by the sender's
+//! preserved mtime, a symlink, xattrs, and hardlinks across a loopback TCP
+//! socket, then asserts every metadata field arrives byte-identical — gated by
+//! the sender's
 //! [`MetadataPolicy`]. A portable policy must round-trip content while carrying
 //! no metadata (backward-compatible wire), and the transfer must still commit
 //! (proving the receiver's metadata-commitment recomputation matches).
@@ -58,10 +59,7 @@ fn mode_of(path: &Path) -> u32 {
 fn set_mtime_secs(path: &Path, secs: u64) {
     let when = UNIX_EPOCH + Duration::from_secs(secs);
     let times = std::fs::FileTimes::new().set_modified(when);
-    std::fs::File::open(path)
-        .unwrap()
-        .set_times(times)
-        .unwrap();
+    std::fs::File::open(path).unwrap().set_times(times).unwrap();
 }
 
 fn mtime_secs(path: &Path) -> u64 {
@@ -72,6 +70,10 @@ fn mtime_secs(path: &Path) -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+fn set_xattr_or_skip(path: &Path, name: &str, value: &[u8]) -> bool {
+    xattr::set(path, name, value).is_ok()
 }
 
 fn spawn_receiver(
@@ -91,7 +93,14 @@ fn spawn_receiver(
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             let addr = listener.local_addr()?;
             addr_tx.send(addr).expect("send addr");
-            receive_once(&cx, &listener, &dest_dir, config_with_policy(policy), "receiver").await
+            receive_once(
+                &cx,
+                &listener,
+                &dest_dir,
+                config_with_policy(policy),
+                "receiver",
+            )
+            .await
         }))
     });
     let addr = addr_rx.recv().expect("receiver bound address");
@@ -122,7 +131,11 @@ fn spawn_receiver_with_config(
     (addr, handle)
 }
 
-fn run_sender(addr: SocketAddr, source: PathBuf, policy: MetadataPolicy) -> Result<SendReport, TransportError> {
+fn run_sender(
+    addr: SocketAddr,
+    source: PathBuf,
+    policy: MetadataPolicy,
+) -> Result<SendReport, TransportError> {
     let runtime = RuntimeBuilder::multi_thread()
         .build()
         .expect("sender runtime");
@@ -177,8 +190,8 @@ fn metadata_roundtrip_preserves_mode_mtime_and_symlink() {
     std::os::unix::fs::symlink("data.txt", tree.join("latest.txt")).unwrap();
 
     let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), MetadataPolicy::full_preservation());
-    let send = run_sender(addr, tree.clone(), MetadataPolicy::full_preservation())
-        .expect("send succeeds");
+    let send =
+        run_sender(addr, tree.clone(), MetadataPolicy::full_preservation()).expect("send succeeds");
     let recv = recv_handle
         .join()
         .expect("receiver thread")
@@ -192,8 +205,16 @@ fn metadata_roundtrip_preserves_mode_mtime_and_symlink() {
 
     // Modes round-trip field-by-field.
     assert_eq!(mode_of(&out.join("run.sh")), 0o755, "exec mode preserved");
-    assert_eq!(mode_of(&out.join("data.txt")), 0o644, "regular mode preserved");
-    assert_eq!(mode_of(&out.join("secret.key")), 0o600, "restrictive mode preserved");
+    assert_eq!(
+        mode_of(&out.join("data.txt")),
+        0o644,
+        "regular mode preserved"
+    );
+    assert_eq!(
+        mode_of(&out.join("secret.key")),
+        0o600,
+        "restrictive mode preserved"
+    );
 
     // mtime round-trips (whole seconds).
     assert_eq!(
@@ -205,7 +226,10 @@ fn metadata_roundtrip_preserves_mode_mtime_and_symlink() {
     // Symlink round-trips as a link to the same target, not a copied file.
     let link = out.join("latest.txt");
     let lmeta = std::fs::symlink_metadata(&link).expect("symlink present");
-    assert!(lmeta.file_type().is_symlink(), "latest.txt must be a symlink");
+    assert!(
+        lmeta.file_type().is_symlink(),
+        "latest.txt must be a symlink"
+    );
     assert_eq!(
         std::fs::read_link(&link).unwrap(),
         Path::new("data.txt"),
@@ -217,6 +241,41 @@ fn metadata_roundtrip_preserves_mode_mtime_and_symlink() {
         std::fs::read(out.join("data.txt")).unwrap(),
         b"some content here\n"
     );
+}
+
+#[test]
+fn xattr_roundtrip_preserves_value_when_supported() {
+    let root = unique_tmp("xattr");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    let tree = src_dir.join("project");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let data = tree.join("data.txt");
+    std::fs::write(&data, b"xattr payload\n").unwrap();
+    let attr_name = "user.asupersync.roundtrip";
+    let attr_value = b"\0binary-value\nwith-newline";
+    if !set_xattr_or_skip(&data, attr_name, attr_value) {
+        return;
+    }
+
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), MetadataPolicy::full_preservation());
+    let send =
+        run_sender(addr, tree.clone(), MetadataPolicy::full_preservation()).expect("send succeeds");
+    let recv = recv_handle
+        .join()
+        .expect("receiver thread")
+        .expect("receive succeeds");
+    assert!(send.receipt.committed && recv.committed);
+
+    let out = dst_dir.join("project").join("data.txt");
+    assert_eq!(
+        xattr::get(&out, attr_name).unwrap(),
+        Some(attr_value.to_vec()),
+        "xattr value must round-trip byte-identical"
+    );
+    assert_eq!(std::fs::read(out).unwrap(), b"xattr payload\n");
 }
 
 #[test]
@@ -271,7 +330,10 @@ fn symlink_only_transfer_commits_with_zero_content() {
     assert!(send.receipt.committed && recv.committed);
     let link = dst_dir.join("project").join("alias");
     assert!(
-        std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "alias must arrive as a symlink"
     );
     assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("target.txt"));
@@ -301,7 +363,10 @@ fn empty_directory_round_trips_and_preserves_mode() {
 
     let out_empty = dst_dir.join("project").join("empty_subdir");
     let meta = std::fs::symlink_metadata(&out_empty).expect("empty dir present on receiver");
-    assert!(meta.file_type().is_dir(), "empty_subdir must arrive as a directory");
+    assert!(
+        meta.file_type().is_dir(),
+        "empty_subdir must arrive as a directory"
+    );
     assert_eq!(mode_of(&out_empty), 0o750, "empty dir mode preserved");
     assert_eq!(
         std::fs::read(dst_dir.join("project").join("keep.txt")).unwrap(),
