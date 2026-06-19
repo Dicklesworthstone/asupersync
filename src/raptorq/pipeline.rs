@@ -13,7 +13,7 @@ use crate::encoding::{EncodingPipeline, max_object_size};
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
 use crate::raptorq::systematic::SystematicParams;
-use crate::security::{AuthenticatedSymbol, AuthenticatedSymbolState, SecurityContext};
+use crate::security::{AuthMode, AuthenticatedSymbol, AuthenticatedSymbolState, SecurityContext};
 use crate::transport::error::StreamError;
 use crate::transport::sink::SymbolSink;
 use crate::transport::stream::SymbolStream;
@@ -348,7 +348,12 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
         // read) to keep the disjoint field borrows clean.
         let config_security = self.config.security.build_context();
         let has_auth_material = self.security.is_some() || config_security.is_some();
-        let reject_unauthenticated = self.config.security.reject_unauthenticated;
+        let reject_unauthenticated = self.config.security.reject_unauthenticated
+            && self
+                .security
+                .as_ref()
+                .or(config_security.as_ref())
+                .is_some_and(|ctx| ctx.mode() == AuthMode::Strict);
 
         let mut symbols_received = 0usize;
         let mut authenticated = has_auth_material;

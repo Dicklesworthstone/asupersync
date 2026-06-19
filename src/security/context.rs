@@ -232,6 +232,12 @@ impl SecurityContext {
         self
     }
 
+    /// Returns the authentication enforcement mode.
+    #[must_use]
+    pub const fn mode(&self) -> AuthMode {
+        self.mode
+    }
+
     /// Signs a symbol, producing an authenticated symbol.
     #[must_use]
     pub fn sign_symbol(&self, symbol: &Symbol) -> AuthenticatedSymbol {
