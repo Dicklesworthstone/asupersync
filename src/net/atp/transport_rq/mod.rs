@@ -1258,6 +1258,12 @@ struct FrameTransport<S> {
     stream: S,
     codec: AtpFrameCodec,
     rbuf: BytesMut,
+    // A control frame that the spray-time drain (`service_rq_spray_control`) pulled but that is
+    // NOT a KeepAlive — i.e. the receiver raced ahead and sent a terminal/feedback frame (Proof /
+    // ObjectRequest) while the sender was still spraying. We stash it here instead of erroring so
+    // the post-spray feedback loop's `recv()` returns it normally (fixes zz35zq: the fast-transfer
+    // "unexpected frame: got Proof, expected KeepAlive while spraying" abort).
+    stashed: Option<Frame>,
 }
 
 impl<S> FrameTransport<S>
@@ -1269,6 +1275,7 @@ where
             stream,
             codec: AtpFrameCodec::new(),
             rbuf: BytesMut::new(),
+            stashed: None,
         }
     }
 
@@ -1282,6 +1289,10 @@ where
     }
 
     async fn recv(&mut self) -> Result<Frame, RqError> {
+        // A frame deferred by the spray-time drain takes precedence (see `stashed`).
+        if let Some(frame) = self.stashed.take() {
+            return Ok(frame);
+        }
         loop {
             if let Some(frame) = self
                 .codec
@@ -3558,11 +3569,14 @@ where
                     "peer closed control during RQ spray",
                 )));
             }
-            got => {
-                return Err(RqError::Unexpected {
-                    got,
-                    expected: "KeepAlive while spraying",
-                });
+            // The receiver converged (or wants more) and sent a terminal/feedback frame while we
+            // are still spraying — a fast-transfer race. Do NOT error: stash the frame so the
+            // post-spray feedback loop's `recv()` handles it (Proof -> finalize, ObjectRequest ->
+            // next round). Stop draining now; remaining sprayed symbols are harmless (the receiver
+            // ignores extras and the sha256+merkle commit gate still verifies). Fixes zz35zq.
+            _ => {
+                control.stashed = Some(frame);
+                break;
             }
         }
     }
