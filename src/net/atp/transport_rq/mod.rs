@@ -5486,6 +5486,7 @@ async fn feed_datagram_to_decoders(
         symbol_size,
         symbol_auth,
         allow_spawn_decode,
+        decode_width_budget,
     )
     .await
 }
