@@ -162,6 +162,10 @@ fn field_matches_pattern(field_path: &str, pattern: &str) -> bool {
         return wildcard_matches(field_path, pattern);
     }
 
+    if pattern.contains('.') {
+        return false;
+    }
+
     // Unsupported custom syntax is treated as fail-closed. A custom rule that
     // this lightweight matcher cannot interpret must redact rather than silently
     // leak a sensitive field.
