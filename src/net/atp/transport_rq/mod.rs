@@ -59,6 +59,7 @@ pub mod adaptive;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 
 use crate::bytes::BytesMut;
 use crate::codec::Decoder;
@@ -544,7 +545,7 @@ impl RqPendingSendBatch {
                 let packets = payloads
                     .iter()
                     .map(|payload| UdpOutboundDatagram { dst_addr, payload })
-                    .collect::<Vec<_>>();
+                    .collect::<SmallVec<[_; RQ_SEND_BATCH_PER_SOCKET]>>();
                 socket.send_batch_to(&packets).await?
             };
 
