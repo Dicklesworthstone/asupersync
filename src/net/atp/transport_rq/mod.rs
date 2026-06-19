@@ -207,6 +207,12 @@ const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
 const RQ_INBOUND_PUMP_BATCH: usize = 512;
 /// Maximum full batches drained after the first ready batch in one pump turn.
 const RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
+/// Maximum blocking decode jobs one receive entry may have in flight.
+///
+/// The current default block sizing produces roughly 13 source blocks for a
+/// 100 MiB object, so 16 preserves the intended parallel decode fan-out while
+/// bounding queued decode memory and blocking-pool pressure.
+const RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 16;
 /// Tiny quiet window used only after a full batch, matching the native QUIC pump.
 const RQ_INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
 
@@ -2490,6 +2496,10 @@ struct PendingDecode {
     handle: crate::runtime::TaskHandle<BlockDecodeOutcome>,
 }
 
+fn can_spawn_parallel_decode(pending_decodes: usize) -> bool {
+    pending_decodes < RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
+}
+
 #[derive(Debug)]
 struct SourceBlockProgress {
     start: u64,
@@ -4097,10 +4107,23 @@ async fn feed_symbol_with_cx(
         Ok(DeferredSymbolAcceptResult::Immediate(result)) => Ok(result),
         Ok(DeferredSymbolAcceptResult::Decode(job)) => {
             let block_sbn = job.sbn();
+            if !can_spawn_parallel_decode(dec.pending_decodes.len()) {
+                rqtrace!(
+                    "receiver: entry {} running decode block {} inline because pending decode cap {} is reached",
+                    dec.index,
+                    block_sbn,
+                    RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
+                );
+                let outcome = run_block_decode_job(job);
+                let _ = finalize_decode_outcome(dec, outcome).await?;
+                return Ok(true);
+            }
+
             let fallback_job = job.clone();
             match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
                 Ok(handle) => {
-                    dec.pending_decodes.push(PendingDecode { block_sbn, handle });
+                    dec.pending_decodes
+                        .push(PendingDecode { block_sbn, handle });
                     rqtrace!(
                         "receiver: entry {} started parallel decode block {} via esi={} kind={:?}",
                         dec.index,
@@ -5129,10 +5152,7 @@ async fn drain_ready_decodes(cx: &Cx, decoders: &mut [EntryDecoder]) -> Result<u
     Ok(completed)
 }
 
-async fn join_all_pending_decodes(
-    cx: &Cx,
-    decoders: &mut [EntryDecoder],
-) -> Result<u64, RqError> {
+async fn join_all_pending_decodes(cx: &Cx, decoders: &mut [EntryDecoder]) -> Result<u64, RqError> {
     let mut completed = 0u64;
     for dec in decoders {
         while let Some(mut pending) = dec.pending_decodes.pop() {
@@ -5425,6 +5445,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_decode_spawn_gate_preserves_default_fanout_with_cap() {
+        assert!(
+            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY >= 16,
+            "cap should preserve the default ~13-block decode fan-out"
+        );
+        assert!(can_spawn_parallel_decode(0));
+        assert!(can_spawn_parallel_decode(
+            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY - 1
+        ));
+        assert!(!can_spawn_parallel_decode(
+            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
+        ));
+    }
 
     #[test]
     fn rq_pacing_carries_path_rate_for_congestion_controller() {
