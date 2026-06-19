@@ -48,9 +48,10 @@ use crate::atp::delta::{
 };
 use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
 use crate::net::atp::transport_common::{
-    EntryDigest, EntryMetadata, FileKind, FilterSet, SourceEntry, StagedEntryReceive,
-    StreamingError, apply_entry_metadata, collect_entries, flat_merkle_root_from_digests,
-    hash_file_streaming, hex_encode, metadata_commitment, read_entry_metadata,
+    EntryDigest, EntryMetadata, FileKind, FilterSet, MirrorError, MirrorPolicy, SourceEntry,
+    StagedEntryReceive, StreamingError, apply_entry_metadata, collect_entries,
+    flat_merkle_root_from_digests, hash_file_streaming, hex_encode, metadata_commitment,
+    mirror_dest, read_entry_metadata,
 };
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
@@ -232,6 +233,16 @@ pub enum TransportError {
 impl From<StreamingError> for TransportError {
     fn from(err: StreamingError) -> Self {
         Self::Source(err.into_message())
+    }
+}
+
+impl From<MirrorError> for TransportError {
+    fn from(err: MirrorError) -> Self {
+        match err {
+            MirrorError::Io(err) => Self::Io(err),
+            MirrorError::Cancelled => Self::Cancelled,
+            other => Self::Frame(format!("mirror reconciliation failed: {other}")),
+        }
     }
 }
 
@@ -2034,7 +2045,31 @@ async fn commit_verified_staging(
         }
         committed_paths.push(out_path);
     }
+    mirror_committed_manifest(cx, dest_dir, manifest).await?;
     Ok(committed_paths)
+}
+
+async fn mirror_committed_manifest(
+    cx: &Cx,
+    dest_dir: &Path,
+    manifest: &TransferManifest,
+) -> Result<(), TransportError> {
+    if !manifest.is_directory {
+        return Ok(());
+    }
+
+    let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+    let keep_rel_paths = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.rel_path.clone())
+        .collect::<BTreeSet<_>>();
+    let policy = MirrorPolicy {
+        enabled: true,
+        ..MirrorPolicy::default()
+    };
+    mirror_dest(cx, &base, &keep_rel_paths, policy).await?;
+    Ok(())
 }
 
 #[cfg(any())]
@@ -3087,6 +3122,7 @@ pub async fn receive_connection(
                     expected: "ObjectComplete | Close",
                 });
             }
+            mirror_committed_manifest(cx, dest_dir, &manifest).await?;
             let receipt = ReceiveReceipt {
                 committed: true,
                 bytes_received: 0,
@@ -3409,6 +3445,7 @@ pub async fn receive_connection(
                 }
                 committed_paths.push(out_path);
             }
+            mirror_committed_manifest(cx, dest_dir, &manifest).await?;
             Ok(())
         }
         .await;

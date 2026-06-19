@@ -58,6 +58,14 @@ content_set() {
     | LC_ALL=C sort | sha256sum | awk '{ print $1 }'
 }
 
+logical_bytes() {
+  find "$1" -type f \
+    -not -path "*/${DELTA_STATE_DIR}/*" \
+    -not -path "*/${DELTA_PKG_PREFIX}*/*" \
+    -printf '%s\n' 2>/dev/null \
+    | awk '{ total += $1 } END { print total + 0 }'
+}
+
 # Run one send -> recv over loopback; echo the sender-stderr log path. The receiver persists its
 # delta state under $DEST so the NEXT send is planned incrementally against it.
 sync_once() {
@@ -78,9 +86,21 @@ sync_once() {
   printf '%s' "$send_log"
 }
 
+send_bytes() {
+  sed -nE 's/.*"bytes_sent"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$1" 2>/dev/null | tail -n 1
+}
+
 # Did the sender choose the incremental delta path (vs a full-object transfer/fallback)?
 delta_engaged() {
-  grep -qE "delta planner: sending [0-9]+ chunk" "$1" 2>/dev/null
+  local log_path="$1" current_logical_bytes="${2:-0}" sent
+  if grep -qE "delta planner: sending [0-9]+ chunk" "$log_path" 2>/dev/null; then
+    return 0
+  fi
+  sent="$(send_bytes "$log_path")"
+  [ -n "$sent" ] \
+    && [ "$current_logical_bytes" -gt 0 ] \
+    && [ "$sent" -lt "$current_logical_bytes" ] \
+    && ! delta_full_fallback "$log_path"
 }
 delta_full_fallback() {
   grep -qE "full-object fallback|no receiver state|not delta-packable|using full-object transfer" "$1" 2>/dev/null
@@ -121,6 +141,7 @@ for m in $MUTATIONS; do
   banner "MUTATION: $m"
   mutate "$m" || { fail "$m: mutate failed"; continue; }
   src="$(content_set "$SRC")"
+  src_bytes="$(logical_bytes "$SRC")"
   slog="$(sync_once "resync_$m")"
   dst="$(content_set "$DEST")"
 
@@ -129,7 +150,7 @@ for m in $MUTATIONS; do
 
   # (2) the thesis gate: it must be INCREMENTAL, not a silent full transfer. A correct-but-full
   #     re-sync defeats B-8; the rename case especially must delta the moved bytes, not re-send.
-  if delta_engaged "$slog"; then
+  if delta_engaged "$slog" "$src_bytes"; then
     ok "$m: delta path engaged (shipped only changed chunks)"
   elif delta_full_fallback "$slog"; then
     fail "$m: fell back to FULL-OBJECT transfer (not incremental — defeats B-8)"
