@@ -37,7 +37,7 @@ Top-five owner decisions:
 | idea | owner | status | decision |
 |---|---|---|---|
 | doctor/operator CLI | `asupersync-idea-wizard-fifth-wave-3gaiun.1` | closed | implemented |
-| AppSpec service topology | `asupersync-idea-wizard-fifth-wave-3gaiun.2` | in_progress | still open |
+| AppSpec service topology | `asupersync-idea-wizard-fifth-wave-3gaiun.2` | closed | implemented |
 | semantic lint suite | `asupersync-idea-wizard-fifth-wave-3gaiun.3` | closed | implemented |
 | Browser Edition GA | `asupersync-idea-wizard-fifth-wave-3gaiun.4` | closed | implemented |
 | lab/live differential evidence | `asupersync-idea-wizard-fifth-wave-3gaiun.5` | closed | implemented |
@@ -64,17 +64,15 @@ the JSON artifact.
 
 ## Blockers
 
-The closeout verdict is blocked. The parent epic cannot close while these owner
-beads remain non-closed or proof-blocked:
-
-- `asupersync-idea-wizard-fifth-wave-3gaiun.2`
+The closeout verdict is ready to close. No top-five or next-ten owner bead
+remains non-closed in tracker state.
 
 The backlog proof-blocked rows have been closed after focused remote RCH proofs.
 AppSpec now has closed A1 schema/capability modeling, A2 compiler/lowering, A3
-deterministic lab replay and artifact contracts, and A4 reference journey
-children. The AppSpec parent owner bead still remains `in_progress` in tracker
-state, so this closeout packet continues to fail closed until that parent is
-explicitly closed and the closeout contract is rerun remotely.
+deterministic lab replay and artifact contracts, A4 reference journey children,
+and the AppSpec parent owner bead itself. This packet still requires the
+focused remote-only closeout contract before the fifth-wave closeout bead or
+parent epic should be closed.
 
 <!-- FIFTH-WAVE-CLOSEOUT:VALIDATION -->
 

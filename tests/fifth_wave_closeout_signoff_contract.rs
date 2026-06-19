@@ -279,19 +279,18 @@ fn closeout_verdict_names_current_blockers() {
     let verdict = object(&artifact, "closeout_verdict");
     assert_eq!(
         verdict.get("status").and_then(Value::as_str),
-        Some("blocked")
+        Some("ready_to_close")
     );
-    assert!(bool_field(verdict, "cannot_close_epic"));
+    assert!(!bool_field(verdict, "cannot_close_epic"));
 
     let blocker_ids = array(&artifact, "blocking_children")
         .iter()
         .map(|row| string(row, "owner_bead_id").to_owned())
         .collect::<BTreeSet<_>>();
-    let expected = ["asupersync-idea-wizard-fifth-wave-3gaiun.2"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(blocker_ids, expected);
+    assert!(
+        blocker_ids.is_empty(),
+        "no owner rows should block closeout"
+    );
 
     let open_owner_ids = all_decisions(&artifact)
         .into_iter()
@@ -305,39 +304,23 @@ fn closeout_verdict_names_current_blockers() {
 }
 
 #[test]
-fn appspec_status_reflects_closed_a1_to_a4_chain_and_open_parent() {
+fn appspec_status_reflects_closed_a1_to_a4_chain_and_parent() {
     let artifact = artifact();
     let appspec = decision_by_idea_id(&artifact, "top-02-appspec-service-topology");
     assert_eq!(
         string(appspec, "owner_bead_id"),
         "asupersync-idea-wizard-fifth-wave-3gaiun.2"
     );
-    assert_eq!(string(appspec, "tracker_status"), "in_progress");
-    assert_eq!(string(appspec, "decision"), "still-open");
-
-    let blocker = string(appspec, "current_blocker");
-    for required in [
-        "A1-A4 child beads are closed",
-        "parent tracker row remains in_progress",
-        "fail closed",
-    ] {
-        assert!(
-            blocker.contains(required),
-            "AppSpec blocker must mention {required}: {blocker}"
-        );
-    }
-
-    let next_step = string(appspec, "next_step");
-    for required in [
-        "Close the AppSpec parent tracker row",
-        "A1-A4 closure evidence",
-        "focused fifth-wave closeout contract",
-    ] {
-        assert!(
-            next_step.contains(required),
-            "AppSpec next step must mention {required}: {next_step}"
-        );
-    }
+    assert_eq!(string(appspec, "tracker_status"), "closed");
+    assert_eq!(string(appspec, "decision"), "implemented");
+    assert!(
+        appspec.get("current_blocker").is_none(),
+        "closed AppSpec owner must not retain stale blocker text"
+    );
+    assert!(
+        appspec.get("next_step").is_none(),
+        "closed AppSpec owner must not retain stale next-step text"
+    );
 
     let proof_refs = string_set(appspec, "proof_refs");
     for required in [

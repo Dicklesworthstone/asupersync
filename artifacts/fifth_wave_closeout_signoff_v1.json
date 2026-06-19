@@ -117,10 +117,8 @@
       "idea_id": "top-02-appspec-service-topology",
       "title": "Declarative service topology compiler with generated lab proofs",
       "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
-      "tracker_status": "in_progress",
-      "decision": "still-open",
-      "current_blocker": "AppSpec A1-A4 child beads are closed with scoped evidence, but the AppSpec parent tracker row remains in_progress, so fifth-wave closeout must fail closed until that parent is explicitly closed.",
-      "next_step": "Close the AppSpec parent tracker row from the A1-A4 closure evidence, then rerun the focused fifth-wave closeout contract remotely before closing the fifth-wave closeout bead.",
+      "tracker_status": "closed",
+      "decision": "implemented",
       "proof_refs": [
         "artifacts/appspec_v1_schema.json",
         "docs/appspec_v1.md",
@@ -146,7 +144,7 @@
         "does not prove broad AppSpec production readiness",
         "does not auto-resolve handler symbols or hide Cx",
         "does not remove the explicit single-group lowering boundary",
-        "does not close the AppSpec parent tracker row"
+        "does not replace focused AppSpec child proof contracts"
       ]
     },
     {
@@ -438,20 +436,13 @@
       ]
     }
   ],
-  "blocking_children": [
-    {
-      "owner_bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.2",
-      "tracker_status": "in_progress",
-      "reason": "AppSpec A1-A4 child beads are closed, but the parent AppSpec owner bead remains in_progress in tracker state."
-    }
-  ],
+  "blocking_children": [],
   "closeout_verdict": {
-    "status": "blocked",
-    "cannot_close_epic": true,
-    "summary": "The fifth-wave epic cannot close while the AppSpec parent owner bead remains in_progress. This packet is a deterministic overlap audit and handoff, not a release or broad workspace-health certificate.",
+    "status": "ready_to_close",
+    "cannot_close_epic": false,
+    "summary": "All fifth-wave top-five and next-ten owner beads are closed in tracker state. This packet is a deterministic overlap audit and handoff, not a release or broad workspace-health certificate.",
     "required_before_close": [
       "focused closeout contract proof completed remotely",
-      "AppSpec parent tracker row closed from the A1-A4 closure evidence",
       "final tracker comment records closure basis and remaining blockers",
       "Agent Mail handoff records closure basis and remaining blockers"
     ]
