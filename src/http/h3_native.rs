@@ -1500,12 +1500,8 @@ pub fn qpack_apply_decoder_instruction(
         QpackDecoderInstruction::StreamCancellation { stream_id } => {
             feedback.apply_stream_cancellation(context, *stream_id)
         }
-        QpackDecoderInstruction::InsertCountIncrement { increment } => {
-            feedback.apply_insert_count_increment(
-                *increment,
-                context.dynamic_table().insertion_counter(),
-            )
-        }
+        QpackDecoderInstruction::InsertCountIncrement { increment } => feedback
+            .apply_insert_count_increment(*increment, context.dynamic_table().insertion_counter()),
     }
 }
 
@@ -1694,6 +1690,12 @@ impl QpackBlockedStreamRecord {
         }
     }
 
+    fn is_reapable_terminal(&self) -> bool {
+        self.status != QpackBlockedStreamStatus::Blocked
+            && self.protected_references.is_empty()
+            && self.blocked_field_section.is_none()
+    }
+
     /// Stream ID associated with this field section.
     #[must_use]
     pub fn stream_id(&self) -> u64 {
@@ -1737,18 +1739,17 @@ impl QpackBlockedStreamRecord {
     }
 }
 
-/// Cap on retained non-`Blocked` (Ready/Cancelled/Failed) records in the
-/// scheduler's `streams` map. `Blocked` records are bounded separately by
-/// SETTINGS_QPACK_BLOCKED_STREAMS and are never reaped (they are still active).
+/// Cap on retained terminal records in the scheduler's `streams` map. `Blocked`
+/// records and `Ready` records with protected references are still active and
+/// are never reaped by this cap.
 ///
 /// Without a cap the map is insert-only — every `submit_*` adds a per-stream
 /// record (success, Ready, Cancelled, or failure) and nothing removes them — so
 /// over a long-lived connection serving many short requests (monotonically
-/// increasing stream IDs) it grows without bound. We reap the OLDEST terminal
-/// records (lowest stream_id) first; on a live connection their Header
-/// Acknowledgement / Stream Cancellation has long since been processed. This
-/// bounds the map to `O(blocked_cap + MAX_RETAINED_NONBLOCKED_RECORDS)`.
-const MAX_RETAINED_NONBLOCKED_RECORDS: usize = 1024;
+/// increasing stream IDs) it grows without bound. We reap the OLDEST unreferenced
+/// terminal records (lowest stream_id) first. This bounds retained terminal
+/// history while preserving records that still protect dynamic-table entries.
+const MAX_RETAINED_TERMINAL_RECORDS: usize = 1024;
 
 /// QPACK blocked-stream scheduler for outbound field sections.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1790,34 +1791,33 @@ impl QpackBlockedStreamScheduler {
             .count() as u64
     }
 
-    /// Total per-stream records currently retained (blocked + terminal). Bounded
-    /// by [`MAX_RETAINED_NONBLOCKED_RECORDS`] plus the live blocked set; exposed
-    /// so callers/tests can observe the scheduler's bounded memory.
+    /// Total per-stream records currently retained; exposed so callers/tests can
+    /// observe the scheduler's bounded terminal memory.
     #[must_use]
     pub fn tracked_record_count(&self) -> usize {
         self.streams.len()
     }
 
-    /// Reap the oldest non-`Blocked` (terminal/ready) records once they exceed
-    /// [`MAX_RETAINED_NONBLOCKED_RECORDS`], bounding the `streams` map for
-    /// long-lived connections. Never removes `Blocked` records — they are still
-    /// active and are bounded separately by SETTINGS_QPACK_BLOCKED_STREAMS.
+    /// Reap the oldest unreferenced terminal records once they exceed
+    /// [`MAX_RETAINED_TERMINAL_RECORDS`], bounding the `streams` map for
+    /// long-lived connections. Never removes `Blocked` records or `Ready`
+    /// records that still protect dynamic-table entries.
     /// BTreeMap iteration is ascending by stream_id, so the oldest streams (whose
     /// acknowledgement/cancellation has already been processed) are reaped first.
     fn reap_excess_records(&mut self) {
-        let nonblocked = self
+        let terminal = self
             .streams
             .values()
-            .filter(|record| record.status != QpackBlockedStreamStatus::Blocked)
+            .filter(|record| record.is_reapable_terminal())
             .count();
-        if nonblocked <= MAX_RETAINED_NONBLOCKED_RECORDS {
+        if terminal <= MAX_RETAINED_TERMINAL_RECORDS {
             return;
         }
-        let excess = nonblocked - MAX_RETAINED_NONBLOCKED_RECORDS;
+        let excess = terminal - MAX_RETAINED_TERMINAL_RECORDS;
         let victims: Vec<u64> = self
             .streams
             .iter()
-            .filter(|(_, record)| record.status != QpackBlockedStreamStatus::Blocked)
+            .filter(|(_, record)| record.is_reapable_terminal())
             .take(excess)
             .map(|(stream_id, _)| *stream_id)
             .collect();
@@ -2029,41 +2029,33 @@ impl QpackBlockedStreamScheduler {
                 Ok(self.unblock_ready(feedback.known_received_count()))
             }
             QpackDecoderInstruction::HeaderAcknowledgement { stream_id } => {
-                if !self.streams.contains_key(stream_id) {
-                    return self.fail(H3NativeError::InvalidFrame(
-                        "unknown qpack blocked stream acknowledgement",
-                    ));
-                }
+                let had_record = self.streams.contains_key(stream_id);
                 if let Err(error) =
                     qpack_apply_decoder_instruction(feedback, context, mode, instruction)
                 {
-                    self.record_stream_error(*stream_id, &error);
+                    if had_record {
+                        self.record_stream_error(*stream_id, &error);
+                    } else {
+                        self.record_error(&error);
+                    }
                     return Err(error);
                 }
-                if let Some(record) = self.streams.get_mut(stream_id) {
-                    record.status = QpackBlockedStreamStatus::Ready;
-                    record.blocked_reason = None;
-                    record.protected_references.clear();
-                }
+                self.streams.remove(stream_id);
                 Ok(Vec::new())
             }
             QpackDecoderInstruction::StreamCancellation { stream_id } => {
-                if !self.streams.contains_key(stream_id) {
-                    return self.fail(H3NativeError::InvalidFrame(
-                        "unknown qpack blocked stream cancellation",
-                    ));
-                }
+                let had_record = self.streams.contains_key(stream_id);
                 if let Err(error) =
                     qpack_apply_decoder_instruction(feedback, context, mode, instruction)
                 {
-                    self.record_stream_error(*stream_id, &error);
+                    if had_record {
+                        self.record_stream_error(*stream_id, &error);
+                    } else {
+                        self.record_error(&error);
+                    }
                     return Err(error);
                 }
-                if let Some(record) = self.streams.get_mut(stream_id) {
-                    record.status = QpackBlockedStreamStatus::Cancelled;
-                    record.blocked_reason = None;
-                    record.protected_references.clear();
-                }
+                self.streams.remove(stream_id);
                 Ok(Vec::new())
             }
         }
@@ -7561,7 +7553,9 @@ mod tests {
             &mut huge,
             &mut context,
             H3QpackMode::DynamicTableAllowed,
-            &QpackDecoderInstruction::InsertCountIncrement { increment: u64::MAX },
+            &QpackDecoderInstruction::InsertCountIncrement {
+                increment: u64::MAX,
+            },
         )
         .expect_err("overshoot via a huge increment");
         assert_eq!(
@@ -7730,9 +7724,7 @@ mod tests {
                 &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
             )
             .expect("ack releases references");
-        let record = scheduler.record(4).expect("record after ack");
-        assert_eq!(record.status(), QpackBlockedStreamStatus::Ready);
-        assert!(record.protected_references().is_empty());
+        assert_eq!(scheduler.record(4), None);
         assert!(feedback.acknowledged_stream_ids().contains(&4));
         context
             .set_dynamic_table_capacity(0)
@@ -7985,17 +7977,7 @@ mod tests {
             )
             .expect("cancel blocked stream");
         assert_eq!(scheduler.blocked_stream_count(), 0);
-        assert_eq!(
-            scheduler.record(4).expect("cancelled").status(),
-            QpackBlockedStreamStatus::Cancelled
-        );
-        assert!(
-            scheduler
-                .record(4)
-                .expect("cancelled")
-                .protected_references()
-                .is_empty()
-        );
+        assert_eq!(scheduler.record(4), None);
         assert!(feedback.cancelled_stream_ids().contains(&4));
         context
             .set_dynamic_table_capacity(0)
@@ -8039,10 +8021,7 @@ mod tests {
                 8,
             )
             .expect("cancel ready stream");
-        assert_eq!(
-            scheduler.record(8).expect("cancelled").status(),
-            QpackBlockedStreamStatus::Cancelled
-        );
+        assert_eq!(scheduler.record(8), None);
         context
             .set_dynamic_table_capacity(0)
             .expect("ready cancellation released reference");
@@ -8183,6 +8162,8 @@ mod tests {
         // Regression for the insert-only streams map (asupersync-...-i7afx1):
         // terminal records must be reaped to bound memory on long-lived
         // connections, while active Blocked records are always retained.
+        let mut context = QpackContext::new(128);
+        let mut feedback = QpackDecoderFeedbackState::new();
         let mut scheduler = QpackBlockedStreamScheduler::new(64);
 
         // One active blocked stream (highest id) must survive reaping.
@@ -8201,8 +8182,25 @@ mod tests {
             },
         );
 
+        // A ready stream with protected references is still live until ack/cancel
+        // feedback releases those references; it must not be treated as terminal.
+        let protected_ready_id = 2_000_000u64;
+        scheduler.streams.insert(
+            protected_ready_id,
+            QpackBlockedStreamRecord {
+                stream_id: protected_ready_id,
+                required_insert_count: 5,
+                base: 5,
+                status: QpackBlockedStreamStatus::Ready,
+                blocked_reason: None,
+                protected_references: vec![7],
+                blocked_field_section: None,
+                first_failure: None,
+            },
+        );
+
         // Far more terminal (failed) records than the retention cap.
-        let extra = MAX_RETAINED_NONBLOCKED_RECORDS + 100;
+        let extra = MAX_RETAINED_TERMINAL_RECORDS + 100;
         for stream_id in 0..extra as u64 {
             scheduler.streams.insert(
                 stream_id,
@@ -8213,32 +8211,65 @@ mod tests {
                 ),
             );
         }
+        feedback
+            .track_stream_references(&mut context, 0, &[])
+            .expect("track unreferenced ready stream feedback");
+        scheduler.streams.insert(
+            0,
+            QpackBlockedStreamRecord {
+                stream_id: 0,
+                required_insert_count: 0,
+                base: 0,
+                status: QpackBlockedStreamStatus::Ready,
+                blocked_reason: None,
+                protected_references: Vec::new(),
+                blocked_field_section: None,
+                first_failure: None,
+            },
+        );
 
         scheduler.reap_excess_records();
 
-        // Non-blocked records are bounded to the cap; the blocked stream stays.
-        let nonblocked = scheduler
+        // Unreferenced terminal records are bounded to the cap; the blocked
+        // stream stays.
+        let terminal = scheduler
             .streams
             .values()
-            .filter(|record| record.status != QpackBlockedStreamStatus::Blocked)
+            .filter(|record| record.is_reapable_terminal())
             .count();
-        assert_eq!(nonblocked, MAX_RETAINED_NONBLOCKED_RECORDS);
+        assert_eq!(terminal, MAX_RETAINED_TERMINAL_RECORDS);
         assert_eq!(
             scheduler.tracked_record_count(),
-            MAX_RETAINED_NONBLOCKED_RECORDS + 1
+            MAX_RETAINED_TERMINAL_RECORDS + 2
         );
         assert!(scheduler.record(blocked_id).is_some());
+        assert_eq!(
+            scheduler
+                .record(protected_ready_id)
+                .expect("protected ready record")
+                .protected_references(),
+            &[7]
+        );
         assert_eq!(scheduler.blocked_stream_count(), 1);
 
         // Oldest terminal records reaped first; newest retained.
         assert!(scheduler.record(0).is_none());
         assert!(scheduler.record((extra - 1) as u64).is_some());
+        scheduler
+            .apply_decoder_instruction(
+                &mut feedback,
+                &mut context,
+                H3QpackMode::DynamicTableAllowed,
+                &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 0 },
+            )
+            .expect("feedback for compacted ready stream still applies");
+        assert!(feedback.acknowledged_stream_ids().contains(&0));
 
         // Already at the cap: a further reap is a no-op (idempotent).
         scheduler.reap_excess_records();
         assert_eq!(
             scheduler.tracked_record_count(),
-            MAX_RETAINED_NONBLOCKED_RECORDS + 1
+            MAX_RETAINED_TERMINAL_RECORDS + 2
         );
     }
 
@@ -8258,7 +8289,7 @@ mod tests {
             .expect_err("ack before stream schedule");
         assert_eq!(
             err,
-            H3NativeError::InvalidFrame("unknown qpack blocked stream acknowledgement")
+            H3NativeError::InvalidFrame("unknown qpack decoder feedback stream")
         );
         assert_eq!(scheduler.first_failure(), Some(&err));
     }
@@ -8727,21 +8758,18 @@ mod tests {
         cancelled
             .feed_decoder_stream_bytes(7, &cancel)
             .expect("cancel blocked stream");
-        let cancel_event = format!(
-            "cancelled:{:?}",
-            cancelled
-                .blocked_scheduler()
-                .record(8)
-                .expect("cancelled record")
-                .status()
-        );
+        let cancel_event = if cancelled.blocked_scheduler().record(8).is_none() {
+            "cancelled:removed".to_string()
+        } else {
+            "cancelled:retained".to_string()
+        };
         rows.push(qpack_instruction_row(
             &cancelled,
             "cancellation-while-blocked",
             1,
-            "cancelled:Cancelled",
+            "cancelled:removed",
             &cancel_event,
-            if cancel_event == "cancelled:Cancelled" {
+            if cancel_event == "cancelled:removed" {
                 "pass"
             } else {
                 "fail"
