@@ -148,7 +148,7 @@ trap cleanup EXIT
 gen_file() {
     local path="$1" bytes="$2" mb=$(( $2 / 1048576 )) rem=$(( $2 % 1048576 ))
     [ "$mb" -gt 0 ] && dd if=/dev/urandom of="$path" bs=1M count="$mb" status=none || : >"$path"
-    [ "$rem" -gt 0 ] && dd if=/dev/urandom bs=1 count="$rem" status=none >>"$path"
+    [ "$rem" -gt 0 ] && dd if=/dev/urandom bs=1 count="$rem" status=none >>"$path" || :
 }
 # Apply a change mode to a FILE in place (operates on a copy passed as $1).
 mutate_file() {
