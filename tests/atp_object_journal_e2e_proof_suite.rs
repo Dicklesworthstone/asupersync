@@ -19,6 +19,18 @@ use atp::object::{
     ObjectTestConfig, RecoveryState, TestArtifact, VerificationResult,
 };
 
+fn unique_suite_temp_dir() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "atp_e2e_proof_suite_{}_{}",
+        std::process::id(),
+        nanos
+    ))
+}
+
 /// Complete ATP E2E proof suite configuration
 #[derive(Debug, Clone)]
 pub struct AtpE2eProofConfig {
@@ -34,7 +46,8 @@ pub struct AtpE2eProofConfig {
 
 impl Default for AtpE2eProofConfig {
     fn default() -> Self {
-        let temp_dir = std::env::temp_dir().join("atp_e2e_proof_suite");
+        let temp_dir = unique_suite_temp_dir();
+        let journal_temp_dir = temp_dir.join("journal");
 
         Self {
             object_config: ObjectTestConfig {
@@ -42,7 +55,9 @@ impl Default for AtpE2eProofConfig {
                 ..Default::default()
             },
             journal_config: JournalTestConfig {
-                temp_dir: temp_dir.join("journal"),
+                journal_path: journal_temp_dir.join("journal.log"),
+                bitmap_path: journal_temp_dir.join("bitmap.dat"),
+                temp_dir: journal_temp_dir,
                 ..Default::default()
             },
             temp_dir,
@@ -356,6 +371,7 @@ impl AtpE2eProofSuite {
             let mut artifact = TestArtifact::new("cross_component_test".to_string(), object_id);
 
             artifact = artifact.with_crash_point(*obj_crash);
+            artifact.record_recovery_state(RecoveryState::Resuming);
             // Note: In a real implementation, we'd also set journal crash point
 
             println!(

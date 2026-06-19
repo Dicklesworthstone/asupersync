@@ -14,6 +14,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos))
+}
+
 /// Test-only constructor shim for historical E2E harness code.
 pub trait ObjectIdTestExt {
     fn new() -> Self;
@@ -102,7 +110,7 @@ pub struct ObjectTestConfig {
 impl Default for ObjectTestConfig {
     fn default() -> Self {
         Self {
-            temp_dir: std::env::temp_dir().join("atp_object_tests"),
+            temp_dir: unique_temp_dir("atp_object_tests"),
             crash_points: CrashPoint::all(),
             verification_policy: MetadataPolicy::full_preservation(),
             timeout: Duration::from_secs(30),
