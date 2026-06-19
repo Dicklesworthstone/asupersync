@@ -4470,14 +4470,27 @@ async fn dispatch_decode_job(
         return Ok(DecodeDispatch::Queued);
     }
 
-    if !allow_spawn_decode || !can_spawn_parallel_decode(dec.pending_decodes.len()) {
-        let joined = join_one_pending_decode(cx, dec).await?;
+    if !allow_spawn_decode {
         rqtrace!(
-            "receiver: entry {} joined {joined} pending decode job(s) before queueing block {} from {trigger} (entry_cap={}, transfer_spawn_allowed={})",
+            "receiver: entry {} running decode block {} inline from {trigger} because transfer decode cap {} is reached",
             dec.index,
             block_sbn,
-            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
-            allow_spawn_decode
+            RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
+        );
+        let outcome = run_block_decode_job(job);
+        if finalize_decode_outcome(dec, outcome).await? {
+            return Ok(DecodeDispatch::Completed);
+        }
+        return Ok(DecodeDispatch::NoProgress);
+    }
+
+    if !can_spawn_parallel_decode(dec.pending_decodes.len()) {
+        let joined = join_one_pending_decode(cx, dec).await?;
+        rqtrace!(
+            "receiver: entry {} joined {joined} pending decode job(s) before queueing block {} from {trigger} at entry cap {}",
+            dec.index,
+            block_sbn,
+            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
         );
         if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
             return Ok(DecodeDispatch::NoProgress);
@@ -4509,47 +4522,6 @@ async fn dispatch_decode_job(
                 Ok(DecodeDispatch::NoProgress)
             }
         }
-    }
-}
-
-async fn drain_ready_entry_decodes(cx: &Cx, dec: &mut EntryDecoder) -> Result<u64, RqError> {
-    let mut completed = 0u64;
-    let mut i = 0usize;
-    while i < dec.pending_decodes.len() {
-        if !dec.pending_decodes[i].handle.is_finished() {
-            i += 1;
-            continue;
-        }
-        let mut pending = dec.pending_decodes.swap_remove(i);
-        let block_sbn = pending.block_sbn;
-        let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-            RqError::Coding(format!(
-                "decode task failed for entry {} block {}: {join_err:?}",
-                dec.index, block_sbn
-            ))
-        })?;
-        if finalize_decode_outcome(dec, outcome).await? {
-            completed = completed.saturating_add(1);
-        }
-    }
-    Ok(completed)
-}
-
-async fn join_one_pending_decode(cx: &Cx, dec: &mut EntryDecoder) -> Result<u64, RqError> {
-    let Some(mut pending) = dec.pending_decodes.pop() else {
-        return Ok(0);
-    };
-    let block_sbn = pending.block_sbn;
-    let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-        RqError::Coding(format!(
-            "decode task failed for entry {} block {}: {join_err:?}",
-            dec.index, block_sbn
-        ))
-    })?;
-    if finalize_decode_outcome(dec, outcome).await? {
-        Ok(1)
-    } else {
-        Ok(0)
     }
 }
 
@@ -5381,6 +5353,8 @@ async fn feed_datagram_to_decoders(
     let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
         return Ok(false);
     };
+    let allow_spawn_decode =
+        rq_pending_decode_jobs(decoders) < RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER;
     feed_symbol_with_cx(
         cx,
         &mut decoders[pos],
@@ -5388,6 +5362,7 @@ async fn feed_datagram_to_decoders(
         payload,
         symbol_size,
         symbol_auth,
+        allow_spawn_decode,
     )
     .await
 }
