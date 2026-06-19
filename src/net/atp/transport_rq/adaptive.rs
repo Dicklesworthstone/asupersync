@@ -41,6 +41,10 @@ const PATH_SIGNAL_EMA_ALPHA: f64 = 0.20;
 const MIN_PATH_RTT_S: f64 = 0.000_001;
 const MAX_PATH_RTT_S: f64 = 60.0;
 const MAX_PATH_LOSS_RATE: f64 = 0.999;
+/// Clean/near-clean paths should not inherit repair-symbol overhead from the
+/// conservative RaptorQ inactivation-floor model. Feedback can still request
+/// repair later if actual loss appears.
+const CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND: f64 = 0.0015;
 /// Conservative cold-start pacing floor used before path evidence is usable.
 ///
 /// This is deliberately below the historic RQ fixed cap: malformed feedback or
@@ -367,6 +371,9 @@ pub fn overhead_for_target(k: u32, loss_p_bar: f64, alpha: f64, max_overhead: f6
         return 0.0;
     }
     let p = loss_p_bar.clamp(0.0, 0.999);
+    if p <= CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND {
+        return 0.0;
+    }
     let kf = f64::from(k);
     let z = z_for_alpha(alpha);
     // First-order analytic seed.
