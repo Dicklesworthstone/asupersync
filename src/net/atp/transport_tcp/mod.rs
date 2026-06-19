@@ -31,7 +31,9 @@
 //! entry, unreachable peer, or rejected handshake is a hard error — there is no
 //! success path that moves zero bytes.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::io::SeekFrom;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,11 +42,15 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::atp::delta::{
+    CasChunkRef, ContentAddressedChunkStore as DeltaPlannerStore, DeltaResyncFallbackReason,
+    DeltaResyncMode, PersistentChunkManifest, plan_incremental_resync,
+};
 use crate::atp::object::{ContentId, MetadataPolicy, ObjectId};
 use crate::net::atp::transport_common::{
-    EntryDigest, EntryMetadata, FileKind, FilterSet, StagedEntryReceive, StreamingError,
-    apply_entry_metadata, collect_entries, flat_merkle_root_from_digests, hash_file_streaming,
-    hex_encode, metadata_commitment, read_entry_metadata,
+    EntryDigest, EntryMetadata, FileKind, FilterSet, SourceEntry, StagedEntryReceive,
+    StreamingError, apply_entry_metadata, collect_entries, flat_merkle_root_from_digests,
+    hash_file_streaming, hex_encode, metadata_commitment, read_entry_metadata,
 };
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
@@ -65,7 +71,7 @@ use crate::net::{TcpListener, TcpStream};
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
 /// changes.
-pub const ATP_TCP_PROTOCOL: u32 = 1;
+pub const ATP_TCP_PROTOCOL: u32 = 2;
 
 /// Default bulk-data chunk size. Kept comfortably below the 1 MiB
 /// `MAX_FRAME_SIZE` so a chunk plus its frame header always fits one frame.
@@ -104,6 +110,8 @@ const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
 /// once. This bounds child task fan-out while preventing one slow peer from
 /// monopolizing the accept loop.
 pub const DEFAULT_MAX_ACTIVE_CONNECTIONS: usize = 64;
+
+const DELTA_CHUNK_SCHEMA: &str = "asupersync.atp.tcp.delta-chunk-manifest.v1";
 
 /// Transport tuning knobs.
 ///
@@ -146,6 +154,12 @@ pub struct TransferConfig {
     /// duplicate copies. When `false` (default), each is sent and written
     /// independently.
     pub preserve_hardlinks: bool,
+    /// Enable the receiver-driven delta planner. When enabled, the sender adds
+    /// chunk-level content ids to the manifest and waits for the receiver to
+    /// request either a delta chunk set, an already-in-sync no-op, or the legacy
+    /// full-object transfer. The receiver falls back to the full path whenever
+    /// a safe delta cannot be proven smaller.
+    pub enable_delta: bool,
 }
 
 impl Default for TransferConfig {
@@ -160,6 +174,7 @@ impl Default for TransferConfig {
             allow_special_files: false,
             sparse_files: false,
             preserve_hardlinks: false,
+            enable_delta: true,
         }
     }
 }
@@ -277,6 +292,87 @@ pub struct TransferManifest {
     pub metadata_root_hex: Option<String>,
     /// File entries in manifest order.
     pub entries: Vec<ManifestEntry>,
+    /// Optional delta chunk manifest. Old full-transfer behavior remains the
+    /// fallback whenever this is absent or the receiver declines the delta path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delta_manifest: Option<DeltaManifestWire>,
+}
+
+/// Sender-side chunk manifest used by receiver-driven delta planning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeltaManifestWire {
+    /// Stable schema tag for fail-closed receiver decoding.
+    pub schema: String,
+    /// Planner tree id. Bound to the transfer root name.
+    pub tree_id: String,
+    /// Fixed chunk size used to derive all chunk refs.
+    pub chunk_size: usize,
+    /// Total logical bytes represented by `chunks`.
+    pub total_size_bytes: u64,
+    /// Planner Merkle root over ordered content-addressed chunks.
+    pub merkle_root_hex: String,
+    /// Chunk refs in logical transfer order.
+    pub chunks: Vec<DeltaChunkWire>,
+}
+
+/// One chunk ref in the sender delta manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DeltaChunkWire {
+    /// Planner chunk index in logical transfer order.
+    pub index: u32,
+    /// Manifest entry index this chunk belongs to.
+    pub entry_index: u32,
+    /// Transfer-relative path for diagnostics and receiver assembly.
+    pub rel_path: String,
+    /// Chunk offset within `rel_path`.
+    pub entry_offset: u64,
+    /// Chunk offset within the logical transfer stream.
+    pub stream_offset: u64,
+    /// Chunk length in bytes.
+    pub size_bytes: u64,
+    /// Hex-encoded domain-separated [`ContentId`] hash for the chunk bytes.
+    pub content_id_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DeltaWireMode {
+    FullObject,
+    DeltaChunks,
+    AlreadyInSync,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DeltaObjectRequest {
+    mode: DeltaWireMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_reason: Option<String>,
+    sender_merkle_root_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receiver_merkle_root_hex: Option<String>,
+    missing_bytes: u64,
+    shared_chunks: u64,
+    stale_chunks: u64,
+    missing_chunks: Vec<DeltaChunkWire>,
+}
+
+impl DeltaObjectRequest {
+    fn full(
+        sender_merkle_root_hex: impl Into<String>,
+        receiver_merkle_root_hex: Option<String>,
+        fallback_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            mode: DeltaWireMode::FullObject,
+            fallback_reason: Some(fallback_reason.into()),
+            sender_merkle_root_hex: sender_merkle_root_hex.into(),
+            receiver_merkle_root_hex,
+            missing_bytes: 0,
+            shared_chunks: 0,
+            stale_chunks: 0,
+            missing_chunks: Vec::new(),
+        }
+    }
 }
 
 /// Receipt returned by the receiver in the `Proof` frame.
@@ -454,6 +550,548 @@ fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, Transport
 
 fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, TransportError> {
     serde_json::from_slice(frame.payload()).map_err(|e| TransportError::Control(e.to_string()))
+}
+
+#[cfg(any())]
+mod unused_delta_legacy {
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    struct DeltaTransferBasis {
+        manifest: PersistentChunkManifest,
+        wire: DeltaManifestWire,
+        store: DeltaPlannerStore,
+    }
+
+    fn decode_hash_hex(value: &str, label: &str) -> Result<[u8; 32], TransportError> {
+        if value.len() != 64 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return Err(TransportError::Frame(format!(
+                "{label} must be a 64-character hex SHA-256/content id"
+            )));
+        }
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(value, &mut out)
+            .map_err(|err| TransportError::Frame(format!("decode {label}: {err}")))?;
+        Ok(out)
+    }
+
+    fn delta_content_id_from_hex(value: &str) -> Result<ContentId, TransportError> {
+        Ok(ContentId::new(decode_hash_hex(
+            value,
+            "delta content_id_hex",
+        )?))
+    }
+
+    fn delta_wire_to_manifest(
+        wire: &DeltaManifestWire,
+    ) -> Result<PersistentChunkManifest, TransportError> {
+        if wire.schema != DELTA_CHUNK_SCHEMA {
+            return Err(TransportError::Frame(format!(
+                "unsupported delta manifest schema: {}",
+                wire.schema
+            )));
+        }
+        if wire.tree_id.trim().is_empty() {
+            return Err(TransportError::Frame(
+                "delta manifest tree_id must not be empty".to_string(),
+            ));
+        }
+        if wire.chunk_size == 0 {
+            return Err(TransportError::Frame(
+                "delta manifest chunk_size must be greater than zero".to_string(),
+            ));
+        }
+        let mut refs = Vec::with_capacity(wire.chunks.len());
+        for chunk in &wire.chunks {
+            refs.push(CasChunkRef {
+                index: chunk.index,
+                byte_offset: chunk.stream_offset,
+                size_bytes: chunk.size_bytes,
+                content_id: delta_content_id_from_hex(&chunk.content_id_hex)?,
+            });
+        }
+        let manifest = PersistentChunkManifest::new(wire.tree_id.clone(), refs)
+            .map_err(|err| TransportError::Frame(format!("invalid delta manifest: {err}")))?;
+        if manifest.total_size_bytes != wire.total_size_bytes {
+            return Err(TransportError::Frame(format!(
+                "delta manifest total size mismatch: wire {}, computed {}",
+                wire.total_size_bytes, manifest.total_size_bytes
+            )));
+        }
+        if manifest.merkle_root
+            != MerkleRoot::new(decode_hash_hex(
+                &wire.merkle_root_hex,
+                "delta merkle_root_hex",
+            )?)
+        {
+            return Err(TransportError::Frame(
+                "delta manifest Merkle root mismatch".to_string(),
+            ));
+        }
+        Ok(manifest)
+    }
+
+    async fn build_delta_basis_from_entries(
+        cx: &Cx,
+        entries: &[SourceEntry],
+        metadatas: &[EntryMetadata],
+        tree_id: &str,
+        chunk_size: usize,
+    ) -> Result<Option<DeltaTransferBasis>, TransportError> {
+        if chunk_size == 0 || entries.len() != metadatas.len() {
+            return Ok(None);
+        }
+        if metadatas.iter().any(|metadata| !metadata.is_bare()) {
+            return Ok(None);
+        }
+
+        let mut store = DeltaPlannerStore::new();
+        let mut refs = Vec::new();
+        let mut wire_chunks = Vec::new();
+        let mut read_buf = vec![0u8; chunk_size];
+        let mut stream_offset = 0u64;
+        let mut index = 0u32;
+
+        for (entry_index, (entry, metadata)) in entries.iter().zip(metadatas).enumerate() {
+            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+            if !matches!(metadata.file_kind, FileKind::Regular)
+                || metadata.hardlink_target.is_some()
+            {
+                return Ok(None);
+            }
+            let entry_index = u32::try_from(entry_index).map_err(|_| {
+                TransportError::Frame("delta manifest entry index exceeds u32::MAX".to_string())
+            })?;
+            let mut file = crate::fs::File::open(&entry.abs_path)
+                .await
+                .map_err(|err| {
+                    TransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+                })?;
+            let mut entry_offset = 0u64;
+            loop {
+                let n = file.read(&mut read_buf).await.map_err(|err| {
+                    TransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+                })?;
+                if n == 0 {
+                    break;
+                }
+                let chunk = &read_buf[..n];
+                let insert = store.insert(chunk).map_err(|err| {
+                    TransportError::Frame(format!("delta chunk store insert: {err}"))
+                })?;
+                let size_bytes = u64::try_from(n)
+                    .map_err(|_| TransportError::Frame("delta chunk size overflow".to_string()))?;
+                let chunk_ref = CasChunkRef {
+                    index,
+                    byte_offset: stream_offset,
+                    size_bytes,
+                    content_id: insert.content_id.clone(),
+                };
+                wire_chunks.push(DeltaChunkWire {
+                    index,
+                    entry_index,
+                    rel_path: entry.rel_path.clone(),
+                    entry_offset,
+                    stream_offset,
+                    size_bytes,
+                    content_id_hex: hex_encode(insert.content_id.hash()),
+                });
+                refs.push(chunk_ref);
+                index = index.checked_add(1).ok_or_else(|| {
+                    TransportError::Frame("delta chunk index overflow".to_string())
+                })?;
+                stream_offset = stream_offset.checked_add(size_bytes).ok_or_else(|| {
+                    TransportError::Frame("delta stream offset overflow".to_string())
+                })?;
+                entry_offset = entry_offset.checked_add(size_bytes).ok_or_else(|| {
+                    TransportError::Frame("delta entry offset overflow".to_string())
+                })?;
+            }
+        }
+
+        let manifest = PersistentChunkManifest::new(tree_id.to_string(), refs)
+            .map_err(|err| TransportError::Frame(format!("build delta manifest: {err}")))?;
+        let wire = DeltaManifestWire {
+            schema: DELTA_CHUNK_SCHEMA.to_string(),
+            tree_id: tree_id.to_string(),
+            chunk_size,
+            total_size_bytes: manifest.total_size_bytes,
+            merkle_root_hex: manifest.merkle_root.to_hex(),
+            chunks: wire_chunks,
+        };
+        Ok(Some(DeltaTransferBasis {
+            manifest,
+            wire,
+            store,
+        }))
+    }
+
+    async fn build_delta_basis_for_path(
+        cx: &Cx,
+        source: &Path,
+        config: &TransferConfig,
+    ) -> Result<Option<DeltaTransferBasis>, TransportError> {
+        let (_, _, entries) = collect_entries(source).await?;
+        let mut read_buf = vec![0u8; config.chunk_size.max(1)];
+        let mut digests = Vec::with_capacity(entries.len());
+        let mut metadatas = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+            let metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
+            if !metadata.is_bare() {
+                return Ok(None);
+            }
+            let (size, content_id, content_sha256) =
+                hash_file_streaming(&entry.abs_path, &mut read_buf).await?;
+            digests.push(EntryDigest {
+                rel_path: entry.rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            });
+            metadatas.push(metadata);
+        }
+        let tree_id = flat_merkle_root_from_digests(&digests);
+        build_delta_basis_from_entries(cx, &entries, &metadatas, &tree_id, config.chunk_size).await
+    }
+
+    fn delta_fallback_reason_text(reason: Option<DeltaResyncFallbackReason>) -> String {
+        match reason {
+            Some(DeltaResyncFallbackReason::NoReceiverManifest) => "no_receiver_manifest",
+            Some(DeltaResyncFallbackReason::ReceiverCasCoverageIncomplete) => {
+                "receiver_cas_coverage_incomplete"
+            }
+            Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject) => {
+                "delta_not_smaller_than_full_object"
+            }
+            None => "delta_planner_selected_full_object",
+        }
+        .to_string()
+    }
+
+    fn delta_request_from_plan(
+        mode: DeltaResyncMode,
+        fallback_reason: Option<DeltaResyncFallbackReason>,
+        sender_merkle_root: &MerkleRoot,
+        receiver_merkle_root: Option<&MerkleRoot>,
+        missing_bytes: u64,
+        shared_chunks: u64,
+        stale_chunks: usize,
+        missing_chunks: &[CasChunkRef],
+        wire: &DeltaManifestWire,
+    ) -> Result<DeltaObjectRequest, TransportError> {
+        if matches!(mode, DeltaResyncMode::FullObjectFallback) {
+            return Ok(DeltaObjectRequest::full(
+                sender_merkle_root.to_hex(),
+                receiver_merkle_root.map(MerkleRoot::to_hex),
+                delta_fallback_reason_text(fallback_reason),
+            ));
+        }
+
+        let by_index: BTreeMap<u32, &DeltaChunkWire> = wire
+            .chunks
+            .iter()
+            .map(|chunk| (chunk.index, chunk))
+            .collect();
+        let mut requested = Vec::with_capacity(missing_chunks.len());
+        for chunk in missing_chunks {
+            let Some(wire_chunk) = by_index.get(&chunk.index) else {
+                return Err(TransportError::Frame(format!(
+                    "delta planner requested unknown chunk index {}",
+                    chunk.index
+                )));
+            };
+            if wire_chunk.size_bytes != chunk.size_bytes
+                || wire_chunk.stream_offset != chunk.byte_offset
+                || wire_chunk.content_id_hex != hex_encode(chunk.content_id.hash())
+            {
+                return Err(TransportError::Frame(format!(
+                    "delta planner chunk {} does not match wire manifest",
+                    chunk.index
+                )));
+            }
+            requested.push((*wire_chunk).clone());
+        }
+
+        Ok(DeltaObjectRequest {
+            mode: match mode {
+                DeltaResyncMode::AlreadyInSync => DeltaWireMode::AlreadyInSync,
+                DeltaResyncMode::DeltaChunks => DeltaWireMode::DeltaChunks,
+                DeltaResyncMode::FullObjectFallback => DeltaWireMode::FullObject,
+            },
+            fallback_reason: None,
+            sender_merkle_root_hex: sender_merkle_root.to_hex(),
+            receiver_merkle_root_hex: receiver_merkle_root.map(MerkleRoot::to_hex),
+            missing_bytes,
+            shared_chunks,
+            stale_chunks: stale_chunks as u64,
+            missing_chunks: requested,
+        })
+    }
+
+    async fn receiver_delta_request(
+        cx: &Cx,
+        dest_dir: &Path,
+        manifest: &TransferManifest,
+        config: &TransferConfig,
+    ) -> Result<(DeltaObjectRequest, Option<DeltaTransferBasis>), TransportError> {
+        let Some(delta_wire) = manifest.delta_manifest.as_ref() else {
+            return Ok((
+                DeltaObjectRequest::full(&manifest.merkle_root_hex, None, "delta_manifest_absent"),
+                None,
+            ));
+        };
+        if !config.enable_delta {
+            return Ok((
+                DeltaObjectRequest::full(&delta_wire.merkle_root_hex, None, "delta_disabled"),
+                None,
+            ));
+        }
+
+        let target_manifest = delta_wire_to_manifest(delta_wire)?;
+        let prior_path = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+        match crate::fs::metadata(&prior_path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((
+                    DeltaObjectRequest::full(
+                        target_manifest.merkle_root.to_hex(),
+                        None,
+                        "no_receiver_manifest",
+                    ),
+                    None,
+                ));
+            }
+            Err(err) => {
+                return Ok((
+                    DeltaObjectRequest::full(
+                        target_manifest.merkle_root.to_hex(),
+                        None,
+                        format!("receiver_prior_state_unreadable: {err}"),
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        let Some(prior_basis) = build_delta_basis_for_path(cx, &prior_path, config).await? else {
+            return Ok((
+                DeltaObjectRequest::full(
+                    target_manifest.merkle_root.to_hex(),
+                    None,
+                    "receiver_prior_state_not_delta_safe",
+                ),
+                None,
+            ));
+        };
+        let plan = plan_incremental_resync(
+            &target_manifest,
+            Some(&prior_basis.manifest),
+            &prior_basis.store,
+        );
+        let request = delta_request_from_plan(
+            plan.mode,
+            plan.fallback_reason,
+            &plan.sender_merkle_root,
+            plan.receiver_merkle_root.as_ref(),
+            plan.missing_bytes,
+            plan.shared_chunks,
+            plan.stale_chunks.len(),
+            &plan.missing_chunks,
+            delta_wire,
+        )?;
+        let prior = matches!(
+            request.mode,
+            DeltaWireMode::DeltaChunks | DeltaWireMode::AlreadyInSync
+        )
+        .then_some(prior_basis);
+        Ok((request, prior))
+    }
+
+    fn delta_receive_uses_staging(request: &DeltaObjectRequest) -> bool {
+        matches!(
+            request.mode,
+            DeltaWireMode::DeltaChunks | DeltaWireMode::AlreadyInSync
+        )
+    }
+
+    fn delta_entry_path(
+        root: &Path,
+        root_is_directory: bool,
+        rel_path: &str,
+    ) -> Result<PathBuf, TransportError> {
+        if root_is_directory {
+            join_relative(root, rel_path)
+        } else {
+            Ok(root.to_path_buf())
+        }
+    }
+
+    async fn read_delta_chunk_from_root(
+        root: &Path,
+        root_is_directory: bool,
+        chunk: &DeltaChunkWire,
+    ) -> Result<Vec<u8>, TransportError> {
+        let path = delta_entry_path(root, root_is_directory, &chunk.rel_path)?;
+        let len = usize::try_from(chunk.size_bytes).map_err(|_| {
+            TransportError::Frame("delta baseline chunk size exceeds usize::MAX".to_string())
+        })?;
+        let mut file = crate::fs::File::open(&path)
+            .await
+            .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
+        file.seek(SeekFrom::Start(chunk.entry_offset)).await?;
+        let mut bytes = vec![0u8; len];
+        file.read_exact(&mut bytes)
+            .await
+            .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
+        let observed = ContentId::from_bytes(&bytes).to_hex();
+        if observed != chunk.content_id_hex {
+            return Err(TransportError::Integrity(format!(
+                "delta baseline chunk hash drift for {} at offset {}",
+                chunk.rel_path, chunk.entry_offset
+            )));
+        }
+        Ok(bytes)
+    }
+
+    async fn write_delta_chunk_to_staging(
+        path: &Path,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), TransportError> {
+        let mut file = crate::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path)
+            .await?;
+        file.seek(SeekFrom::Start(offset)).await?;
+        file.write_all(bytes).await?;
+        file.flush().await?;
+        Ok(())
+    }
+
+    async fn prepare_delta_receive_staging(
+        dest_dir: &Path,
+        manifest: &TransferManifest,
+        target_wire: &DeltaManifestWire,
+        state: &ReceiverDeltaState,
+        staging_paths: &[PathBuf],
+    ) -> Result<BTreeSet<DeltaChunkKey>, TransportError> {
+        let Some(baseline) = state.baseline.as_ref() else {
+            return Err(TransportError::Frame(
+                "delta receive selected without verified receiver baseline".to_string(),
+            ));
+        };
+        let pending: BTreeSet<DeltaChunkKey> = state
+            .request
+            .missing_chunks
+            .iter()
+            .map(delta_chunk_key)
+            .collect();
+        if pending.len() != state.request.missing_chunks.len() {
+            return Err(TransportError::Frame(
+                "delta ObjectRequest contains duplicate missing chunks".to_string(),
+            ));
+        }
+
+        for (entry, staging_path) in manifest.entries.iter().zip(staging_paths) {
+            if let Some(parent) = staging_path.parent() {
+                crate::fs::create_dir_all(parent).await?;
+            }
+            let file = crate::fs::File::create(staging_path).await?;
+            file.set_len(entry.size).await?;
+        }
+
+        for chunk in &target_wire.chunks {
+            if pending.contains(&delta_chunk_key(chunk)) {
+                continue;
+            }
+            let key = delta_content_key(chunk.content_id_hex.clone(), chunk.size_bytes);
+            let bytes = baseline.chunks_by_content.get(&key).ok_or_else(|| {
+                TransportError::Frame(format!(
+                    "delta baseline cannot satisfy target chunk {}",
+                    chunk.index
+                ))
+            })?;
+            let staging_path = staging_paths
+                .get(chunk.entry_index as usize)
+                .ok_or_else(|| {
+                    TransportError::Frame("delta chunk entry index out of range".to_string())
+                })?;
+            write_delta_chunk_to_staging(staging_path, chunk.entry_offset, bytes).await?;
+        }
+
+        Ok(pending)
+    }
+
+    async fn receive_delta_data_frame(
+        frame: &Frame,
+        manifest: &TransferManifest,
+        staging_paths: &[PathBuf],
+        pending: &mut BTreeSet<DeltaChunkKey>,
+        received: &mut u64,
+        config: &TransferConfig,
+    ) -> Result<(), TransportError> {
+        let (index, offset, chunk) = parse_data_frame(frame)?;
+        let idx = index as usize;
+        let entry = manifest.entries.get(idx).ok_or_else(|| {
+            TransportError::Frame(format!("ObjectData for unknown entry index {index}"))
+        })?;
+        let size_bytes = u64::try_from(chunk.len())
+            .map_err(|_| TransportError::Frame("delta ObjectData chunk too large".to_string()))?;
+        if offset.saturating_add(size_bytes) > entry.size {
+            return Err(TransportError::Frame(format!(
+                "delta ObjectData entry {index} overruns declared size {}",
+                entry.size
+            )));
+        }
+        let content_id_hex = ContentId::from_bytes(chunk).to_hex();
+        let key = DeltaChunkKey {
+            entry_index: index,
+            entry_offset: offset,
+            size_bytes,
+            content_id_hex,
+        };
+        if !pending.remove(&key) {
+            return Err(TransportError::Frame(format!(
+                "unexpected or duplicate delta ObjectData for entry {index} at offset {offset}"
+            )));
+        }
+        *received = received.saturating_add(size_bytes);
+        if *received > config.max_transfer_bytes {
+            return Err(TransportError::TooLarge {
+                size: *received,
+                max: config.max_transfer_bytes,
+            });
+        }
+        let staging_path = staging_paths.get(idx).ok_or_else(|| {
+            TransportError::Frame("delta staging entry index out of range".to_string())
+        })?;
+        write_delta_chunk_to_staging(staging_path, offset, chunk).await
+    }
+
+    async fn finalize_delta_staging(
+        manifest: &TransferManifest,
+        staging_paths: &[PathBuf],
+        read_buf: &mut [u8],
+    ) -> Result<(Vec<EntryDigest>, bool), TransportError> {
+        let mut digests = Vec::with_capacity(manifest.entries.len());
+        let mut sha_ok = true;
+        for (entry, staging_path) in manifest.entries.iter().zip(staging_paths) {
+            let (size, content_id, content_sha256) =
+                hash_file_streaming(staging_path, read_buf).await?;
+            if size != entry.size || hex_encode(&content_sha256) != entry.sha256_hex {
+                sha_ok = false;
+            }
+            digests.push(EntryDigest {
+                rel_path: entry.rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            });
+        }
+        Ok((digests, sha_ok))
+    }
 }
 
 #[cfg(test)]
@@ -734,6 +1372,864 @@ fn parse_data_frame(frame: &Frame) -> Result<(u32, u64, &[u8]), TransportError> 
     Ok((index, offset, &p[12..]))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DeltaChunkKey {
+    entry_index: u32,
+    entry_offset: u64,
+    size_bytes: u64,
+    content_id_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DeltaContentKey {
+    content_id_hex: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug)]
+struct ReceiverDeltaBaseline {
+    manifest: PersistentChunkManifest,
+    store: DeltaPlannerStore,
+    chunks_by_content: BTreeMap<DeltaContentKey, Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct ReceiverDeltaState {
+    request: DeltaObjectRequest,
+    baseline: Option<ReceiverDeltaBaseline>,
+}
+
+fn delta_chunk_key(chunk: &DeltaChunkWire) -> DeltaChunkKey {
+    DeltaChunkKey {
+        entry_index: chunk.entry_index,
+        entry_offset: chunk.entry_offset,
+        size_bytes: chunk.size_bytes,
+        content_id_hex: chunk.content_id_hex.clone(),
+    }
+}
+
+fn delta_content_key(content_id_hex: impl Into<String>, size_bytes: u64) -> DeltaContentKey {
+    DeltaContentKey {
+        content_id_hex: content_id_hex.into(),
+        size_bytes,
+    }
+}
+
+fn decode_hex_32(hex_value: &str, label: &str) -> Result<[u8; 32], TransportError> {
+    if hex_value.len() != 64 {
+        return Err(TransportError::Frame(format!(
+            "{label} must be exactly 64 hex characters"
+        )));
+    }
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(hex_value, &mut out)
+        .map_err(|err| TransportError::Frame(format!("decode {label}: {err}")))?;
+    Ok(out)
+}
+
+fn planner_manifest_from_wire(
+    manifest: &DeltaManifestWire,
+) -> Result<PersistentChunkManifest, TransportError> {
+    if manifest.schema != DELTA_CHUNK_SCHEMA {
+        return Err(TransportError::Frame(format!(
+            "unsupported delta manifest schema: {}",
+            manifest.schema
+        )));
+    }
+    let chunks = manifest
+        .chunks
+        .iter()
+        .map(|chunk| {
+            Ok(CasChunkRef {
+                index: chunk.index,
+                byte_offset: chunk.stream_offset,
+                size_bytes: chunk.size_bytes,
+                content_id: ContentId::new(decode_hex_32(
+                    &chunk.content_id_hex,
+                    "delta content id",
+                )?),
+            })
+        })
+        .collect::<Result<Vec<_>, TransportError>>()?;
+    let planned =
+        PersistentChunkManifest::new(manifest.tree_id.clone(), chunks).map_err(|err| {
+            TransportError::Frame(format!("invalid delta manifest in ObjectManifest: {err}"))
+        })?;
+    if planned.total_size_bytes != manifest.total_size_bytes {
+        return Err(TransportError::Frame(format!(
+            "delta manifest total size mismatch: wire {}, computed {}",
+            manifest.total_size_bytes, planned.total_size_bytes
+        )));
+    }
+    if planned.merkle_root.to_hex() != manifest.merkle_root_hex {
+        return Err(TransportError::Frame(format!(
+            "delta manifest Merkle root mismatch: wire {}, computed {}",
+            manifest.merkle_root_hex,
+            planned.merkle_root.to_hex()
+        )));
+    }
+    Ok(planned)
+}
+
+fn fallback_reason_label(reason: DeltaResyncFallbackReason) -> &'static str {
+    match reason {
+        DeltaResyncFallbackReason::NoReceiverManifest => "no_receiver_manifest",
+        DeltaResyncFallbackReason::ReceiverCasCoverageIncomplete => {
+            "receiver_cas_coverage_incomplete"
+        }
+        DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject => {
+            "delta_not_smaller_than_full_object"
+        }
+    }
+}
+
+async fn build_delta_manifest_from_entries(
+    tree_id: String,
+    entries: &[SourceEntry],
+    metadatas: &[EntryMetadata],
+    chunk_size: usize,
+) -> Result<DeltaManifestWire, TransportError> {
+    let chunk_size = chunk_size.max(1);
+    let mut wire_chunks = Vec::new();
+    let mut planner_chunks = Vec::new();
+    let mut stream_offset = 0u64;
+    let mut index = 0u32;
+
+    for (entry_index, (entry, metadata)) in entries.iter().zip(metadatas).enumerate() {
+        if !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some() {
+            continue;
+        }
+        let entry_index = u32::try_from(entry_index)
+            .map_err(|_| TransportError::Frame("too many delta manifest entries".to_string()))?;
+        append_file_delta_chunks(
+            &entry.abs_path,
+            &entry.rel_path,
+            entry_index,
+            chunk_size,
+            &mut index,
+            &mut stream_offset,
+            &mut wire_chunks,
+            &mut planner_chunks,
+        )
+        .await?;
+    }
+
+    let planner = PersistentChunkManifest::new(tree_id.clone(), planner_chunks)
+        .map_err(|err| TransportError::Frame(format!("build sender delta manifest: {err}")))?;
+    Ok(DeltaManifestWire {
+        schema: DELTA_CHUNK_SCHEMA.to_string(),
+        tree_id,
+        chunk_size,
+        total_size_bytes: planner.total_size_bytes,
+        merkle_root_hex: planner.merkle_root.to_hex(),
+        chunks: wire_chunks,
+    })
+}
+
+async fn append_file_delta_chunks(
+    path: &Path,
+    rel_path: &str,
+    entry_index: u32,
+    chunk_size: usize,
+    next_index: &mut u32,
+    stream_offset: &mut u64,
+    wire_chunks: &mut Vec<DeltaChunkWire>,
+    planner_chunks: &mut Vec<CasChunkRef>,
+) -> Result<(), TransportError> {
+    let mut file = crate::fs::File::open(path)
+        .await
+        .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
+    let mut entry_offset = 0u64;
+    let mut buf = vec![0u8; chunk_size];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        let bytes = &buf[..n];
+        let size_bytes = u64::try_from(n)
+            .map_err(|_| TransportError::Frame("delta chunk length overflow".to_string()))?;
+        let content_id = ContentId::from_bytes(bytes);
+        let chunk = CasChunkRef {
+            index: *next_index,
+            byte_offset: *stream_offset,
+            size_bytes,
+            content_id: content_id.clone(),
+        };
+        planner_chunks.push(chunk);
+        wire_chunks.push(DeltaChunkWire {
+            index: *next_index,
+            entry_index,
+            rel_path: rel_path.to_string(),
+            entry_offset,
+            stream_offset: *stream_offset,
+            size_bytes,
+            content_id_hex: content_id.to_hex(),
+        });
+        *next_index = (*next_index)
+            .checked_add(1)
+            .ok_or_else(|| TransportError::Frame("delta chunk index overflow".to_string()))?;
+        entry_offset = entry_offset
+            .checked_add(size_bytes)
+            .ok_or_else(|| TransportError::Frame("delta entry offset overflow".to_string()))?;
+        *stream_offset = (*stream_offset)
+            .checked_add(size_bytes)
+            .ok_or_else(|| TransportError::Frame("delta stream offset overflow".to_string()))?;
+    }
+    Ok(())
+}
+
+async fn send_full_entries_streaming<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    entries: &[SourceEntry],
+    metadatas: &[EntryMetadata],
+    digests: &[EntryDigest],
+    config: &TransferConfig,
+    read_buf: &mut [u8],
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<u64, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let total_bytes = digests
+        .iter()
+        .fold(0u64, |sum, digest| sum.saturating_add(digest.size));
+    let mut sent_bytes = 0u64;
+    for (i, entry) in entries.iter().enumerate() {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        if !matches!(metadatas[i].file_kind, FileKind::Regular)
+            || metadatas[i].hardlink_target.is_some()
+        {
+            continue;
+        }
+        let index = u32::try_from(i).unwrap_or(u32::MAX);
+        send_file_streaming(cx, transport, index, &entry.abs_path, config, read_buf).await?;
+        sent_bytes = sent_bytes.saturating_add(digests[i].size);
+        on_progress(sent_bytes, total_bytes);
+    }
+    on_progress(total_bytes, total_bytes);
+    Ok(total_bytes)
+}
+
+async fn send_delta_entries_streaming<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    entries: &[SourceEntry],
+    manifest: &DeltaManifestWire,
+    request: &DeltaObjectRequest,
+    config: &TransferConfig,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<u64, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let advertised: BTreeSet<DeltaChunkKey> = manifest.chunks.iter().map(delta_chunk_key).collect();
+    let requested: BTreeSet<DeltaChunkKey> =
+        request.missing_chunks.iter().map(delta_chunk_key).collect();
+    if requested.len() != request.missing_chunks.len() {
+        return Err(TransportError::Frame(
+            "delta ObjectRequest contains duplicate missing chunks".to_string(),
+        ));
+    }
+    if !requested.is_subset(&advertised) {
+        return Err(TransportError::Frame(
+            "delta ObjectRequest asks for a chunk outside the sender manifest".to_string(),
+        ));
+    }
+
+    let total_bytes = request.missing_bytes;
+    let mut sent_bytes = 0u64;
+    for chunk in &request.missing_chunks {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        let entry = entries
+            .get(chunk.entry_index as usize)
+            .ok_or_else(|| TransportError::Frame("delta chunk entry index out of range".into()))?;
+        let mut file = crate::fs::File::open(&entry.abs_path)
+            .await
+            .map_err(|err| {
+                TransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+            })?;
+        file.seek(SeekFrom::Start(chunk.entry_offset)).await?;
+        let len = usize::try_from(chunk.size_bytes).map_err(|_| {
+            TransportError::Frame("delta requested chunk size exceeds usize::MAX".to_string())
+        })?;
+        let mut bytes = vec![0u8; len];
+        file.read_exact(&mut bytes).await.map_err(|err| {
+            TransportError::Source(format!("{}: {err}", entry.abs_path.display()))
+        })?;
+        let observed = ContentId::from_bytes(&bytes).to_hex();
+        if observed != chunk.content_id_hex {
+            return Err(TransportError::Integrity(format!(
+                "delta source chunk hash drift for {} at offset {}",
+                chunk.rel_path, chunk.entry_offset
+            )));
+        }
+        let frame = data_frame(chunk.entry_index, chunk.entry_offset, &bytes)?;
+        with_transport_timeout(
+            cx,
+            config.idle_timeout,
+            "send delta data frame",
+            transport.send(&frame),
+        )
+        .await?;
+        sent_bytes = sent_bytes.saturating_add(chunk.size_bytes);
+        on_progress(sent_bytes, total_bytes);
+    }
+    on_progress(total_bytes, total_bytes);
+    Ok(total_bytes)
+}
+
+async fn build_receiver_delta_state(
+    dest_dir: &Path,
+    manifest: &TransferManifest,
+    config: &TransferConfig,
+) -> Result<ReceiverDeltaState, TransportError> {
+    let Some(delta_manifest) = manifest.delta_manifest.as_ref() else {
+        return Ok(ReceiverDeltaState {
+            request: DeltaObjectRequest::full("", None, "sender_delta_manifest_unavailable"),
+            baseline: None,
+        });
+    };
+    let sender_manifest = planner_manifest_from_wire(delta_manifest)?;
+    if !config.enable_delta {
+        return Ok(ReceiverDeltaState {
+            request: DeltaObjectRequest::full(
+                sender_manifest.merkle_root.to_hex(),
+                None,
+                "receiver_delta_disabled",
+            ),
+            baseline: None,
+        });
+    }
+    if manifest.entries.iter().any(delta_unsupported_metadata) {
+        return Ok(ReceiverDeltaState {
+            request: DeltaObjectRequest::full(
+                sender_manifest.merkle_root.to_hex(),
+                None,
+                "delta_unsupported_metadata",
+            ),
+            baseline: None,
+        });
+    }
+
+    let Some(baseline) =
+        build_receiver_delta_baseline(dest_dir, manifest, delta_manifest, config).await?
+    else {
+        return Ok(ReceiverDeltaState {
+            request: DeltaObjectRequest::full(
+                sender_manifest.merkle_root.to_hex(),
+                None,
+                fallback_reason_label(DeltaResyncFallbackReason::NoReceiverManifest),
+            ),
+            baseline: None,
+        });
+    };
+
+    let plan = plan_incremental_resync(&sender_manifest, Some(&baseline.manifest), &baseline.store);
+    let receiver_merkle_root_hex = Some(baseline.manifest.merkle_root.to_hex());
+    let request = match plan.mode {
+        DeltaResyncMode::AlreadyInSync => DeltaObjectRequest {
+            mode: DeltaWireMode::AlreadyInSync,
+            fallback_reason: None,
+            sender_merkle_root_hex: plan.sender_merkle_root.to_hex(),
+            receiver_merkle_root_hex,
+            missing_bytes: 0,
+            shared_chunks: plan.shared_chunks,
+            stale_chunks: 0,
+            missing_chunks: Vec::new(),
+        },
+        DeltaResyncMode::FullObjectFallback => DeltaObjectRequest {
+            mode: DeltaWireMode::FullObject,
+            fallback_reason: Some(
+                fallback_reason_label(
+                    plan.fallback_reason
+                        .unwrap_or(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject),
+                )
+                .to_string(),
+            ),
+            sender_merkle_root_hex: plan.sender_merkle_root.to_hex(),
+            receiver_merkle_root_hex,
+            missing_bytes: plan.missing_bytes,
+            shared_chunks: plan.shared_chunks,
+            stale_chunks: plan.stale_chunks.len() as u64,
+            missing_chunks: Vec::new(),
+        },
+        DeltaResyncMode::DeltaChunks => DeltaObjectRequest {
+            mode: DeltaWireMode::DeltaChunks,
+            fallback_reason: None,
+            sender_merkle_root_hex: plan.sender_merkle_root.to_hex(),
+            receiver_merkle_root_hex,
+            missing_bytes: plan.missing_bytes,
+            shared_chunks: plan.shared_chunks,
+            stale_chunks: plan.stale_chunks.len() as u64,
+            missing_chunks: wire_missing_chunks(delta_manifest, &plan.missing_chunks)?,
+        },
+    };
+
+    Ok(ReceiverDeltaState {
+        baseline: matches!(
+            request.mode,
+            DeltaWireMode::DeltaChunks | DeltaWireMode::AlreadyInSync
+        )
+        .then_some(baseline),
+        request,
+    })
+}
+
+fn delta_unsupported_metadata(entry: &ManifestEntry) -> bool {
+    entry.metadata.as_ref().is_some_and(|metadata| {
+        !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some()
+    })
+}
+
+fn wire_missing_chunks(
+    manifest: &DeltaManifestWire,
+    missing_chunks: &[CasChunkRef],
+) -> Result<Vec<DeltaChunkWire>, TransportError> {
+    let mut by_ref = BTreeMap::new();
+    for chunk in &manifest.chunks {
+        by_ref.insert(
+            (
+                chunk.index,
+                chunk.stream_offset,
+                chunk.size_bytes,
+                chunk.content_id_hex.clone(),
+            ),
+            chunk,
+        );
+    }
+    missing_chunks
+        .iter()
+        .map(|chunk| {
+            let key = (
+                chunk.index,
+                chunk.byte_offset,
+                chunk.size_bytes,
+                chunk.content_id.to_hex(),
+            );
+            by_ref.get(&key).cloned().cloned().ok_or_else(|| {
+                TransportError::Frame(
+                    "delta planner selected a chunk absent from wire manifest".into(),
+                )
+            })
+        })
+        .collect()
+}
+
+async fn build_receiver_delta_baseline(
+    dest_dir: &Path,
+    manifest: &TransferManifest,
+    delta_manifest: &DeltaManifestWire,
+    config: &TransferConfig,
+) -> Result<Option<ReceiverDeltaBaseline>, TransportError> {
+    let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+    if !base.exists() {
+        return Ok(None);
+    }
+    let (_, _, entries) = collect_entries(&base).await?;
+    let mut store = DeltaPlannerStore::new();
+    let mut chunks_by_content = BTreeMap::new();
+    let mut planner_chunks = Vec::new();
+    let mut digests = Vec::with_capacity(entries.len());
+    let mut read_buf = vec![0u8; config.chunk_size.max(1)];
+    let mut stream_offset = 0u64;
+    let mut index = 0u32;
+
+    for entry in entries {
+        let metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
+        if !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some() {
+            return Ok(None);
+        }
+        let (size, content_id, content_sha256) =
+            hash_file_streaming(&entry.abs_path, &mut read_buf).await?;
+        digests.push(EntryDigest {
+            rel_path: entry.rel_path.clone(),
+            size,
+            content_id,
+            content_sha256,
+        });
+        append_receiver_delta_chunks(
+            &entry.abs_path,
+            delta_manifest.chunk_size.max(1),
+            &mut index,
+            &mut stream_offset,
+            &mut store,
+            &mut chunks_by_content,
+            &mut planner_chunks,
+        )
+        .await?;
+    }
+
+    let receiver_tree_id = flat_merkle_root_from_digests(&digests);
+    let receiver_manifest = PersistentChunkManifest::new(receiver_tree_id, planner_chunks)
+        .map_err(|err| TransportError::Frame(format!("build receiver delta manifest: {err}")))?;
+    Ok(Some(ReceiverDeltaBaseline {
+        manifest: receiver_manifest,
+        store,
+        chunks_by_content,
+    }))
+}
+
+async fn append_receiver_delta_chunks(
+    path: &Path,
+    chunk_size: usize,
+    next_index: &mut u32,
+    stream_offset: &mut u64,
+    store: &mut DeltaPlannerStore,
+    chunks_by_content: &mut BTreeMap<DeltaContentKey, Vec<u8>>,
+    planner_chunks: &mut Vec<CasChunkRef>,
+) -> Result<(), TransportError> {
+    let mut file = crate::fs::File::open(path)
+        .await
+        .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
+    let mut buf = vec![0u8; chunk_size.max(1)];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        let bytes = &buf[..n];
+        let insert = store
+            .insert(bytes)
+            .map_err(|err| TransportError::Frame(format!("receiver delta CAS insert: {err}")))?;
+        let size_bytes = u64::try_from(n)
+            .map_err(|_| TransportError::Frame("delta chunk length overflow".to_string()))?;
+        let content_id_hex = insert.content_id.to_hex();
+        chunks_by_content
+            .entry(delta_content_key(content_id_hex.clone(), size_bytes))
+            .or_insert_with(|| bytes.to_vec());
+        planner_chunks.push(CasChunkRef {
+            index: *next_index,
+            byte_offset: *stream_offset,
+            size_bytes,
+            content_id: insert.content_id,
+        });
+        *next_index = (*next_index)
+            .checked_add(1)
+            .ok_or_else(|| TransportError::Frame("delta chunk index overflow".to_string()))?;
+        *stream_offset = (*stream_offset)
+            .checked_add(size_bytes)
+            .ok_or_else(|| TransportError::Frame("delta stream offset overflow".to_string()))?;
+    }
+    Ok(())
+}
+
+async fn send_receipt_and_close<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    config: &TransferConfig,
+    receipt: &ReceiveReceipt,
+) -> Result<(), TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let proof = json_frame(FrameType::Proof, receipt)?;
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send proof",
+        transport.send(&proof),
+    )
+    .await?;
+    let close = Frame::empty(FrameType::Close).map_err(|e| TransportError::Frame(e.to_string()))?;
+    let _ = with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send close",
+        transport.send(&close),
+    )
+    .await;
+    Ok(())
+}
+
+async fn commit_verified_staging(
+    cx: &Cx,
+    dest_dir: &Path,
+    manifest: &TransferManifest,
+    config: &TransferConfig,
+    staging_paths: &[PathBuf],
+) -> Result<Vec<PathBuf>, TransportError> {
+    let mut committed_paths = Vec::new();
+    let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+    for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
+        let out_path = if manifest.is_directory {
+            join_relative(&base, &entry.rel_path)?
+        } else {
+            base.clone()
+        };
+
+        if let Some(meta) = &entry.metadata {
+            if meta.file_kind.is_special() {
+                if matches!(meta.file_kind, FileKind::Fifo) && config.allow_special_files {
+                    if let Some(parent) = out_path.parent() {
+                        crate::fs::create_dir_all(parent).await?;
+                    }
+                    let mode = meta.unix_mode.unwrap_or(0o644);
+                    let _ = crate::fs::remove_file(&out_path).await;
+                    crate::net::atp::transport_common::metadata::recreate_fifo(&out_path, mode)
+                        .await?;
+                    committed_paths.push(out_path);
+                    continue;
+                }
+                if cx.trace_buffer().is_some() {
+                    let path_str = out_path.display().to_string();
+                    let kind = format!("{:?}", meta.file_kind);
+                    cx.trace_with_fields(
+                        "atp_tcp_special_file_skipped",
+                        &[("path", path_str.as_str()), ("kind", kind.as_str())],
+                    );
+                }
+                continue;
+            }
+        }
+
+        if let Some(parent) = out_path.parent() {
+            crate::fs::create_dir_all(parent).await?;
+        }
+
+        if let Some(meta) = &entry.metadata {
+            if matches!(meta.file_kind, FileKind::Directory) {
+                crate::fs::create_dir_all(&out_path).await?;
+                apply_entry_metadata_best_effort(cx, &out_path, meta).await;
+                committed_paths.push(out_path);
+                continue;
+            }
+        }
+
+        let symlink_target = entry.metadata.as_ref().and_then(|m| {
+            matches!(m.file_kind, FileKind::Symlink)
+                .then(|| m.symlink_target.clone())
+                .flatten()
+        });
+        if let Some(target) = symlink_target {
+            let _ = crate::fs::remove_file(&out_path).await;
+            crate::fs::symlink(&target, &out_path).await?;
+            committed_paths.push(out_path);
+            continue;
+        }
+
+        let hardlink_target = entry
+            .metadata
+            .as_ref()
+            .and_then(|m| m.hardlink_target.clone());
+        if let Some(primary_rel) = hardlink_target {
+            let primary_path = join_relative(&base, &primary_rel)?;
+            let _ = crate::fs::remove_file(&out_path).await;
+            crate::fs::hard_link(&primary_path, &out_path).await?;
+            committed_paths.push(out_path);
+            continue;
+        }
+
+        crate::fs::rename(staging_path, &out_path).await?;
+        if let Some(meta) = &entry.metadata {
+            apply_entry_metadata_best_effort(cx, &out_path, meta).await;
+        }
+        committed_paths.push(out_path);
+    }
+    Ok(committed_paths)
+}
+
+#[cfg(any())]
+mod unused_delta_payload_helpers {
+    use super::*;
+
+    async fn expect_object_complete<S>(
+        cx: &Cx,
+        transport: &mut FrameTransport<S>,
+        config: &TransferConfig,
+    ) -> Result<(), TransportError>
+    where
+        S: AsyncReadExt + AsyncWriteExt + Unpin,
+    {
+        let frame = with_transport_timeout(
+            cx,
+            config.idle_timeout,
+            "receive completion",
+            transport.recv(),
+        )
+        .await?;
+        match frame.frame_type() {
+            FrameType::ObjectComplete | FrameType::Close => Ok(()),
+            FrameType::Error => Err(TransportError::Frame(format!(
+                "peer sent Error frame: {}",
+                String::from_utf8_lossy(frame.payload())
+            ))),
+            other => Err(TransportError::Unexpected {
+                got: other,
+                expected: "ObjectComplete | Close",
+            }),
+        }
+    }
+
+    fn committed_paths_for_existing_manifest(
+        dest_dir: &Path,
+        manifest: &TransferManifest,
+    ) -> Result<Vec<PathBuf>, TransportError> {
+        let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+        manifest
+            .entries
+            .iter()
+            .map(|entry| {
+                if manifest.is_directory {
+                    join_relative(&base, &entry.rel_path)
+                } else {
+                    Ok(base.clone())
+                }
+            })
+            .collect()
+    }
+
+    async fn create_delta_staging_files(
+        dest_dir: &Path,
+        staging_dir: &Path,
+        manifest: &TransferManifest,
+        baseline: &ReceiverDeltaBaseline,
+    ) -> Result<Vec<PathBuf>, TransportError> {
+        let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
+        let mut staging_paths = Vec::with_capacity(manifest.entries.len());
+        let mut baseline_by_content = baseline.chunks_by_content.clone();
+
+        for (index, entry) in manifest.entries.iter().enumerate() {
+            let staging_path = staging_dir.join(index.to_string());
+            let mut staged = crate::fs::File::create(&staging_path).await?;
+            let mut written = 0u64;
+
+            let Some(delta_manifest) = manifest.delta_manifest.as_ref() else {
+                return Err(TransportError::Frame(
+                    "delta staging requires sender delta manifest".to_string(),
+                ));
+            };
+            for chunk in delta_manifest
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.entry_index as usize == index)
+            {
+                let key = delta_content_key(chunk.content_id_hex.clone(), chunk.size_bytes);
+                if let Some(bytes) = baseline_by_content.get_mut(&key) {
+                    staged.seek(SeekFrom::Start(chunk.entry_offset)).await?;
+                    staged.write_all(bytes).await?;
+                    written = written.saturating_add(chunk.size_bytes);
+                }
+            }
+
+            staged.set_len(entry.size).await?;
+            staged.flush().await?;
+            let _ = written;
+            staging_paths.push(staging_path);
+        }
+
+        let _ = base;
+        Ok(staging_paths)
+    }
+
+    async fn receive_delta_payload<S>(
+        cx: &Cx,
+        transport: &mut FrameTransport<S>,
+        config: &TransferConfig,
+        manifest: &TransferManifest,
+        staging_paths: &[PathBuf],
+    ) -> Result<u64, TransportError>
+    where
+        S: AsyncReadExt + AsyncWriteExt + Unpin,
+    {
+        let mut received = 0u64;
+        loop {
+            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+            let frame = with_transport_timeout(
+                cx,
+                config.idle_timeout,
+                "receive delta frame",
+                transport.recv(),
+            )
+            .await?;
+            match frame.frame_type() {
+                FrameType::ObjectData => {
+                    let (index, offset, chunk) = parse_data_frame(&frame)?;
+                    let idx = index as usize;
+                    let entry = manifest.entries.get(idx).ok_or_else(|| {
+                        TransportError::Frame(format!("ObjectData for unknown entry index {index}"))
+                    })?;
+                    if offset.saturating_add(chunk.len() as u64) > entry.size {
+                        return Err(TransportError::Frame(format!(
+                            "delta ObjectData entry {index} overruns declared size {}",
+                            entry.size
+                        )));
+                    }
+                    let staging_path = staging_paths.get(idx).ok_or_else(|| {
+                        TransportError::Frame(format!(
+                            "missing delta staging path for entry {index}"
+                        ))
+                    })?;
+                    let mut file = crate::fs::File::options()
+                        .write(true)
+                        .open(staging_path)
+                        .await?;
+                    file.seek(SeekFrom::Start(offset)).await?;
+                    if config.sparse_files {
+                        write_chunk_sparse(&mut file, chunk).await?;
+                    } else {
+                        file.write_all(chunk).await?;
+                    }
+                    file.flush().await?;
+                    received = received.saturating_add(chunk.len() as u64);
+                    if received > config.max_transfer_bytes {
+                        return Err(TransportError::TooLarge {
+                            size: received,
+                            max: config.max_transfer_bytes,
+                        });
+                    }
+                }
+                FrameType::ObjectComplete | FrameType::Close => break,
+                FrameType::Error => {
+                    return Err(TransportError::Frame(format!(
+                        "peer sent Error frame: {}",
+                        String::from_utf8_lossy(frame.payload())
+                    )));
+                }
+                other => {
+                    return Err(TransportError::Unexpected {
+                        got: other,
+                        expected: "ObjectData | ObjectComplete | Close",
+                    });
+                }
+            }
+        }
+        Ok(received)
+    }
+
+    async fn verify_staging_digests(
+        manifest: &TransferManifest,
+        staging_paths: &[PathBuf],
+        chunk_size: usize,
+    ) -> Result<(bool, bool, Vec<EntryDigest>), TransportError> {
+        let mut read_buf = vec![0u8; chunk_size.max(1)];
+        let mut sha_ok = true;
+        let mut digests = Vec::with_capacity(manifest.entries.len());
+        for (entry, path) in manifest.entries.iter().zip(staging_paths.iter()) {
+            let (size, content_id, content_sha256) =
+                hash_file_streaming(path, &mut read_buf).await?;
+            if size != entry.size || hex_encode(&content_sha256) != entry.sha256_hex {
+                sha_ok = false;
+            }
+            digests.push(EntryDigest {
+                rel_path: entry.rel_path.clone(),
+                size,
+                content_id,
+                content_sha256,
+            });
+        }
+        let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex;
+        Ok((sha_ok, merkle_ok, digests))
+    }
+}
+
 async fn with_transport_timeout<T, E, F>(
     cx: &Cx,
     timeout: Duration,
@@ -753,11 +2249,7 @@ where
     }
 }
 
-fn trace_tcp_metadata_skips(
-    cx: &Cx,
-    out_path: &Path,
-    skipped: &[(&'static str, String)],
-) {
+fn trace_tcp_metadata_skips(cx: &Cx, out_path: &Path, skipped: &[(&'static str, String)]) {
     if cx.trace_buffer().is_none() || skipped.is_empty() {
         return;
     }
@@ -967,6 +2459,19 @@ pub async fn send_path_filtered(
         .map(|(d, m)| (d.rel_path.as_str(), m))
         .collect();
     let metadata_root_hex = metadata_commitment(&metadata_pairs);
+    let delta_manifest = if config.enable_delta {
+        Some(
+            build_delta_manifest_from_entries(
+                merkle_root_hex.clone(),
+                &entries,
+                &metadatas,
+                config.chunk_size,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let manifest_entries: Vec<ManifestEntry> = digests
         .iter()
         .zip(&metadatas)
@@ -988,6 +2493,7 @@ pub async fn send_path_filtered(
         merkle_root_hex: merkle_root_hex.clone(),
         metadata_root_hex,
         entries: manifest_entries,
+        delta_manifest,
     };
 
     let stream =
@@ -1041,37 +2547,60 @@ pub async fn send_path_filtered(
         transport.send(&manifest_frame),
     )
     .await?;
-
-    // Bulk data, entry by entry — second streaming pass. Each file is re-read
-    // off disk in `read_buf`-sized chunks and framed directly onto the wire, so
-    // the sender never holds a whole file (or the whole transfer) in memory.
-    let mut sent_bytes: u64 = 0;
-    for (i, entry) in entries.iter().enumerate() {
-        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        // Non-regular entries (symlinks, empty dirs, special files) and
-        // hardlinks-to-a-primary carry no content bytes; the receiver
-        // materializes them from the manifest metadata at commit, so emit no
-        // ObjectData frames.
-        if !matches!(metadatas[i].file_kind, FileKind::Regular)
-            || metadatas[i].hardlink_target.is_some()
-        {
-            continue;
-        }
-        let index = u32::try_from(i).unwrap_or(u32::MAX);
-        send_file_streaming(
-            cx,
-            &mut transport,
-            index,
-            &entry.abs_path,
-            &config,
-            &mut read_buf,
-        )
-        .await?;
-        sent_bytes = sent_bytes.saturating_add(digests[i].size);
-        on_progress(sent_bytes, total_bytes);
+    let request_frame = with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "receive object request",
+        transport.recv(),
+    )
+    .await?;
+    if request_frame.frame_type() != FrameType::ObjectRequest {
+        return Err(TransportError::Unexpected {
+            got: request_frame.frame_type(),
+            expected: "ObjectRequest",
+        });
     }
-    // Final tick so a progress consumer always observes completion at 100%.
-    on_progress(total_bytes, total_bytes);
+    let delta_request: DeltaObjectRequest = parse_json(&request_frame)?;
+
+    // Bulk data, entry by entry — second streaming pass. For a delta request,
+    // only receiver-missing chunks are re-read and framed. Otherwise this is the
+    // legacy full-object stream, preserving the existing fallback path.
+    let bytes_sent = match delta_request.mode {
+        DeltaWireMode::AlreadyInSync => {
+            on_progress(total_bytes, total_bytes);
+            0
+        }
+        DeltaWireMode::DeltaChunks => {
+            let delta_manifest = manifest.delta_manifest.as_ref().ok_or_else(|| {
+                TransportError::Frame(
+                    "receiver requested delta without sender manifest".to_string(),
+                )
+            })?;
+            send_delta_entries_streaming(
+                cx,
+                &mut transport,
+                &entries,
+                delta_manifest,
+                &delta_request,
+                &config,
+                &mut on_progress,
+            )
+            .await?
+        }
+        DeltaWireMode::FullObject => {
+            send_full_entries_streaming(
+                cx,
+                &mut transport,
+                &entries,
+                &metadatas,
+                &digests,
+                &config,
+                &mut read_buf,
+                &mut on_progress,
+            )
+            .await?
+        }
+    };
 
     // Completion + receipt.
     let complete = Frame::empty(FrameType::ObjectComplete)
@@ -1113,7 +2642,7 @@ pub async fn send_path_filtered(
 
     Ok(SendReport {
         transfer_id,
-        bytes_sent: total_bytes,
+        bytes_sent,
         files: u32::try_from(entries.len()).unwrap_or(u32::MAX),
         symbols_sent: 0,
         feedback_rounds: 0,
@@ -1180,6 +2709,279 @@ impl Drop for StagingDirGuard {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
+}
+
+async fn receive_delta_chunks_and_commit<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    peer: SocketAddr,
+    dest_dir: &Path,
+    config: &TransferConfig,
+    manifest: &TransferManifest,
+    baseline: &ReceiverDeltaBaseline,
+    request: &DeltaObjectRequest,
+) -> Result<ReceiveReport, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let delta_manifest = manifest.delta_manifest.as_ref().ok_or_else(|| {
+        TransportError::Frame("delta receive selected without sender manifest".to_string())
+    })?;
+    let requested_keys: BTreeSet<DeltaChunkKey> =
+        request.missing_chunks.iter().map(delta_chunk_key).collect();
+    let requested_by_key: BTreeMap<DeltaChunkKey, &DeltaChunkWire> = request
+        .missing_chunks
+        .iter()
+        .map(|chunk| (delta_chunk_key(chunk), chunk))
+        .collect();
+    if requested_keys.len() != request.missing_chunks.len() {
+        return Err(TransportError::Frame(
+            "delta ObjectRequest contains duplicate missing chunks".to_string(),
+        ));
+    }
+
+    let mut received_chunks = BTreeMap::<DeltaContentKey, Vec<u8>>::new();
+    let mut received_keys = BTreeSet::<DeltaChunkKey>::new();
+    let mut received = 0u64;
+    let recv_result: Result<(), TransportError> = async {
+        loop {
+            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+            let frame =
+                with_transport_timeout(cx, config.idle_timeout, "receive frame", transport.recv())
+                    .await?;
+            match frame.frame_type() {
+                FrameType::ObjectData => {
+                    let (entry_index, entry_offset, chunk) = parse_data_frame(&frame)?;
+                    let size_bytes = u64::try_from(chunk.len()).map_err(|_| {
+                        TransportError::Frame("delta chunk length overflow".to_string())
+                    })?;
+                    let content_id_hex = ContentId::from_bytes(chunk).to_hex();
+                    let key = DeltaChunkKey {
+                        entry_index,
+                        entry_offset,
+                        size_bytes,
+                        content_id_hex: content_id_hex.clone(),
+                    };
+                    if !requested_keys.contains(&key) {
+                        return Err(TransportError::Frame(format!(
+                            "unexpected delta chunk for entry {entry_index} offset {entry_offset}"
+                        )));
+                    }
+                    if !received_keys.insert(key) {
+                        return Err(TransportError::Frame(format!(
+                            "duplicate delta chunk for entry {entry_index} offset {entry_offset}"
+                        )));
+                    }
+                    received = received.saturating_add(size_bytes);
+                    if received > config.max_transfer_bytes {
+                        return Err(TransportError::TooLarge {
+                            size: received,
+                            max: config.max_transfer_bytes,
+                        });
+                    }
+                    received_chunks
+                        .entry(delta_content_key(content_id_hex, size_bytes))
+                        .or_insert_with(|| chunk.to_vec());
+                }
+                FrameType::ObjectComplete => break,
+                FrameType::Close => break,
+                FrameType::Error => {
+                    return Err(TransportError::Frame(format!(
+                        "peer sent Error frame: {}",
+                        String::from_utf8_lossy(frame.payload())
+                    )));
+                }
+                other => {
+                    return Err(TransportError::Unexpected {
+                        got: other,
+                        expected: "ObjectData | ObjectComplete | Close",
+                    });
+                }
+            }
+        }
+        if received_keys != requested_keys {
+            return Err(TransportError::Frame(
+                "delta sender did not provide every requested chunk".to_string(),
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(err) = recv_result {
+        return Err(err);
+    }
+
+    let staging_seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging_dir = dest_dir.join(format!(
+        ".atp-staging-{}-{staging_seq}",
+        manifest.transfer_id
+    ));
+    let _ = crate::fs::remove_dir_all(&staging_dir).await;
+    crate::fs::create_dir_all(&staging_dir).await?;
+    let mut staging_guard = StagingDirGuard::new(staging_dir.clone());
+
+    let mut chunks_by_entry = BTreeMap::<u32, Vec<&DeltaChunkWire>>::new();
+    for chunk in &delta_manifest.chunks {
+        chunks_by_entry
+            .entry(chunk.entry_index)
+            .or_default()
+            .push(chunk);
+    }
+    for chunks in chunks_by_entry.values_mut() {
+        chunks.sort_by_key(|chunk| chunk.entry_offset);
+    }
+
+    let mut digests = Vec::with_capacity(manifest.entries.len());
+    let mut staging_paths = Vec::with_capacity(manifest.entries.len());
+    let reassemble_result: Result<(), TransportError> = async {
+        for entry in &manifest.entries {
+            let idx = entry.index;
+            let staging_path = staging_dir.join(idx.to_string());
+            let mut state = StagedEntryReceive::new(staging_path.clone());
+            let mut active_file: Option<crate::fs::File> = None;
+            let mut expected_offset = 0u64;
+            if let Some(chunks) = chunks_by_entry.get(&idx) {
+                let mut file = crate::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&staging_path)
+                    .await?;
+                state.mark_created();
+                for chunk in chunks {
+                    if chunk.entry_offset != expected_offset {
+                        return Err(TransportError::Frame(format!(
+                            "delta reassembly non-contiguous chunk for {}: expected {}, observed {}",
+                            chunk.rel_path, expected_offset, chunk.entry_offset
+                        )));
+                    }
+                    let content_key =
+                        delta_content_key(chunk.content_id_hex.clone(), chunk.size_bytes);
+                    let bytes = received_chunks
+                        .get(&content_key)
+                        .or_else(|| baseline.chunks_by_content.get(&content_key))
+                        .ok_or_else(|| {
+                            TransportError::Frame(format!(
+                                "delta reassembly missing chunk for {} at offset {}",
+                                chunk.rel_path, chunk.entry_offset
+                            ))
+                        })?;
+                    if ContentId::from_bytes(bytes).to_hex() != chunk.content_id_hex {
+                        return Err(TransportError::Integrity(format!(
+                            "delta reassembly content id mismatch for {} at offset {}",
+                            chunk.rel_path, chunk.entry_offset
+                        )));
+                    }
+                    file.write_all(bytes).await?;
+                    state.update_with_chunk(bytes);
+                    expected_offset = expected_offset.checked_add(chunk.size_bytes).ok_or_else(|| {
+                        TransportError::Frame("delta reassembly offset overflow".to_string())
+                    })?;
+                }
+                active_file = Some(file);
+            }
+            if let Some(mut file) = active_file {
+                file.flush().await?;
+            }
+            if expected_offset != entry.size {
+                return Err(TransportError::Frame(format!(
+                    "delta reassembly size mismatch for {}: expected {}, rebuilt {}",
+                    entry.rel_path, entry.size, expected_offset
+                )));
+            }
+            let (digest, staging_path, created) = state.finalize(entry.rel_path.clone());
+            if !created {
+                crate::fs::File::create(&staging_path).await?;
+            }
+            digests.push(digest);
+            staging_paths.push(staging_path);
+        }
+        Ok(())
+    }
+    .await;
+
+    if let Err(err) = reassemble_result {
+        let _ = crate::fs::remove_dir_all(&staging_dir).await;
+        return Err(err);
+    }
+
+    let sha_ok = digests
+        .iter()
+        .zip(&manifest.entries)
+        .all(|(digest, entry)| {
+            digest.size == entry.size && hex_encode(&digest.content_sha256) == entry.sha256_hex
+        });
+    let merkle_ok = flat_merkle_root_from_digests(&digests) == manifest.merkle_root_hex;
+    let meta_pairs: Vec<(String, EntryMetadata)> = manifest
+        .entries
+        .iter()
+        .map(|e| (e.rel_path.clone(), e.metadata.clone().unwrap_or_default()))
+        .collect();
+    let meta_refs: Vec<(&str, &EntryMetadata)> =
+        meta_pairs.iter().map(|(p, m)| (p.as_str(), m)).collect();
+    let metadata_ok = metadata_commitment(&meta_refs) == manifest.metadata_root_hex;
+
+    let mut committed_paths = Vec::new();
+    let committed = sha_ok && merkle_ok && metadata_ok;
+    if committed {
+        let commit = commit_verified_staging(cx, dest_dir, manifest, config, &staging_paths).await;
+        match commit {
+            Ok(paths) => committed_paths = paths,
+            Err(err) => {
+                let _ = crate::fs::remove_dir_all(&staging_dir).await;
+                return Err(err);
+            }
+        }
+    }
+    let _ = crate::fs::remove_dir_all(&staging_dir).await;
+    staging_guard.disarm();
+
+    let receipt = ReceiveReceipt {
+        committed,
+        bytes_received: received,
+        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        sha_ok,
+        merkle_ok,
+        symbols_accepted: 0,
+        feedback_rounds: 0,
+        decode_count: 0,
+        decode_micros: 0,
+        reason: if committed {
+            None
+        } else if !sha_ok {
+            Some("delta per-entry SHA-256 mismatch".to_string())
+        } else if !merkle_ok {
+            Some("delta merkle-root mismatch".to_string())
+        } else {
+            Some("delta metadata commitment mismatch".to_string())
+        },
+        committed_paths: committed_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+    };
+    send_receipt_and_close(cx, transport, config, &receipt).await?;
+    if !committed {
+        return Err(TransportError::Integrity(
+            receipt
+                .reason
+                .unwrap_or_else(|| "delta verification failed".to_string()),
+        ));
+    }
+
+    let _ = requested_by_key;
+    Ok(ReceiveReport {
+        transfer_id: manifest.transfer_id.clone(),
+        bytes_received: received,
+        files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+        committed,
+        symbols_accepted: 0,
+        feedback_rounds: 0,
+        decode_count: 0,
+        decode_micros: 0,
+        committed_paths,
+        peer,
+    })
 }
 
 /// Drive a single accepted connection through the receive protocol.
@@ -1259,6 +3061,78 @@ pub async fn receive_connection(
     // Reject symlink-traversal escapes (writing a nested entry through a
     // manifest-declared symlink) before any filesystem mutation.
     reject_symlink_traversal(&manifest)?;
+    let delta_state = build_receiver_delta_state(dest_dir, &manifest, &config).await?;
+    let request_frame = json_frame(FrameType::ObjectRequest, &delta_state.request)?;
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send object request",
+        transport.send(&request_frame),
+    )
+    .await?;
+    match delta_state.request.mode {
+        DeltaWireMode::AlreadyInSync => {
+            let complete = with_transport_timeout(
+                cx,
+                config.idle_timeout,
+                "receive delta noop complete",
+                transport.recv(),
+            )
+            .await?;
+            if !matches!(
+                complete.frame_type(),
+                FrameType::ObjectComplete | FrameType::Close
+            ) {
+                return Err(TransportError::Unexpected {
+                    got: complete.frame_type(),
+                    expected: "ObjectComplete | Close",
+                });
+            }
+            let receipt = ReceiveReceipt {
+                committed: true,
+                bytes_received: 0,
+                files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                sha_ok: true,
+                merkle_ok: true,
+                symbols_accepted: 0,
+                feedback_rounds: 0,
+                decode_count: 0,
+                decode_micros: 0,
+                reason: None,
+                committed_paths: Vec::new(),
+            };
+            send_receipt_and_close(cx, &mut transport, &config, &receipt).await?;
+            return Ok(ReceiveReport {
+                transfer_id: manifest.transfer_id,
+                bytes_received: 0,
+                files: u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+                committed: true,
+                symbols_accepted: 0,
+                feedback_rounds: 0,
+                decode_count: 0,
+                decode_micros: 0,
+                committed_paths: Vec::new(),
+                peer,
+            });
+        }
+        DeltaWireMode::DeltaChunks => {
+            let baseline = delta_state.baseline.as_ref().ok_or_else(|| {
+                TransportError::Frame("delta request missing receiver baseline".to_string())
+            })?;
+            return receive_delta_chunks_and_commit(
+                cx,
+                &mut transport,
+                peer,
+                dest_dir,
+                &config,
+                &manifest,
+                baseline,
+                &delta_state.request,
+            )
+            .await;
+        }
+        DeltaWireMode::FullObject => {}
+    }
 
     // Bounded-memory streaming receive: every entry is written straight to a
     // staging file as chunks arrive, with incremental SHA-256 + content-id
@@ -1835,6 +3709,7 @@ mod tests {
                 sha256_hex: "ff".repeat(32),
                 metadata: None,
             }],
+            delta_manifest: None,
         };
         let json = serde_json::to_vec(&manifest).unwrap();
         let back: TransferManifest = serde_json::from_slice(&json).unwrap();
@@ -1851,6 +3726,7 @@ mod tests {
             merkle_root_hex: "00".repeat(32),
             metadata_root_hex: None,
             entries: Vec::new(),
+            delta_manifest: None,
         };
         assert!(matches!(
             json_frame(FrameType::ObjectManifest, &manifest),
@@ -1968,6 +3844,7 @@ mod tests {
             merkle_root_hex: "0".repeat(64),
             metadata_root_hex: None,
             entries,
+            delta_manifest: None,
         }
     }
 

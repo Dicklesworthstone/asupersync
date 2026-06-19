@@ -149,6 +149,7 @@ pub struct ChunkStoreIngestReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContentAddressedChunkStore {
     chunks: BTreeMap<ContentId, Vec<u8>>,
+    verified_coverage: BTreeSet<ReceiverChunkKey>,
     stored_bytes: u64,
 }
 
@@ -158,6 +159,7 @@ impl ContentAddressedChunkStore {
     pub const fn new() -> Self {
         Self {
             chunks: BTreeMap::new(),
+            verified_coverage: BTreeSet::new(),
             stored_bytes: 0,
         }
     }
@@ -176,6 +178,10 @@ impl ContentAddressedChunkStore {
             self.chunks.insert(content_id.clone(), bytes.to_vec());
             true
         };
+        self.verified_coverage.insert(ReceiverChunkKey {
+            content_id: content_id.clone(),
+            size_bytes,
+        });
 
         Ok(ChunkStoreInsert {
             content_id,
@@ -223,12 +229,38 @@ impl ContentAddressedChunkStore {
     #[must_use]
     pub fn contains(&self, content_id: &ContentId) -> bool {
         self.chunks.contains_key(content_id)
+            || self
+                .verified_coverage
+                .iter()
+                .any(|chunk| &chunk.content_id == content_id)
     }
 
     /// Fetch a stored chunk by content id.
     #[must_use]
     pub fn get(&self, content_id: &ContentId) -> Option<&[u8]> {
         self.chunks.get(content_id).map(Vec::as_slice)
+    }
+
+    /// Record a chunk whose bytes have already been verified by the caller.
+    ///
+    /// This is used by negotiated receiver-state exchange: the receiver can
+    /// advertise that its local CAS/destination contains a hash-and-size pair
+    /// without forcing the sender-side planner to materialize those bytes.
+    pub fn insert_verified_coverage(&mut self, content_id: ContentId, size_bytes: u64) {
+        self.verified_coverage.insert(ReceiverChunkKey {
+            content_id,
+            size_bytes,
+        });
+    }
+
+    /// Whether the store can satisfy exactly this content id and size.
+    #[must_use]
+    pub fn has_exact_chunk(&self, chunk: &CasChunkRef) -> bool {
+        let key = chunk.key();
+        if self.verified_coverage.contains(&key) {
+            return true;
+        }
+        store_payload_matches(self, chunk)
     }
 
     /// Number of unique chunks stored.
@@ -419,6 +451,9 @@ impl PersistentChunkManifest {
         store: &ContentAddressedChunkStore,
     ) -> Result<(), DeltaError> {
         for chunk in &self.chunks {
+            if store.has_exact_chunk(chunk) {
+                continue;
+            }
             let Some(payload) = store.get(&chunk.content_id) else {
                 return Err(DeltaError::MissingChunk {
                     index: chunk.index,
@@ -461,6 +496,63 @@ pub struct ChunkManifestDiff {
     pub missing_bytes: u64,
     /// Stale receiver bytes by logical chunk size.
     pub stale_bytes: u64,
+}
+
+/// Receiver-side CAS coverage, verified before it is advertised to a sender.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReceiverCasCoverage {
+    chunks: BTreeSet<ReceiverChunkKey>,
+}
+
+impl ReceiverCasCoverage {
+    /// Create an empty coverage set.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            chunks: BTreeSet::new(),
+        }
+    }
+
+    /// Record one available content-addressed chunk.
+    pub fn insert(&mut self, content_id: ContentId, size_bytes: u64) {
+        self.chunks.insert(ReceiverChunkKey {
+            content_id,
+            size_bytes,
+        });
+    }
+
+    /// Record one available manifest chunk.
+    pub fn insert_chunk_ref(&mut self, chunk: &CasChunkRef) {
+        self.chunks.insert(chunk.key());
+    }
+
+    /// Build coverage from every chunk in a manifest.
+    #[must_use]
+    pub fn from_manifest(manifest: &PersistentChunkManifest) -> Self {
+        let mut coverage = Self::new();
+        for chunk in &manifest.chunks {
+            coverage.insert_chunk_ref(chunk);
+        }
+        coverage
+    }
+
+    /// Whether this coverage set can satisfy a manifest chunk exactly.
+    #[must_use]
+    pub fn contains_chunk(&self, chunk: &CasChunkRef) -> bool {
+        self.chunks.contains(&chunk.key())
+    }
+
+    /// Number of unique chunks covered.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Whether no chunks are covered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
 }
 
 /// Deterministic send mode for an incremental re-sync attempt.
@@ -544,16 +636,48 @@ pub fn plan_incremental_resync(
     receiver: Option<&PersistentChunkManifest>,
     receiver_store: &ContentAddressedChunkStore,
 ) -> DeltaResyncPlan {
-    let receiver_merkle_root = receiver.map(|manifest| manifest.merkle_root.clone());
     let Some(receiver) = receiver else {
-        return full_object_plan(
-            sender,
-            None,
-            DeltaResyncFallbackReason::NoReceiverManifest,
-        );
+        return full_object_plan(sender, None, DeltaResyncFallbackReason::NoReceiverManifest);
     };
 
     if receiver.verify_store_coverage(receiver_store).is_err() {
+        return full_object_plan(
+            sender,
+            Some(receiver),
+            DeltaResyncFallbackReason::ReceiverCasCoverageIncomplete,
+        );
+    }
+
+    let mut coverage = ReceiverCasCoverage::from_manifest(receiver);
+    for chunk in &sender.chunks {
+        if store_has_exact_chunk(receiver_store, chunk) {
+            coverage.insert_chunk_ref(chunk);
+        }
+    }
+    plan_incremental_resync_with_receiver_coverage(sender, Some(receiver), &coverage)
+}
+
+/// Plan an ATP incremental re-sync from receiver-advertised CAS coverage.
+///
+/// The receiver must verify this coverage locally before sending it. The sender
+/// still gets deterministic fallback semantics, while the receiver's final
+/// whole-object SHA/Merkle verification remains the fail-closed authority.
+#[must_use]
+pub fn plan_incremental_resync_with_receiver_coverage(
+    sender: &PersistentChunkManifest,
+    receiver: Option<&PersistentChunkManifest>,
+    receiver_coverage: &ReceiverCasCoverage,
+) -> DeltaResyncPlan {
+    let receiver_merkle_root = receiver.map(|manifest| manifest.merkle_root.clone());
+    let Some(receiver) = receiver else {
+        return full_object_plan(sender, None, DeltaResyncFallbackReason::NoReceiverManifest);
+    };
+
+    if receiver
+        .chunks
+        .iter()
+        .any(|chunk| !receiver_coverage.contains_chunk(chunk))
+    {
         return full_object_plan(
             sender,
             Some(receiver),
@@ -582,7 +706,89 @@ pub fn plan_incremental_resync(
     let mut shared_chunks = 0u64;
 
     for chunk in &sender.chunks {
-        if receiver_keys.contains(&chunk.key()) || store_has_exact_chunk(receiver_store, chunk) {
+        if receiver_keys.contains(&chunk.key()) || receiver_coverage.contains_chunk(chunk) {
+            shared_chunks += 1;
+            continue;
+        }
+        missing_bytes = missing_bytes.saturating_add(chunk.size_bytes);
+        missing_chunks.push(chunk.clone());
+    }
+
+    let mut stale_chunks = Vec::new();
+    let mut stale_bytes = 0u64;
+    for chunk in &receiver.chunks {
+        if !sender_keys.contains(&chunk.key()) {
+            stale_bytes = stale_bytes.saturating_add(chunk.size_bytes);
+            stale_chunks.push(chunk.clone());
+        }
+    }
+
+    if missing_bytes >= sender.total_size_bytes {
+        return DeltaResyncPlan {
+            mode: DeltaResyncMode::FullObjectFallback,
+            fallback_reason: Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject),
+            sender_merkle_root: sender.merkle_root.clone(),
+            receiver_merkle_root,
+            missing_chunks,
+            missing_bytes,
+            shared_chunks,
+            stale_chunks,
+            stale_bytes,
+        };
+    }
+
+    DeltaResyncPlan {
+        mode: DeltaResyncMode::DeltaChunks,
+        fallback_reason: None,
+        sender_merkle_root: sender.merkle_root.clone(),
+        receiver_merkle_root,
+        missing_chunks,
+        missing_bytes,
+        shared_chunks,
+        stale_chunks,
+        stale_bytes,
+    }
+}
+
+/// Plan an ATP incremental re-sync from a receiver manifest whose CAS coverage
+/// has already been verified by the receiver before it persisted the state.
+///
+/// This entry point exists for CLI bootstraps where the sender can fetch the
+/// receiver's last committed manifest but not the receiver's private CAS bytes.
+/// Callers must only pass manifests read from a receiver-maintained state file
+/// that was emitted after local store coverage and final tree verification.
+#[must_use]
+pub fn plan_incremental_resync_from_verified_receiver_manifest(
+    sender: &PersistentChunkManifest,
+    receiver: Option<&PersistentChunkManifest>,
+) -> DeltaResyncPlan {
+    let receiver_merkle_root = receiver.map(|manifest| manifest.merkle_root.clone());
+    let Some(receiver) = receiver else {
+        return full_object_plan(sender, None, DeltaResyncFallbackReason::NoReceiverManifest);
+    };
+
+    if sender.merkle_root == receiver.merkle_root {
+        return DeltaResyncPlan {
+            mode: DeltaResyncMode::AlreadyInSync,
+            fallback_reason: None,
+            sender_merkle_root: sender.merkle_root.clone(),
+            receiver_merkle_root,
+            missing_chunks: Vec::new(),
+            missing_bytes: 0,
+            shared_chunks: sender.chunks.len() as u64,
+            stale_chunks: Vec::new(),
+            stale_bytes: 0,
+        };
+    }
+
+    let receiver_keys = manifest_chunk_keys(&receiver.chunks);
+    let sender_keys = manifest_chunk_keys(&sender.chunks);
+    let mut missing_chunks = Vec::new();
+    let mut missing_bytes = 0u64;
+    let mut shared_chunks = 0u64;
+
+    for chunk in &sender.chunks {
+        if receiver_keys.contains(&chunk.key()) {
             shared_chunks += 1;
             continue;
         }
@@ -739,22 +945,25 @@ impl fmt::Display for DeltaError {
 
 impl std::error::Error for DeltaError {}
 
+/// Content-addressed receiver coverage key used during delta planning.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ChunkKey {
+pub struct ReceiverChunkKey {
+    /// Domain-separated content id for the covered chunk.
     content_id: ContentId,
+    /// Chunk length in bytes.
     size_bytes: u64,
 }
 
 impl CasChunkRef {
-    fn key(&self) -> ChunkKey {
-        ChunkKey {
+    fn key(&self) -> ReceiverChunkKey {
+        ReceiverChunkKey {
             content_id: self.content_id.clone(),
             size_bytes: self.size_bytes,
         }
     }
 }
 
-fn manifest_chunk_keys(chunks: &[CasChunkRef]) -> BTreeSet<ChunkKey> {
+fn manifest_chunk_keys(chunks: &[CasChunkRef]) -> BTreeSet<ReceiverChunkKey> {
     chunks.iter().map(CasChunkRef::key).collect()
 }
 
@@ -781,6 +990,10 @@ fn full_object_plan(
 }
 
 fn store_has_exact_chunk(store: &ContentAddressedChunkStore, chunk: &CasChunkRef) -> bool {
+    store.has_exact_chunk(chunk)
+}
+
+fn store_payload_matches(store: &ContentAddressedChunkStore, chunk: &CasChunkRef) -> bool {
     let Some(payload) = store.get(&chunk.content_id) else {
         return false;
     };
@@ -1115,11 +1328,7 @@ mod tests {
         let sender = ingest_manifest(
             &mut sender_store,
             "tree-a",
-            vec![
-                b"alpha".as_slice(),
-                b"beta".as_slice(),
-                b"gamma".as_slice(),
-            ],
+            vec![b"alpha".as_slice(), b"beta".as_slice(), b"gamma".as_slice()],
         );
         let receiver = ingest_manifest(
             &mut receiver_store,
@@ -1133,8 +1342,14 @@ mod tests {
         assert_eq!(plan.fallback_reason, None);
         assert_eq!(plan.shared_chunks, 2);
         assert_eq!(plan.missing_chunks.len(), 1);
-        assert_eq!(plan.missing_chunks[0].content_id, ContentId::from_bytes(b"gamma"));
-        assert_eq!(plan.missing_content_ids(), vec![ContentId::from_bytes(b"gamma")]);
+        assert_eq!(
+            plan.missing_chunks[0].content_id,
+            ContentId::from_bytes(b"gamma")
+        );
+        assert_eq!(
+            plan.missing_content_ids(),
+            vec![ContentId::from_bytes(b"gamma")]
+        );
         assert_eq!(plan.missing_bytes, 5);
     }
 
@@ -1152,7 +1367,9 @@ mod tests {
             "tree-a",
             vec![b"alpha".as_slice(), b"old".as_slice()],
         );
-        receiver_store.insert(b"beta").expect("receiver has beta in CAS");
+        receiver_store
+            .insert(b"beta")
+            .expect("receiver has beta in CAS");
 
         let plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
 
