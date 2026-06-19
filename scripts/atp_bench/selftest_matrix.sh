@@ -94,10 +94,13 @@ cat >"$TMP/results.jsonl" <<'JSONL'
 JSONL
 python3 "$HERE/score_matrix.py" "$TMP/results.jsonl" >"$TMP/scorecard.md" 2>/dev/null || bad "scorer crashed on synthetic results"
 # atp wins the 'bad' cell (4.4/9.2 ~ 0.48) -> ratio table must contain a 'bad' row.
-if grep -qE '\| 50M \| bad \| nocrypto \| atp-rq-lab \| rsyncd \|' "$TMP/scorecard.md"; then ok "atp-vs-rsync ratio present for verified 'bad' cell"; else bad "missing headline ratio for 'bad' cell"; fi
+# (scorer's ratio table carries an "ATP streams" column between ATP method and
+# rsync method, so allow one column between atp-rq-lab and rsyncd.)
+if grep -qE '\| 50M \| bad \| nocrypto \| atp-rq-lab \|[^|]*\| rsyncd \|' "$TMP/scorecard.md"; then ok "atp-vs-rsync ratio present for verified 'bad' cell"; else bad "missing headline ratio for 'bad' cell"; fi
 # The 123s sha-MISS cell MUST appear in failures, NOT in a headline ratio row.
-if awk '/## Failed or excluded rows/{f=1} f && /50M.*broken.*atp-rq-lab.*sha_mismatch/{print; found=1} END{exit !found}' "$TMP/scorecard.md" >/dev/null; then
-    ok "sha-MISS (50M/broken) surfaced under 'Failed or excluded rows'"
+# (scorer surfaces these under "## Failed or incomplete rows".)
+if awk '/## Failed or incomplete rows/{f=1} f && /50M.*broken.*atp-rq-lab.*sha_mismatch/{print; found=1} END{exit !found}' "$TMP/scorecard.md" >/dev/null; then
+    ok "sha-MISS (50M/broken) surfaced under 'Failed or incomplete rows'"
 else bad "sha-MISS not surfaced as a failure"; fi
 # Crucial: there must be NO ATP-vs-rsync ratio row for the broken regime (atp
 # failed there). Scope the check to the "## ATP vs rsync ratios" SECTION only —
