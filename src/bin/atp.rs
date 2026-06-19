@@ -86,6 +86,7 @@ const DELTA_TREE_OBJECT_MIN_CHUNK_BYTES: usize = 16 * 1024;
 const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
 const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64) - 1;
+const AUTO_MAX_BLOCK_SIZE: usize = 512 * 1024;
 
 /// Standalone ATP transfer tool.
 #[derive(Parser)]
@@ -338,20 +339,49 @@ impl std::str::FromStr for MaxBlockSizeArg {
         if value.eq_ignore_ascii_case("auto") {
             return Ok(Self::Auto);
         }
-        let bytes = value
-            .parse::<usize>()
-            .map_err(|err| format!("invalid --max-block-size {value:?}: {err}"))?;
-        if bytes == 0 {
-            return Err("--max-block-size must be greater than 0".to_string());
-        }
-        Ok(Self::Bytes(bytes))
+        parse_max_block_size_bytes(value).map(Self::Bytes)
     }
+}
+
+fn parse_max_block_size_bytes(value: &str) -> Result<usize, String> {
+    let lower = value.to_ascii_lowercase();
+    let (digits, multiplier) = [
+        ("gib", 1024usize * 1024 * 1024),
+        ("gb", 1024usize * 1024 * 1024),
+        ("g", 1024usize * 1024 * 1024),
+        ("mib", 1024usize * 1024),
+        ("mb", 1024usize * 1024),
+        ("m", 1024usize * 1024),
+        ("kib", 1024usize),
+        ("kb", 1024usize),
+        ("k", 1024usize),
+        ("b", 1usize),
+    ]
+    .iter()
+    .find_map(|(suffix, multiplier)| {
+        lower
+            .strip_suffix(suffix)
+            .map(|digits| (digits, *multiplier))
+    })
+    .unwrap_or((value, 1usize));
+
+    let count = digits.trim().parse::<usize>().map_err(|_| {
+        format!(
+            "invalid --max-block-size {value:?}: expected positive bytes, auto, or K/M/G suffix"
+        )
+    })?;
+    if count == 0 {
+        return Err("--max-block-size must be greater than 0".to_string());
+    }
+    count
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("invalid --max-block-size {value:?}: byte count overflows usize"))
 }
 
 impl MaxBlockSizeArg {
     fn effective(self, symbol_size: u16) -> Result<usize, String> {
         match self {
-            Self::Auto => normalize_max_block_size(symbol_size, DEFAULT_MAX_BLOCK_SIZE),
+            Self::Auto => normalize_max_block_size(symbol_size, AUTO_MAX_BLOCK_SIZE),
             Self::Bytes(bytes) => normalize_max_block_size(symbol_size, bytes),
         }
     }
@@ -4243,23 +4273,33 @@ mod tests {
             Ok(MaxBlockSizeArg::Bytes(512 * 1024))
         );
         assert_eq!(
+            "512KiB".parse::<MaxBlockSizeArg>(),
+            Ok(MaxBlockSizeArg::Bytes(512 * 1024))
+        );
+        assert_eq!(
+            "8M".parse::<MaxBlockSizeArg>(),
+            Ok(MaxBlockSizeArg::Bytes(8 * 1024 * 1024))
+        );
+        assert_eq!(
             "0".parse::<MaxBlockSizeArg>(),
             Err("--max-block-size must be greater than 0".to_string())
         );
         assert_eq!(
             "not-bytes".parse::<MaxBlockSizeArg>(),
             Err(
-                "invalid --max-block-size \"not-bytes\": invalid digit found in string".to_string()
+                "invalid --max-block-size \"not-bytes\": expected positive bytes, auto, or K/M/G suffix"
+                    .to_string()
             )
         );
     }
 
     #[test]
-    fn max_block_size_arg_auto_uses_transport_default_ceiling() {
+    fn max_block_size_arg_auto_uses_bounded_decode_ceiling() {
         assert_eq!(
             MaxBlockSizeArg::Auto.effective(1024),
-            Ok(DEFAULT_MAX_BLOCK_SIZE)
+            Ok(AUTO_MAX_BLOCK_SIZE)
         );
+        assert!(AUTO_MAX_BLOCK_SIZE < DEFAULT_MAX_BLOCK_SIZE);
         assert_eq!(MaxBlockSizeArg::Bytes(512).effective(1024), Ok(1024));
         assert_eq!(
             MaxBlockSizeArg::Bytes(512 * 1024).effective(1024),
