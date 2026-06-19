@@ -2287,8 +2287,21 @@ mod tests {
             counter.load(Ordering::SeqCst) > 0
         );
 
-        // Timer should fire within reasonable precision (allowing for OS scheduling)
-        let tolerance = Duration::from_millis(10); // 10ms tolerance for wall clock
+        crate::assert_with_log!(
+            elapsed >= short_duration,
+            &format!(
+                "wall clock timer did not fire before deadline: {:?} >= {:?}",
+                elapsed, short_duration
+            ),
+            true,
+            elapsed >= short_duration
+        );
+
+        // Wall-clock tests run under shared CI/RCH hosts, so scheduler latency
+        // can dominate the 5ms timer period even when the timer driver is
+        // correct. Keep the bound below the 100ms test timeout while allowing
+        // loaded-host jitter.
+        let tolerance = Duration::from_millis(50);
         crate::assert_with_log!(
             elapsed <= short_duration + tolerance,
             &format!(

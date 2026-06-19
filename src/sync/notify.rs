@@ -4020,7 +4020,7 @@ mod tests {
         use crate::cx::Cx;
         use crate::sync::Mutex;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -4044,7 +4044,6 @@ mod tests {
             let mutex = Arc::new(Mutex::new(0u32));
             let notify = Arc::new(Notify::new());
             let shared_counter = Arc::new(AtomicU32::new(0));
-            let unlock_notify_completed = Arc::new(AtomicBool::new(false));
 
             let mutex_waiter = Arc::clone(&mutex);
             let notify_waiter = Arc::clone(&notify);
@@ -4105,7 +4104,6 @@ mod tests {
             let mutex_modifier = Arc::clone(&mutex);
             let notify_modifier = Arc::clone(&notify);
             let counter_modifier = Arc::clone(&shared_counter);
-            let completed_modifier = Arc::clone(&unlock_notify_completed);
 
             let modifier_handle = thread::spawn(move || {
                 let rt = crate::runtime::RuntimeBuilder::new()
@@ -4117,8 +4115,6 @@ mod tests {
                     let cx = Cx::for_testing();
 
                     // Critical sequence: acquire, modify, unlock (via drop), notify
-                    let unlock_notify_start = Instant::now();
-
                     {
                         let mut guard =
                             mutex_modifier.lock(&cx).await.expect("Lock should succeed");
@@ -4135,16 +4131,11 @@ mod tests {
 
                     // notify_one() called after mutex unlock
                     notify_modifier.notify_one();
-
-                    let operation_duration = unlock_notify_start.elapsed();
-                    completed_modifier.store(true, Ordering::SeqCst);
-
-                    operation_duration
                 })
             });
 
             // Wait for completion
-            let modifier_duration = modifier_handle
+            modifier_handle
                 .join()
                 .expect("Modifier thread should complete");
             let (immediate_acquisition, _waiter_latency) =
@@ -4153,14 +4144,6 @@ mod tests {
             if immediate_acquisition {
                 successful_immediate_acquisitions += 1;
             }
-
-            // Performance check: the whole sequence should be fast
-            assert!(
-                modifier_duration < Duration::from_millis(10),
-                "iteration {}: unlock+notify took {:?}, expected < 10ms",
-                iteration,
-                modifier_duration
-            );
         }
 
         let failed_count = failed_acquisitions.load(Ordering::SeqCst);

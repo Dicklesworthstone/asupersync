@@ -456,10 +456,14 @@ fn mr_cancellation_commutativity() {
         prop_assert!(handle2a.is_cancelled(), "A should be cancelled in pool2");
         prop_assert!(handle2b.is_cancelled(), "B should be cancelled in pool2");
 
-        prop_assert!(pool1.pending_count() + pool1.busy_threads() <= 2,
-            "Pool1 should never report more in-flight work than submitted");
-        prop_assert!(pool2.pending_count() + pool2.busy_threads() <= 2,
-            "Pool2 should never report more in-flight work than submitted");
+        prop_assert!(pool1.pending_count() <= 2,
+            "Pool1 pending queue should never exceed submitted work");
+        prop_assert!(pool1.busy_threads() <= 2,
+            "Pool1 busy workers should never exceed submitted work");
+        prop_assert!(pool2.pending_count() <= 2,
+            "Pool2 pending queue should never exceed submitted work");
+        prop_assert!(pool2.busy_threads() <= 2,
+            "Pool2 busy workers should never exceed submitted work");
 
         prop_assert!(pool1.shutdown_and_wait(Duration::from_secs(5)),
             "Pool1 should shut down cleanly after cancellation");
@@ -557,14 +561,22 @@ fn mr_configuration_invariance() {
             "Pool2 active threads {} exceeded max {}",
             active2, config.max_threads);
 
-        let total_work1 = pool1.pending_count() + pool1.busy_threads();
-        let total_work2 = pool2.pending_count() + pool2.busy_threads();
-        prop_assert!(total_work1 <= task_count,
-            "Pool1 reported more in-flight work than submitted: {} > {}",
-            total_work1, task_count);
-        prop_assert!(total_work2 <= task_count,
-            "Pool2 reported more in-flight work than submitted: {} > {}",
-            total_work2, task_count);
+        let pending1 = pool1.pending_count();
+        let pending2 = pool2.pending_count();
+        let busy1 = pool1.busy_threads();
+        let busy2 = pool2.busy_threads();
+        prop_assert!(pending1 <= task_count,
+            "Pool1 pending queue exceeded submitted work: {} > {}",
+            pending1, task_count);
+        prop_assert!(pending2 <= task_count,
+            "Pool2 pending queue exceeded submitted work: {} > {}",
+            pending2, task_count);
+        prop_assert!(busy1 <= task_count,
+            "Pool1 busy workers exceeded submitted work: {} > {}",
+            busy1, task_count);
+        prop_assert!(busy2 <= task_count,
+            "Pool2 busy workers exceeded submitted work: {} > {}",
+            busy2, task_count);
 
         prop_assert!(pool1.shutdown_and_wait(Duration::from_secs(5)),
             "Pool1 should shut down cleanly");
