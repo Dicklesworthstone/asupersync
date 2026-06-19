@@ -40,6 +40,15 @@ use syn::{
     spanned::Spanned,
 };
 
+const ERR_REQUIRES_FUTURE: &str = "spawn! requires a future expression; use spawn!(future), spawn!(\"name\", future), spawn!(scope, future), or spawn!(scope, \"name\", future)";
+const ERR_STRING_ONLY: &str =
+    "spawn! task names must be followed by a future expression: spawn!(\"name\", async { ... })";
+const ERR_STRING_FUTURE: &str = "spawn! future expression cannot be a string literal; use async { ... } or |cx| async move { ... }";
+const ERR_SCOPE_NAME_REQUIRES_FUTURE: &str =
+    "spawn! scope + name form requires a future expression: spawn!(scope, \"name\", future)";
+const ERR_THREE_ARG_NAME: &str = "spawn! three-argument form is spawn!(scope, \"name\", future); put the task name before the future";
+const ERR_TOO_MANY_ARGS: &str = "spawn! accepts at most three arguments: spawn!(future), spawn!(\"name\", future), spawn!(scope, future), or spawn!(scope, \"name\", future)";
+
 /// Input to the spawn! macro.
 ///
 /// Supported forms:
@@ -59,10 +68,7 @@ impl Parse for SpawnInput {
         let mut items: Vec<Expr> = args.into_iter().collect();
 
         if items.is_empty() {
-            return Err(Error::new(
-                input.span(),
-                "spawn! requires a future expression",
-            ));
+            return Err(Error::new(input.span(), ERR_REQUIRES_FUTURE));
         }
 
         let is_str_lit = |expr: &Expr| match expr {
@@ -81,45 +87,32 @@ impl Parse for SpawnInput {
         let (scope, name, future) = match items.len() {
             1 => {
                 if is_str_lit(&items[0]) {
-                    return Err(Error::new(
-                        items[0].span(),
-                        "spawn! argument must be a future expression",
-                    ));
+                    return Err(Error::new(items[0].span(), ERR_STRING_ONLY));
                 }
                 (None, None, items.remove(0))
             }
             2 => {
                 if is_str_lit(&items[0]) {
                     if is_str_lit(&items[1]) {
-                        return Err(Error::new(
-                            items[1].span(),
-                            "spawn! argument must be a future expression",
-                        ));
+                        return Err(Error::new(items[1].span(), ERR_STRING_FUTURE));
                     }
                     let name = take_str(&items[0]).expect("string literal checked");
                     (None, Some(name), items.remove(1))
                 } else if is_str_lit(&items[1]) {
-                    return Err(Error::new(
-                        items[1].span(),
-                        "spawn! requires a future expression",
-                    ));
+                    return Err(Error::new(items[1].span(), ERR_SCOPE_NAME_REQUIRES_FUTURE));
                 } else {
                     (Some(items.remove(0)), None, items.remove(0))
                 }
             }
             3 => {
                 let scope = items.remove(0);
-                let name = take_str(&items[0]).ok_or_else(|| {
-                    Error::new(items[0].span(), "spawn! name must be a string literal")
-                })?;
+                let name = take_str(&items[0])
+                    .ok_or_else(|| Error::new(items[0].span(), ERR_THREE_ARG_NAME))?;
                 let future = items.remove(1);
                 (Some(scope), Some(name), future)
             }
             _ => {
-                return Err(Error::new(
-                    input.span(),
-                    "spawn! accepts at most three arguments: [scope], [\"name\"], future",
-                ));
+                return Err(Error::new(input.span(), ERR_TOO_MANY_ARGS));
             }
         };
 
@@ -251,6 +244,23 @@ mod tests {
         let input: proc_macro2::TokenStream = quote! { a, b, c, d };
         let result: Result<SpawnInput, _> = syn::parse2(input);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn spawn_error_messages_are_stable() {
+        let cases = [
+            (quote! {}, ERR_REQUIRES_FUTURE),
+            (quote! { "worker" }, ERR_STRING_ONLY),
+            (quote! { "worker", "not a future" }, ERR_STRING_FUTURE),
+            (quote! { scope, "worker" }, ERR_SCOPE_NAME_REQUIRES_FUTURE),
+            (quote! { scope, async { 42 }, "worker" }, ERR_THREE_ARG_NAME),
+            (quote! { a, b, c, d }, ERR_TOO_MANY_ARGS),
+        ];
+
+        for (input, expected) in cases {
+            let err = syn::parse2::<SpawnInput>(input).expect_err(expected);
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     // =========================================================================

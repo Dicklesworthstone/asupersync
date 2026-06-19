@@ -1,0 +1,5 @@
+error: spawn! scope + name form requires a future expression: spawn!(scope, "name", future)
+ --> tests/compile_fail/spawn_scope_name_without_future.rs:4:27
+  |
+4 |     let _ = spawn!(scope, "worker");
+  |                           ^^^^^^^^

@@ -1,0 +1,5 @@
+error: spawn! future expression cannot be a string literal; use async { ... } or |cx| async move { ... }
+ --> tests/compile_fail/spawn_string_as_future.rs:4:30
+  |
+4 |     let _ = spawn!("worker", "not a future");
+  |                              ^^^^^^^^^^^^^^
