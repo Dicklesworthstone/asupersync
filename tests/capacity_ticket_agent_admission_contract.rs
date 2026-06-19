@@ -198,6 +198,7 @@ fn capacity_ticket_budget_semantics_fail_closed_and_preserve_owner() {
     assert_eq!(ticket.granted().memory_bytes, Some(4096));
     assert_eq!(ticket.granted().cpu_units, Some(8));
     assert_eq!(ticket.granted().artifact_bytes, Some(512));
+    let _ = ticket.release();
 
     let err = request_capacity_ticket_from_budget(
         region,
@@ -348,10 +349,10 @@ fn sibling_and_cousin_splits_mint_distinct_ticket_ids() {
 
     // Cousins: first grandchild of each distinct parent shares owner + lineage
     // depth (2) but must still be distinct (parent nonce is folded in).
-    let grandchild_one = first
+    let mut grandchild_one = first
         .split(budget, reqs, "grandchild of first")
         .expect("admits");
-    let grandchild_two = second
+    let mut grandchild_two = second
         .split(budget, reqs, "grandchild of second")
         .expect("admits");
     assert_eq!(grandchild_one.id().lineage(), 2);
@@ -375,6 +376,12 @@ fn sibling_and_cousin_splits_mint_distinct_ticket_ids() {
         .split(budget, reqs, "first child")
         .expect("first split admits");
     assert_eq!(first.id(), first_replay.id());
+
+    let _ = parent.unreleased_receipt();
+    let _ = parent_replay.unreleased_receipt();
+    let _ = first_replay.release();
+    let _ = grandchild_one.unreleased_receipt();
+    let _ = grandchild_two.unreleased_receipt();
 
     // Distinct ids carry distinct receipts: matching a release by ticket_id can
     // no longer mis-close a sibling. (release() consumes the ticket, so do this
@@ -416,6 +423,9 @@ fn root_admission_sequences_mint_distinct_same_owner_ticket_ids() {
     assert_eq!(first.owner_task(), second.owner_task());
     assert_ne!(first.id(), second.id());
     assert_ne!(first.id().nonce(), second.id().nonce());
+
+    let _ = first.release();
+    let _ = second.release();
 }
 
 #[test]
