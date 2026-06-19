@@ -51,6 +51,7 @@ pub mod safety;
 #[path = "sdk.rs"]
 pub mod sdk;
 pub mod seeding;
+pub mod slepian_wolf;
 pub mod stream_object;
 pub mod supervision;
 pub mod swarm;
