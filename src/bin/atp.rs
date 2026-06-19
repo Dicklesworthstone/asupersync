@@ -51,6 +51,7 @@ use asupersync::atp::delta::{
 use asupersync::atp::object::ContentId;
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
+use asupersync::net::atp::chunk::dedupe::{CdcEngine, CdcParameters};
 use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_BLOCK_SIZE, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD,
@@ -73,7 +74,10 @@ const DELTA_PACKAGE_FILE: &str = "delta-package.json";
 const DELTA_STATE_SCHEMA: &str = "asupersync.atp.cli-delta-state.v1";
 const DELTA_PACKAGE_SCHEMA: &str = "asupersync.atp.cli-delta-package.v1";
 const DELTA_TREE_OBJECT_MAGIC: &[u8] = b"ASUP_ATP_CLI_DELTA_TREE_OBJECT_V1\0";
-const DELTA_TREE_OBJECT_CHUNK_BYTES: usize = 256 * 1024;
+const DELTA_TREE_OBJECT_CDC_WINDOW_BYTES: usize = 64;
+const DELTA_TREE_OBJECT_MIN_CHUNK_BYTES: usize = 16 * 1024;
+const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
+const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Standalone ATP transfer tool.
 #[derive(Parser)]
@@ -1559,10 +1563,7 @@ fn build_delta_snapshot_from_files(
     })?;
     let object_bytes = encode_delta_tree_object(&files)?;
     let object_sha256_hex = hex::encode(Sha256::digest(&object_bytes));
-    let chunk_payloads = object_bytes
-        .chunks(DELTA_TREE_OBJECT_CHUNK_BYTES)
-        .map(<[u8]>::to_vec)
-        .collect::<Vec<_>>();
+    let chunk_payloads = split_delta_tree_object_chunks(&object_bytes)?;
 
     let mut store = DeltaChunkStore::new();
     let ingest = store
@@ -1586,6 +1587,45 @@ fn build_delta_snapshot_from_files(
         file_count: files.len(),
         logical_file_bytes,
     })
+}
+
+fn split_delta_tree_object_chunks(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut engine = CdcEngine::new();
+    let chunks = engine
+        .compute_cdc_boundaries(bytes, &delta_tree_object_cdc_params())
+        .map_err(|err| format!("FastCDC delta chunking failed: {err}"))?;
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let start = usize::try_from(chunk.byte_offset)
+                .map_err(|_| "delta FastCDC chunk offset exceeds usize::MAX".to_string())?;
+            let end = chunk
+                .byte_offset
+                .checked_add(chunk.size_bytes)
+                .ok_or_else(|| "delta FastCDC chunk end offset overflowed".to_string())
+                .and_then(|end| {
+                    usize::try_from(end)
+                        .map_err(|_| "delta FastCDC chunk end exceeds usize::MAX".to_string())
+                })?;
+            bytes.get(start..end).map(<[u8]>::to_vec).ok_or_else(|| {
+                format!(
+                    "delta FastCDC chunk {}..{} is outside object length {}",
+                    start,
+                    end,
+                    bytes.len()
+                )
+            })
+        })
+        .collect()
+}
+
+const fn delta_tree_object_cdc_params() -> CdcParameters {
+    CdcParameters {
+        window_size: DELTA_TREE_OBJECT_CDC_WINDOW_BYTES,
+        min_chunk_size: DELTA_TREE_OBJECT_MIN_CHUNK_BYTES as u64,
+        max_chunk_size: DELTA_TREE_OBJECT_MAX_CHUNK_BYTES as u64,
+        normalization_constant: DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64,
+    }
 }
 
 fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, String> {
@@ -2664,7 +2704,7 @@ mod unused_delta_sidecar_draft {
                 let mut file = fs::File::open(&path)
                     .map_err(|err| format!("open delta source {}: {err}", path.display()))?;
                 let mut entry_size = 0u64;
-                let mut buf = vec![0u8; DELTA_TREE_OBJECT_CHUNK_BYTES];
+                let mut buf = vec![0u8; DELTA_TREE_OBJECT_MAX_CHUNK_BYTES];
                 loop {
                     let n = file
                         .read(&mut buf)
@@ -3611,6 +3651,59 @@ mod tests {
     #[test]
     fn auto_transport_order_uses_tcp_for_delta_resync() {
         assert_eq!(Transport::auto_fallback_order(true), &[Transport::Tcp]);
+    }
+
+    #[test]
+    fn delta_tree_chunker_uses_smaller_content_defined_chunks() {
+        let data = (0..(512 * 1024))
+            .map(|idx| ((idx * 31 + idx / 7 + 13) % 251) as u8)
+            .collect::<Vec<_>>();
+
+        let chunks = split_delta_tree_object_chunks(&data).expect("FastCDC chunks");
+        let rebuilt = chunks.concat();
+        let min_chunk = DELTA_TREE_OBJECT_MIN_CHUNK_BYTES;
+        let max_chunk = DELTA_TREE_OBJECT_MAX_CHUNK_BYTES;
+
+        assert_eq!(rebuilt, data);
+        assert!(
+            chunks.len() > 2,
+            "256 KiB chunks would produce only two chunks"
+        );
+        assert!(
+            chunks
+                .iter()
+                .take(chunks.len().saturating_sub(1))
+                .all(|chunk| chunk.len() >= min_chunk && chunk.len() <= max_chunk)
+        );
+        assert!(
+            chunks.iter().any(|chunk| chunk.len() < max_chunk),
+            "gear hash should find content boundaries before the hard cap"
+        );
+    }
+
+    #[test]
+    fn delta_tree_chunker_resynchronizes_after_insert() {
+        let mut original = (0..(768 * 1024))
+            .map(|idx| ((idx * 17 + idx / 11 + 29) % 253) as u8)
+            .collect::<Vec<_>>();
+        let original_chunks = split_delta_tree_object_chunks(&original).expect("original chunks");
+        original.splice(96 * 1024..96 * 1024, [0xA5; 257]);
+        let shifted_chunks = split_delta_tree_object_chunks(&original).expect("shifted chunks");
+
+        let original_hashes = original_chunks
+            .iter()
+            .map(|chunk| hex::encode(Sha256::digest(chunk)))
+            .collect::<std::collections::BTreeSet<_>>();
+        let shared = shifted_chunks
+            .iter()
+            .map(|chunk| hex::encode(Sha256::digest(chunk)))
+            .filter(|hash| original_hashes.contains(hash))
+            .count();
+
+        assert!(
+            shared * 2 >= original_chunks.len(),
+            "content-defined chunks should resynchronize after a small insert"
+        );
     }
 
     #[test]
