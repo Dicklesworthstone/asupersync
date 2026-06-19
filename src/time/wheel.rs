@@ -696,6 +696,14 @@ impl TimerWheel {
         }
 
         while self.current_tick < target_tick {
+            if target_tick == self.current_tick.saturating_add(1)
+                && self.can_fast_advance_one_no_ready_tick(target_tick)
+            {
+                self.current_tick = target_tick;
+                self.levels[0].cursor = (self.levels[0].cursor + 1) % SLOTS_PER_LEVEL;
+                continue;
+            }
+
             // Optimization: Skip empty ticks across all levels
             let next_tick = self.next_skip_tick(target_tick);
             if next_tick > self.current_tick + 1 {
@@ -707,6 +715,26 @@ impl TimerWheel {
             self.tick_level0();
             self.refill_overflow();
         }
+    }
+
+    fn can_fast_advance_one_no_ready_tick(&self, target_tick: u64) -> bool {
+        let next_cursor = (self.levels[0].cursor + 1) % SLOTS_PER_LEVEL;
+        if next_cursor == 0 || self.levels[0].is_occupied(next_cursor) {
+            return false;
+        }
+
+        if let Some(entry) = self.overflow.peek() {
+            let min_enter_ns = entry
+                .deadline
+                .as_nanos()
+                .saturating_sub(self.max_range_ns());
+            let min_enter_tick = min_enter_ns / LEVEL0_RESOLUTION_NS;
+            if min_enter_tick <= target_tick {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn next_skip_tick(&self, limit: u64) -> u64 {
@@ -1237,6 +1265,57 @@ mod tests {
         let count = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(count == 1, "counter", 1, count);
         crate::test_complete!("collect_expired_no_ready_preserves_future_timer");
+    }
+
+    #[test]
+    fn collect_expired_single_tick_no_ready_advances_cursor_without_bucket_work() {
+        init_test("collect_expired_single_tick_no_ready_advances_cursor_without_bucket_work");
+        let mut wheel = TimerWheel::new();
+        let counter = Arc::new(AtomicU64::new(0));
+
+        wheel.register(Time::from_millis(10), counter_waker(counter.clone()));
+
+        let early = wheel.collect_expired(Time::from_millis(1));
+        crate::assert_with_log!(
+            early.is_empty(),
+            "single no-ready tick does not fire future timer",
+            true,
+            early.len()
+        );
+        crate::assert_with_log!(
+            wheel.current_tick == 1,
+            "single tick advances current tick",
+            1u64,
+            wheel.current_tick
+        );
+        crate::assert_with_log!(
+            wheel.levels[0].cursor == 1,
+            "single tick advances level-0 cursor",
+            1usize,
+            wheel.levels[0].cursor
+        );
+        crate::assert_with_log!(
+            wheel.levels[0].is_occupied(10),
+            "future timer slot remains occupied",
+            true,
+            wheel.levels[0].is_occupied(10)
+        );
+
+        let due = wheel.collect_expired(Time::from_millis(10));
+        crate::assert_with_log!(
+            due.len() == 1,
+            "future timer fires after fast no-ready tick",
+            1,
+            due.len()
+        );
+        for waker in due {
+            waker.wake();
+        }
+        let count = counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(count == 1, "counter", 1, count);
+        crate::test_complete!(
+            "collect_expired_single_tick_no_ready_advances_cursor_without_bucket_work"
+        );
     }
 
     #[test]
