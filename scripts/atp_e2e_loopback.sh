@@ -15,6 +15,7 @@
 # Usage:
 #   ATP_BIN=/path/to/atp ./scripts/atp_e2e_loopback.sh
 #   SIZES="512K:524288 1M:1048576" TRANSPORTS="rq quic" ./scripts/atp_e2e_loopback.sh
+#   METADATA_TREE=1 TRANSPORTS="rq quic" ./scripts/atp_e2e_loopback.sh
 # The atp binary must be built with --features atp-cli,tls:
 #   rch exec -- env CARGO_TARGET_DIR=/tmp/atp_e2e cargo build --release --bin atp --features atp-cli,tls
 set -uo pipefail
@@ -23,6 +24,7 @@ set -uo pipefail
 ATP_BIN="${ATP_BIN:-}"
 SIZES="${SIZES:-512K:524288 1M:1048576 10M:10485760 100M:104857600}"   # add 1G:1073741824 explicitly (rq encode is CPU-heavy)
 TRANSPORTS="${TRANSPORTS:-rq quic}"
+METADATA_TREE="${METADATA_TREE:-1}"
 WORKERS="${WORKERS:-4}"
 PORT_BASE="${PORT_BASE:-19400}"
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -87,12 +89,15 @@ gen_payloads(){
   head -c 200000  /dev/urandom > "$W/src/tree/a/d/big3.bin"
   head -c 4096    /dev/urandom > "$W/src/tree/e/small.bin"
   for i in $(seq 1 30); do echo "tree text file line $i" > "$W/src/tree/e/text_$i.txt"; done
-  # NOTE: empty directories + full metadata fidelity are deliberately NOT in this
-  # floor tree — transport_quic does not yet encode explicit/empty directory
-  # entries (rq/tcp do, the J2 work). That metadata-parity gap is tracked as its
-  # own bead and exercised by the G4.5 metadata-fidelity suite (gated on the fix),
-  # so this floor stays green for currently-working behavior.
   log "  tree/ (heterogeneous: 5 binaries + 30 text files, depth 3)"
+  if [ "$METADATA_TREE" = "1" ]; then
+    local meta="$W/src/tree_metadata"
+    mkdir -p "$meta/a/empty" "$meta/a/nested" "$meta/b"
+    printf 'metadata fixture payload\n' > "$meta/a/nested/file.txt"
+    head -c 65536 /dev/urandom > "$meta/b/blob.bin"
+    ln -s "../a/nested/file.txt" "$meta/b/link_to_file"
+    log "  tree_metadata/ (empty directory + relative symlink + regular files)"
+  fi
 }
 
 src_sha(){ # path -> sorted list of sha256 (for files); for a file, single hash
@@ -100,10 +105,21 @@ src_sha(){ # path -> sorted list of sha256 (for files); for a file, single hash
   else sha256sum "$1" | awk '{print $1}'; fi
 }
 
+metadata_tree_ok(){ # committed tree root -> OK/FAIL
+  local root="$1"
+  [ -d "$root/a/empty" ] || return 1
+  [ -d "$root/a/nested" ] || return 1
+  [ -f "$root/a/nested/file.txt" ] || return 1
+  [ -f "$root/b/blob.bin" ] || return 1
+  [ -L "$root/b/link_to_file" ] || return 1
+  [ "$(readlink "$root/b/link_to_file" 2>/dev/null)" = "../a/nested/file.txt" ] || return 1
+  return 0
+}
+
 run_case(){ # transport label
   local tr="$1" label="$2"
   local src dst; PORT=$((PORT+1))
-  if [ "$label" = "tree" ]; then src="$W/src/tree"; else src="$W/src/file_$label.bin"; fi
+  if [ "$label" = "tree" ] || [ "$label" = "tree_metadata" ]; then src="$W/src/$label"; else src="$W/src/file_$label.bin"; fi
   dst="$W/dst_${tr}_${label}"; rm -rf "$dst" 2>/dev/null; mkdir -p "$dst"
   local rlog="$OUT/logs/recv_${tr}_${label}.log" slog="$OUT/logs/send_${tr}_${label}.log"
   local recv_extra="" send_extra="" ready_pat="listening"
@@ -138,42 +154,45 @@ run_case(){ # transport label
   sha_ok=$(grep -o '"sha_ok":[a-z]*' "$slog" | head -1 | cut -d: -f2)
   merkle_ok=$(grep -o '"merkle_ok":[a-z]*' "$slog" | head -1 | cut -d: -f2)
   # sha verify: compare committed dst against src
-  local want got base ok="MISMATCH"
+  local want got base ok="MISMATCH" metadata_ok="NA"
   base="$(basename "$src")"
   want="$(src_sha "$src")"
-  if [ "$label" = "tree" ]; then got="$( [ -d "$dst/tree" ] && ( cd "$dst/tree" && find . -type f | sort | xargs sha256sum 2>/dev/null | awk '{print $1}' ) )"
+  if [ -d "$src" ]; then got="$( [ -d "$dst/$base" ] && ( cd "$dst/$base" && find . -type f | sort | xargs sha256sum 2>/dev/null | awk '{print $1}' ) )"
   else got="$(sha256sum "$dst/$base" 2>/dev/null | awk '{print $1}')"; fi
   [ -n "$got" ] && [ "$want" = "$got" ] && ok="OK"
+  if [ "$label" = "tree_metadata" ]; then
+    metadata_tree_ok "$dst/tree_metadata" && metadata_ok="OK" || metadata_ok="FAIL"
+  fi
   # staging leak check (the F-REG regression the floor must catch)
   local leak="none"; ls -d "$dst"/.atp-*-staging-* >/dev/null 2>&1 && leak="LEAKED"
   # verdict (with known-gap xfail tracking so the floor stays green on working behavior)
   local verdict="PASS" gap=""
-  if [ "$src_rc" != 0 ] || [ "$ok" != "OK" ] || [ "$committed" != "true" ] || [ "$leak" != "none" ]; then
+  if [ "$src_rc" != 0 ] || [ "$ok" != "OK" ] || [ "$committed" != "true" ] || [ "$leak" != "none" ] || { [ "$metadata_ok" != "NA" ] && [ "$metadata_ok" != "OK" ]; }; then
     verdict="FAIL"
     for g in $KNOWN_GAPS; do [ "${g%%=*}" = "$tr:$label" ] && { verdict="XFAIL"; gap="${g##*=}"; break; }; done
   fi
-  log "  send_rc=$src_rc wall=${wall}s sha=$ok committed=${committed:-?} merkle_ok=${merkle_ok:-?} staging=$leak => $verdict${gap:+ (known gap: $gap)}"
+  log "  send_rc=$src_rc wall=${wall}s sha=$ok metadata=$metadata_ok committed=${committed:-?} merkle_ok=${merkle_ok:-?} staging=$leak => $verdict${gap:+ (known gap: $gap)}"
   case "$verdict" in
     FAIL)  log "  --- sender log ---"; sed 's/^/    send| /' "$slog"; log "  --- receiver log ---"; sed 's/^/    recv| /' "$rlog"; FAIL=$((FAIL+1));;
     XFAIL) XFAIL=$((XFAIL+1));;
     *)     PASS=$((PASS+1));;
   esac
-  printf '{"transport":"%s","label":"%s","result":"%s","gap":"%s","send_rc":%s,"wall_s":%s,"sha":"%s","committed":"%s","staging":"%s"}\n' \
-    "$tr" "$label" "$verdict" "$gap" "${src_rc:-null}" "${wall:-null}" "$ok" "${committed:-unknown}" "$leak" >> "$RESULTS"
+  printf '{"transport":"%s","label":"%s","result":"%s","gap":"%s","send_rc":%s,"wall_s":%s,"sha":"%s","metadata":"%s","committed":"%s","staging":"%s"}\n' \
+    "$tr" "$label" "$verdict" "$gap" "${src_rc:-null}" "${wall:-null}" "$ok" "$metadata_ok" "${committed:-unknown}" "$leak" >> "$RESULTS"
   rm -rf "$dst" 2>/dev/null || true
 }
 
 # ---- run ----
 banner "ATP LOOPBACK E2E  ($TS)"
-log "sizes=[$SIZES] transports=[$TRANSPORTS] out=$OUT"
+log "sizes=[$SIZES] transports=[$TRANSPORTS] metadata_tree=$METADATA_TREE out=$OUT"
 echo "$TRANSPORTS" | grep -qw quic && gen_certs
 gen_payloads
-labels=""; for pair in $SIZES; do labels="$labels ${pair%%:*}"; done; labels="$labels tree"
+labels=""; for pair in $SIZES; do labels="$labels ${pair%%:*}"; done; labels="$labels tree"; [ "$METADATA_TREE" = "1" ] && labels="$labels tree_metadata"
 for tr in $TRANSPORTS; do for label in $labels; do run_case "$tr" "$label"; done; done
 
 banner "SUMMARY"
 log "PASS=$PASS FAIL=$FAIL XFAIL=$XFAIL (tracked known gaps)   results: $RESULTS"
-if command -v jq >/dev/null 2>&1; then jq -rs '.[] | "  \(.result)  \(.transport)/\(.label)  sha=\(.sha) staging=\(.staging) wall=\(.wall_s)s" + (if .gap!="" then "  [gap:\(.gap)]" else "" end)' "$RESULTS"; else cat "$RESULTS"; fi
+if command -v jq >/dev/null 2>&1; then jq -rs '.[] | "  \(.result)  \(.transport)/\(.label)  sha=\(.sha) metadata=\(.metadata) staging=\(.staging) wall=\(.wall_s)s" + (if .gap!="" then "  [gap:\(.gap)]" else "" end)' "$RESULTS"; else cat "$RESULTS"; fi
 printf '{"ts":"%s","pass":%s,"fail":%s,"xfail":%s,"atp_bin":"%s"}\n' "$TS" "$PASS" "$FAIL" "$XFAIL" "$ATP_BIN" > "$OUT/summary.json"
 log "artifacts: $OUT (logs/, results.jsonl, summary.json)"
 [ "$FAIL" -eq 0 ] && { log "==== E2E LOOPBACK: PASS ($PASS pass, $XFAIL known-gap xfail) ===="; exit 0; } || { log "==== E2E LOOPBACK: FAIL ($FAIL real failures, $XFAIL known-gap) ===="; exit 1; }
