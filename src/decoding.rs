@@ -469,6 +469,18 @@ impl DecodingPipeline {
         self.feed_with_retention(auth_symbol, true)
     }
 
+    /// Feeds a received authenticated symbol and returns an owned decode job
+    /// when the block reaches threshold. Unlike
+    /// [`Self::feed_streaming_block_deferred`], completed block data is retained
+    /// in this pipeline so existing full-object commit paths can still call
+    /// [`Self::into_data`] after joining the decode job.
+    pub(crate) fn feed_deferred(
+        &mut self,
+        auth_symbol: AuthenticatedSymbol,
+    ) -> Result<DeferredSymbolAcceptResult, DecodingError> {
+        self.feed_with_retention_and_mode(auth_symbol, true, FeedDecodeMode::Deferred)
+    }
+
     /// Feeds a symbol for streaming receivers that immediately persist decoded
     /// blocks and do not need `into_data()` to retain a second in-memory copy.
     #[cfg_attr(not(feature = "tls"), allow(dead_code))]

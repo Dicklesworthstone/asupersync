@@ -86,8 +86,9 @@ use crate::codec::Decoder;
 use crate::config::EncodingConfig;
 use crate::cx::Cx;
 use crate::decoding::{
-    BlockStateKind, DecodingConfig, DecodingPipeline, MissingSourceSymbol, RejectReason,
-    SymbolAcceptResult,
+    BlockDecodeOutcome, BlockStateKind, DecodingConfig, DecodingPipeline,
+    DeferredSymbolAcceptResult, MissingSourceSymbol, RejectReason, SymbolAcceptResult,
+    run_block_decode_job,
 };
 use crate::encoding::EncodingPipeline;
 use crate::io::AsyncReadExt;
@@ -214,6 +215,13 @@ const MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND: usize = 2048;
 /// receive queue grow behind the decoder under lossy bursts and can manufacture
 /// unnecessary NeedMore rounds.
 const NATIVE_SYMBOL_DRAIN_BATCH: usize = 512;
+
+/// Maximum native QUIC receiver decode jobs one entry may have in flight.
+///
+/// Mirrors the RQ receiver bound: enough fan-out to keep independent bounded-K
+/// blocks off the hot receive pump, while avoiding unbounded blocking-pool and
+/// decoded-block memory pressure under bursty loss.
+const QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 16;
 
 const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 
@@ -2160,6 +2168,13 @@ struct QuicEntryDecoder {
     pipeline: Option<DecodingPipeline>,
     complete: bool,
     data: Vec<u8>,
+    pending_decodes: Vec<QuicPendingDecode>,
+}
+
+struct QuicPendingDecode {
+    block_sbn: u8,
+    started_at: Instant,
+    handle: crate::runtime::TaskHandle<BlockDecodeOutcome>,
 }
 
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
@@ -2470,6 +2485,7 @@ fn decoders_from_manifest(
                 pipeline: Some(pipeline),
                 complete: entry.size == 0,
                 data: Vec::new(),
+                pending_decodes: Vec::new(),
             })
         })
         .collect()
@@ -3140,6 +3156,143 @@ fn feed_authenticated_symbol(
     }
 }
 
+fn finish_quic_decode_outcome(
+    decoder: &mut QuicEntryDecoder,
+    outcome: BlockDecodeOutcome,
+    decode_stats: &mut QuicDecodeStats,
+    started_at: Instant,
+) -> Result<bool, QuicTransportError> {
+    let Some(pipeline) = decoder.pipeline.as_mut() else {
+        return Ok(false);
+    };
+    match pipeline.finish_decode_job(outcome) {
+        SymbolAcceptResult::BlockComplete { .. } => {
+            decode_stats.record_completed_block(started_at.elapsed());
+            decoder.complete = pipeline.is_complete();
+            Ok(true)
+        }
+        SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed) => Err(
+            QuicTransportError::Integrity("symbol authentication failed".to_string()),
+        ),
+        SymbolAcceptResult::Rejected(reason) => Err(QuicTransportError::Control(format!(
+            "RaptorQ decoder rejected deferred block: {reason:?}"
+        ))),
+        SymbolAcceptResult::Accepted { .. }
+        | SymbolAcceptResult::DecodingStarted { .. }
+        | SymbolAcceptResult::Duplicate => Ok(false),
+    }
+}
+
+fn feed_authenticated_symbol_deferred(
+    cx: &Cx,
+    decoder: &mut QuicEntryDecoder,
+    auth_symbol: AuthenticatedSymbol,
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<bool, QuicTransportError> {
+    if decoder.complete {
+        return Ok(false);
+    }
+    let Some(pipeline) = decoder.pipeline.as_mut() else {
+        return Ok(false);
+    };
+    let started_at = Instant::now();
+    match pipeline.feed_deferred(auth_symbol) {
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete { .. })) => {
+            decode_stats.record_completed_block(started_at.elapsed());
+            decoder.complete = pipeline.is_complete();
+            Ok(true)
+        }
+        Ok(DeferredSymbolAcceptResult::Immediate(
+            SymbolAcceptResult::Accepted { .. } | SymbolAcceptResult::DecodingStarted { .. },
+        )) => Ok(true),
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
+            RejectReason::AuthenticationFailed,
+        ))) => Err(QuicTransportError::Integrity(
+            "symbol authentication failed".to_string(),
+        )),
+        Ok(DeferredSymbolAcceptResult::Immediate(
+            SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_),
+        )) => Ok(false),
+        Ok(DeferredSymbolAcceptResult::Decode(job)) => {
+            let block_sbn = job.sbn();
+            if decoder.pending_decodes.len() >= QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY {
+                let outcome = run_block_decode_job(job);
+                return finish_quic_decode_outcome(decoder, outcome, decode_stats, started_at);
+            }
+            let fallback_job = job.clone();
+            match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+                Ok(handle) => {
+                    decoder.pending_decodes.push(QuicPendingDecode {
+                        block_sbn,
+                        started_at,
+                        handle,
+                    });
+                    Ok(true)
+                }
+                Err(_) => {
+                    let outcome = run_block_decode_job(fallback_job);
+                    finish_quic_decode_outcome(decoder, outcome, decode_stats, started_at)
+                }
+            }
+        }
+        Err(err) => Err(QuicTransportError::Control(format!(
+            "RaptorQ decoder rejected symbol: {err}"
+        ))),
+    }
+}
+
+async fn drain_ready_quic_decodes(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<u64, QuicTransportError> {
+    let mut completed = 0u64;
+    for decoder in decoders {
+        let mut i = 0usize;
+        while i < decoder.pending_decodes.len() {
+            if !decoder.pending_decodes[i].handle.is_finished() {
+                i += 1;
+                continue;
+            }
+            let pending = decoder.pending_decodes.swap_remove(i);
+            let block_sbn = pending.block_sbn;
+            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+                QuicTransportError::Control(format!(
+                    "decode task failed for entry {} block {}: {join_err:?}",
+                    decoder.index, block_sbn
+                ))
+            })?;
+            if finish_quic_decode_outcome(decoder, outcome, decode_stats, pending.started_at)? {
+                completed = completed.saturating_add(1);
+            }
+        }
+    }
+    Ok(completed)
+}
+
+async fn join_all_quic_decodes(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<u64, QuicTransportError> {
+    let mut completed = 0u64;
+    for decoder in decoders {
+        while let Some(pending) = decoder.pending_decodes.pop() {
+            let block_sbn = pending.block_sbn;
+            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+                QuicTransportError::Control(format!(
+                    "decode task failed for entry {} block {}: {join_err:?}",
+                    decoder.index, block_sbn
+                ))
+            })?;
+            if finish_quic_decode_outcome(decoder, outcome, decode_stats, pending.started_at)? {
+                completed = completed.saturating_add(1);
+            }
+        }
+    }
+    Ok(completed)
+}
+
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
 fn feed_authenticated_symbol_take_block(
     decoder: &mut QuicEntryDecoder,
@@ -3328,6 +3481,54 @@ fn feed_aggregated_symbol_for_entry(
         }
         let ready = authenticated_symbol_with_existing_tag(symbol, &auth_symbol);
         if feed_authenticated_symbol(decoder, ready)? {
+            accepted = accepted.saturating_add(1);
+        }
+    }
+    trace_aggregated_symbol_result(
+        receive.trace_cx,
+        entry,
+        receive.path,
+        source_symbol_id,
+        ready,
+        accepted,
+        duplicate,
+    );
+    Ok(accepted)
+}
+
+fn feed_aggregated_symbol_for_entry_deferred(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    entry: u32,
+    auth_symbol: AuthenticatedSymbol,
+    receive: QuicReceiveAggregation<'_>,
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<u64, QuicTransportError> {
+    let decoder = decoders
+        .iter_mut()
+        .find(|decoder| decoder.index == entry)
+        .ok_or_else(|| {
+            QuicTransportError::Integrity(format!("symbol for unknown manifest entry {entry}"))
+        })?;
+
+    let source_symbol_id = auth_symbol.symbol().id();
+    let source_tag = *auth_symbol.tag();
+    let aggregated =
+        receive
+            .aggregator
+            .process(auth_symbol.symbol().clone(), receive.path, receive.now);
+    let duplicate = aggregated.was_duplicate;
+    let ready = aggregated.ready.len();
+    let mut accepted = 0u64;
+    for symbol in aggregated.ready {
+        if !source_tag.is_zero() && symbol.id() != source_symbol_id {
+            return Err(QuicTransportError::Integrity(
+                "authenticated QUIC receive aggregation emitted a buffered symbol without its original tag"
+                    .to_string(),
+            ));
+        }
+        let ready = authenticated_symbol_with_existing_tag(symbol, &auth_symbol);
+        if feed_authenticated_symbol_deferred(cx, decoder, ready, decode_stats)? {
             accepted = accepted.saturating_add(1);
         }
     }
@@ -4845,6 +5046,61 @@ fn drain_native_symbol_datagrams_with_aggregator(
     Ok(accepted)
 }
 
+async fn drain_native_symbol_datagrams_with_aggregator_deferred(
+    cx: &Cx,
+    conn: &mut NativeQuicConnection,
+    manifest: &TransferManifest,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    receive: QuicReceiveAggregation<'_>,
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<u64, QuicTransportError> {
+    let symbol_auth = config.symbol_auth_context()?;
+    let auth_required = symbol_auth.is_some();
+    let tag = transfer_tag(&manifest.transfer_id);
+    let mut accepted = 0u64;
+    while let Some(envelope) = recv_native_symbol_envelope(conn, auth_required)? {
+        if envelope.transfer_tag != tag {
+            return Err(QuicTransportError::Integrity(format!(
+                "symbol transfer tag mismatch: got {}, expected {tag}",
+                envelope.transfer_tag
+            )));
+        }
+        if envelope.payload.len() != usize::from(config.symbol_size) {
+            return Err(QuicTransportError::Integrity(format!(
+                "symbol payload has {} bytes, expected {}",
+                envelope.payload.len(),
+                config.symbol_size
+            )));
+        }
+        let decoder = decoders
+            .iter()
+            .find(|decoder| decoder.index == envelope.entry)
+            .ok_or_else(|| {
+                QuicTransportError::Integrity(format!(
+                    "symbol for unknown manifest entry {}",
+                    envelope.entry
+                ))
+            })?;
+        let auth_symbol = verified_authenticated_symbol_from_envelope(
+            &envelope,
+            decoder.object_id,
+            symbol_auth.as_ref(),
+        )?;
+        accepted = accepted.saturating_add(feed_aggregated_symbol_for_entry_deferred(
+            cx,
+            decoders,
+            envelope.entry,
+            auth_symbol,
+            receive,
+            decode_stats,
+        )?);
+        let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
+    }
+    let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
+    Ok(accepted)
+}
+
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
 fn drain_native_symbol_datagrams_with_blocks(
     conn: &mut NativeQuicConnection,
@@ -5360,7 +5616,7 @@ async fn commit_decoded_entries(
     Ok((receipt, committed_paths))
 }
 
-fn receive_native_symbol_round(
+async fn receive_native_symbol_round(
     cx: &Cx,
     connection: &mut NativeQuicConnection,
     control: &mut NativeQuicFrameTransport,
@@ -5373,16 +5629,21 @@ fn receive_native_symbol_round(
     decode_stats: &mut QuicDecodeStats,
 ) -> Result<Option<QuicNeedMore>, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    *symbols_accepted =
-        (*symbols_accepted).saturating_add(drain_native_symbol_datagrams_with_aggregator(
+    *symbols_accepted = (*symbols_accepted).saturating_add(
+        drain_native_symbol_datagrams_with_aggregator_deferred(
+            cx,
             connection,
             manifest,
             decoders,
             config,
             QuicReceiveAggregation::new(aggregator, QUIC_PRIMARY_RECEIVE_PATH_ID, cx.now())
                 .with_trace(cx),
-        )?);
+            decode_stats,
+        )
+        .await?,
+    );
     receive_native_object_complete(cx, connection, control)?;
+    let _ = join_all_quic_decodes(cx, decoders, decode_stats).await?;
     decode_stats.add(assemble_completed_entries(decoders));
 
     let pending = pending_entries(decoders);
@@ -5476,6 +5737,7 @@ async fn receive_established_native_connection(
             &mut feedback_rounds,
             &mut decode_stats,
         )?
+        .await?
         .is_none()
         {
             break;
@@ -10050,6 +10312,7 @@ mod tests {
             pipeline: None,
             complete: true,
             data: bytes,
+            pending_decodes: Vec::new(),
         }];
 
         let err = block_on(commit_decoded_entries(
