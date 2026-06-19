@@ -104,6 +104,7 @@ pub struct Histogram {
     counts: Vec<AtomicU64>,
     sum: AtomicU64, // Stored as bits of f64
     count: AtomicU64,
+    state_lock: Mutex<()>,
 }
 
 /// Point-in-time view of a [`Histogram`].
@@ -137,6 +138,7 @@ impl Histogram {
             counts,
             sum: AtomicU64::new(0),
             count: AtomicU64::new(0),
+            state_lock: Mutex::new(()),
         }
     }
 
@@ -148,6 +150,10 @@ impl Histogram {
         if !value.is_finite() {
             return;
         }
+        let _guard = self
+            .state_lock
+            .lock()
+            .expect("histogram state mutex poisoned");
         // Find bucket index
         let idx = self
             .buckets
@@ -182,11 +188,19 @@ impl Histogram {
 
     /// Returns the total count of observations.
     pub fn count(&self) -> u64 {
+        let _guard = self
+            .state_lock
+            .lock()
+            .expect("histogram state mutex poisoned");
         self.count.load(Ordering::Relaxed)
     }
 
     /// Returns the sum of observations.
     pub fn sum(&self) -> f64 {
+        let _guard = self
+            .state_lock
+            .lock()
+            .expect("histogram state mutex poisoned");
         f64::from_bits(self.sum.load(Ordering::Relaxed))
     }
 
@@ -198,6 +212,10 @@ impl Histogram {
     /// Returns a point-in-time snapshot for conformance and export checks.
     #[must_use]
     pub fn snapshot(&self) -> HistogramSnapshot {
+        let _guard = self
+            .state_lock
+            .lock()
+            .expect("histogram state mutex poisoned");
         HistogramSnapshot {
             name: self.name.clone(),
             bucket_boundaries: self.buckets.clone(),
@@ -206,13 +224,17 @@ impl Histogram {
                 .iter()
                 .map(|atomic| atomic.load(Ordering::Relaxed))
                 .collect(),
-            count: self.count(),
-            sum: self.sum(),
+            count: self.count.load(Ordering::Relaxed),
+            sum: f64::from_bits(self.sum.load(Ordering::Relaxed)),
         }
     }
 
     #[cfg(all(test, feature = "metrics"))]
     pub(crate) fn bucket_counts(&self) -> Vec<u64> {
+        let _guard = self
+            .state_lock
+            .lock()
+            .expect("histogram state mutex poisoned");
         self.counts
             .iter()
             .map(|atomic| atomic.load(Ordering::Relaxed))
@@ -221,6 +243,10 @@ impl Histogram {
 
     #[cfg(all(test, feature = "metrics"))]
     pub(crate) fn reset(&self) {
+        let _guard = self
+            .state_lock
+            .lock()
+            .expect("histogram state mutex poisoned");
         for count in &self.counts {
             count.store(0, Ordering::Relaxed);
         }
@@ -230,11 +256,15 @@ impl Histogram {
 
     #[cfg(all(test, feature = "metrics"))]
     pub(crate) fn mean(&self) -> f64 {
-        let total_count = self.count();
+        let _guard = self
+            .state_lock
+            .lock()
+            .expect("histogram state mutex poisoned");
+        let total_count = self.count.load(Ordering::Relaxed);
         if total_count == 0 {
             0.0
         } else {
-            self.sum() / (total_count as f64)
+            f64::from_bits(self.sum.load(Ordering::Relaxed)) / (total_count as f64)
         }
     }
 
@@ -245,11 +275,19 @@ impl Histogram {
 
     #[cfg(test)]
     pub(crate) fn percentile(&self, p: f64) -> Option<f64> {
-        if !(0.0..=1.0).contains(&p) || self.count() == 0 {
+        if !(0.0..=1.0).contains(&p) {
             return None;
         }
 
-        let total = self.count();
+        let _guard = self
+            .state_lock
+            .lock()
+            .expect("histogram state mutex poisoned");
+        let total = self.count.load(Ordering::Relaxed);
+        if total == 0 {
+            return None;
+        }
+
         let target_rank = if p == 0.0 {
             1
         } else {
