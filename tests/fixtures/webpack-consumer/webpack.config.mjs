@@ -13,4 +13,7 @@ export default {
     path: path.resolve(thisDir, "dist"),
     clean: true,
   },
+  performance: {
+    hints: false,
+  },
 };

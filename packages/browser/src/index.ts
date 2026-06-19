@@ -4854,6 +4854,17 @@ function mapOutcome<T, U>(
   return outcome as BrowserOutcome<U>;
 }
 
+function requireHandleKind<K extends HandleKind>(
+  handle: HandleRef,
+  expectedKind: K,
+): asserts handle is HandleRef & { kind: K } {
+  if (handle.kind !== expectedKind) {
+    throw new TypeError(
+      `Expected ${expectedKind} handle; received ${handle.kind}`,
+    );
+  }
+}
+
 function asCoreRegionHandle(
   handle: RegionHandle | CoreRegionHandle | HandleRef,
 ): CoreRegionHandle {
@@ -4863,6 +4874,7 @@ function asCoreRegionHandle(
   if (handle instanceof CoreRegionHandle) {
     return handle;
   }
+  requireHandleKind(handle, "region");
   return new CoreRegionHandle(handle);
 }
 
@@ -4875,6 +4887,7 @@ function asCoreTaskHandle(
   if (handle instanceof CoreTaskHandle) {
     return handle;
   }
+  requireHandleKind(handle, "task");
   return new CoreTaskHandle(handle);
 }
 
@@ -4887,6 +4900,7 @@ function asCoreFetchHandle(
   if (handle instanceof CoreFetchHandle) {
     return handle;
   }
+  requireHandleKind(handle, "fetch_request");
   return new CoreFetchHandle(handle);
 }
 

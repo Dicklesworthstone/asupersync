@@ -32,15 +32,19 @@ fi
 case "${PROFILE}" in
   minimal)
     BUILD_ARGS=(--release -- --no-default-features --features minimal)
+    RCH_CARGO_ARGS=(build -p asupersync-browser-core --target wasm32-unknown-unknown --release --no-default-features --features minimal)
     ;;
   dev)
     BUILD_ARGS=(--dev -- --no-default-features --features dev)
+    RCH_CARGO_ARGS=(build -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev)
     ;;
   prod)
     BUILD_ARGS=(--release -- --no-default-features --features prod)
+    RCH_CARGO_ARGS=(build -p asupersync-browser-core --target wasm32-unknown-unknown --release --no-default-features --features prod)
     ;;
   deterministic)
     BUILD_ARGS=(--release -- --no-default-features --features deterministic)
+    RCH_CARGO_ARGS=(build -p asupersync-browser-core --target wasm32-unknown-unknown --release --no-default-features --features deterministic)
     ;;
   *)
     cat >&2 <<'USAGE'
@@ -53,35 +57,36 @@ esac
 
 mkdir -p "${STAGING_DIR}" "${PACKAGE_DIR}" "${WRAPPER_ROOT}"
 WORK_DIR="$(mktemp -d "${WRAPPER_ROOT}/${PROFILE}.XXXXXX")"
-CARGO_WRAPPER="${WORK_DIR}/cargo-rch"
 TARGET_DIR="${WORK_DIR}/target"
+LOCAL_TARGET_DIR="${WORK_DIR}/wasm-pack-target"
+PREFLIGHT_LOG="${WORK_DIR}/rch-preflight-build.log"
 BUILD_LOG="${WORK_DIR}/wasm-pack-build.log"
 
 reject_rch_local_fallback_log() {
-  if grep -Eq '^\[RCH\] local \(|falling back to local' "${BUILD_LOG}" 2>/dev/null; then
+  local log_path="$1"
+  if grep -Eq '^\[RCH\] local \(|falling back to local' "${log_path}" 2>/dev/null; then
     echo "error: rch local fallback detected; refusing local cargo execution" >&2
     echo "rch local fallback detected; refusing local cargo execution" > "${WORK_DIR}/rch_local_fallback.txt"
     exit 86
   fi
 }
 
-cat > "${CARGO_WRAPPER}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd "${REPO_ROOT}"
-exec "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "\$@"
-EOF
-chmod +x "${CARGO_WRAPPER}"
+echo "==> Preflighting asupersync-browser-core (${PROFILE}) through RCH"
+if RCH_REQUIRE_REMOTE=1 "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo "${RCH_CARGO_ARGS[@]}" 2>&1 | tee "${PREFLIGHT_LOG}"; then
+  reject_rch_local_fallback_log "${PREFLIGHT_LOG}"
+else
+  reject_rch_local_fallback_log "${PREFLIGHT_LOG}"
+  exit 1
+fi
 
-echo "==> Building asupersync-browser-core (${PROFILE})"
-if CARGO="${CARGO_WRAPPER}" wasm-pack build "${CRATE_DIR}" \
+echo "==> Packaging asupersync-browser-core (${PROFILE})"
+if CARGO_TARGET_DIR="${LOCAL_TARGET_DIR}" wasm-pack build "${CRATE_DIR}" \
   --target web \
   --out-dir "${STAGING_DIR}" \
   --out-name asupersync \
   "${BUILD_ARGS[@]}" 2>&1 | tee "${BUILD_LOG}"; then
-  reject_rch_local_fallback_log
+  :
 else
-  reject_rch_local_fallback_log
   exit 1
 fi
 

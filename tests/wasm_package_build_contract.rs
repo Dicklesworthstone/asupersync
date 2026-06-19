@@ -268,13 +268,17 @@ fn build_browser_core_artifacts_script_exists() {
     assert!(content.contains("wasm-pack build"), "must invoke wasm-pack");
     assert!(
         content.contains(
-            "exec \"${RCH_BIN}\" exec -- env CARGO_TARGET_DIR=\"${TARGET_DIR}\" cargo \"\\$@\""
+            "RCH_REQUIRE_REMOTE=1 \"${RCH_BIN}\" exec -- env CARGO_TARGET_DIR=\"${TARGET_DIR}\""
         ),
-        "must route browser-core cargo invocations through rch with an isolated target dir"
+        "must preflight browser-core wasm compilation through rch with an isolated target dir"
     );
     assert!(
         content.contains("TARGET_DIR=\"${WORK_DIR}/target\""),
         "must pin a per-run target dir for remote browser-core builds"
+    );
+    assert!(
+        content.contains("CARGO_TARGET_DIR=\"${LOCAL_TARGET_DIR}\" wasm-pack build"),
+        "must package through a local wasm-pack target dir so wasm-bindgen can read the wasm artifact"
     );
     assert!(
         content.contains("abi-metadata.json"),

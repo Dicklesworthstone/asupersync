@@ -67,16 +67,24 @@ cp -R "${REPO_ROOT}/packages/browser-core" "${PKG_DIR}/browser-core"
 cp -R "${REPO_ROOT}/packages/browser" "${PKG_DIR}/browser"
 
 # Consumer installs from local package copies; rewrite workspace protocol so npm can resolve.
-python3 - "${PKG_DIR}/browser/package.json" <<'PY'
+python3 - "${CONSUMER_DIR}/package.json" "${PKG_DIR}/browser/package.json" <<'PY'
 import json
 import pathlib
 import sys
 
-path = pathlib.Path(sys.argv[1])
-data = json.loads(path.read_text())
-deps = data.setdefault("dependencies", {})
-deps["@asupersync/browser-core"] = "file:../browser-core"
-path.write_text(json.dumps(data, indent=2) + "\n")
+consumer_path = pathlib.Path(sys.argv[1])
+browser_path = pathlib.Path(sys.argv[2])
+
+consumer_data = json.loads(consumer_path.read_text())
+consumer_deps = consumer_data.setdefault("dependencies", {})
+consumer_deps["@asupersync/browser"] = "file:../packages/browser"
+consumer_deps["@asupersync/browser-core"] = "file:../packages/browser-core"
+consumer_path.write_text(json.dumps(consumer_data, indent=2) + "\n")
+
+browser_data = json.loads(browser_path.read_text())
+browser_deps = browser_data.setdefault("dependencies", {})
+browser_deps["@asupersync/browser-core"] = "file:../browser-core"
+browser_path.write_text(json.dumps(browser_data, indent=2) + "\n")
 PY
 
 (

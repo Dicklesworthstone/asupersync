@@ -848,11 +848,10 @@ export class NextServerBridgeAdapter {
   }
 
   unsupportedRuntimeError(): NextServerBridgeRuntimeError {
-    const error = createNextUnsupportedRuntimeError(
-      this.diagnosticsState.runtimeSupport,
-    ) as NextServerBridgeRuntimeError;
-    error.bridgeDiagnostics = this.diagnostics();
-    return error;
+    return Object.assign(
+      createNextUnsupportedRuntimeError(this.diagnosticsState.runtimeSupport),
+      { bridgeDiagnostics: this.diagnostics() },
+    );
   }
 }
 
@@ -937,11 +936,10 @@ export class NextEdgeBridgeAdapter {
   }
 
   unsupportedRuntimeError(): NextEdgeBridgeRuntimeError {
-    const error = createNextUnsupportedRuntimeError(
-      this.diagnosticsState.runtimeSupport,
-    ) as NextEdgeBridgeRuntimeError;
-    error.bridgeDiagnostics = this.diagnostics();
-    return error;
+    return Object.assign(
+      createNextUnsupportedRuntimeError(this.diagnosticsState.runtimeSupport),
+      { bridgeDiagnostics: this.diagnostics() },
+    );
   }
 }
 

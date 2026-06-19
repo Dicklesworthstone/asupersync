@@ -12,6 +12,11 @@ export function abi_fingerprint(): bigint;
 export function abi_version(): string;
 
 /**
+ * `browser_operator_snapshot` ABI symbol.
+ */
+export function browser_operator_snapshot(): string;
+
+/**
  * `fetch_request` ABI symbol.
  */
 export function fetch_request(request_json: string, consumer_version_json?: string | null): string;
@@ -82,6 +87,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly abi_fingerprint: () => bigint;
     readonly abi_version: (a: number) => void;
+    readonly browser_operator_snapshot: (a: number) => void;
     readonly fetch_request: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly runtime_close: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly runtime_create: (a: number, b: number, c: number) => void;
@@ -95,18 +101,16 @@ export interface InitOutput {
     readonly websocket_open: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly websocket_recv: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly websocket_send: (a: number, b: number, c: number, d: number, e: number) => void;
-    readonly __wasm_bindgen_func_elem_761: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_82: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_326: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_766: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_101: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_331: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_331_3: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_803: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_103: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_354: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_354_3: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;
+    readonly __wbindgen_export4: (a: number, b: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
-    readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_export5: (a: number, b: number, c: number) => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

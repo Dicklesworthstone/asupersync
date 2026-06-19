@@ -21,5 +21,10 @@
     "node": ">=18.12.0",
     "pnpm": ">=10.34.3"
   },
-  "packageManager": "pnpm@10.34.3"
+  "packageManager": "pnpm@10.34.3",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "sharp"
+    ]
+  }
 }

@@ -1,7 +1,5 @@
 import { detectNextRuntimeSupport } from "@asupersync/next";
 
-export const runtime = "edge";
-
 export async function GET() {
   return Response.json({
     target: "edge",

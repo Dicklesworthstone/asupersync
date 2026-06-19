@@ -25,6 +25,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactElement,
   type ReactNode,
 } from "react";
 
@@ -126,7 +127,7 @@ function closeScope(scope: RegionHandle | null, consumerVersion?: AbiVersion | n
 export function ReactRuntimeProvider({
   children,
   runtimeOptions,
-}: ReactRuntimeProviderProps): JSX.Element {
+}: ReactRuntimeProviderProps): ReactElement {
   const consumerVersionMajor = runtimeOptions?.consumerVersion?.major ?? null;
   const consumerVersionMinor = runtimeOptions?.consumerVersion?.minor ?? null;
   const eagerInit = runtimeOptions?.eagerInit;
