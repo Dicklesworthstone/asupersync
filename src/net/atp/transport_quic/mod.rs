@@ -139,10 +139,10 @@ pub use symbol_datagram::{
 
 pub use crate::net::atp::transport_rq::adaptive::{
     AdaptiveController as QuicAdaptiveController, AdaptivePolicy as QuicAdaptivePolicy,
-    BlockPlan as QuicAdaptiveBlockPlan, PathEstimate as QuicPathEstimate,
-    PathSignalSample as QuicPathSignalSample,
-    RateMatchedPacingPlan as QuicRateMatchedPacingPlan,
+    BlockPlan as QuicAdaptiveBlockPlan,
     DEFAULT_COLD_START_PACING_BYTES_PER_S as QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S,
+    PathEstimate as QuicPathEstimate, PathSignalSample as QuicPathSignalSample,
+    RateMatchedPacingPlan as QuicRateMatchedPacingPlan,
     rate_matched_pacing_plan as rq_rate_matched_pacing_plan,
 };
 
@@ -629,11 +629,8 @@ pub fn quic_adaptive_rate_matched_pacing_decision(
         .max(1);
     adapted.validate()?;
 
-    let spray = quic_spray_pacing_decision_from_config_with_cpu(
-        &adapted,
-        path.clamped(),
-        cpu_parallelism,
-    );
+    let spray =
+        quic_spray_pacing_decision_from_config_with_cpu(&adapted, path.clamped(), cpu_parallelism);
 
     Ok(QuicAdaptivePacingDecision {
         config: adapted,
@@ -1223,10 +1220,9 @@ pub fn quic_initial_fanout_blocks_for_manifest(
     for entry in &manifest.entries {
         let block_count = block_count_for_len(entry.size, config)?;
         for block_index in 0..block_count {
-            let block_start =
-                u64::try_from(block_index)
-                    .unwrap_or(u64::MAX)
-                    .saturating_mul(u64::try_from(max_block).unwrap_or(u64::MAX));
+            let block_start = u64::try_from(block_index)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(u64::try_from(max_block).unwrap_or(u64::MAX));
             let block_len = usize::try_from((entry.size - block_start).min(max_block as u64))
                 .unwrap_or(usize::MAX);
             let source_symbols = block_len.div_ceil(symbol_size).max(1);
@@ -1875,6 +1871,7 @@ fn manifest_from_entries(
         merkle_root_hex,
         metadata_root_hex: None,
         entries: manifest_entries,
+        delta_manifest: None,
     }
 }
 
@@ -2351,6 +2348,7 @@ async fn prepare_source_manifest(
         merkle_root_hex,
         metadata_root_hex,
         entries: manifest_entries,
+        delta_manifest: None,
     };
     validate_quic_manifest(&manifest, &effective_config)?;
 
@@ -6494,7 +6492,10 @@ mod tests {
         .expect("operator-capped adaptation should be valid");
 
         assert_eq!(decision.config.bwlimit_bps, Some(128 * 1024));
-        assert_eq!(decision.spray.limiter, QuicSprayPacingLimiter::BandwidthLimit);
+        assert_eq!(
+            decision.spray.limiter,
+            QuicSprayPacingLimiter::BandwidthLimit
+        );
         assert!(decision.spray.pacing_rate_bps <= 128 * 1024);
     }
 
@@ -7949,7 +7950,7 @@ mod tests {
         };
         let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 61))];
         let manifest = manifest_from_entries("payload", true, &entries);
-        let mut decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
+        let decoders = decoders_from_manifest(&manifest, &config).expect("decoders");
         let symbol = Symbol::from_slice(
             SymbolId::new(decoders[0].object_id, 0, 0),
             &entries[0].1,

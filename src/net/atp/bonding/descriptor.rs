@@ -526,6 +526,7 @@ mod tests {
                 size: 18,
                 sha256_hex: "00ff".to_string(),
                 members: Vec::new(),
+                fragment: None,
             }],
         };
         let desc = BondTransferDescriptor::from_manifest(
