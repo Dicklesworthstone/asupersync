@@ -18,11 +18,11 @@ pub mod assignment;
 pub mod descriptor;
 pub mod esi;
 pub mod handshake;
+pub mod receiver;
 
 pub use assignment::{
-    BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondedSymbolAuthVerdict,
-    BondedSymbolRejectReason, DonorAssignment, DonorAssignmentError, EsiWindow,
-    MAX_BONDING_DONORS, verify_bonded_symbol_tag,
+    BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondedSymbolAuthVerdict, BondedSymbolRejectReason,
+    DonorAssignment, DonorAssignmentError, EsiWindow, MAX_BONDING_DONORS, verify_bonded_symbol_tag,
 };
 pub use descriptor::{BondEntry, BondProofError, BondTransferDescriptor};
 pub use esi::{
@@ -31,4 +31,8 @@ pub use esi::{
 pub use handshake::{
     BONDING_HANDSHAKE_VERSION, BondTransport, BondingAgreement, BondingAssignmentMode,
     BondingHandshake, BondingHandshakeError,
+};
+pub use receiver::{
+    BondedDonorIngressStats, BondedReceiverIngressStats, BondedReceiverSymbolSet,
+    BondedSymbolDisposition, BondedSymbolKey,
 };
