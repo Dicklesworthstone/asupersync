@@ -1017,3 +1017,10 @@ fat pipes) → E-4 block-size. E-5 (parallel decode) DECONFIRMED. N-1 (SIMD) ref
 The user's goal "beat tuned rsync over ANY connection, less memory" = E-7 + E-8 as the spine,
 E-3/E-6 to win on high-BDP, fountain-FEC to win under loss. The adaptive math already exists
 (adaptive.rs); the work is wiring + a conservative fallback + honest A/B across link regimes.
+
+## E-RESYNC-1 (2026-06-19, orchestrator loopback measurement) — delta CORRECT but ZERO wire savings (does NOT beat rsync yet)
+Built atp-cli (delta wiring bzkxa5/0g8lod, --no-delta opt-out present = delta default-on). Loopback re-sync test, 10MB file:
+- ROUND 1 initial full sync: bytes_sent=10485760 (correct), dst sha == src sha.
+- 1% in-place mutation (100KB @ 5MB, python in-place).
+- ROUND 2 re-sync (delta default-on): **bytes_sent=10485760 (FULL), symbols_sent=7490 — NO delta savings**; dst sha == src sha (byte-identical, fail-closed-correct).
+VERDICT: delta path is CORRECT (byte-identical both rounds) but the sender does NOT reduce the transfer — it sends the full object on re-sync. Send/recv logs show no delta-plan/negotiation. The receiver persists `<dest>/.asupersync-atp-delta-v1` but `atp send <host:port>` never consumes it. **Re-sync bytes-on-wire ratio vs rsync ≈ FULL/delta = LOSS** (rsync would send ~the 100KB change). GAP (for bzkxa5/0g8lod): wire the send↔recv handshake — recv advertises prior manifest/CAS coverage on connect (incl --once), sender calls delta::plan with it, sender transmits ONLY missing chunks. Until then transparent-delta is a no-op for wire bytes. Harness note: resync_bench.sh netns send→host 10.99.0.1 times out (os err 110, align with run_matrix_cell.sh); gen_file set -e abort fixed a74b98bca.
