@@ -361,7 +361,14 @@ main() {
             for change in $CHANGES; do
                 [ "$change" = "rename" ] && continue  # rename is a tree case (see TREE note)
                 local port=$((PORT_BASE + port_off)); port_off=$((port_off + 2))
-                run_file_cell "$label" "$bytes" "$regime" "$change" "$port"
+                # Isolate each cell: under `set -e` a lossy-regime (good/bad) timeout
+                # or non-convergence inside run_file_cell would otherwise abort the
+                # WHOLE matrix at the first failing cell. Catch it, stop any cell-
+                # local rsyncd, and continue so every regime/size/change cell still
+                # produces a comparison row (the loss regimes are exactly where atp
+                # RaptorQ FEC should beat rsync TCP-delta retransmit stalls).
+                run_file_cell "$label" "$bytes" "$regime" "$change" "$port" \
+                    || { log "[WARN] cell ${label}/${regime}/${change} aborted (continuing matrix)"; stop_rsyncd 2>/dev/null || true; }
             done
         done
     done
