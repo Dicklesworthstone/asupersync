@@ -16264,6 +16264,109 @@ lab:
         assert_eq!(err.error_type, "atp_not_implemented");
     }
 
+    fn assert_atp_not_implemented(result: Result<(), CliError>, context: &str) {
+        let err = result.expect_err(context);
+        assert_eq!(err.error_type, "atp_not_implemented");
+        assert!(
+            err.title.contains("[ASUP-E701]"),
+            "{context} should carry the operator-facing ASUP-E701 token"
+        );
+    }
+
+    #[test]
+    fn atp_sync_mirror_watch_fail_closed_instead_of_fake_success() {
+        let mut output = Output::new(OutputFormat::JsonPretty);
+        let sync = AtpSyncArgs {
+            source: PathBuf::from("Cargo.toml"),
+            target: "peer:/dst".to_string(),
+            dry_run: false,
+            allow_updates: true,
+            verbose: true,
+            progress: true,
+            explain: false,
+        };
+        assert_atp_not_implemented(atp_sync(&sync, &mut output), "sync must fail closed");
+
+        let mirror = AtpMirrorArgs {
+            source: PathBuf::from("Cargo.toml"),
+            target: "peer:/dst".to_string(),
+            dry_run: false,
+            allow_deletes: true,
+            verbose: true,
+            progress: true,
+            explain: false,
+        };
+        assert_atp_not_implemented(atp_mirror(&mirror, &mut output), "mirror must fail closed");
+
+        let watch = AtpWatchArgs {
+            source: PathBuf::from("Cargo.toml"),
+            target: "peer:/dst".to_string(),
+            debounce_seconds: 1,
+            mode: "sync-only".to_string(),
+            verbose: true,
+        };
+        assert_atp_not_implemented(atp_watch(&watch, &mut output), "watch must fail closed");
+    }
+
+    #[test]
+    fn atp_inbox_resume_cancel_status_and_bench_fail_closed() {
+        let mut output = Output::new(OutputFormat::JsonPretty);
+
+        let inbox_list = AtpInboxArgs {
+            command: AtpInboxCommand::List,
+        };
+        assert_atp_not_implemented(
+            atp_inbox(&inbox_list, &mut output),
+            "inbox list must fail closed",
+        );
+
+        let inbox_accept = AtpInboxArgs {
+            command: AtpInboxCommand::Accept {
+                transfer_id: "transfer-123".to_string(),
+                destination: Some(PathBuf::from("target/inbox")),
+            },
+        };
+        assert_atp_not_implemented(
+            atp_inbox(&inbox_accept, &mut output),
+            "inbox accept must fail closed",
+        );
+
+        let resume = AtpResumeArgs {
+            transfer_id: "transfer-123".to_string(),
+            force: true,
+            verbose: true,
+        };
+        assert_atp_not_implemented(atp_resume(&resume, &mut output), "resume must fail closed");
+
+        let cancel = AtpCancelArgs {
+            transfer_id: "transfer-123".to_string(),
+            reason: "test".to_string(),
+            force: true,
+        };
+        assert_atp_not_implemented(atp_cancel(&cancel, &mut output), "cancel must fail closed");
+
+        let status = AtpTransferStatusArgs {
+            transfer_id: Some("transfer-123".to_string()),
+            explain: true,
+            watch: false,
+            interval_seconds: 1,
+        };
+        assert_atp_not_implemented(
+            atp_transfer_status(&status, &mut output),
+            "transfer-status must fail closed",
+        );
+
+        let bench = AtpBenchArgs {
+            profile: "throughput".to_string(),
+            duration_seconds: 1,
+            output_dir: PathBuf::from("target/atp-bench-results"),
+            concurrency: 1,
+            transfer_size: 1024,
+            detailed: true,
+        };
+        assert_atp_not_implemented(atp_bench(&bench, &mut output), "bench must fail closed");
+    }
+
     #[test]
     fn atp_serve_does_not_report_listening_when_bind_fails() {
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve test port");
