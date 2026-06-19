@@ -143,6 +143,7 @@ fn tuple_indices_fail_closed_for_malformed_tuple_inputs() {
         ("sentinel zero tuple", LtTuple::default(), w, p, p1),
         ("W <= 2", valid_tuple(), 2, p, p1),
         ("P == 0", valid_tuple(), w, 0, p1),
+        ("P1 == 0", valid_tuple(), w, p, 0),
         ("P1 below P", valid_tuple(), w, p, p - 1),
         ("composite P1", valid_tuple(), w, p, p + 1),
         (
