@@ -18,6 +18,7 @@ BASE=/root/atp-bench
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ATP_RQ_STREAMS=8
 ATP_RQ_SYMBOL_SIZE=1024
+ATP_RQ_MAX_BLOCK_SIZE=auto
 ATP_RQ_REPAIR_OVERHEAD=1.001
 ATP_RQ_TAIL_DRAIN_MS=2
 ATP_RQ_AUTH_KEY_HEX=""
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --run-id) RUN_ID="$2"; shift 2;;
         --atp-rq-streams) ATP_RQ_STREAMS="$2"; shift 2;;
         --atp-rq-symbol-size) ATP_RQ_SYMBOL_SIZE="$2"; shift 2;;
+        --atp-rq-max-block-size) ATP_RQ_MAX_BLOCK_SIZE="$2"; shift 2;;
         --atp-rq-repair-overhead) ATP_RQ_REPAIR_OVERHEAD="$2"; shift 2;;
         --atp-rq-tail-drain-ms) ATP_RQ_TAIL_DRAIN_MS="$2"; shift 2;;
         --atp-rq-auth-key-hex) ATP_RQ_AUTH_KEY_HEX="$2"; shift 2;;
@@ -127,7 +129,7 @@ RTT=$("${SSH_S[@]}" "ping -c 10 -q $RECEIVER_IP 2>/dev/null | tail -1" || echo "
 SENDER_CORES=$("${SSH_S[@]}" nproc)
 RECEIVER_CORES=$("${SSH_R[@]}" nproc)
 cat > "$OUT/conditions.json" <<EOF
-{"date":"$(date -u +%FT%TZ)","run_id":"$RUN_ID","sender":"$SENDER","receiver":"$RECEIVER","rtt":"$RTT","sender_cores":$SENDER_CORES,"receiver_cores":$RECEIVER_CORES,"tools":"$TOOLS","payloads":"$PAYLOADS","runs":$RUNS,"atp_rq_streams":$ATP_RQ_STREAMS,"atp_rq_symbol_size":$ATP_RQ_SYMBOL_SIZE,"atp_rq_repair_overhead":$ATP_RQ_REPAIR_OVERHEAD,"atp_rq_tail_drain_ms":$ATP_RQ_TAIL_DRAIN_MS,"atp_rq_auth":"per-run-env-key","atp_quic_tls":"per-run-self-signed","atp_quic_server_name":"$ATP_QUIC_SERVER_NAME","atp_quic_handshake_timeout_ms":$ATP_QUIC_HANDSHAKE_TIMEOUT_MS,"max_load_per_core":$MAX_LOAD_PER_CORE,"max_sender_rss_mb":$MAX_SENDER_RSS_MB,"max_receiver_rss_mb":$MAX_RECEIVER_RSS_MB}
+{"date":"$(date -u +%FT%TZ)","run_id":"$RUN_ID","sender":"$SENDER","receiver":"$RECEIVER","rtt":"$RTT","sender_cores":$SENDER_CORES,"receiver_cores":$RECEIVER_CORES,"tools":"$TOOLS","payloads":"$PAYLOADS","runs":$RUNS,"atp_rq_streams":$ATP_RQ_STREAMS,"atp_rq_symbol_size":$ATP_RQ_SYMBOL_SIZE,"atp_rq_max_block_size":"$ATP_RQ_MAX_BLOCK_SIZE","atp_rq_repair_overhead":$ATP_RQ_REPAIR_OVERHEAD,"atp_rq_tail_drain_ms":$ATP_RQ_TAIL_DRAIN_MS,"atp_rq_auth":"per-run-env-key","atp_quic_tls":"per-run-self-signed","atp_quic_server_name":"$ATP_QUIC_SERVER_NAME","atp_quic_handshake_timeout_ms":$ATP_QUIC_HANDSHAKE_TIMEOUT_MS,"max_load_per_core":$MAX_LOAD_PER_CORE,"max_sender_rss_mb":$MAX_SENDER_RSS_MB,"max_receiver_rss_mb":$MAX_RECEIVER_RSS_MB}
 EOF
 note "RTT: $RTT"
 
@@ -180,11 +182,11 @@ run_transfer() { # tool payload run_idx -> appends one JSON line to RESULTS
     case "$tool" in
         atp-rq)
             "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh '$BASE/atp recv' $run_dir/sampler.jsonl >/dev/null 2>&1 & echo \$! > $run_dir/sampler.pid
-nohup /usr/bin/time -v -o $run_dir/recv_time.txt env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport rq --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
+nohup /usr/bin/time -v -o $run_dir/recv_time.txt env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport rq --symbol-size $ATP_RQ_SYMBOL_SIZE --max-block-size '$ATP_RQ_MAX_BLOCK_SIZE' --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
             sleep 1 ;;
         atp-quic)
             "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh '$BASE/atp recv' $run_dir/sampler.jsonl >/dev/null 2>&1 & echo \$! > $run_dir/sampler.pid
-nohup /usr/bin/time -v -o $run_dir/recv_time.txt env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport quic --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS --server-cert $QUIC_CERT --server-key $QUIC_KEY --quic-handshake-timeout-ms $ATP_QUIC_HANDSHAKE_TIMEOUT_MS > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
+nohup /usr/bin/time -v -o $run_dir/recv_time.txt env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport quic --symbol-size $ATP_RQ_SYMBOL_SIZE --max-block-size '$ATP_RQ_MAX_BLOCK_SIZE' --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS --server-cert $QUIC_CERT --server-key $QUIC_KEY --quic-handshake-timeout-ms $ATP_QUIC_HANDSHAKE_TIMEOUT_MS > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
             sleep 1 ;;
         atp-tcp)
             "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh '$BASE/atp recv' $run_dir/sampler.jsonl >/dev/null 2>&1 & echo \$! > $run_dir/sampler.pid
@@ -202,9 +204,9 @@ nohup /usr/bin/time -v -o $run_dir/recv_time.txt $BASE/atp recv $run_dest --list
     local sender_json
     case "$tool" in
         atp-rq)
-            sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport rq --streams $ATP_RQ_STREAMS --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS") ;;
+            sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport rq --streams $ATP_RQ_STREAMS --symbol-size $ATP_RQ_SYMBOL_SIZE --max-block-size '$ATP_RQ_MAX_BLOCK_SIZE' --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS") ;;
         atp-quic)
-            sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport quic --symbol-size $ATP_RQ_SYMBOL_SIZE --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS --ca $QUIC_CERT --server-name '$ATP_QUIC_SERVER_NAME' --quic-handshake-timeout-ms $ATP_QUIC_HANDSHAKE_TIMEOUT_MS") ;;
+            sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- env ATP_RQ_AUTH_KEY_HEX='$ATP_RQ_AUTH_KEY_HEX' $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport quic --symbol-size $ATP_RQ_SYMBOL_SIZE --max-block-size '$ATP_RQ_MAX_BLOCK_SIZE' --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS --ca $QUIC_CERT --server-name '$ATP_QUIC_SERVER_NAME' --quic-handshake-timeout-ms $ATP_QUIC_HANDSHAKE_TIMEOUT_MS") ;;
         atp-tcp)
             sender_json=$("${SSH_S[@]}" "bash $BASE/run_one.sh $label $bytes -- $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport tcp") ;;
         rsync-ssh)
