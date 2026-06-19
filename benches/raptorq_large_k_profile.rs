@@ -3,6 +3,7 @@
 //! **MISSION**: Find >5%-CPU bottlenecks in encoder/decoder hot paths under realistic workloads.
 //! **TARGET AREAS**: gf256 multiply, matrix solve step, gap-handling
 //! **METHODOLOGY**: Profile realistic scenarios with K=1024, 2048, 4096 to stress-test hot paths
+//! **E-4 OUTPUT**: decode-vs-K rows carry JSONL-compatible envelope metadata for br-asupersync-atp-e4-decode-vs-k-result-u2xblb.
 //!
 //! Run with: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_bench_docs cargo bench --bench raptorq_large_k_profile --features simd-intrinsics
 //! Profile with: rch exec -- samply record --save-only -o raptorq_large_k.json -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_bench_docs cargo bench --bench raptorq_large_k_profile --features simd-intrinsics
