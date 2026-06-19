@@ -5,6 +5,7 @@
 //! content-addressed; the manifest keeps the logical object layout and projects
 //! directly into the existing transfer journal resume shape.
 
+use crate::atp::delta_subchunk::{self, SubBlockSignature, SubDeltaOp};
 use crate::atp::journal::TransferResumeChunk;
 use crate::atp::manifest::{ChunkBoundary, ChunkStrategy, MerkleRoot};
 use crate::atp::object::ContentId;
@@ -17,7 +18,10 @@ pub const ATP_DELTA_CHUNK_MANIFEST_SCHEMA: &str = "asupersync.atp.delta.chunk-ma
 
 const MANIFEST_MAGIC: &[u8] = b"ASUP_ATP_DELTA_CHUNK_MANIFEST_V1\0";
 const MANIFEST_HASH_DOMAIN: &[u8] = b"asupersync.atp.delta.chunk-manifest.root.v1\0";
+const SUBDELTA_OPS_MAGIC: &[u8] = b"ASUP_ATP_DELTA_SUBCHUNK_OPS_V1\0";
 const ENCODED_CHUNK_BYTES: usize = 4 + 8 + 8 + 32;
+const SUBDELTA_OP_COPY: u8 = 0;
+const SUBDELTA_OP_LITERAL: u8 = 1;
 
 /// A logical object chunk addressed by its content hash.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -623,6 +627,89 @@ impl DeltaResyncPlan {
     }
 }
 
+/// Receiver-advertised signature for one old chunk.
+///
+/// The receiver builds this from locally verified old bytes; the sender uses it
+/// to emit a byte-precise sub-chunk op stream for the same positional chunk
+/// instead of sending the whole new chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiverSubchunkSignature {
+    /// Receiver manifest chunk that was signed.
+    pub chunk: CasChunkRef,
+    /// Fixed-size sub-block signature for the receiver's old chunk bytes.
+    pub signature: SubBlockSignature,
+}
+
+/// Concrete payload item emitted by the delta send path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeltaResyncSendItem {
+    /// Whole missing content-addressed chunk payload.
+    WholeChunk {
+        chunk: CasChunkRef,
+        payload: Vec<u8>,
+    },
+    /// Byte-precise op stream reconstructing `target_chunk` from `base_chunk`.
+    SubchunkOps {
+        target_chunk: CasChunkRef,
+        base_chunk: CasChunkRef,
+        target_sha256: [u8; 32],
+        encoded_ops: Vec<u8>,
+    },
+}
+
+impl DeltaResyncSendItem {
+    /// Payload bytes emitted on the delta stream for this item.
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        match self {
+            Self::WholeChunk { payload, .. } => payload.len(),
+            Self::SubchunkOps { encoded_ops, .. } => encoded_ops.len(),
+        }
+    }
+
+    /// Whether this item sends a sub-chunk op stream instead of a whole chunk.
+    #[must_use]
+    pub const fn is_subchunk_ops(&self) -> bool {
+        matches!(self, Self::SubchunkOps { .. })
+    }
+}
+
+/// Concrete mixed whole/sub-chunk payload selected for a re-sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeltaResyncSendPlan {
+    /// Delta planner metadata that selected the missing/stale chunk set.
+    pub base_plan: DeltaResyncPlan,
+    /// Ordered payload items to emit.
+    pub items: Vec<DeltaResyncSendItem>,
+    /// Actual encoded payload bytes emitted by `items`.
+    pub payload_bytes: u64,
+    /// Logical whole-chunk bytes represented by the missing set before B-8.10.
+    pub whole_chunk_bytes: u64,
+}
+
+impl DeltaResyncSendPlan {
+    /// Count of payload items encoded as sub-chunk op streams.
+    #[must_use]
+    pub fn subchunk_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.is_subchunk_ops())
+            .count()
+    }
+
+    /// Count of payload items still emitted as whole chunks.
+    #[must_use]
+    pub fn whole_chunk_count(&self) -> usize {
+        self.items.len().saturating_sub(self.subchunk_count())
+    }
+
+    /// Whether this concrete payload is smaller than a full-object send.
+    #[must_use]
+    pub const fn beats_full_object(&self, full_object_bytes: u64) -> bool {
+        self.payload_bytes < full_object_bytes
+    }
+}
+
 /// Plan an ATP incremental re-sync using prior manifest + receiver CAS state.
 ///
 /// This is the fail-closed decision point for B-8.8 CLI wiring: no prior
@@ -832,6 +919,161 @@ pub fn plan_incremental_resync_from_verified_receiver_manifest(
     }
 }
 
+/// Build receiver-side sub-chunk signatures from verified old chunk bytes.
+pub fn build_receiver_subchunk_signatures(
+    receiver: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    block_size: usize,
+) -> Result<Vec<ReceiverSubchunkSignature>, DeltaError> {
+    let mut signatures = Vec::with_capacity(receiver.chunks.len());
+    for chunk in &receiver.chunks {
+        let payload = verified_chunk_payload(receiver_store, chunk)?;
+        signatures.push(ReceiverSubchunkSignature {
+            chunk: chunk.clone(),
+            signature: delta_subchunk::signature(payload, block_size),
+        });
+    }
+    Ok(signatures)
+}
+
+/// Build the concrete sender payload for a delta re-sync.
+///
+/// Whole missing chunks remain the fallback, but when the receiver provided a
+/// positional old-chunk signature this emits a compact sub-chunk op stream if
+/// the encoded op stream is smaller than the whole target chunk.
+pub fn build_delta_resync_send_plan(
+    base_plan: &DeltaResyncPlan,
+    sender_store: &ContentAddressedChunkStore,
+    receiver_manifest: &PersistentChunkManifest,
+    receiver_signatures: &[ReceiverSubchunkSignature],
+) -> Result<DeltaResyncSendPlan, DeltaError> {
+    let mut items = Vec::with_capacity(base_plan.missing_chunks.len());
+    let mut payload_bytes = 0u64;
+
+    for chunk in &base_plan.missing_chunks {
+        let payload = verified_chunk_payload(sender_store, chunk)?;
+        let item =
+            build_delta_resync_send_item(chunk, payload, receiver_manifest, receiver_signatures)?;
+        payload_bytes = payload_bytes
+            .checked_add(
+                u64::try_from(item.payload_bytes()).map_err(|_| DeltaError::ChunkSizeOverflow)?,
+            )
+            .ok_or(DeltaError::ChunkSizeOverflow)?;
+        items.push(item);
+    }
+
+    Ok(DeltaResyncSendPlan {
+        base_plan: base_plan.clone(),
+        items,
+        payload_bytes,
+        whole_chunk_bytes: base_plan.missing_bytes,
+    })
+}
+
+/// Apply a concrete delta send payload to receiver state and verify target coverage.
+pub fn apply_delta_resync_send_plan(
+    target_manifest: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    send_plan: &DeltaResyncSendPlan,
+) -> Result<ContentAddressedChunkStore, DeltaError> {
+    let mut store = receiver_store.clone();
+    for item in &send_plan.items {
+        match item {
+            DeltaResyncSendItem::WholeChunk { payload, .. } => {
+                store.insert(payload)?;
+            }
+            DeltaResyncSendItem::SubchunkOps {
+                target_chunk,
+                base_chunk,
+                target_sha256,
+                encoded_ops,
+            } => {
+                let old = verified_chunk_payload(&store, base_chunk)?;
+                let ops = decode_subdelta_ops(encoded_ops)?;
+                let rebuilt = delta_subchunk::reconstruct_verified(old, &ops, target_sha256)
+                    .map_err(|source| DeltaError::SubDeltaReconstruction {
+                        index: target_chunk.index,
+                        source,
+                    })?;
+                store.insert(&rebuilt)?;
+            }
+        }
+    }
+    target_manifest.verify_store_coverage(&store)?;
+    Ok(store)
+}
+
+/// Reconstruct a manifest's logical byte stream from a verified chunk store.
+pub fn reconstruct_manifest_bytes(
+    manifest: &PersistentChunkManifest,
+    store: &ContentAddressedChunkStore,
+) -> Result<Vec<u8>, DeltaError> {
+    let capacity =
+        usize::try_from(manifest.total_size_bytes).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    for chunk in &manifest.chunks {
+        bytes.extend_from_slice(verified_chunk_payload(store, chunk)?);
+    }
+    Ok(bytes)
+}
+
+/// Encode sub-delta ops into the compact hot-path wire representation.
+pub fn encode_subdelta_ops(ops: &[SubDeltaOp]) -> Result<Vec<u8>, DeltaError> {
+    let mut out = Vec::new();
+    out.extend_from_slice(SUBDELTA_OPS_MAGIC);
+    out.extend_from_slice(
+        &u64::try_from(ops.len())
+            .map_err(|_| DeltaError::ChunkCountOverflow)?
+            .to_be_bytes(),
+    );
+    for op in ops {
+        match op {
+            SubDeltaOp::Copy { old_offset, len } => {
+                out.push(SUBDELTA_OP_COPY);
+                out.extend_from_slice(&old_offset.to_be_bytes());
+                out.extend_from_slice(&len.to_be_bytes());
+            }
+            SubDeltaOp::Literal(bytes) => {
+                out.push(SUBDELTA_OP_LITERAL);
+                out.extend_from_slice(
+                    &u64::try_from(bytes.len())
+                        .map_err(|_| DeltaError::ChunkSizeOverflow)?
+                        .to_be_bytes(),
+                );
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Decode the compact hot-path sub-delta op-stream representation.
+pub fn decode_subdelta_ops(bytes: &[u8]) -> Result<Vec<SubDeltaOp>, DeltaError> {
+    let mut reader = ByteReader::new(bytes);
+    reader.expect_magic(SUBDELTA_OPS_MAGIC)?;
+    let op_count =
+        usize::try_from(reader.read_u64()?).map_err(|_| DeltaError::ChunkCountOverflow)?;
+    let mut ops = Vec::with_capacity(op_count);
+    for _ in 0..op_count {
+        let tag = reader.read_u8()?;
+        match tag {
+            SUBDELTA_OP_COPY => {
+                let old_offset = reader.read_u64()?;
+                let len = reader.read_u32()?;
+                ops.push(SubDeltaOp::Copy { old_offset, len });
+            }
+            SUBDELTA_OP_LITERAL => {
+                let len = usize::try_from(reader.read_u64()?)
+                    .map_err(|_| DeltaError::ChunkSizeOverflow)?;
+                ops.push(SubDeltaOp::Literal(reader.read_exact(len)?.to_vec()));
+            }
+            other => return Err(DeltaError::InvalidSubDeltaOpTag { tag: other }),
+        }
+    }
+    reader.expect_eof()?;
+    Ok(ops)
+}
+
 /// Delta manifest/store validation errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeltaError {
@@ -880,6 +1122,13 @@ pub enum DeltaError {
         expected: ContentId,
         actual: ContentId,
     },
+    /// A sub-chunk op stream failed while reconstructing the target chunk.
+    SubDeltaReconstruction {
+        index: u32,
+        source: delta_subchunk::SubDeltaError,
+    },
+    /// A compact sub-delta op stream used an unknown operation tag.
+    InvalidSubDeltaOpTag { tag: u8 },
 }
 
 impl fmt::Display for DeltaError {
@@ -939,11 +1188,27 @@ impl fmt::Display for DeltaError {
                 f,
                 "delta manifest chunk {index} content id mismatch: expected {expected}, got {actual}"
             ),
+            Self::SubDeltaReconstruction { index, source } => {
+                write!(
+                    f,
+                    "delta sub-chunk reconstruction failed at chunk {index}: {source}"
+                )
+            }
+            Self::InvalidSubDeltaOpTag { tag } => {
+                write!(f, "delta sub-chunk op stream used invalid tag {tag}")
+            }
         }
     }
 }
 
-impl std::error::Error for DeltaError {}
+impl std::error::Error for DeltaError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SubDeltaReconstruction { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// Content-addressed receiver coverage key used during delta planning.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -989,8 +1254,78 @@ fn full_object_plan(
     }
 }
 
+fn build_delta_resync_send_item(
+    target_chunk: &CasChunkRef,
+    target_payload: &[u8],
+    receiver_manifest: &PersistentChunkManifest,
+    receiver_signatures: &[ReceiverSubchunkSignature],
+) -> Result<DeltaResyncSendItem, DeltaError> {
+    let whole = || DeltaResyncSendItem::WholeChunk {
+        chunk: target_chunk.clone(),
+        payload: target_payload.to_vec(),
+    };
+
+    let Some(base_chunk) = receiver_manifest
+        .chunks
+        .get(usize::try_from(target_chunk.index).map_err(|_| DeltaError::ChunkCountOverflow)?)
+    else {
+        return Ok(whole());
+    };
+    if base_chunk.content_id == target_chunk.content_id {
+        return Ok(whole());
+    }
+    let Some(signature) = receiver_signatures
+        .iter()
+        .find(|entry| entry.chunk.key() == base_chunk.key())
+    else {
+        return Ok(whole());
+    };
+
+    let ops = delta_subchunk::diff(target_payload, &signature.signature);
+    let encoded_ops = encode_subdelta_ops(&ops)?;
+    if encoded_ops.len() >= target_payload.len() {
+        return Ok(whole());
+    }
+
+    Ok(DeltaResyncSendItem::SubchunkOps {
+        target_chunk: target_chunk.clone(),
+        base_chunk: base_chunk.clone(),
+        target_sha256: Sha256::digest(target_payload).into(),
+        encoded_ops,
+    })
+}
+
 fn store_has_exact_chunk(store: &ContentAddressedChunkStore, chunk: &CasChunkRef) -> bool {
     store.has_exact_chunk(chunk)
+}
+
+fn verified_chunk_payload<'a>(
+    store: &'a ContentAddressedChunkStore,
+    chunk: &CasChunkRef,
+) -> Result<&'a [u8], DeltaError> {
+    let Some(payload) = store.get(&chunk.content_id) else {
+        return Err(DeltaError::MissingChunk {
+            index: chunk.index,
+            content_id: chunk.content_id.clone(),
+        });
+    };
+    let payload_size = u64::try_from(payload.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+    if payload_size != chunk.size_bytes {
+        return Err(DeltaError::ChunkPayloadSizeMismatch {
+            index: chunk.index,
+            expected: chunk.size_bytes,
+            actual: payload_size,
+        });
+    }
+    let actual_content_id = ContentId::from_bytes(payload);
+    if actual_content_id != chunk.content_id {
+        return Err(DeltaError::ChunkPayloadHashMismatch {
+            index: chunk.index,
+            expected: chunk.content_id.clone(),
+            actual: actual_content_id,
+        });
+    }
+    Ok(payload)
 }
 
 fn store_payload_matches(store: &ContentAddressedChunkStore, chunk: &CasChunkRef) -> bool {
@@ -1093,6 +1428,13 @@ impl<'a> ByteReader<'a> {
                 .try_into()
                 .map_err(|_| DeltaError::TruncatedManifest)?,
         ))
+    }
+
+    fn read_u8(&mut self) -> Result<u8, DeltaError> {
+        Ok(*self
+            .read_exact(1)?
+            .first()
+            .ok_or(DeltaError::TruncatedManifest)?)
     }
 
     fn read_u64(&mut self) -> Result<u64, DeltaError> {
@@ -1421,5 +1763,60 @@ mod tests {
         );
         assert_eq!(plan.missing_chunks, sender.chunks);
         assert_eq!(plan.missing_bytes, sender.total_size_bytes);
+    }
+
+    #[test]
+    fn send_plan_emits_subchunk_ops_and_reconstructs_byte_identical() {
+        let old = (0..(64 * 1024))
+            .map(|idx| ((idx * 17 + idx / 5 + 41) % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut new = old.clone();
+        for byte in &mut new[24 * 1024..25 * 1024] {
+            *byte ^= 0x5a;
+        }
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(&mut sender_store, "tree-a", vec![new.as_slice()]);
+        let receiver = ingest_manifest(&mut receiver_store, "tree-a", vec![old.as_slice()]);
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let base_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &receiver_coverage,
+        );
+
+        assert_eq!(base_plan.mode, DeltaResyncMode::FullObjectFallback);
+        assert_eq!(base_plan.missing_bytes, sender.total_size_bytes);
+
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let send_plan =
+            build_delta_resync_send_plan(&base_plan, &sender_store, &receiver, &signatures)
+                .expect("send plan");
+
+        assert_eq!(send_plan.subchunk_count(), 1);
+        assert_eq!(send_plan.whole_chunk_count(), 0);
+        assert!(send_plan.beats_full_object(sender.total_size_bytes));
+        assert!(send_plan.payload_bytes < send_plan.whole_chunk_bytes);
+
+        let DeltaResyncSendItem::SubchunkOps { encoded_ops, .. } = &send_plan.items[0] else {
+            panic!("expected sub-chunk op stream");
+        };
+        let decoded_ops = decode_subdelta_ops(encoded_ops).expect("decode op stream");
+        assert!(
+            decoded_ops
+                .iter()
+                .any(|op| matches!(op, SubDeltaOp::Literal(_)))
+        );
+
+        let applied = apply_delta_resync_send_plan(&sender, &receiver_store, &send_plan)
+            .expect("apply send plan");
+        let rebuilt = reconstruct_manifest_bytes(&sender, &applied).expect("reconstruct target");
+        assert_eq!(rebuilt, new);
     }
 }
