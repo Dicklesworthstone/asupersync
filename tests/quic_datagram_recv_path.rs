@@ -202,8 +202,8 @@ fn inbound_queue_refuses_overflow_without_evicting_buffered_datagrams() {
     // big-endian index so we can reconstruct exactly which symbols survived.
     let fill_count = conn.inbound_datagram_capacity();
     assert!(
-        fill_count >= 512,
-        "receive queue must cover a full native QUIC pump batch"
+        fill_count >= 2048,
+        "receive queue must cover four full native QUIC pump batches"
     );
     let frames: Vec<QuicFrame> = (0..fill_count)
         .map(|i| QuicFrame::Datagram {

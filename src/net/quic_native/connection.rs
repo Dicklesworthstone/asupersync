@@ -256,10 +256,11 @@ const DEFAULT_MAX_REMOTE_STREAMS: u64 = 128;
 /// Maximum number of decoded inbound DATAGRAM payloads buffered before packet
 /// processing applies backpressure. The receiver never evicts buffered symbols.
 ///
-/// Keep this at least two full native ATP receive-drain batches: one batch may
-/// arrive before the higher-level decoder drains the queue, and the next batch
-/// must be able to backpressure cleanly without displacing accepted survivors.
-const MAX_INBOUND_DATAGRAMS: usize = 1024;
+/// Keep this at least four full native ATP receive-drain batches: one batch may
+/// arrive before the higher-level decoder drains the queue, a WAN burst may
+/// already be queued behind it, and the receiver still needs a clean
+/// backpressure boundary without displacing accepted survivors.
+const MAX_INBOUND_DATAGRAMS: usize = 2048;
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.

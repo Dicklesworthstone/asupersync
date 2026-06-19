@@ -62,8 +62,8 @@ use rustls::{ClientConfig, ServerConfig};
 use crate::bytes::BytesMut;
 use crate::cx::Cx;
 use crate::io::AsyncWriteExt;
-use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
+use crate::net::atp::protocol::frames::{Frame, FrameType};
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
 use crate::net::atp::transport_common::{
     EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
@@ -465,15 +465,11 @@ impl QuicLink {
     }
 
     fn beacon_measurement(&self) -> BeaconMeasurement {
-        self.beacons.latest_rtt().map_or_else(
-            BeaconMeasurement::empty,
-            |rtt| {
-                BeaconMeasurement::with_rtt(
-                    u32::try_from(rtt.as_micros()).unwrap_or(u32::MAX),
-                    0,
-                )
-            },
-        )
+        self.beacons
+            .latest_rtt()
+            .map_or_else(BeaconMeasurement::empty, |rtt| {
+                BeaconMeasurement::with_rtt(u32::try_from(rtt.as_micros()).unwrap_or(u32::MAX), 0)
+            })
     }
 
     async fn service_spray_liveness(
@@ -2038,8 +2034,8 @@ mod tests {
             datagrams_received: 12,
             datagrams_dropped_on_receive: 0,
             pending_datagrams: 3,
-            inbound_datagram_capacity: 1024,
-            inbound_datagram_available: 1021,
+            inbound_datagram_capacity: 2048,
+            inbound_datagram_available: 2045,
             inbound_pump_batch_limit: INBOUND_PUMP_BATCH,
         };
         let decode_stats = crate::net::atp::transport_quic::QuicDecodeStats {
@@ -2068,8 +2064,8 @@ mod tests {
         assert_eq!(entry.get_field("datagrams_dropped_on_receive"), Some("0"));
         assert_eq!(entry.get_field("pending_datagrams"), Some("3"));
         assert_eq!(entry.get_field("reorder_occupancy"), Some("3"));
-        assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("1024"));
-        assert_eq!(entry.get_field("inbound_datagram_available"), Some("1021"));
+        assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("2048"));
+        assert_eq!(entry.get_field("inbound_datagram_available"), Some("2045"));
         assert_eq!(entry.get_field("inbound_pump_batch_limit"), Some("512"));
     }
 
