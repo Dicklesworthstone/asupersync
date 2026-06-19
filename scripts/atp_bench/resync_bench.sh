@@ -116,8 +116,11 @@ import json, sys
 state_path = sys.argv[1]
 with open(state_path, "rb") as fh:
     state = json.load(fh)
-if not state.get("chunk_signatures"):
-    raise SystemExit(f"ATP receiver delta state has no chunk signatures: {state_path}")
+# Accept the legacy per-chunk-signature array OR the compact manifest format
+# (kogbnc/d1833a063 shrank the eager 17.7KB/chunk chunk_signatures array down to a
+# manifest_hex + chunk_count, ~160x smaller — the delta-negotiation bytes win).
+if not (state.get("chunk_signatures") or (state.get("manifest_hex") and state.get("chunk_count"))):
+    raise SystemExit(f"ATP receiver delta state has no chunk manifest/signatures: {state_path}")
 PY
 }
 probe_atp_delta_sidecar() {
@@ -137,8 +140,8 @@ payload = b"".join(chunks).strip()
 if not payload:
     raise SystemExit("ATP delta sidecar returned empty state")
 state = json.loads(payload.decode("utf-8"))
-if not state.get("chunk_signatures"):
-    raise SystemExit("ATP delta sidecar state has no chunk signatures")
+if not (state.get("chunk_signatures") or (state.get("manifest_hex") and state.get("chunk_count"))):
+    raise SystemExit("ATP delta sidecar state has no chunk manifest/signatures")
 with open(out, "wb") as fh:
     fh.write(payload + b"\n")
 PY
