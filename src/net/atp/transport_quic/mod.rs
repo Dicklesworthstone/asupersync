@@ -3254,7 +3254,7 @@ async fn drain_ready_quic_decodes(
                 i += 1;
                 continue;
             }
-            let pending = decoder.pending_decodes.swap_remove(i);
+            let mut pending = decoder.pending_decodes.swap_remove(i);
             let block_sbn = pending.block_sbn;
             let outcome = pending.handle.join(cx).await.map_err(|join_err| {
                 QuicTransportError::Control(format!(
@@ -3277,7 +3277,7 @@ async fn join_all_quic_decodes(
 ) -> Result<u64, QuicTransportError> {
     let mut completed = 0u64;
     for decoder in decoders {
-        while let Some(pending) = decoder.pending_decodes.pop() {
+        while let Some(mut pending) = decoder.pending_decodes.pop() {
             let block_sbn = pending.block_sbn;
             let outcome = pending.handle.join(cx).await.map_err(|join_err| {
                 QuicTransportError::Control(format!(
@@ -5736,7 +5736,7 @@ async fn receive_established_native_connection(
             &mut symbols_accepted,
             &mut feedback_rounds,
             &mut decode_stats,
-        )?
+        )
         .await?
         .is_none()
         {
@@ -9163,7 +9163,7 @@ mod tests {
                         let decoders = receiver_decoders
                             .as_mut()
                             .expect("receiver decoders initialized");
-                        match receive_native_symbol_round(
+                        match block_on(receive_native_symbol_round(
                             &cx,
                             &mut native_server,
                             control,
@@ -9174,7 +9174,7 @@ mod tests {
                             &mut symbols_accepted,
                             &mut feedback_rounds,
                             &mut decode_stats,
-                        )? {
+                        ))? {
                             Some(_) => {
                                 let moved = pump_native_until_idle(
                                     &cx,
@@ -9312,7 +9312,7 @@ mod tests {
         let mut symbols_accepted = 0u64;
         let mut feedback_rounds = 0u32;
         let mut decode_stats = QuicDecodeStats::default();
-        let need = match receive_native_symbol_round(
+        let need = match block_on(receive_native_symbol_round(
             &cx,
             &mut native_server,
             &mut receiver_control,
@@ -9323,7 +9323,7 @@ mod tests {
             &mut symbols_accepted,
             &mut feedback_rounds,
             &mut decode_stats,
-        )
+        ))
         .expect("initial native receive round asks for repair")
         {
             Some(need) => need,
@@ -9385,7 +9385,7 @@ mod tests {
         assert!(moved > 0);
 
         assert!(matches!(
-            receive_native_symbol_round(
+            block_on(receive_native_symbol_round(
                 &cx,
                 &mut native_server,
                 &mut receiver_control,
@@ -9396,7 +9396,7 @@ mod tests {
                 &mut symbols_accepted,
                 &mut feedback_rounds,
                 &mut decode_stats,
-            )
+            ))
             .expect("repair native receive round converges"),
             None
         ));
