@@ -253,7 +253,12 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     local r_tag="atprecv-${SUFFIX}" s_tag="atpsend-${SUFFIX}"
     local r_stop="$CASE_DIR/r_stop" r_out="$CASE_DIR/r_rss" s_stop="$CASE_DIR/s_stop" s_out="$CASE_DIR/s_rss"
     local -a auth_recv=() auth_send=() block_args=() delta_args=() tls_recv=() tls_send=()
-    block_args=(--max-block-size "$MAX_BLOCK_SIZE")
+    # "auto" means let atp pick its built-in (auto-bound) block size — the CLI
+    # flag parses strictly as a number, so omit it rather than passing "auto"
+    # (passing the literal "auto" makes atp reject the arg and instant-fail).
+    if [ "$MAX_BLOCK_SIZE" != "auto" ]; then
+        block_args=(--max-block-size "$MAX_BLOCK_SIZE")
+    fi
     # Matrix cells are whole-object scorecard transfers, not re-sync delta cells.
     # Disable the receiver-state sidecar probe so netns route issues cannot add
     # fallback noise to wall-time or obscure the transport under test.
