@@ -2584,11 +2584,14 @@ enum DecodeDispatch {
     NoProgress,
 }
 
-fn entry_decode_width_budget(dec: &EntryDecoder) -> usize {
+fn entry_decode_width_budget(dec: &EntryDecoder, transfer_decode_width: usize) -> usize {
     let max_block_size = u64::try_from(dec.max_block_size.max(1)).unwrap_or(u64::MAX);
     let planned_blocks = usize::try_from(dec.size.div_ceil(max_block_size)).unwrap_or(usize::MAX);
     let block_count = dec.source_blocks.len().max(planned_blocks).max(1);
-    block_count.min(RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY).max(1)
+    block_count
+        .min(RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY)
+        .min(transfer_decode_width.max(1))
+        .max(1)
 }
 
 fn can_spawn_parallel_decode(pending_decodes: usize, entry_decode_width: usize) -> bool {
@@ -4364,6 +4367,7 @@ async fn feed_symbol_with_cx(
     symbol_size: u16,
     symbol_auth: Option<&SecurityContext>,
     allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<bool, RqError> {
     if dec.complete {
         return Ok(false);
@@ -4435,6 +4439,7 @@ async fn feed_symbol_with_cx(
                 job,
                 "received repair/source symbol",
                 allow_spawn_decode,
+                transfer_decode_width,
             )
             .await?;
             true
@@ -4534,6 +4539,7 @@ async fn feed_symbol_with_cx(
             symbol_size,
             symbol_auth,
             allow_spawn_decode,
+            transfer_decode_width,
         )
         .await?;
     }
@@ -4549,7 +4555,17 @@ async fn feed_symbol(
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<bool, RqError> {
     let cx = Cx::for_testing();
-    feed_symbol_with_cx(&cx, dec, parsed, payload, symbol_size, symbol_auth, true).await
+    feed_symbol_with_cx(
+        &cx,
+        dec,
+        parsed,
+        payload,
+        symbol_size,
+        symbol_auth,
+        true,
+        RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
+    )
+    .await
 }
 
 async fn dispatch_decode_job(
@@ -4558,6 +4574,7 @@ async fn dispatch_decode_job(
     job: BlockDecodeJob,
     trigger: &'static str,
     allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<DecodeDispatch, RqError> {
     let block_sbn = job.sbn();
     let _ = drain_ready_entry_decodes(cx, dec).await?;
@@ -4582,7 +4599,7 @@ async fn dispatch_decode_job(
         }
     }
 
-    let entry_decode_width = entry_decode_width_budget(dec);
+    let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
     if !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width) {
         let joined = join_one_pending_decode(cx, dec).await?;
         rqtrace!(
@@ -4637,19 +4654,9 @@ async fn dispatch_decode_job(
                     if let Some(pipeline) = dec.pipeline.as_mut() {
                         pipeline.cancel_decode_job(block_sbn);
                     }
-                    Err(RqError::Coding(format!(
-                        "decode task spawn denied for entry {} block {}: {retry_err:?}",
-                        dec.index, block_sbn
-                    )))
+                    Ok(DecodeDispatch::NoProgress)
                 }
             }
-        }
-    }
-}
-            if let Some(pipeline) = dec.pipeline.as_mut() {
-                pipeline.cancel_decode_job(block_sbn);
-            }
-            Ok(DecodeDispatch::NoProgress)
         }
     }
 }
@@ -4661,6 +4668,7 @@ async fn seed_source_streaming_pipeline(
     symbol_size: u16,
     symbol_auth: Option<&SecurityContext>,
     allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<(), RqError> {
     if dec.pipeline.is_none() {
         return Ok(());
@@ -4753,6 +4761,7 @@ async fn seed_source_streaming_pipeline(
                     job,
                     "source-streaming repair seed",
                     allow_spawn_decode,
+                    transfer_decode_width,
                 )
                 .await?
                 {
