@@ -1199,3 +1199,31 @@ LAND.1 landed (b89f897b8: F-POS-5 PROVEN-WIN ledger entry + tests/atp_rq_beat_rs
 1owe64 foundation complete (encode 2cee5b608 + BP-decode 674c2d35e). To decide whether the eventual wiring (blocked by hot transport_rq) is worth the integration cost, %8 added a STANDALONE measurement + decode proptest to src/atp/slepian_wolf.rs (committed 47dbb8f58, unit-test-verified, NOT on live path → no live benchmark). Measured for a 4KB append-like delta:
 - syndrome_value_bytes = 4,096 (4KB) vs compact-sidecar baseline 14,336 (14KB) → syndrome_to_sidecar_ratio = 0.285× (28.5% of the sidecar), sidecar_minus_syndrome = 10,240 (~10KB saved). Decode proptest: `converged`, byte-identical round-trip, used_symbols ≤ n.
 ★VERDICT: the one-shot syndrome IS substantially smaller than the interactive sidecar (~10KB savings) AND is loss-robust (single shot, no receiver→sender state upload to drop under loss). So 1owe64-wiring is WORTH pursuing — but PRIMARILY for LOSS-ROBUSTNESS (it fixes the E-RESYNC-17 under-loss full-object-fallback bug, where the interactive sidecar dropped at 2% loss), NOT as a clean-link append winner. Append arithmetic update (cf. E-RESYNC-15/16): replacing the 14KB sidecar with a ~4KB syndrome cuts append wire ~128.8KB → ~118KB, STILL > rsync 96KB. ⇒ 1owe64 ALONE does not win clean-link append; an outright append win still needs the FEC-floor cut too (and E-RESYNC-16 showed the naive FEC-floor removal regressed, so that lever is unsolved). RETRY-COND: once transport_rq frees → wire slepian_wolf syndrome+decode into the append/localized delta path (replace direct_receiver_state_sidecar), re-run REGIMES='worse terrible' insert+append → expect the under-loss full-object fallback to VANISH (lossy insert becomes a valid delta cell) + ~10KB clean-link savings. NET: 1owe64 = a loss-robustness + negotiation-shrink lever (verified-foundation, wiring pending), not an append-bytes silver bullet. Campaign headline unchanged (insert/shift 11-15× win, F-POS-5).
+
+## MATRIX-1 (2026-06-19) — FULL WHOLE-FILE/TREE matrix re-run at HEAD (nocrypto tier): atp WINS 5M perfect+bad; LOSES 50M everywhere (DECODE WALL); 50M/broken FAILS (exit 144); atp wins memory on trees
+First authoritative `matrix_bench` whole-file/tree scoreboard since the swarm's source-first/FEC fixes (atp 0.3.5 @HEAD 4a195a116, fresh release build). 88 reps / 22 cells, nocrypto tier (atp-rq-lab vs tuned rsyncd `-aW --inplace --no-compress`), rate-capped netem both ends, SHA-gated, REPS 3 (5 for tree_small). Run: `artifacts/atp_bench_matrix/20260619T184351Z/`. This is the BROAD scoreboard the resync_bench (append/spread delta) slice is NOT — it answers "beat rsync across the board".
+
+| workload | regime | wall ratio ATP/rsync | verdict | feedback rounds |
+|---|---|--:|---|--:|
+| 5M | perfect | **0.786** | **atp WINS 1.27×** | 0 |
+| 5M | bad (2%/50mbit) | **0.905** | **atp WINS 1.10×** | 3 |
+| 5M | broken (10%/10mbit) | 1.276 | loses 1.28× (converges) | 10 |
+| 5M | good (0.1%/200mbit) | 1.480 | loses 1.48× | 2 |
+| tree_small | good | 1.358 | loses; **wins mem (combined RSS 0.42×)** | 1 |
+| tree_small | bad | 1.393 | loses; wins mem (0.58×) | 3 |
+| tree_small | broken | 1.333 | loses; wins mem (0.85×) | 10 |
+| tree_small | perfect | 1.996 | loses 2.0×; wins mem (0.43×) | 0 |
+| 50M | good | 1.210 | loses (cv 85% — NOISY, rerun) | 1 |
+| 50M | perfect | 3.553 | loses 3.55× | 0 |
+| 50M | bad (2%) | 4.893 | loses 4.89× (atp recv peak 483MB) | 4 |
+| 50M | broken (10%) | n/a | **FAILS: status=error exit 144 ×3 reps, sha_ok=true** | — |
+
+Per-regime geomean wall ratio ATP/rsync (>1 = atp slower): bad 1.835 · perfect 1.773 · good 1.345 · broken 1.304.
+
+FINDINGS:
+1. FIRST WHOLE-FILE WINS: atp BEATS tuned rsync at 5M on perfect (1.27×) and bad/2%-loss (1.10×), SHA-clean. Small files clear the decode wall.
+2. DECODE WALL dominates 50M: every 50M cell loses 3.5-4.9× (perfect 4.36s vs rsync 1.23s; bad 68.2s vs 13.9s). Wall ~= single-core RaptorQ decode ~0.8MB/s on the FEC-repair path (perfect 0-rounds is the fastest 50M cell). => #1 LEVER = `--max-block-size` (#45): chunk big files into ~5M tree-like blocks so 50M behaves like the WINNING 5M cell. decode-parallelism (#44) is the complementary lever.
+3. 50M/broken FAILS: atp exits 144 (sha_ok=true => bytes land, process errors) on all 3 reps. Big-single-file-specific: tree_small/broken @10% converges fine (status=ok). Likely same root as the wall (one huge block under heavy loss). NEEDS A FIX before any 50M-class claim.
+4. atp WINS MEMORY on trees (combined RSS 0.42-0.85× of rsync — rsync's per-file overhead on 2000 files). NO-CLAIM: rsync-side RSS at 50M reads 0.7-19GB = a `/usr/bin/time` daemon measurement artifact; 50M memory comparison is UNRELIABLE and not claimed either way. atp-side 50M recv peak (483MB) is real and is itself a bounded-memory target.
+5. NOISE: 50M/good cv 85%, several 5M/tree cells cv>5% (flagged) — rerun before hardening any single ratio.
+NO-CLAIM BOUNDARY: nocrypto tier only; auth + encrypted tiers and 500K/500M/5G sizes NOT yet measured (expansion run pending). "Beat rsync across the board" is NOT achieved: real wins at 5M(perfect/bad) + tree-memory, but 50M loses on the decode wall and 50M/broken fails. RETRY-COND: after `--max-block-size` lands → re-run 50M/500M/5G; expect 50M to track the 5M win-profile and the broken-cell exit-144 to clear.
