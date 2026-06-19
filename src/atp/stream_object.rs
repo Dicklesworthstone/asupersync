@@ -286,13 +286,16 @@ impl StreamManifest {
             }
         }
 
-        // Mark stream as complete if this is a final epoch
-        if epoch.is_final() {
+        let epoch_is_final = epoch.is_final();
+        self.epochs.push(epoch);
+
+        // Mark stream as complete if this is a final epoch. Compute the final
+        // digest after insertion so the final epoch is part of the manifest.
+        if epoch_is_final {
             self.stream_state = StreamState::Complete;
             self.final_manifest_hash = Some(self.compute_final_hash());
         }
 
-        self.epochs.push(epoch);
         self.updated_at = SystemTime::now();
 
         Outcome::ok(())

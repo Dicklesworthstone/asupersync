@@ -7,6 +7,7 @@
 //! - Proof bundle records prefix consumption and finalization semantics
 //! - Producer cancellation, receiver cancellation, and final manifest mismatch scenarios
 
+use asupersync::atp::manifest::{ChunkBoundary, ChunkStrategy};
 use asupersync::atp::object::{ContentId, ObjectId};
 use asupersync::atp::stream_object::*;
 
@@ -345,24 +346,36 @@ fn test_final_manifest_mismatch_detection() {
         manifest2.add_epoch(epoch2).unwrap();
     }
 
+    let final_chunk1 = ChunkBoundary {
+        index: 0,
+        byte_offset: 3000,
+        size_bytes: 1000,
+        content_hash: [0x11; 32],
+        strategy: ChunkStrategy::FixedSize,
+        metadata: None,
+    };
+    let final_chunk2 = ChunkBoundary {
+        content_hash: [0x22; 32],
+        ..final_chunk1.clone()
+    };
+
     // Make them final
     let final_epoch1 = StreamEpoch::new(
         4,
         object_id.clone(),
         ByteRange::new(3000, 4000),
         EpochState::Final,
-        vec![],
+        vec![final_chunk1],
     );
-    let mut final_epoch2 = StreamEpoch::new(
+    let final_epoch2 = StreamEpoch::new(
         4,
         object_id.clone(),
         ByteRange::new(3000, 4000),
         EpochState::Final,
-        vec![],
+        vec![final_chunk2],
     );
 
-    // Introduce difference in final epoch
-    final_epoch2.producer_signature = Some(vec![0xFF; 32]); // Different signature
+    // Introduce a canonical content difference in the final epoch.
 
     manifest1.add_epoch(final_epoch1).unwrap();
     manifest2.add_epoch(final_epoch2).unwrap();
