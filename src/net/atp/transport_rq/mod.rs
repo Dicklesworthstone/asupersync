@@ -2596,6 +2596,66 @@ fn rq_pending_decode_jobs(decoders: &[EntryDecoder]) -> usize {
         .sum()
 }
 
+fn source_streaming_block_ready_to_seed(dec: &EntryDecoder, sbn: usize) -> bool {
+    let Some(block) = dec.source_blocks.get(sbn) else {
+        return false;
+    };
+    if block.complete {
+        return false;
+    }
+    let Ok(block_sbn) = u8::try_from(sbn) else {
+        return false;
+    };
+    let Some(status) = dec
+        .pipeline
+        .as_ref()
+        .and_then(|pipeline| pipeline.block_status(block_sbn))
+    else {
+        return false;
+    };
+    let unseeded_sources = block
+        .received
+        .iter()
+        .zip(&block.pipeline_seeded)
+        .filter(|(received, seeded)| **received && !**seeded)
+        .count();
+
+    status.symbols_received.saturating_add(unseeded_sources) >= block.k
+}
+
+fn source_seed_read_plan(
+    dec: &EntryDecoder,
+    sbn: usize,
+    esi: usize,
+    symbol_size: usize,
+) -> Result<Option<(u64, usize, Option<AuthenticationTag>)>, RqError> {
+    let Some(block) = dec.source_blocks.get(sbn) else {
+        return Ok(None);
+    };
+    if esi >= block.k || !block.received[esi] || block.pipeline_seeded[esi] || block.complete {
+        return Ok(None);
+    }
+
+    let Some(within_block) = esi.checked_mul(symbol_size) else {
+        return Err(RqError::Coding(format!(
+            "entry {} source seed offset overflow",
+            dec.index
+        )));
+    };
+    if within_block >= block.len {
+        return Ok(None);
+    }
+
+    let take = symbol_size.min(block.len - within_block);
+    let offset = block
+        .start
+        .checked_add(u64::try_from(within_block).unwrap_or(u64::MAX))
+        .ok_or_else(|| {
+            RqError::Coding(format!("entry {} source seed offset overflow", dec.index))
+        })?;
+    Ok(Some((offset, take, block.auth_tags[esi])))
+}
+
 fn rq_max_buffered_symbols_per_block(max_block_size: usize, symbol_size: u16) -> usize {
     let symbol_size = usize::from(symbol_size.max(1));
     let k = max_block_size.div_ceil(symbol_size).max(1);
@@ -4301,17 +4361,6 @@ async fn feed_symbol_with_cx(
             return persist_source_symbol(dec, parsed, payload, symbol_size).await;
         }
     }
-    if dec.source_streaming && parsed.kind.is_repair() {
-        seed_source_streaming_pipeline(
-            cx,
-            dec,
-            parsed.sbn,
-            symbol_size,
-            symbol_auth,
-            allow_spawn_decode,
-        )
-        .await?;
-    }
     if dec.pipeline.is_none() {
         return Ok(false);
     }
@@ -4334,8 +4383,7 @@ async fn feed_symbol_with_cx(
         .as_mut()
         .expect("checked above")
         .feed_streaming_block_deferred(auth);
-    let result = match result {
-        Ok(DeferredSymbolAcceptResult::Immediate(result)) => Ok(result),
+    let accepted = match result {
         Ok(DeferredSymbolAcceptResult::Decode(job)) => {
             let _ = dispatch_decode_job(
                 cx,
@@ -4345,12 +4393,12 @@ async fn feed_symbol_with_cx(
                 allow_spawn_decode,
             )
             .await?;
-            return Ok(true);
+            true
         }
-        Err(err) => Err(err),
-    };
-    match result {
-        Ok(SymbolAcceptResult::Accepted { received, needed }) => {
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted {
+            received,
+            needed,
+        })) => {
             if received >= needed || received % 64 == 0 {
                 rqtrace!(
                     "receiver: entry {} accepted sbn={} esi={} kind={:?} received={} needed={}",
@@ -4362,9 +4410,11 @@ async fn feed_symbol_with_cx(
                     needed
                 );
             }
-            Ok(true)
+            true
         }
-        Ok(SymbolAcceptResult::DecodingStarted { block_sbn }) => {
+        Ok(DeferredSymbolAcceptResult::Immediate(
+            SymbolAcceptResult::DecodingStarted { block_sbn },
+        )) => {
             rqtrace!(
                 "receiver: entry {} started decode block {} via esi={} kind={:?}",
                 dec.index,
@@ -4372,9 +4422,11 @@ async fn feed_symbol_with_cx(
                 parsed.esi,
                 parsed.kind
             );
-            Ok(true)
+            true
         }
-        Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
+        Ok(DeferredSymbolAcceptResult::Immediate(
+            SymbolAcceptResult::BlockComplete { block_sbn, data },
+        )) => {
             persist_decoded_block(dec, block_sbn, &data).await?;
             // `persist_decoded_block` may have already completed the entry via the source-block
             // tracker (mixed source+FEC, E-9). Otherwise fall back to the pipeline's own view
@@ -4395,9 +4447,9 @@ async fn feed_symbol_with_cx(
                 parsed.esi,
                 parsed.kind
             );
-            Ok(true)
+            true
         }
-        Ok(SymbolAcceptResult::Duplicate) => {
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Duplicate)) => {
             rqtrace!(
                 "receiver: entry {} duplicate sbn={} esi={} kind={:?}",
                 dec.index,
@@ -4405,9 +4457,11 @@ async fn feed_symbol_with_cx(
                 parsed.esi,
                 parsed.kind
             );
-            Ok(false)
+            false
         }
-        Ok(SymbolAcceptResult::Rejected(reason)) => {
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
+            reason,
+        ))) => {
             rqtrace!(
                 "receiver: entry {} rejected sbn={} esi={} kind={:?} reason={:?}",
                 dec.index,
@@ -4416,7 +4470,7 @@ async fn feed_symbol_with_cx(
                 parsed.kind,
                 reason
             );
-            Ok(false)
+            false
         }
         Err(err) => {
             rqtrace!(
@@ -4426,9 +4480,21 @@ async fn feed_symbol_with_cx(
                 parsed.esi,
                 parsed.kind
             );
-            Ok(false)
+            false
         }
+    };
+    if accepted && dec.source_streaming && parsed.kind.is_repair() {
+        seed_source_streaming_pipeline(
+            cx,
+            dec,
+            parsed.sbn,
+            symbol_size,
+            symbol_auth,
+            allow_spawn_decode,
+        )
+        .await?;
     }
+    Ok(accepted)
 }
 
 #[cfg(test)]

@@ -383,23 +383,20 @@ impl SymbolSet {
         }
     }
 
-    /// Clears only repair symbols for a block, retaining systematic source
-    /// symbols and the block's configured K.
-    pub fn clear_repair_symbols_for_block(&mut self, sbn: u8) -> usize {
-        let ids: Vec<SymbolId> = self
-            .symbols
-            .iter()
-            .filter_map(|(id, symbol)| {
-                if symbol.sbn() == sbn && symbol.kind() == SymbolKind::Repair {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let removed = ids.len();
+    /// Clears selected repair symbols for a block, retaining systematic source
+    /// symbols, newer repair symbols, and the block's configured K.
+    pub fn clear_repair_symbols_for_block(&mut self, sbn: u8, ids: &[SymbolId]) -> usize {
+        let mut removed = 0usize;
         for id in ids {
-            let _ = self.remove(&id);
+            let Some(symbol) = self.symbols.get(id) else {
+                continue;
+            };
+            if symbol.sbn() != sbn || symbol.kind() != SymbolKind::Repair {
+                continue;
+            }
+            if self.remove(id).is_some() {
+                removed = removed.saturating_add(1);
+            }
         }
         removed
     }

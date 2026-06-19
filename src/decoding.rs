@@ -183,6 +183,7 @@ enum BlockDecodeResolution {
 pub(crate) struct BlockDecodeOutcome {
     sbn: u8,
     retain_decoded_block: bool,
+    repair_symbol_ids: Vec<SymbolId>,
     resolution: BlockDecodeResolution,
 }
 
@@ -205,10 +206,20 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
         }
         Err(_) => BlockDecodeResolution::Failed(RejectReason::InconsistentEquations),
     };
+    let repair_symbol_ids = if matches!(resolution, BlockDecodeResolution::Retry(_)) {
+        job.symbols
+            .iter()
+            .filter(|symbol| symbol.kind().is_repair())
+            .map(Symbol::id)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     BlockDecodeOutcome {
         sbn: job.sbn,
         retain_decoded_block: job.retain_decoded_block,
+        repair_symbol_ids,
         resolution,
     }
 }
@@ -604,7 +615,7 @@ impl DecodingPipeline {
         }
         if kind.is_repair() && !self.symbols.contains(&symbol_id) {
             self.configure_block_k();
-            if self.block_is_decoding(sbn) || self.repair_retention_saturated(sbn) {
+            if self.repair_retention_saturated(sbn) {
                 return Ok(DeferredSymbolAcceptResult::Immediate(
                     SymbolAcceptResult::Rejected(RejectReason::MemoryLimitReached),
                 ));
@@ -919,26 +930,29 @@ impl DecodingPipeline {
     }
 
     fn finish_inline_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
-        match outcome.resolution {
+        let BlockDecodeOutcome {
+            sbn,
+            retain_decoded_block,
+            repair_symbol_ids,
+            resolution,
+        } = outcome;
+        match resolution {
             BlockDecodeResolution::Complete(block_data) => {
-                self.mark_block_complete(
-                    outcome.sbn,
-                    outcome.retain_decoded_block.then(|| block_data.clone()),
-                );
+                self.mark_block_complete(sbn, retain_decoded_block.then(|| block_data.clone()));
                 SymbolAcceptResult::BlockComplete {
-                    block_sbn: outcome.sbn,
+                    block_sbn: sbn,
                     data: block_data,
                 }
             }
             BlockDecodeResolution::Retry(reason) => {
-                self.clear_repair_symbols_for_retry(outcome.sbn);
-                if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
+                self.clear_repair_symbols_for_retry(sbn, &repair_symbol_ids);
+                if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Collecting;
                 }
                 SymbolAcceptResult::Rejected(reason)
             }
             BlockDecodeResolution::Failed(reason) => {
-                if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
+                if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Failed;
                 }
                 SymbolAcceptResult::Rejected(reason)
@@ -950,30 +964,33 @@ impl DecodingPipeline {
     #[must_use]
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn finish_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
-        if self.completed_blocks.contains(&outcome.sbn) {
+        let BlockDecodeOutcome {
+            sbn,
+            retain_decoded_block,
+            repair_symbol_ids,
+            resolution,
+        } = outcome;
+        if self.completed_blocks.contains(&sbn) {
             return SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded);
         }
 
-        match outcome.resolution {
+        match resolution {
             BlockDecodeResolution::Complete(block_data) => {
-                self.mark_block_complete(
-                    outcome.sbn,
-                    outcome.retain_decoded_block.then(|| block_data.clone()),
-                );
+                self.mark_block_complete(sbn, retain_decoded_block.then(|| block_data.clone()));
                 SymbolAcceptResult::BlockComplete {
-                    block_sbn: outcome.sbn,
+                    block_sbn: sbn,
                     data: block_data,
                 }
             }
             BlockDecodeResolution::Retry(reason) => {
-                self.clear_repair_symbols_for_retry(outcome.sbn);
-                if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
+                self.clear_repair_symbols_for_retry(sbn, &repair_symbol_ids);
+                if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Collecting;
                 }
                 SymbolAcceptResult::Rejected(reason)
             }
             BlockDecodeResolution::Failed(reason) => {
-                if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
+                if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Failed;
                 }
                 SymbolAcceptResult::Rejected(reason)
@@ -981,12 +998,15 @@ impl DecodingPipeline {
         }
     }
 
-    fn clear_repair_symbols_for_retry(&mut self, sbn: u8) {
-        if self.symbols.clear_repair_symbols_for_block(sbn) == 0 {
+    fn clear_repair_symbols_for_retry(&mut self, sbn: u8, repair_symbol_ids: &[SymbolId]) {
+        let removed = self
+            .symbols
+            .clear_repair_symbols_for_block(sbn, repair_symbol_ids);
+        if removed == 0 {
             return;
         }
         if let Some(counts) = self.block_symbol_counts.get_mut(&sbn) {
-            counts.repair_symbols = 0;
+            counts.repair_symbols = counts.repair_symbols.saturating_sub(removed);
         }
     }
 
