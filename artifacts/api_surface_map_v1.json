@@ -2,7 +2,7 @@
   "counts": {
     "entry_points": 19,
     "modules": 120,
-    "root_exports": 297
+    "root_exports": 298
   },
   "entry_points": [
     {
@@ -2917,6 +2917,18 @@
       "line": 447,
       "name": "asupersync_macros::scope",
       "signature": "pub use asupersync_macros::scope",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 447,
+      "name": "asupersync_macros::select",
+      "signature": "pub use asupersync_macros::select",
       "stability": "feature-gated"
     },
     {
