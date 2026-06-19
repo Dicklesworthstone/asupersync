@@ -203,7 +203,8 @@ const RQ_MILD_LOSS_PACING_FLOOR_FRACTION: f64 = 0.50;
 const RQ_MILD_LOSS_PACING_MAX_LOSS: f64 = 0.02;
 const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
 const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
-const RQ_SOURCE_FEC_ZERO_LOSS_CUTOFF: f64 = 0.000_5;
+const RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR: f64 = 0.01;
+const RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD: f64 = 0.03;
 
 /// Packets pulled from the UDP socket per receive-pump turn.
 ///
@@ -703,17 +704,19 @@ impl RqAdaptiveSendState {
             RQ_SOURCE_FEC_FALLBACK_ALPHA,
             RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
         );
-        tuning.repair_overhead = tuning.repair_overhead.max(1.0 + overhead);
+        tuning.repair_overhead = tuning
+            .repair_overhead
+            .max(1.0 + overhead)
+            .max(1.0 + RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD);
         tuning
     }
 
     fn source_fec_fallback_loss_bar(&self) -> f64 {
         let measured_loss = self.pacing_loss_ema.max(self.est.loss_p_hat);
-        if measured_loss <= RQ_SOURCE_FEC_ZERO_LOSS_CUTOFF {
-            0.0
-        } else {
-            self.loss_bar.max(self.loss_ema).max(measured_loss)
-        }
+        self.loss_bar
+            .max(self.loss_ema)
+            .max(measured_loss)
+            .max(RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR)
     }
 
     fn observe_need_more(
@@ -3005,7 +3008,7 @@ fn max_feedback_repair_batch_per_block(block_source_n: usize) -> usize {
 
 fn adaptive_feedback_repair_batch_per_block(block_source_n: usize, repair_overhead: f64) -> usize {
     if repair_overhead <= 1.0 {
-        return 0;
+        return 1;
     }
 
     let matched = ((block_source_n as f64) * (repair_overhead - 1.0)).ceil() as usize;
@@ -7012,9 +7015,9 @@ mod tests {
     }
 
     #[test]
-    fn source_first_feedback_repair_batch_is_zero_at_clean_floor() {
-        assert_eq!(repair_target_for_feedback_round(512, 0, 1.0), 0);
-        assert_eq!(repair_target_for_feedback_round(512, 7, 1.0), 7);
+    fn source_first_feedback_repair_batch_is_minimal() {
+        assert_eq!(repair_target_for_feedback_round(512, 0, 1.0), 1);
+        assert_eq!(repair_target_for_feedback_round(512, 7, 1.0), 8);
     }
 
     #[test]
@@ -7118,7 +7121,7 @@ mod tests {
     }
 
     #[test]
-    fn source_fec_fallback_has_no_clean_link_repair_floor() {
+    fn source_fec_fallback_preserves_clean_link_batching_floor() {
         let config = RqConfig {
             symbol_size: 1024,
             max_block_size: 512 * 1024,
@@ -7133,16 +7136,19 @@ mod tests {
 
         let tuning = state.source_fec_fallback_tuning(&config);
 
-        assert_eq!(state.source_fec_fallback_loss_bar(), 0.0);
+        assert_eq!(
+            state.source_fec_fallback_loss_bar(),
+            RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR
+        );
         assert!(
-            tuning.repair_overhead < 1.01,
-            "clean-link fallback should keep only minimal adaptive block-plan repair, got {}",
+            tuning.repair_overhead >= 1.0 + RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD,
+            "clean-link fallback must preserve batching floor after E-RESYNC-16: got {}",
             tuning.repair_overhead
         );
     }
 
     #[test]
-    fn source_fec_fallback_uses_calibrated_epsilon_without_fixed_three_percent_floor() {
+    fn source_fec_fallback_keeps_near_clean_batching_floor() {
         let config = RqConfig {
             symbol_size: 1024,
             max_block_size: 512 * 1024,
@@ -7158,16 +7164,19 @@ mod tests {
         let tuning = state.source_fec_fallback_tuning(&config);
         let expected = adaptive::overhead_for_target(
             fixed_block_k(&config),
-            0.001,
+            RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR,
             RQ_SOURCE_FEC_FALLBACK_ALPHA,
             RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
         );
 
-        assert_eq!(state.source_fec_fallback_loss_bar(), 0.001);
+        assert_eq!(
+            state.source_fec_fallback_loss_bar(),
+            RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR
+        );
         assert!(tuning.repair_overhead >= 1.0 + expected);
         assert!(
-            tuning.repair_overhead < 1.03,
-            "fixed 3% floor must stay removed at low measured loss: {}",
+            tuning.repair_overhead >= 1.0 + RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD,
+            "near-clean fallback should batch repair symbols, got {}",
             tuning.repair_overhead
         );
     }
