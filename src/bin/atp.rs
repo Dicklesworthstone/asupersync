@@ -631,6 +631,77 @@ fn print_json<T: serde::Serialize>(value: &T) {
     }
 }
 
+fn throughput_bytes_per_sec(bytes: u64, elapsed: Option<Duration>) -> Option<u64> {
+    let elapsed = elapsed?;
+    let micros = elapsed.as_micros();
+    if micros == 0 {
+        return None;
+    }
+    let rate = u128::from(bytes).saturating_mul(1_000_000) / micros;
+    Some(rate.min(u128::from(u64::MAX)) as u64)
+}
+
+fn elapsed_micros(elapsed: Option<Duration>) -> Option<u64> {
+    elapsed.map(|duration| {
+        let micros = duration.as_micros();
+        micros.min(u128::from(u64::MAX)) as u64
+    })
+}
+
+fn atp_metrics_json(
+    bytes: u64,
+    symbols_sent: Option<u64>,
+    symbols_accepted: Option<u64>,
+    feedback_rounds: u32,
+    decode_count: Option<u64>,
+    decode_micros: Option<u64>,
+    chosen_fanout: usize,
+    elapsed: Option<Duration>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "bytes": bytes,
+        "elapsed_micros": elapsed_micros(elapsed),
+        "throughput_bytes_per_sec": throughput_bytes_per_sec(bytes, elapsed),
+        "symbols_sent": symbols_sent,
+        "symbols_accepted": symbols_accepted,
+        "feedback_rounds": feedback_rounds,
+        "decode_count": decode_count,
+        "decode_micros": decode_micros,
+        "chosen_fanout": chosen_fanout,
+        "ring_peak_occupancy": Option::<u64>::None,
+        "ring_avg_occupancy": Option::<u64>::None,
+        "drop_count": Option::<u64>::None,
+        "park_count": Option::<u64>::None,
+    })
+}
+
+fn print_atp_metrics_line(
+    direction: &str,
+    transport: Transport,
+    bytes: u64,
+    symbols_sent: Option<u64>,
+    symbols_accepted: Option<u64>,
+    feedback_rounds: u32,
+    decode_micros: Option<u64>,
+    chosen_fanout: usize,
+    elapsed: Option<Duration>,
+) {
+    let throughput = throughput_bytes_per_sec(bytes, elapsed)
+        .map_or_else(|| "n/a".to_string(), |value| value.to_string());
+    let symbols_sent = symbols_sent.map_or_else(|| "n/a".to_string(), |value| value.to_string());
+    let symbols_accepted =
+        symbols_accepted.map_or_else(|| "n/a".to_string(), |value| value.to_string());
+    let decode_micros = decode_micros.map_or_else(|| "n/a".to_string(), |value| value.to_string());
+    eprintln!(
+        "[atp] progress metrics direction={direction} transport={} bytes={bytes} \
+         throughput_bytes_per_sec={throughput} symbols_sent={symbols_sent} \
+         symbols_accepted={symbols_accepted} feedback_rounds={feedback_rounds} \
+         decode_micros={decode_micros} fanout={chosen_fanout} \
+         ring_peak_occupancy=n/a ring_avg_occupancy=n/a drop_count=n/a park_count=n/a",
+        transport.cli_arg(),
+    );
+}
+
 fn resolve(target: &str) -> Result<SocketAddr, String> {
     target
         .to_socket_addrs()
@@ -849,7 +920,8 @@ fn send_to_addr_with_transport(
                                 .eta
                                 .map_or_else(String::new, |e| format!("  eta {e:.1?}"));
                             eprintln!(
-                                "[atp] {:>3.0}%  {done} / {total} bytes  {:.0} B/s{eta}",
+                                "[atp] progress transport=tcp pct={:>3.0} bytes={done}/{total} \
+                                 throughput_bytes_per_sec={:.0}{eta} fanout=1",
                                 snap.fraction * 100.0,
                                 snap.rate_bytes_per_sec,
                             );
@@ -858,7 +930,19 @@ fn send_to_addr_with_transport(
                     .await
                 }))
                 .map_err(|e: TransportError| e.to_string())?;
-            Ok(tcp_send_json(&report))
+            let elapsed = start.elapsed();
+            print_atp_metrics_line(
+                "send",
+                Transport::Tcp,
+                report.bytes_sent,
+                Some(report.symbols_sent),
+                Some(report.receipt.symbols_accepted),
+                report.feedback_rounds,
+                Some(report.receipt.decode_micros),
+                1,
+                Some(elapsed),
+            );
+            Ok(tcp_send_json(&report, Some(elapsed)))
         }
         Transport::Rq => {
             let cfg = rq_config(
@@ -871,18 +955,34 @@ fn send_to_addr_with_transport(
                 args.rq_auth_key_hex.as_deref(),
                 args.rq_allow_unauthenticated_lab,
             )?;
+            let chosen_fanout = cfg.udp_fanout.max(1);
+            let start = Instant::now();
             let report = runtime
                 .block_on(runtime.handle().spawn(async move {
                     let cx = Cx::current().expect("sender cx");
                     transport_rq::send_path(&cx, addr, &source, cfg, &peer_id).await
                 }))
                 .map_err(|e| e.to_string())?;
-            Ok(rq_send_json(&report))
+            let elapsed = start.elapsed();
+            print_atp_metrics_line(
+                "send",
+                Transport::Rq,
+                report.bytes_sent,
+                Some(report.symbols_sent),
+                Some(report.receipt.symbols_accepted),
+                report.feedback_rounds,
+                None,
+                chosen_fanout,
+                Some(elapsed),
+            );
+            Ok(rq_send_json(&report, chosen_fanout, Some(elapsed)))
         }
         Transport::Quic => {
             #[cfg(feature = "tls")]
             {
                 let cfg = quic_config_send(args)?;
+                let chosen_fanout = cfg.datagram_fanout.max(1);
+                let start = Instant::now();
                 let report = runtime
                     .block_on(runtime.handle().spawn(async move {
                         let cx = Cx::current().expect("sender cx");
@@ -894,7 +994,19 @@ fn send_to_addr_with_transport(
                     .map_err(
                         |e: asupersync::net::atp::transport_quic::QuicTransportError| e.to_string(),
                     )?;
-                Ok(quic_send_json(&report))
+                let elapsed = start.elapsed();
+                print_atp_metrics_line(
+                    "send",
+                    Transport::Quic,
+                    report.bytes_sent,
+                    Some(report.symbols_sent),
+                    Some(report.receipt.symbols_accepted),
+                    report.feedback_rounds,
+                    Some(report.receipt.decode_micros),
+                    chosen_fanout,
+                    Some(elapsed),
+                );
+                Ok(quic_send_json(&report, chosen_fanout, Some(elapsed)))
             }
             #[cfg(not(feature = "tls"))]
             {
@@ -2701,12 +2813,25 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 let bound = listener.local_addr().map_err(|e| e.to_string())?;
                 eprintln!("atp: tcp listening on {bound}, dest {}", dest.display());
                 if one_shot {
+                    let start = Instant::now();
                     let report: ReceiveReport =
                         transport_tcp::receive_once(&cx, &listener, &dest, cfg, &peer_id)
                             .await
                             .map_err(|e| e.to_string())?;
+                    let elapsed = start.elapsed();
                     handle_post_receive_delta(&dest, delta_enabled)?;
-                    print_json(&tcp_recv_json(&report));
+                    print_atp_metrics_line(
+                        "receive",
+                        Transport::Tcp,
+                        report.bytes_received,
+                        None,
+                        Some(report.symbols_accepted),
+                        report.feedback_rounds,
+                        Some(report.decode_micros),
+                        1,
+                        Some(elapsed),
+                    );
+                    print_json(&tcp_recv_json(&report, Some(elapsed)));
                     Ok::<(), String>(())
                 } else {
                     let delta_dest = dest.clone();
@@ -2718,7 +2843,18 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                                 {
                                     eprintln!("atp: delta receiver failed: {err}");
                                 }
-                                print_json(&tcp_recv_json(&r));
+                                print_atp_metrics_line(
+                                    "receive",
+                                    Transport::Tcp,
+                                    r.bytes_received,
+                                    None,
+                                    Some(r.symbols_accepted),
+                                    r.feedback_rounds,
+                                    Some(r.decode_micros),
+                                    1,
+                                    None,
+                                );
+                                print_json(&tcp_recv_json(&r, None));
                             }
                             Err(e) => eprintln!("atp: transfer failed: {e}"),
                         }
@@ -2739,6 +2875,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 args.rq_auth_key_hex.as_deref(),
                 args.rq_allow_unauthenticated_lab,
             )?;
+            let chosen_fanout = cfg.udp_fanout.max(1);
             runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("receiver cx");
                 asupersync::fs::create_dir_all(&dest)
@@ -2753,6 +2890,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                     dest.display()
                 );
                 if one_shot {
+                    let start = Instant::now();
                     let report = transport_rq::receive_once(
                         &cx,
                         &listener,
@@ -2763,8 +2901,20 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                     )
                     .await
                     .map_err(|e| e.to_string())?;
+                    let elapsed = start.elapsed();
                     handle_post_receive_delta(&dest, delta_enabled)?;
-                    print_json(&rq_recv_json(&report));
+                    print_atp_metrics_line(
+                        "receive",
+                        Transport::Rq,
+                        report.bytes_received,
+                        None,
+                        Some(report.symbols_accepted),
+                        report.feedback_rounds,
+                        None,
+                        chosen_fanout,
+                        Some(elapsed),
+                    );
+                    print_json(&rq_recv_json(&report, chosen_fanout, Some(elapsed)));
                     Ok::<(), String>(())
                 } else {
                     let delta_dest = dest.clone();
@@ -2782,7 +2932,18 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                                 {
                                     eprintln!("atp: delta receiver failed: {err}");
                                 }
-                                print_json(&rq_recv_json(&r));
+                                print_atp_metrics_line(
+                                    "receive",
+                                    Transport::Rq,
+                                    r.bytes_received,
+                                    None,
+                                    Some(r.symbols_accepted),
+                                    r.feedback_rounds,
+                                    None,
+                                    chosen_fanout,
+                                    None,
+                                );
+                                print_json(&rq_recv_json(&r, chosen_fanout, None));
                             }
                             Err(e) => eprintln!("atp: transfer failed: {e}"),
                         },
@@ -2796,6 +2957,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
             #[cfg(feature = "tls")]
             {
                 let cfg = quic_config_recv(&args)?;
+                let chosen_fanout = cfg.datagram_fanout.max(1);
                 runtime.block_on(runtime.handle().spawn(async move {
                     use asupersync::net::atp::transport_quic::native_link::{
                         bind_server_endpoint, receive_on_endpoint,
@@ -2813,11 +2975,24 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                             endpoint.local_addr(),
                             dest.display()
                         );
+                        let start = Instant::now();
                         let report = receive_on_endpoint(&cx, endpoint, &dest, &cfg, &peer_id)
                             .await
                             .map_err(|e| e.to_string())?;
+                        let elapsed = start.elapsed();
                         handle_post_receive_delta(&dest, delta_enabled)?;
-                        print_json(&quic_recv_json(&report));
+                        print_atp_metrics_line(
+                            "receive",
+                            Transport::Quic,
+                            report.bytes_received,
+                            None,
+                            Some(report.symbols_accepted),
+                            report.feedback_rounds,
+                            Some(report.decode_micros),
+                            chosen_fanout,
+                            Some(elapsed),
+                        );
+                        print_json(&quic_recv_json(&report, chosen_fanout, Some(elapsed)));
                         Ok::<(), String>(())
                     } else {
                         eprintln!("atp: quic listening on {listen}, dest {}", dest.display());
@@ -2835,7 +3010,18 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                                     {
                                         eprintln!("atp: delta receiver failed: {err}");
                                     }
-                                    print_json(&quic_recv_json(&r));
+                                    print_atp_metrics_line(
+                                        "receive",
+                                        Transport::Quic,
+                                        r.bytes_received,
+                                        None,
+                                        Some(r.symbols_accepted),
+                                        r.feedback_rounds,
+                                        Some(r.decode_micros),
+                                        chosen_fanout,
+                                        None,
+                                    );
+                                    print_json(&quic_recv_json(&r, chosen_fanout, None));
                                 }
                                 Err(e) => eprintln!("atp: transfer failed: {e}"),
                             }
@@ -2852,7 +3038,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
     }
 }
 
-fn tcp_recv_json(report: &ReceiveReport) -> serde_json::Value {
+fn tcp_recv_json(report: &ReceiveReport, elapsed: Option<Duration>) -> serde_json::Value {
     serde_json::json!({
         "event": "atp_receive", "transport": "tcp",
         "transfer_id": report.transfer_id,
@@ -2863,12 +3049,22 @@ fn tcp_recv_json(report: &ReceiveReport) -> serde_json::Value {
         "feedback_rounds": report.feedback_rounds,
         "decode_count": report.decode_count,
         "decode_micros": report.decode_micros,
+        "metrics": atp_metrics_json(
+            report.bytes_received,
+            None,
+            Some(report.symbols_accepted),
+            report.feedback_rounds,
+            Some(report.decode_count),
+            Some(report.decode_micros),
+            1,
+            elapsed,
+        ),
         "committed_paths": report.committed_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "peer": report.peer.to_string(),
     })
 }
 
-fn tcp_send_json(report: &SendReport) -> serde_json::Value {
+fn tcp_send_json(report: &SendReport, elapsed: Option<Duration>) -> serde_json::Value {
     serde_json::json!({
         "event": "atp_send", "transport": "tcp",
         "transfer_id": report.transfer_id,
@@ -2880,11 +3076,25 @@ fn tcp_send_json(report: &SendReport) -> serde_json::Value {
         "merkle_root": report.merkle_root_hex,
         "sha_ok": report.receipt.sha_ok,
         "merkle_ok": report.receipt.merkle_ok,
+        "metrics": atp_metrics_json(
+            report.bytes_sent,
+            Some(report.symbols_sent),
+            Some(report.receipt.symbols_accepted),
+            report.feedback_rounds,
+            Some(report.receipt.decode_count),
+            Some(report.receipt.decode_micros),
+            1,
+            elapsed,
+        ),
         "peer": report.peer.to_string(),
     })
 }
 
-fn rq_recv_json(report: &transport_rq::ReceiveReport) -> serde_json::Value {
+fn rq_recv_json(
+    report: &transport_rq::ReceiveReport,
+    chosen_fanout: usize,
+    elapsed: Option<Duration>,
+) -> serde_json::Value {
     serde_json::json!({
         "event": "atp_receive", "transport": "rq",
         "transfer_id": report.transfer_id,
@@ -2893,12 +3103,26 @@ fn rq_recv_json(report: &transport_rq::ReceiveReport) -> serde_json::Value {
         "files": report.files,
         "symbols_accepted": report.symbols_accepted,
         "feedback_rounds": report.feedback_rounds,
+        "metrics": atp_metrics_json(
+            report.bytes_received,
+            None,
+            Some(report.symbols_accepted),
+            report.feedback_rounds,
+            None,
+            None,
+            chosen_fanout,
+            elapsed,
+        ),
         "committed_paths": report.committed_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "peer": report.peer.to_string(),
     })
 }
 
-fn rq_send_json(report: &transport_rq::SendReport) -> serde_json::Value {
+fn rq_send_json(
+    report: &transport_rq::SendReport,
+    chosen_fanout: usize,
+    elapsed: Option<Duration>,
+) -> serde_json::Value {
     serde_json::json!({
         "event": "atp_send", "transport": "rq",
         "transfer_id": report.transfer_id,
@@ -2910,6 +3134,16 @@ fn rq_send_json(report: &transport_rq::SendReport) -> serde_json::Value {
         "merkle_root": report.merkle_root_hex,
         "sha_ok": report.receipt.sha_ok,
         "merkle_ok": report.receipt.merkle_ok,
+        "metrics": atp_metrics_json(
+            report.bytes_sent,
+            Some(report.symbols_sent),
+            Some(report.receipt.symbols_accepted),
+            report.feedback_rounds,
+            None,
+            None,
+            chosen_fanout,
+            elapsed,
+        ),
         "peer": report.peer.to_string(),
     })
 }
@@ -2917,6 +3151,8 @@ fn rq_send_json(report: &transport_rq::SendReport) -> serde_json::Value {
 #[cfg(feature = "tls")]
 fn quic_recv_json(
     report: &asupersync::net::atp::transport_quic::ReceiveReport,
+    chosen_fanout: usize,
+    elapsed: Option<Duration>,
 ) -> serde_json::Value {
     serde_json::json!({
         "event": "atp_receive", "transport": "quic",
@@ -2928,13 +3164,27 @@ fn quic_recv_json(
         "feedback_rounds": report.feedback_rounds,
         "decode_count": report.decode_count,
         "decode_micros": report.decode_micros,
+        "metrics": atp_metrics_json(
+            report.bytes_received,
+            None,
+            Some(report.symbols_accepted),
+            report.feedback_rounds,
+            Some(report.decode_count),
+            Some(report.decode_micros),
+            chosen_fanout,
+            elapsed,
+        ),
         "committed_paths": report.committed_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "peer": report.peer.to_string(),
     })
 }
 
 #[cfg(feature = "tls")]
-fn quic_send_json(report: &asupersync::net::atp::transport_quic::SendReport) -> serde_json::Value {
+fn quic_send_json(
+    report: &asupersync::net::atp::transport_quic::SendReport,
+    chosen_fanout: usize,
+    elapsed: Option<Duration>,
+) -> serde_json::Value {
     serde_json::json!({
         "event": "atp_send", "transport": "quic",
         "transfer_id": report.transfer_id,
@@ -2946,6 +3196,16 @@ fn quic_send_json(report: &asupersync::net::atp::transport_quic::SendReport) -> 
         "merkle_root": report.merkle_root_hex,
         "sha_ok": report.receipt.sha_ok,
         "merkle_ok": report.receipt.merkle_ok,
+        "metrics": atp_metrics_json(
+            report.bytes_sent,
+            Some(report.symbols_sent),
+            Some(report.receipt.symbols_accepted),
+            report.feedback_rounds,
+            Some(report.receipt.decode_count),
+            Some(report.receipt.decode_micros),
+            chosen_fanout,
+            elapsed,
+        ),
         "peer": report.peer.to_string(),
     })
 }
