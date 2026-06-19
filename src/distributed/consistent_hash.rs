@@ -1274,8 +1274,7 @@ mod tests {
 
         let config = BoundedLoadConfig::STRICT;
         let mut bounded_loads = std::collections::BTreeMap::<String, u64>::new();
-        let mut total_load = 0_u64;
-        for _ in 0..10_000 {
+        for total_load in 0..10_000 {
             let decision = ring
                 .bounded_node_for_key(&"hot-key", total_load, config, |node| {
                     bounded_loads.get(node).copied().unwrap_or(0)
@@ -1284,7 +1283,6 @@ mod tests {
             *bounded_loads
                 .entry(decision.selected_node.to_owned())
                 .or_insert(0) += 1;
-            total_load += 1;
         }
 
         let unbounded_max = unbounded_loads.values().copied().max().expect("loads");
@@ -1367,18 +1365,19 @@ mod tests {
 
             let config = BoundedLoadConfig::new(250);
             let mut loads = std::collections::BTreeMap::<String, u64>::new();
-            let mut total_load = 0_u64;
             let mut decisions = Vec::new();
 
-            for key in (0..2048_u64).map(|idx| format!("tenant-hot-key-{}", idx % 17)) {
+            for (total_load, key) in (0..2048_u64)
+                .map(|idx| format!("tenant-hot-key-{}", idx % 17))
+                .enumerate()
+            {
                 let selected = ring
-                    .node_for_key_bounded_load(&key, total_load, config, |node| {
+                    .node_for_key_bounded_load(&key, total_load as u64, config, |node| {
                         loads.get(node).copied().unwrap_or(0)
                     })
                     .expect("bounded selected node")
                     .to_owned();
                 *loads.entry(selected.clone()).or_insert(0) += 1;
-                total_load += 1;
                 decisions.push(selected);
             }
 

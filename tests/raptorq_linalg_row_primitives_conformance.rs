@@ -11,8 +11,10 @@
 //! *different* call shape:
 //!   * `row_xor(dst, src)`        ≡ `row_scale_add(dst, src, 1)`   (XOR is +)
 //!   * `row_scale(row, c)`        ≡ `row_scale_add(0, row, c)`     (c·row = 0 + c·row)
+//!
 //! plus the GF(256) group laws that need no oracle at all (XOR involution,
 //! scale by 1 = identity, scale by 0 = zero, scale by `c` then `c⁻¹` = identity).
+//!
 //! The index/count helpers are checked differentially against naive scans.
 //!
 //! Every test is pure and deterministic (no runtime, no entropy — a seeded LCG
@@ -22,8 +24,8 @@
 
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::linalg::{
-    row_first_nonzero_from, row_nonzero_count, row_scale, row_scale_add, row_swap, row_xor,
-    DenseRow,
+    DenseRow, row_first_nonzero_from, row_nonzero_count, row_scale, row_scale_add, row_swap,
+    row_xor,
 };
 
 /// Deterministic LCG (Knuth MMIX constants) for reproducible row generation.
@@ -91,7 +93,10 @@ fn row_xor_is_involutive_and_self_cancels() {
             let mut dst = original.clone();
             row_xor(&mut dst, &src);
             row_xor(&mut dst, &src);
-            assert_eq!(dst, original, "row_xor not involutive (len={len}, seed={seed})");
+            assert_eq!(
+                dst, original,
+                "row_xor not involutive (len={len}, seed={seed})"
+            );
 
             // XOR with self yields the zero row (a ^ a = 0).
             let mut self_x = original.clone();
@@ -205,8 +210,16 @@ fn dense_row_swap_matches_free_function() {
             let mut b = DenseRow::new(b0.clone());
             a.swap(&mut b);
 
-            assert_eq!(a.as_slice(), b0.as_slice(), "DenseRow::swap: a must become old b");
-            assert_eq!(b.as_slice(), a0.as_slice(), "DenseRow::swap: b must become old a");
+            assert_eq!(
+                a.as_slice(),
+                b0.as_slice(),
+                "DenseRow::swap: a must become old b"
+            );
+            assert_eq!(
+                b.as_slice(),
+                a0.as_slice(),
+                "DenseRow::swap: b must become old a"
+            );
         }
     }
 }
@@ -243,10 +256,7 @@ fn row_first_nonzero_from_matches_naive() {
                     let naive = if start >= row.len() {
                         None
                     } else {
-                        row[start..]
-                            .iter()
-                            .position(|&b| b != 0)
-                            .map(|i| start + i)
+                        row[start..].iter().position(|&b| b != 0).map(|i| start + i)
                     };
                     assert_eq!(
                         row_first_nonzero_from(&row, start),
@@ -274,7 +284,11 @@ fn row_first_nonzero_from_edge_cases() {
     let mut one = vec![0u8; 10];
     one[5] = 0x9A;
     for start in 0..=5 {
-        assert_eq!(row_first_nonzero_from(&one, start), Some(5), "start={start}");
+        assert_eq!(
+            row_first_nonzero_from(&one, start),
+            Some(5),
+            "start={start}"
+        );
     }
     for start in 6..=12 {
         assert_eq!(row_first_nonzero_from(&one, start), None, "start={start}");

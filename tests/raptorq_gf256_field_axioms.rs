@@ -110,17 +110,9 @@ fn mul_associativity_and_distributivity_full_domain() {
             for c in 0u16..=255 {
                 let gc = Gf256(c as u8);
                 // Associativity: (a*b)*c == a*(b*c).
-                assert_eq!(
-                    ab * gc,
-                    ga * (gb * gc),
-                    "assoc fails ({a},{b},{c})"
-                );
+                assert_eq!(ab * gc, ga * (gb * gc), "assoc fails ({a},{b},{c})");
                 // Distributivity: a*(b+c) == a*b + a*c.
-                assert_eq!(
-                    ga * (gb + gc),
-                    ab + ga * gc,
-                    "distrib fails ({a},{b},{c})"
-                );
+                assert_eq!(ga * (gb + gc), ab + ga * gc, "distrib fails ({a},{b},{c})");
             }
         }
     }
@@ -151,13 +143,16 @@ fn pow_and_generator_is_primitive() {
         );
         seen[acc.0 as usize] = true;
         assert_ne!(acc.0, 0, "alpha^{k} hit zero — impossible for a generator");
-        acc = acc * alpha;
+        acc *= alpha;
     }
     // After 255 steps we must return to 1 (full cycle).
     assert_eq!(acc, Gf256::ONE, "alpha^255 != 1 — order is not 255");
     // Every nonzero element was enumerated exactly once.
     for v in 1u16..=255 {
-        assert!(seen[v as usize], "nonzero element {v} never produced by α powers");
+        assert!(
+            seen[v as usize],
+            "nonzero element {v} never produced by α powers"
+        );
     }
     assert!(!seen[0], "zero must not appear in the multiplicative group");
 }

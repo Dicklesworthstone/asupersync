@@ -252,8 +252,10 @@ fn repeated_decode_accumulates_per_object_id_until_rate_limited() {
     for call in 2..=140u32 {
         match decoder.decode_with_object_id(&received, Some(&oid)) {
             Ok(_) => {}
-            Err(DecodeError::EsiRateLimitExceeded { .. })
-            | Err(DecodeError::ComputeBudgetExhausted { .. }) => {
+            Err(
+                DecodeError::EsiRateLimitExceeded { .. }
+                | DecodeError::ComputeBudgetExhausted { .. },
+            ) => {
                 first_trip = Some(call);
                 break;
             }

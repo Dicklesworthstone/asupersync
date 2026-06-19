@@ -200,7 +200,7 @@ mod tests {
         let bytes = env.encode().expect("encode");
         let decoded = QuicSymbolEnvelope::decode(&bytes, false).expect("decode");
         let back = envelope_to_symbol(&decoded, ObjectId::from_u128(1));
-        assert!(back == s);
+        assert_eq!(back, s);
     }
 
     #[test]
@@ -221,6 +221,6 @@ mod tests {
         let bytes = env.encode().expect("encode");
         let decoded = QuicSymbolEnvelope::decode(&bytes, false).expect("decode");
         let back = envelope_to_symbol(&decoded, ObjectId::from_u128(3));
-        assert!(back == s);
+        assert_eq!(back, s);
     }
 }

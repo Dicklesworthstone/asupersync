@@ -27,9 +27,7 @@
 use std::fmt::Write as _;
 use std::fs;
 
-use asupersync::raptorq::rfc6330::{
-    LtTuple, V0, V1, V2, V3, next_prime_ge, tuple, tuple_indices,
-};
+use asupersync::raptorq::rfc6330::{LtTuple, V0, V1, V2, V3, next_prime_ge, tuple, tuple_indices};
 use asupersync::raptorq::systematic::SystematicParams;
 
 // ---- independent reference implementation (RFC 6330 pseudocode) ----
@@ -49,45 +47,45 @@ const F: [u32; 31] = [
 
 /// §5.3.5.2 Deg[v] with the RFC W-2 cap applied at tuple generation.
 fn ref_deg(v: u32, w: usize) -> usize {
-    let mut d = 30usize;
-    for j in 1..=30usize {
-        if v < F[j] {
-            d = j;
+    let mut degree = 30usize;
+    for (threshold_degree, threshold) in F.iter().enumerate().skip(1) {
+        if v < *threshold {
+            degree = threshold_degree;
             break;
         }
     }
-    d.min(w - 2)
+    degree.min(w - 2)
 }
 
 /// §5.3.5.4 Tuple[K', X] generator. `j` is the systematic index J(K').
-fn ref_tuple(j: usize, w: usize, p1: usize, x: u32) -> LtTuple {
-    let j = j as u32;
-    let mut a = 53_591u32.wrapping_add(997u32.wrapping_mul(j));
-    if a % 2 == 0 {
-        a = a.wrapping_add(1);
+fn ref_tuple(systematic_index: usize, width: usize, prime_p1: usize, isi: u32) -> LtTuple {
+    let systematic_index = systematic_index as u32;
+    let mut lt_seed_multiplier = 53_591u32.wrapping_add(997u32.wrapping_mul(systematic_index));
+    if lt_seed_multiplier % 2 == 0 {
+        lt_seed_multiplier = lt_seed_multiplier.wrapping_add(1);
     }
-    let b = 10_267u32.wrapping_mul(j.wrapping_add(1));
-    let y = b.wrapping_add(x.wrapping_mul(a));
+    let lt_seed_offset = 10_267u32.wrapping_mul(systematic_index.wrapping_add(1));
+    let tuple_seed = lt_seed_offset.wrapping_add(isi.wrapping_mul(lt_seed_multiplier));
 
-    let v = ref_rand(y, 0, 1 << 20);
-    let d = ref_deg(v, w);
-    let lt_step = 1 + ref_rand(y, 1, (w as u32) - 1) as usize;
-    let lt_start = ref_rand(y, 2, w as u32) as usize;
-    let d1 = if d < 4 {
-        2 + ref_rand(x, 3, 2) as usize
+    let degree_sample = ref_rand(tuple_seed, 0, 1 << 20);
+    let degree = ref_deg(degree_sample, width);
+    let lt_step = 1 + ref_rand(tuple_seed, 1, (width as u32) - 1) as usize;
+    let lt_start = ref_rand(tuple_seed, 2, width as u32) as usize;
+    let pi_degree = if degree < 4 {
+        2 + ref_rand(isi, 3, 2) as usize
     } else {
         2
     };
-    let a1 = 1 + ref_rand(x, 4, (p1 as u32) - 1) as usize;
-    let b1 = ref_rand(x, 5, p1 as u32) as usize;
+    let pi_step = 1 + ref_rand(isi, 4, (prime_p1 as u32) - 1) as usize;
+    let pi_start = ref_rand(isi, 5, prime_p1 as u32) as usize;
 
     LtTuple {
-        d,
+        d: degree,
         a: lt_step,
         b: lt_start,
-        d1,
-        a1,
-        b1,
+        d1: pi_degree,
+        a1: pi_step,
+        b1: pi_start,
     }
 }
 
@@ -134,7 +132,9 @@ fn tuple_mismatch_class(a: LtTuple, b: LtTuple) -> &'static str {
     }
 }
 
-const K_SWEEP: &[usize] = &[1, 2, 4, 8, 10, 11, 26, 42, 50, 100, 101, 200, 500, 1000, 2048, 10000];
+const K_SWEEP: &[usize] = &[
+    1, 2, 4, 8, 10, 11, 26, 42, 50, 100, 101, 200, 500, 1000, 2048, 10000,
+];
 
 #[test]
 fn differential_tuple_and_equation_vs_independent_reference() {
@@ -166,7 +166,8 @@ fn differential_tuple_and_equation_vs_independent_reference() {
                 );
             }
             assert_eq!(
-                prod_t, ref_t,
+                prod_t,
+                ref_t,
                 "K={k} K'={kp} ISI={esi} W={w} P={p} P1={p1}: tuple diverges from \
                  independent RFC §5.3.5.4 reference [class={}]; \
                  repro='cargo test --test raptorq_differential_tuple_reference'",
@@ -196,7 +197,10 @@ fn differential_tuple_and_equation_vs_independent_reference() {
         }
     }
 
-    assert!(compared > 10_000, "differential sweep too small: {compared} points");
+    assert!(
+        compared > 10_000,
+        "differential sweep too small: {compared} points"
+    );
     assert_eq!(tuple_mismatches, 0, "tuple mismatches found");
     assert_eq!(walk_mismatches, 0, "index-walk mismatches found");
 

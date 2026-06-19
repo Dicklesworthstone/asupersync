@@ -6,6 +6,7 @@
 //!   - `try_repair_symbol(esi) -> Result<Vec<u8>>`(allocating, fallible)
 //!   - `repair_symbol_into(esi, &mut buf)`        (in-place, panics on bad ESI)
 //!   - `try_repair_symbol_into(esi, &mut buf)`    (in-place, fallible)
+//!
 //! Three of those four (`try_repair_symbol`, `try_repair_symbol_into`,
 //! `repair_symbol_into`) had ZERO test coverage, so nothing pinned that the
 //! allocating / in-place / fallible / panicking variants all agree byte-for-byte
@@ -66,16 +67,26 @@ fn all_variants_agree_byte_for_byte() {
             let esi = k_u32 + off;
 
             let alloc = enc.repair_symbol(esi);
-            assert_eq!(alloc.len(), SYMBOL_SIZE, "repair symbol must be symbol_size");
+            assert_eq!(
+                alloc.len(),
+                SYMBOL_SIZE,
+                "repair symbol must be symbol_size"
+            );
 
             let try_alloc = enc
                 .try_repair_symbol(esi)
                 .unwrap_or_else(|e| panic!("try_repair_symbol({esi}) errored: {e:?}"));
-            assert_eq!(try_alloc, alloc, "try_repair_symbol != repair_symbol (K={k} esi={esi})");
+            assert_eq!(
+                try_alloc, alloc,
+                "try_repair_symbol != repair_symbol (K={k} esi={esi})"
+            );
 
             let mut into_buf = vec![0u8; SYMBOL_SIZE];
             enc.repair_symbol_into(esi, &mut into_buf);
-            assert_eq!(into_buf, alloc, "repair_symbol_into != repair_symbol (K={k} esi={esi})");
+            assert_eq!(
+                into_buf, alloc,
+                "repair_symbol_into != repair_symbol (K={k} esi={esi})"
+            );
 
             let mut try_into_buf = vec![0u8; SYMBOL_SIZE];
             enc.try_repair_symbol_into(esi, &mut try_into_buf)
@@ -86,7 +97,11 @@ fn all_variants_agree_byte_for_byte() {
             );
 
             // Determinism: a second allocating call is byte-identical.
-            assert_eq!(enc.repair_symbol(esi), alloc, "non-deterministic repair symbol");
+            assert_eq!(
+                enc.repair_symbol(esi),
+                alloc,
+                "non-deterministic repair symbol"
+            );
         }
     }
 }
@@ -100,7 +115,9 @@ fn repair_symbol_matches_emit_repair_stream() {
 
         // repair_symbol is &self and does not advance the streaming cursor, so
         // we can snapshot the expected data before driving emit_repair.
-        let expected: Vec<Vec<u8>> = (0..n).map(|i| enc.repair_symbol(k_u32 + i as u32)).collect();
+        let expected: Vec<Vec<u8>> = (0..n)
+            .map(|i| enc.repair_symbol(k_u32 + i as u32))
+            .collect();
 
         let emitted = enc.emit_repair(n);
         assert_eq!(emitted.len(), n, "emit_repair must emit n symbols (K={k})");
@@ -180,9 +197,14 @@ fn oversized_buffer_writes_only_symbol_prefix() {
     // Buffer twice the symbol size, tail pre-filled with a sentinel.
     const SENTINEL: u8 = 0x5A;
     let mut buf = vec![SENTINEL; SYMBOL_SIZE * 2];
-    enc.try_repair_symbol_into(esi, &mut buf).expect("valid esi");
+    enc.try_repair_symbol_into(esi, &mut buf)
+        .expect("valid esi");
 
-    assert_eq!(&buf[..SYMBOL_SIZE], &canonical[..], "prefix must be the canonical symbol");
+    assert_eq!(
+        &buf[..SYMBOL_SIZE],
+        &canonical[..],
+        "prefix must be the canonical symbol"
+    );
     assert!(
         buf[SYMBOL_SIZE..].iter().all(|&b| b == SENTINEL),
         "bytes past symbol_size must be left untouched"

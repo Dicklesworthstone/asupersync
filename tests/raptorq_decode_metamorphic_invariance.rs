@@ -122,8 +122,10 @@ fn decode(decoder: &InactivationDecoder, received: &[ReceivedSymbol], sbn: u8) -
     let object_id = ObjectId::new(OBJECT_ID_HIGH, OBJECT_ID_LOW);
     decoder
         .decode_with_proof(received, object_id, sbn)
-        .map(|success| success.result.source)
-        .unwrap_or_else(|(err, _proof)| panic!("decode must succeed: {err:?}"))
+        .map_or_else(
+            |(err, _proof)| panic!("decode must succeed: {err:?}"),
+            |success| success.result.source,
+        )
 }
 
 const K: usize = 20;
@@ -213,8 +215,7 @@ fn decode_is_invariant_to_repair_symbol_selection() {
 
     // Window A: repair ESIs [K, K + L).
     let decoder_a = InactivationDecoder::new(K, SYMBOL_SIZE, SEED);
-    let window_a =
-        build_received_with_repair_window(&encoder, &decoder_a, &source, DROPPED, 0, l);
+    let window_a = build_received_with_repair_window(&encoder, &decoder_a, &source, DROPPED, 0, l);
     let recovered_a = decode(&decoder_a, &window_a, SBN);
     assert_eq!(
         recovered_a, source,

@@ -869,9 +869,7 @@ impl AtpTransferBrain {
         // ~1 GB (panic under overflow-checks, wrap in release).
         let mut max_cwnd = min_cwnd.saturating_mul(4);
         let mut algorithm = CongestionAlgorithm::AtpAdaptive;
-        let mut pacing_rate = None;
-
-        if let Some(signal) = self.loss_transfer_signal {
+        let pacing_rate = if let Some(signal) = self.loss_transfer_signal {
             if let Some(factor) = signal.cwnd_reduction_factor {
                 initial_cwnd = scale_cwnd_by_factor(initial_cwnd, factor);
                 max_cwnd = scale_cwnd_by_factor(max_cwnd, factor).max(initial_cwnd);
@@ -879,8 +877,10 @@ impl AtpTransferBrain {
             if signal.prefer_bbr {
                 algorithm = CongestionAlgorithm::Bbr;
             }
-            pacing_rate = signal.pacing_rate_hint;
-        }
+            signal.pacing_rate_hint
+        } else {
+            None
+        };
 
         CongestionParams {
             initial_cwnd,

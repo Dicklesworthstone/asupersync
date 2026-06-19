@@ -30,9 +30,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Default sub-block size for the level-2 diff. Small enough that a localized
-/// edit maps to a few literal blocks, large enough to keep the signature compact
-/// relative to a content-defined chunk (~16-64 KiB).
+/// Default sub-block size for the level-2 diff.
+///
+/// Small enough that a localized edit maps to a few literal blocks, large
+/// enough to keep the signature compact relative to a content-defined chunk
+/// (~16-64 KiB).
 pub const DEFAULT_SUBBLOCK_BYTES: usize = 1024;
 
 /// Truncated strong-checksum length (128-bit). Collisions are cryptographically
@@ -183,9 +185,11 @@ fn strong_checksum(block: &[u8]) -> [u8; STRONG_LEN] {
     out
 }
 
-/// Build the OLD buffer's signature using fixed-size sub-blocks. Only full
-/// `block_size` blocks are signed (a shorter tail is left to fall through as
-/// literal — correct, marginally less optimal). `block_size` is clamped to >= 1.
+/// Build the OLD buffer's signature using fixed-size sub-blocks.
+///
+/// Only full `block_size` blocks are signed (a shorter tail is left to fall
+/// through as literal — correct, marginally less optimal). `block_size` is
+/// clamped to >= 1.
 #[must_use]
 pub fn signature(old: &[u8], block_size: usize) -> SubBlockSignature {
     let block_size = block_size.max(1);
@@ -295,7 +299,7 @@ pub fn apply(old: &[u8], ops: &[SubDeltaOp]) -> Result<Vec<u8>, SubDeltaError> {
         match op {
             SubDeltaOp::Copy { old_offset, len } => {
                 let start = usize::try_from(*old_offset).unwrap_or(usize::MAX);
-                let end = start.checked_add(*len as usize).unwrap_or(usize::MAX);
+                let end = start.saturating_add(*len as usize);
                 if end > old.len() {
                     return Err(SubDeltaError::CopyOutOfRange {
                         old_offset: *old_offset,
@@ -334,9 +338,11 @@ pub fn reconstruct_verified(
     Ok(rebuilt)
 }
 
-/// Estimated bytes-on-wire for an op stream: literal bytes (the only payload)
-/// plus a fixed per-op overhead. This is what level 2 saves over shipping the
-/// whole chunk — for a small edit it is ~proportional to the change.
+/// Estimated bytes-on-wire for an op stream.
+///
+/// Literal bytes are the only payload; non-literal ops add fixed overhead. This
+/// is what level 2 saves over shipping the whole chunk — for a small edit it is
+/// ~proportional to the change.
 #[must_use]
 pub fn wire_bytes(ops: &[SubDeltaOp]) -> usize {
     ops.iter()
@@ -347,9 +353,11 @@ pub fn wire_bytes(ops: &[SubDeltaOp]) -> usize {
         .sum()
 }
 
-/// Convenience: full sender-side sub-delta of `new` against `old`. Equivalent to
-/// `diff(new, &signature(old, block_size))`; the protocol splits these across the
-/// wire (receiver signs, sender diffs), but a co-located caller / test can do both.
+/// Convenience: full sender-side sub-delta of `new` against `old`.
+///
+/// Equivalent to `diff(new, &signature(old, block_size))`; the protocol splits
+/// these across the wire (receiver signs, sender diffs), but a co-located
+/// caller / test can do both.
 #[must_use]
 pub fn sub_delta(old: &[u8], new: &[u8], block_size: usize) -> Vec<SubDeltaOp> {
     diff(new, &signature(old, block_size))

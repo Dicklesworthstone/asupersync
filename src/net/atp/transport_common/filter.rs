@@ -430,7 +430,11 @@ mod tests {
         );
         // target/ subtree fully pruned; *.tmp dropped; src/keep included.
         assert!(!selected.iter().any(|p| p.starts_with("target")));
-        assert!(!selected.iter().any(|p| p.ends_with(".tmp")));
+        assert!(!selected.iter().any(|p| {
+            std::path::Path::new(p)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+        }));
     }
 
     #[test]

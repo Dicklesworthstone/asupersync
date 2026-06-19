@@ -142,12 +142,22 @@ fn quorum_collects_successes_when_threshold_met() {
 
     let captured = block_on(
         capture(|p| {
-            let a = p.leaf(async { 1u32 });
-            let b = p.leaf(async { 0u32 });
-            let c = p.leaf(async { 3u32 });
-            let d = p.leaf(async { 0u32 });
-            let e = p.leaf(async { 5u32 });
-            p.quorum([a, b, c, d, e], 2, |v: &u32| *v > 0)
+            let positive_one = p.leaf(async { 1u32 });
+            let zero_one = p.leaf(async { 0u32 });
+            let positive_three = p.leaf(async { 3u32 });
+            let zero_two = p.leaf(async { 0u32 });
+            let positive_five = p.leaf(async { 5u32 });
+            p.quorum(
+                [
+                    positive_one,
+                    zero_one,
+                    positive_three,
+                    zero_two,
+                    positive_five,
+                ],
+                2,
+                |v: &u32| *v > 0,
+            )
         })
         .expect("valid")
         .execute_all(&cx),
@@ -186,12 +196,12 @@ fn quorum_not_met_reports_shortfall() {
 fn nested_race_of_join_and_timeout() {
     let cx = Cx::for_testing();
     let plan = capture(|p| {
-        let a = p.leaf(async { 1u32 });
-        let b = p.leaf(async { 2u32 });
-        let j = p.join([a, b]);
-        let c = p.leaf(async { 3u32 });
-        let t = p.timeout(c, Duration::from_secs(60));
-        p.race([j, t])
+        let left = p.leaf(async { 1u32 });
+        let right = p.leaf(async { 2u32 });
+        let joined = p.join([left, right]);
+        let timed_leaf = p.leaf(async { 3u32 });
+        let timed = p.timeout(timed_leaf, Duration::from_secs(60));
+        p.race([joined, timed])
     })
     .expect("valid");
 
@@ -236,12 +246,12 @@ fn race_drops_losers_without_completing_them() {
 #[test]
 fn try_structure_emits_plandag_for_core_kinds() {
     let plan = capture(|p| {
-        let a = p.leaf(async { 1u32 });
-        let b = p.leaf(async { 2u32 });
-        let j = p.join([a, b]);
-        let c = p.leaf(async { 3u32 });
-        let t = p.timeout(c, Duration::from_secs(1));
-        p.race([j, t])
+        let left = p.leaf(async { 1u32 });
+        let right = p.leaf(async { 2u32 });
+        let joined = p.join([left, right]);
+        let timed_leaf = p.leaf(async { 3u32 });
+        let timed = p.timeout(timed_leaf, Duration::from_secs(1));
+        p.race([joined, timed])
     })
     .expect("valid");
 

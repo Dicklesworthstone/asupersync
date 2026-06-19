@@ -132,9 +132,9 @@ fn diagonal_built_by_set_coefficient_is_identity() {
     // cells remain the structural zeros from `new`. The identity's solution
     // is the RHS verbatim, proving (row, col) addressing is exact.
     let mut solver = GaussianSolver::new(3, 3);
-    for i in 0..3 {
+    for (i, rhs) in RHS.iter().enumerate() {
         solver.set_coefficient(i, i, Gf256::ONE);
-        solver.set_rhs(i, DenseRow::new(RHS[i].to_vec()));
+        solver.set_rhs(i, DenseRow::new(rhs.to_vec()));
     }
 
     match solver.solve() {

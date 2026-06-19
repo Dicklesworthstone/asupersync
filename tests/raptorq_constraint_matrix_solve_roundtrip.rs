@@ -66,10 +66,10 @@ fn matvec(a: &ConstraintMatrix, c: &[Vec<u8>], sym: usize) -> Vec<Vec<u8>> {
     (0..a.rows)
         .map(|r| {
             let mut acc = vec![0u8; sym];
-            for col in 0..a.cols {
+            for (col, symbol) in c.iter().enumerate().take(a.cols) {
                 let coef = a.get(r, col);
                 // row_scale_add is a no-op for coef == 0; call unconditionally.
-                row_scale_add(&mut acc, &c[col], coef);
+                row_scale_add(&mut acc, symbol, coef);
             }
             acc
         })

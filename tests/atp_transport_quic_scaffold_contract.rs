@@ -109,6 +109,7 @@ fn manifest_and_receipt_types_are_reused_from_transport_tcp() {
         total_bytes: 0,
         merkle_root_hex: "00".repeat(32),
         metadata_root_hex: None,
+        delta_manifest: None,
         entries: vec![],
     };
     let quic_manifest: TransferManifest = tcp_manifest;
@@ -283,7 +284,7 @@ fn adaptive_arm_rejects_invalid_controller_output() {
             overhead: 0.1,
             fanout: 1,
         }),
-        Err(QuicTransportError::Config(message)) if message.contains("k")
+        Err(QuicTransportError::Config(message)) if message.contains('k')
     ));
     assert!(matches!(
         QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
@@ -527,6 +528,7 @@ fn manifest_json_roundtrips() {
         total_bytes: 1234,
         merkle_root_hex: "ab".repeat(32),
         metadata_root_hex: None,
+        delta_manifest: None,
         entries: vec![
             ManifestEntry {
                 index: 0,

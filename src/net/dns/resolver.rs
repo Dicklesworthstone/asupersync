@@ -2174,7 +2174,7 @@ mod tests {
         init_test("decode_dns_name_rejects_oversized_uncompressed_expansion");
 
         let mut packet = Vec::new();
-        for byte in [b'a', b'b', b'c', b'd'] {
+        for byte in *b"abcd" {
             packet.push(63);
             packet.extend_from_slice(&[byte; 63]);
         }

@@ -6371,7 +6371,7 @@ mod tests {
                 overhead: 0.1,
                 fanout: 1,
             }),
-            Err(QuicTransportError::Config(m)) if m.contains("k")
+            Err(QuicTransportError::Config(m)) if m.contains('k')
         ));
         assert!(matches!(
             QuicAdaptiveArm::from_block_plan(QuicAdaptiveBlockPlan {
@@ -7950,7 +7950,7 @@ mod tests {
             symbol_size: 128,
             max_block_size: 512,
             repair_overhead: 1.0,
-            ..auth_quic_config(0xBAD7_A6)
+            ..auth_quic_config(0x00BA_D7A6)
         };
         let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 61))];
         let manifest = manifest_from_entries("payload", true, &entries);

@@ -4603,7 +4603,7 @@ mod tests {
     #[test]
     fn redirect_policy_debug_clone() {
         let a = RedirectPolicy::Limited(5);
-        let b = a.clone();
+        let b = a;
         let dbg = format!("{a:?}");
         assert!(dbg.contains("Limited"));
         assert!(dbg.contains('5'));

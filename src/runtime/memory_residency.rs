@@ -1450,16 +1450,8 @@ mod tests {
             schema_version: "test-runtime-pressure-v1".to_string(),
             overall_verdict: verdict,
             missing_signal_count: 0,
-            degraded_signal_count: if verdict == RuntimePressureVerdict::Degraded {
-                1
-            } else {
-                0
-            },
-            critical_signal_count: if verdict == RuntimePressureVerdict::Critical {
-                1
-            } else {
-                0
-            },
+            degraded_signal_count: u64::from(verdict == RuntimePressureVerdict::Degraded),
+            critical_signal_count: u64::from(verdict == RuntimePressureVerdict::Critical),
             resource_composite_degradation: if verdict == RuntimePressureVerdict::Critical {
                 DegradationLevel::Emergency
             } else {

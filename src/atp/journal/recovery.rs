@@ -638,9 +638,9 @@ fn process_recovery_record(
 /// The fallback path constructs an empty bitmap that derives its `transfer_id`
 /// from the on-disk filename (`transfer_<id>.bitmap`) only after the journal
 /// replay admits that transfer id.
-pub async fn load_recovered_or_create_bitmap(
+pub async fn load_recovered_or_create_bitmap<S: std::hash::BuildHasher + Sync>(
     bitmap_path: &Path,
-    journal_recovered_transfers: &HashSet<String>,
+    journal_recovered_transfers: &HashSet<String, S>,
 ) -> Result<Option<ChunkBitmap>, RecoveryError> {
     let transfer_id = required_transfer_id_from_bitmap_path(bitmap_path)?;
     if !journal_recovered_transfers.contains(&transfer_id) {
@@ -660,10 +660,10 @@ pub async fn load_recovered_or_create_bitmap(
     }
 }
 
-fn accept_recovered_bitmap(
+fn accept_recovered_bitmap<S: std::hash::BuildHasher>(
     bitmap_path: &Path,
     bitmap: ChunkBitmap,
-    journal_recovered_transfers: &HashSet<String>,
+    journal_recovered_transfers: &HashSet<String, S>,
 ) -> Result<Option<ChunkBitmap>, RecoveryError> {
     let transfer_id = required_transfer_id_from_bitmap_path(bitmap_path)?;
     if !journal_recovered_transfers.contains(&transfer_id) {

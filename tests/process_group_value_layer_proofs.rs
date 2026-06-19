@@ -322,17 +322,18 @@ fn monitor_stream_delivers_every_event_exactly_once() {
     // "exactly once" guarantee is over the right events, not just the right count.
     let log = state.event_log();
     assert_eq!(log.len(), ops.len());
-    assert!(matches!(log[0].kind(), GroupEventKind::Joined) && log[0].member() == &a);
-    assert!(matches!(log[1].kind(), GroupEventKind::Joined) && log[1].member() == &b);
-    assert!(matches!(log[2].kind(), GroupEventKind::Joined) && log[2].member() == &c);
-    assert!(matches!(log[3].kind(), GroupEventKind::Left) && log[3].member() == &b);
+    assert!(matches!(log[0].kind(), GroupEventKind::Joined) && log[0].member() == &node_one);
+    assert!(matches!(log[1].kind(), GroupEventKind::Joined) && log[1].member() == &node_two);
+    assert!(matches!(log[2].kind(), GroupEventKind::Joined) && log[2].member() == &node_three);
+    assert!(matches!(log[3].kind(), GroupEventKind::Left) && log[3].member() == &node_two);
     assert!(
-        matches!(log[4].kind(), GroupEventKind::Down(DownReason::Normal)) && log[4].member() == &a
+        matches!(log[4].kind(), GroupEventKind::Down(DownReason::Normal))
+            && log[4].member() == &node_one
     );
-    assert!(matches!(log[5].kind(), GroupEventKind::Joined) && log[5].member() == &d);
+    assert!(matches!(log[5].kind(), GroupEventKind::Joined) && log[5].member() == &node_four);
     assert!(
         matches!(log[6].kind(), GroupEventKind::Down(DownReason::Error(_)))
-            && log[6].member() == &c
+            && log[6].member() == &node_three
     );
 }
 

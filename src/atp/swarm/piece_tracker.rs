@@ -961,9 +961,9 @@ mod tests {
         let peer_b = PeerId::new("peer-b");
 
         let mut map_a = PieceMap::new(1, 1024, "hash-a".to_string());
-        map_a.add_peer_pieces(peer_a.clone(), [piece_id].into_iter().collect());
+        map_a.add_peer_pieces(peer_a.clone(), std::iter::once(piece_id).collect());
         let mut map_b = PieceMap::new(1, 1024, "hash-b".to_string());
-        map_b.add_peer_pieces(peer_b.clone(), [piece_id].into_iter().collect());
+        map_b.add_peer_pieces(peer_b.clone(), std::iter::once(piece_id).collect());
 
         tracker.initialize_transfer(&transfer_a, &map_a).unwrap();
         tracker.initialize_transfer(&transfer_b, &map_b).unwrap();
@@ -1003,7 +1003,7 @@ mod tests {
             peer_a.clone(),
             [piece_a, shared_piece].into_iter().collect(),
         );
-        piece_map.add_peer_pieces(peer_b.clone(), [shared_piece].into_iter().collect());
+        piece_map.add_peer_pieces(peer_b.clone(), std::iter::once(shared_piece).collect());
 
         tracker
             .initialize_transfer(&transfer_id, &piece_map)
@@ -1025,7 +1025,7 @@ mod tests {
         );
         assert_eq!(
             tracker.get_peer_pieces(&transfer_id, &peer_b).unwrap(),
-            [shared_piece].into_iter().collect()
+            std::iter::once(shared_piece).collect()
         );
         assert_eq!(
             tracker

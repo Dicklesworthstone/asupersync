@@ -258,7 +258,9 @@ mod tests {
         ];
 
         for (input, expected) in cases {
-            let err = syn::parse2::<SpawnInput>(input).expect_err(expected);
+            let Err(err) = syn::parse2::<SpawnInput>(input) else {
+                panic!("{expected}");
+            };
             assert_eq!(err.to_string(), expected);
         }
     }

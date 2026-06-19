@@ -8,30 +8,27 @@
 //! coverage, so nothing pinned that the derivation matches the canonical
 //! fail-closed path or the repair-index expansion path.
 //!
-//! This harness pins four contracts using only the public API:
+//! This harness pins four contracts using only the public API.
 //!
-//!   1. WRAPPER EQUIVALENCE — for every (J, W, P, X),
-//!        tuple_with_prime_p1(J,W,P,X)
-//!          == next_prime_ge(P).and_then(|p1| try_tuple(J,W,P,p1,X))
-//!      i.e. the wrapper is byte-identical to computing the prime yourself
-//!      and calling `try_tuple` — no argument-order or constant drift.
+//! Contract 1: WRAPPER EQUIVALENCE. For every (J, W, P, X),
+//! `tuple_with_prime_p1(J,W,P,X)` equals
+//! `next_prime_ge(P).and_then(|p1| try_tuple(J,W,P,p1,X))`; the wrapper is
+//! byte-identical to computing the prime yourself and calling `try_tuple`, with
+//! no argument-order or constant drift.
 //!
-//!   2. COMPOSITE-P FIX-UP (metamorphic) — when P is composite, calling
-//!      `try_tuple(J,W,P,P,X)` with P itself as the modulus is rejected
-//!      (P != smallest_prime_ge(P)), yet `tuple_with_prime_p1` SUCCEEDS by
-//!      substituting the corrected prime P1. This is the wrapper's reason
-//!      to exist; we prove the corrected output equals `try_tuple` driven
-//!      with the prime.
+//! Contract 2: COMPOSITE-P FIX-UP (metamorphic). When P is composite, calling
+//! `try_tuple(J,W,P,P,X)` with P itself as the modulus is rejected
+//! (P != smallest_prime_ge(P)), yet `tuple_with_prime_p1` SUCCEEDS by
+//! substituting the corrected prime P1. This is the wrapper's reason to exist;
+//! we prove the corrected output equals `try_tuple` driven with the prime.
 //!
-//!   3. CROSS-FUNCTION PARITY — `repair_indices_for_esi(J,W,P,X)` must
-//!      expand exactly the tuple that `tuple_with_prime_p1` produces:
-//!        repair_indices_for_esi(J,W,P,X)
-//!          == tuple_with_prime_p1(J,W,P,X)
-//!               .map(|t| tuple_indices(t, W, P, smallest_prime_ge(P)))
-//!               .unwrap_or_default()
+//! Contract 3: CROSS-FUNCTION PARITY. `repair_indices_for_esi(J,W,P,X)` expands
+//! exactly the tuple that `tuple_with_prime_p1` produces, matching
+//! `tuple_with_prime_p1(J,W,P,X).map(|t| tuple_indices(t, W, P,
+//! smallest_prime_ge(P))).unwrap_or_default()`.
 //!
-//!   4. FAIL-CLOSED — W <= 2 and P == 0 both yield `None` regardless of
-//!      the other inputs, and the wrapper is deterministic.
+//! Contract 4: FAIL-CLOSED. W <= 2 and P == 0 both yield `None` regardless of
+//! the other inputs, and the wrapper is deterministic.
 //!
 //! Repro: `cargo test --test raptorq_tuple_with_prime_p1_equivalence`
 

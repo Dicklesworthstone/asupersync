@@ -44,6 +44,12 @@ fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     text
 }
 
+fn has_extension(path: &str, extension: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+}
+
 fn bool_field(value: &Value, key: &str) -> bool {
     value
         .get(key)
@@ -203,7 +209,7 @@ fn commands_kinds_and_feature_flags_are_shape_checked() {
         match kind {
             "rust" => {
                 assert!(
-                    file.ends_with(".rs"),
+                    has_extension(file, "rs"),
                     "rust entry must point to .rs: {file}"
                 );
                 assert!(
@@ -235,7 +241,7 @@ fn commands_kinds_and_feature_flags_are_shape_checked() {
             }
             "shell" => {
                 assert!(
-                    file.ends_with(".sh"),
+                    has_extension(file, "sh"),
                     "shell entry must point to .sh: {file}"
                 );
                 assert!(
@@ -245,7 +251,7 @@ fn commands_kinds_and_feature_flags_are_shape_checked() {
             }
             "markdown" => {
                 assert!(
-                    file.ends_with(".md"),
+                    has_extension(file, "md"),
                     "markdown entry must point to .md: {file}"
                 );
                 assert!(
@@ -255,7 +261,7 @@ fn commands_kinds_and_feature_flags_are_shape_checked() {
             }
             "json" => {
                 assert!(
-                    file.ends_with(".json"),
+                    has_extension(file, "json"),
                     "json entry must point to .json: {file}"
                 );
                 assert!(
@@ -265,7 +271,7 @@ fn commands_kinds_and_feature_flags_are_shape_checked() {
             }
             "scenario-yaml" => {
                 assert!(
-                    file.starts_with("examples/scenarios/") && file.ends_with(".yaml"),
+                    file.starts_with("examples/scenarios/") && has_extension(file, "yaml"),
                     "scenario-yaml entry must point to examples/scenarios/*.yaml: {file}"
                 );
                 assert!(

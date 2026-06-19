@@ -1178,8 +1178,8 @@ mod tests {
             let peer_a = test_peer("peer-a", [piece_id]);
             let peer_b = test_peer("peer-b", [piece_id]);
             let mut piece_map = PieceMap::new(1, 1024, "test-hash".to_string());
-            piece_map.add_peer_pieces(peer_a.peer_id.clone(), [piece_id].into_iter().collect());
-            piece_map.add_peer_pieces(peer_b.peer_id.clone(), [piece_id].into_iter().collect());
+            piece_map.add_peer_pieces(peer_a.peer_id.clone(), std::iter::once(piece_id).collect());
+            piece_map.add_peer_pieces(peer_b.peer_id.clone(), std::iter::once(piece_id).collect());
 
             let transfer_id = coordinator
                 .start_swarm_transfer(
@@ -1268,7 +1268,7 @@ mod tests {
             let piece_id = PieceId::new(0);
             let peer = test_peer("peer-a", [piece_id]);
             let mut piece_map = PieceMap::new(1, 1024, "test-hash".to_string());
-            piece_map.add_peer_pieces(peer.peer_id.clone(), [piece_id].into_iter().collect());
+            piece_map.add_peer_pieces(peer.peer_id.clone(), std::iter::once(piece_id).collect());
 
             let transfer_id = coordinator
                 .start_swarm_transfer(

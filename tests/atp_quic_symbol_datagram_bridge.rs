@@ -111,7 +111,7 @@ fn authed_symbol_round_trips_with_matching_posture() {
         .expect("a datagram arrived");
     assert_eq!(env.auth_tag, Some(tag));
     let got = envelope_to_symbol(&env, ObjectId::from_u128(OBJ));
-    assert!(got == s);
+    assert_eq!(got, s);
 }
 
 #[test]
