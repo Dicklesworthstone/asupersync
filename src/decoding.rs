@@ -17,6 +17,12 @@ use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+const REPAIR_RETENTION_MIN_SLACK: usize = 16;
+const REPAIR_RETENTION_MAX_SLACK: usize = 64;
+
+const AUTO_REPAIR_RETENTION_MIN_EXTRA_SYMBOLS: usize = 64;
+const AUTO_REPAIR_RETENTION_MAX_EXTRA_SYMBOLS: usize = 8192;
+
 /// Errors produced by the decoding pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum DecodingError {
@@ -457,6 +463,7 @@ impl DecodingPipeline {
         self.object_id = Some(params.object_id);
         self.object_size = Some(params.object_size);
         self.block_plans = Some(plans);
+        self.configure_auto_buffer_limit();
         self.configure_block_k();
         Ok(())
     }
@@ -582,6 +589,7 @@ impl DecodingPipeline {
             self.object_id = Some(symbol.object_id());
         }
 
+        let symbol_id = symbol.id();
         let sbn = symbol.sbn();
         let kind = symbol.kind();
         if self.block_plans.is_some() && self.block_plan(sbn).is_none() {
@@ -593,6 +601,14 @@ impl DecodingPipeline {
             return Ok(DeferredSymbolAcceptResult::Immediate(
                 SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded),
             ));
+        }
+        if kind.is_repair() && !self.symbols.contains(&symbol_id) {
+            self.configure_block_k();
+            if self.block_is_decoding(sbn) || self.repair_retention_saturated(sbn) {
+                return Ok(DeferredSymbolAcceptResult::Immediate(
+                    SymbolAcceptResult::Rejected(RejectReason::MemoryLimitReached),
+                ));
+            }
         }
 
         // Ensure block entry exists
@@ -796,6 +812,23 @@ impl DecodingPipeline {
         }
     }
 
+    fn configure_auto_buffer_limit(&mut self) {
+        if self.config.max_buffered_symbols != 0 {
+            return;
+        }
+        let Some(plans) = &self.block_plans else {
+            return;
+        };
+        let max_k = plans.iter().map(|plan| plan.k).max().unwrap_or(0);
+        if max_k == 0 {
+            return;
+        }
+        let extra = max_k
+            .max(AUTO_REPAIR_RETENTION_MIN_EXTRA_SYMBOLS)
+            .min(AUTO_REPAIR_RETENTION_MAX_EXTRA_SYMBOLS);
+        self.symbols.set_max_per_block(max_k.saturating_add(extra));
+    }
+
     fn try_decode_block(
         &mut self,
         sbn: u8,
@@ -852,6 +885,42 @@ impl DecodingPipeline {
             .is_some_and(|block| matches!(block.state, BlockDecodingState::Decoding))
     }
 
+    fn repair_retention_saturated(&self, sbn: u8) -> bool {
+        let Some(cap) = self.repair_retention_cap(sbn) else {
+            return false;
+        };
+        self.block_symbol_counts
+            .get(&sbn)
+            .is_some_and(|counts| counts.total() >= cap)
+    }
+
+    fn repair_retention_cap(&self, sbn: u8) -> Option<usize> {
+        let k = self
+            .block_plan(sbn)
+            .map(|plan| plan.k)
+            .or_else(|| {
+                self.symbols
+                    .block_progress(sbn)
+                    .and_then(|progress| progress.k.map(usize::from))
+            })?;
+        if k == 0 {
+            return Some(0);
+        }
+        let needed = required_symbols(
+            u16::try_from(k).unwrap_or(u16::MAX),
+            self.config.repair_overhead,
+            self.config.min_overhead,
+        );
+        let slack = (k / 32).clamp(REPAIR_RETENTION_MIN_SLACK, REPAIR_RETENTION_MAX_SLACK);
+        let dynamic_cap = needed.saturating_add(slack).max(k);
+        let configured_cap = self.config.max_buffered_symbols;
+        Some(if configured_cap == 0 {
+            dynamic_cap
+        } else {
+            dynamic_cap.min(configured_cap).max(k)
+        })
+    }
+
     fn finish_inline_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
         match outcome.resolution {
             BlockDecodeResolution::Complete(block_data) => {
@@ -865,6 +934,7 @@ impl DecodingPipeline {
                 }
             }
             BlockDecodeResolution::Retry(reason) => {
+                self.clear_repair_symbols_for_retry(outcome.sbn);
                 if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
                     block.state = BlockDecodingState::Collecting;
                 }
@@ -899,6 +969,7 @@ impl DecodingPipeline {
                 }
             }
             BlockDecodeResolution::Retry(reason) => {
+                self.clear_repair_symbols_for_retry(outcome.sbn);
                 if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
                     block.state = BlockDecodingState::Collecting;
                 }
@@ -910,6 +981,15 @@ impl DecodingPipeline {
                 }
                 SymbolAcceptResult::Rejected(reason)
             }
+        }
+    }
+
+    fn clear_repair_symbols_for_retry(&mut self, sbn: u8) {
+        if self.symbols.clear_repair_symbols_for_block(sbn) == 0 {
+            return;
+        }
+        if let Some(counts) = self.block_symbol_counts.get_mut(&sbn) {
+            counts.repair_symbols = 0;
         }
     }
 

@@ -219,6 +219,14 @@ impl SymbolSet {
         progress.threshold_reached
     }
 
+    /// Updates the maximum number of symbols accepted per block.
+    ///
+    /// This is used by decoders that can derive a safer cap only after object
+    /// parameters reveal the block geometry.
+    pub fn set_max_per_block(&mut self, max_per_block: usize) {
+        self.threshold_config.max_per_block = max_per_block;
+    }
+
     /// Returns true if a symbol is present.
     #[inline]
     #[must_use]
@@ -373,6 +381,27 @@ impl SymbolSet {
                 self.block_counts.remove(&sbn);
             }
         }
+    }
+
+    /// Clears only repair symbols for a block, retaining systematic source
+    /// symbols and the block's configured K.
+    pub fn clear_repair_symbols_for_block(&mut self, sbn: u8) -> usize {
+        let ids: Vec<SymbolId> = self
+            .symbols
+            .iter()
+            .filter_map(|(id, symbol)| {
+                if symbol.sbn() == sbn && symbol.kind() == SymbolKind::Repair {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let removed = ids.len();
+        for id in ids {
+            let _ = self.remove(&id);
+        }
+        removed
     }
 
     fn calculate_threshold(progress: &BlockProgress, config: &ThresholdConfig) -> bool {
