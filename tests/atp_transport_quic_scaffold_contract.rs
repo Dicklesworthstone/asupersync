@@ -660,6 +660,67 @@ fn send_path_start_trace_carries_stable_structured_fields() {
     }
 }
 
+#[test]
+fn send_path_extended_config_trace_carries_overflow_safe_fields() {
+    let cx = Cx::for_testing();
+    let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+    cx.set_diagnostic_context(DiagnosticContext::new());
+    cx.set_log_collector(collector.clone());
+
+    let config = QuicConfig {
+        bwlimit_bps: Some(256 * 1024),
+        max_spray_symbols_per_flush: 17,
+        responsiveness_pressure: 0.125,
+        allow_special_files: true,
+        preserve_hardlinks: true,
+        ..trusted_quic_config()
+    };
+    let expected_metadata_policy = format!("{:?}", config.metadata_policy);
+    let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let missing = temp.path().join("trace-extended-config.bin");
+
+    let result: Result<SendReport, QuicTransportError> =
+        block_on(send_path(&cx, addr, &missing, config, "sender"));
+    assert!(
+        matches!(result, Err(QuicTransportError::Source(_))),
+        "missing source should still fail after extended config trace, got {result:?}"
+    );
+
+    let entries = collector.peek();
+    let start = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.transport.start")
+        .expect("transport start trace entry");
+    assert_eq!(start.get_field("operation"), Some("send_path"));
+    assert_eq!(start.get_field("datagram_fanout"), Some("1"));
+    assert_eq!(
+        start.get_field("bwlimit_bps"),
+        None,
+        "extended config fields live on atp_quic.transport.config to stay under LogEntry's field cap"
+    );
+
+    let config = entries
+        .iter()
+        .find(|entry| entry.message() == "atp_quic.transport.config")
+        .expect("transport extended config trace entry");
+    assert_eq!(config.level(), LogLevel::Trace);
+    assert_eq!(config.get_field("operation"), Some("send_path"));
+    assert_eq!(config.get_field("peer_id"), Some("sender"));
+    assert_eq!(config.get_field("bwlimit_bps"), Some("262144"));
+    assert_eq!(config.get_field("max_spray_symbols_per_flush"), Some("17"));
+    assert_eq!(
+        config.get_field("responsiveness_pressure"),
+        Some("0.125000")
+    );
+    assert_eq!(
+        config.get_field("metadata_policy"),
+        Some(expected_metadata_policy.as_str())
+    );
+    assert_eq!(config.get_field("allow_special_files"), Some("true"));
+    assert_eq!(config.get_field("preserve_hardlinks"), Some("true"));
+}
+
 fn assert_transport_start_trace(collector: &LogCollector, operation: &str, peer_id: &str) {
     let entries = collector.peek();
     let start = entries
