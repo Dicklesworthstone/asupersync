@@ -116,7 +116,7 @@ impl NetworkRegime {
             loss_permille: 5,                     // 0.5% loss
             bandwidth_bps: 20_000_000,            // 20 Mbps
             stability_permille: 700,              // Moderately stable
-            relay_cost_multiplier_permille: 5000, // Very expensive
+            relay_cost_multiplier_permille: 6000, // Above the default relay-cost gate
             mobile_unstable: false,
             high_bdp: false,
             asymmetric_uplink_ratio: 1.0,
@@ -219,8 +219,15 @@ impl NetworkRegime {
         // Available peer count
         let available_peer_count = (self.swarm_peer_count as u16).max(1);
 
-        // Relay cost
-        let relay_cost_micros_per_mib = (self.relay_cost_multiplier_permille * 100) / 1000; // Convert permille multiplier to micros/MiB
+        // Relay cost starts at 100ms/MiB for a normal-cost relay and scales
+        // by the regime multiplier.
+        let relay_cost_micros_per_mib =
+            self.relay_cost_multiplier_permille.saturating_mul(100_000) / 1000;
+        let path_mode = if self.name == "relay-expensive" {
+            AtpRepairPathMode::DirectAndRelay
+        } else {
+            AtpRepairPathMode::Direct
+        };
 
         AtpRepairRoiInputs {
             trace_id: format!("repair-sim-{}", self.name),
@@ -236,8 +243,8 @@ impl NetworkRegime {
             resume_value_permille,
             loss_permille,
             available_peer_count,
-            path_mode: AtpRepairPathMode::Direct, // Default to direct path
-            requested_mode: None,                 // Let coordinator decide
+            path_mode,
+            requested_mode: None, // Let coordinator decide
             missing_tail_chunks: if self.name.contains("tail") { 10 } else { 0 },
             rtt_micros: self.rtt_micros,
             path_migration_events: if self.mobile_unstable { 3 } else { 0 },
@@ -394,8 +401,13 @@ impl RepairRoiSimulator {
                         let coordinator = AtpRepairCoordinator::new(*policy);
                         let decision = coordinator.decide(&roi_inputs);
 
-                        let repair_recommended =
-                            !matches!(decision.action, AtpRepairAction::NoRepair);
+                        let repair_recommended = matches!(
+                            decision.action,
+                            AtpRepairAction::ParityTrickle
+                                | AtpRepairAction::BurstRepair
+                                | AtpRepairAction::MultiPeerRepair
+                                | AtpRepairAction::RelayOnlyRepair
+                        );
 
                         let mut result = RepairRoiSimulationResult {
                             regime: regime.clone(),
