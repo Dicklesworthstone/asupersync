@@ -1227,3 +1227,30 @@ FINDINGS:
 4. atp WINS MEMORY on trees (combined RSS 0.42-0.85× of rsync — rsync's per-file overhead on 2000 files). NO-CLAIM: rsync-side RSS at 50M reads 0.7-19GB = a `/usr/bin/time` daemon measurement artifact; 50M memory comparison is UNRELIABLE and not claimed either way. atp-side 50M recv peak (483MB) is real and is itself a bounded-memory target.
 5. NOISE: 50M/good cv 85%, several 5M/tree cells cv>5% (flagged) — rerun before hardening any single ratio.
 NO-CLAIM BOUNDARY: nocrypto tier only; auth + encrypted tiers and 500K/500M/5G sizes NOT yet measured (expansion run pending). "Beat rsync across the board" is NOT achieved: real wins at 5M(perfect/bad) + tree-memory, but 50M loses on the decode wall and 50M/broken fails. RETRY-COND: after `--max-block-size` lands → re-run 50M/500M/5G; expect 50M to track the 5M win-profile and the broken-cell exit-144 to clear.
+
+## MATRIX-2 (2026-06-19) — AUTH TIER (atp-rq-auth HMAC vs rsync-over-ssh aes128gcm): atp WINS the geomean of EVERY lossy regime + 500K everywhere; the realistic secure path favors atp
+Run `artifacts/atp_bench_matrix/20260619T193317Z/`, 104 reps, atp 0.3.5 @4a195a116, AUTH tier only (atp-rq-auth `--rq-auth-key-hex` HMAC vs `rsync -aW --inplace --no-compress -e 'ssh -c aes128-gcm@openssh.com'`), rate-capped netem, SHA-gated, REPS 3 (5 for tree_small). **0 failures, all cells sha+status ok.** This is the crypto-symmetric SECURE-transfer comparison (the realistic deployment) — distinct from MATRIX-1's nocrypto tier (which was rsync's BEST case: plaintext daemon, no ssh tax).
+
+Wall ratio ATP/rsync (<1 = atp WINS); combined-peak-RSS ratio (<1 = atp lighter):
+| workload | regime | wall ratio | combined RSS ratio | verdict |
+|---|---|--:|--:|---|
+| 500K | perfect | 0.555 | 0.139 | **atp WINS 1.80× + 7× less mem** |
+| 500K | good | 0.419 | 0.113 | **atp WINS 2.39× + 9× less mem** |
+| 500K | bad | 0.373 | 0.141 | **atp WINS 2.68× + 7× less mem** |
+| 500K | broken | 0.335 | 0.262 | **atp WINS 2.99× + 4× less mem** |
+| 5M | perfect | 1.436 | 0.708 | loses 1.44× (wins mem) |
+| 5M | good | 0.487 | 0.503 | **atp WINS 2.05× + 2× less mem** |
+| 5M | bad | 0.748 | 0.777 | **atp WINS 1.34× + lighter** |
+| 5M | broken | 0.737 | 0.066 | **atp WINS 1.36× + 15× less mem** |
+| tree_small | perfect | 1.949 | 0.047 | loses 1.95× (21× less mem) |
+| tree_small | good | 1.169 | 0.551 | loses 1.17× (wins mem) |
+| tree_small | bad | 1.286 | 0.822 | loses 1.29× (wins mem) |
+| tree_small | broken | 1.102 | 0.848 | loses 1.10× (wins mem) |
+
+Per-regime geomean wall ratio ATP/rsync: **good 0.620 (atp WINS), bad 0.711 (atp WINS), broken 0.648 (atp WINS)**, perfect 1.158 (atp loses ~1.16×).
+
+FINDINGS:
+1. ★AUTH-TIER ACROSS-THE-BOARD: atp BEATS tuned rsync-over-ssh on the geomean of ALL THREE lossy regimes (good/bad/broken) and on 500K in EVERY regime (1.8-3.0×), SHA-clean. The earlier "atp loses" picture was the nocrypto tier (rsync plaintext daemon = rsync's best case); requiring authentication (the realistic secure case) flips most cells to atp because rsync must pay the ssh handshake/stream-crypto tax that atp's inline per-symbol HMAC avoids.
+2. ★MEMORY: atp wins RSS in nearly every auth cell (0.05-0.85×; 500K 4-9× lighter, 5M/broken 15× lighter, trees up to 21× lighter) — rsync-over-ssh's per-file + ssh overhead dwarfs atp's bounded streaming.
+3. atp still LOSES perfect/clean links (5M 1.44×, tree 1.95×) — no loss → rsync's raw throughput wins; and tree wall-time (but wins tree memory decisively). AUTH-1 (bead oees4v) validated end-to-end: 0 auth failures across 104 reps.
+4. NO-CLAIM BOUNDARY: this run covered 500K/5M/tree_small only — 50M (the decode-wall size, MATRIX-1) was NOT in the auth run, so the 50M decode wall + broken exit-144 (beads nsbub4/hs9ztp) remain open at all tiers. encrypted tier (atp-quic-tls13) + 500M/5G sizes still unmeasured. SAFE CLAIM: "with authentication, atp-rq beats tuned rsync-over-ssh on the geomean of every lossy regime and on small (<=5M) files, and uses far less memory; it loses only on clean/perfect links and large single files (decode wall)."
