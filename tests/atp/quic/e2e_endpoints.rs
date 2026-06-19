@@ -278,24 +278,29 @@ impl QuicE2EEndpoint {
         data: &[u8],
         from: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = self.state.lock().unwrap();
-
-        state.packets_received += 1;
-        state.bytes_received += data.len() as u64;
-        state.last_activity = Instant::now();
-
-        self.log_event("transport", "packet_received", hashmap! {
-            "from".to_string() => serde_json::Value::String(from.to_string()),
-            "size".to_string() => serde_json::Value::Number(data.len().into()),
-            "packet_number".to_string() => serde_json::Value::Number(state.packets_received.into()),
-        });
-
-        // Parse packet (simplified)
-        if data.len() >= 8 {
-            let packet_number = u64::from_be_bytes([
+        let packet_number = if data.len() >= 8 {
+            Some(u64::from_be_bytes([
                 data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-            ]);
+            ]))
+        } else {
+            None
+        };
 
+        {
+            let mut state = self.state.lock().unwrap();
+
+            state.packets_received += 1;
+            state.bytes_received += data.len() as u64;
+            state.last_activity = Instant::now();
+
+            self.log_event("transport", "packet_received", hashmap! {
+                "from".to_string() => serde_json::Value::String(from.to_string()),
+                "size".to_string() => serde_json::Value::Number(data.len().into()),
+                "packet_number".to_string() => serde_json::Value::Number(state.packets_received.into()),
+            });
+        }
+
+        if let Some(packet_number) = packet_number {
             self.process_ack(packet_number)?;
         }
 

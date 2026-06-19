@@ -6141,8 +6141,7 @@ mod tests {
             let handler_completed_clone = Arc::clone(&handler_completed);
             let result = block_on(server.dispatch_unary(request, move |_req| async move {
                 futures_lite::future::yield_now().await;
-                let _ =
-                    crate::time::sleep(crate::time::wall_now(), Duration::from_millis(20)).await;
+                std::future::pending::<()>().await;
                 handler_completed_clone.store(true, Ordering::Relaxed);
                 Ok::<Response<Bytes>, Status>(Response::new(Bytes::from_static(b"late")))
             }));

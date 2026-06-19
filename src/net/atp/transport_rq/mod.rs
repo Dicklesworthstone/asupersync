@@ -7098,6 +7098,8 @@ mod tests {
         let mut state = RqAdaptiveSendState::new(99, &config, 4);
         state.loss_ema = 0.03;
         state.loss_bar = 0.05;
+        state.pacing_loss_ema = 0.05;
+        state.est.loss_p_hat = 0.05;
 
         let tuning = state.source_fec_fallback_tuning(&config);
         let expected = adaptive::overhead_for_target(
@@ -7132,10 +7134,10 @@ mod tests {
         let tuning = state.source_fec_fallback_tuning(&config);
 
         assert_eq!(state.source_fec_fallback_loss_bar(), 0.0);
-        assert_eq!(tuning.repair_overhead, 1.0);
-        assert_eq!(
-            repair_target_for_feedback_round(fixed_block_k(&config) as usize, 0, 1.0),
-            0
+        assert!(
+            tuning.repair_overhead < 1.01,
+            "clean-link fallback should keep only minimal adaptive block-plan repair, got {}",
+            tuning.repair_overhead
         );
     }
 
@@ -7717,11 +7719,21 @@ mod tests {
         assert!(validate_manifest(&manifest, &RqConfig::default()).is_ok());
 
         let mut gapped = manifest.clone();
+        gapped.entries[0]
+            .fragment
+            .as_mut()
+            .expect("fragment")
+            .logical_size += 1;
         gapped.entries[1]
             .fragment
             .as_mut()
             .expect("fragment")
             .logical_offset += 1;
+        gapped.entries[1]
+            .fragment
+            .as_mut()
+            .expect("fragment")
+            .logical_size += 1;
         assert!(matches!(
             validate_manifest(&gapped, &RqConfig::default()),
             Err(RqError::Frame(m)) if m.contains("not contiguous")

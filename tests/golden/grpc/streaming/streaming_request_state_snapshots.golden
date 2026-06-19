@@ -1,11 +1,11 @@
 === Empty Stream ===
-StreamingRequest { items: [], closed: false, graceful_terminal: false, terminal_status: None, waiter: None }
+StreamingRequest { items: [], closed: false, graceful_terminal: false, terminal_status: None, waiter: None, capacity_waiter: None, call_cancellation: None }
 
 === Populated Stream (2 items) ===
-StreamingRequest { items: [Ok("item1"), Ok("item2")], closed: false, graceful_terminal: false, terminal_status: None, waiter: None }
+StreamingRequest { items: [Ok("item1"), Ok("item2")], closed: false, graceful_terminal: false, terminal_status: None, waiter: None, capacity_waiter: None, call_cancellation: None }
 
 === Mixed Stream ===
-StreamingRequest { items: [Ok(42), Ok(84)], closed: false, graceful_terminal: false, terminal_status: None, waiter: None }
+StreamingRequest { items: [Ok(42), Ok(84)], closed: false, graceful_terminal: false, terminal_status: None, waiter: None, capacity_waiter: None, call_cancellation: None }
 
 === Closed Stream ===
-StreamingRequest { items: [Ok(true)], closed: true, graceful_terminal: true, terminal_status: None, waiter: None }
+StreamingRequest { items: [Ok(true)], closed: true, graceful_terminal: true, terminal_status: None, waiter: None, capacity_waiter: None, call_cancellation: None }

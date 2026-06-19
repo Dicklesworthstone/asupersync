@@ -226,7 +226,7 @@ mod tests {
                 content_verified: true,
                 manifest_verified: true,
                 proof_location: None, // No proof bundle
-                verified_at: Some(now),
+                verified_at: Some(now - Duration::from_secs(10 * 60)),
             },
         };
 

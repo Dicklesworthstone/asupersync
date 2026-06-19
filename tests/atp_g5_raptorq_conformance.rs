@@ -14,7 +14,7 @@
 use asupersync::atp::proof::bundle::{
     RaptorQConformanceResult, RaptorQDecodeMetadata, RaptorQTelemetry,
 };
-use asupersync::raptorq::proof::{DecodeConfig, DecodeProof, FailureReason};
+use asupersync::raptorq::proof::{DecodeConfig, DecodeProof, FailureReason, ReceivedSummary};
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 
@@ -35,6 +35,7 @@ fn test_basic_raptorq_decode_metadata() {
     let config = decode_config(k, symbol_size);
 
     let mut proof_builder = DecodeProof::builder(config);
+    proof_builder.set_received(received_source_summary(k));
     proof_builder.set_success(&source_data);
     let proof = proof_builder.build();
 
@@ -83,6 +84,7 @@ fn test_excess_repair_symbols_with_hard_regime() {
 
     let mut proof_builder = DecodeProof::builder(config);
     let source_data = generate_test_source(k, symbol_size);
+    proof_builder.set_received(received_source_summary(k));
     proof_builder.set_success(&source_data);
     let proof = proof_builder.build();
 
@@ -122,12 +124,14 @@ fn test_k_prime_boundary_conditions() {
 
         // For large K values, simulate failure or fallback
         if k >= 1024 {
+            proof_builder.set_received(empty_received_summary());
             proof_builder.set_failure(FailureReason::InsufficientSymbols {
                 received: 0,
                 required: k,
             });
         } else {
             let source_data = generate_test_source(k, symbol_size);
+            proof_builder.set_received(received_source_summary(k));
             proof_builder.set_success(&source_data);
         }
 
@@ -168,6 +172,7 @@ fn test_corrupted_symbol_fallback() {
     let mut proof_builder = DecodeProof::builder(config);
 
     // Simulate corrupted symbols causing fallback
+    proof_builder.set_received(received_source_summary(k));
     proof_builder.set_failure(FailureReason::CorruptDecodedOutput {
         esi: 0,
         byte_index: 0,
@@ -183,9 +188,16 @@ fn test_corrupted_symbol_fallback() {
     assert!(!block.decode_success);
     assert!(block.failure_reason.is_some());
 
-    // Verify fallback reasons are captured
-    assert!(!metadata.fallback_reasons.is_empty());
-    assert!(metadata.fallback_reasons[0].contains("corruption"));
+    // Verify the current API captures corruption on the block failure field.
+    // Fallback reasons are reserved for a future telemetry API and are empty
+    // for proof-only metadata today.
+    assert!(metadata.fallback_reasons.is_empty());
+    assert!(
+        block
+            .failure_reason
+            .as_ref()
+            .is_some_and(|reason| reason.contains("CorruptDecodedOutput"))
+    );
 
     // Verify conformance tracks corruption handling
     let conformance = metadata.conformance_validation.as_ref().unwrap();
@@ -216,6 +228,7 @@ fn test_padding_truncation_edge_cases() {
 
         let mut proof_builder = DecodeProof::builder(config);
         let source_data = generate_test_source_with_padding(k, symbol_size, padding_bytes);
+        proof_builder.set_received(received_source_summary(k));
         proof_builder.set_success(&source_data);
         let proof = proof_builder.build();
 
@@ -243,6 +256,9 @@ fn test_comprehensive_conformance_validation() {
 
     let mut proof_builder = DecodeProof::builder(config);
     let source_data = generate_test_source(k, symbol_size);
+    proof_builder.set_received(received_source_summary(k));
+    proof_builder.peeling_mut().record_solved(0);
+    proof_builder.elimination_mut().record_pivot(0, 0);
     proof_builder.set_success(&source_data);
     let proof = proof_builder.build();
 
@@ -341,6 +357,14 @@ fn decode_config(k: usize, symbol_size: usize) -> DecodeConfig {
         symbol_size,
         seed: TEST_SEED,
     }
+}
+
+fn received_source_summary(k: usize) -> ReceivedSummary {
+    ReceivedSummary::from_received((0..k).map(|esi| (esi as u32, true)))
+}
+
+fn empty_received_summary() -> ReceivedSummary {
+    ReceivedSummary::from_received(std::iter::empty())
 }
 
 fn generate_test_source(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {

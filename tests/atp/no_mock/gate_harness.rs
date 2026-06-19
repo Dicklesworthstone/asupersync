@@ -227,12 +227,14 @@ fn repository_policy_covers_current_atp_debt_without_hiding_new_hits() {
     );
     let report = parse_stdout(&output);
     assert_eq!(report["summary"]["status"].as_str(), Some("pass"));
-    assert!(
-        report["covered"]
-            .as_array()
-            .expect("covered rows")
-            .iter()
-            .any(|row| row["category"].as_str() == Some("known_production_debt")),
-        "repository policy should keep known ATP debt visible"
-    );
+    assert_eq!(report["summary"]["violation_hits"].as_u64(), Some(0));
+    for row in report["covered"].as_array().expect("covered rows") {
+        if row["surface"].as_str() == Some("production_atp") {
+            assert_eq!(
+                row["category"].as_str(),
+                Some("known_production_debt"),
+                "production ATP scanner hits must remain visible as scoped debt"
+            );
+        }
+    }
 }

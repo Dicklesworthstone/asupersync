@@ -1,11 +1,11 @@
 === Empty Response Stream ===
-ResponseStream { items: [], closed: false, graceful_terminal: false, terminal_status: None, waiter: None }
+ResponseStream { items: [], closed: false, graceful_terminal: false, terminal_status: None, waiter: None, call_cancellation: None }
 
 === Success Response Stream ===
-ResponseStream { items: [Ok("response1"), Ok("response2")], closed: false, graceful_terminal: false, terminal_status: None, waiter: None }
+ResponseStream { items: [Ok("response1"), Ok("response2")], closed: false, graceful_terminal: false, terminal_status: None, waiter: None, call_cancellation: None }
 
 === Error Response Stream ===
-ResponseStream { items: [Ok(100), Err(Status { code: InvalidArgument, message: "bad input", details: None })], closed: false, graceful_terminal: false, terminal_status: None, waiter: None }
+ResponseStream { items: [Ok(100), Err(Status { code: InvalidArgument, message: "bad input", details: None })], closed: false, graceful_terminal: false, terminal_status: None, waiter: None, call_cancellation: None }
 
 === Closed Response Stream ===
-ResponseStream { items: [Ok('A')], closed: true, graceful_terminal: true, terminal_status: None, waiter: None }
+ResponseStream { items: [Ok('A')], closed: true, graceful_terminal: true, terminal_status: None, waiter: None, call_cancellation: None }

@@ -17,7 +17,7 @@ fn test_cdc_small_edits_boundary_preservation() {
     let mut engine = CdcEngine::new();
 
     // Original content with clear structure
-    let original = b"line1\nline2\nline3\nline4\nline5\n".repeat(100);
+    let original = b"line1\nline2\nline3\nline4\nline5\n".repeat(200);
 
     // Small edit: change one line
     let mut modified = original.clone();

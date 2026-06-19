@@ -1,5 +1,5 @@
 === Server Streaming ===
-ServerStreaming { inner: ResponseStream { items: [], closed: false, graceful_terminal: false, terminal_status: None, waiter: None }, _marker: PhantomData<alloc::string::String> }
+ServerStreaming { inner: ResponseStream { items: [], closed: false, graceful_terminal: false, terminal_status: None, waiter: None, call_cancellation: None }, _marker: PhantomData<alloc::string::String> }
 
 === Client Streaming ===
 ClientStreaming { _marker: PhantomData<u32> }

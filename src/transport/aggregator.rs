@@ -3698,7 +3698,7 @@ mod tests {
             enable_reordering: true,
             reorder: ReordererConfig {
                 immediate_delivery: false,
-                max_sequence_gap: 1,
+                max_sequence_gap: 0,
                 ..Default::default()
             },
             ..Default::default()
@@ -4469,7 +4469,7 @@ mod tests {
         let config = AggregatorConfig {
             reorder: ReordererConfig {
                 immediate_delivery: false,
-                max_sequence_gap: 1,
+                max_sequence_gap: 0,
                 ..Default::default()
             },
             ..Default::default()
@@ -4571,6 +4571,7 @@ mod tests {
                 max_wait_time: Time::from_millis(5),
                 ..Default::default()
             },
+            flush_interval: Time::ZERO,
             ..Default::default()
         };
         let aggregator = MultipathAggregator::new(config);
