@@ -267,7 +267,12 @@ resync_rsync() {
     sample_peak_rss "rsync " "$s_stop" "$s_out" & local samp=$!
     local before after start finish status
     before="$(ns_wire_bytes)"; start="$(now_s)"
-    ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v rsync -aW --inplace --no-compress \
+    # MEASURED re-sync: rsync MUST use its delta algorithm for a fair/tough baseline.
+    # (-W=--whole-file would disable delta and send the whole file -> false atp "win".)
+    # --no-whole-file enables the rolling+strong-checksum delta; --checksum forces
+    # content-based change detection (robust vs in-place same-size edits). Matches the
+    # canonical loopback baseline (ledger E-RESYNC-3/4). BUG-A fix (SapphireHill).
+    ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v rsync -a --no-whole-file --checksum --inplace --no-compress \
         "$src" "rsync://${HOST_IP}:1873/bench/" >"$sl" 2>"$st"
     status=$?
     finish="$(now_s)"; after="$(ns_wire_bytes)"
