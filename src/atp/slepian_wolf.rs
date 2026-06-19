@@ -10,6 +10,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::atp::delta::{
     CasChunkRef, ContentAddressedChunkStore, DeltaResyncPlan, PersistentChunkManifest,
 };
@@ -200,6 +202,10 @@ pub struct RatelessSyndrome {
     pub shape: LdpcShape,
     /// Seed used to derive rows.
     pub seed: u64,
+    /// Minimum non-bootstrap row degree used to derive sparse taps.
+    pub min_degree: usize,
+    /// Maximum non-bootstrap row degree used to derive sparse taps.
+    pub max_degree: usize,
     /// Emitted syndrome rows.
     pub symbols: Vec<SyndromeSymbol>,
 }
@@ -222,6 +228,179 @@ impl RatelessSyndrome {
             .iter()
             .filter(|symbol| !symbol.value.is_zero())
             .count()
+    }
+
+    /// Syndrome-value bytes emitted versus the zero-error side-information
+    /// floor implied by this `[n, k, d]` shape.
+    #[must_use]
+    pub fn floor_gap_report(&self) -> SyndromeFloorGapReport {
+        SyndromeFloorGapReport::new(self.shape.n, self.shape.k, self.encoded_value_bytes())
+    }
+
+    /// Convert this syndrome to a compact sidecar-free wire frame.
+    ///
+    /// Taps are intentionally omitted: the receiver reconstructs them from
+    /// `(shape, seed, degree window, row id)`, so only syndrome values cross
+    /// the wire.
+    pub fn to_compact_wire_frame(&self) -> Result<CompactRatelessSyndromeFrame, SlepianWolfError> {
+        let first_symbol_id = self.symbols.first().map_or(0, |symbol| symbol.id);
+        let mut values = Vec::with_capacity(self.symbols.len());
+        for (offset, symbol) in self.symbols.iter().enumerate() {
+            let offset =
+                u64::try_from(offset).map_err(|_| SlepianWolfError::SyndromePayloadSizeOverflow)?;
+            let expected = first_symbol_id.checked_add(offset).ok_or(
+                SlepianWolfError::SyndromeSymbolIdOverflow {
+                    first_symbol_id,
+                    offset,
+                },
+            )?;
+            if symbol.id != expected {
+                return Err(SlepianWolfError::NonContiguousSyndromeRows {
+                    expected,
+                    actual: symbol.id,
+                });
+            }
+            values.push(symbol.value.raw());
+        }
+
+        Ok(CompactRatelessSyndromeFrame {
+            schema: ATP_SLEPIAN_WOLF_SYNDROME_SCHEMA.to_string(),
+            n: u64::try_from(self.shape.n)
+                .map_err(|_| SlepianWolfError::SyndromePayloadSizeOverflow)?,
+            k: u64::try_from(self.shape.k)
+                .map_err(|_| SlepianWolfError::SyndromePayloadSizeOverflow)?,
+            d: u64::try_from(self.shape.d)
+                .map_err(|_| SlepianWolfError::SyndromePayloadSizeOverflow)?,
+            seed: self.seed,
+            min_degree: u64::try_from(self.min_degree)
+                .map_err(|_| SlepianWolfError::SyndromePayloadSizeOverflow)?,
+            max_degree: u64::try_from(self.max_degree)
+                .map_err(|_| SlepianWolfError::SyndromePayloadSizeOverflow)?,
+            first_symbol_id,
+            values,
+        })
+    }
+}
+
+/// Compact serde-ready syndrome frame.
+///
+/// This is the B-8.11 non-interactive wire shape: no receiver signature
+/// sidecar and no serialized sparse matrix, just deterministic row metadata
+/// plus raw syndrome values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactRatelessSyndromeFrame {
+    /// Stable schema marker.
+    pub schema: String,
+    /// Number of source symbols.
+    pub n: u64,
+    /// Information symbols.
+    pub k: u64,
+    /// Minimum-distance design hint.
+    pub d: u64,
+    /// Seed used to derive rows.
+    pub seed: u64,
+    /// Minimum non-bootstrap row degree.
+    pub min_degree: u64,
+    /// Maximum non-bootstrap row degree.
+    pub max_degree: u64,
+    /// First row id represented by `values`.
+    pub first_symbol_id: u64,
+    /// Raw GF(256) syndrome values.
+    pub values: Vec<u8>,
+}
+
+impl CompactRatelessSyndromeFrame {
+    /// Rehydrate this compact frame into the in-memory syndrome representation.
+    pub fn into_rateless_syndrome(self) -> Result<RatelessSyndrome, SlepianWolfError> {
+        if self.schema != ATP_SLEPIAN_WOLF_SYNDROME_SCHEMA {
+            return Err(SlepianWolfError::UnsupportedWireSchema {
+                schema: self.schema,
+            });
+        }
+
+        let shape = LdpcShape::new(
+            usize_from_wire("n", self.n)?,
+            usize_from_wire("k", self.k)?,
+            usize_from_wire("d", self.d)?,
+        )?;
+        let config = RatelessLdpcConfig::new(
+            shape,
+            self.seed,
+            usize_from_wire("min_degree", self.min_degree)?,
+            usize_from_wire("max_degree", self.max_degree)?,
+        )?;
+
+        let mut symbols = Vec::with_capacity(self.values.len());
+        for (offset, value) in self.values.into_iter().enumerate() {
+            let offset =
+                u64::try_from(offset).map_err(|_| SlepianWolfError::SyndromePayloadSizeOverflow)?;
+            let id = self.first_symbol_id.checked_add(offset).ok_or(
+                SlepianWolfError::SyndromeSymbolIdOverflow {
+                    first_symbol_id: self.first_symbol_id,
+                    offset,
+                },
+            )?;
+            let taps = derive_ldpc_taps(config, id);
+            symbols.push(SyndromeSymbol {
+                id,
+                taps,
+                value: Gf256::new(value),
+            });
+        }
+
+        Ok(RatelessSyndrome {
+            schema: ATP_SLEPIAN_WOLF_SYNDROME_SCHEMA,
+            shape,
+            seed: self.seed,
+            min_degree: config.min_degree,
+            max_degree: config.max_degree,
+            symbols,
+        })
+    }
+}
+
+/// Byte-symbol floor/gap accounting for a Slepian-Wolf syndrome frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyndromeFloorGapReport {
+    /// Source byte-symbols represented by the coded region.
+    pub source_symbols: usize,
+    /// Byte-symbols assumed known from receiver side information.
+    pub side_info_symbols: usize,
+    /// Zero-error byte-symbol floor, `source_symbols - side_info_symbols`.
+    pub floor_bytes: usize,
+    /// Syndrome value bytes actually emitted.
+    pub syndrome_value_bytes: usize,
+    /// Bytes above the floor. Saturates at zero when a frame is below the floor
+    /// due to an intentionally partial rateless window.
+    pub gap_bytes: usize,
+    /// `gap_bytes / floor_bytes` in per-mille units; `None` for a zero floor.
+    pub gap_over_floor_per_mille: Option<u64>,
+}
+
+impl SyndromeFloorGapReport {
+    /// Build deterministic syndrome accounting from source/side-info counts.
+    #[must_use]
+    pub fn new(
+        source_symbols: usize,
+        side_info_symbols: usize,
+        syndrome_value_bytes: usize,
+    ) -> Self {
+        let side_info_symbols = side_info_symbols.min(source_symbols);
+        let floor_bytes = source_symbols - side_info_symbols;
+        let gap_bytes = syndrome_value_bytes.saturating_sub(floor_bytes);
+        let gap_over_floor_per_mille = if floor_bytes == 0 {
+            None
+        } else {
+            Some(saturating_per_mille(gap_bytes, floor_bytes))
+        };
+        Self {
+            source_symbols,
+            side_info_symbols,
+            floor_bytes,
+            syndrome_value_bytes,
+            gap_bytes,
+            gap_over_floor_per_mille,
+        }
     }
 }
 
@@ -275,6 +454,16 @@ impl MissingChunkSyndrome {
     pub fn encoded_value_bytes(&self) -> usize {
         self.frame.encoded_value_bytes()
     }
+
+    /// Syndrome-value bytes emitted versus this chunk's side-information floor.
+    #[must_use]
+    pub fn floor_gap_report(&self) -> SyndromeFloorGapReport {
+        SyndromeFloorGapReport::new(
+            self.source_symbols,
+            self.side_info_symbols,
+            self.encoded_value_bytes(),
+        )
+    }
 }
 
 /// Sender-side Slepian-Wolf package that does not require receiver signatures.
@@ -297,6 +486,26 @@ impl SidecarFreeSyndromePlan {
     #[must_use]
     pub const fn is_sidecar_free(&self) -> bool {
         self.receiver_sidecar_bytes == 0
+    }
+
+    /// Aggregate syndrome-value bytes emitted versus the package floor.
+    #[must_use]
+    pub fn floor_gap_report(&self) -> SyndromeFloorGapReport {
+        let source_symbols = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.source_symbols)
+            .sum::<usize>();
+        let side_info_symbols = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.side_info_symbols)
+            .sum::<usize>();
+        SyndromeFloorGapReport::new(
+            source_symbols,
+            side_info_symbols,
+            u64_to_saturating_usize(self.payload_bytes),
+        )
     }
 }
 
@@ -340,6 +549,14 @@ pub enum SlepianWolfError {
     },
     /// Syndrome payload accounting overflowed.
     SyndromePayloadSizeOverflow,
+    /// Wire frame used an unsupported schema marker.
+    UnsupportedWireSchema { schema: String },
+    /// Wire shape value cannot be represented on this target.
+    WireShapeValueOutOfRange { field: &'static str, value: u64 },
+    /// Compact wire frames require contiguous row ids.
+    NonContiguousSyndromeRows { expected: u64, actual: u64 },
+    /// Row id arithmetic overflowed while decoding a compact frame.
+    SyndromeSymbolIdOverflow { first_symbol_id: u64, offset: u64 },
 }
 
 impl fmt::Display for SlepianWolfError {
@@ -398,6 +615,24 @@ impl fmt::Display for SlepianWolfError {
             Self::SyndromePayloadSizeOverflow => {
                 f.write_str("Slepian-Wolf syndrome payload size overflowed")
             }
+            Self::UnsupportedWireSchema { schema } => {
+                write!(f, "unsupported Slepian-Wolf syndrome schema: {schema}")
+            }
+            Self::WireShapeValueOutOfRange { field, value } => write!(
+                f,
+                "Slepian-Wolf wire shape field {field}={value} is out of range"
+            ),
+            Self::NonContiguousSyndromeRows { expected, actual } => write!(
+                f,
+                "compact syndrome rows must be contiguous: expected row {expected}, got {actual}"
+            ),
+            Self::SyndromeSymbolIdOverflow {
+                first_symbol_id,
+                offset,
+            } => write!(
+                f,
+                "syndrome row id overflow from first row {first_symbol_id} and offset {offset}"
+            ),
         }
     }
 }
@@ -523,6 +758,8 @@ pub fn encode_rateless_syndrome(
         schema: ATP_SLEPIAN_WOLF_SYNDROME_SCHEMA,
         shape: config.shape,
         seed: config.seed,
+        min_degree: config.min_degree,
+        max_degree: config.max_degree,
         symbols,
     })
 }
@@ -711,6 +948,10 @@ fn checked_chunk_payload<'a>(
         });
     }
     Ok(payload)
+}
+
+fn usize_from_wire(field: &'static str, value: u64) -> Result<usize, SlepianWolfError> {
+    usize::try_from(value).map_err(|_| SlepianWolfError::WireShapeValueOutOfRange { field, value })
 }
 
 fn derive_ldpc_taps(config: RatelessLdpcConfig, symbol_id: u64) -> Vec<LdpcTap> {
@@ -921,6 +1162,20 @@ fn syndrome_weight(symbols: &[SyndromeSymbol]) -> usize {
         .count()
 }
 
+fn saturating_per_mille(numerator: usize, denominator: usize) -> u64 {
+    if denominator == 0 {
+        return u64::MAX;
+    }
+    let value = (numerator as u128)
+        .saturating_mul(1000)
+        .saturating_div(denominator as u128);
+    value.min(u128::from(u64::MAX)) as u64
+}
+
+fn u64_to_saturating_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
 fn nonzero_coefficient(word: u64) -> Gf256 {
     let byte = (word as u8).wrapping_add(1);
     if byte == 0 {
@@ -1040,6 +1295,17 @@ mod tests {
         let frame = encode_rateless_syndrome(&region.new_bytes, config, shape.n).expect("syndrome");
         assert_eq!(frame.schema, ATP_SLEPIAN_WOLF_SYNDROME_SCHEMA);
         assert!(frame.syndrome_weight() > 0);
+        assert_eq!(
+            frame.floor_gap_report(),
+            SyndromeFloorGapReport {
+                source_symbols: 6,
+                side_info_symbols: 2,
+                floor_bytes: 4,
+                syndrome_value_bytes: 6,
+                gap_bytes: 2,
+                gap_over_floor_per_mille: Some(500),
+            }
+        );
 
         let decoded = decode_with_side_information(&frame, &region.old_bytes, &uncertain, 1)
             .expect("bp decode");
@@ -1118,11 +1384,23 @@ mod tests {
         assert_eq!(syndrome_plan.payload_bytes, append.len() as u64);
         assert_eq!(syndrome_plan.whole_chunk_bytes, append.len() as u64);
         assert!(syndrome_plan.payload_bytes < 96 * 1024);
+        assert_eq!(
+            syndrome_plan.floor_gap_report(),
+            SyndromeFloorGapReport {
+                source_symbols: append.len(),
+                side_info_symbols: 0,
+                floor_bytes: append.len(),
+                syndrome_value_bytes: append.len(),
+                gap_bytes: 0,
+                gap_over_floor_per_mille: Some(0),
+            }
+        );
 
         let chunk = &syndrome_plan.chunks[0];
         assert_eq!(chunk.side_info_symbols, 0);
         assert_eq!(chunk.initial_symbols, append.len());
         assert_eq!(chunk.encoded_value_bytes(), append.len());
+        assert_eq!(chunk.floor_gap_report(), syndrome_plan.floor_gap_report());
         let decoded = decode_missing_chunk_syndrome(&chunk.frame, chunk.initial_symbols)
             .expect("missing chunk decode");
         assert_eq!(decoded.bytes, append);
@@ -1183,6 +1461,60 @@ mod tests {
                 source_symbols: 4,
                 used_symbols: 2,
             }
+        );
+    }
+
+    #[test]
+    fn compact_syndrome_wire_frame_round_trips_without_serialized_taps() {
+        let old = b"same-prefix-012345".to_vec();
+        let mut new = old.clone();
+        new[3] = b'X';
+        new[14] = b'Y';
+
+        let changed_symbols = old
+            .iter()
+            .zip(new.iter())
+            .filter(|(old, new)| old != new)
+            .count();
+        let shape = LdpcShape::new(new.len(), new.len() - changed_symbols, 3).expect("shape");
+        let config = RatelessLdpcConfig::foundation(shape, 0xfeed_51de).expect("config");
+        let frame = encode_rateless_syndrome(&new, config, shape.n).expect("syndrome");
+
+        let wire = frame.to_compact_wire_frame().expect("compact wire frame");
+        assert_eq!(wire.values.len(), frame.symbols.len());
+        let wire_json = serde_json::to_string(&wire).expect("serialize compact frame");
+        assert!(!wire_json.contains("taps"));
+
+        let decoded_wire: CompactRatelessSyndromeFrame =
+            serde_json::from_str(&wire_json).expect("deserialize compact frame");
+        let restored = decoded_wire
+            .into_rateless_syndrome()
+            .expect("restore syndrome");
+        assert_eq!(restored.shape, frame.shape);
+        assert_eq!(restored.seed, frame.seed);
+        assert_eq!(restored.min_degree, frame.min_degree);
+        assert_eq!(restored.max_degree, frame.max_degree);
+        assert_eq!(restored.symbols, frame.symbols);
+
+        let decoded =
+            decode_with_old_file_side_information(&restored, &old, shape.design_syndrome_symbols())
+                .expect("compact syndrome decodes");
+        assert_eq!(decoded.bytes, new);
+    }
+
+    #[test]
+    fn compact_syndrome_wire_frame_rejects_non_contiguous_rows() {
+        let shape = LdpcShape::new(4, 0, 1).expect("shape");
+        let config = RatelessLdpcConfig::foundation(shape, 0x51de).expect("config");
+        let mut frame = encode_rateless_syndrome(b"abcd", config, 4).expect("syndrome");
+        frame.symbols[1].id = 3;
+
+        assert_eq!(
+            frame.to_compact_wire_frame(),
+            Err(SlepianWolfError::NonContiguousSyndromeRows {
+                expected: 1,
+                actual: 3,
+            })
         );
     }
 
