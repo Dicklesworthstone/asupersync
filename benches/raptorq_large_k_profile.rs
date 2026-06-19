@@ -97,6 +97,9 @@ const E4_LOSS_FRACTION: f64 = 0.02;
 const E4_MIN_EXTRA_REPAIR: usize = 32;
 const E4_MAX_REPAIR_SYMBOLS: usize = 512;
 const E4_DECODE_K_VALUES: [usize; 4] = [256, 1024, 4096, 8192];
+const E4_TREE_ALPHA: f64 = 1.35;
+const E4_TREE_MAX_DEPTH: usize = 6;
+const E4_DECODE_VS_K_RESULT_SCHEMA: &str = "e4_decode_vs_k_result_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DecodeVsKResult {
@@ -104,11 +107,16 @@ struct DecodeVsKResult {
     symbol_size: usize,
     total_bytes: usize,
     source_symbols: usize,
+    required_symbols: usize,
     received_source_symbols: usize,
     missing_source_symbols: usize,
     repair_symbols: usize,
     total_received_symbols: usize,
     overhead_basis_points: u64,
+    loss_basis_points: u64,
+    repair_bytes: usize,
+    decoder_input_bytes: usize,
+    rank_slack_symbols: usize,
 }
 
 impl DecodeVsKResult {
@@ -118,6 +126,7 @@ impl DecodeVsKResult {
         total_bytes: usize,
         received_source_symbols: usize,
         repair_symbols: usize,
+        required_symbols: usize,
     ) -> Self {
         let missing_source_symbols = k.saturating_sub(received_source_symbols);
         let total_received_symbols = received_source_symbols.saturating_add(repair_symbols);
@@ -127,31 +136,120 @@ impl DecodeVsKResult {
         } else {
             u64::try_from(overhead_symbols.saturating_mul(10_000) / k).unwrap_or(u64::MAX)
         };
+        let loss_basis_points = if k == 0 {
+            0
+        } else {
+            u64::try_from(missing_source_symbols.saturating_mul(10_000) / k).unwrap_or(u64::MAX)
+        };
 
         Self {
             k,
             symbol_size,
             total_bytes,
             source_symbols: k,
+            required_symbols,
             received_source_symbols,
             missing_source_symbols,
             repair_symbols,
             total_received_symbols,
             overhead_basis_points,
+            loss_basis_points,
+            repair_bytes: repair_symbols.saturating_mul(symbol_size),
+            decoder_input_bytes: total_received_symbols.saturating_mul(symbol_size),
+            rank_slack_symbols: total_received_symbols.saturating_sub(required_symbols),
         }
     }
 
     fn benchmark_id(self) -> String {
         format!(
-            "k{}_sym{}_total{}_missing{}_repair{}_overhead{}bp",
+            "{}_k{}_sym{}_total{}_required{}_source{}_missing{}_loss{}bp_repair{}_received{}_repairbytes{}_inputbytes{}_slack{}_overhead{}bp",
+            E4_DECODE_VS_K_RESULT_SCHEMA,
             self.k,
             self.symbol_size,
             self.total_bytes,
+            self.required_symbols,
+            self.received_source_symbols,
             self.missing_source_symbols,
+            self.loss_basis_points,
             self.repair_symbols,
+            self.total_received_symbols,
+            self.repair_bytes,
+            self.decoder_input_bytes,
+            self.rank_slack_symbols,
             self.overhead_basis_points
         )
     }
+
+    fn artifact_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": E4_DECODE_VS_K_RESULT_SCHEMA,
+            "benchmark_id": self.benchmark_id(),
+            "k": self.k,
+            "symbol_size": self.symbol_size,
+            "total_bytes": self.total_bytes,
+            "source_symbols": self.source_symbols,
+            "required_symbols": self.required_symbols,
+            "received_source_symbols": self.received_source_symbols,
+            "missing_source_symbols": self.missing_source_symbols,
+            "repair_symbols": self.repair_symbols,
+            "total_received_symbols": self.total_received_symbols,
+            "overhead_basis_points": self.overhead_basis_points,
+            "loss_basis_points": self.loss_basis_points,
+            "repair_bytes": self.repair_bytes,
+            "decoder_input_bytes": self.decoder_input_bytes,
+            "rank_slack_symbols": self.rank_slack_symbols,
+        })
+    }
+
+    fn artifact_json_line(self) -> String {
+        serde_json::to_string(&self.artifact_json())
+            .expect("E-4 decode-vs-K result envelope must serialize")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PowerLawTreeEntry {
+    index: usize,
+    depth: usize,
+    size_bytes: usize,
+}
+
+fn next_lcg(state: &mut u64) -> u64 {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+    *state
+}
+
+fn next_unit_interval(state: &mut u64) -> f64 {
+    let value = next_lcg(state) >> 11;
+    (value as f64 + 1.0) / ((1u64 << 53) as f64 + 1.0)
+}
+
+fn generate_power_law_tree_entries(
+    file_count: usize,
+    min_size: usize,
+    max_size: usize,
+    seed: u64,
+) -> Vec<PowerLawTreeEntry> {
+    assert!(min_size > 0, "power-law tree min_size must be nonzero");
+    assert!(
+        min_size <= max_size,
+        "power-law tree min_size must not exceed max_size"
+    );
+
+    let mut state = seed;
+    (0..file_count)
+        .map(|index| {
+            let unit = next_unit_interval(&mut state);
+            let pareto_size = (min_size as f64) / unit.powf(1.0 / E4_TREE_ALPHA);
+            let size_bytes = pareto_size.clamp(min_size as f64, max_size as f64) as usize;
+            let depth = 1 + (next_lcg(&mut state) as usize % E4_TREE_MAX_DEPTH);
+            PowerLawTreeEntry {
+                index,
+                depth,
+                size_bytes,
+            }
+        })
+        .collect()
 }
 
 fn generate_test_data(size: usize, seed: u64) -> Vec<u8> {
@@ -274,6 +372,7 @@ fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
         E4_FIXED_TOTAL_BYTES,
         received_source_symbols,
         repair_symbols,
+        required_symbols,
     );
     assert_eq!(
         result.total_received_symbols,
@@ -298,18 +397,61 @@ mod e4_decode_vs_k_tests {
 
     #[test]
     fn decode_vs_k_result_reports_missing_repair_and_overhead() {
-        let result = DecodeVsKResult::new(1024, 4096, E4_FIXED_TOTAL_BYTES, 1004, 52);
+        let result = DecodeVsKResult::new(1024, 4096, E4_FIXED_TOTAL_BYTES, 1004, 52, 1024);
 
         assert_eq!(result.source_symbols, 1024);
+        assert_eq!(result.required_symbols, 1024);
         assert_eq!(result.received_source_symbols, 1004);
         assert_eq!(result.missing_source_symbols, 20);
         assert_eq!(result.repair_symbols, 52);
         assert_eq!(result.total_received_symbols, 1056);
         assert_eq!(result.overhead_basis_points, 312);
+        assert_eq!(result.loss_basis_points, 195);
+        assert_eq!(result.repair_bytes, 212_992);
+        assert_eq!(result.decoder_input_bytes, 4_325_376);
+        assert_eq!(result.rank_slack_symbols, 32);
         assert_eq!(
             result.benchmark_id(),
-            "k1024_sym4096_total4194304_missing20_repair52_overhead312bp"
+            "e4_decode_vs_k_result_v1_k1024_sym4096_total4194304_required1024_source1004_missing20_loss195bp_repair52_received1056_repairbytes212992_inputbytes4325376_slack32_overhead312bp"
         );
+    }
+
+    #[test]
+    fn decode_vs_k_result_artifact_json_line_round_trips_schema() {
+        let result = DecodeVsKResult::new(1024, 4096, E4_FIXED_TOTAL_BYTES, 1004, 52, 1024);
+        let benchmark_id = result.benchmark_id();
+        let envelope = result.artifact_json();
+
+        assert_eq!(
+            envelope,
+            serde_json::json!({
+                "schema_version": E4_DECODE_VS_K_RESULT_SCHEMA,
+                "benchmark_id": benchmark_id,
+                "k": 1024,
+                "symbol_size": 4096,
+                "total_bytes": E4_FIXED_TOTAL_BYTES,
+                "source_symbols": 1024,
+                "required_symbols": 1024,
+                "received_source_symbols": 1004,
+                "missing_source_symbols": 20,
+                "repair_symbols": 52,
+                "total_received_symbols": 1056,
+                "overhead_basis_points": 312,
+                "loss_basis_points": 195,
+                "repair_bytes": 212_992,
+                "decoder_input_bytes": 4_325_376,
+                "rank_slack_symbols": 32,
+            })
+        );
+
+        let line = result.artifact_json_line();
+        assert!(
+            !line.contains('\n'),
+            "artifact envelope must be a JSONL-compatible single line"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("artifact envelope must be valid JSON");
+        assert_eq!(parsed, envelope);
     }
 
     #[test]
@@ -318,6 +460,25 @@ mod e4_decode_vs_k_tests {
             E4_DECODE_K_VALUES
                 .iter()
                 .all(|k| E4_FIXED_TOTAL_BYTES % k == 0)
+        );
+    }
+
+    #[test]
+    fn power_law_tree_entries_are_deterministic_and_bounded() {
+        let first = generate_power_law_tree_entries(16, 1024, 1024 * 1024, 0xE4_700E);
+        let second = generate_power_law_tree_entries(16, 1024, 1024 * 1024, 0xE4_700E);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 16);
+        assert!(first.iter().all(|entry| entry.depth >= 1));
+        assert!(first.iter().all(|entry| entry.depth <= E4_TREE_MAX_DEPTH));
+        assert!(first.iter().all(|entry| entry.size_bytes >= 1024));
+        assert!(first.iter().all(|entry| entry.size_bytes <= 1024 * 1024));
+        assert!(
+            first
+                .iter()
+                .enumerate()
+                .all(|(index, entry)| entry.index == index)
         );
     }
 }
@@ -332,12 +493,17 @@ fn bench_e4_decode_vs_k_fixed_total_bytes(c: &mut Criterion) {
         let scenario = build_fixed_total_decode_scenario(k);
         group.throughput(Throughput::Bytes(scenario.total_bytes as u64));
         let bench_name = scenario.result.benchmark_id();
+        let result_envelope = scenario.result.artifact_json_line();
+        let bench_input = (scenario, result_envelope);
 
         group.bench_with_input(
             BenchmarkId::new("decode_block_path", &bench_name),
-            &scenario,
-            |b, scenario| {
+            &bench_input,
+            |b, bench_input| {
+                let scenario = &bench_input.0;
+                let result_envelope = bench_input.1.as_str();
                 b.iter(|| {
+                    black_box(result_envelope);
                     let decoder =
                         InactivationDecoder::new(scenario.k, scenario.symbol_size, scenario.seed);
                     let decoded = decoder
