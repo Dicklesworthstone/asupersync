@@ -1,4 +1,10 @@
 //! Deadline propagation utilities.
+//!
+//! Deadline jitter is intentionally opt-in and separated from
+//! [`Budget`](crate::types::Budget) deadline composition. A budget deadline
+//! remains the exact cancellation bound; callers that want thundering-herd
+//! smoothing apply [`DeadlineJitterPolicy`] only to the timer or timed-lane
+//! wakeup they register for that work.
 
 use crate::cx::Scope;
 use crate::tracing_compat::debug;

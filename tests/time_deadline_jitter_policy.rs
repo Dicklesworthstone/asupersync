@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use asupersync::time::{DeadlineJitterPolicy, DeadlineJitterScope};
@@ -69,4 +70,92 @@ fn deadline_jitter_never_schedules_before_original_deadline() {
         assert!(decision.jittered_deadline <= Time::MAX);
         assert!(decision.jitter <= Duration::from_secs(1));
     }
+}
+
+#[test]
+fn deadline_jitter_schedule_replay_is_byte_identical_for_same_seed_and_workload() {
+    let workload: Vec<(TaskId, RegionId, Time)> = (0..16)
+        .map(|i| (task(1_000 + i), region(7), Time::from_secs(60)))
+        .collect();
+    let policy = DeadlineJitterPolicy::new(Duration::from_millis(250), 0x5EED_F00D)
+        .with_policy_id(0xAA55)
+        .with_scope(DeadlineJitterScope::TaskAndRegion);
+
+    let first = jittered_schedule(policy, &workload);
+    let second = jittered_schedule(policy, &workload);
+
+    assert_eq!(first, second);
+    assert!(
+        first
+            .iter()
+            .all(|entry| entry.jittered_deadline_ns >= entry.original_deadline_ns),
+        "deadline slack policy must never wake before the original deadline"
+    );
+    assert!(
+        first
+            .iter()
+            .map(|entry| entry.jittered_deadline_ns)
+            .collect::<BTreeSet<_>>()
+            .len()
+            > 1,
+        "same-deadline workload should be spread when jitter is enabled"
+    );
+}
+
+#[test]
+fn deadline_jitter_schedule_changes_with_seed_without_changing_original_deadlines() {
+    let workload: Vec<(TaskId, RegionId, Time)> = (0..8)
+        .map(|i| (task(2_000 + i), region(9), Time::from_secs(15)))
+        .collect();
+    let left = DeadlineJitterPolicy::new(Duration::from_millis(100), 11)
+        .with_scope(DeadlineJitterScope::TaskAndRegion);
+    let right = DeadlineJitterPolicy::new(Duration::from_millis(100), 12)
+        .with_scope(DeadlineJitterScope::TaskAndRegion);
+
+    let left_schedule = jittered_schedule(left, &workload);
+    let right_schedule = jittered_schedule(right, &workload);
+
+    assert_ne!(left_schedule, right_schedule);
+    assert_eq!(
+        original_deadlines(&left_schedule),
+        original_deadlines(&right_schedule),
+        "seed must affect only the wake slack, not the caller's exact deadline"
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JitteredScheduleEntry {
+    task_id: u64,
+    region_id: u64,
+    policy_id: u64,
+    original_deadline_ns: u64,
+    jittered_deadline_ns: u64,
+    jitter_ns: u64,
+}
+
+fn jittered_schedule(
+    policy: DeadlineJitterPolicy,
+    workload: &[(TaskId, RegionId, Time)],
+) -> Vec<JitteredScheduleEntry> {
+    workload
+        .iter()
+        .map(|(task_id, region_id, original)| {
+            let decision = policy.apply(*original, *task_id, *region_id);
+            JitteredScheduleEntry {
+                task_id: decision.task_id.as_u64(),
+                region_id: decision.region_id.as_u64(),
+                policy_id: decision.policy_id,
+                original_deadline_ns: decision.original_deadline.as_nanos(),
+                jittered_deadline_ns: decision.jittered_deadline.as_nanos(),
+                jitter_ns: decision.jitter.as_nanos() as u64,
+            }
+        })
+        .collect()
+}
+
+fn original_deadlines(schedule: &[JitteredScheduleEntry]) -> Vec<u64> {
+    schedule
+        .iter()
+        .map(|entry| entry.original_deadline_ns)
+        .collect()
 }

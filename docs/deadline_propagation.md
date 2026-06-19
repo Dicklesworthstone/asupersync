@@ -69,6 +69,37 @@ Each hop reads `now` from its timer driver (exact under lab virtual time),
 so the same algebra is deterministic in `LabRuntime` tests and wall-clock
 bound in production.
 
+## Opt-in deadline jitter for wake smoothing
+
+The deadline propagation law above stays exact. `Budget` deadlines are still
+the cancellation and admission boundary, and `sleep_until` / `Sleep` preserve
+same-deadline ordering unless a caller explicitly applies a jitter policy.
+
+For thundering-herd smoothing, use
+`asupersync::time::DeadlineJitterPolicy` at the point where a task registers a
+timer or timed-lane wakeup. The policy takes a maximum non-negative slack, a
+deterministic seed, a stable policy id for observability, and a scope:
+
+| Scope | Identity input | Use when |
+|-------|----------------|----------|
+| `Task` | task id | many tasks share a region but can be spread independently |
+| `Region` | region id | a whole request or tenant region should share one offset |
+| `TaskAndRegion` | task id plus region id | default per-task smoothing that remains region-distinct |
+
+The policy returns a decision with `original_deadline`,
+`jittered_deadline`, `jitter`, `policy_id`, `task_id`, and `region_id`, and
+emits the same fields as structured tracing data. The jittered deadline is
+always `>= original_deadline` and saturates at `Time::MAX`, so smoothing never
+wakes work before its exact budget deadline. Under `LabRuntime`, replay uses
+the same seed and task/region ids, so the same workload produces byte-identical
+jittered wake schedules.
+
+Use jitter for best-effort wake registration and background maintenance
+storms, not for tightening or extending budget propagation. If a downstream
+hop receives a budget deadline, it should meet it with local config first and
+then, only if smoothing is desired, jitter the local wake used to check or
+resume that work.
+
 ## Where each piece lives
 
 | Hop | Mechanism | Code |
