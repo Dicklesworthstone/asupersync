@@ -58,6 +58,7 @@ fn test_stream_priority_scheduling() {
 
     // Control should come first (highest priority)
     assert_eq!(scheduler.next_stream(), Some(control_stream));
+    scheduler.mark_blocked(control_stream);
 
     // Data streams should come next (round-robin between them)
     let next1 = scheduler.next_stream().unwrap();
@@ -65,6 +66,8 @@ fn test_stream_priority_scheduling() {
     assert!(next1 == data_stream1 || next1 == data_stream2);
     assert!(next2 == data_stream1 || next2 == data_stream2);
     assert_ne!(next1, next2);
+    scheduler.mark_blocked(next1);
+    scheduler.mark_blocked(next2);
 
     // Repair should come last
     assert_eq!(scheduler.next_stream(), Some(repair_stream));
