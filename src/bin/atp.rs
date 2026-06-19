@@ -122,8 +122,12 @@ impl Transport {
         }
     }
 
-    const fn auto_fallback_order() -> &'static [Self] {
-        &[Self::Quic, Self::Rq, Self::Tcp]
+    const fn auto_fallback_order(delta_enabled: bool) -> &'static [Self] {
+        if delta_enabled {
+            &[Self::Tcp]
+        } else {
+            &[Self::Quic, Self::Rq, Self::Tcp]
+        }
     }
 }
 
@@ -896,7 +900,10 @@ fn run_send_auto_to_addr(
     addr: SocketAddr,
 ) -> Result<serde_json::Value, String> {
     let mut attempts = Vec::new();
-    for transport in Transport::auto_fallback_order().iter().copied() {
+    for transport in Transport::auto_fallback_order(!args.no_delta)
+        .iter()
+        .copied()
+    {
         eprintln!("[atp] transport selection: trying {}", transport.cli_arg());
         match send_to_addr_with_transport(runtime, args, transport, addr) {
             Ok(report) => {
@@ -3595,10 +3602,15 @@ mod tests {
     #[test]
     fn auto_transport_order_prefers_quic_then_rq_then_tcp() {
         assert_eq!(
-            Transport::auto_fallback_order(),
+            Transport::auto_fallback_order(false),
             &[Transport::Quic, Transport::Rq, Transport::Tcp]
         );
         assert_eq!(Transport::Auto.cli_arg(), "auto");
+    }
+
+    #[test]
+    fn auto_transport_order_uses_tcp_for_delta_resync() {
+        assert_eq!(Transport::auto_fallback_order(true), &[Transport::Tcp]);
     }
 
     #[test]
