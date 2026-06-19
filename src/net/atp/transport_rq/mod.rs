@@ -2520,7 +2520,7 @@ struct EntryDecoder {
     pipeline: Option<DecodingPipeline>,
     complete: bool,
     staging_path: PathBuf,
-    file: Option<crate::fs::File>,
+    staging_created: bool,
     bytes_written: u64,
     max_block_size: usize,
     source_streaming: bool,
@@ -3807,7 +3807,7 @@ pub async fn receive_connection(
                 pipeline: Some(pipeline),
                 complete: e.size == 0,
                 staging_path: staging_dir.join(e.index.to_string()),
-                file: None,
+                staging_created: false,
                 bytes_written: 0,
                 max_block_size: receiver_max_block_size,
                 source_streaming: entry_source_streaming,
@@ -4521,15 +4521,7 @@ async fn persist_source_symbol(
         (offset, take)
     };
 
-    ensure_entry_staging_file(dec).await?;
-    let Some(file) = dec.file.as_mut() else {
-        return Err(RqError::Frame(format!(
-            "internal: no staging file for entry {}",
-            dec.index
-        )));
-    };
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    file.write_all(&payload[..take]).await?;
+    write_entry_staging_range(dec, offset, &payload[..take]).await?;
 
     let completed_now = {
         let block = &mut dec.source_blocks[sbn];
@@ -4567,13 +4559,19 @@ async fn persist_source_symbol(
     Ok(true)
 }
 
-async fn ensure_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError> {
-    if dec.file.is_some() {
-        return Ok(());
-    }
+async fn open_entry_staging_file(dec: &mut EntryDecoder) -> Result<crate::fs::File, RqError> {
     if let Some(parent) = dec.staging_path.parent() {
         crate::fs::create_dir_all(parent).await?;
     }
+
+    if dec.staging_created {
+        return Ok(crate::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&dec.staging_path)
+            .await?);
+    }
+
     let file = crate::fs::File::create_new(&dec.staging_path)
         .await
         .map_err(|err| {
@@ -4587,7 +4585,19 @@ async fn ensure_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError
             }
         })?;
     file.set_len(dec.size).await?;
-    dec.file = Some(file);
+    dec.staging_created = true;
+    Ok(file)
+}
+
+async fn write_entry_staging_range(
+    dec: &mut EntryDecoder,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), RqError> {
+    let mut file = open_entry_staging_file(dec).await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    file.write_all(data).await?;
+    file.flush().await?;
     Ok(())
 }
 
@@ -4670,15 +4680,7 @@ async fn persist_decoded_block(
         )));
     }
 
-    ensure_entry_staging_file(dec).await?;
-    let Some(file) = dec.file.as_mut() else {
-        return Err(RqError::Frame(format!(
-            "internal: no staging file for entry {}",
-            dec.index
-        )));
-    };
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    file.write_all(data).await?;
+    write_entry_staging_range(dec, offset, data).await?;
     // E-9 fix: `source_blocks[sbn].complete` is the single source of truth for both completion
     // and byte accounting. A block decoded via FEC here can LATER also receive its final source
     // symbols via retransmit; if we do not mark it complete now, `persist_source_symbol` would
@@ -4863,10 +4865,8 @@ async fn verify_and_commit(
     feedback_rounds: u32,
 ) -> Result<ReceiveReceipt, RqError> {
     for d in decoders.iter_mut() {
-        if d.size == 0 && d.file.is_none() {
-            ensure_entry_staging_file(d).await?;
-        }
-        if let Some(mut file) = d.file.take() {
+        if d.size == 0 && !d.staging_created {
+            let mut file = open_entry_staging_file(d).await?;
             file.flush().await?;
         }
     }
@@ -6259,7 +6259,7 @@ mod tests {
             pipeline: None,
             complete: true,
             staging_path,
-            file: None,
+            staging_created: true,
             bytes_written: size,
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
@@ -6341,7 +6341,7 @@ mod tests {
             pipeline: None,
             complete: false,
             staging_path,
-            file: None,
+            staging_created: false,
             bytes_written: 0,
             max_block_size: usize::try_from(size).expect("test size fits usize"),
             source_streaming: true,
@@ -6392,7 +6392,11 @@ mod tests {
         .expect("feed first source symbol");
         assert!(accepted);
         assert!(!decoder.complete);
-        assert!(decoder.file.is_some());
+        assert!(decoder.staging_created);
+        assert_eq!(
+            std::fs::read(&staging_path).expect("read staged first source symbol"),
+            vec![1, 2, 3, 4, 0, 0, 0, 0]
+        );
 
         let (second, second_payload) =
             signed_source_payload(&ctx, object_id, 1, vec![5, 6, 7, 8], None);
@@ -6408,10 +6412,65 @@ mod tests {
         assert!(decoder.complete);
         assert_eq!(decoder.bytes_written, 8);
 
-        drop(decoder.file.take());
         assert_eq!(
             std::fs::read(staging_path).expect("read staged source stream"),
             vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn e14_source_streaming_does_not_retain_one_staging_fd_per_entry() {
+        fn fd_count() -> usize {
+            std::fs::read_dir("/proc/self/fd")
+                .expect("read /proc/self/fd")
+                .count()
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let symbol_size = 1u16;
+        let parsed = ParsedDatagram {
+            entry: 0,
+            sbn: 0,
+            esi: 0,
+            kind: SymbolKind::Source,
+            auth_tag: None,
+            payload_len: 1,
+            header_len: 0,
+        };
+        let before = fd_count();
+        let mut decoders: Vec<EntryDecoder> = (0..1500)
+            .map(|idx| {
+                source_streaming_test_decoder(
+                    entry_object_id("e14-fd-bound", u32::try_from(idx).expect("test index fits")),
+                    dir.path().join(idx.to_string()),
+                    1,
+                    symbol_size,
+                )
+            })
+            .collect();
+
+        for (idx, decoder) in decoders.iter_mut().enumerate() {
+            let payload = [u8::try_from(idx % 251).expect("bounded byte")];
+            assert!(
+                futures_lite::future::block_on(persist_source_symbol(
+                    decoder,
+                    &parsed,
+                    &payload,
+                    symbol_size
+                ))
+                .expect("persist source symbol"),
+                "entry {idx} source symbol should be accepted"
+            );
+            assert!(decoder.complete, "entry {idx} should complete");
+            assert!(decoder.staging_created, "entry {idx} should have staging");
+            assert_eq!(decoder.bytes_written, 1, "entry {idx} byte count");
+        }
+
+        let after = fd_count();
+        assert!(
+            after <= before + 64,
+            "receiver retained too many staging FDs: before={before} after={after}"
         );
     }
 
@@ -6451,7 +6510,7 @@ mod tests {
         assert!(!accepted);
         assert!(!decoder.complete);
         assert_eq!(decoder.bytes_written, 0);
-        assert!(decoder.file.is_none());
+        assert!(!decoder.staging_created);
         assert!(!staging_path.exists());
     }
 
@@ -6531,7 +6590,6 @@ mod tests {
 
         assert!(decoder.complete, "repair fallback should finish the block");
         assert!(decoder.source_blocks[0].pipeline_seeded[0]);
-        drop(decoder.file.take());
         assert_eq!(
             std::fs::read(staging_path).expect("read repaired source stream"),
             data
@@ -6600,7 +6658,6 @@ mod tests {
             "late source must NOT double-count bytes_written (E-9)"
         );
 
-        drop(decoder.file.take());
         assert_eq!(std::fs::read(&staging_path).expect("read staged"), data);
     }
 
@@ -6624,7 +6681,7 @@ mod tests {
             pipeline: None,
             complete: false,
             staging_path: staging_path.clone(),
-            file: None,
+            staging_created: false,
             bytes_written: 0,
             max_block_size: 4,
             source_streaming: true,
@@ -6688,7 +6745,6 @@ mod tests {
             "each block counted once; bytes_written == size"
         );
 
-        drop(decoder.file.take());
         assert_eq!(std::fs::read(&staging_path).expect("read staged"), data);
     }
 
@@ -7620,7 +7676,7 @@ mod tests {
                 pipeline: None,
                 complete: true,
                 staging_path: a_path,
-                file: None,
+                staging_created: true,
                 bytes_written: a.len() as u64,
                 max_block_size: DEFAULT_MAX_BLOCK_SIZE,
                 source_streaming: false,
@@ -7634,7 +7690,7 @@ mod tests {
                 pipeline: None,
                 complete: true,
                 staging_path: b_path,
-                file: None,
+                staging_created: true,
                 bytes_written: b.len() as u64,
                 max_block_size: DEFAULT_MAX_BLOCK_SIZE,
                 source_streaming: false,
@@ -7897,7 +7953,7 @@ mod tests {
             pipeline: None,
             complete: true,
             staging_path,
-            file: None,
+            staging_created: true,
             bytes_written: object.len() as u64,
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
@@ -8072,7 +8128,7 @@ mod tests {
             pipeline: None,
             complete: true,
             staging_path,
-            file: None,
+            staging_created: true,
             bytes_written: object.len() as u64,
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
