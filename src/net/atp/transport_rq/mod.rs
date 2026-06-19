@@ -3960,13 +3960,19 @@ pub async fn receive_connection(
                 let source_symbols = source_retransmit_request_limit(&config, feedback_rounds)
                     .map_or_else(Vec::new, |limit| collect_source_requests(&decoders, limit));
                 if std::env::var_os("ATP_RQ_TRACE").is_some() {
-                    let (source_received, source_needed, pending_decode_jobs) =
-                        source_progress_for_pending(&decoders, &pending);
+                    let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
-                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} symbols_accepted={} source_received={source_received}/{source_needed} pending_decode_jobs={pending_decode_jobs}",
+                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} symbols_accepted={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
                         pending.len(),
                         source_symbols.len(),
                         symbols_accepted,
+                        progress.source_received,
+                        progress.source_needed,
+                        progress.pending_decode_jobs,
+                        progress.rank,
+                        progress.rank_columns,
+                        progress.rank_deficit,
+                        progress.rank_blocks,
                     );
                 }
 
@@ -4098,24 +4104,57 @@ fn collect_source_requests(decoders: &[EntryDecoder], limit: usize) -> Vec<Sourc
     requests
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct PendingDecodeProgress {
+    source_received: usize,
+    source_needed: usize,
+    pending_decode_jobs: usize,
+    rank: usize,
+    rank_columns: usize,
+    rank_deficit: usize,
+    rank_blocks: usize,
+}
+
 fn source_progress_for_pending(
     decoders: &[EntryDecoder],
     pending: &[u32],
-) -> (usize, usize, usize) {
-    let mut received = 0usize;
-    let mut needed = 0usize;
-    let mut pending_decode_jobs = 0usize;
+) -> PendingDecodeProgress {
+    let mut progress = PendingDecodeProgress::default();
     for decoder in decoders
         .iter()
         .filter(|decoder| pending.contains(&decoder.index))
     {
-        pending_decode_jobs = pending_decode_jobs.saturating_add(decoder.pending_decodes.len());
-        for block in &decoder.source_blocks {
-            received = received.saturating_add(block.received_count);
-            needed = needed.saturating_add(block.k);
+        progress.pending_decode_jobs = progress
+            .pending_decode_jobs
+            .saturating_add(decoder.pending_decodes.len());
+        for (sbn, block) in decoder.source_blocks.iter().enumerate() {
+            progress.source_received = progress
+                .source_received
+                .saturating_add(block.received_count);
+            progress.source_needed = progress.source_needed.saturating_add(block.k);
+            let Some(sbn) = u8::try_from(sbn).ok() else {
+                continue;
+            };
+            let Some(status) = decoder
+                .pipeline
+                .as_ref()
+                .and_then(|pipeline| pipeline.block_status(sbn))
+            else {
+                continue;
+            };
+            let Some(rank) = status.rank else {
+                continue;
+            };
+            let deficit = status.rank_deficit.unwrap_or(0);
+            progress.rank = progress.rank.saturating_add(rank);
+            progress.rank_columns = progress
+                .rank_columns
+                .saturating_add(rank.saturating_add(deficit));
+            progress.rank_deficit = progress.rank_deficit.saturating_add(deficit);
+            progress.rank_blocks = progress.rank_blocks.saturating_add(1);
         }
     }
-    (received, needed, pending_decode_jobs)
+    progress
 }
 
 async fn feed_symbol_with_cx(
