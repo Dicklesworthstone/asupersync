@@ -918,12 +918,13 @@ impl DecodingPipeline {
             self.config.min_overhead,
         );
         let slack = k.clamp(REPAIR_RETENTION_MIN_SLACK, REPAIR_RETENTION_MAX_SLACK);
+        let minimum_safe_cap = needed.max(k);
         let dynamic_cap = needed.saturating_add(slack).max(k);
         let configured_cap = self.config.max_buffered_symbols;
         Some(if configured_cap == 0 {
             dynamic_cap
         } else {
-            configured_cap.max(k)
+            configured_cap.max(minimum_safe_cap)
         })
     }
 
@@ -990,6 +991,17 @@ impl DecodingPipeline {
                     block.state = BlockDecodingState::Failed;
                 }
                 SymbolAcceptResult::Rejected(reason)
+            }
+        }
+    }
+
+    pub(crate) fn cancel_decode_job(&mut self, sbn: u8) {
+        if self.completed_blocks.contains(&sbn) {
+            return;
+        }
+        if let Some(block) = self.blocks.get_mut(&sbn) {
+            if matches!(block.state, BlockDecodingState::Decoding) {
+                block.state = BlockDecodingState::Collecting;
             }
         }
     }
