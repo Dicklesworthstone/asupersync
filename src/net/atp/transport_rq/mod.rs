@@ -4412,9 +4412,9 @@ async fn feed_symbol_with_cx(
             }
             true
         }
-        Ok(DeferredSymbolAcceptResult::Immediate(
-            SymbolAcceptResult::DecodingStarted { block_sbn },
-        )) => {
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::DecodingStarted {
+            block_sbn,
+        })) => {
             rqtrace!(
                 "receiver: entry {} started decode block {} via esi={} kind={:?}",
                 dec.index,
@@ -4424,9 +4424,10 @@ async fn feed_symbol_with_cx(
             );
             true
         }
-        Ok(DeferredSymbolAcceptResult::Immediate(
-            SymbolAcceptResult::BlockComplete { block_sbn, data },
-        )) => {
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
+            block_sbn,
+            data,
+        })) => {
             persist_decoded_block(dec, block_sbn, &data).await?;
             // `persist_decoded_block` may have already completed the entry via the source-block
             // tracker (mixed source+FEC, E-9). Otherwise fall back to the pipeline's own view
@@ -4459,9 +4460,7 @@ async fn feed_symbol_with_cx(
             );
             false
         }
-        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
-            reason,
-        ))) => {
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(reason))) => {
             rqtrace!(
                 "receiver: entry {} rejected sbn={} esi={} kind={:?} reason={:?}",
                 dec.index,
@@ -4592,101 +4591,96 @@ async fn seed_source_streaming_pipeline(
         return Ok(());
     };
 
-    for sbn in 0..dec.source_blocks.len() {
-        // Seed only the repair block and only once retained repair equations plus staged source
-        // symbols can reach K. This keeps lossy transfers from retaining source payloads for many
-        // partially-repaired blocks while still feeding the same symbols before decode.
-        if sbn != target_sbn_index {
-            continue;
-        }
-        if dec.source_blocks[sbn].complete {
-            continue;
-        }
+    // Seed only the repair block and only once retained repair equations plus staged source
+    // symbols can reach K. This keeps lossy transfers from retaining source payloads for many
+    // partially-repaired blocks while still feeding the same symbols before decode.
+    if dec.source_blocks[target_sbn_index].complete {
+        return Ok(());
+    }
 
-        let k = dec.source_blocks[sbn].k;
-        for esi in 0..k {
-            let Some((offset, take, auth_tag)) =
-                source_seed_read_plan(dec, sbn, esi, symbol_size)?
-            else {
-                continue;
-            };
-            let mut payload = vec![0u8; symbol_size];
-            reader.seek(std::io::SeekFrom::Start(offset)).await?;
-            reader.read_exact(&mut payload[..take]).await?;
+    let sbn = target_sbn_index;
+    let k = dec.source_blocks[sbn].k;
+    for esi in 0..k {
+        let Some((offset, take, auth_tag)) = source_seed_read_plan(dec, sbn, esi, symbol_size)?
+        else {
+            continue;
+        };
+        let mut payload = vec![0u8; symbol_size];
+        reader.seek(std::io::SeekFrom::Start(offset)).await?;
+        reader.read_exact(&mut payload[..take]).await?;
 
-            let sbn_u8 = u8::try_from(sbn).map_err(|_| {
-                RqError::Coding(format!("entry {} source seed SBN overflow", dec.index))
+        let sbn_u8 = u8::try_from(sbn).map_err(|_| {
+            RqError::Coding(format!("entry {} source seed SBN overflow", dec.index))
+        })?;
+        let esi_u32 = u32::try_from(esi).map_err(|_| {
+            RqError::Coding(format!("entry {} source seed ESI overflow", dec.index))
+        })?;
+        let symbol = Symbol::new(
+            SymbolId::new(dec.object_id, sbn_u8, esi_u32),
+            payload,
+            SymbolKind::Source,
+        );
+        let auth_symbol = if symbol_auth.is_some() {
+            let tag = auth_tag.ok_or_else(|| {
+                RqError::Authentication(format!(
+                    "entry {} source seed missing verified auth tag for sbn={sbn} esi={esi}",
+                    dec.index
+                ))
             })?;
-            let esi_u32 = u32::try_from(esi).map_err(|_| {
-                RqError::Coding(format!("entry {} source seed ESI overflow", dec.index))
-            })?;
-            let symbol = Symbol::new(
-                SymbolId::new(dec.object_id, sbn_u8, esi_u32),
-                payload,
-                SymbolKind::Source,
-            );
-            let auth_symbol = if symbol_auth.is_some() {
-                let tag = auth_tag.ok_or_else(|| {
-                    RqError::Authentication(format!(
-                        "entry {} source seed missing verified auth tag for sbn={sbn} esi={esi}",
-                        dec.index
-                    ))
-                })?;
-                AuthenticatedSymbol::from_parts(symbol, tag)
-            } else {
-                AuthenticatedSymbol::new_unauthenticated(symbol)
-            };
-            let result = dec
-                .pipeline
-                .as_mut()
-                .expect("checked above")
-                .feed_streaming_block_deferred(auth_symbol);
-            if result.is_ok() {
-                dec.source_blocks[sbn].pipeline_seeded[esi] = true;
+            AuthenticatedSymbol::from_parts(symbol, tag)
+        } else {
+            AuthenticatedSymbol::new_unauthenticated(symbol)
+        };
+        let result = dec
+            .pipeline
+            .as_mut()
+            .expect("checked above")
+            .feed_streaming_block_deferred(auth_symbol);
+        if result.is_ok() {
+            dec.source_blocks[sbn].pipeline_seeded[esi] = true;
+        }
+        match result {
+            Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
+                block_sbn,
+                data,
+            })) => {
+                persist_decoded_block(dec, block_sbn, &data).await?;
+                // `persist_decoded_block` may have completed the entry (mixed source+FEC, E-9)
+                // and already dropped the pipeline; stop seeding so the next loop iteration does
+                // not touch a `None` pipeline.
+                if dec.complete
+                    || dec
+                        .pipeline
+                        .as_ref()
+                        .is_some_and(DecodingPipeline::is_complete)
+                {
+                    dec.complete = true;
+                    dec.pipeline = None;
+                    return Ok(());
+                }
             }
-            match result {
-                Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
-                    block_sbn,
-                    data,
-                })) => {
-                    persist_decoded_block(dec, block_sbn, &data).await?;
-                    // `persist_decoded_block` may have completed the entry (mixed source+FEC, E-9)
-                    // and already dropped the pipeline; stop seeding so the next loop iteration does
-                    // not touch a `None` pipeline.
-                    if dec.complete
-                        || dec
-                            .pipeline
-                            .as_ref()
-                            .is_some_and(DecodingPipeline::is_complete)
-                    {
-                        dec.complete = true;
-                        dec.pipeline = None;
-                        return Ok(());
-                    }
+            Ok(DeferredSymbolAcceptResult::Immediate(_)) => {}
+            Ok(DeferredSymbolAcceptResult::Decode(job)) => {
+                match dispatch_decode_job(
+                    cx,
+                    dec,
+                    job,
+                    "source-streaming repair seed",
+                    allow_spawn_decode,
+                )
+                .await?
+                {
+                    DecodeDispatch::Queued | DecodeDispatch::Completed => return Ok(()),
+                    DecodeDispatch::NoProgress => {}
                 }
-                Ok(DeferredSymbolAcceptResult::Immediate(_)) => {}
-                Ok(DeferredSymbolAcceptResult::Decode(job)) => {
-                    match dispatch_decode_job(
-                        cx,
-                        dec,
-                        job,
-                        "source-streaming repair seed",
-                        allow_spawn_decode,
-                    )
-                    .await?
-                    {
-                        DecodeDispatch::Queued | DecodeDispatch::Completed => return Ok(()),
-                        DecodeDispatch::NoProgress => {}
-                    }
-                }
-                Err(err) => {
-                    rqtrace!(
-                        "receiver: entry {} source seed error sbn={} esi={}: {err}",
-                        dec.index,
-                        sbn,
-                        esi
-                    );
-                }
+            }
+            Err(err) => {
+                rqtrace!(
+                    "receiver: entry {} source seed error sbn={} esi={}: {err}",
+                    dec.index,
+                    sbn,
+                    esi
+                );
             }
         }
     }
