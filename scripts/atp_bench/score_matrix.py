@@ -36,6 +36,8 @@ class Sample:
     feedback_rounds: float | None
     sha_ok: bool
     status: str
+    timed_out: bool
+    status_code: int | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -205,8 +207,12 @@ def load_samples(path: Path) -> list[Sample]:
                 feedback_rounds=as_float(
                     pick(row, "feedback_rounds", "rq.feedback_rounds", "metrics.feedback_rounds")
                 ),
-                sha_ok=as_bool(pick(row, "sha_ok", "verify_ok", "sha256_ok", "integrity.sha_ok")),
+                sha_ok=as_bool(
+                    pick(row, "sha_ok", "verify_ok", "sha256_ok", "integrity.sha_ok"), False
+                ),
                 status=str(pick(row, "status", "outcome") or "ok").lower(),
+                timed_out=as_bool(pick(row, "timed_out", "timeout", "metrics.timed_out"), False),
+                status_code=as_int(pick(row, "status_code", "exit_code", "rc")),
             )
             samples.append(sample)
     return samples
@@ -223,6 +229,12 @@ def cv_pct(values: list[float]) -> float:
     if mean == 0.0:
         return 0.0
     return float(statistics.stdev(values) / mean * 100.0)
+
+
+def ratio(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator in (None, 0):
+        return None
+    return numerator / denominator
 
 
 SummaryKey = tuple[str, str, str, str, str]
@@ -334,30 +346,7 @@ def matched_pairs(
                         }
                     )
                     continue
-                wall_ratio = atp_stats["wall_median_s"] / rsync_stats["wall_median_s"]
-                rss_ratio = None
-                atp_rss = atp_stats["peak_rss_median_kb"]
-                rsync_rss = rsync_stats["peak_rss_median_kb"]
-                if atp_rss is not None and rsync_rss not in (None, 0):
-                    rss_ratio = atp_rss / rsync_rss
-                sender_rss_ratio = None
-                receiver_rss_ratio = None
-                if (
-                    atp_stats["sender_peak_rss_median_kb"] is not None
-                    and rsync_stats["sender_peak_rss_median_kb"] not in (None, 0)
-                ):
-                    sender_rss_ratio = (
-                        atp_stats["sender_peak_rss_median_kb"]
-                        / rsync_stats["sender_peak_rss_median_kb"]
-                    )
-                if (
-                    atp_stats["receiver_peak_rss_median_kb"] is not None
-                    and rsync_stats["receiver_peak_rss_median_kb"] not in (None, 0)
-                ):
-                    receiver_rss_ratio = (
-                        atp_stats["receiver_peak_rss_median_kb"]
-                        / rsync_stats["receiver_peak_rss_median_kb"]
-                    )
+                wall_ratio = ratio(atp_stats["wall_median_s"], rsync_stats["wall_median_s"])
                 pairs.append(
                     {
                         "workload": workload,
@@ -370,9 +359,28 @@ def matched_pairs(
                         "rsync_wall_s": rsync_stats["wall_median_s"],
                         "wall_ratio_atp_over_rsync": wall_ratio,
                         "speedup_rsync_over_atp": 1.0 / wall_ratio if wall_ratio else None,
-                        "peak_rss_ratio_atp_over_rsync": rss_ratio,
-                        "sender_peak_rss_ratio_atp_over_rsync": sender_rss_ratio,
-                        "receiver_peak_rss_ratio_atp_over_rsync": receiver_rss_ratio,
+                        "peak_rss_ratio_atp_over_rsync": ratio(
+                            atp_stats["peak_rss_median_kb"], rsync_stats["peak_rss_median_kb"]
+                        ),
+                        "avg_rss_ratio_atp_over_rsync": ratio(
+                            atp_stats["avg_rss_median_kb"], rsync_stats["avg_rss_median_kb"]
+                        ),
+                        "sender_peak_rss_ratio_atp_over_rsync": ratio(
+                            atp_stats["sender_peak_rss_median_kb"],
+                            rsync_stats["sender_peak_rss_median_kb"],
+                        ),
+                        "sender_avg_rss_ratio_atp_over_rsync": ratio(
+                            atp_stats["sender_avg_rss_median_kb"],
+                            rsync_stats["sender_avg_rss_median_kb"],
+                        ),
+                        "receiver_peak_rss_ratio_atp_over_rsync": ratio(
+                            atp_stats["receiver_peak_rss_median_kb"],
+                            rsync_stats["receiver_peak_rss_median_kb"],
+                        ),
+                        "receiver_avg_rss_ratio_atp_over_rsync": ratio(
+                            atp_stats["receiver_avg_rss_median_kb"],
+                            rsync_stats["receiver_avg_rss_median_kb"],
+                        ),
                         "atp_feedback_rounds": atp_stats["feedback_rounds_median"],
                     }
                 )
@@ -394,6 +402,25 @@ def fmt(value: Any, digits: int = 3) -> str:
     return str(value)
 
 
+def correctness_status(stats: dict[str, Any]) -> str:
+    ok = stats["ok_reps"]
+    reps = stats["reps"]
+    if ok == reps:
+        return "sha+status ok"
+    if ok == 0:
+        return "no verified reps"
+    return f"{ok}/{reps} verified"
+
+
+def cv_flag(stats: dict[str, Any]) -> str:
+    cv = stats["wall_cv_pct"]
+    if cv is None:
+        return "n/a"
+    if cv > 5.0:
+        return "noisy"
+    return "stable"
+
+
 def render_markdown(
     summary: dict[SummaryKey, dict[str, Any]],
     pairs: list[dict[str, Any]],
@@ -407,17 +434,12 @@ def render_markdown(
         "",
         "## Per-cell method medians",
         "",
-        "| workload | regime | tier | method | ATP streams | reps | ok | status | median wall s | cv pct | sender peak RSS KB | receiver peak RSS KB | combined peak RSS KB | feedback rounds |",
-        "|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|",
+        "| workload | regime | tier | method | ATP streams | reps | ok | correctness | median wall s | cv_pct | cv flag | sender peak RSS KB | sender avg RSS KB | receiver peak RSS KB | receiver avg RSS KB | combined peak RSS KB | combined avg RSS KB | feedback rounds |",
+        "|---|---|---|---|---:|---:|---:|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for (workload, regime, tier, method, _stream), stats in sorted(summary.items()):
-        status = "OK"
-        if stats["ok_reps"] == 0:
-            status = "FAIL"
-        elif stats["failed"]:
-            status = "PARTIAL"
         lines.append(
-            "| {workload} | {regime} | {tier} | {method} | {streams} | {reps} | {ok} | {status} | {wall} | {cv} | {sender_rss} | {receiver_rss} | {rss} | {rounds} |".format(
+            "| {workload} | {regime} | {tier} | {method} | {streams} | {reps} | {ok} | {correctness} | {wall} | {cv} | {cv_flag} | {sender_peak_rss} | {sender_avg_rss} | {receiver_peak_rss} | {receiver_avg_rss} | {peak_rss} | {avg_rss} | {rounds} |".format(
                 workload=workload,
                 regime=regime,
                 tier=tier,
@@ -425,15 +447,50 @@ def render_markdown(
                 streams=fmt(stats["stream_count"], 0),
                 reps=stats["reps"],
                 ok=stats["ok_reps"],
-                status=status,
+                correctness=correctness_status(stats),
                 wall=fmt(stats["wall_median_s"]),
                 cv=fmt(stats["wall_cv_pct"], 2),
-                sender_rss=fmt(stats["sender_peak_rss_median_kb"], 0),
-                receiver_rss=fmt(stats["receiver_peak_rss_median_kb"], 0),
-                rss=fmt(stats["peak_rss_median_kb"], 0),
+                cv_flag=cv_flag(stats),
+                sender_peak_rss=fmt(stats["sender_peak_rss_median_kb"], 0),
+                sender_avg_rss=fmt(stats["sender_avg_rss_median_kb"], 0),
+                receiver_peak_rss=fmt(stats["receiver_peak_rss_median_kb"], 0),
+                receiver_avg_rss=fmt(stats["receiver_avg_rss_median_kb"], 0),
+                peak_rss=fmt(stats["peak_rss_median_kb"], 0),
+                avg_rss=fmt(stats["avg_rss_median_kb"], 0),
                 rounds=fmt(stats["feedback_rounds_median"], 0),
             )
         )
+
+    noise_rows = [
+        (key, stats)
+        for key, stats in sorted(summary.items())
+        if stats["wall_cv_pct"] is not None and stats["wall_cv_pct"] > 5.0
+    ]
+    lines.extend(["", "## Noise warnings", ""])
+    if noise_rows:
+        lines.extend(
+            [
+                "Rows with cv_pct > 5.0 are noisy and should not be treated as clean wins without rerun evidence.",
+                "",
+                "| workload | regime | tier | method | ATP streams | cv_pct | ok/reps |",
+                "|---|---|---|---|---:|---:|---:|",
+            ]
+        )
+        for (workload, regime, tier, method, _stream), stats in noise_rows:
+            lines.append(
+                "| {workload} | {regime} | {tier} | {method} | {streams} | {cv} | {ok}/{reps} |".format(
+                    workload=workload,
+                    regime=regime,
+                    tier=tier,
+                    method=method,
+                    streams=fmt(stats["stream_count"], 0),
+                    cv=fmt(stats["wall_cv_pct"], 2),
+                    ok=stats["ok_reps"],
+                    reps=stats["reps"],
+                )
+            )
+    else:
+        lines.append("No per-cell wall-time cv_pct exceeded 5.0.")
 
     lines.extend(
         [
@@ -442,13 +499,13 @@ def render_markdown(
             "",
             "Only crypto-symmetric, same-cell ATP-vs-rsync pairs are admitted here.",
             "",
-            "| workload | regime | tier | ATP method | ATP streams | rsync method | wall ratio ATP/rsync | speedup rsync/ATP | sender RSS ratio | receiver RSS ratio | combined peak RSS ratio | ATP feedback rounds |",
-            "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|",
+            "| workload | regime | tier | ATP method | ATP streams | rsync method | wall ratio ATP/rsync | speedup rsync/ATP | sender peak RSS ratio | sender avg RSS ratio | receiver peak RSS ratio | receiver avg RSS ratio | combined peak RSS ratio | combined avg RSS ratio | ATP feedback rounds |",
+            "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for pair in pairs:
         lines.append(
-            "| {workload} | {regime} | {tier} | {atp} | {streams} | {rsync} | {wall} | {speedup} | {sender_rss} | {receiver_rss} | {rss} | {rounds} |".format(
+            "| {workload} | {regime} | {tier} | {atp} | {streams} | {rsync} | {wall} | {speedup} | {sender_peak_rss} | {sender_avg_rss} | {receiver_peak_rss} | {receiver_avg_rss} | {peak_rss} | {avg_rss} | {rounds} |".format(
                 workload=pair["workload"],
                 regime=pair["regime"],
                 tier=pair["tier"],
@@ -457,22 +514,29 @@ def render_markdown(
                 rsync=pair["rsync_method"],
                 wall=fmt(pair["wall_ratio_atp_over_rsync"]),
                 speedup=fmt(pair["speedup_rsync_over_atp"]),
-                sender_rss=fmt(pair["sender_peak_rss_ratio_atp_over_rsync"]),
-                receiver_rss=fmt(pair["receiver_peak_rss_ratio_atp_over_rsync"]),
-                rss=fmt(pair["peak_rss_ratio_atp_over_rsync"]),
+                sender_peak_rss=fmt(pair["sender_peak_rss_ratio_atp_over_rsync"]),
+                sender_avg_rss=fmt(pair["sender_avg_rss_ratio_atp_over_rsync"]),
+                receiver_peak_rss=fmt(pair["receiver_peak_rss_ratio_atp_over_rsync"]),
+                receiver_avg_rss=fmt(pair["receiver_avg_rss_ratio_atp_over_rsync"]),
+                peak_rss=fmt(pair["peak_rss_ratio_atp_over_rsync"]),
+                avg_rss=fmt(pair["avg_rss_ratio_atp_over_rsync"]),
                 rounds=fmt(pair["atp_feedback_rounds"], 0),
             )
         )
 
     by_regime: dict[str, list[float]] = defaultdict(list)
     for pair in pairs:
-        by_regime[pair["regime"]].append(pair["wall_ratio_atp_over_rsync"])
+        wall_ratio = pair["wall_ratio_atp_over_rsync"]
+        if wall_ratio is not None:
+            by_regime[pair["regime"]].append(wall_ratio)
     lines.extend(["", "## Per-regime geomean", "", "| regime | geomean wall ratio ATP/rsync |", "|---|---:|"])
     for regime, values in sorted(by_regime.items()):
         lines.append(f"| {regime} | {fmt(geomean(values))} |")
 
-    lines.extend(["", "## Excluded asymmetric ratios", ""])
+    lines.extend(["", "## Crypto-symmetry warnings", ""])
     if excluded_pairs:
+        lines.append("These ATP/rsync pairs were excluded from ratios because their crypto tiers are asymmetric.")
+        lines.append("")
         lines.extend(
             [
                 "| workload | regime | tier | ATP method | ATP streams | rsync method | reason |",
@@ -484,19 +548,19 @@ def render_markdown(
                 f"| {pair['workload']} | {pair['regime']} | {pair['tier']} | {pair['atp_method']} | {fmt(pair.get('atp_streams'), 0)} | {pair['rsync_method']} | {pair['reason']} |"
             )
     else:
-        lines.append("No asymmetric ATP/rsync pairs were present.")
+        lines.append("No crypto-asymmetric ATP/rsync pairs were present.")
 
-    lines.extend(["", "## Failed or excluded rows", ""])
+    lines.extend(["", "## Failed or incomplete rows", ""])
     if failures:
         lines.extend(
             [
-                "| workload | regime | tier | method | ATP streams | rep | status | sha ok |",
-                "|---|---|---|---|---:|---:|---|---|",
+                "| workload | regime | tier | method | ATP streams | rep | status | sha ok | timed out | status code |",
+                "|---|---|---|---|---:|---:|---|---|---|---:|",
             ]
         )
         for failure in failures:
             lines.append(
-                f"| {failure.workload} | {failure.regime} | {failure.tier} | {failure.method} | {fmt(failure.stream_count, 0)} | {failure.rep} | {failure.status} | {failure.sha_ok} |"
+                f"| {failure.workload} | {failure.regime} | {failure.tier} | {failure.method} | {fmt(failure.stream_count, 0)} | {failure.rep} | {failure.status} | {failure.sha_ok} | {failure.timed_out} | {fmt(failure.status_code, 0)} |"
             )
     else:
         lines.append("No failed SHA or incomplete rows were present.")
@@ -506,12 +570,30 @@ def render_markdown(
 
 def run_self_test() -> int:
     rows = [
-        Sample("50M", "bad", "auth", "atp-rq-auth", 4, 1, 10.0, 100.0, None, 40.0, 100.0, None, None, 1.0, True, "ok"),
-        Sample("50M", "bad", "auth", "atp-rq-auth", 4, 2, 12.0, 120.0, None, 60.0, 120.0, None, None, 1.0, True, "ok"),
-        Sample("50M", "bad", "auth", "rsync-ssh-aes128gcm", None, 1, 20.0, 200.0, None, 90.0, 200.0, None, None, None, True, "ok"),
-        Sample("50M", "bad", "auth", "rsync-ssh-aes128gcm", None, 2, 22.0, 220.0, None, 110.0, 220.0, None, None, None, True, "ok"),
-        Sample("50M", "bad", "auth", "atp-rq-auth", 4, 3, 11.0, 110.0, None, 55.0, 110.0, None, None, 2.0, False, "mismatch"),
-        Sample("50M", "bad", "auth", "atp-rq-lab", 1, 1, 9.0, 90.0, None, 35.0, 90.0, None, None, 0.0, True, "ok"),
+        Sample(
+            "50M", "bad", "auth", "atp-rq-auth", 4, 1, 10.0, 100.0, 80.0,
+            40.0, 100.0, 30.0, 80.0, 1.0, True, "ok", False, 0
+        ),
+        Sample(
+            "50M", "bad", "auth", "atp-rq-auth", 4, 2, 12.0, 120.0, 100.0,
+            60.0, 120.0, 50.0, 100.0, 1.0, True, "ok", False, 0
+        ),
+        Sample(
+            "50M", "bad", "auth", "rsync-ssh-aes128gcm", None, 1, 20.0, 200.0,
+            160.0, 90.0, 200.0, 70.0, 160.0, None, True, "ok", False, 0
+        ),
+        Sample(
+            "50M", "bad", "auth", "rsync-ssh-aes128gcm", None, 2, 22.0, 220.0,
+            180.0, 110.0, 220.0, 90.0, 180.0, None, True, "ok", False, 0
+        ),
+        Sample(
+            "50M", "bad", "auth", "atp-rq-auth", 4, 3, 11.0, 110.0, 90.0,
+            55.0, 110.0, 45.0, 90.0, 2.0, False, "mismatch", False, 1
+        ),
+        Sample(
+            "50M", "bad", "auth", "atp-rq-lab", 1, 1, 9.0, 90.0, 70.0,
+            35.0, 90.0, 25.0, 70.0, 0.0, True, "ok", False, 0
+        ),
     ]
     summary, failures = summarize(rows)
     pairs, excluded_pairs = matched_pairs(summary)
@@ -520,7 +602,12 @@ def run_self_test() -> int:
     assert pairs[0]["atp_streams"] == "4"
     assert excluded_pairs and excluded_pairs[0]["atp_method"] == "atp-rq-lab"
     assert round(pairs[0]["receiver_peak_rss_ratio_atp_over_rsync"], 3) == 0.524
-    assert "ATP vs rsync" in render_markdown(summary, pairs, excluded_pairs, failures)
+    assert round(pairs[0]["receiver_avg_rss_ratio_atp_over_rsync"], 3) == 0.529
+    rendered = render_markdown(summary, pairs, excluded_pairs, failures)
+    assert "ATP vs rsync" in rendered
+    assert "Crypto-symmetry warnings" in rendered
+    assert "cv_pct" in rendered
+    assert "timed out" in rendered
     return 0
 
 
