@@ -1443,7 +1443,7 @@ pub enum QuicTransportError {
     #[error("control frame decode error: {0}")]
     Control(String),
     /// The peer rejected the handshake.
-    #[error("handshake rejected by peer: {0}")]
+    #[error("[ASUP-E802] handshake rejected by peer: {0}")]
     HandshakeRejected(String),
     /// An unexpected frame type arrived for the current protocol state.
     #[error("unexpected frame: got {got:?}, expected {expected}")]
@@ -1466,7 +1466,7 @@ pub enum QuicTransportError {
     Integrity(String),
     /// The fountain feedback loop exhausted its configured round budget.
     #[error(
-        "transfer did not converge after {rounds} feedback rounds ({pending} entries still incomplete)"
+        "[ASUP-E801] transfer did not converge after {rounds} feedback rounds ({pending} entries still incomplete); if accepted symbols do not advance decode rank, see [ASUP-E805]"
     )]
     NoConvergence {
         /// Feedback rounds attempted.
@@ -1487,7 +1487,7 @@ pub enum QuicTransportError {
     #[error("transfer cancelled")]
     Cancelled,
     /// A transport operation exceeded its configured timeout.
-    #[error("transport timeout during {operation} after {timeout:?}")]
+    #[error("[ASUP-E804] transport timeout during {operation} after {timeout:?}")]
     Timeout {
         /// Operation that timed out.
         operation: &'static str,
@@ -2080,7 +2080,9 @@ fn effective_quic_max_block_size_for_largest_entry(
     };
     rq_effective_max_block_size(&rq_config, max_entry_len).map_err(|err| match err {
         RqError::TooLarge { size, max } => QuicTransportError::TooLarge { size, max },
-        other => QuicTransportError::Config(format!("QUIC block-size planning failed: {other}")),
+        other => QuicTransportError::Config(format!(
+            "[ASUP-E803] QUIC block-size planning failed: {other}"
+        )),
     })
 }
 
@@ -5858,6 +5860,7 @@ mod tests {
             total_bytes: 9,
             merkle_root_hex: "00".repeat(32),
             metadata_root_hex: None,
+            delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "a/b.txt".to_string(),
@@ -5924,6 +5927,7 @@ mod tests {
                 .fold(0u64, |acc, entry| acc.saturating_add(entry.size)),
             merkle_root_hex: "00".repeat(32),
             metadata_root_hex: None,
+            delta_manifest: None,
             entries,
         };
         manifest.metadata_root_hex = manifest_metadata_commitment(&manifest);
@@ -10071,6 +10075,7 @@ mod tests {
             // metadata commitment + per-entry metadata; portable transfers leave
             // them None. Additive cross-edit to keep HEAD compiling.
             metadata_root_hex: None,
+            delta_manifest: None,
             entries: vec![ManifestEntry {
                 index: 0,
                 rel_path: "a/b.txt".to_string(),

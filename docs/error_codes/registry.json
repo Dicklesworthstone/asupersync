@@ -1,7 +1,7 @@
 {
   "schema_version": "asupersync-error-code-registry-v1",
   "namespace": "ASUP-Exxx",
-  "updated": "2026-06-13",
+  "updated": "2026-06-19",
   "ranges": [
     {
       "range": "ASUP-E0xx",
@@ -647,6 +647,110 @@
       "since": "0.3.4",
       "source_refs": [
         "src/bin/atpd.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E801",
+      "name": "atp-rq-no-convergence",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP RaptorQ/QUIC fountain transfer exhausted its feedback-round budget with undecoded entries remaining.",
+      "probable_causes": [
+        "The sender and receiver could not exchange enough repair symbols before max feedback rounds were exhausted.",
+        "Loss, auth filtering, or an undersized repair budget kept one or more entries undecodable."
+      ],
+      "remediation": [
+        "Inspect the pending entry count, feedback round count, and observed loss before retrying.",
+        "Increase repair overhead or feedback-round budget only after ruling out auth, manifest, or block-size mismatch."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E801.md",
+      "since": "0.3.5",
+      "source_refs": [
+        "src/net/atp/transport_rq/mod.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E802",
+      "name": "atp-capability-mismatch",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP peer lacks a required wire-version or transport capability for the requested data-plane mode.",
+      "probable_causes": [
+        "Sender and receiver binaries were built from incompatible protocol versions.",
+        "The selected path requires a feature or capability the peer did not advertise."
+      ],
+      "remediation": [
+        "Upgrade both endpoints to binaries that advertise the same ATP capability set.",
+        "Force a lower transport mode only when the runbook says it preserves the required integrity guarantees."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E802.md",
+      "since": "0.3.5",
+      "source_refs": [
+        "src/net/atp/transport_rq/mod.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E803",
+      "name": "atp-block-size-mismatch",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP RaptorQ/QUIC transfer detected incompatible sender and receiver block-size planning.",
+      "probable_causes": [
+        "The sender and receiver computed different effective maximum block sizes for the same manifest.",
+        "One endpoint is running an older build that does not apply the current block-size negotiation rule."
+      ],
+      "remediation": [
+        "Compare both endpoints' configured and effective block-size values.",
+        "Upgrade the older endpoint or force a full compatible transfer mode before retrying."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E803.md",
+      "since": "0.3.5",
+      "source_refs": [
+        "src/net/atp/transport_rq/mod.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E804",
+      "name": "atp-pacer-stall",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP receiver observed no delivery samples within the idle window while waiting for paced symbols.",
+      "probable_causes": [
+        "The sender stopped emitting symbols or keepalives while the receiver still expected progress.",
+        "A path, firewall, or pacer configuration dropped all data-plane packets after setup."
+      ],
+      "remediation": [
+        "Check the last delivery sample timestamp, idle window, and selected path before retrying.",
+        "Reduce pacer aggressiveness or switch paths if the stall follows a bandwidth estimate change."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E804.md",
+      "since": "0.3.5",
+      "source_refs": [
+        "src/net/atp/transport_quic/mod.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E805",
+      "name": "atp-decode-rank-stall",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP receiver accepted symbols but decoder rank stopped advancing for a pending entry.",
+      "probable_causes": [
+        "Symbols are authenticated but redundant for the pending source block.",
+        "Manifest, object id, or repair-symbol metadata drift means received symbols cannot increase rank."
+      ],
+      "remediation": [
+        "Compare accepted-symbol count, rank deficit, manifest hash, and auth domain for the stalled entry.",
+        "Treat repeated rank stalls as a fail-closed signal and fall back to a full compatible transfer."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E805.md",
+      "since": "0.3.5",
+      "source_refs": [
+        "src/net/atp/transport_rq/mod.rs",
+        "src/net/atp/transport_quic/mod.rs"
       ]
     },
     {

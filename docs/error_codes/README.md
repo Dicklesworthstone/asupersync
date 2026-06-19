@@ -50,6 +50,11 @@ lands.
 | ASUP-E601 | live | database | [Database pool acquire timeout](./ASUP-E601.md) |
 | ASUP-E701 | live | distributed-remote | [ATP command not implemented](./ASUP-E701.md) |
 | ASUP-E702 | live | distributed-remote | [ATP transfer listener bind failed](./ASUP-E702.md) |
+| ASUP-E801 | live | raptorq | [ATP RQ no convergence](./ASUP-E801.md) |
+| ASUP-E802 | live | raptorq | [ATP capability mismatch](./ASUP-E802.md) |
+| ASUP-E803 | live | raptorq | [ATP block-size mismatch](./ASUP-E803.md) |
+| ASUP-E804 | live | raptorq | [ATP pacer stall](./ASUP-E804.md) |
+| ASUP-E805 | live | raptorq | [ATP decode-rank stall](./ASUP-E805.md) |
 | ASUP-E901 | live | config-build | [Config invalid](./ASUP-E901.md) |
 | ASUP-E902 | live | config-build | [Semantic lint ambient determinism](./ASUP-E902.md) |
 | ASUP-E903 | live | config-build | [Semantic lint await holding resource](./ASUP-E903.md) |

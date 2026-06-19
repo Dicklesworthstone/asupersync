@@ -965,7 +965,7 @@ pub enum RqError {
     #[error("control frame decode error: {0}")]
     Control(String),
     /// The peer rejected the handshake.
-    #[error("handshake rejected by peer: {0}")]
+    #[error("[ASUP-E802] handshake rejected by peer: {0}")]
     HandshakeRejected(String),
     /// An unexpected frame type arrived for the current protocol state.
     #[error("unexpected frame: got {got:?}, expected {expected}")]
@@ -989,7 +989,7 @@ pub enum RqError {
     /// The fountain feedback loop ran out of rounds with entries still
     /// undecoded.
     #[error(
-        "transfer did not converge after {rounds} feedback rounds ({pending} entries still incomplete)"
+        "[ASUP-E801] transfer did not converge after {rounds} feedback rounds ({pending} entries still incomplete); if accepted symbols do not advance decode rank, see [ASUP-E805]"
     )]
     NoConvergence {
         /// Feedback rounds attempted.
@@ -2425,10 +2425,9 @@ pub(in crate::net::atp) fn effective_max_block_size_for_largest_entry(
     // huge-file decode quadratic.
     let max_supported = max_object_size(configured_max);
     if max_entry_len > max_supported {
-        return Err(RqError::TooLarge {
-            size: max_entry_len as u64,
-            max: max_supported as u64,
-        });
+        return Err(RqError::Coding(format!(
+            "[ASUP-E803] ATP block-size planning failed: largest entry {max_entry_len} bytes exceeds supported max {max_supported} bytes"
+        )));
     }
 
     let target = symbol_size
@@ -6570,7 +6569,7 @@ mod tests {
         let five_gib: usize = 5 * 1024 * 1024 * 1024;
         assert!(matches!(
             effective_max_block_size_for_largest_entry(&config, five_gib),
-            Err(RqError::TooLarge { .. })
+            Err(RqError::Coding(msg)) if msg.starts_with("[ASUP-E803]")
         ));
 
         // Entries within the configured 2 GiB default ceiling are unaffected (byte-identical).
@@ -6589,7 +6588,7 @@ mod tests {
         let ceiling = config.max_block_size.saturating_mul(MAX_SOURCE_BLOCKS);
         assert!(matches!(
             effective_max_block_size_for_largest_entry(&config, ceiling + 1),
-            Err(RqError::TooLarge { .. })
+            Err(RqError::Coding(msg)) if msg.starts_with("[ASUP-E803]")
         ));
     }
 
