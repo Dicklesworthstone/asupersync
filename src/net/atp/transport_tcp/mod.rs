@@ -1811,7 +1811,7 @@ fn wire_missing_chunks(
                 chunk.size_bytes,
                 chunk.content_id.to_hex(),
             );
-            by_ref.get(&key).cloned().cloned().ok_or_else(|| {
+            by_ref.get(&key).copied().cloned().ok_or_else(|| {
                 TransportError::Frame(
                     "delta planner selected a chunk absent from wire manifest".into(),
                 )
@@ -2807,9 +2807,7 @@ where
         Ok(())
     }
     .await;
-    if let Err(err) = recv_result {
-        return Err(err);
-    }
+    recv_result?;
 
     let staging_seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
     let staging_dir = dest_dir.join(format!(

@@ -987,6 +987,28 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
     if args.transport == Transport::Quic && args.server_name.is_none() {
         args.server_name = Some(default_quic_server_name_for_ssh(remote));
     }
+    let delta_package = if args.no_delta {
+        None
+    } else {
+        prepare_delta_ssh_send(&args, remote)?
+    };
+    if let Some(delta) = delta_package {
+        match delta {
+            DeltaSshSend::AlreadyInSync(report) => {
+                print_json(&report);
+                return Ok(());
+            }
+            DeltaSshSend::Package { package_root, plan } => {
+                eprintln!(
+                    "[atp] delta planner: sending {} chunk(s), {} byte(s), shared {} chunk(s)",
+                    plan.missing_chunks.len(),
+                    plan.missing_bytes,
+                    plan.shared_chunks
+                );
+                args.source = package_root;
+            }
+        }
+    }
     let data_target = socket_target(&data_host, args.remote_listen.port());
     let addr = resolve(&data_target)?;
     let mut child = spawn_remote_receiver(&args, remote, rq_auth.as_ref())?;
