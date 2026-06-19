@@ -129,6 +129,83 @@ pub enum SymbolAcceptResult {
     Rejected(RejectReason),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedDecodeMode {
+    Inline,
+    Deferred,
+}
+
+/// Result of a feed that may defer the CPU-heavy RaptorQ solve to a blocking
+/// worker.
+#[derive(Debug)]
+pub(crate) enum DeferredSymbolAcceptResult {
+    /// The symbol was handled synchronously.
+    Immediate(SymbolAcceptResult),
+    /// The block reached decode threshold and should be solved off the caller's
+    /// hot receive path.
+    Decode(BlockDecodeJob),
+}
+
+/// Owned RaptorQ block-decode job.
+#[derive(Debug, Clone)]
+pub(crate) struct BlockDecodeJob {
+    sbn: u8,
+    plan: BlockPlan,
+    symbols: Vec<Symbol>,
+    symbol_size: usize,
+    retain_decoded_block: bool,
+}
+
+impl BlockDecodeJob {
+    #[must_use]
+    pub(crate) const fn sbn(&self) -> u8 {
+        self.sbn
+    }
+}
+
+#[derive(Debug)]
+enum BlockDecodeResolution {
+    Complete(Vec<u8>),
+    Retry(RejectReason),
+    Failed(RejectReason),
+}
+
+/// Output from a [`BlockDecodeJob`]. Feed it back through
+/// [`DecodingPipeline::finish_decode_job`] to update pipeline state.
+#[derive(Debug)]
+pub(crate) struct BlockDecodeOutcome {
+    sbn: u8,
+    retain_decoded_block: bool,
+    resolution: BlockDecodeResolution,
+}
+
+/// Runs an owned block-decode job. Intended for `Cx::spawn_blocking`.
+#[must_use]
+pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
+    let resolution = match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
+        Ok(data) => BlockDecodeResolution::Complete(data),
+        Err(DecodingError::InsufficientSymbols { .. }) => {
+            BlockDecodeResolution::Retry(RejectReason::InsufficientRank)
+        }
+        Err(DecodingError::MatrixInversionFailed { .. }) => {
+            BlockDecodeResolution::Retry(RejectReason::InconsistentEquations)
+        }
+        Err(DecodingError::InconsistentMetadata { .. }) => {
+            BlockDecodeResolution::Failed(RejectReason::InvalidMetadata)
+        }
+        Err(DecodingError::SymbolSizeMismatch { .. }) => {
+            BlockDecodeResolution::Failed(RejectReason::SymbolSizeMismatch)
+        }
+        Err(_) => BlockDecodeResolution::Failed(RejectReason::InconsistentEquations),
+    };
+
+    BlockDecodeOutcome {
+        sbn: job.sbn,
+        retain_decoded_block: job.retain_decoded_block,
+        resolution,
+    }
+}
+
 /// Configuration for decoding operations.
 #[derive(Debug, Clone)]
 pub struct DecodingConfig {
@@ -401,19 +478,47 @@ impl DecodingPipeline {
         self.feed_with_retention(auth_symbol, false)
     }
 
+    /// Feeds a streaming symbol and returns an owned decode job when the block
+    /// reaches threshold. The caller must run the job and pass its outcome to
+    /// [`Self::finish_decode_job`].
+    pub(crate) fn feed_streaming_block_deferred(
+        &mut self,
+        auth_symbol: AuthenticatedSymbol,
+    ) -> Result<DeferredSymbolAcceptResult, DecodingError> {
+        self.feed_with_retention_and_mode(auth_symbol, false, FeedDecodeMode::Deferred)
+    }
+
     fn feed_with_retention(
+        &mut self,
+        auth_symbol: AuthenticatedSymbol,
+        retain_decoded_block: bool,
+    ) -> Result<SymbolAcceptResult, DecodingError> {
+        match self.feed_with_retention_and_mode(
+            auth_symbol,
+            retain_decoded_block,
+            FeedDecodeMode::Inline,
+        )? {
+            DeferredSymbolAcceptResult::Immediate(result) => Ok(result),
+            DeferredSymbolAcceptResult::Decode(job) => Ok(SymbolAcceptResult::DecodingStarted {
+                block_sbn: job.sbn(),
+            }),
+        }
+    }
+
+    fn feed_with_retention_and_mode(
         &mut self,
         mut auth_symbol: AuthenticatedSymbol,
         retain_decoded_block: bool,
-    ) -> Result<SymbolAcceptResult, DecodingError> {
+        mode: FeedDecodeMode,
+    ) -> Result<DeferredSymbolAcceptResult, DecodingError> {
         if self.config.verify_auth {
             match &self.auth_context {
                 Some(ctx) => {
                     if ctx.verify_authenticated_symbol(&mut auth_symbol).is_err()
                         || !auth_symbol.is_verified()
                     {
-                        return Ok(SymbolAcceptResult::Rejected(
-                            RejectReason::AuthenticationFailed,
+                        return Ok(DeferredSymbolAcceptResult::Immediate(
+                            SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed),
                         ));
                     }
                 }
@@ -421,8 +526,8 @@ impl DecodingPipeline {
                     // A bare `verified` bit does not identify which key or verifier vouched for
                     // the symbol. Without an auth context, we cannot authenticate deterministically
                     // and must fail closed.
-                    return Ok(SymbolAcceptResult::Rejected(
-                        RejectReason::AuthenticationFailed,
+                    return Ok(DeferredSymbolAcceptResult::Immediate(
+                        SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed),
                     ));
                 }
             }
@@ -448,14 +553,16 @@ impl DecodingPipeline {
         let symbol = auth_symbol.into_symbol();
 
         if symbol.len() != usize::from(self.config.symbol_size) {
-            return Ok(SymbolAcceptResult::Rejected(
-                RejectReason::SymbolSizeMismatch,
+            return Ok(DeferredSymbolAcceptResult::Immediate(
+                SymbolAcceptResult::Rejected(RejectReason::SymbolSizeMismatch),
             ));
         }
 
         if let Some(object_id) = self.object_id {
             if object_id != symbol.object_id() {
-                return Ok(SymbolAcceptResult::Rejected(RejectReason::WrongObjectId));
+                return Ok(DeferredSymbolAcceptResult::Immediate(
+                    SymbolAcceptResult::Rejected(RejectReason::WrongObjectId),
+                ));
             }
         } else {
             self.object_id = Some(symbol.object_id());
@@ -464,11 +571,13 @@ impl DecodingPipeline {
         let sbn = symbol.sbn();
         let kind = symbol.kind();
         if self.block_plans.is_some() && self.block_plan(sbn).is_none() {
-            return Ok(SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata));
+            return Ok(DeferredSymbolAcceptResult::Immediate(
+                SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata),
+            ));
         }
         if self.completed_blocks.contains(&sbn) {
-            return Ok(SymbolAcceptResult::Rejected(
-                RejectReason::BlockAlreadyDecoded,
+            return Ok(DeferredSymbolAcceptResult::Immediate(
+                SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded),
             ));
         }
 
@@ -480,9 +589,13 @@ impl DecodingPipeline {
 
         let insert_result = self.symbols.insert(symbol);
         match insert_result {
-            InsertResult::Duplicate => Ok(SymbolAcceptResult::Duplicate),
+            InsertResult::Duplicate => Ok(DeferredSymbolAcceptResult::Immediate(
+                SymbolAcceptResult::Duplicate,
+            )),
             InsertResult::MemoryLimitReached | InsertResult::BlockLimitReached { .. } => Ok(
-                SymbolAcceptResult::Rejected(RejectReason::MemoryLimitReached),
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
+                    RejectReason::MemoryLimitReached,
+                )),
             ),
             InsertResult::Inserted {
                 block_progress,
@@ -521,12 +634,30 @@ impl DecodingPipeline {
                     )
                 });
                 if k.is_some_and(|k| source_received >= k || received >= needed) {
+                    if matches!(mode, FeedDecodeMode::Deferred)
+                        && self.block_is_decoding(sbn)
+                    {
+                        return Ok(DeferredSymbolAcceptResult::Immediate(
+                            SymbolAcceptResult::Accepted { received, needed },
+                        ));
+                    }
+
                     // Update state to Decoding
                     if let Some(block) = self.blocks.get_mut(&sbn) {
                         block.state = BlockDecodingState::Decoding;
                     }
-                    if let Some(result) = self.try_decode_block(sbn, retain_decoded_block) {
-                        return Ok(result);
+                    if matches!(mode, FeedDecodeMode::Deferred) {
+                        if let Some(result) = self.try_complete_source_block(
+                            sbn,
+                            retain_decoded_block,
+                        ) {
+                            return Ok(DeferredSymbolAcceptResult::Immediate(result));
+                        }
+                        if let Some(job) = self.prepare_decode_job(sbn, retain_decoded_block) {
+                            return Ok(DeferredSymbolAcceptResult::Decode(job));
+                        }
+                    } else if let Some(result) = self.try_decode_block(sbn, retain_decoded_block) {
+                        return Ok(DeferredSymbolAcceptResult::Immediate(result));
                     }
                 }
 
@@ -539,7 +670,9 @@ impl DecodingPipeline {
                         block.state = BlockDecodingState::Collecting;
                     }
                 }
-                Ok(SymbolAcceptResult::Accepted { received, needed })
+                Ok(DeferredSymbolAcceptResult::Immediate(
+                    SymbolAcceptResult::Accepted { received, needed },
+                ))
             }
         }
     }
@@ -657,75 +790,22 @@ impl DecodingPipeline {
         sbn: u8,
         retain_decoded_block: bool,
     ) -> Option<SymbolAcceptResult> {
+        if let Some(result) = self.try_complete_source_block(sbn, retain_decoded_block) {
+            return Some(result);
+        }
+
+        let job = self.prepare_decode_job(sbn, retain_decoded_block)?;
+        let outcome = run_block_decode_job(job);
+        Some(self.finish_inline_decode_job(outcome))
+    }
+
+    fn try_complete_source_block(
+        &mut self,
+        sbn: u8,
+        retain_decoded_block: bool,
+    ) -> Option<SymbolAcceptResult> {
         let block_plan = self.block_plan(sbn)?.clone();
-        let k = block_plan.k;
-        if k == 0 {
-            return None;
-        }
-
-        if let Some(block_data) = self.try_complete_from_source_symbols(&block_plan) {
-            self.mark_block_complete(sbn, retain_decoded_block.then(|| block_data.clone()));
-            return Some(SymbolAcceptResult::BlockComplete {
-                block_sbn: sbn,
-                data: block_data,
-            });
-        }
-
-        let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
-        if symbols.len() < k {
-            return None;
-        }
-
-        let decoded_symbols = match decode_block(
-            &block_plan,
-            &symbols,
-            usize::from(self.config.symbol_size),
-        ) {
-            Ok(symbols) => symbols,
-            Err(DecodingError::InsufficientSymbols { .. }) => {
-                return Some(SymbolAcceptResult::Rejected(RejectReason::InsufficientRank));
-            }
-            Err(DecodingError::MatrixInversionFailed { .. }) => {
-                return Some(SymbolAcceptResult::Rejected(
-                    RejectReason::InconsistentEquations,
-                ));
-            }
-            Err(DecodingError::InconsistentMetadata { .. }) => {
-                let block = self.blocks.get_mut(&sbn);
-                if let Some(block) = block {
-                    block.state = BlockDecodingState::Failed;
-                }
-                return Some(SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata));
-            }
-            Err(DecodingError::SymbolSizeMismatch { .. }) => {
-                let block = self.blocks.get_mut(&sbn);
-                if let Some(block) = block {
-                    block.state = BlockDecodingState::Failed;
-                }
-                return Some(SymbolAcceptResult::Rejected(
-                    RejectReason::SymbolSizeMismatch,
-                ));
-            }
-            Err(err) => {
-                let block = self.blocks.get_mut(&sbn);
-                if let Some(block) = block {
-                    block.state = BlockDecodingState::Failed;
-                }
-                #[cfg(feature = "tracing-integration")]
-                tracing::error!(sbn = sbn, error = %err, "unexpected error during block decode");
-                #[cfg(not(feature = "tracing-integration"))]
-                let _ = &err;
-                return Some(SymbolAcceptResult::Rejected(
-                    RejectReason::InconsistentEquations,
-                ));
-            }
-        };
-
-        let mut block_data = Vec::with_capacity(block_plan.len);
-        for symbol in &decoded_symbols {
-            block_data.extend_from_slice(symbol.data());
-        }
-        block_data.truncate(block_plan.len);
+        let block_data = self.try_complete_from_source_symbols(&block_plan)?;
 
         self.mark_block_complete(sbn, retain_decoded_block.then(|| block_data.clone()));
 
@@ -733,6 +813,99 @@ impl DecodingPipeline {
             block_sbn: sbn,
             data: block_data,
         })
+    }
+
+    fn prepare_decode_job(
+        &self,
+        sbn: u8,
+        retain_decoded_block: bool,
+    ) -> Option<BlockDecodeJob> {
+        let block_plan = self.block_plan(sbn)?.clone();
+        if block_plan.k == 0 {
+            return None;
+        }
+
+        let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
+        if symbols.len() < block_plan.k {
+            return None;
+        }
+
+        Some(BlockDecodeJob {
+            sbn,
+            plan: block_plan,
+            symbols,
+            symbol_size: usize::from(self.config.symbol_size),
+            retain_decoded_block,
+        })
+    }
+
+    fn block_is_decoding(&self, sbn: u8) -> bool {
+        self.blocks
+            .get(&sbn)
+            .is_some_and(|block| matches!(block.state, BlockDecodingState::Decoding))
+    }
+
+    fn finish_inline_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
+        match outcome.resolution {
+            BlockDecodeResolution::Complete(block_data) => {
+                self.mark_block_complete(
+                    outcome.sbn,
+                    outcome.retain_decoded_block.then(|| block_data.clone()),
+                );
+                SymbolAcceptResult::BlockComplete {
+                    block_sbn: outcome.sbn,
+                    data: block_data,
+                }
+            }
+            BlockDecodeResolution::Retry(reason) => {
+                if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
+                    block.state = BlockDecodingState::Collecting;
+                }
+                SymbolAcceptResult::Rejected(reason)
+            }
+            BlockDecodeResolution::Failed(reason) => {
+                if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
+                    block.state = BlockDecodingState::Failed;
+                }
+                SymbolAcceptResult::Rejected(reason)
+            }
+        }
+    }
+
+    /// Finalizes a previously deferred decode job and updates block state.
+    #[must_use]
+    pub(crate) fn finish_decode_job(
+        &mut self,
+        outcome: BlockDecodeOutcome,
+    ) -> SymbolAcceptResult {
+        if self.completed_blocks.contains(&outcome.sbn) {
+            return SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded);
+        }
+
+        match outcome.resolution {
+            BlockDecodeResolution::Complete(block_data) => {
+                self.mark_block_complete(
+                    outcome.sbn,
+                    outcome.retain_decoded_block.then(|| block_data.clone()),
+                );
+                SymbolAcceptResult::BlockComplete {
+                    block_sbn: outcome.sbn,
+                    data: block_data,
+                }
+            }
+            BlockDecodeResolution::Retry(reason) => {
+                if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
+                    block.state = BlockDecodingState::Collecting;
+                }
+                SymbolAcceptResult::Rejected(reason)
+            }
+            BlockDecodeResolution::Failed(reason) => {
+                if let Some(block) = self.blocks.get_mut(&outcome.sbn) {
+                    block.state = BlockDecodingState::Failed;
+                }
+                SymbolAcceptResult::Rejected(reason)
+            }
+        }
     }
 
     fn try_complete_from_source_symbols(&self, block_plan: &BlockPlan) -> Option<Vec<u8>> {
@@ -1202,6 +1375,20 @@ fn decode_block(
     }
 
     Ok(decoded_symbols)
+}
+
+fn decode_block_data(
+    plan: &BlockPlan,
+    symbols: &[Symbol],
+    symbol_size: usize,
+) -> Result<Vec<u8>, DecodingError> {
+    let decoded_symbols = decode_block(plan, symbols, symbol_size)?;
+    let mut block_data = Vec::with_capacity(plan.len);
+    for symbol in &decoded_symbols {
+        block_data.extend_from_slice(symbol.data());
+    }
+    block_data.truncate(plan.len);
+    Ok(block_data)
 }
 
 fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
@@ -2850,6 +3037,81 @@ mod tests {
             decoded_data.len()
         );
         crate::test_complete!("multi_block_roundtrip");
+    }
+
+    #[test]
+    fn deferred_streaming_feed_finishes_via_decode_job() {
+        init_test("deferred_streaming_feed_finishes_via_decode_job");
+        let config = crate::config::EncodingConfig {
+            symbol_size: 4,
+            max_block_size: 8,
+            repair_overhead: 1.0,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let object_id = ObjectId::new_for_test(113);
+        let data = b"ABCDEFGH".to_vec();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let mut source_zero = None;
+        let mut first_repair = None;
+        for encoded in encoder.encode_single_block_with_repair(object_id, 0, &data, 1) {
+            let symbol = encoded.expect("encode").into_symbol();
+            match symbol.kind() {
+                SymbolKind::Source if symbol.esi() == 0 => source_zero = Some(symbol),
+                SymbolKind::Repair if first_repair.is_none() => first_repair = Some(symbol),
+                _ => {}
+            }
+        }
+
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 8192,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data.len() as u64,
+                config.symbol_size,
+                1,
+                2,
+            ))
+            .expect("set params");
+
+        let first = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                source_zero.expect("source zero"),
+            ))
+            .expect("feed source");
+        assert!(matches!(
+            first,
+            DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. })
+        ));
+
+        let second = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                first_repair.expect("repair"),
+            ))
+            .expect("feed repair");
+        let DeferredSymbolAcceptResult::Decode(job) = second else {
+            panic!("second symbol should start deferred decode");
+        };
+
+        let outcome = run_block_decode_job(job);
+        let result = decoder.finish_decode_job(outcome);
+        match result {
+            SymbolAcceptResult::BlockComplete { block_sbn, data: got } => {
+                assert_eq!(block_sbn, 0);
+                assert_eq!(got, data);
+            }
+            other => panic!("deferred decode should complete block, got {other:?}"),
+        }
+        assert!(decoder.is_complete());
+        crate::test_complete!("deferred_streaming_feed_finishes_via_decode_job");
     }
 
     #[test]

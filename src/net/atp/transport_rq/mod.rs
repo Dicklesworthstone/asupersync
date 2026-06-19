@@ -63,7 +63,10 @@ use sha2::{Digest, Sha256};
 use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
-use crate::decoding::{DecodingConfig, DecodingPipeline, MissingSourceSymbol, SymbolAcceptResult};
+use crate::decoding::{
+    BlockDecodeOutcome, DecodingConfig, DecodingPipeline, DeferredSymbolAcceptResult,
+    MissingSourceSymbol, SymbolAcceptResult, run_block_decode_job,
+};
 use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
@@ -2479,6 +2482,12 @@ struct EntryDecoder {
     max_block_size: usize,
     source_streaming: bool,
     source_blocks: Vec<SourceBlockProgress>,
+    pending_decodes: Vec<PendingDecode>,
+}
+
+struct PendingDecode {
+    block_sbn: u8,
+    handle: crate::runtime::TaskHandle<BlockDecodeOutcome>,
 }
 
 #[derive(Debug)]
@@ -3735,6 +3744,7 @@ pub async fn receive_connection(
                 max_block_size: receiver_max_block_size,
                 source_streaming: entry_source_streaming,
                 source_blocks: source_blocks.unwrap_or_default(),
+                pending_decodes: Vec::new(),
             }
         })
         .collect();
@@ -3797,6 +3807,12 @@ pub async fn receive_connection(
                 .await?;
                 if drained > 0 {
                     rqtrace!("receiver: tail-drained {drained} datagrams after ObjectComplete");
+                }
+                let completed_decodes = join_all_pending_decodes(cx, &mut decoders).await?;
+                if completed_decodes > 0 {
+                    rqtrace!(
+                        "receiver: finalized {completed_decodes} pending decode job(s) after ObjectComplete"
+                    );
                 }
 
                 let pending: Vec<u32> = decoders
@@ -4004,7 +4020,8 @@ fn collect_source_requests(decoders: &[EntryDecoder], limit: usize) -> Vec<Sourc
     requests
 }
 
-async fn feed_symbol(
+async fn feed_symbol_with_cx(
+    cx: &Cx,
     dec: &mut EntryDecoder,
     parsed: &ParsedDatagram,
     payload: &[u8],
@@ -4075,7 +4092,37 @@ async fn feed_symbol(
         .pipeline
         .as_mut()
         .expect("checked above")
-        .feed_streaming_block(auth);
+        .feed_streaming_block_deferred(auth);
+    let result = match result {
+        Ok(DeferredSymbolAcceptResult::Immediate(result)) => Ok(result),
+        Ok(DeferredSymbolAcceptResult::Decode(job)) => {
+            let block_sbn = job.sbn();
+            let fallback_job = job.clone();
+            match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+                Ok(handle) => {
+                    dec.pending_decodes.push(PendingDecode { block_sbn, handle });
+                    rqtrace!(
+                        "receiver: entry {} started parallel decode block {} via esi={} kind={:?}",
+                        dec.index,
+                        block_sbn,
+                        parsed.esi,
+                        parsed.kind
+                    );
+                }
+                Err(err) => {
+                    rqtrace!(
+                        "receiver: entry {} running decode block {} inline after spawn denial: {err:?}",
+                        dec.index,
+                        block_sbn
+                    );
+                    let outcome = run_block_decode_job(fallback_job);
+                    let _ = finalize_decode_outcome(dec, outcome).await?;
+                }
+            }
+            return Ok(true);
+        }
+        Err(err) => Err(err),
+    };
     match result {
         Ok(SymbolAcceptResult::Accepted { received, needed }) => {
             if received >= needed || received % 64 == 0 {
@@ -4156,6 +4203,18 @@ async fn feed_symbol(
             Ok(false)
         }
     }
+}
+
+#[cfg(test)]
+async fn feed_symbol(
+    dec: &mut EntryDecoder,
+    parsed: &ParsedDatagram,
+    payload: &[u8],
+    symbol_size: u16,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<bool, RqError> {
+    let cx = Cx::for_testing();
+    feed_symbol_with_cx(&cx, dec, parsed, payload, symbol_size, symbol_auth).await
 }
 
 async fn seed_source_streaming_pipeline(
@@ -4949,6 +5008,7 @@ fn parse_symbol_datagram_payload(
 }
 
 async fn feed_datagram_to_decoders(
+    cx: &Cx,
     buf: &[u8],
     n: usize,
     tag: u64,
@@ -4963,7 +5023,8 @@ async fn feed_datagram_to_decoders(
     let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
         return Ok(false);
     };
-    feed_symbol(
+    feed_symbol_with_cx(
+        cx,
         &mut decoders[pos],
         &parsed,
         payload,
@@ -4974,6 +5035,7 @@ async fn feed_datagram_to_decoders(
 }
 
 async fn feed_datagram_batch_to_decoders(
+    cx: &Cx,
     batch: &crate::net::UdpRecvBatch,
     tag: u64,
     auth_required: bool,
@@ -4984,6 +5046,7 @@ async fn feed_datagram_batch_to_decoders(
     let mut accepted = 0u64;
     for packet in &batch.packets {
         if feed_datagram_to_decoders(
+            cx,
             &packet.payload,
             packet.payload.len(),
             tag,
@@ -4997,7 +5060,95 @@ async fn feed_datagram_batch_to_decoders(
             accepted = accepted.saturating_add(1);
         }
     }
+    let _ = drain_ready_decodes(cx, decoders).await?;
     Ok(accepted)
+}
+
+async fn finalize_decode_outcome(
+    dec: &mut EntryDecoder,
+    outcome: BlockDecodeOutcome,
+) -> Result<bool, RqError> {
+    let Some(pipeline) = dec.pipeline.as_mut() else {
+        return Ok(false);
+    };
+    let result = pipeline.finish_decode_job(outcome);
+    match result {
+        SymbolAcceptResult::BlockComplete { block_sbn, data } => {
+            persist_decoded_block(dec, block_sbn, &data).await?;
+            if dec.complete
+                || dec
+                    .pipeline
+                    .as_ref()
+                    .is_some_and(DecodingPipeline::is_complete)
+            {
+                dec.complete = true;
+                dec.pipeline = None;
+            }
+            rqtrace!(
+                "receiver: entry {} completed parallel decode block {}",
+                dec.index,
+                block_sbn
+            );
+            Ok(true)
+        }
+        SymbolAcceptResult::Rejected(reason) => {
+            rqtrace!(
+                "receiver: entry {} parallel decode rejected reason={reason:?}",
+                dec.index
+            );
+            Ok(false)
+        }
+        SymbolAcceptResult::Accepted { .. }
+        | SymbolAcceptResult::DecodingStarted { .. }
+        | SymbolAcceptResult::Duplicate => Ok(false),
+    }
+}
+
+async fn drain_ready_decodes(cx: &Cx, decoders: &mut [EntryDecoder]) -> Result<u64, RqError> {
+    let mut completed = 0u64;
+    for dec in decoders {
+        let mut i = 0usize;
+        while i < dec.pending_decodes.len() {
+            if !dec.pending_decodes[i].handle.is_finished() {
+                i += 1;
+                continue;
+            }
+            let mut pending = dec.pending_decodes.swap_remove(i);
+            let block_sbn = pending.block_sbn;
+            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+                RqError::Coding(format!(
+                    "decode task failed for entry {} block {}: {join_err:?}",
+                    dec.index, block_sbn
+                ))
+            })?;
+            if finalize_decode_outcome(dec, outcome).await? {
+                completed = completed.saturating_add(1);
+            }
+        }
+    }
+    Ok(completed)
+}
+
+async fn join_all_pending_decodes(
+    cx: &Cx,
+    decoders: &mut [EntryDecoder],
+) -> Result<u64, RqError> {
+    let mut completed = 0u64;
+    for dec in decoders {
+        while let Some(mut pending) = dec.pending_decodes.pop() {
+            let block_sbn = pending.block_sbn;
+            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+                RqError::Coding(format!(
+                    "decode task failed for entry {} block {}: {join_err:?}",
+                    dec.index, block_sbn
+                ))
+            })?;
+            if finalize_decode_outcome(dec, outcome).await? {
+                completed = completed.saturating_add(1);
+            }
+        }
+    }
+    Ok(completed)
 }
 
 /// Pump UDP symbol datagrams into the decoders until a control frame arrives.
@@ -5036,6 +5187,7 @@ where
     let mut pumped: u64 = 0;
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
+        let _ = drain_ready_decodes(cx, decoders).await?;
 
         // 1) First, non-blockingly drain whatever the control codec already has
         //    buffered (a prior read may have pulled the frame in with symbols).
@@ -5081,6 +5233,7 @@ where
                 let mut received_len = batch.packets.len();
                 let mut batches = 1usize;
                 let accepted = feed_datagram_batch_to_decoders(
+                    cx,
                     &batch,
                     tag,
                     auth_required,
@@ -5091,6 +5244,7 @@ where
                 .await?;
                 pumped = pumped.saturating_add(accepted);
                 *symbols_accepted = (*symbols_accepted).saturating_add(accepted);
+                let _ = drain_ready_decodes(cx, decoders).await?;
 
                 while received_len == RQ_INBOUND_PUMP_BATCH {
                     if batches >= RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES {
@@ -5116,6 +5270,7 @@ where
                         break;
                     }
                     let accepted = feed_datagram_batch_to_decoders(
+                        cx,
                         &tail,
                         tag,
                         auth_required,
@@ -5126,6 +5281,7 @@ where
                     .await?;
                     pumped = pumped.saturating_add(accepted);
                     *symbols_accepted = (*symbols_accepted).saturating_add(accepted);
+                    let _ = drain_ready_decodes(cx, decoders).await?;
                     batches = batches.saturating_add(1);
                 }
             }
@@ -5207,6 +5363,7 @@ async fn drain_round_tail(
         };
 
         if feed_datagram_to_decoders(
+            cx,
             rbuf,
             n,
             tag,
@@ -5221,6 +5378,7 @@ async fn drain_round_tail(
             *symbols_accepted = (*symbols_accepted).saturating_add(1);
             quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
         }
+        let _ = drain_ready_decodes(cx, decoders).await?;
 
         if drained > 0 && drained % 512 == 0 {
             crate::runtime::yield_now().await;
@@ -5773,6 +5931,7 @@ mod tests {
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
             source_blocks: Vec::new(),
+            pending_decodes: Vec::new(),
         }];
 
         let err = futures_lite::future::block_on(verify_and_commit(
@@ -5859,6 +6018,7 @@ mod tests {
                 symbol_size,
             )
             .expect("test source blocks"),
+            pending_decodes: Vec::new(),
         }
     }
 
@@ -6136,6 +6296,7 @@ mod tests {
             max_block_size: 4,
             source_streaming: true,
             source_blocks: source_block_progress_for(8, 4, symbol_size).expect("two source blocks"),
+            pending_decodes: Vec::new(),
         };
         assert_eq!(decoder.source_blocks.len(), 2);
 
@@ -7107,6 +7268,7 @@ mod tests {
                 max_block_size: DEFAULT_MAX_BLOCK_SIZE,
                 source_streaming: false,
                 source_blocks: Vec::new(),
+                pending_decodes: Vec::new(),
             },
             EntryDecoder {
                 index: 1,
@@ -7120,6 +7282,7 @@ mod tests {
                 max_block_size: DEFAULT_MAX_BLOCK_SIZE,
                 source_streaming: false,
                 source_blocks: Vec::new(),
+                pending_decodes: Vec::new(),
             },
         ];
 
@@ -7382,6 +7545,7 @@ mod tests {
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
             source_blocks: Vec::new(),
+            pending_decodes: Vec::new(),
         }];
 
         let receipt = futures_lite::future::block_on(verify_and_commit(
@@ -7556,6 +7720,7 @@ mod tests {
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
             source_blocks: Vec::new(),
+            pending_decodes: Vec::new(),
         }];
 
         let receipt = futures_lite::future::block_on(verify_and_commit(
