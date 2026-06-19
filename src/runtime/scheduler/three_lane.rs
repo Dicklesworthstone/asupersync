@@ -9111,6 +9111,39 @@ mod tests {
     }
 
     #[test]
+    fn local_ready_tombstones_skip_cancelled_entries_in_fifo_order() {
+        let first = TaskId::new_for_test(1, 0);
+        let cancelled_a = TaskId::new_for_test(1, 1);
+        let cancelled_b = TaskId::new_for_test(1, 2);
+        let last = TaskId::new_for_test(1, 3);
+        let mut local_ready =
+            LocalReadyQueueInner::new(VecDeque::from([first, cancelled_a, cancelled_b, last]));
+
+        local_ready.tombstone(cancelled_a);
+        local_ready.tombstone(cancelled_b);
+
+        assert_eq!(
+            local_ready.snapshot(),
+            vec![first, last],
+            "tombstones should hide cancelled tasks from diagnostics"
+        );
+        assert_eq!(local_ready.len(), 2, "only live tasks should count");
+        assert!(
+            !local_ready.contains(&cancelled_a) && !local_ready.contains(&cancelled_b),
+            "cancelled tasks should not look live while awaiting lazy skip"
+        );
+
+        assert_eq!(local_ready.pop_front(), Some(first));
+        assert_eq!(
+            local_ready.pop_front(),
+            Some(last),
+            "lazy tombstones should not reorder later live tasks"
+        );
+        assert_eq!(local_ready.pop_front(), None);
+        assert!(local_ready.is_empty(), "all membership state should drain");
+    }
+
+    #[test]
     fn local_cancel_promotion_waits_on_local_before_local_ready() {
         let task_id = TaskId::new_for_test(1, 2);
         let local_ready = Arc::new(local_ready_queue(VecDeque::from([task_id])));
