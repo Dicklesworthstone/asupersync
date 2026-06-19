@@ -200,6 +200,8 @@ pub enum RejectionReason {
     LowUsefulness { usefulness: f64, threshold: f64 },
     /// Symbol already received
     DuplicateSymbol,
+    /// Requested peer disappeared before delivering the assigned symbol
+    PeerUnavailable { peer: String },
     /// Peer exceeded budget
     BudgetExceeded { available: u64, requested: u64 },
     /// Peer trust score too low
@@ -243,6 +245,9 @@ impl std::fmt::Display for RejectionReason {
                 )
             }
             RejectionReason::DuplicateSymbol => write!(f, "duplicate symbol"),
+            RejectionReason::PeerUnavailable { peer } => {
+                write!(f, "peer unavailable before symbol delivery: {}", peer)
+            }
             RejectionReason::BudgetExceeded {
                 available,
                 requested,
@@ -334,9 +339,27 @@ impl MultiSourceRepairScheduler {
         if let Some(_peer_info) = self.peers.remove(peer_id) {
             info!("Unregistering peer {}", peer_id.as_string());
 
-            // Cancel any pending requests from this peer
-            self.pending_requests
-                .retain(|_, request| request.peer_id != *peer_id);
+            // Retire any pending requests from this peer through the same
+            // accounting path as timeouts/rejections. Dropping them silently
+            // would reset the symbol retry budget under churn and let a
+            // flapping peer make a symbol retry forever.
+            let mut cancelled_requests = Vec::new();
+            self.pending_requests.retain(|_, request| {
+                if request.peer_id == *peer_id {
+                    cancelled_requests.push(request.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            for request in cancelled_requests {
+                self.record_request_failure(
+                    request,
+                    RejectionReason::PeerUnavailable {
+                        peer: peer_id.as_string(),
+                    },
+                );
+            }
 
             // Update symbol rarity after peer removal
             self.recalculate_symbol_rarity();
@@ -1483,6 +1506,70 @@ mod tests {
             "symbol 1 already had its initial attempt plus one configured retry"
         );
         assert_eq!(scheduler.retry_count_for_symbol(1), 2);
+        assert_eq!(scheduler.get_decode_progress().rejected_symbols, 2);
+    }
+
+    #[test]
+    fn unregistered_peer_request_consumes_retry_budget() {
+        let config = RepairSchedulerConfig {
+            max_symbol_retries: 1,
+            ..RepairSchedulerConfig::default()
+        };
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            config,
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            1,
+        );
+
+        let first_peer = create_test_peer_id(8001);
+        let retry_peer = create_test_peer_id(8002);
+        let exhausted_peer = create_test_peer_id(8003);
+
+        for peer in [&first_peer, &retry_peer, &exhausted_peer] {
+            let info = create_test_peer_info(&scheduler, peer.clone(), vec![1]);
+            scheduler.register_peer(info).unwrap();
+        }
+
+        let first = scheduler
+            .schedule_next_batch_at(Time::from_secs(10))
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].peer_id, first_peer);
+        assert_eq!(first[0].retry_count, 0);
+
+        scheduler.unregister_peer(&first_peer);
+        assert!(scheduler.pending_requests.is_empty());
+        assert_eq!(scheduler.retry_count_for_symbol(1), 1);
+        assert_eq!(scheduler.get_decode_progress().rejected_symbols, 1);
+        assert!(
+            matches!(
+                scheduler.rejected_requests.back().map(|(_, reason)| reason),
+                Some(RejectionReason::PeerUnavailable { .. })
+            ),
+            "peer departure must be recorded as an unavailable-peer rejection"
+        );
+
+        let retry = scheduler
+            .schedule_next_batch_at(Time::from_secs(20))
+            .unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].peer_id, retry_peer);
+        assert_eq!(
+            retry[0].retry_count, 1,
+            "peer departure must preserve the retry count for the next request"
+        );
+
+        scheduler.unregister_peer(&retry_peer);
+        assert_eq!(scheduler.retry_count_for_symbol(1), 2);
+
+        let exhausted = scheduler
+            .schedule_next_batch_at(Time::from_secs(30))
+            .unwrap();
+        assert!(
+            exhausted.is_empty(),
+            "initial request plus one configured retry were already consumed by peer churn"
+        );
         assert_eq!(scheduler.get_decode_progress().rejected_symbols, 2);
     }
 
