@@ -222,6 +222,14 @@ const NATIVE_SYMBOL_DRAIN_BATCH: usize = 512;
 /// blocks off the hot receive pump, while avoiding unbounded blocking-pool and
 /// decoded-block memory pressure under bursty loss.
 const QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 16;
+/// Maximum native QUIC receiver decode jobs one transfer may have in flight.
+///
+/// The per-entry bound alone is insufficient for tree transfers: thousands of
+/// small files could otherwise multiply the blocking-pool queue and retained
+/// decoded-block memory by entry count. Once this transfer-wide window is full,
+/// decode falls back to the existing inline path until ready jobs drain.
+const QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER: usize =
+    QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY * 4;
 
 const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 
@@ -2177,6 +2185,13 @@ struct QuicPendingDecode {
     handle: crate::runtime::TaskHandle<BlockDecodeOutcome>,
 }
 
+fn quic_pending_decode_jobs(decoders: &[QuicEntryDecoder]) -> usize {
+    decoders
+        .iter()
+        .map(|decoder| decoder.pending_decodes.len())
+        .sum()
+}
+
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
 pub(crate) struct QuicDecodedBlock {
     pub(crate) entry: u32,
@@ -3188,6 +3203,7 @@ fn feed_authenticated_symbol_deferred(
     decoder: &mut QuicEntryDecoder,
     auth_symbol: AuthenticatedSymbol,
     decode_stats: &mut QuicDecodeStats,
+    allow_spawn_decode: bool,
 ) -> Result<bool, QuicTransportError> {
     if decoder.complete {
         return Ok(false);
@@ -3215,7 +3231,9 @@ fn feed_authenticated_symbol_deferred(
         )) => Ok(false),
         Ok(DeferredSymbolAcceptResult::Decode(job)) => {
             let block_sbn = job.sbn();
-            if decoder.pending_decodes.len() >= QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY {
+            if !allow_spawn_decode
+                || decoder.pending_decodes.len() >= QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY
+            {
                 let outcome = run_block_decode_job(job);
                 return finish_quic_decode_outcome(decoder, outcome, decode_stats, started_at);
             }
@@ -3504,9 +3522,9 @@ fn feed_aggregated_symbol_for_entry_deferred(
     receive: QuicReceiveAggregation<'_>,
     decode_stats: &mut QuicDecodeStats,
 ) -> Result<u64, QuicTransportError> {
-    let decoder = decoders
-        .iter_mut()
-        .find(|decoder| decoder.index == entry)
+    let decoder_index = decoders
+        .iter()
+        .position(|decoder| decoder.index == entry)
         .ok_or_else(|| {
             QuicTransportError::Integrity(format!("symbol for unknown manifest entry {entry}"))
         })?;
@@ -3528,7 +3546,15 @@ fn feed_aggregated_symbol_for_entry_deferred(
             ));
         }
         let ready = authenticated_symbol_with_existing_tag(symbol, &auth_symbol);
-        if feed_authenticated_symbol_deferred(cx, decoder, ready, decode_stats)? {
+        let allow_spawn_decode =
+            quic_pending_decode_jobs(decoders) < QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER;
+        if feed_authenticated_symbol_deferred(
+            cx,
+            &mut decoders[decoder_index],
+            ready,
+            decode_stats,
+            allow_spawn_decode,
+        )? {
             accepted = accepted.saturating_add(1);
         }
     }
