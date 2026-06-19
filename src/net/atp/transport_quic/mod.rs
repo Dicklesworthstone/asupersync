@@ -228,8 +228,7 @@ const QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 16;
 /// small files could otherwise multiply the blocking-pool queue and retained
 /// decoded-block memory by entry count. Once this transfer-wide window is full,
 /// decode falls back to the existing inline path until ready jobs drain.
-const QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER: usize =
-    QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY * 4;
+const QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER: usize = QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY * 4;
 
 const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 
@@ -3171,19 +3170,46 @@ fn feed_authenticated_symbol(
     }
 }
 
+fn materialize_decoder_data_if_complete(
+    decoder: &mut QuicEntryDecoder,
+) -> Result<(), QuicTransportError> {
+    if !decoder
+        .pipeline
+        .as_ref()
+        .is_some_and(DecodingPipeline::is_complete)
+    {
+        return Ok(());
+    }
+    let Some(pipeline) = decoder.pipeline.take() else {
+        return Ok(());
+    };
+    let mut bytes = pipeline.into_data().map_err(|err| {
+        QuicTransportError::Control(format!(
+            "RaptorQ decoder completed but data assembly failed: {err}"
+        ))
+    })?;
+    bytes.truncate(usize::try_from(decoder.size).unwrap_or(usize::MAX));
+    decoder.data = bytes;
+    decoder.complete = true;
+    Ok(())
+}
+
 fn finish_quic_decode_outcome(
     decoder: &mut QuicEntryDecoder,
     outcome: BlockDecodeOutcome,
     decode_stats: &mut QuicDecodeStats,
     started_at: Instant,
 ) -> Result<bool, QuicTransportError> {
-    let Some(pipeline) = decoder.pipeline.as_mut() else {
-        return Ok(false);
+    let result = {
+        let Some(pipeline) = decoder.pipeline.as_mut() else {
+            return Ok(false);
+        };
+        pipeline.finish_decode_job(outcome)
     };
-    match pipeline.finish_decode_job(outcome) {
+    match result {
         SymbolAcceptResult::BlockComplete { .. } => {
             decode_stats.record_completed_block(started_at.elapsed());
-            decoder.complete = pipeline.is_complete();
+            materialize_decoder_data_if_complete(decoder)?;
             Ok(true)
         }
         SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed) => Err(
@@ -3208,14 +3234,17 @@ fn feed_authenticated_symbol_deferred(
     if decoder.complete {
         return Ok(false);
     }
-    let Some(pipeline) = decoder.pipeline.as_mut() else {
-        return Ok(false);
+    let result = {
+        let Some(pipeline) = decoder.pipeline.as_mut() else {
+            return Ok(false);
+        };
+        pipeline.feed_deferred(auth_symbol)
     };
     let started_at = Instant::now();
-    match pipeline.feed_deferred(auth_symbol) {
+    match result {
         Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete { .. })) => {
             decode_stats.record_completed_block(started_at.elapsed());
-            decoder.complete = pipeline.is_complete();
+            materialize_decoder_data_if_complete(decoder)?;
             Ok(true)
         }
         Ok(DeferredSymbolAcceptResult::Immediate(
