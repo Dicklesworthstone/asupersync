@@ -4,8 +4,8 @@
 //! changed byte region with the existing content-addressed chunks, then send a
 //! sparse GF(256) syndrome for that region.  This first slice is intentionally
 //! a small, testable foundation: shape/rate types, deterministic rateless row
-//! generation, syndrome encoding, and a belief-propagation style erasure
-//! peeling decoder seeded from the receiver's old bytes.
+//! generation, syndrome encoding, and belief-propagation style peeling decoders
+//! seeded from the receiver's old bytes.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -581,6 +581,11 @@ pub fn encode_missing_chunk_syndrome_plan(
 }
 
 /// Decode a rateless syndrome, pulling more rows when BP stalls.
+///
+/// This explicit-erasure entry point is useful when a harness or future
+/// reliability model already knows which old side-information positions are
+/// uncertain. Use [`decode_with_old_file_side_information`] when the receiver
+/// has only the old region bytes and no uncertainty sidecar.
 pub fn decode_with_side_information(
     frame: &RatelessSyndrome,
     old_side_info: &[u8],
@@ -624,14 +629,61 @@ pub fn decode_with_side_information(
     }
 }
 
+/// Decode a rateless syndrome from only receiver old-file side information.
+///
+/// The receiver starts with its old byte region as the prior and solves the
+/// sparse delta vector `new ^ old` from syndrome residuals. The first rows of
+/// the deterministic schedule are singleton bootstrap checks, so unchanged
+/// bytes are proven as zero deltas and changed bytes are recovered without a
+/// receiver signature sidecar. Additional rateless rows are pulled until BP
+/// peels every delta or fails closed.
+pub fn decode_with_old_file_side_information(
+    frame: &RatelessSyndrome,
+    old_side_info: &[u8],
+    initial_symbols: usize,
+) -> Result<BpDecodeResult, SlepianWolfError> {
+    if old_side_info.len() != frame.shape.n {
+        return Err(SlepianWolfError::SideInfoLengthMismatch {
+            expected: frame.shape.n,
+            actual: old_side_info.len(),
+        });
+    }
+
+    let mut used_symbols = initial_symbols.min(frame.symbols.len());
+    let mut stalled_windows = 0usize;
+    loop {
+        let attempt = attempt_side_info_delta_decode(frame, old_side_info, used_symbols)?;
+        if let Some(bytes) = attempt.bytes {
+            let report = BpDecodeReport {
+                converged: true,
+                iterations: attempt.iterations,
+                used_symbols,
+                pulled_symbols: used_symbols.saturating_sub(initial_symbols),
+                stalled_windows,
+                known_symbols: frame.shape.n,
+                syndrome_weight: syndrome_weight(&frame.symbols[..used_symbols]),
+            };
+            return Ok(BpDecodeResult { bytes, report });
+        }
+        if used_symbols == frame.symbols.len() {
+            return Err(SlepianWolfError::DecodeStalled {
+                known_symbols: attempt.known_symbols,
+                source_symbols: frame.shape.n,
+                used_symbols,
+            });
+        }
+        stalled_windows += 1;
+        used_symbols += 1;
+    }
+}
+
 /// Decode a missing-chunk syndrome with no receiver side information.
 pub fn decode_missing_chunk_syndrome(
     frame: &RatelessSyndrome,
     initial_symbols: usize,
 ) -> Result<BpDecodeResult, SlepianWolfError> {
     let old_side_info = vec![0u8; frame.shape.n];
-    let uncertain_indices = (0..frame.shape.n).collect::<Vec<_>>();
-    decode_with_side_information(frame, &old_side_info, &uncertain_indices, initial_symbols)
+    decode_with_old_file_side_information(frame, &old_side_info, initial_symbols)
 }
 
 fn syndrome_chunk_seed(seed: u64, chunk: &CasChunkRef) -> u64 {
@@ -773,11 +825,83 @@ fn attempt_peeling_decode(
     }
 }
 
+fn attempt_side_info_delta_decode(
+    frame: &RatelessSyndrome,
+    old_side_info: &[u8],
+    used_symbols: usize,
+) -> Result<DecodeAttempt, SlepianWolfError> {
+    let old_values = old_side_info
+        .iter()
+        .copied()
+        .map(Gf256::new)
+        .collect::<Vec<_>>();
+    let mut deltas = vec![None::<Gf256>; frame.shape.n];
+    let mut iterations = 0usize;
+
+    loop {
+        let mut progressed = false;
+        iterations += 1;
+
+        for symbol in &frame.symbols[..used_symbols] {
+            let mut residual = symbol.value;
+            let mut unknown = None::<LdpcTap>;
+            let mut unknown_count = 0usize;
+
+            for tap in &symbol.taps {
+                residual = residual - tap.coefficient * old_values[tap.index];
+                match deltas[tap.index] {
+                    Some(delta) => residual = residual - tap.coefficient * delta,
+                    None => {
+                        unknown = Some(*tap);
+                        unknown_count += 1;
+                    }
+                }
+            }
+
+            match (unknown_count, unknown) {
+                (0, _) if !residual.is_zero() => {
+                    return Err(SlepianWolfError::SyndromeContradiction {
+                        symbol_id: symbol.id,
+                    });
+                }
+                (1, Some(tap)) => {
+                    deltas[tap.index] = Some(residual / tap.coefficient);
+                    progressed = true;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(bytes) = collect_side_info_decoded_bytes(&old_values, &deltas) {
+            return Ok(DecodeAttempt {
+                bytes: Some(bytes),
+                iterations,
+                known_symbols: deltas.len(),
+            });
+        }
+        if !progressed {
+            return Ok(DecodeAttempt {
+                bytes: None,
+                iterations,
+                known_symbols: deltas.iter().filter(|delta| delta.is_some()).count(),
+            });
+        }
+    }
+}
+
 fn collect_decoded_bytes(values: &[Option<Gf256>]) -> Option<Vec<u8>> {
     values
         .iter()
         .copied()
         .map(|value| value.map(Gf256::raw))
+        .collect()
+}
+
+fn collect_side_info_decoded_bytes(old: &[Gf256], deltas: &[Option<Gf256>]) -> Option<Vec<u8>> {
+    old.iter()
+        .copied()
+        .zip(deltas.iter().copied())
+        .map(|(old, delta)| delta.map(|delta| (old + delta).raw()))
         .collect()
 }
 
@@ -882,6 +1006,39 @@ mod tests {
     }
 
     #[test]
+    fn bp_decode_old_file_side_info_recovers_sparse_edits_without_uncertainty_sidecar() {
+        let old = b"0123456789abcdef".to_vec();
+        let mut new = old.clone();
+        new[0] = b'X';
+        new[7] = b'Y';
+        new[15] = b'Z';
+
+        let changed_symbols = old
+            .iter()
+            .zip(new.iter())
+            .filter(|(old, new)| old != new)
+            .count();
+        let shape = LdpcShape::new(new.len(), new.len() - changed_symbols, 3).expect("shape");
+        let config = RatelessLdpcConfig::foundation(shape, 0xdec0_de01).expect("config");
+        let frame = encode_rateless_syndrome(&new, config, shape.n).expect("syndrome");
+
+        let decoded =
+            decode_with_old_file_side_information(&frame, &old, shape.design_syndrome_symbols())
+                .expect("old-file side-info BP decode");
+
+        assert_eq!(decoded.bytes, new);
+        assert!(decoded.report.converged);
+        assert_eq!(decoded.report.used_symbols, shape.n);
+        assert_eq!(
+            decoded.report.pulled_symbols,
+            shape.n - shape.design_syndrome_symbols()
+        );
+        assert!(decoded.report.stalled_windows > 0);
+        assert_eq!(decoded.report.known_symbols, shape.n);
+        assert!(decoded.report.syndrome_weight > 0);
+    }
+
+    #[test]
     fn sidecar_free_missing_append_syndrome_beats_rsync_target() {
         let base = vec![0x31; 5 * 1024 * 1024];
         let append = (0..(64 * 1024))
@@ -924,6 +1081,26 @@ mod tests {
         let decoded = decode_missing_chunk_syndrome(&chunk.frame, chunk.initial_symbols)
             .expect("missing chunk decode");
         assert_eq!(decoded.bytes, append);
+    }
+
+    #[test]
+    fn old_file_side_info_decode_reports_stall_when_rows_are_exhausted() {
+        let source = b"wxyz";
+        let old = b"abcd";
+        let shape = LdpcShape::new(4, 0, 3).expect("shape");
+        let config = RatelessLdpcConfig::foundation(shape, 7).expect("config");
+        let frame = encode_rateless_syndrome(source, config, 2).expect("syndrome");
+        let err = decode_with_old_file_side_information(&frame, old, 1)
+            .expect_err("not enough rows to decode all side-info deltas");
+
+        assert_eq!(
+            err,
+            SlepianWolfError::DecodeStalled {
+                known_symbols: 2,
+                source_symbols: 4,
+                used_symbols: 2,
+            }
+        );
     }
 
     #[test]
