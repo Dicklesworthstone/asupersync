@@ -204,8 +204,12 @@ struct SendArgs {
     /// Number of UDP sockets to spray across (rq only).
     #[arg(long, default_value_t = DEFAULT_UDP_FANOUT)]
     streams: usize,
-    /// Maximum RaptorQ source-block size in bytes, or `auto` (rq/quic only).
-    #[arg(long, default_value_t = MaxBlockSizeArg::Auto)]
+    /// Maximum RaptorQ source-block size in bytes, `auto`, or `0` (rq/quic only).
+    #[arg(
+        long,
+        default_value_t = MaxBlockSizeArg::Auto,
+        value_parser = parse_max_block_size_arg
+    )]
     max_block_size: MaxBlockSizeArg,
     /// Round-0 repair overhead factor, >= 1.0 (rq only).
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
@@ -281,8 +285,12 @@ struct RecvArgs {
     /// RaptorQ symbol size in bytes (rq only; must match the sender).
     #[arg(long, default_value_t = DEFAULT_SYMBOL_SIZE)]
     symbol_size: u16,
-    /// Maximum RaptorQ source-block size in bytes, or `auto` (rq/quic only; must match the sender).
-    #[arg(long, default_value_t = MaxBlockSizeArg::Auto)]
+    /// Maximum RaptorQ source-block size in bytes, `auto`, or `0` (rq/quic only; must match the sender).
+    #[arg(
+        long,
+        default_value_t = MaxBlockSizeArg::Auto,
+        value_parser = parse_max_block_size_arg
+    )]
     max_block_size: MaxBlockSizeArg,
     /// Round-0 repair overhead factor (rq only).
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
@@ -335,11 +343,20 @@ impl std::str::FromStr for MaxBlockSizeArg {
     type Err = String;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        let value = raw.trim();
-        if value.eq_ignore_ascii_case("auto") {
-            return Ok(Self::Auto);
-        }
-        parse_max_block_size_bytes(value).map(Self::Bytes)
+        parse_max_block_size_arg(raw)
+    }
+}
+
+fn parse_max_block_size_arg(raw: &str) -> Result<MaxBlockSizeArg, String> {
+    let value = raw.trim();
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(MaxBlockSizeArg::Auto);
+    }
+    let bytes = parse_max_block_size_bytes(value)?;
+    if bytes == 0 {
+        Ok(MaxBlockSizeArg::Auto)
+    } else {
+        Ok(MaxBlockSizeArg::Bytes(bytes))
     }
 }
 
@@ -367,12 +384,9 @@ fn parse_max_block_size_bytes(value: &str) -> Result<usize, String> {
 
     let count = digits.trim().parse::<usize>().map_err(|_| {
         format!(
-            "invalid --max-block-size {value:?}: expected positive bytes, auto, or K/M/G suffix"
+            "invalid --max-block-size {value:?}: expected positive bytes, auto, 0, or K/M/G suffix"
         )
     })?;
-    if count == 0 {
-        return Err("--max-block-size must be greater than 0".to_string());
-    }
     count
         .checked_mul(multiplier)
         .ok_or_else(|| format!("invalid --max-block-size {value:?}: byte count overflows usize"))
@@ -4288,17 +4302,45 @@ mod tests {
             "8M".parse::<MaxBlockSizeArg>(),
             Ok(MaxBlockSizeArg::Bytes(8 * 1024 * 1024))
         );
+        assert_eq!("0".parse::<MaxBlockSizeArg>(), Ok(MaxBlockSizeArg::Auto));
         assert_eq!(
-            "0".parse::<MaxBlockSizeArg>(),
-            Err("--max-block-size must be greater than 0".to_string())
+            "0b".parse::<MaxBlockSizeArg>(),
+            Ok(MaxBlockSizeArg::Auto)
         );
         assert_eq!(
             "not-bytes".parse::<MaxBlockSizeArg>(),
             Err(
-                "invalid --max-block-size \"not-bytes\": expected positive bytes, auto, or K/M/G suffix"
+                "invalid --max-block-size \"not-bytes\": expected positive bytes, auto, 0, or K/M/G suffix"
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn max_block_size_clap_parser_accepts_auto_and_zero() {
+        let send_auto = SendArgs::try_parse_from([
+            "send",
+            "/tmp/source",
+            "127.0.0.1:8472",
+            "--max-block-size",
+            "auto",
+        ])
+        .expect("send parser should accept auto max-block-size");
+        assert_eq!(send_auto.max_block_size, MaxBlockSizeArg::Auto);
+
+        let send_zero = SendArgs::try_parse_from([
+            "send",
+            "/tmp/source",
+            "127.0.0.1:8472",
+            "--max-block-size",
+            "0",
+        ])
+        .expect("send parser should accept zero max-block-size sentinel");
+        assert_eq!(send_zero.max_block_size, MaxBlockSizeArg::Auto);
+
+        let recv_zero = RecvArgs::try_parse_from(["recv", "/tmp/dest", "--max-block-size", "0"])
+            .expect("recv parser should accept zero max-block-size sentinel");
+        assert_eq!(recv_zero.max_block_size, MaxBlockSizeArg::Auto);
     }
 
     #[test]
@@ -4307,10 +4349,7 @@ mod tests {
             MaxBlockSizeArg::Auto.effective(1024),
             Ok(AUTO_MAX_BLOCK_SIZE)
         );
-        assert!(
-            AUTO_MAX_BLOCK_SIZE
-                < asupersync::net::atp::transport_rq::DEFAULT_MAX_BLOCK_SIZE
-        );
+        assert!(AUTO_MAX_BLOCK_SIZE < asupersync::net::atp::transport_rq::DEFAULT_MAX_BLOCK_SIZE);
         assert_eq!(MaxBlockSizeArg::Bytes(512).effective(1024), Ok(1024));
         assert_eq!(
             MaxBlockSizeArg::Bytes(512 * 1024).effective(1024),
