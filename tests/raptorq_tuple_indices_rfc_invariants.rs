@@ -24,13 +24,15 @@
 //!
 //! Repro: `cargo test --test raptorq_tuple_indices_rfc_invariants`
 
-use asupersync::raptorq::rfc6330::{next_prime_ge, tuple, tuple_indices};
+use asupersync::raptorq::rfc6330::{LtTuple, next_prime_ge, tuple, tuple_indices};
 use asupersync::raptorq::systematic::SystematicParams;
 
 /// Representative source-block sizes spanning the RFC systematic index
 /// table: degenerate-small, the K=100 region exercised by the golden
 /// vectors, and progressively larger blocks up to a healthy K.
-const K_SWEEP: &[usize] = &[1, 2, 4, 8, 10, 26, 42, 50, 100, 101, 200, 500, 1000, 2048, 10000];
+const K_SWEEP: &[usize] = &[
+    1, 2, 4, 8, 10, 26, 42, 50, 100, 101, 200, 500, 1000, 2048, 10000,
+];
 
 #[test]
 fn tuple_indices_structural_invariants_sweep() {
@@ -42,8 +44,8 @@ fn tuple_indices_structural_invariants_sweep() {
         let w = params.w;
         let p = params.p;
         let j = params.j;
-        let p1 = next_prime_ge(p)
-            .unwrap_or_else(|| panic!("K={k}: next_prime_ge(P={p}) must fit in usize"));
+        let p1 = next_prime_ge(p).unwrap_or(0);
+        assert_ne!(p1, 0, "K={k}: next_prime_ge(P={p}) must fit in usize");
 
         // Sweep source ESIs (0..K') and a band of repair ESIs beyond K'.
         let esi_max = (params.k_prime as u32).saturating_add(128);
@@ -70,11 +72,7 @@ fn tuple_indices_structural_invariants_sweep() {
             );
 
             // Invariant 1: count == d + d1.
-            assert_eq!(
-                idx.len(),
-                t.d + t.d1,
-                "{ctx}: index count != d + d1"
-            );
+            assert_eq!(idx.len(), t.d + t.d1, "{ctx}: index count != d + d1");
 
             // Invariant 2: LT-side indices in [0, W).
             for &lt in &idx[..t.d] {
@@ -98,10 +96,7 @@ fn tuple_indices_structural_invariants_sweep() {
             if p >= t.d1 {
                 for a in 0..pi.len() {
                     for b in (a + 1)..pi.len() {
-                        assert_ne!(
-                            pi[a], pi[b],
-                            "{ctx}: PI indices not distinct at {a},{b}"
-                        );
+                        assert_ne!(pi[a], pi[b], "{ctx}: PI indices not distinct at {a},{b}");
                     }
                 }
             }
@@ -119,4 +114,135 @@ fn tuple_indices_structural_invariants_sweep() {
         "sweep was too small or produced empty schedules: \
          checked={checked_points} nonempty={nonempty_points}"
     );
+}
+
+#[test]
+fn tuple_indices_fail_closed_for_malformed_tuple_inputs() {
+    fn valid_tuple() -> LtTuple {
+        LtTuple {
+            d: 3,
+            a: 5,
+            b: 7,
+            d1: 2,
+            a1: 3,
+            b1: 11,
+        }
+    }
+
+    let w = 113;
+    let p = 15;
+    let p1 = next_prime_ge(p).unwrap_or(0);
+    assert_ne!(p1, 0, "valid PI count must have a prime modulus");
+
+    assert!(
+        !tuple_indices(valid_tuple(), w, p, p1).is_empty(),
+        "control tuple must be valid before fail-closed mutations are tested"
+    );
+
+    let malformed_cases: &[(&str, LtTuple, usize, usize, usize)] = &[
+        ("sentinel zero tuple", LtTuple::default(), w, p, p1),
+        ("W <= 2", valid_tuple(), 2, p, p1),
+        ("P == 0", valid_tuple(), w, 0, p1),
+        ("P1 below P", valid_tuple(), w, p, p - 1),
+        ("composite P1", valid_tuple(), w, p, p + 1),
+        (
+            "zero LT degree",
+            LtTuple {
+                d: 0,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+        (
+            "oversized LT degree",
+            LtTuple {
+                d: 31,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+        (
+            "invalid PI degree",
+            LtTuple {
+                d1: 1,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+        (
+            "zero LT step",
+            LtTuple {
+                a: 0,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+        (
+            "LT step outside W",
+            LtTuple {
+                a: w,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+        (
+            "LT start outside W",
+            LtTuple {
+                b: w,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+        (
+            "zero PI step",
+            LtTuple {
+                a1: 0,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+        (
+            "PI step outside P1",
+            LtTuple {
+                a1: p1,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+        (
+            "PI start outside P1",
+            LtTuple {
+                b1: p1,
+                ..valid_tuple()
+            },
+            w,
+            p,
+            p1,
+        ),
+    ];
+
+    for &(label, lt_tuple, lt_width, pi_count, pi_modulus) in malformed_cases {
+        assert!(
+            tuple_indices(lt_tuple, lt_width, pi_count, pi_modulus).is_empty(),
+            "{label}: tuple_indices must fail closed to an empty schedule, not \
+             panic or produce bogus indices; tuple={lt_tuple:?} W={lt_width} \
+             P={pi_count} P1={pi_modulus}"
+        );
+    }
 }
