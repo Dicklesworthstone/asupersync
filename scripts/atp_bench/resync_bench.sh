@@ -160,6 +160,9 @@ regime_netem() {
         perfect) printf 'delay 2ms rate 1gbit' ;;
         good)    printf 'delay 25ms loss 0.1%% rate 200mbit' ;;
         bad)     printf 'delay 80ms 20ms loss 2%% rate 50mbit' ;;
+        worse)   printf 'delay 80ms 20ms loss 5%% rate 50mbit' ;;
+        terrible) printf 'delay 120ms 30ms loss 10%% rate 20mbit' ;;
+        highbdp) printf 'delay 200ms 10ms loss 0.1%% rate 1gbit' ;;
         *) die "unknown regime: $1" ;;
     esac
 }
