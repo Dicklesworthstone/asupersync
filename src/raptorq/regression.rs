@@ -36,7 +36,7 @@ pub const G8_SCHEMA_VERSION: &str = "raptorq-g8-anytime-regression-v1";
 pub const G8_REPLAY_REF: &str = "replay:rq-track-g-regression-v1";
 
 /// Minimum calibration samples before regression detection activates.
-const MIN_CALIBRATION_SAMPLES: usize = 10;
+const MIN_CALIBRATION_SAMPLES: usize = 20;
 
 /// Significance level for conformal coverage guarantee (95% coverage).
 const CONFORMAL_ALPHA: f64 = 0.05;
@@ -208,7 +208,7 @@ impl RegressionMonitor {
         if !self.calibration_complete {
             self.calibration_complete = TRACKED_METRICS
                 .iter()
-                .all(|m| self.calibrator.is_metric_calibrated(m));
+                .all(|metric| self.active_threshold(metric).is_some());
         }
     }
 
@@ -227,7 +227,7 @@ impl RegressionMonitor {
         self.total_observations += 1;
 
         for (metric, value) in &values {
-            let check_result = if self.calibrator.threshold(metric).is_some() {
+            let check_result = if self.active_threshold(metric).is_some() {
                 self.calibrator.check_and_track(metric, *value)
             } else {
                 // Grow the split-conformal calibration set until the metric has
@@ -295,7 +295,7 @@ impl RegressionMonitor {
         if !self.calibration_complete {
             self.calibration_complete = TRACKED_METRICS
                 .iter()
-                .all(|metric| self.calibrator.is_metric_calibrated(metric));
+                .all(|metric| self.active_threshold(metric).is_some());
         }
 
         let regime_state = stats
@@ -341,7 +341,13 @@ impl RegressionMonitor {
     /// Get the current conformal threshold for a specific metric.
     #[must_use]
     pub fn threshold(&self, metric: &str) -> Option<f64> {
-        self.calibrator.threshold(metric)
+        self.active_threshold(metric)
+    }
+
+    fn active_threshold(&self, metric: &str) -> Option<f64> {
+        self.calibrator
+            .threshold(metric)
+            .filter(|threshold| threshold.is_finite())
     }
 
     /// Check if any metric has a statistically significant regression.
@@ -683,7 +689,7 @@ mod tests {
             .expect("gauss_ops threshold should be calibrated");
 
         let tolerated_value = threshold.floor().max(10.0) as usize;
-        let violating_value = threshold.ceil() as usize + 1;
+        let violating_value = (threshold.ceil() as usize).saturating_add(1);
 
         let mut tolerated_stats = make_baseline_stats(10, 3);
         tolerated_stats.gauss_ops = tolerated_value;
