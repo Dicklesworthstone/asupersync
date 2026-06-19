@@ -48,8 +48,16 @@ ATP_TRANSPORT="${ATP_TRANSPORT:-rq}"
 STREAMS="${STREAMS:-8}"
 SYMBOL_SIZE="${SYMBOL_SIZE:-1200}"
 MAX_BYTES="${MAX_BYTES:-6442450944}"
-HOST_IP="${HOST_IP:-10.99.0.1}"
-NS_IP="${NS_IP:-10.99.0.2}"
+if [ -z "${HOST_IP+x}" ] && [ -z "${NS_IP+x}" ]; then
+    # Pick a per-run subnet by default so concurrent netns benches do not
+    # collide on the old fixed 10.99.0.0/24 route.
+    NETNS_SUBNET="${NETNS_SUBNET:-$(printf '%s' "$RUN_ID" | cksum | awk '{printf "10.%d.%d", 64 + ($1 % 128), 1 + (int($1 / 128) % 254)}')}"
+    HOST_IP="${NETNS_SUBNET}.1"
+    NS_IP="${NETNS_SUBNET}.2"
+else
+    HOST_IP="${HOST_IP:-10.99.0.1}"
+    NS_IP="${NS_IP:-10.99.0.2}"
+fi
 CIDR="${CIDR:-24}"
 PORT_BASE="${PORT_BASE:-41000}"
 TIMEOUT_S="${TIMEOUT_S:-3600}"
@@ -57,6 +65,8 @@ RECEIVER_READY_SLEEP="${RECEIVER_READY_SLEEP:-0.75}"
 RSS_SAMPLE_INTERVAL="${RSS_SAMPLE_INTERVAL:-0.2}"
 RQ_AUTH_LAB="${RQ_AUTH_LAB:---rq-allow-unauthenticated-lab}"
 TREE_PRESET="${TREE_PRESET:-tree_small}"
+ATP_DELTA_STATE_DIR="${ATP_DELTA_STATE_DIR:-.asupersync-atp-delta-v1}"
+ATP_DELTA_STATE_FILE="${ATP_DELTA_STATE_FILE:-state.json}"
 GIT_HEAD="$(git -C "$HERE" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 
 NS=""; IF_HOST=""; IF_NS=""; RSYNCD_PID=""
@@ -90,6 +100,48 @@ tree_digest() {
         ! -path './.asupersync-atp-delta-v1/*' -print0 | sort -z \
         | while IFS= read -r -d '' f; do printf '%s:%s\n' "${f#./}" "$(sha256sum "$f" | awk '{print $1}')"; done ) \
         | sha256sum | awk '{print $1}'
+}
+
+atp_delta_state_path() {
+    printf '%s/%s/%s' "$1" "$ATP_DELTA_STATE_DIR" "$ATP_DELTA_STATE_FILE"
+}
+require_atp_delta_state() {
+    local state_path; state_path="$(atp_delta_state_path "$1")"
+    if [ ! -s "$state_path" ]; then
+        log "ATP seed sync did not persist receiver delta state: $state_path"
+        return 1
+    fi
+    python3 - "$state_path" <<'PY'
+import json, sys
+state_path = sys.argv[1]
+with open(state_path, "rb") as fh:
+    state = json.load(fh)
+if not state.get("chunk_signatures"):
+    raise SystemExit(f"ATP receiver delta state has no chunk signatures: {state_path}")
+PY
+}
+probe_atp_delta_sidecar() {
+    local host="$1" port="$2" out="$3"
+    ip netns exec "$NS" python3 - "$host" "$port" "$out" <<'PY'
+import json, socket, sys
+host, port, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+with socket.create_connection((host, port), timeout=5.0) as sock:
+    sock.settimeout(5.0)
+    chunks = []
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+payload = b"".join(chunks).strip()
+if not payload:
+    raise SystemExit("ATP delta sidecar returned empty state")
+state = json.loads(payload.decode("utf-8"))
+if not state.get("chunk_signatures"):
+    raise SystemExit("ATP delta sidecar state has no chunk signatures")
+with open(out, "wb") as fh:
+    fh.write(payload + b"\n")
+PY
 }
 
 # bytes-on-wire = sender (netns) veth tx+rx delta around the measured transfer.
@@ -126,6 +178,7 @@ setup_netns() {
     ip netns exec "$NS" ip addr add "${NS_IP}/${CIDR}" dev "$IF_NS"
     ip netns exec "$NS" ip link set lo up
     ip netns exec "$NS" ip link set "$IF_NS" up
+    log "netns $NS host=$HOST_IP ns=$NS_IP/$CIDR"
 }
 start_rsyncd() {
     local root="$1" conf="$2"
@@ -241,12 +294,28 @@ resync_atp() {
     local recv_pid=$!
     sample_peak_rss "$s_tag" "$s_stop" "$s_out" & local samp=$!
     sleep "$RECEIVER_READY_SLEEP"
+    local sidecar_port=$((port + 1)) probe_status=0
+    probe_atp_delta_sidecar "$HOST_IP" "$sidecar_port" "$case_dir/atp_delta_sidecar_state.json"
+    probe_status=$?
+    if [ "$probe_status" != "0" ]; then
+        log "ATP delta sidecar ${HOST_IP}:${sidecar_port} unavailable or empty; aborting measured ATP re-sync"
+        kill "$recv_pid" 2>/dev/null || true
+        wait "$recv_pid" 2>/dev/null || true
+        touch "$s_stop"; wait "$samp" 2>/dev/null
+        set -e
+        printf '0 0 0 %s' "$probe_status"
+        return 0
+    fi
     local before after start finish ss rs
     before="$(ns_wire_bytes)"; start="$(now_s)"
     ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" send "$src" "${HOST_IP}:${port}" \
         "${send_args[@]}" --peer-id "$s_tag" --max-bytes "$MAX_BYTES" >"$sl" 2>"$st"
     ss=$?
     finish="$(now_s)"; after="$(ns_wire_bytes)"
+    if [ "$ss" = "0" ] && grep -Eq "using full-object transfer|full-object fallback" "$st"; then
+        log "ATP sender fell back to full-object despite sidecar state; marking cell invalid"
+        ss=91
+    fi
     [ "$ss" != "0" ] && kill "$recv_pid" 2>/dev/null
     wait "$recv_pid"; rs=$?
     touch "$s_stop"; wait "$samp" 2>/dev/null
@@ -327,11 +396,19 @@ run_file_cell() {
         --peer-id "init-recv-${port}" --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
         --symbol-size "$SYMBOL_SIZE" $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
     local ip_pid=$!; sleep "$RECEIVER_READY_SLEEP"
+    local init_send_status init_recv_status
     ip netns exec "$NS" timeout "$TIMEOUT_S" "$BIN" send "$atp_src" "${HOST_IP}:${port}" --transport rq \
         --streams "$STREAMS" --symbol-size "$SYMBOL_SIZE" --peer-id "init-send-${port}" \
         --max-bytes "$MAX_BYTES" $RQ_AUTH_LAB >"$case_dir/atp_init_send.log" 2>&1
+    init_send_status=$?
     wait "$ip_pid" 2>/dev/null
+    init_recv_status=$?
     set -e
+    if [ "$init_send_status" != "0" ] || [ "$init_recv_status" != "0" ]; then
+        log "[$label/$regime/$change] atp initial sync failed (send=$init_send_status recv=$init_recv_status)"
+        return 1
+    fi
+    require_atp_delta_state "$atp_dest"
     mutate_file "$atp_src" "$change"
     local fields; fields="$(resync_atp "$atp_src" "$atp_dest" "$((port+1))" "$case_dir")"
     # shellcheck disable=SC2086
@@ -365,7 +442,7 @@ main() {
         for regime in $REGIMES; do
             for change in $CHANGES; do
                 [ "$change" = "rename" ] && continue  # rename is a tree case (see TREE note)
-                local port=$((PORT_BASE + port_off)); port_off=$((port_off + 2))
+                local port=$((PORT_BASE + port_off)); port_off=$((port_off + 4))
                 # Isolate each cell: under `set -e` a lossy-regime (good/bad) timeout
                 # or non-convergence inside run_file_cell would otherwise abort the
                 # WHOLE matrix at the first failing cell. Catch it, stop any cell-
