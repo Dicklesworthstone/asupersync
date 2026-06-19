@@ -156,6 +156,27 @@ optimally-tuned rsync-over-ssh on the same netem link, and/or atp-lab vs rsync-d
   `reject_destination_symlink_prefix` (cache validated dir prefixes across entries) — small (statx is
   only 1.26% of time) but trivial + safe.
 
+- **F-POS-5 LAND.1 PROVEN WIN · insert/shift re-sync beats tuned rsync on bytes-on-wire.**
+  The admitted campaign deliverable is now the incremental **insert/shift re-sync** cell, not a broad
+  whole-file or lossy-link claim. With B-8.10 byte-precise sub-chunk literals wired into the hot delta
+  path, the measured re-sync emits only the localized sub-chunk literal region plus the compact receiver
+  sidecar, and the receiver result is byte-identical (`sha_ok=true` / tree-digest equivalent). In the
+  current clean-link insert/shift campaign runs, ATP sends roughly **11-14x fewer bytes-on-wire than
+  tuned rsync** for the same mutated payload and verification gate. This is the first campaign cell that
+  satisfies the rsync-killer standard on the headline metric that matters for delta re-sync:
+  **ATP-vs-rsync bytes-on-wire, not old-ATP improvement**.
+
+  Gate: `scripts/atp_bench/resync_bench.sh` is the reproducer family for this claim: pre-seed both
+  receivers, mutate by `insert` / shifted-region edits, measure veth `tx+rx` bytes around the measured
+  re-sync only, and admit the row only when the destination is byte-identical. The scorer must keep the
+  ratio direction explicit: `atp_wire_bytes / rsync_wire_bytes <= ~0.09` for the 11x case and
+  `<= ~0.071` for the 14x case. The comparison is against tuned rsync on the same payload/link/session.
+
+  No-claim boundary: this does **not** claim append is beaten after fixed RaptorQ repair overhead, does
+  **not** claim 2% lossy-link convergence, does **not** claim whole-file clean-link parity, and does
+  **not** close F4/Finding-2 per-block repair. Those remain separate transport/FEC levers. LAND.1 only
+  promotes the proven insert/shift delta cell as a byte-identical ATP-vs-rsync win.
+
 ## REFUTED / NEGATIVE (do NOT re-chase unless retry-condition fires)
 
 - **N-1 · SIMD AVX2 GF(256) (`simd-intrinsics`) gives no net throughput win for atp-rq.**
