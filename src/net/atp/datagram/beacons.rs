@@ -648,6 +648,8 @@ pub struct BeaconScheduler {
     last_keepalive: Option<Instant>,
     last_probe: Option<Instant>,
     pending_probe_since: Option<Instant>,
+    pending_probe_round_seq: Option<u64>,
+    latest_probe_round_seq: Option<u64>,
     latest_rtt: Option<Duration>,
     missed_probes: u8,
     max_missed_probes: u8,
@@ -685,6 +687,8 @@ impl BeaconScheduler {
             last_keepalive: None,
             last_probe: None,
             pending_probe_since: None,
+            pending_probe_round_seq: None,
+            latest_probe_round_seq: None,
             latest_rtt: None,
             missed_probes: 0,
             max_missed_probes: DEFAULT_MAX_MISSED_PROBES,
@@ -713,6 +717,7 @@ impl BeaconScheduler {
     /// Disable WIRE-5 control beacons. This mirrors seq=0 legacy peers.
     pub fn disable_control(&mut self) {
         self.next_control_round_seq = 0;
+        self.clear_pending_probe();
     }
 
     /// Latest observed probe RTT.
@@ -753,8 +758,17 @@ impl BeaconScheduler {
 
     /// Mark inbound peer activity, suppressing idle keepalives.
     pub fn mark_peer_activity(&mut self, now: Instant) {
+        self.note_peer_activity(now);
+        self.clear_pending_probe();
+    }
+
+    fn note_peer_activity(&mut self, now: Instant) {
         self.last_peer_activity = now;
+    }
+
+    fn clear_pending_probe(&mut self) {
         self.pending_probe_since = None;
+        self.pending_probe_round_seq = None;
         self.missed_probes = 0;
     }
 
@@ -763,8 +777,69 @@ impl BeaconScheduler {
         if round_seq == 0 {
             return None;
         }
-        self.next_control_round_seq = round_seq.saturating_add(1);
+        self.next_control_round_seq = round_seq.checked_add(1).unwrap_or(0);
         Some(round_seq)
+    }
+
+    fn probe_response_completes_latest_round(&self, round_seq: u64) -> bool {
+        self.pending_probe_round_seq == Some(round_seq)
+            || (self.pending_probe_round_seq.is_none()
+                && self.latest_probe_round_seq == Some(round_seq))
+    }
+
+    fn complete_probe_response(&mut self, now: Instant, rtt: Duration) {
+        self.last_probe = Some(now);
+        self.latest_rtt = Some(rtt);
+        self.note_peer_activity(now);
+        self.clear_pending_probe();
+    }
+
+    fn create_probe_action(
+        &mut self,
+        now: Instant,
+        idle_for: Duration,
+        measurement: BeaconMeasurement,
+    ) -> Option<BeaconScheduleAction> {
+        if !self.manager.is_beacon_type_enabled(BeaconType::Probe) {
+            return None;
+        }
+
+        let round_seq = self.allocate_control_round_seq()?;
+        let beacon = self
+            .manager
+            .create_probe_beacon(self.path_id, measurement)?
+            .with_control_round_seq(round_seq);
+        self.last_probe = Some(now);
+        self.pending_probe_since = Some(now);
+        self.pending_probe_round_seq = Some(round_seq);
+        self.latest_probe_round_seq = Some(round_seq);
+        Some(BeaconScheduleAction {
+            beacon,
+            idle_for,
+            missed_probes: self.missed_probes,
+        })
+    }
+
+    fn create_keepalive_action(
+        &mut self,
+        now: Instant,
+        idle_for: Duration,
+    ) -> Option<BeaconScheduleAction> {
+        if !self.manager.is_beacon_type_enabled(BeaconType::Keepalive) {
+            return None;
+        }
+
+        let round_seq = self.allocate_control_round_seq()?;
+        let beacon = self
+            .manager
+            .create_keepalive_beacon(self.path_id)?
+            .with_control_round_seq(round_seq);
+        self.last_keepalive = Some(now);
+        Some(BeaconScheduleAction {
+            beacon,
+            idle_for,
+            missed_probes: self.missed_probes,
+        })
     }
 
     /// Return the next due keepalive/probe action, if any.
@@ -780,40 +855,22 @@ impl BeaconScheduler {
         self.record_missed_probe_if_due(now);
 
         let idle_for = elapsed_since(now, self.last_peer_activity);
-        let keepalive_due = idle_for >= self.keepalive_interval
-            && self
-                .last_keepalive
-                .is_none_or(|last| elapsed_since(now, last) >= self.keepalive_interval);
-        if keepalive_due {
-            let round_seq = self.allocate_control_round_seq()?;
-            let beacon = self
-                .manager
-                .create_keepalive_beacon(self.path_id)?
-                .with_control_round_seq(round_seq);
-            self.last_keepalive = Some(now);
-            return Some(BeaconScheduleAction {
-                beacon,
-                idle_for,
-                missed_probes: self.missed_probes,
-            });
-        }
-
         let probe_due = self
             .last_probe
             .is_none_or(|last| elapsed_since(now, last) >= self.probe_interval);
         if probe_due {
-            let round_seq = self.allocate_control_round_seq()?;
-            let beacon = self
-                .manager
-                .create_probe_beacon(self.path_id, measurement)?
-                .with_control_round_seq(round_seq);
-            self.last_probe = Some(now);
-            self.pending_probe_since = Some(now);
-            return Some(BeaconScheduleAction {
-                beacon,
-                idle_for,
-                missed_probes: self.missed_probes,
-            });
+            if let Some(action) = self.create_probe_action(now, idle_for, measurement) {
+                return Some(action);
+            }
+        }
+
+        let keepalive_due = self.pending_probe_since.is_none()
+            && idle_for >= self.keepalive_interval
+            && self
+                .last_keepalive
+                .is_none_or(|last| elapsed_since(now, last) >= self.keepalive_interval);
+        if keepalive_due {
+            return self.create_keepalive_action(now, idle_for);
         }
 
         None
@@ -823,6 +880,7 @@ impl BeaconScheduler {
     pub fn observe_probe_result(&mut self, now: Instant, rtt: Duration) {
         self.last_probe = Some(now);
         self.pending_probe_since = None;
+        self.pending_probe_round_seq = None;
         self.latest_rtt = Some(rtt);
         self.mark_peer_activity(now);
         self.manager.record_path_rtt(self.path_id, rtt);
@@ -853,13 +911,18 @@ impl BeaconScheduler {
         }
         *last_seen = beacon.control_round_seq;
 
-        let rtt = (beacon.beacon_type == BeaconType::Response).then(|| beacon.age());
+        let beacon_type = beacon.beacon_type;
+        let control_round_seq = beacon.control_round_seq;
+        let rtt = (beacon_type == BeaconType::Response).then(|| beacon.age());
         let response = self.manager.process_received_beacon(beacon);
-        self.mark_peer_activity(now);
 
         if let Some(rtt) = rtt {
-            self.latest_rtt = Some(rtt);
-            self.last_probe = Some(now);
+            self.note_peer_activity(now);
+            if self.probe_response_completes_latest_round(control_round_seq) {
+                self.complete_probe_response(now, rtt);
+            }
+        } else {
+            self.mark_peer_activity(now);
         }
 
         response.map(|beacon| BeaconScheduleAction {
@@ -878,6 +941,7 @@ impl BeaconScheduler {
         }
 
         self.pending_probe_since = None;
+        self.pending_probe_round_seq = None;
         self.missed_probes = self
             .missed_probes
             .saturating_add(1)
@@ -965,7 +1029,8 @@ mod tests {
             PathBeacon::probe(7, 42, BeaconMeasurement::empty()).with_control_round_seq(9);
         request.send_timestamp = 1234;
 
-        let response = PathBeacon::response_to(&request, BeaconMeasurement::with_rtt(50_000, 5_000));
+        let response =
+            PathBeacon::response_to(&request, BeaconMeasurement::with_rtt(50_000, 5_000));
 
         assert_eq!(response.sequence, request.sequence);
         assert_eq!(response.path_id, request.path_id);
@@ -1048,7 +1113,7 @@ mod tests {
             42,
             now,
             Duration::from_secs(10),
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         );
 
         let first = scheduler
@@ -1081,6 +1146,30 @@ mod tests {
         assert_eq!(keepalive.beacon.beacon_type, BeaconType::Keepalive);
         assert_eq!(keepalive.beacon.control_round_seq, 2);
         assert!(keepalive.idle_for >= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_beacon_scheduler_probe_due_takes_priority_over_keepalive() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::with_intervals(
+            42,
+            now,
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+
+        let first = scheduler
+            .next_action(now, BeaconMeasurement::empty())
+            .expect("initial probe is due");
+        assert_eq!(first.beacon.beacon_type, BeaconType::Probe);
+        scheduler.observe_probe_result(now, Duration::from_millis(10));
+
+        let action = scheduler
+            .next_action(now + Duration::from_secs(2), BeaconMeasurement::empty())
+            .expect("probe and keepalive are both due");
+
+        assert_eq!(action.beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(action.beacon.control_round_seq, 2);
     }
 
     #[test]
@@ -1123,6 +1212,45 @@ mod tests {
     }
 
     #[test]
+    fn test_beacon_scheduler_old_response_does_not_clear_new_pending_probe() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::with_intervals(
+            7,
+            now,
+            Duration::from_secs(30),
+            Duration::from_secs(2),
+        )
+        .with_missed_probe_budget(3);
+
+        let first = scheduler
+            .next_action(now, BeaconMeasurement::empty())
+            .expect("initial probe is due");
+        let second_at = now + Duration::from_secs(2);
+        let second = scheduler
+            .next_action(second_at, BeaconMeasurement::empty())
+            .expect("replacement probe is due after first miss");
+        assert_eq!(first.beacon.control_round_seq, 1);
+        assert_eq!(second.beacon.control_round_seq, 2);
+        assert_eq!(second.missed_probes, 1);
+
+        let old_response = PathBeacon::response_to(&first.beacon, BeaconMeasurement::empty());
+        assert!(
+            scheduler
+                .process_inbound_beacon(second_at + Duration::from_millis(50), old_response)
+                .is_none()
+        );
+        assert_eq!(scheduler.missed_probes(), 1);
+        assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Suspect);
+
+        let third = scheduler
+            .next_action(now + Duration::from_secs(4), BeaconMeasurement::empty())
+            .expect("newer pending probe should still time out");
+        assert_eq!(third.beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(third.beacon.control_round_seq, 3);
+        assert_eq!(third.missed_probes, 2);
+    }
+
+    #[test]
     fn test_beacon_scheduler_ignores_disabled_and_stale_control_beacons() {
         let now = Instant::now();
         let mut scheduler = BeaconScheduler::with_intervals(
@@ -1153,6 +1281,25 @@ mod tests {
         let mut scheduler = BeaconScheduler::new(42, now);
         scheduler.disable_control();
 
+        assert!(!scheduler.control_enabled());
+        assert!(
+            scheduler
+                .next_action(now + DEFAULT_PROBE_INTERVAL, BeaconMeasurement::empty())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_beacon_scheduler_does_not_reuse_exhausted_control_round() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::new(42, now);
+        scheduler.next_control_round_seq = u64::MAX;
+
+        let action = scheduler
+            .next_action(now, BeaconMeasurement::empty())
+            .expect("final control round can be emitted once");
+
+        assert_eq!(action.beacon.control_round_seq, u64::MAX);
         assert!(!scheduler.control_enabled());
         assert!(
             scheduler
