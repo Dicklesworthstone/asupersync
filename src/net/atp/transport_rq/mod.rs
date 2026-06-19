@@ -64,8 +64,8 @@ use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::decoding::{
-    BlockDecodeOutcome, DecodingConfig, DecodingPipeline, DeferredSymbolAcceptResult,
-    MissingSourceSymbol, SymbolAcceptResult, run_block_decode_job,
+    BlockDecodeJob, BlockDecodeOutcome, DecodingConfig, DecodingPipeline,
+    DeferredSymbolAcceptResult, MissingSourceSymbol, SymbolAcceptResult, run_block_decode_job,
 };
 use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
 use crate::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
@@ -219,6 +219,21 @@ const RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
 /// 100 MiB object, so 16 preserves the intended parallel decode fan-out while
 /// bounding queued decode memory and blocking-pool pressure.
 const RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 16;
+/// Maximum blocking decode jobs one receive transfer may have in flight.
+///
+/// The per-entry cap protects a single large file, but a repair burst can make
+/// many entries or source blocks decode-ready at once. This transfer-wide cap
+/// keeps the blocking pool and cloned decode-job symbol memory bounded; once it
+/// is full, decode joins/drains existing work before queueing more.
+const RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER: usize = RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY * 4;
+/// Retain at most this much extra repair headroom beyond K for one RQ receive block.
+///
+/// Matrix-4's remaining 50M/bad cell is dominated by FEC-repair decode memory.
+/// The sender's aggressive source-FEC fallback is capped at 50% overhead, so
+/// keeping K plus max(K/2, 64) symbols preserves the intended repair budget
+/// while preventing a lossy round train from retaining unbounded repair symbols
+/// behind a block that is already queued for decode.
+const RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA: usize = 64;
 /// Tiny quiet window used only after a full batch, matching the native QUIC pump.
 const RQ_INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
 
@@ -2557,8 +2572,35 @@ struct PendingDecode {
     handle: crate::runtime::TaskHandle<BlockDecodeOutcome>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecodeDispatch {
+    Queued,
+    Completed,
+    NoProgress,
+}
+
 fn can_spawn_parallel_decode(pending_decodes: usize) -> bool {
     pending_decodes < RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
+}
+
+fn block_decode_pending(dec: &EntryDecoder, block_sbn: u8) -> bool {
+    dec.pending_decodes
+        .iter()
+        .any(|pending| pending.block_sbn == block_sbn)
+}
+
+fn rq_pending_decode_jobs(decoders: &[EntryDecoder]) -> usize {
+    decoders
+        .iter()
+        .map(|decoder| decoder.pending_decodes.len())
+        .sum()
+}
+
+fn rq_max_buffered_symbols_per_block(max_block_size: usize, symbol_size: u16) -> usize {
+    let symbol_size = usize::from(symbol_size.max(1));
+    let k = max_block_size.div_ceil(symbol_size).max(1);
+    let repair_extra = (k / 2).max(RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA);
+    k.saturating_add(repair_extra)
 }
 
 #[derive(Debug)]
@@ -3806,7 +3848,10 @@ pub async fn receive_connection(
                 max_block_size: receiver_max_block_size,
                 repair_overhead: config.repair_overhead,
                 min_overhead: 0,
-                max_buffered_symbols: 0,
+                max_buffered_symbols: rq_max_buffered_symbols_per_block(
+                    receiver_max_block_size,
+                    symbol_size,
+                ),
                 block_timeout: std::time::Duration::from_secs(0),
                 verify_auth: symbol_auth_enabled,
             };
@@ -4214,6 +4259,7 @@ async fn feed_symbol_with_cx(
     payload: &[u8],
     symbol_size: u16,
     symbol_auth: Option<&SecurityContext>,
+    allow_spawn_decode: bool,
 ) -> Result<bool, RqError> {
     if dec.complete {
         return Ok(false);
@@ -4256,7 +4302,24 @@ async fn feed_symbol_with_cx(
         }
     }
     if dec.source_streaming && parsed.kind.is_repair() {
-        seed_source_streaming_pipeline(dec, parsed.sbn, symbol_size, symbol_auth).await?;
+        seed_source_streaming_pipeline(
+            cx,
+            dec,
+            parsed.sbn,
+            symbol_size,
+            symbol_auth,
+            allow_spawn_decode,
+        )
+        .await?;
+    }
+    if block_decode_pending(dec, parsed.sbn) {
+        rqtrace!(
+            "receiver: entry {} skipped {:?} symbol for block {} while decode job is pending",
+            dec.index,
+            parsed.kind,
+            parsed.sbn
+        );
+        return Ok(false);
     }
     if dec.pipeline.is_none() {
         return Ok(false);
@@ -4283,42 +4346,14 @@ async fn feed_symbol_with_cx(
     let result = match result {
         Ok(DeferredSymbolAcceptResult::Immediate(result)) => Ok(result),
         Ok(DeferredSymbolAcceptResult::Decode(job)) => {
-            let block_sbn = job.sbn();
-            if !can_spawn_parallel_decode(dec.pending_decodes.len()) {
-                rqtrace!(
-                    "receiver: entry {} running decode block {} inline because pending decode cap {} is reached",
-                    dec.index,
-                    block_sbn,
-                    RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
-                );
-                let outcome = run_block_decode_job(job);
-                let _ = finalize_decode_outcome(dec, outcome).await?;
-                return Ok(true);
-            }
-
-            let fallback_job = job.clone();
-            match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
-                Ok(handle) => {
-                    dec.pending_decodes
-                        .push(PendingDecode { block_sbn, handle });
-                    rqtrace!(
-                        "receiver: entry {} started parallel decode block {} via esi={} kind={:?}",
-                        dec.index,
-                        block_sbn,
-                        parsed.esi,
-                        parsed.kind
-                    );
-                }
-                Err(err) => {
-                    rqtrace!(
-                        "receiver: entry {} running decode block {} inline after spawn denial: {err:?}",
-                        dec.index,
-                        block_sbn
-                    );
-                    let outcome = run_block_decode_job(fallback_job);
-                    let _ = finalize_decode_outcome(dec, outcome).await?;
-                }
-            }
+            let _ = dispatch_decode_job(
+                cx,
+                dec,
+                job,
+                "received repair/source symbol",
+                allow_spawn_decode,
+            )
+            .await?;
             return Ok(true);
         }
         Err(err) => Err(err),
@@ -4414,16 +4449,122 @@ async fn feed_symbol(
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<bool, RqError> {
     let cx = Cx::for_testing();
-    feed_symbol_with_cx(&cx, dec, parsed, payload, symbol_size, symbol_auth).await
+    feed_symbol_with_cx(&cx, dec, parsed, payload, symbol_size, symbol_auth, true).await
+}
+
+async fn dispatch_decode_job(
+    cx: &Cx,
+    dec: &mut EntryDecoder,
+    job: BlockDecodeJob,
+    trigger: &'static str,
+    allow_spawn_decode: bool,
+) -> Result<DecodeDispatch, RqError> {
+    let block_sbn = job.sbn();
+    let _ = drain_ready_entry_decodes(cx, dec).await?;
+    if block_decode_pending(dec, block_sbn) {
+        rqtrace!(
+            "receiver: entry {} dropped duplicate decode job for block {} from {trigger}",
+            dec.index,
+            block_sbn
+        );
+        return Ok(DecodeDispatch::Queued);
+    }
+
+    if !allow_spawn_decode || !can_spawn_parallel_decode(dec.pending_decodes.len()) {
+        let joined = join_one_pending_decode(cx, dec).await?;
+        rqtrace!(
+            "receiver: entry {} joined {joined} pending decode job(s) before queueing block {} from {trigger} (entry_cap={}, transfer_spawn_allowed={})",
+            dec.index,
+            block_sbn,
+            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
+            allow_spawn_decode
+        );
+        if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
+            return Ok(DecodeDispatch::NoProgress);
+        }
+    }
+
+    let fallback_job = job.clone();
+    match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+        Ok(handle) => {
+            dec.pending_decodes
+                .push(PendingDecode { block_sbn, handle });
+            rqtrace!(
+                "receiver: entry {} queued parallel decode block {} from {trigger}",
+                dec.index,
+                block_sbn
+            );
+            Ok(DecodeDispatch::Queued)
+        }
+        Err(err) => {
+            rqtrace!(
+                "receiver: entry {} running decode block {} inline from {trigger} after spawn denial: {err:?}",
+                dec.index,
+                block_sbn
+            );
+            let outcome = run_block_decode_job(fallback_job);
+            if finalize_decode_outcome(dec, outcome).await? {
+                Ok(DecodeDispatch::Completed)
+            } else {
+                Ok(DecodeDispatch::NoProgress)
+            }
+        }
+    }
+}
+
+async fn drain_ready_entry_decodes(cx: &Cx, dec: &mut EntryDecoder) -> Result<u64, RqError> {
+    let mut completed = 0u64;
+    let mut i = 0usize;
+    while i < dec.pending_decodes.len() {
+        if !dec.pending_decodes[i].handle.is_finished() {
+            i += 1;
+            continue;
+        }
+        let mut pending = dec.pending_decodes.swap_remove(i);
+        let block_sbn = pending.block_sbn;
+        let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+            RqError::Coding(format!(
+                "decode task failed for entry {} block {}: {join_err:?}",
+                dec.index, block_sbn
+            ))
+        })?;
+        if finalize_decode_outcome(dec, outcome).await? {
+            completed = completed.saturating_add(1);
+        }
+    }
+    Ok(completed)
+}
+
+async fn join_one_pending_decode(cx: &Cx, dec: &mut EntryDecoder) -> Result<u64, RqError> {
+    let Some(mut pending) = dec.pending_decodes.pop() else {
+        return Ok(0);
+    };
+    let block_sbn = pending.block_sbn;
+    let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+        RqError::Coding(format!(
+            "decode task failed for entry {} block {}: {join_err:?}",
+            dec.index, block_sbn
+        ))
+    })?;
+    if finalize_decode_outcome(dec, outcome).await? {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
 }
 
 async fn seed_source_streaming_pipeline(
+    cx: &Cx,
     dec: &mut EntryDecoder,
     target_sbn: u8,
     symbol_size: u16,
     symbol_auth: Option<&SecurityContext>,
+    allow_spawn_decode: bool,
 ) -> Result<(), RqError> {
     if dec.pipeline.is_none() {
+        return Ok(());
+    }
+    if block_decode_pending(dec, target_sbn) {
         return Ok(());
     }
     let symbol_size = usize::from(symbol_size);
@@ -4500,10 +4641,13 @@ async fn seed_source_streaming_pipeline(
                 .pipeline
                 .as_mut()
                 .expect("checked above")
-                .feed_streaming_block(auth_symbol);
+                .feed_streaming_block_deferred(auth_symbol);
             dec.source_blocks[sbn].pipeline_seeded[esi] = true;
             match result {
-                Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
+                Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
+                    block_sbn,
+                    data,
+                })) => {
                     persist_decoded_block(dec, block_sbn, &data).await?;
                     // `persist_decoded_block` may have completed the entry (mixed source+FEC, E-9)
                     // and already dropped the pipeline; stop seeding so the next loop iteration does
@@ -4519,7 +4663,21 @@ async fn seed_source_streaming_pipeline(
                         return Ok(());
                     }
                 }
-                Ok(_) => {}
+                Ok(DeferredSymbolAcceptResult::Immediate(_)) => {}
+                Ok(DeferredSymbolAcceptResult::Decode(job)) => {
+                    match dispatch_decode_job(
+                        cx,
+                        dec,
+                        job,
+                        "source-streaming repair seed",
+                        allow_spawn_decode,
+                    )
+                    .await?
+                    {
+                        DecodeDispatch::Queued | DecodeDispatch::Completed => return Ok(()),
+                        DecodeDispatch::NoProgress => {}
+                    }
+                }
                 Err(err) => {
                     rqtrace!(
                         "receiver: entry {} source seed error sbn={} esi={}: {err}",
@@ -5307,24 +5465,7 @@ async fn finalize_decode_outcome(
 async fn drain_ready_decodes(cx: &Cx, decoders: &mut [EntryDecoder]) -> Result<u64, RqError> {
     let mut completed = 0u64;
     for dec in decoders {
-        let mut i = 0usize;
-        while i < dec.pending_decodes.len() {
-            if !dec.pending_decodes[i].handle.is_finished() {
-                i += 1;
-                continue;
-            }
-            let mut pending = dec.pending_decodes.swap_remove(i);
-            let block_sbn = pending.block_sbn;
-            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-                RqError::Coding(format!(
-                    "decode task failed for entry {} block {}: {join_err:?}",
-                    dec.index, block_sbn
-                ))
-            })?;
-            if finalize_decode_outcome(dec, outcome).await? {
-                completed = completed.saturating_add(1);
-            }
-        }
+        completed = completed.saturating_add(drain_ready_entry_decodes(cx, dec).await?);
     }
     Ok(completed)
 }
@@ -5333,19 +5474,50 @@ async fn join_all_pending_decodes(cx: &Cx, decoders: &mut [EntryDecoder]) -> Res
     let mut completed = 0u64;
     for dec in decoders {
         while let Some(mut pending) = dec.pending_decodes.pop() {
-            let block_sbn = pending.block_sbn;
-            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
-                RqError::Coding(format!(
-                    "decode task failed for entry {} block {}: {join_err:?}",
-                    dec.index, block_sbn
-                ))
-            })?;
-            if finalize_decode_outcome(dec, outcome).await? {
-                completed = completed.saturating_add(1);
-            }
+            completed = completed.saturating_add(join_pending_decode(cx, dec, &mut pending).await?);
         }
     }
     Ok(completed)
+}
+
+async fn drain_ready_entry_decodes(cx: &Cx, dec: &mut EntryDecoder) -> Result<u64, RqError> {
+    let mut completed = 0u64;
+    let mut i = 0usize;
+    while i < dec.pending_decodes.len() {
+        if !dec.pending_decodes[i].handle.is_finished() {
+            i += 1;
+            continue;
+        }
+        let mut pending = dec.pending_decodes.swap_remove(i);
+        completed = completed.saturating_add(join_pending_decode(cx, dec, &mut pending).await?);
+    }
+    Ok(completed)
+}
+
+async fn join_one_pending_decode(cx: &Cx, dec: &mut EntryDecoder) -> Result<u64, RqError> {
+    let Some(mut pending) = dec.pending_decodes.pop() else {
+        return Ok(0);
+    };
+    join_pending_decode(cx, dec, &mut pending).await
+}
+
+async fn join_pending_decode(
+    cx: &Cx,
+    dec: &mut EntryDecoder,
+    pending: &mut PendingDecode,
+) -> Result<u64, RqError> {
+    let block_sbn = pending.block_sbn;
+    let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+        RqError::Coding(format!(
+            "decode task failed for entry {} block {}: {join_err:?}",
+            dec.index, block_sbn
+        ))
+    })?;
+    if finalize_decode_outcome(dec, outcome).await? {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
 }
 
 /// Pump UDP symbol datagrams into the decoders until a control frame arrives.
