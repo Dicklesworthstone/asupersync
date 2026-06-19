@@ -84,9 +84,7 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 fn is_golden_update_mode() -> bool {
-    std::env::var("GOLDEN_UPDATE")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    std::env::var("GOLDEN_UPDATE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn load_golden() -> Option<GoldenFile> {

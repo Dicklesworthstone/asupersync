@@ -56,7 +56,8 @@ fn timeout_now() -> Time {
         .map_or_else(crate::time::wall_now, |driver| driver.now())
 }
 
-pub use acceptor::{ClientAuth, EarlyDataReplayProtection, TlsAcceptor, TlsAcceptorBuilder};
+pub use acceptor::EarlyDataReplayProtection;
+pub use acceptor::{ClientAuth, TlsAcceptor, TlsAcceptorBuilder};
 pub use connector::{TlsConnector, TlsConnectorBuilder};
 pub use error::TlsError;
 pub use stream::TlsStream;

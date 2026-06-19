@@ -187,9 +187,11 @@ pub fn plan_multi_object_split(
     while logical_offset < logical_size {
         let remaining = logical_size - logical_offset;
         let len = remaining.min(max_object_bytes);
-        let source_block_count = u32::try_from(len.div_ceil(config.max_block_size))
-            .map_err(|_| MultiObjectSplitError::TooManyShards {
-                shard_count: required_shards,
+        let source_block_count =
+            u32::try_from(len.div_ceil(config.max_block_size)).map_err(|_| {
+                MultiObjectSplitError::TooManyShards {
+                    shard_count: required_shards,
+                }
             })?;
         debug_assert!(source_block_count <= config.max_source_blocks_per_object);
 
@@ -226,8 +228,7 @@ mod tests {
         let config = MultiObjectSplitConfig::default();
         assert_eq!(
             config.object_byte_limit().unwrap(),
-            u64::from(ATP_RQ_MAX_SOURCE_BLOCKS_PER_OBJECT)
-                * ATP_RQ_DEFAULT_MULTI_OBJECT_BLOCK_SIZE
+            u64::from(ATP_RQ_MAX_SOURCE_BLOCKS_PER_OBJECT) * ATP_RQ_DEFAULT_MULTI_OBJECT_BLOCK_SIZE
         );
         assert_eq!(config.object_byte_limit().unwrap(), 2 * GIB);
     }

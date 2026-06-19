@@ -76,7 +76,13 @@ impl GossipBuffer {
                 }
             }
             None => {
-                self.rumors.insert(node, Buffered { rumor, transmits: 0 });
+                self.rumors.insert(
+                    node,
+                    Buffered {
+                        rumor,
+                        transmits: 0,
+                    },
+                );
             }
         }
     }

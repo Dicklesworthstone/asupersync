@@ -78,7 +78,11 @@ fn snapshot_member_order_is_deterministic_registration_order() {
 
     assert_eq!(
         order_first,
-        vec![member("node-c", 30), member("node-a", 10), member("node-b", 20)],
+        vec![
+            member("node-c", 30),
+            member("node-a", 10),
+            member("node-b", 20)
+        ],
         "snapshot must preserve registration (join-sequence) order, not key order"
     );
     assert_eq!(
@@ -126,7 +130,11 @@ fn monitor_subscriber_observes_each_event_exactly_once() {
     state.join(b.clone(), Time::from_nanos(2)).expect("join b");
     state.leave(&a, Time::from_nanos(3)).expect("leave a");
     state
-        .mark_down(&b, asupersync::monitor::DownReason::Normal, Time::from_nanos(4))
+        .mark_down(
+            &b,
+            asupersync::monitor::DownReason::Normal,
+            Time::from_nanos(4),
+        )
         .expect("down b");
 
     let mut subscriber = GroupEventSubscriber::new();

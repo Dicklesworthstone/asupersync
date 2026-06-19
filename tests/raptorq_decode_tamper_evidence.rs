@@ -79,7 +79,12 @@ fn build_received(
             // valid so this is a *content* tamper, not a malformed symbol.
             repair_data[0] ^= 0xFF;
         }
-        received.push(ReceivedSymbol::repair(esi, columns, coefficients, repair_data));
+        received.push(ReceivedSymbol::repair(
+            esi,
+            columns,
+            coefficients,
+            repair_data,
+        ));
     }
 
     received
@@ -104,7 +109,10 @@ fn clean_overdetermined_set_recovers_true_source() {
     let success = decoder
         .decode_with_proof(&received, object_id(), SBN)
         .unwrap_or_else(|(err, _)| panic!("clean set must decode: {err:?}"));
-    assert_eq!(success.result.source, source, "clean decode must be byte-exact");
+    assert_eq!(
+        success.result.source, source,
+        "clean decode must be byte-exact"
+    );
 }
 
 /// Tamper-evidence: a single flipped byte in a redundant repair symbol must be
@@ -118,8 +126,7 @@ fn tampered_repair_byte_is_never_silently_accepted() {
     // pivot ordering.
     for corrupt_offset in 0..REPAIRS {
         let decoder = InactivationDecoder::new(K, SYMBOL_SIZE, SEED);
-        let received =
-            build_received(&encoder, &decoder, &source, REPAIRS, Some(corrupt_offset));
+        let received = build_received(&encoder, &decoder, &source, REPAIRS, Some(corrupt_offset));
 
         match decoder.decode_with_proof(&received, object_id(), SBN) {
             Ok(success) => {

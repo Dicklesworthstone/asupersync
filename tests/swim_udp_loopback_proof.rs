@@ -13,8 +13,8 @@
 use asupersync::cx::Cx;
 use asupersync::distributed::membership::{Packet, Payload, Rumor, UdpMembershipTransport};
 use asupersync::net::UdpSocket;
-use asupersync::runtime::RuntimeBuilder;
 use asupersync::remote::NodeId;
+use asupersync::runtime::RuntimeBuilder;
 
 #[test]
 fn membership_packet_round_trips_over_loopback_udp() {
@@ -32,7 +32,9 @@ fn membership_packet_round_trips_over_loopback_udp() {
         let mut sender = UdpMembershipTransport::new(sender_socket);
         let mut receiver = UdpMembershipTransport::new(receiver_socket);
 
-        let sender_addr = sender.local_addr().map_err(|e| format!("sender addr: {e}"))?;
+        let sender_addr = sender
+            .local_addr()
+            .map_err(|e| format!("sender addr: {e}"))?;
         let receiver_addr = receiver
             .local_addr()
             .map_err(|e| format!("receiver addr: {e}"))?;
@@ -54,7 +56,10 @@ fn membership_packet_round_trips_over_loopback_udp() {
             .await
             .map_err(|e| format!("send: {e}"))?;
         if encoded.gossip_dropped != 0 {
-            return Err(format!("gossip unexpectedly dropped: {}", encoded.gossip_dropped));
+            return Err(format!(
+                "gossip unexpectedly dropped: {}",
+                encoded.gossip_dropped
+            ));
         }
 
         let (from, received) = receiver.recv().await.map_err(|e| format!("recv: {e}"))?;

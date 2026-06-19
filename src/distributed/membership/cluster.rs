@@ -85,7 +85,11 @@ impl VirtualCluster {
         let mut partition = BTreeMap::new();
         let mut events = BTreeMap::new();
         for (index, id) in node_ids.iter().enumerate() {
-            let mut swim = Swim::new(id.clone(), swim_config.clone(), seed.wrapping_add(index as u64));
+            let mut swim = Swim::new(
+                id.clone(),
+                swim_config.clone(),
+                seed.wrapping_add(index as u64),
+            );
             for other in node_ids {
                 if other != id {
                     swim.add_peer(0, other.clone());
@@ -127,7 +131,9 @@ impl VirtualCluster {
     /// `viewer`'s belief about `subject`'s state.
     #[must_use]
     pub fn view(&self, viewer: &NodeId, subject: &NodeId) -> Option<MemberState> {
-        self.nodes.get(viewer).and_then(|swim| swim.state_of(subject))
+        self.nodes
+            .get(viewer)
+            .and_then(|swim| swim.state_of(subject))
     }
 
     /// The membership events `node` has observed so far.

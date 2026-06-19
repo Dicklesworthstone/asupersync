@@ -302,17 +302,11 @@ mod tests {
 
     #[test]
     fn best_rename_source_picks_the_nearest_above_threshold() {
-        let ids: Vec<[u8; 32]> = (0..16u8).map(|i| [i; 32]).collect();
-        let current = simhash_of_chunk_ids(ids.iter());
+        let current = 0xfeed_face_cafe_beefu64;
+        let near = current ^ 0x0000_0000_0000_0001;
+        let far = current ^ 0x0000_0000_0000_ffff;
 
-        let mut near = ids.clone();
-        near[0] = [99u8; 32]; // close
-        let far_ids: Vec<[u8; 32]> = (100..116u8).map(|i| [i; 32]).collect();
-
-        let candidates = [
-            ("old/far.bin", simhash_of_chunk_ids(far_ids.iter())),
-            ("old/near.bin", simhash_of_chunk_ids(near.iter())),
-        ];
+        let candidates = [("old/far.bin", far), ("old/near.bin", near)];
         let m = best_rename_source(current, candidates.iter().map(|(p, h)| (*p, *h)), 0.6)
             .expect("a near match clears the threshold");
         assert_eq!(m.prior_path, "old/near.bin");

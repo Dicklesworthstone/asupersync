@@ -10630,7 +10630,10 @@ mod tests {
             // stay PENDING — no PgSavepoint guard is created, so nothing
             // releases them or poisons the transaction on drop.
             for name in ["sp1", "sp2", "sp3"] {
-                match tx.execute_unchecked(&cx, &format!("SAVEPOINT {name}")).await {
+                match tx
+                    .execute_unchecked(&cx, &format!("SAVEPOINT {name}"))
+                    .await
+                {
                     Outcome::Ok(_) => {}
                     other => panic!("expected {name} savepoint to open, got {other:?}"),
                 }

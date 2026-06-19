@@ -1183,15 +1183,21 @@ mod tests {
     }
 
     #[test]
-    fn wall_clock_starts_near_zero() {
-        init_test("wall_clock_starts_near_zero");
+    fn wall_clock_uses_shared_process_epoch() {
+        init_test("wall_clock_uses_shared_process_epoch");
+        let before = crate::time::sleep::wall_now().as_nanos();
         let clock = WallClock::new();
-        let now = clock.now();
-        // Should be very close to zero (within 1ms of creation)
-        let max_nanos = 1_000_000;
-        let actual = now.as_nanos();
-        crate::assert_with_log!(actual < max_nanos, "near zero", max_nanos, actual);
-        crate::test_complete!("wall_clock_starts_near_zero");
+        let now = clock.now().as_nanos();
+        let after = crate::time::sleep::wall_now().as_nanos();
+
+        crate::assert_with_log!(
+            now >= before,
+            "clock not before process wall_now",
+            before,
+            now
+        );
+        crate::assert_with_log!(now <= after, "clock not after process wall_now", after, now);
+        crate::test_complete!("wall_clock_uses_shared_process_epoch");
     }
 
     #[test]

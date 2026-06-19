@@ -70,7 +70,11 @@ fn encoded_len_size_class_boundaries() {
         (VARINT_MAX, 8),
     ];
     for (value, len) in cases {
-        assert_eq!(VarInt::new(value).unwrap().encoded_len(), len, "value={value}");
+        assert_eq!(
+            VarInt::new(value).unwrap().encoded_len(),
+            len,
+            "value={value}"
+        );
         assert_eq!(encode(value).len(), len, "encoded value={value}");
     }
 }
@@ -97,7 +101,11 @@ fn round_trip_across_size_classes() {
     for value in values {
         let bytes = encode(value);
         assert_eq!(bytes.len(), VarInt::new(value).unwrap().encoded_len());
-        assert_eq!(decode_ok(&bytes), (value, bytes.len()), "round-trip value={value}");
+        assert_eq!(
+            decode_ok(&bytes),
+            (value, bytes.len()),
+            "round-trip value={value}"
+        );
     }
 }
 
@@ -130,7 +138,11 @@ fn partial_buffer_needs_more_data() {
     // First byte 0x80 declares a 4-byte varint, but only two bytes are present.
     let mut partial = BytesMut::from([0x80u8, 0x00].as_slice());
     assert!(matches!(VarInt::decode(&mut partial), Outcome::Ok(None)));
-    assert_eq!(partial.as_ref().len(), 2, "Ok(None) must not consume the buffer");
+    assert_eq!(
+        partial.as_ref().len(),
+        2,
+        "Ok(None) must not consume the buffer"
+    );
 }
 
 /// `peek_len` reports the size class from the first byte without consuming it.
@@ -140,7 +152,13 @@ fn peek_len_reports_size_class_without_consuming() {
     assert_eq!(VarInt::peek_len(&eight), Some(8));
     assert_eq!(eight.as_ref().len(), 8, "peek must not consume");
 
-    assert_eq!(VarInt::peek_len(&BytesMut::from([0x25u8].as_slice())), Some(1));
-    assert_eq!(VarInt::peek_len(&BytesMut::from([0x40u8, 0x00].as_slice())), Some(2));
+    assert_eq!(
+        VarInt::peek_len(&BytesMut::from([0x25u8].as_slice())),
+        Some(1)
+    );
+    assert_eq!(
+        VarInt::peek_len(&BytesMut::from([0x40u8, 0x00].as_slice())),
+        Some(2)
+    );
     assert_eq!(VarInt::peek_len(&BytesMut::new()), None);
 }

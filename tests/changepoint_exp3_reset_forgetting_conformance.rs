@@ -141,7 +141,8 @@ fn reset_decouples_post_shift_trajectory_from_prior_regime() {
 
     // RESET == a fresh controller (reset_to_priors is `*self = Self::new(steps)`).
     let reset_from_low = drive_window(AdaptiveCancelStreakPolicyBench::new(1), NEW_OPTIMUM, WINDOW);
-    let reset_from_high = drive_window(AdaptiveCancelStreakPolicyBench::new(1), NEW_OPTIMUM, WINDOW);
+    let reset_from_high =
+        drive_window(AdaptiveCancelStreakPolicyBench::new(1), NEW_OPTIMUM, WINDOW);
     assert_eq!(
         reset_from_low, reset_from_high,
         "a reset controller's post-shift trajectory must depend only on the new regime"
@@ -176,8 +177,12 @@ fn discounted_ucb_adapts_without_reset_so_reset_is_conservative_not_faster() {
     let noreset_seq = drive_window(learned, NEW_OPTIMUM, WINDOW);
 
     let hits = |seq: &[usize]| seq.iter().filter(|&&arm| arm == NEW_OPTIMUM).count();
-    let tail_hits =
-        |seq: &[usize]| seq[seq.len() - 8..].iter().filter(|&&arm| arm == NEW_OPTIMUM).count();
+    let tail_hits = |seq: &[usize]| {
+        seq[seq.len() - 8..]
+            .iter()
+            .filter(|&&arm| arm == NEW_OPTIMUM)
+            .count()
+    };
 
     // Honest finding: the no-reset baseline reaches the new optimum at least as
     // often as the reset controller — reset is not faster.

@@ -473,9 +473,15 @@ pub struct CircuitBreakerFuture<F, C = DefaultClassifier> {
 #[derive(Debug)]
 enum CircuitBreakerFutureState<F, C> {
     NotReady,
-    Open { remaining: std::time::Duration },
+    Open {
+        remaining: std::time::Duration,
+    },
     HalfOpenFull,
-    Running { inner: F, guard: PermitGuard, classifier: C },
+    Running {
+        inner: F,
+        guard: PermitGuard,
+        classifier: C,
+    },
     Done,
 }
 

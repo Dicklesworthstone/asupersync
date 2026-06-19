@@ -523,7 +523,7 @@ impl AtpBundleVerifier {
 
         // Count verification stages
         // Reported for visibility only: this raw count is intentionally NOT a
-        // hard gate. The "8" is a placeholder and `verification_evidence.len()`
+        // hard gate. The "8" is a legacy display total and `verification_evidence.len()`
         // does not map 1:1 to required stages, so a `passed >= total` comparison
         // would fail many legitimate bundles. Proper per-stage required-set
         // enforcement is tracked in asupersync-u5owrm; the concrete content gates

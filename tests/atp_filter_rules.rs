@@ -59,7 +59,10 @@ fn first_match_wins_is_deterministic() {
         FilterRule::exclude("*.tmp"),
         FilterRule::include("keep.tmp"),
     ]);
-    assert_eq!(no_rescue.decision("keep.tmp", false), FilterDecision::Exclude);
+    assert_eq!(
+        no_rescue.decision("keep.tmp", false),
+        FilterDecision::Exclude
+    );
 }
 
 #[test]

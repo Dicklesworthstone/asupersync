@@ -79,9 +79,17 @@ fn encoded_size_matches_real_length() {
 #[test]
 fn varint_length_size_class_boundary() {
     let f63 = DatagramFrame::with_length(Bytes::from(vec![0u8; 63]));
-    assert_eq!(f63.encoded_size(), 1 + 1 + 63, "type + 1-byte len + 63 payload");
+    assert_eq!(
+        f63.encoded_size(),
+        1 + 1 + 63,
+        "type + 1-byte len + 63 payload"
+    );
     let f64 = DatagramFrame::with_length(Bytes::from(vec![0u8; 64]));
-    assert_eq!(f64.encoded_size(), 1 + 2 + 64, "type + 2-byte len + 64 payload");
+    assert_eq!(
+        f64.encoded_size(),
+        1 + 2 + 64,
+        "type + 2-byte len + 64 payload"
+    );
 
     for frame in [f63, f64] {
         let bytes = encode(&frame);
@@ -104,7 +112,11 @@ fn round_trip_matrix_is_identity() {
             let mut buf = BytesMut::from(encode(&frame).as_slice());
             let decoded = DatagramFrame::decode(&mut buf, 4096).unwrap();
             assert_eq!(decoded.frame_type, frame.frame_type);
-            assert_eq!(decoded.payload(), &payload, "size={size} with_length={with_length}");
+            assert_eq!(
+                decoded.payload(),
+                &payload,
+                "size={size} with_length={with_length}"
+            );
             assert!(buf.is_empty());
         }
     }

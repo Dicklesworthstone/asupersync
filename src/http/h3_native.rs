@@ -8671,6 +8671,17 @@ mod tests {
         )
         .expect("dynamic qpack");
         decoder_rt
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        let decoder_insert =
+            qpack_encoder_instruction_bytes(&QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-feedback".to_string(),
+                value: "ok".to_string(),
+            });
+        decoder_rt
+            .feed_encoder_stream_bytes(3, &decoder_insert)
+            .expect("decoder feedback insertion");
+        decoder_rt
             .register_stream(7, H3UniStreamType::QpackDecoder)
             .expect("decoder stream");
         let increment =

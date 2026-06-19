@@ -324,7 +324,9 @@ fn redelivery_after_commit_delivers_only_the_new_tail() {
     assert_eq!(seqs(first.batch()), vec![0, 1]);
 
     // Second wave: new events appended, delivered.
-    state.leave(&member("n", 0), Time::from_nanos(2)).expect("l0");
+    state
+        .leave(&member("n", 0), Time::from_nanos(2))
+        .expect("l0");
     state.join(member("n", 2), Time::from_nanos(3)).expect("j2");
     let second = sub
         .deliver_pending_to(&cx, &state, &tx)

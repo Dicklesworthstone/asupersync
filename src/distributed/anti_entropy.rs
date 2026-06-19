@@ -146,7 +146,10 @@ impl MerkleRangeTree {
     /// subtrees whose hashes differ. Both trees must share the same `depth`.
     #[must_use]
     pub fn diff(&self, other: &Self) -> DiffReport {
-        assert_eq!(self.depth, other.depth, "anti-entropy requires equal tree depth");
+        assert_eq!(
+            self.depth, other.depth,
+            "anti-entropy requires equal tree depth"
+        );
         let leaf_base = 1usize << self.depth;
         let mut diffs = Vec::new();
         let mut nodes_compared = 0usize;
@@ -274,8 +277,11 @@ mod tests {
         let here = tree_with(8, &[("a", 1), ("b", 2), ("c", 3), ("d", 4)]);
         let there = tree_with(8, &[("a", 1), ("b", 999), ("d", 4), ("e", 5)]);
         let report = here.diff(&there);
-        let kinds: Vec<(&[u8], DiffKind)> =
-            report.diffs.iter().map(|d| (d.key.as_slice(), d.kind)).collect();
+        let kinds: Vec<(&[u8], DiffKind)> = report
+            .diffs
+            .iter()
+            .map(|d| (d.key.as_slice(), d.kind))
+            .collect();
         assert!(kinds.contains(&(b"b".as_slice(), DiffKind::HashDiffers)));
         assert!(kinds.contains(&(b"c".as_slice(), DiffKind::OnlyHere)));
         assert!(kinds.contains(&(b"e".as_slice(), DiffKind::OnlyThere)));
@@ -318,6 +324,9 @@ mod tests {
         let b = tree_with(8, &[("x", 1), ("y", 2)]);
         let report = a.diff(&b);
         assert!(report.diffs.is_empty());
-        assert_eq!(report.nodes_compared, 1, "identical roots prune immediately");
+        assert_eq!(
+            report.nodes_compared, 1,
+            "identical roots prune immediately"
+        );
     }
 }

@@ -1877,13 +1877,10 @@ mod tests {
 
     impl TestDnsServer {
         fn start(zone: BTreeMap<(String, u16), Vec<TestDnsRecord>>, truncate_udp: bool) -> Self {
-            let udp_socket = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .expect("bind test UDP DNS server");
+            let (udp_socket, tcp_listener, addr) = bind_test_dns_sockets();
             udp_socket
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("set UDP timeout");
-            let addr = udp_socket.local_addr().expect("test UDP local addr");
-            let tcp_listener = TcpListener::bind(addr).expect("bind test TCP DNS server");
             tcp_listener
                 .set_nonblocking(true)
                 .expect("set test TCP nonblocking");
@@ -1957,6 +1954,34 @@ mod tests {
                 tcp_handle: Some(tcp_handle),
             }
         }
+    }
+
+    fn bind_test_dns_sockets() -> (UdpSocket, TcpListener, SocketAddr) {
+        let mut last_udp_error = None;
+
+        for _ in 0..64 {
+            let tcp_listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .unwrap_or_else(|err| {
+                    panic!("bind test TCP DNS server on loopback wildcard port: {err}")
+                });
+            let addr = tcp_listener.local_addr().expect("test TCP local addr");
+
+            match UdpSocket::bind(addr) {
+                Ok(udp_socket) => return (udp_socket, tcp_listener, addr),
+                Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+                    last_udp_error = Some(err);
+                }
+                Err(err) => panic!("bind test UDP DNS server on TCP-selected {addr}: {err}"),
+            }
+        }
+
+        panic!(
+            "bind test UDP/TCP DNS server pair after 64 attempts: {}",
+            last_udp_error.map_or_else(
+                || "no UDP bind attempt recorded".to_string(),
+                |err| err.to_string()
+            )
+        );
     }
 
     impl Drop for TestDnsServer {

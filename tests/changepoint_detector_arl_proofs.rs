@@ -63,8 +63,7 @@ impl Lcg {
             .checked_mul(2)
             .and_then(|value| value.checked_add(1))
             .expect("jitter span must fit u64");
-        let offset =
-            i64::try_from(self.next_u64() % span).expect("jitter offset must fit i64");
+        let offset = i64::try_from(self.next_u64() % span).expect("jitter offset must fit i64");
         offset - range
     }
 }

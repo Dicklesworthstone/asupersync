@@ -314,7 +314,9 @@ impl<T: PbftTransport> PbftNode<T> {
             (batch, sequence, view)
         };
 
-        let result = self.send_preprepare(cx, view, sequence, batch.clone()).await;
+        let result = self
+            .send_preprepare(cx, view, sequence, batch.clone())
+            .await;
         let mut state = self.state.lock().unwrap();
         match result {
             Ok(()) => {
@@ -358,9 +360,11 @@ impl<T: PbftTransport> PbftNode<T> {
         {
             let mut state = self.state.lock().unwrap();
             if state.log.contains_key(&sequence) {
-                return Err(Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
-                    "PBFT pre-prepare sequence {sequence} already has a log entry"
-                )));
+                return Err(
+                    Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
+                        "PBFT pre-prepare sequence {sequence} already has a log entry"
+                    )),
+                );
             }
             let entry = LogEntry {
                 batch: batch.clone(),
@@ -461,10 +465,12 @@ impl<T: PbftTransport> PbftNode<T> {
                 return Err(Error::new(ErrorKind::InvalidInput));
             }
             if sequence <= state.last_executed {
-                return Err(Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
-                    "PBFT pre-prepare sequence {sequence} is at or below executed watermark {}",
-                    state.last_executed
-                )));
+                return Err(
+                    Error::new(ErrorKind::InvalidStateTransition).with_message(format!(
+                        "PBFT pre-prepare sequence {sequence} is at or below executed watermark {}",
+                        state.last_executed
+                    )),
+                );
             }
 
             if let Some(entry) = state.log.get_mut(&sequence) {

@@ -157,8 +157,7 @@ impl BondingHandshake {
     }
 
     fn validate_offer(&self) -> Result<(), BondingHandshakeError> {
-        if self.min_protocol_version == 0 || self.min_protocol_version > self.max_protocol_version
-        {
+        if self.min_protocol_version == 0 || self.min_protocol_version > self.max_protocol_version {
             return Err(BondingHandshakeError::InvalidProtocolRange {
                 min: self.min_protocol_version,
                 max: self.max_protocol_version,
@@ -361,11 +360,8 @@ mod tests {
             Err(BondingHandshakeError::InvalidDonorCount { donor_count: 0 })
         );
 
-        let too_many_donors = BondingHandshake::v1_static(
-            [BondTransport::DirectIp],
-            MAX_BONDING_DONORS + 1,
-            true,
-        );
+        let too_many_donors =
+            BondingHandshake::v1_static([BondTransport::DirectIp], MAX_BONDING_DONORS + 1, true);
         assert_eq!(
             too_many_donors.negotiate(&donor),
             Err(BondingHandshakeError::TooManyDonors {

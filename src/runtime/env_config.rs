@@ -643,11 +643,18 @@ mod tests {
 
     #[test]
     fn env_rejects_thread_name_prefix_with_nul() {
-        with_env(ENV_THREAD_NAME_PREFIX, "bad\0prefix", || {
-            let mut config = RuntimeConfig::default();
-            let err = apply_env_overrides(&mut config).expect_err("NUL prefix must be rejected");
-            assert!(err.to_string().contains("NUL"), "unexpected error: {err}");
-        });
+        let mut vars = HashMap::new();
+        vars.insert(
+            ENV_THREAD_NAME_PREFIX.to_string(),
+            "bad\0prefix".to_string(),
+        );
+        let reader = TestEnvReader::new(vars);
+        let mut config = RuntimeConfig::default();
+
+        let err = super::apply_env_overrides(&mut config, &reader)
+            .expect_err("NUL prefix must be rejected");
+
+        assert!(err.to_string().contains("NUL"), "unexpected error: {err}");
     }
 
     #[test]

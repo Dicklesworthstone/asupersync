@@ -1331,16 +1331,32 @@ mod tests {
     #[test]
     fn recv_with_ancillary_surfaces_partial_truncation_fds_without_leak() {
         use crate::net::unix::{AncillaryMessage, SocketAncillary, ancillary_space_for_fds};
+        use std::collections::HashSet;
         use std::os::unix::io::AsRawFd;
+        use std::path::PathBuf;
 
-        fn open_fd_count() -> usize {
-            std::fs::read_dir("/proc/self/fd")
-                .expect("read /proc/self/fd")
-                .count()
+        fn fd_target(fd: RawFd) -> PathBuf {
+            std::fs::read_link(format!("/proc/self/fd/{fd}")).expect("read fd target")
+        }
+
+        fn matching_open_fd_targets(targets: &HashSet<PathBuf>) -> Vec<PathBuf> {
+            let mut matches = Vec::new();
+            for entry in std::fs::read_dir("/proc/self/fd").expect("read /proc/self/fd") {
+                let Ok(entry) = entry else {
+                    continue;
+                };
+                let Ok(target) = std::fs::read_link(entry.path()) else {
+                    continue;
+                };
+                if targets.contains(&target) {
+                    matches.push(target);
+                }
+            }
+            matches
         }
 
         init_test("recv_with_ancillary_surfaces_partial_truncation_fds_without_leak");
-        let before = open_fd_count();
+        let mut sent_read_targets = HashSet::new();
 
         {
             let (sender, receiver) = UnixStream::pair().expect("UnixStream::pair");
@@ -1349,6 +1365,7 @@ mod tests {
                 .iter()
                 .map(|(read_end, _write_end)| read_end.as_raw_fd())
                 .collect();
+            sent_read_targets.extend(send_fds.iter().copied().map(fd_target));
 
             let mut send_ancillary = SocketAncillary::new(0);
             send_ancillary.add_fds(&send_fds);
@@ -1392,12 +1409,12 @@ mod tests {
             }
         }
 
-        let after = open_fd_count();
+        let leaked_targets = matching_open_fd_targets(&sent_read_targets);
         crate::assert_with_log!(
-            after <= before + 1,
+            leaked_targets.is_empty(),
             "partial truncation must not leak fds",
-            before,
-            after
+            Vec::<PathBuf>::new(),
+            leaked_targets
         );
         crate::test_complete!("recv_with_ancillary_surfaces_partial_truncation_fds_without_leak");
     }

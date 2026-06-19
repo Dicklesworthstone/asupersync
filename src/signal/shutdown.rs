@@ -610,7 +610,7 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -625,6 +625,17 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        condition()
     }
 
     #[test]
@@ -1033,18 +1044,22 @@ mod tests {
         if !listener_installed {
             return;
         }
-        shutdown.listen_for_signals();
+        let shutdown_watches_sighup = watched_signal_kinds().contains(&SignalKind::hangup());
+        crate::assert_with_log!(
+            !shutdown_watches_sighup,
+            "shutdown listener excludes SIGHUP",
+            false,
+            shutdown_watches_sighup
+        );
 
         let sighup_injected = inject_test_signal(SignalKind::hangup()).is_ok();
         crate::assert_with_log!(sighup_injected, "inject SIGHUP", true, sighup_injected);
         if !sighup_injected {
             return;
         }
-        for _ in 0..50 {
-            if reload.reload_count() > 0 {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
+        if !wait_until(|| reload.reload_count() > 0) {
+            crate::assert_with_log!(false, "SIGHUP triggered reload before timeout", true, false);
+            return;
         }
 
         let mut reload_fut = Box::pin(reload_rx.wait());
@@ -1073,24 +1088,22 @@ mod tests {
             shutdown.is_shutting_down()
         );
 
+        shutdown.listen_for_signals();
         let sigterm_injected = inject_test_signal(SignalKind::terminate()).is_ok();
         crate::assert_with_log!(sigterm_injected, "inject SIGTERM", true, sigterm_injected);
         if !sigterm_injected {
             return;
         }
         let mut fut = Box::pin(shutdown_rx.wait());
-        for _ in 0..50 {
-            if poll_once(&mut fut).is_ready() {
-                crate::assert_with_log!(
-                    shutdown.is_shutting_down(),
-                    "SIGTERM triggers shutdown",
-                    true,
-                    shutdown.is_shutting_down()
-                );
-                crate::test_complete!("sighup_triggers_reload_only_and_sigterm_triggers_shutdown");
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
+        if wait_until(|| poll_once(&mut fut).is_ready()) {
+            crate::assert_with_log!(
+                shutdown.is_shutting_down(),
+                "SIGTERM triggers shutdown",
+                true,
+                shutdown.is_shutting_down()
+            );
+            crate::test_complete!("sighup_triggers_reload_only_and_sigterm_triggers_shutdown");
+            return;
         }
 
         crate::assert_with_log!(

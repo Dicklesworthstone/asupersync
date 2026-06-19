@@ -4735,8 +4735,14 @@ mod tests {
         // Default max_connections_per_client = 3, so one client may hold 2.
         let pool = DbPool::new(manager, DbPoolConfig::with_max_size(4));
         let client = "client-a";
-        let client_count =
-            || pool.inner.lock().client_connections.get(client).copied().unwrap_or(0);
+        let client_count = || {
+            pool.inner
+                .lock()
+                .client_connections
+                .get(client)
+                .copied()
+                .unwrap_or(0)
+        };
 
         // Hold TWO connections for the same client at once.
         let c1 = pool.get_for_client(client).expect("acquire 1");

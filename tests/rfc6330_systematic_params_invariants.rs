@@ -151,7 +151,13 @@ fn systematic_index_table_rows_satisfy_rfc_invariants() {
         // Infallible wrapper must agree with the fallible lookup.
         let infallible = SystematicParams::for_source_block(k, SYMBOL_SIZE);
         assert_eq!(
-            (infallible.k_prime, infallible.j, infallible.s, infallible.h, infallible.w),
+            (
+                infallible.k_prime,
+                infallible.j,
+                infallible.s,
+                infallible.h,
+                infallible.w
+            ),
             (params.k_prime, params.j, params.s, params.h, params.w),
             "for_source_block disagrees with try_for_source_block for K={k}"
         );

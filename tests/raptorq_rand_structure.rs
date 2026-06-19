@@ -97,7 +97,11 @@ fn rand_matches_rfc_formula_and_invariants() {
                 );
                 assert!(got < m, "rand({y},{i},{m}) = {got} not < m");
                 // Determinism.
-                assert_eq!(rand(y, i, m), got, "rand not deterministic at ({y},{i},{m})");
+                assert_eq!(
+                    rand(y, i, m),
+                    got,
+                    "rand not deterministic at ({y},{i},{m})"
+                );
                 checked += 1;
             }
             // mod-1 always collapses to zero.

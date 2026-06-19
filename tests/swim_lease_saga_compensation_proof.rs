@@ -10,7 +10,9 @@
 //!
 //! Run with: `cargo test --test swim_lease_saga_compensation_proof --features test-internals`.
 
-use asupersync::distributed::membership::{MembershipView, Packet, Payload, Rumor, Swim, SwimConfig};
+use asupersync::distributed::membership::{
+    MembershipView, Packet, Payload, Rumor, Swim, SwimConfig,
+};
 use asupersync::remote::{Lease, MembershipLeaseManager, NodeId, Saga, SagaState};
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 use std::sync::Arc;
@@ -76,7 +78,11 @@ fn death_revokes_leases_and_runs_saga_compensation() {
     let _ = swim.tick(30_000);
     view.apply_all(swim.drain_events());
     let revoked = manager.sync(&view);
-    assert_eq!(revoked.len(), lease_count as usize, "all leases revoked on death");
+    assert_eq!(
+        revoked.len(),
+        lease_count as usize,
+        "all leases revoked on death"
+    );
 
     // death → revoke → compensate: each revoked lease's saga compensates.
     for r in &revoked {

@@ -733,7 +733,13 @@ impl Swim {
             None => true,
         };
         if supersede {
-            self.adopt(now, node, rumor.target_state(), rumor.incarnation(), rumor.accuser());
+            self.adopt(
+                now,
+                node,
+                rumor.target_state(),
+                rumor.incarnation(),
+                rumor.accuser(),
+            );
             self.gossip.queue(rumor.clone());
         } else if let Rumor::Suspect {
             incarnation, from, ..
@@ -799,7 +805,12 @@ impl Swim {
         // Helper role: relay the target's ack back to the original requester.
         if let Some(pos) = self.forwards.iter().position(|f| f.helper_seq == seq) {
             let f = self.forwards.remove(pos);
-            let pkt = self.packet_to(f.requester, Payload::Ack { seq: f.requester_seq });
+            let pkt = self.packet_to(
+                f.requester,
+                Payload::Ack {
+                    seq: f.requester_seq,
+                },
+            );
             out.push(pkt);
         }
     }
@@ -854,7 +865,8 @@ impl Swim {
         }
         for (id, inc) in to_kill {
             self.adopt(now, id.clone(), MemberState::Dead, inc, None);
-            self.gossip.queue(Rumor::confirm(id, inc, self.local.clone()));
+            self.gossip
+                .queue(Rumor::confirm(id, inc, self.local.clone()));
         }
     }
 
@@ -870,7 +882,12 @@ impl Swim {
             }
         }
         for f in expired {
-            let pkt = self.packet_to(f.requester, Payload::Nack { seq: f.requester_seq });
+            let pkt = self.packet_to(
+                f.requester,
+                Payload::Nack {
+                    seq: f.requester_seq,
+                },
+            );
             out.push(pkt);
         }
     }
@@ -982,9 +999,7 @@ impl Swim {
                 self.probe_order = self
                     .members
                     .iter()
-                    .filter(|&(_, m)| {
-                        m.state != MemberState::Dead && m.state != MemberState::Left
-                    })
+                    .filter(|&(_, m)| m.state != MemberState::Dead && m.state != MemberState::Left)
                     .map(|(id, _)| id.clone())
                     .collect();
                 if self.probe_order.is_empty() {
@@ -1134,8 +1149,11 @@ mod tests {
         // Sender learned as alive.
         assert_eq!(s.state_of(&node("peer")), Some(MemberState::Alive));
         let events = s.drain_events();
-        assert!(events.iter().any(|e| e.node == node("peer")
-            && e.kind == MembershipKind::Alive));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.node == node("peer") && e.kind == MembershipKind::Alive)
+        );
     }
 
     #[test]
@@ -1197,9 +1215,11 @@ mod tests {
         let _ = s.tick(1000);
         assert_eq!(s.state_of(&target), Some(MemberState::Suspect));
         let events = s.drain_events();
-        assert!(events
-            .iter()
-            .any(|e| e.node == target && e.kind == MembershipKind::Suspect));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.node == target && e.kind == MembershipKind::Suspect)
+        );
     }
 
     #[test]
@@ -1223,9 +1243,11 @@ mod tests {
         let _ = s.tick(30_000);
         assert_eq!(s.state_of(&node("a")), Some(MemberState::Dead));
         let events = s.drain_events();
-        assert!(events
-            .iter()
-            .any(|e| e.node == node("a") && e.kind == MembershipKind::Dead));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.node == node("a") && e.kind == MembershipKind::Dead)
+        );
     }
 
     #[test]
@@ -1277,9 +1299,11 @@ mod tests {
         );
         assert_eq!(s.state_of(&node("a")), Some(MemberState::Alive));
         let events = s.drain_events();
-        assert!(events
-            .iter()
-            .any(|e| e.node == node("a") && e.kind == MembershipKind::Alive));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.node == node("a") && e.kind == MembershipKind::Alive)
+        );
     }
 
     #[test]
@@ -1355,7 +1379,10 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, Rumor::Suspect { node: nn, .. } if *nn == target))
         });
-        assert!(carried, "suspicion must be piggybacked on outbound probe traffic");
+        assert!(
+            carried,
+            "suspicion must be piggybacked on outbound probe traffic"
+        );
     }
 
     #[test]
@@ -1416,7 +1443,11 @@ mod tests {
             panic!("expected ping to target");
         };
         // Target acks the helper.
-        let relayed = s.handle(10, node("tgt"), Packet::new(Payload::Ack { seq: helper_seq }));
+        let relayed = s.handle(
+            10,
+            node("tgt"),
+            Packet::new(Payload::Ack { seq: helper_seq }),
+        );
         assert_eq!(relayed.len(), 1);
         assert_eq!(relayed[0].to, node("req"));
         assert_eq!(relayed[0].packet.payload, Payload::Ack { seq: 77 });

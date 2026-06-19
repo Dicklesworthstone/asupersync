@@ -155,7 +155,10 @@ fn default_for_runtime_yields_a_working_pooled_client() {
 
         // Obtaining the default client dials nothing — no ambient network reach.
         let fresh = client.pool_stats();
-        assert_eq!(fresh.connections_created, 0, "fresh default client has not dialed");
+        assert_eq!(
+            fresh.connections_created, 0,
+            "fresh default client has not dialed"
+        );
         assert_eq!(fresh.total_connections, 0);
 
         let url = format!("http://{addr}/");
@@ -168,7 +171,10 @@ fn default_for_runtime_yields_a_working_pooled_client() {
         assert_eq!(resp.body, b"DEFAULT-OK");
     });
 
-    server.join().expect("server thread panicked").expect("server io error");
+    server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
 }
 
 /// AC6 (shared pool): the returned value is a cheap-clone handle over a shared
@@ -213,7 +219,10 @@ fn default_client_is_a_cheap_clone_over_a_shared_pool() {
         );
     });
 
-    server.join().expect("server thread panicked").expect("server io error");
+    server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
 }
 
 /// AC6 (no hidden global): two independent accessor calls yield two independent

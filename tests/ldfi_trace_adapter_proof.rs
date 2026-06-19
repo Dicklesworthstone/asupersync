@@ -102,15 +102,20 @@ fn ac1_adapter_finds_single_shared_send_fault() {
     assert_eq!(ids(&graph.derivations()[1]), vec![1, 3]); // {send, ack_b}
 
     let result = graph.minimal_hitting_sets(HittingSetBudget::default());
-    let smallest = result.hypotheses.first().expect("a breaking hypothesis exists");
-    assert_eq!(smallest, &set(&[1]), "the minimal breaking hypothesis is the send");
+    let smallest = result
+        .hypotheses
+        .first()
+        .expect("a breaking hypothesis exists");
+    assert_eq!(
+        smallest,
+        &set(&[1]),
+        "the minimal breaking hypothesis is the send"
+    );
     assert!(result.exhausted);
 
     // Blind-chaos baseline: every fault-able event is a single-fault experiment.
-    let blind_single_fault_experiments = trace
-        .iter()
-        .filter(|ev| default_faultable(ev.kind))
-        .count();
+    let blind_single_fault_experiments =
+        trace.iter().filter(|ev| default_faultable(ev.kind)).count();
     assert_eq!(blind_single_fault_experiments, 3, "send + ack_a + ack_b");
     // LDFI's first hypothesis is the one fault that actually breaks delivery.
     assert!(result.hypotheses.len() < blind_single_fault_experiments);
@@ -213,8 +218,12 @@ fn soundness_lamport_overapproximates_but_keeps_true_fault() {
 
     let lamport = support_graph_for(&trace, TraceLineageConfig::default(), is_outcome)
         .minimal_hitting_sets(HittingSetBudget::default());
-    let vector = support_graph_for(&delivery_trace_vector(), TraceLineageConfig::default(), is_outcome)
-        .minimal_hitting_sets(HittingSetBudget::default());
+    let vector = support_graph_for(
+        &delivery_trace_vector(),
+        TraceLineageConfig::default(),
+        is_outcome,
+    )
+    .minimal_hitting_sets(HittingSetBudget::default());
 
     // The true fault is never under-approximated away.
     assert!(lamport.hypotheses.contains(&set(&[1])));
@@ -228,9 +237,24 @@ fn soundness_lamport_overapproximates_but_keeps_true_fault() {
 fn structural_sources_assemble_cone_without_clocks() {
     // All three events on task 1; the obligation also chains reserve -> commit.
     let trace = vec![
-        TraceEvent::obligation_reserve(0, Time::ZERO, ob(1), task(1), region(), ObligationKind::Lease),
+        TraceEvent::obligation_reserve(
+            0,
+            Time::ZERO,
+            ob(1),
+            task(1),
+            region(),
+            ObligationKind::Lease,
+        ),
         TraceEvent::wake(1, Time::ZERO, task(1), region()),
-        TraceEvent::obligation_commit(2, Time::ZERO, ob(1), task(1), region(), ObligationKind::Lease, 10),
+        TraceEvent::obligation_commit(
+            2,
+            Time::ZERO,
+            ob(1),
+            task(1),
+            region(),
+            ObligationKind::Lease,
+            10,
+        ),
     ];
     let config = TraceLineageConfig {
         use_logical_time: false,
@@ -239,7 +263,10 @@ fn structural_sources_assemble_cone_without_clocks() {
     let lineage = build_causal_lineage(&trace, config);
     // The commit's fault-able support is the reserve, the wake, and itself —
     // all reachable through program order and the obligation chain alone.
-    assert_eq!(ids(&lineage.support_of(FaultEventId::new(2))), vec![0, 1, 2]);
+    assert_eq!(
+        ids(&lineage.support_of(FaultEventId::new(2))),
+        vec![0, 1, 2]
+    );
 
     let graph = SupportGraph::from_causal_cones(&lineage, outcome_events(&trace, |ev| ev.seq == 2));
     let result = graph.minimal_hitting_sets(HittingSetBudget::default());
@@ -314,7 +341,10 @@ fn ac5_report_carries_experiment_violation() {
 
     let report =
         ldfi_report(&result, blind_chaos_single_fault_count(&trace)).with_experiment(&experiment);
-    let summary = report.experiment.as_ref().expect("experiment summary attached");
+    let summary = report
+        .experiment
+        .as_ref()
+        .expect("experiment summary attached");
     assert_eq!(summary.status, "found_violation");
     assert_eq!(summary.experiments_run, 1);
     assert_eq!(summary.violating_hypothesis, Some(vec![1]));

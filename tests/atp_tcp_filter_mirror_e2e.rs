@@ -46,12 +46,21 @@ fn spawn_receiver(
 ) {
     let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
     let handle = thread::spawn(move || {
-        let runtime = RuntimeBuilder::multi_thread().build().expect("recv runtime");
+        let runtime = RuntimeBuilder::multi_thread()
+            .build()
+            .expect("recv runtime");
         runtime.block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("recv cx");
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             addr_tx.send(listener.local_addr()?).expect("send addr");
-            receive_once(&cx, &listener, &dest_dir, TransferConfig::default(), "receiver").await
+            receive_once(
+                &cx,
+                &listener,
+                &dest_dir,
+                TransferConfig::default(),
+                "receiver",
+            )
+            .await
         }))
     });
     let addr = addr_rx.recv().expect("receiver bound");
@@ -63,7 +72,9 @@ fn run_sender_filtered(
     source: PathBuf,
     filter: FilterSet,
 ) -> Result<SendReport, TransportError> {
-    let runtime = RuntimeBuilder::multi_thread().build().expect("send runtime");
+    let runtime = RuntimeBuilder::multi_thread()
+        .build()
+        .expect("send runtime");
     runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("send cx");
         send_path_filtered(
@@ -80,7 +91,9 @@ fn run_sender_filtered(
 }
 
 fn run_mirror(dest: PathBuf, keep: BTreeSet<String>) -> usize {
-    let runtime = RuntimeBuilder::multi_thread().build().expect("mirror runtime");
+    let runtime = RuntimeBuilder::multi_thread()
+        .build()
+        .expect("mirror runtime");
     let report = runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("mirror cx");
         mirror_dest(
@@ -155,13 +168,22 @@ fn mirror_deletes_receiver_extras_after_transfer() {
     assert!(got.join("stale.txt").exists());
 
     // ...now mirror against the transferred manifest (keep only a.txt + b.txt).
-    let keep: BTreeSet<String> = ["a.txt", "b.txt"].iter().map(|s| (*s).to_string()).collect();
+    let keep: BTreeSet<String> = ["a.txt", "b.txt"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     let deleted = run_mirror(got.clone(), keep);
 
     assert!(got.join("a.txt").exists());
     assert!(got.join("b.txt").exists());
-    assert!(!got.join("stale.txt").exists(), "mirror must delete the stale file");
-    assert!(!got.join("oldsub").exists(), "mirror must delete the stale subtree");
+    assert!(
+        !got.join("stale.txt").exists(),
+        "mirror must delete the stale file"
+    );
+    assert!(
+        !got.join("oldsub").exists(),
+        "mirror must delete the stale subtree"
+    );
     assert!(deleted >= 2, "mirror reported {deleted} deletions");
 }
 

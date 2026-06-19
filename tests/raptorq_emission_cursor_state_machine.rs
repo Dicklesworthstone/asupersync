@@ -123,14 +123,21 @@ fn repair_cursor_is_contiguous_and_monotone() {
                 "cursor desync before emit_repair({count}) (K={k})"
             );
             let batch = enc.emit_repair(count);
-            assert_eq!(batch.len(), count, "emit_repair must return `count` symbols (K={k})");
+            assert_eq!(
+                batch.len(),
+                count,
+                "emit_repair must return `count` symbols (K={k})"
+            );
             for (i, sym) in batch.iter().enumerate() {
                 assert_eq!(
                     sym.esi,
                     start + i as u32,
                     "repair ESI must be start+i within batch (K={k})"
                 );
-                assert!(!sym.is_source, "repair symbol must not be is_source (K={k})");
+                assert!(
+                    !sym.is_source,
+                    "repair symbol must not be is_source (K={k})"
+                );
                 assert!(sym.esi >= k as u32, "repair ESI must be >= K (K={k})");
                 all_esis.push(sym.esi);
             }
@@ -143,12 +150,24 @@ fn repair_cursor_is_contiguous_and_monotone() {
         }
 
         // Global property: strictly ascending, no gaps, no overlaps, begins at K.
-        assert_eq!(all_esis.first().copied(), Some(k as u32), "first repair ESI != K");
+        assert_eq!(
+            all_esis.first().copied(),
+            Some(k as u32),
+            "first repair ESI != K"
+        );
         for w in all_esis.windows(2) {
-            assert_eq!(w[1], w[0] + 1, "repair ESIs must be gap-free and ascending (K={k})");
+            assert_eq!(
+                w[1],
+                w[0] + 1,
+                "repair ESIs must be gap-free and ascending (K={k})"
+            );
         }
         let total: usize = plan.iter().sum();
-        assert_eq!(all_esis.len(), total, "emitted repair count mismatch (K={k})");
+        assert_eq!(
+            all_esis.len(),
+            total,
+            "emitted repair count mismatch (K={k})"
+        );
     }
 }
 
@@ -161,7 +180,10 @@ fn repair_permanently_closes_systematic_lane() {
         // After repair starts, systematic emission is closed forever.
         let repair = enc.emit_repair(2);
         assert_eq!(repair.len(), 2);
-        assert!(enc.systematic_emitted(), "flag stays true after repair (K={k})");
+        assert!(
+            enc.systematic_emitted(),
+            "flag stays true after repair (K={k})"
+        );
         assert!(
             enc.emit_systematic().is_empty(),
             "systematic lane must stay closed after repair (K={k})"
@@ -179,7 +201,10 @@ fn repair_first_drops_source_from_the_wire() {
 
         let repair = enc.emit_repair(3);
         assert_eq!(repair.len(), 3);
-        assert_eq!(repair[0].esi, k as u32, "repair-first must still start at K (K={k})");
+        assert_eq!(
+            repair[0].esi, k as u32,
+            "repair-first must still start at K (K={k})"
+        );
         assert!(
             enc.systematic_emitted(),
             "emit_repair must close the lane even when called first (K={k})"
@@ -217,6 +242,9 @@ fn empty_repair_does_not_close_lane() {
         // Systematic emission still works and yields the full source block.
         let sys = enc.emit_systematic();
         assert_is_full_source(&sys, &source);
-        assert!(enc.systematic_emitted(), "flag flips after the real systematic pass (K={k})");
+        assert!(
+            enc.systematic_emitted(),
+            "flag flips after the real systematic pass (K={k})"
+        );
     }
 }

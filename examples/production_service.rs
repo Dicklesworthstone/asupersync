@@ -77,7 +77,11 @@ async fn users_handler() -> Response {
     // Handlers run inside the listener task's capability context; recover it to
     // drive Cx-aware effects (here: the SQLite blocking pool).
     let Some(cx) = Cx::current() else {
-        return Response::new(500, "Internal Server Error", b"no runtime context\n".to_vec());
+        return Response::new(
+            500,
+            "Internal Server Error",
+            b"no runtime context\n".to_vec(),
+        );
     };
 
     let conn = match SqliteConnection::open_in_memory(&cx).await {
@@ -133,10 +137,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = runtime.handle();
 
     runtime.block_on(async move {
-        let listener =
-            Http1Listener::bind_with_config("127.0.0.1:0", route, service_config())
-                .await
-                .expect("bind production service");
+        let listener = Http1Listener::bind_with_config("127.0.0.1:0", route, service_config())
+            .await
+            .expect("bind production service");
 
         let addr = listener.local_addr().expect("local addr");
         let manager = listener.connection_manager().clone();

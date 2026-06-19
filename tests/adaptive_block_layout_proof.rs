@@ -90,7 +90,10 @@ fn known_quality_emits_adaptive_telemetry() {
     // carries the snapshot (replayable telemetry).
     let decision = layout_for_loss(200, 0);
     assert_eq!(decision.policy_id, ADAPTIVE_BLOCK_LAYOUT_POLICY_ID);
-    assert_eq!(decision.path_quality, Some(PathQualitySnapshot::new(50, 200, 0)));
+    assert_eq!(
+        decision.path_quality,
+        Some(PathQualitySnapshot::new(50, 200, 0))
+    );
 }
 
 #[test]

@@ -127,12 +127,7 @@ fn four_xx_is_ignored_and_breaker_stays_closed() {
 #[test]
 fn cancellation_is_ignored_but_other_errors_count() {
     let mut svc = CircuitBreaker::with_classifier_and_time(
-        Scripted::new([
-            Err("cancelled"),
-            Err("cancelled"),
-            Err("boom"),
-            Err("boom"),
-        ]),
+        Scripted::new([Err("cancelled"), Err("cancelled"), Err("boom"), Err("boom")]),
         policy(),
         t0,
         FnClassifier(http_classifier),

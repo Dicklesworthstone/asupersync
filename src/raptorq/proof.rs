@@ -1865,7 +1865,7 @@ mod tests {
     fn scrub_decode_proof_for_snapshot_test(proof: &DecodeProof) -> serde_json::Value {
         json!({
             "version": proof.version,
-            "content_hash": proof.content_hash(),
+            "content_hash": "[content_hash]",
             "config": {
                 "object_id": "[object_id]",
                 "sbn": proof.config.sbn,

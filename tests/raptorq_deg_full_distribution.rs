@@ -56,7 +56,8 @@ fn deg_full_domain_distribution_matches_rfc_table() {
     for d in 1..=30usize {
         let expected = F[d] - F[d - 1];
         assert_eq!(
-            counts[d], expected,
+            counts[d],
+            expected,
             "degree {d}: counted {} values, RFC band f[{d}]-f[{}]={expected}; \
              repro='cargo test --test raptorq_deg_full_distribution'",
             counts[d],
@@ -64,5 +65,8 @@ fn deg_full_domain_distribution_matches_rfc_table() {
         );
         total += counts[d];
     }
-    assert_eq!(total, DOMAIN, "all 2^20 domain values must be accounted for");
+    assert_eq!(
+        total, DOMAIN,
+        "all 2^20 domain values must be accounted for"
+    );
 }

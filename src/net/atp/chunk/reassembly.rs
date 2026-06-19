@@ -11,11 +11,9 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::cas::{
-    CasManifestChunk, CasMerkleManifest, ChunkAddress, ContentAddressedChunkStore,
-};
-use super::delta_stream::DeltaChunkPayload;
 use super::ChunkingProfileError;
+use super::cas::{CasManifestChunk, CasMerkleManifest, ChunkAddress, ContentAddressedChunkStore};
+use super::delta_stream::DeltaChunkPayload;
 
 const TREE_DIGEST_DOMAIN: &[u8] = b"asupersync:atp:delta-reassembly:tree-digest:v1";
 
@@ -167,8 +165,10 @@ where
         });
     }
 
-    let recomputed_manifest =
-        CasMerkleManifest::from_chunks(target_manifest.tree_id().to_string(), observed_manifest_chunks)?;
+    let recomputed_manifest = CasMerkleManifest::from_chunks(
+        target_manifest.tree_id().to_string(),
+        observed_manifest_chunks,
+    )?;
     if recomputed_manifest.root() != target_manifest.root() {
         return Err(ChunkingProfileError::InvalidChunkParameters(
             "reassembled CAS Merkle root does not match target manifest".to_string(),
@@ -282,7 +282,11 @@ where
     fs::rename(staging_root, destination_root).map_err(io_error)?;
     Ok(ReassemblyCommitReceipt {
         destination_root: destination_root.to_path_buf(),
-        committed_paths: tree.files.iter().map(|file| file.rel_path.clone()).collect(),
+        committed_paths: tree
+            .files
+            .iter()
+            .map(|file| file.rel_path.clone())
+            .collect(),
         tree_sha256: tree.tree_sha256,
         manifest_root: tree.manifest_root,
     })
@@ -496,8 +500,12 @@ mod tests {
                 .expect("manifest");
         let cas = ContentAddressedChunkStore::new();
 
-        let result =
-            reassemble_from_cas_and_decoded(&manifest, &cas, [], expected_digest("file.txt", b"missing"));
+        let result = reassemble_from_cas_and_decoded(
+            &manifest,
+            &cas,
+            [],
+            expected_digest("file.txt", b"missing"),
+        );
 
         assert!(matches!(
             result,
@@ -551,7 +559,10 @@ mod tests {
             Err(ChunkingProfileError::InvalidChunkParameters(message))
                 if message.contains("destination already exists")
         ));
-        assert_eq!(fs::read(destination.join("old.txt")).expect("old file"), b"old");
+        assert_eq!(
+            fs::read(destination.join("old.txt")).expect("old file"),
+            b"old"
+        );
         assert!(!staging.exists());
     }
 }

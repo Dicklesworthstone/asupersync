@@ -93,12 +93,14 @@ impl AdaptiveLayoutConfig {
     #[must_use]
     pub fn fallback(&self) -> BlockLayoutChoice {
         BlockLayoutChoice {
-            source_symbols: self
-                .static_source_symbols
-                .clamp(self.min_source_symbols.min(self.max_source_symbols), self.max_source_symbols.max(self.min_source_symbols)),
-            overhead: self
-                .static_overhead
-                .clamp(self.min_overhead.min(self.max_overhead), self.max_overhead.max(self.min_overhead)),
+            source_symbols: self.static_source_symbols.clamp(
+                self.min_source_symbols.min(self.max_source_symbols),
+                self.max_source_symbols.max(self.min_source_symbols),
+            ),
+            overhead: self.static_overhead.clamp(
+                self.min_overhead.min(self.max_overhead),
+                self.max_overhead.max(self.min_overhead),
+            ),
         }
     }
 

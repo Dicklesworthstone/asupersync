@@ -310,7 +310,11 @@ fn golden_stream_frame_type_flag_bits() {
     };
     // 0x08 base; +0x04 OFF, +0x02 LEN (ALWAYS set so STREAM frames are
     // self-delimiting — see the encoder), +0x01 FIN.
-    assert_eq!(base(None, b"", false), 0x0a, "empty STREAM (LEN always set)");
+    assert_eq!(
+        base(None, b"", false),
+        0x0a,
+        "empty STREAM (LEN always set)"
+    );
     assert_eq!(base(None, b"x", false), 0x0a, "LEN bit");
     assert_eq!(base(Some(vi(1)), b"x", false), 0x0e, "OFF|LEN");
     assert_eq!(base(Some(vi(1)), b"x", true), 0x0f, "OFF|LEN|FIN");

@@ -57,8 +57,6 @@ pub mod wire;
 pub use cluster::{ClusterConfig, VirtualCluster};
 pub use gossip::GossipBuffer;
 pub use lease_reactor::{LeaseAction, MembershipLeaseReactor, lease_action_for};
-pub use udp::{UdpMembershipError, UdpMembershipTransport};
-pub use view::MembershipView;
 pub use lifeguard::{
     Awareness, Millis, max_suspicion_ms, min_suspicion_ms, node_scale, suspicion_timeout_ms,
 };
@@ -66,4 +64,8 @@ pub use swim::{
     MemberState, MembershipEvent, MembershipKind, Outgoing, Packet, Payload, Rumor, Swim,
     SwimConfig, SwimConfigError,
 };
-pub use wire::{DEFAULT_MTU, EncodedDatagram, WIRE_VERSION, WireError, decode_packet, encode_packet};
+pub use udp::{UdpMembershipError, UdpMembershipTransport};
+pub use view::MembershipView;
+pub use wire::{
+    DEFAULT_MTU, EncodedDatagram, WIRE_VERSION, WireError, decode_packet, encode_packet,
+};

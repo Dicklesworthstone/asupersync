@@ -125,12 +125,8 @@ fn wrong_payload_size_is_rejected() {
 #[test]
 fn equation_arity_mismatch_is_rejected() {
     // Correct payload size, but two columns and only one coefficient.
-    let bogus = ReceivedSymbol::repair(
-        K as u32,
-        vec![0, 1],
-        vec![Gf256(1)],
-        vec![0u8; SYMBOL_SIZE],
-    );
+    let bogus =
+        ReceivedSymbol::repair(K as u32, vec![0, 1], vec![Gf256(1)], vec![0u8; SYMBOL_SIZE]);
     match reject(bogus, "arity-mismatch") {
         DecodeError::SymbolEquationArityMismatch {
             columns,
@@ -148,12 +144,7 @@ fn equation_arity_mismatch_is_rejected() {
 fn column_index_out_of_range_is_rejected() {
     let l = InactivationDecoder::new(K, SYMBOL_SIZE, SEED).params().l;
     // A column index equal to L is one past the valid domain [0, L).
-    let bogus = ReceivedSymbol::repair(
-        K as u32,
-        vec![l],
-        vec![Gf256(1)],
-        vec![0u8; SYMBOL_SIZE],
-    );
+    let bogus = ReceivedSymbol::repair(K as u32, vec![l], vec![Gf256(1)], vec![0u8; SYMBOL_SIZE]);
     match reject(bogus, "column-oob") {
         DecodeError::ColumnIndexOutOfRange {
             column, max_valid, ..

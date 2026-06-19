@@ -259,7 +259,10 @@ impl fmt::Display for QuicStreamError {
             Self::SendStopped { code } => write!(f, "send stopped by peer: code={code}"),
             Self::ReceiveStopped { code } => write!(f, "receive side stopped: code={code}"),
             Self::ReceiveReset { code, final_size } => {
-                write!(f, "receive side reset by peer: code={code}, final_size={final_size}")
+                write!(
+                    f,
+                    "receive side reset by peer: code={code}, final_size={final_size}"
+                )
             }
             Self::InconsistentReset {
                 previous_final_size,
@@ -1207,9 +1210,7 @@ impl StreamTable {
         self.recv_connection_credit
             .can_consume(connection_delta)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
-        let flow_delta = self
-            .stream_mut(id)?
-            .reset_receive(error_code, final_size)?;
+        let flow_delta = self.stream_mut(id)?.reset_receive(error_code, final_size)?;
         self.recv_connection_credit
             .consume(flow_delta)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;

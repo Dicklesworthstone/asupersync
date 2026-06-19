@@ -17,7 +17,10 @@ fn unique_tmp(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!("atp_cli_dryrun_{label}_{}_{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "atp_cli_dryrun_{label}_{}_{nanos}",
+        std::process::id()
+    ))
 }
 
 fn mkfile(base: &Path, rel: &str, contents: &[u8]) {
@@ -38,12 +41,7 @@ fn atp_send_dry_run_prints_plan_and_opens_no_socket() {
     // Target is required by the parser but ignored under --dry-run (no connect),
     // so an unroutable address must still produce the plan and exit 0.
     let output = Command::new(env!("CARGO_BIN_EXE_atp"))
-        .args([
-            "send",
-            "--dry-run",
-            proj.to_str().unwrap(),
-            "127.0.0.1:0",
-        ])
+        .args(["send", "--dry-run", proj.to_str().unwrap(), "127.0.0.1:0"])
         .output()
         .expect("run atp binary");
 
@@ -54,7 +52,10 @@ fn atp_send_dry_run_prints_plan_and_opens_no_socket() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"root_name\":\"proj\""), "stdout: {stdout}");
+    assert!(
+        stdout.contains("\"root_name\":\"proj\""),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("\"is_directory\":true"), "stdout: {stdout}");
     assert!(stdout.contains("\"file_count\":2"), "stdout: {stdout}");
     assert!(stdout.contains("\"total_bytes\":12"), "stdout: {stdout}");

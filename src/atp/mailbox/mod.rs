@@ -577,18 +577,14 @@ mod tests {
     fn golden_mailbox_transfer_id_serialization() {
         let transfer_id = fixed_transfer_id();
 
-        insta::assert_json_snapshot!(transfer_id, @r###"
-        "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
-        "###);
+        insta::assert_json_snapshot!(transfer_id, @r#""6ba7b810-9dad-11d1-80b4-00c04fd430c8""#);
     }
 
     #[test]
     fn golden_peer_id_serialization() {
         let peer_id = PeerId::new("peer-atp-node-f3c4d5e6");
 
-        insta::assert_json_snapshot!(peer_id, @r###"
-        "peer-atp-node-f3c4d5e6"
-        "###);
+        insta::assert_json_snapshot!(peer_id, @r#""peer-atp-node-f3c4d5e6""#);
     }
 
     #[test]

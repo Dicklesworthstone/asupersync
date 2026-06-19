@@ -23,7 +23,10 @@ fn unique_tmp(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!("atp_tcp_prog_{label}_{}_{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "atp_tcp_prog_{label}_{}_{nanos}",
+        std::process::id()
+    ))
 }
 
 fn mkfile(base: &Path, rel: &str, contents: &[u8]) {
@@ -42,12 +45,21 @@ fn spawn_receiver(
 ) {
     let (addr_tx, addr_rx) = mpsc::channel::<SocketAddr>();
     let handle = thread::spawn(move || {
-        let runtime = RuntimeBuilder::multi_thread().build().expect("recv runtime");
+        let runtime = RuntimeBuilder::multi_thread()
+            .build()
+            .expect("recv runtime");
         runtime.block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().expect("recv cx");
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             addr_tx.send(listener.local_addr()?).expect("send addr");
-            receive_once(&cx, &listener, &dest_dir, TransferConfig::default(), "receiver").await
+            receive_once(
+                &cx,
+                &listener,
+                &dest_dir,
+                TransferConfig::default(),
+                "receiver",
+            )
+            .await
         }))
     });
     (addr_rx.recv().expect("receiver bound"), handle)
@@ -59,7 +71,9 @@ fn run_sender_collect_progress(
     source: PathBuf,
 ) -> (Result<SendReport, TransportError>, Vec<(u64, u64)>) {
     let (tx, rx) = mpsc::channel::<(u64, u64)>();
-    let runtime = RuntimeBuilder::multi_thread().build().expect("send runtime");
+    let runtime = RuntimeBuilder::multi_thread()
+        .build()
+        .expect("send runtime");
     let result = runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("send cx");
         send_path_filtered(
@@ -104,7 +118,10 @@ fn progress_is_monotonic_and_reaches_total() {
     let mut prev = 0u64;
     for (done, t) in &updates {
         assert_eq!(*t, total, "total must be constant across ticks");
-        assert!(*done >= prev, "progress must be monotonic ({done} < {prev})");
+        assert!(
+            *done >= prev,
+            "progress must be monotonic ({done} < {prev})"
+        );
         assert!(*done <= total, "progress cannot exceed total");
         prev = *done;
     }

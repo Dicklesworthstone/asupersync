@@ -16,8 +16,7 @@ use asupersync::atp::object::MetadataPolicy;
 use asupersync::cx::Cx;
 use asupersync::net::atp::transport_common::{TransferPlan, TransferProgress, plan_transfer};
 
-const HELLO_WORLD_SHA256: &str =
-    "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+const HELLO_WORLD_SHA256: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
 
 /// Plan with the same defaults the `atp` CLI / real TCP send uses
 /// (`MetadataPolicy::default()`, hardlinks off).
@@ -84,8 +83,11 @@ fn dry_run_plan_handles_empty_dirs_without_eisdir() {
     assert!(p.is_directory);
     // Only the regular file contributes bytes; the directory is zero-content.
     assert_eq!(p.total_bytes, 4);
-    let by_rel: std::collections::BTreeMap<&str, u64> =
-        p.entries.iter().map(|e| (e.rel_path.as_str(), e.size)).collect();
+    let by_rel: std::collections::BTreeMap<&str, u64> = p
+        .entries
+        .iter()
+        .map(|e| (e.rel_path.as_str(), e.size))
+        .collect();
     assert_eq!(by_rel.get("a.txt"), Some(&4));
     assert_eq!(
         by_rel.get("empty"),
@@ -107,8 +109,11 @@ fn dry_run_plan_treats_symlink_as_zero_content() {
     std::os::unix::fs::symlink("real.txt", base.join("link.txt")).unwrap();
 
     let p = plan(base);
-    let by_rel: std::collections::BTreeMap<&str, u64> =
-        p.entries.iter().map(|e| (e.rel_path.as_str(), e.size)).collect();
+    let by_rel: std::collections::BTreeMap<&str, u64> = p
+        .entries
+        .iter()
+        .map(|e| (e.rel_path.as_str(), e.size))
+        .collect();
     assert_eq!(by_rel.get("real.txt"), Some(&11));
     assert_eq!(
         by_rel.get("link.txt"),
@@ -131,8 +136,11 @@ fn dry_run_plan_tolerates_dangling_symlink() {
     std::os::unix::fs::symlink("nonexistent-target", base.join("dangling")).unwrap();
 
     let p = plan(base); // must not error
-    let by_rel: std::collections::BTreeMap<&str, u64> =
-        p.entries.iter().map(|e| (e.rel_path.as_str(), e.size)).collect();
+    let by_rel: std::collections::BTreeMap<&str, u64> = p
+        .entries
+        .iter()
+        .map(|e| (e.rel_path.as_str(), e.size))
+        .collect();
     assert_eq!(by_rel.get("dangling"), Some(&0));
     assert_eq!(p.total_bytes, 5);
 }
@@ -146,7 +154,10 @@ fn dry_run_plan_is_deterministic() {
 
     let a = plan(base);
     let b = plan(base);
-    assert_eq!(a, b, "plan_transfer must be deterministic (no clock/network)");
+    assert_eq!(
+        a, b,
+        "plan_transfer must be deterministic (no clock/network)"
+    );
     assert_eq!(a.total_bytes, 6234);
 }
 

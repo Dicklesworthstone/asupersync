@@ -22,8 +22,8 @@
 //! structure), deterministic, and require no cargo features.
 
 use asupersync::raptorq::gf256::{
-    gf256_profile_pack_catalog, gf256_tuning_candidate_catalog, Gf256ArchitectureClass,
-    Gf256ProfilePackId, Gf256TuningCandidateMetadata,
+    Gf256ArchitectureClass, Gf256ProfilePackId, Gf256TuningCandidateMetadata,
+    gf256_profile_pack_catalog, gf256_tuning_candidate_catalog,
 };
 use std::collections::HashSet;
 
@@ -113,10 +113,7 @@ fn tuning_catalog_is_deterministic_nonempty_and_well_formed() {
     );
 
     for c in a {
-        assert!(
-            !c.candidate_id.is_empty(),
-            "candidate_id must be non-empty"
-        );
+        assert!(!c.candidate_id.is_empty(), "candidate_id must be non-empty");
         assert!(
             !c.fusion_shape.is_empty(),
             "fusion_shape must be non-empty for `{}`",

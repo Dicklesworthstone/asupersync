@@ -747,13 +747,19 @@ mod tests {
             burst += 1;
             assert!(burst <= 4, "burst {burst} exceeded the configured bound");
         }
-        assert_eq!(burst, 4, "burst should drain exactly the bounded token count");
+        assert_eq!(
+            burst, 4,
+            "burst should drain exactly the bounded token count"
+        );
 
         // Drained: the pacer now gates, and the hint is ~1/rate (100 ms at 10 dps).
         assert!(!controller.try_consume_send_budget(now));
         let wait = controller.time_until_send_budget(now);
         assert!(wait > Duration::ZERO);
-        assert!(wait <= Duration::from_millis(150), "wait {wait:?} too long for 10 dps");
+        assert!(
+            wait <= Duration::from_millis(150),
+            "wait {wait:?} too long for 10 dps"
+        );
     }
 
     #[test]

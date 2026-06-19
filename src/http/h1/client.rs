@@ -143,7 +143,12 @@ fn parse_status_line(line: &str) -> Result<(Version, u16, String), HttpError> {
     if !(100..=999).contains(&status) {
         return Err(HttpError::BadRequestLine);
     }
-    if !reason.as_bytes().iter().copied().all(is_valid_reason_phrase_byte) {
+    if !reason
+        .as_bytes()
+        .iter()
+        .copied()
+        .all(is_valid_reason_phrase_byte)
+    {
         return Err(HttpError::BadRequestLine);
     }
 

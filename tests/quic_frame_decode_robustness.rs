@@ -122,7 +122,9 @@ fn truncated_datagram_length_prefix_is_unexpected_eof_without_over_alloc() {
 #[test]
 fn datagram_round_trip_is_identity_across_payload_sizes() {
     let mut rng = XorShift::new(0xDEAD_BEEF_CAFE_F00D);
-    for &size in &[0usize, 1, 2, 3, 7, 8, 63, 64, 127, 128, 255, 256, 1000, 1200] {
+    for &size in &[
+        0usize, 1, 2, 3, 7, 8, 63, 64, 127, 128, 255, 256, 1000, 1200,
+    ] {
         let payload: Vec<u8> = (0..size).map(|_| rng.byte()).collect();
         let frame = QuicFrame::Datagram {
             data: asupersync::bytes::Bytes::from(payload.clone()),

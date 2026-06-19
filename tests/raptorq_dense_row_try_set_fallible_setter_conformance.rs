@@ -102,10 +102,7 @@ fn try_set_out_of_bounds_errors_exactly_without_mutating() {
         // Exact payload: the requested index and the row's current length.
         assert_eq!(
             err,
-            DenseRowIndexError {
-                index: bad,
-                len,
-            },
+            DenseRowIndexError { index: bad, len },
             "rejection must report the offending index and the live length"
         );
         // Fail-closed: a rejected write leaves the row byte-for-byte untouched.
@@ -252,7 +249,11 @@ fn try_set_round_trips_every_gf256_value() {
         let v = v as u8;
         let i = v as usize;
         assert_eq!(row.get(i).raw(), v, "get fidelity for value {v}");
-        assert_eq!(row.try_get(i).map(Gf256::raw), Some(v), "try_get fidelity for {v}");
+        assert_eq!(
+            row.try_get(i).map(Gf256::raw),
+            Some(v),
+            "try_get fidelity for {v}"
+        );
         assert_eq!(row.as_slice()[i], v, "slice fidelity for value {v}");
     }
 }
@@ -276,7 +277,10 @@ fn dense_row_index_error_payload_is_exact_and_copyable() {
     let twin = DenseRowIndexError { index: 9, len: 3 };
     let copied = err;
     assert_eq!(err, twin, "value equality against a structural twin");
-    assert_eq!(copied, err, "Copy preserves the payload and leaves the source live");
+    assert_eq!(
+        copied, err,
+        "Copy preserves the payload and leaves the source live"
+    );
 
     // A different index or length is a distinct error value.
     assert_ne!(err, DenseRowIndexError { index: 9, len: 4 });

@@ -91,7 +91,11 @@ fn repair_symbols_are_additively_linear_in_the_source() {
             let r2 = e2.repair_symbol(esi);
             let r3 = e3.repair_symbol(esi);
 
-            assert_eq!(r1.len(), symbol_size, "repair symbol must be symbol_size bytes");
+            assert_eq!(
+                r1.len(),
+                symbol_size,
+                "repair symbol must be symbol_size bytes"
+            );
             assert_eq!(
                 r3,
                 xor_bytes(&r1, &r2),

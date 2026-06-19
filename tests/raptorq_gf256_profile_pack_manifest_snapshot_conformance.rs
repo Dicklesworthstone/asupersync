@@ -23,9 +23,9 @@
 //! a differential oracle), deterministic, and require no cargo features.
 
 use asupersync::raptorq::gf256::{
-    active_kernel, dual_kernel_policy_snapshot, gf256_profile_pack_catalog,
-    gf256_profile_pack_manifest_snapshot, gf256_tuning_candidate_catalog, Gf256ArchitectureClass,
-    Gf256ProfilePackId,
+    Gf256ArchitectureClass, Gf256ProfilePackId, active_kernel, dual_kernel_policy_snapshot,
+    gf256_profile_pack_catalog, gf256_profile_pack_manifest_snapshot,
+    gf256_tuning_candidate_catalog,
 };
 
 /// Canonical pairing between a profile-pack id and its architecture class,
@@ -171,8 +171,14 @@ fn manifest_active_profile_metadata_is_coherent_with_active_policy() {
         meta.rejected_tuning_candidate_ids, pol.rejected_tuning_candidate_ids,
         "rejected_tuning_candidate_ids disagree between metadata and policy"
     );
-    assert_eq!(meta.mul_min_total, pol.mul_min_total, "mul_min_total disagrees");
-    assert_eq!(meta.mul_max_total, pol.mul_max_total, "mul_max_total disagrees");
+    assert_eq!(
+        meta.mul_min_total, pol.mul_min_total,
+        "mul_min_total disagrees"
+    );
+    assert_eq!(
+        meta.mul_max_total, pol.mul_max_total,
+        "mul_max_total disagrees"
+    );
     assert_eq!(
         meta.addmul_min_total, pol.addmul_min_total,
         "addmul_min_total disagrees"
@@ -185,9 +191,18 @@ fn manifest_active_profile_metadata_is_coherent_with_active_policy() {
         meta.addmul_min_lane, pol.addmul_min_lane,
         "addmul_min_lane disagrees"
     );
-    assert_eq!(meta.max_lane_ratio, pol.max_lane_ratio, "max_lane_ratio disagrees");
-    assert_eq!(meta.replay_pointer, pol.replay_pointer, "replay_pointer disagrees");
-    assert_eq!(meta.command_bundle, pol.command_bundle, "command_bundle disagrees");
+    assert_eq!(
+        meta.max_lane_ratio, pol.max_lane_ratio,
+        "max_lane_ratio disagrees"
+    );
+    assert_eq!(
+        meta.replay_pointer, pol.replay_pointer,
+        "replay_pointer disagrees"
+    );
+    assert_eq!(
+        meta.command_bundle, pol.command_bundle,
+        "command_bundle disagrees"
+    );
 
     // Decision-contract provenance the policy snapshot copies from the
     // effective profile metadata.
@@ -195,7 +210,10 @@ fn manifest_active_profile_metadata_is_coherent_with_active_policy() {
         meta.decision_artifact_id, pol.decision_artifact_id,
         "decision_artifact_id disagrees"
     );
-    assert_eq!(meta.decision_role, pol.decision_role, "decision_role disagrees");
+    assert_eq!(
+        meta.decision_role, pol.decision_role,
+        "decision_role disagrees"
+    );
     assert_eq!(
         meta.decision_evidence_status, pol.decision_evidence_status,
         "decision_evidence_status disagrees"

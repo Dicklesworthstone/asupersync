@@ -29,7 +29,11 @@ const SYMBOL_SIZE: usize = 8;
 
 fn make_source(k: usize) -> Vec<Vec<u8>> {
     (0..k)
-        .map(|i| (0..SYMBOL_SIZE).map(|b| ((i * 13 + b * 3 + 1) & 0xFF) as u8).collect())
+        .map(|i| {
+            (0..SYMBOL_SIZE)
+                .map(|b| ((i * 13 + b * 3 + 1) & 0xFF) as u8)
+                .collect()
+        })
         .collect()
 }
 
@@ -47,7 +51,11 @@ fn assert_derived_match_raw(s: &EncodingStats) {
     } else {
         s.degree_sum as f64 / s.degree_count as f64
     };
-    assert_eq!(s.average_degree(), expect_avg, "average_degree != degree_sum/degree_count");
+    assert_eq!(
+        s.average_degree(),
+        expect_avg,
+        "average_degree != degree_sum/degree_count"
+    );
 
     // overhead_ratio
     let expect_overhead = if s.source_symbol_count == 0 {
@@ -71,7 +79,11 @@ fn assert_derived_match_raw(s: &EncodingStats) {
     } else {
         s.systematic_bytes_emitted as f64 / total as f64
     };
-    assert_eq!(s.encoding_efficiency(), expect_eff, "encoding_efficiency != sys/total");
+    assert_eq!(
+        s.encoding_efficiency(),
+        expect_eff,
+        "encoding_efficiency != sys/total"
+    );
 
     // repair_overhead
     let expect_repair = if s.systematic_bytes_emitted == 0 {
@@ -79,7 +91,11 @@ fn assert_derived_match_raw(s: &EncodingStats) {
     } else {
         s.repair_bytes_emitted as f64 / s.systematic_bytes_emitted as f64
     };
-    assert_eq!(s.repair_overhead(), expect_repair, "repair_overhead != repair/sys");
+    assert_eq!(
+        s.repair_overhead(),
+        expect_repair,
+        "repair_overhead != repair/sys"
+    );
 }
 
 #[test]
@@ -114,10 +130,17 @@ fn systematic_emission_marks_all_bytes_as_source() {
         assert_derived_match_raw(s);
 
         let sys_bytes = k * SYMBOL_SIZE;
-        assert_eq!(s.systematic_bytes_emitted, sys_bytes, "systematic bytes = K*sym");
+        assert_eq!(
+            s.systematic_bytes_emitted, sys_bytes,
+            "systematic bytes = K*sym"
+        );
         assert_eq!(s.repair_bytes_emitted, 0, "no repair bytes yet");
         assert_eq!(s.total_bytes_emitted(), sys_bytes, "total = systematic");
-        assert_eq!(s.encoding_efficiency(), 1.0, "all bytes are systematic -> efficiency 1.0");
+        assert_eq!(
+            s.encoding_efficiency(),
+            1.0,
+            "all bytes are systematic -> efficiency 1.0"
+        );
         assert_eq!(s.average_degree(), 0.0, "no repair degrees recorded yet");
         assert_eq!(s.repair_overhead(), 0.0, "no repair overhead yet");
     }
@@ -138,22 +161,47 @@ fn repair_emission_updates_derived_metrics_consistently() {
         let rep_bytes = n * SYMBOL_SIZE;
         assert_eq!(s.systematic_bytes_emitted, sys_bytes);
         assert_eq!(s.repair_bytes_emitted, rep_bytes);
-        assert_eq!(s.total_bytes_emitted(), sys_bytes + rep_bytes, "total = sys + repair");
+        assert_eq!(
+            s.total_bytes_emitted(),
+            sys_bytes + rep_bytes,
+            "total = sys + repair"
+        );
 
         // efficiency == sys/(sys+rep) == K/(K+n) since all symbols are sym bytes.
         let expect_eff = sys_bytes as f64 / (sys_bytes + rep_bytes) as f64;
         assert_eq!(s.encoding_efficiency(), expect_eff);
-        assert_eq!(s.encoding_efficiency(), k as f64 / (k + n) as f64, "efficiency == K/(K+n)");
+        assert_eq!(
+            s.encoding_efficiency(),
+            k as f64 / (k + n) as f64,
+            "efficiency == K/(K+n)"
+        );
 
         // repair_overhead == rep/sys == n/K.
-        assert_eq!(s.repair_overhead(), n as f64 / k as f64, "repair_overhead == n/K");
+        assert_eq!(
+            s.repair_overhead(),
+            n as f64 / k as f64,
+            "repair_overhead == n/K"
+        );
 
         // degree bookkeeping: one degree per emitted repair symbol.
-        assert_eq!(s.degree_count, n, "degree_count == number of repair symbols");
-        assert_eq!(s.repair_symbols_generated, n, "repair_symbols_generated == n");
+        assert_eq!(
+            s.degree_count, n,
+            "degree_count == number of repair symbols"
+        );
+        assert_eq!(
+            s.repair_symbols_generated, n,
+            "repair_symbols_generated == n"
+        );
         let avg = s.average_degree();
-        assert_eq!(avg, s.degree_sum as f64 / n as f64, "average_degree == degree_sum/n");
-        assert!(avg >= 1.0, "every repair symbol has degree >= 1 (avg={avg})");
+        assert_eq!(
+            avg,
+            s.degree_sum as f64 / n as f64,
+            "average_degree == degree_sum/n"
+        );
+        assert!(
+            avg >= 1.0,
+            "every repair symbol has degree >= 1 (avg={avg})"
+        );
         assert!(
             avg <= s.intermediate_symbol_count as f64,
             "average degree cannot exceed L (avg={avg}, L={})",
@@ -171,9 +219,17 @@ fn overhead_ratio_is_stable_across_lifecycle() {
         let fresh = enc.stats().overhead_ratio();
 
         let _ = enc.emit_systematic();
-        assert_eq!(enc.stats().overhead_ratio(), fresh, "overhead_ratio moved after systematic");
+        assert_eq!(
+            enc.stats().overhead_ratio(),
+            fresh,
+            "overhead_ratio moved after systematic"
+        );
 
         let _ = enc.emit_repair(5);
-        assert_eq!(enc.stats().overhead_ratio(), fresh, "overhead_ratio moved after repair");
+        assert_eq!(
+            enc.stats().overhead_ratio(),
+            fresh,
+            "overhead_ratio moved after repair"
+        );
     }
 }

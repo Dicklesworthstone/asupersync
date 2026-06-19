@@ -11,7 +11,9 @@
 //!
 //! Run with: `cargo test --test swim_remote_lease_revocation_proof --features test-internals`.
 
-use asupersync::distributed::membership::{MembershipView, Packet, Payload, Rumor, Swim, SwimConfig};
+use asupersync::distributed::membership::{
+    MembershipView, Packet, Payload, Rumor, Swim, SwimConfig,
+};
 use asupersync::remote::{Lease, MembershipLeaseManager, NodeId};
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 use std::time::Duration;

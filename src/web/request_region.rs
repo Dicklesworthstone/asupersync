@@ -1575,28 +1575,39 @@ mod tests {
             let region = RequestRegion::new(&cx, req);
 
             let task_cancelled = Arc::new(AtomicBool::new(false));
+            let task_started = Arc::new(AtomicBool::new(false));
+            let cancellation_armed = Arc::new(AtomicBool::new(false));
             let task_cancelled_clone = Arc::clone(&task_cancelled);
+            let task_started_clone = Arc::clone(&task_started);
+            let cancellation_armed_clone = Arc::clone(&cancellation_armed);
 
             let outcome = region.run(|ctx| {
                 std::thread::scope(|s| {
                     // Spawn a background task that monitors cancellation
                     let task_ctx = ctx.cx().clone();
                     s.spawn(move || {
-                        for _ in 0..100 {
+                        task_started_clone.store(true, Ordering::SeqCst);
+                        while !cancellation_armed_clone.load(Ordering::SeqCst) {
+                            std::hint::spin_loop();
+                            std::thread::yield_now();
+                        }
+                        for _ in 0..10_000 {
                             if task_ctx.is_cancel_requested() {
                                 task_cancelled_clone.store(true, Ordering::SeqCst);
                                 break;
                             }
-                            virtual_delay(Duration::from_millis(1));
+                            std::hint::spin_loop();
+                            std::thread::yield_now();
                         }
                     });
 
                     // Simulate client disconnect
-                    virtual_delay(Duration::from_millis(5));
+                    while !task_started.load(Ordering::SeqCst) {
+                        std::hint::spin_loop();
+                        std::thread::yield_now();
+                    }
                     ctx.cx().set_cancel_requested(true);
-
-                    // Give spawned task time to observe cancellation
-                    virtual_delay(Duration::from_millis(10));
+                    cancellation_armed.store(true, Ordering::SeqCst);
                 });
 
                 Response::new(StatusCode::OK, b"ok".to_vec())
