@@ -228,11 +228,23 @@ pub enum AtpFeature {
     ProofBundles,
     /// Crash-safe resume transcript/idempotency support.
     Resume,
+    /// Bounded-K RaptorQ block layout advertised before symbols move.
+    BoundedK,
+    /// NeedMore feedback can name the exact missing source/repair deficit.
+    ExactDeficitNeedMore,
+    /// Delivery-rate samples and receiver credit fields are present.
+    DeliveryRateCredit,
+    /// Control frames use ARQ/PTO resend plus keep-alive/probe beacons.
+    ControlArqBeacon,
+    /// Sender may fan out symbol spray across multiple streams/connections.
+    FanOut,
+    /// Receiver can union symbols from multiple authenticated peers.
+    MultiPeer,
 }
 
 impl AtpFeature {
     /// Every known ATP feature in canonical order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 18] = [
         Self::Repair,
         Self::Datagrams,
         Self::Compression,
@@ -245,6 +257,12 @@ impl AtpFeature {
         Self::MasqueAdapter,
         Self::ProofBundles,
         Self::Resume,
+        Self::BoundedK,
+        Self::ExactDeficitNeedMore,
+        Self::DeliveryRateCredit,
+        Self::ControlArqBeacon,
+        Self::FanOut,
+        Self::MultiPeer,
     ];
 
     /// Stable machine-readable feature code.
@@ -263,6 +281,12 @@ impl AtpFeature {
             Self::MasqueAdapter => "masque_adapter",
             Self::ProofBundles => "proof_bundles",
             Self::Resume => "resume",
+            Self::BoundedK => "bounded_k",
+            Self::ExactDeficitNeedMore => "exact_deficit_need_more",
+            Self::DeliveryRateCredit => "delivery_rate_credit",
+            Self::ControlArqBeacon => "control_arq_beacon",
+            Self::FanOut => "fan_out",
+            Self::MultiPeer => "multi_peer",
         }
     }
 
@@ -283,9 +307,26 @@ impl AtpFeature {
             Self::ProofBundles => "proof_bundles_not_supported_by_peer_policy",
             Self::Resume => "resume_not_supported_by_peer_policy",
             Self::EncryptionPolicy => "encryption_policy_required",
+            Self::BoundedK => "bounded_k_not_supported_by_peer",
+            Self::ExactDeficitNeedMore => "exact_deficit_need_more_not_supported_by_peer",
+            Self::DeliveryRateCredit => "delivery_rate_credit_not_supported_by_peer",
+            Self::ControlArqBeacon => "control_arq_beacon_not_supported_by_peer",
+            Self::FanOut => "fan_out_not_supported_by_peer",
+            Self::MultiPeer => "multi_peer_not_supported_by_peer",
         }
     }
 }
+
+/// ATP data-plane redesign capabilities that a `ClientHello`/`ServerHello`
+/// can negotiate independently from the generic session-security features.
+pub const ATP_DATAPLANE_REDESIGN_FEATURES: [AtpFeature; 6] = [
+    AtpFeature::BoundedK,
+    AtpFeature::ExactDeficitNeedMore,
+    AtpFeature::DeliveryRateCredit,
+    AtpFeature::ControlArqBeacon,
+    AtpFeature::FanOut,
+    AtpFeature::MultiPeer,
+];
 
 /// ATP adapter families whose parity and downgrade behavior are tracked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -371,6 +412,12 @@ pub const ATP_ADAPTER_PARITY_MATRIX: [AtpAdapterParity; 5] = [
             AtpFeature::Swarm,
             AtpFeature::Mailbox,
             AtpFeature::Relay,
+            AtpFeature::BoundedK,
+            AtpFeature::ExactDeficitNeedMore,
+            AtpFeature::DeliveryRateCredit,
+            AtpFeature::ControlArqBeacon,
+            AtpFeature::FanOut,
+            AtpFeature::MultiPeer,
         ],
         unsupported_features: &[
             AtpFeature::H3Adapter,
@@ -388,6 +435,10 @@ pub const ATP_ADAPTER_PARITY_MATRIX: [AtpAdapterParity; 5] = [
             AtpFeature::Resume,
             AtpFeature::Repair,
             AtpFeature::Compression,
+            AtpFeature::BoundedK,
+            AtpFeature::ExactDeficitNeedMore,
+            AtpFeature::DeliveryRateCredit,
+            AtpFeature::ControlArqBeacon,
             AtpFeature::H3Adapter,
         ],
         unsupported_features: &[
@@ -396,6 +447,8 @@ pub const ATP_ADAPTER_PARITY_MATRIX: [AtpAdapterParity; 5] = [
             AtpFeature::MasqueAdapter,
             AtpFeature::Swarm,
             AtpFeature::Mailbox,
+            AtpFeature::FanOut,
+            AtpFeature::MultiPeer,
         ],
         adapter_downgrade_reason: "h3_adapter_lacks_native_datagram_and_swarm_parity",
         proof_summary_label: "h3_adapter_stream",
@@ -409,12 +462,19 @@ pub const ATP_ADAPTER_PARITY_MATRIX: [AtpAdapterParity; 5] = [
             AtpFeature::Repair,
             AtpFeature::Datagrams,
             AtpFeature::WebTransportAdapter,
+            AtpFeature::BoundedK,
+            AtpFeature::ExactDeficitNeedMore,
+            AtpFeature::DeliveryRateCredit,
+            AtpFeature::ControlArqBeacon,
+            AtpFeature::FanOut,
         ],
         unsupported_features: &[
             AtpFeature::H3Adapter,
             AtpFeature::MasqueAdapter,
             AtpFeature::Mailbox,
             AtpFeature::Swarm,
+            AtpFeature::Compression,
+            AtpFeature::MultiPeer,
         ],
         adapter_downgrade_reason: "webtransport_adapter_browser_policy_limited",
         proof_summary_label: "webtransport_adapter_browser",
@@ -429,12 +489,19 @@ pub const ATP_ADAPTER_PARITY_MATRIX: [AtpAdapterParity; 5] = [
             AtpFeature::Datagrams,
             AtpFeature::Relay,
             AtpFeature::MasqueAdapter,
+            AtpFeature::BoundedK,
+            AtpFeature::ExactDeficitNeedMore,
+            AtpFeature::DeliveryRateCredit,
+            AtpFeature::ControlArqBeacon,
+            AtpFeature::FanOut,
         ],
         unsupported_features: &[
             AtpFeature::H3Adapter,
             AtpFeature::WebTransportAdapter,
             AtpFeature::Mailbox,
             AtpFeature::Swarm,
+            AtpFeature::Compression,
+            AtpFeature::MultiPeer,
         ],
         adapter_downgrade_reason: "masque_connect_udp_requires_proxy_authority",
         proof_summary_label: "masque_connect_udp_proxy",
@@ -448,6 +515,9 @@ pub const ATP_ADAPTER_PARITY_MATRIX: [AtpAdapterParity; 5] = [
             AtpFeature::Repair,
             AtpFeature::Compression,
             AtpFeature::Relay,
+            AtpFeature::BoundedK,
+            AtpFeature::ExactDeficitNeedMore,
+            AtpFeature::ControlArqBeacon,
         ],
         unsupported_features: &[
             AtpFeature::Datagrams,
@@ -456,6 +526,9 @@ pub const ATP_ADAPTER_PARITY_MATRIX: [AtpAdapterParity; 5] = [
             AtpFeature::MasqueAdapter,
             AtpFeature::Mailbox,
             AtpFeature::Swarm,
+            AtpFeature::DeliveryRateCredit,
+            AtpFeature::FanOut,
+            AtpFeature::MultiPeer,
         ],
         adapter_downgrade_reason: "tcp_tls_443_fallback_lacks_datagrams",
         proof_summary_label: "tcp_tls_443_fallback_relay",
@@ -1883,6 +1956,12 @@ fn feature_code(feature: AtpFeature) -> u8 {
         AtpFeature::MasqueAdapter => 9,
         AtpFeature::ProofBundles => 10,
         AtpFeature::Resume => 11,
+        AtpFeature::BoundedK => 12,
+        AtpFeature::ExactDeficitNeedMore => 13,
+        AtpFeature::DeliveryRateCredit => 14,
+        AtpFeature::ControlArqBeacon => 15,
+        AtpFeature::FanOut => 16,
+        AtpFeature::MultiPeer => 17,
     }
 }
 
@@ -2237,6 +2316,107 @@ mod tests {
         assert!(warned.contains(&AtpFeature::H3Adapter));
         assert!(warned.contains(&AtpFeature::WebTransportAdapter));
         assert_eq!(proof.selected_features, vec!["repair", "encryption_policy"]);
+    }
+
+    #[test]
+    fn dataplane_redesign_capabilities_negotiate_by_intersection() {
+        assert_eq!(
+            ATP_DATAPLANE_REDESIGN_FEATURES.map(AtpFeature::code),
+            [
+                "bounded_k",
+                "exact_deficit_need_more",
+                "delivery_rate_credit",
+                "control_arq_beacon",
+                "fan_out",
+                "multi_peer",
+            ]
+        );
+
+        let hello = hello_for(SessionContextKind::Direct).with_features(&[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::BoundedK,
+            AtpFeature::ExactDeficitNeedMore,
+            AtpFeature::DeliveryRateCredit,
+            AtpFeature::ControlArqBeacon,
+            AtpFeature::FanOut,
+            AtpFeature::MultiPeer,
+        ]);
+        let mut policy = policy_for(SessionContextKind::Direct).with_supported_features(&[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::BoundedK,
+            AtpFeature::ExactDeficitNeedMore,
+            AtpFeature::ControlArqBeacon,
+        ]);
+        let mut server = SessionNegotiator::server(policy.local_peer);
+
+        let (server_hello, _frame, _proof) =
+            server.accept_client_hello(&hello, &mut policy).unwrap();
+
+        assert!(
+            server_hello
+                .selected_features
+                .contains(AtpFeature::BoundedK)
+        );
+        assert!(
+            server_hello
+                .selected_features
+                .contains(AtpFeature::ExactDeficitNeedMore)
+        );
+        assert!(
+            server_hello
+                .selected_features
+                .contains(AtpFeature::ControlArqBeacon)
+        );
+        assert!(
+            !server_hello
+                .selected_features
+                .contains(AtpFeature::DeliveryRateCredit)
+        );
+        assert!(!server_hello.selected_features.contains(AtpFeature::FanOut));
+        assert!(
+            !server_hello
+                .selected_features
+                .contains(AtpFeature::MultiPeer)
+        );
+
+        let warnings = server_hello
+            .downgrade_warnings
+            .iter()
+            .map(|warning| (warning.feature, warning.reason_code))
+            .collect::<BTreeSet<_>>();
+        assert!(warnings.contains(&(
+            AtpFeature::DeliveryRateCredit,
+            "delivery_rate_credit_not_supported_by_peer"
+        )));
+        assert!(warnings.contains(&(AtpFeature::FanOut, "fan_out_not_supported_by_peer")));
+        assert!(warnings.contains(&(AtpFeature::MultiPeer, "multi_peer_not_supported_by_peer")));
+    }
+
+    #[test]
+    fn missing_required_dataplane_capability_fails_closed() {
+        let hello = hello_for(SessionContextKind::Direct)
+            .with_features(&[AtpFeature::EncryptionPolicy, AtpFeature::BoundedK]);
+        let mut policy = policy_for(SessionContextKind::Direct)
+            .with_supported_features(&[
+                AtpFeature::EncryptionPolicy,
+                AtpFeature::BoundedK,
+                AtpFeature::ExactDeficitNeedMore,
+            ])
+            .with_required_features(&[
+                AtpFeature::EncryptionPolicy,
+                AtpFeature::ExactDeficitNeedMore,
+            ]);
+        let mut server = SessionNegotiator::server(policy.local_peer);
+
+        let error = server.accept_client_hello(&hello, &mut policy).unwrap_err();
+
+        assert_eq!(error.code(), "missing_required_feature");
+        assert_eq!(
+            error
+                .proof()
+                .and_then(|proof| proof.rejected_reason.as_deref()),
+            Some("missing_required_feature")
+        );
     }
 
     #[test]
