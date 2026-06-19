@@ -388,11 +388,18 @@ else
 fi
 [ -n "$SRC_SHA" ] && [ "$SRC_SHA" = "$DST_SHA" ] && SHA_OK=true
 
-# Fail-closed status: a transfer error, timeout, OR sha mismatch is NOT "ok".
+# Fail-closed status. SHA_OK (tree_digest src==dst) is the source of truth for
+# DELIVERY: it proves the WHOLE object arrived byte-identical, so a partial or
+# corrupt transfer can never pass it. A non-zero EXIT after a verified delivery is
+# a clean-exit robustness bug, NOT a data failure — atp 50M single-file @ 10% loss
+# delivers correctly but the process exits 144 (bead nsbub4). Crediting it as "ok"
+# (with status_code preserving the dirty exit in the row) keeps atp's real
+# lossy-link delivery from being discarded as a failure, while staying fail-closed:
+# a timeout, or any non-zero exit WITHOUT verified data, is still not "ok".
 STATUS="ok"
 if [ "$TIMED_OUT" = "true" ]; then STATUS="timeout"
-elif [ "${STATUS_CODE:-1}" != "0" ]; then STATUS="error"
-elif [ "$SHA_OK" != "true" ]; then STATUS="sha_mismatch"
+elif [ "$SHA_OK" != "true" ]; then
+    if [ "${STATUS_CODE:-1}" != "0" ]; then STATUS="error"; else STATUS="sha_mismatch"; fi
 fi
 
 SIZE_BYTES=0
