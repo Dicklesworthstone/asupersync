@@ -1911,8 +1911,8 @@ mod tests {
 
     /// bd-10hic: keep the legacy sentinel tuple helper quarantined to this
     /// module's compatibility/conformance tests. Live production code, the
-    /// compact integration conformance harness, and the vector generator must
-    /// use the fallible tuple path instead.
+    /// compact integration conformance harness, production-adjacent parity
+    /// tests, and the vector generator must use the fallible tuple path instead.
     #[test]
     fn legacy_tuple_sentinel_is_quarantined_from_production_and_generator_sources() {
         let checked_sources = [
@@ -1925,6 +1925,14 @@ mod tests {
             (
                 "tests/rfc6330_conformance.rs",
                 include_str!("../../tests/rfc6330_conformance.rs"),
+            ),
+            (
+                "tests/raptorq_repair_indices_equivalence.rs",
+                include_str!("../../tests/raptorq_repair_indices_equivalence.rs"),
+            ),
+            (
+                "tests/raptorq_tuple_with_prime_p1_equivalence.rs",
+                include_str!("../../tests/raptorq_tuple_with_prime_p1_equivalence.rs"),
             ),
         ];
 

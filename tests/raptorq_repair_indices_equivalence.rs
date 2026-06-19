@@ -7,12 +7,13 @@
 //! encoder/decoder parity code actually calls (`systematic.rs` builds
 //! repair-symbol equation columns through it). It must produce exactly
 //! the same intermediate-symbol index set as the canonical two-step
-//! path `tuple_indices(tuple(J,W,P,P1,X), W, P, P1)` with
-//! `P1 = next_prime_ge(P)`. If the wrapper ever derived `P1`
+//! path `tuple_with_prime_p1(J,W,P,X).map(|t| tuple_indices(t, W, P, P1))`
+//! with `P1 = next_prime_ge(P)`. If the wrapper ever derived `P1`
 //! differently or expanded the tuple with different bounds, encoder and
 //! decoder would compute mismatched equations and decode would silently
-//! corrupt — so this equivalence is a load-bearing invariant, not a
-//! cosmetic one.
+//! corrupt. The canonical side intentionally uses the fallible tuple helper
+//! so the legacy zero-sentinel tuple path stays quarantined from this
+//! production-adjacent parity test.
 //!
 //! Also pins the fail-closed contract: invalid FEC-OTI parameters yield
 //! an empty schedule (the "invalid encoding" signal) rather than a
@@ -20,10 +21,14 @@
 //!
 //! Repro: `cargo test --test raptorq_repair_indices_equivalence`
 
-use asupersync::raptorq::rfc6330::{next_prime_ge, repair_indices_for_esi, tuple, tuple_indices};
+use asupersync::raptorq::rfc6330::{
+    next_prime_ge, repair_indices_for_esi, tuple_indices, tuple_with_prime_p1,
+};
 use asupersync::raptorq::systematic::SystematicParams;
 
-const K_SWEEP: &[usize] = &[1, 2, 4, 8, 10, 26, 42, 50, 100, 101, 200, 500, 1000, 2048, 10000];
+const K_SWEEP: &[usize] = &[
+    1, 2, 4, 8, 10, 26, 42, 50, 100, 101, 200, 500, 1000, 2048, 10000,
+];
 
 #[test]
 fn repair_indices_match_canonical_tuple_expansion() {
@@ -32,18 +37,26 @@ fn repair_indices_match_canonical_tuple_expansion() {
     for &k in K_SWEEP {
         let params = SystematicParams::for_source_block(k, 64);
         let (j, w, p) = (params.j, params.w, params.p);
-        let p1 = next_prime_ge(p)
-            .unwrap_or_else(|| panic!("K={k}: next_prime_ge(P={p}) must fit in usize"));
+        let p1 = next_prime_ge(p);
+        assert!(
+            p1.is_some(),
+            "K={k}: next_prime_ge(P={p}) must fit in usize"
+        );
+        let Some(p1) = p1 else {
+            continue;
+        };
 
         let esi_max = (params.k_prime as u32).saturating_add(128);
         for esi in 0..esi_max {
             let wrapper = repair_indices_for_esi(j, w, p, esi);
-            let canonical = tuple_indices(tuple(j, w, p, p1, esi), w, p, p1);
+            let canonical = tuple_with_prime_p1(j, w, p, esi)
+                .map(|lt_tuple| tuple_indices(lt_tuple, w, p, p1))
+                .unwrap_or_default();
             assert_eq!(
                 wrapper, canonical,
                 "K={k} ESI={esi} W={w} P={p} P1={p1}: \
                  repair_indices_for_esi diverged from canonical \
-                 tuple_indices(tuple(..)) path — encoder/decoder parity \
+                 tuple_with_prime_p1 + tuple_indices path — encoder/decoder parity \
                  would break; \
                  repro='cargo test --test raptorq_repair_indices_equivalence'"
             );
