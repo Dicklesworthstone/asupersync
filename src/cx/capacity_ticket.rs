@@ -12,6 +12,7 @@ use crate::types::{
     RegionId, TaskId,
 };
 use core::fmt;
+use core::num::NonZeroU64;
 
 /// Stable ticket identifier derived from explicit owner IDs, child lineage,
 /// and a per-mint sibling nonce.
@@ -29,11 +30,10 @@ use core::fmt;
 /// ids — the "deterministic value object" contract is preserved (no ambient
 /// clock / RNG / global counter).
 ///
-/// NOTE — still open on 7tcipb item 1 (deferred, see bead): two independent
-/// ROOT tickets minted by the same `(region, task)` still collide (there is no
-/// shared parent counter to draw from — needs a caller/`Cx`-supplied admission
-/// sequence), and the `Clone` + by-value `release`/`revoke` double-receipt and
-/// missing-`Drop` leak-detection gaps are not addressed here.
+/// Root tickets include an explicit caller-supplied admission sequence in the
+/// nonce, so independent root admissions for the same `(region, task)` no
+/// longer silently collide. Derived tickets fold their parent nonce and
+/// per-parent child sequence to keep siblings and cousins distinct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapacityTicketId {
     owner_region: RegionId,
@@ -44,12 +44,16 @@ pub struct CapacityTicketId {
 
 impl CapacityTicketId {
     #[inline]
-    const fn root(owner_region: RegionId, owner_task: TaskId) -> Self {
+    const fn root(
+        owner_region: RegionId,
+        owner_task: TaskId,
+        admission_sequence: NonZeroU64,
+    ) -> Self {
         Self {
             owner_region,
             owner_task,
             lineage: 0,
-            nonce: 0,
+            nonce: fold_child_nonce(0, admission_sequence.get()),
         }
     }
 
@@ -319,7 +323,8 @@ impl fmt::Display for CapacityTicketRefusal {
 impl std::error::Error for CapacityTicketRefusal {}
 
 /// Active admitted capacity ticket.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "capacity tickets must be released, revoked, or audited with unreleased_receipt"]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CapacityTicket {
     ticket_id: CapacityTicketId,
     parent_ticket_id: Option<CapacityTicketId>,
@@ -615,6 +620,7 @@ pub struct CapacityTicketReceipt {
 #[inline]
 pub fn request_capacity_ticket<Caps>(
     cx: &Cx<Caps>,
+    admission_sequence: NonZeroU64,
     request: CapacityTicketRequest,
 ) -> Result<CapacityTicket, CapacityTicketRefusal> {
     let owner_region = cx.region_id();
@@ -628,7 +634,7 @@ pub fn request_capacity_ticket<Caps>(
     Ok(CapacityTicket::admitted(
         owner_region,
         owner_task,
-        CapacityTicketId::root(owner_region, owner_task),
+        CapacityTicketId::root(owner_region, owner_task, admission_sequence),
         None,
         granted,
         request,
@@ -643,6 +649,7 @@ pub fn request_capacity_ticket<Caps>(
 pub fn request_capacity_ticket_from_budget(
     owner_region: RegionId,
     owner_task: TaskId,
+    admission_sequence: NonZeroU64,
     parent_budget: CapabilityBudget,
     request: CapacityTicketRequest,
 ) -> Result<CapacityTicket, CapacityTicketRefusal> {
@@ -655,7 +662,7 @@ pub fn request_capacity_ticket_from_budget(
     Ok(CapacityTicket::admitted(
         owner_region,
         owner_task,
-        CapacityTicketId::root(owner_region, owner_task),
+        CapacityTicketId::root(owner_region, owner_task, admission_sequence),
         None,
         granted,
         request,
@@ -672,6 +679,11 @@ mod tests {
         Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetDimension,
         CapabilityBudgetRefusal, CapabilityBudgetRequirements, RegionId, TaskId,
     };
+    use core::num::NonZeroU64;
+
+    fn admission_sequence(value: u64) -> NonZeroU64 {
+        NonZeroU64::new(value).expect("test admission sequences are non-zero")
+    }
 
     #[test]
     fn cx_ticket_admission_uses_context_owner_and_fail_closed_requirements() {
@@ -684,7 +696,8 @@ mod tests {
             "swarm admission",
         );
 
-        let ticket = request_capacity_ticket(&cx, request).expect("ticket admits");
+        let ticket =
+            request_capacity_ticket(&cx, admission_sequence(1), request).expect("ticket admits");
 
         assert_eq!(ticket.owner_region(), cx.region_id());
         assert_eq!(ticket.owner_task(), cx.task_id());
@@ -696,6 +709,7 @@ mod tests {
 
         let err = request_capacity_ticket(
             &cx,
+            admission_sequence(2),
             CapacityTicketRequest::agent_swarm_admission(
                 CapabilityBudget::new()
                     .with_cpu_units(4)
@@ -717,6 +731,7 @@ mod tests {
         let mut parent = request_capacity_ticket_from_budget(
             owner_region,
             owner_task,
+            admission_sequence(1),
             CapabilityBudget::UNSPECIFIED,
             CapacityTicketRequest::agent_swarm_admission(
                 CapabilityBudget::new()
@@ -775,9 +790,10 @@ mod tests {
 
     #[test]
     fn receipts_distinguish_release_revoke_and_unreleased_audit() {
-        let ticket = request_capacity_ticket_from_budget(
+        let release_ticket = request_capacity_ticket_from_budget(
             RegionId::new_for_test(9, 1),
             TaskId::new_for_test(9, 0),
+            admission_sequence(1),
             CapabilityBudget::UNSPECIFIED,
             CapacityTicketRequest::agent_swarm_admission(
                 CapabilityBudget::new()
@@ -788,18 +804,32 @@ mod tests {
             ),
         )
         .expect("ticket admits");
+        let revoke_ticket = request_capacity_ticket_from_budget(
+            RegionId::new_for_test(9, 1),
+            TaskId::new_for_test(9, 0),
+            admission_sequence(2),
+            CapabilityBudget::UNSPECIFIED,
+            CapacityTicketRequest::agent_swarm_admission(
+                CapabilityBudget::new()
+                    .with_memory_bytes(1024)
+                    .with_cpu_units(1)
+                    .with_artifact_bytes(64),
+                "receipt",
+            ),
+        )
+        .expect("second ticket admits");
 
-        let audit = ticket.unreleased_receipt();
+        let audit = release_ticket.unreleased_receipt();
         assert_eq!(audit.status, CapacityTicketReceiptStatus::Unreleased);
         assert!(!audit.obligation_leak_free);
         assert!(audit.no_ambient_authority);
 
-        let released = ticket.clone().release();
+        let released = release_ticket.release();
         assert_eq!(released.status, CapacityTicketReceiptStatus::Released);
         assert!(released.obligation_leak_free);
         assert!(released.cancel_reason.is_none());
 
-        let revoked = ticket.revoke(CancelReason::new(CancelKind::User));
+        let revoked = revoke_ticket.revoke(CancelReason::new(CancelKind::User));
         assert_eq!(revoked.status, CapacityTicketReceiptStatus::Revoked);
         assert!(revoked.obligation_leak_free);
         assert_eq!(
@@ -823,6 +853,7 @@ mod tests {
         let mut parent = request_capacity_ticket_from_budget(
             owner_region,
             owner_task,
+            admission_sequence(1),
             CapabilityBudget::UNSPECIFIED,
             CapacityTicketRequest::agent_swarm_admission(
                 CapabilityBudget::new()
@@ -888,6 +919,7 @@ mod tests {
         let mut parent_replay = request_capacity_ticket_from_budget(
             owner_region,
             owner_task,
+            admission_sequence(1),
             CapabilityBudget::UNSPECIFIED,
             CapacityTicketRequest::agent_swarm_admission(
                 CapabilityBudget::new()
@@ -902,5 +934,44 @@ mod tests {
             .split(budget, reqs, "first child")
             .expect("first split admits");
         assert_eq!(first.id(), first_replay.id());
+    }
+
+    #[test]
+    fn root_tickets_use_admission_sequence_to_avoid_same_owner_collisions() {
+        let owner_region = RegionId::new_for_test(14, 1);
+        let owner_task = TaskId::new_for_test(14, 0);
+        let request = || {
+            CapacityTicketRequest::agent_swarm_admission(
+                CapabilityBudget::new()
+                    .with_memory_bytes(1024)
+                    .with_cpu_units(1)
+                    .with_artifact_bytes(64),
+                "root",
+            )
+        };
+
+        let first = request_capacity_ticket_from_budget(
+            owner_region,
+            owner_task,
+            admission_sequence(1),
+            CapabilityBudget::UNSPECIFIED,
+            request(),
+        )
+        .expect("first root admits");
+        let second = request_capacity_ticket_from_budget(
+            owner_region,
+            owner_task,
+            admission_sequence(2),
+            CapabilityBudget::UNSPECIFIED,
+            request(),
+        )
+        .expect("second root admits");
+
+        assert_eq!(first.id().lineage(), 0);
+        assert_eq!(second.id().lineage(), 0);
+        assert_eq!(first.owner_region(), second.owner_region());
+        assert_eq!(first.owner_task(), second.owner_task());
+        assert_ne!(first.id(), second.id());
+        assert_ne!(first.id().nonce(), second.id().nonce());
     }
 }

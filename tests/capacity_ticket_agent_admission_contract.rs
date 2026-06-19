@@ -10,6 +10,7 @@ use asupersync::{
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/capacity_ticket_agent_admission_contract_v1.json";
@@ -58,6 +59,10 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
 
 fn owner() -> (RegionId, TaskId) {
     (RegionId::new_for_test(410, 1), TaskId::new_for_test(410, 0))
+}
+
+fn admission_sequence(value: u64) -> NonZeroU64 {
+    NonZeroU64::new(value).expect("test admission sequences are non-zero")
 }
 
 fn agent_request(reason: &str) -> CapacityTicketRequest {
@@ -174,6 +179,7 @@ fn capacity_ticket_budget_semantics_fail_closed_and_preserve_owner() {
     let ticket = request_capacity_ticket_from_budget(
         region,
         task,
+        admission_sequence(1),
         CapabilityBudget::UNSPECIFIED,
         agent_request("root admission"),
     )
@@ -196,6 +202,7 @@ fn capacity_ticket_budget_semantics_fail_closed_and_preserve_owner() {
     let err = request_capacity_ticket_from_budget(
         region,
         task,
+        admission_sequence(2),
         CapabilityBudget::UNSPECIFIED,
         CapacityTicketRequest::agent_swarm_admission(
             CapabilityBudget::new()
@@ -220,6 +227,7 @@ fn split_lend_and_receipts_are_meet_based_and_leak_visible() {
     let mut parent = request_capacity_ticket_from_budget(
         region,
         task,
+        admission_sequence(1),
         CapabilityBudget::UNSPECIFIED,
         agent_request("parent"),
     )
@@ -302,6 +310,7 @@ fn sibling_and_cousin_splits_mint_distinct_ticket_ids() {
     let mut parent = request_capacity_ticket_from_budget(
         region,
         task,
+        admission_sequence(1),
         CapabilityBudget::UNSPECIFIED,
         agent_request("parent"),
     )
@@ -357,6 +366,7 @@ fn sibling_and_cousin_splits_mint_distinct_ticket_ids() {
     let mut parent_replay = request_capacity_ticket_from_budget(
         region,
         task,
+        admission_sequence(1),
         CapabilityBudget::UNSPECIFIED,
         agent_request("parent"),
     )
@@ -374,6 +384,38 @@ fn sibling_and_cousin_splits_mint_distinct_ticket_ids() {
     assert_ne!(first_receipt.ticket_id, second_unreleased.ticket_id);
     assert!(first_receipt.obligation_leak_free);
     assert!(!second_unreleased.obligation_leak_free);
+}
+
+#[test]
+fn root_admission_sequences_mint_distinct_same_owner_ticket_ids() {
+    // br-asupersync-audit-followups-2026-06-12-7tcipb item 1: independent
+    // root requests from the same owner used to share a zero nonce, so their
+    // receipts could collide even when sibling/cousin splits were already
+    // distinct. Root admissions now require a non-zero caller/Cx sequence.
+    let (region, task) = owner();
+    let first = request_capacity_ticket_from_budget(
+        region,
+        task,
+        admission_sequence(1),
+        CapabilityBudget::UNSPECIFIED,
+        agent_request("root"),
+    )
+    .expect("first root admits");
+    let second = request_capacity_ticket_from_budget(
+        region,
+        task,
+        admission_sequence(2),
+        CapabilityBudget::UNSPECIFIED,
+        agent_request("root"),
+    )
+    .expect("second root admits");
+
+    assert_eq!(first.id().lineage(), 0);
+    assert_eq!(second.id().lineage(), 0);
+    assert_eq!(first.owner_region(), second.owner_region());
+    assert_eq!(first.owner_task(), second.owner_task());
+    assert_ne!(first.id(), second.id());
+    assert_ne!(first.id().nonce(), second.id().nonce());
 }
 
 #[test]
