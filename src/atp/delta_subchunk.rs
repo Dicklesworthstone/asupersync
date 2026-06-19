@@ -93,6 +93,10 @@ pub enum SubDeltaError {
         len: u32,
         old_len: usize,
     },
+    /// The reconstructed chunk's SHA-256 did not match the manifest's expected
+    /// hash — the fail-closed backstop. The caller must discard and fall back to
+    /// a whole-chunk transfer rather than commit the bytes.
+    HashMismatch { expected: [u8; 32], got: [u8; 32] },
 }
 
 impl std::fmt::Display for SubDeltaError {
@@ -106,11 +110,27 @@ impl std::fmt::Display for SubDeltaError {
                 f,
                 "sub-delta copy [{old_offset}..+{len}] out of old buffer (len {old_len})"
             ),
+            Self::HashMismatch { expected, got } => write!(
+                f,
+                "reconstructed chunk sha256 {} != expected {}",
+                hex16(got),
+                hex16(expected)
+            ),
         }
     }
 }
 
 impl std::error::Error for SubDeltaError {}
+
+/// Short hex prefix (first 8 bytes) for diagnostics.
+fn hex16(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(16);
+    for b in &bytes[..8] {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
 
 /// rsync weak rolling checksum over a window (Mark Adler variant): rollable in
 /// O(1) as the window slides one byte.
@@ -291,6 +311,29 @@ pub fn apply(old: &[u8], ops: &[SubDeltaOp]) -> Result<Vec<u8>, SubDeltaError> {
     Ok(out)
 }
 
+/// Receiver-side fail-closed reconstruction: apply the op stream to the OLD chunk
+/// and verify the result's SHA-256 against the manifest's expected chunk hash.
+///
+/// Returns the reconstructed bytes only if the whole-chunk hash matches; a
+/// `Copy`-out-of-range or a hash mismatch is an error so the caller falls back to
+/// a whole-chunk transfer rather than committing wrong bytes. This is the
+/// integration entry point the delta negotiation calls per changed chunk.
+pub fn reconstruct_verified(
+    old: &[u8],
+    ops: &[SubDeltaOp],
+    expected_sha256: &[u8; 32],
+) -> Result<Vec<u8>, SubDeltaError> {
+    let rebuilt = apply(old, ops)?;
+    let got: [u8; 32] = Sha256::digest(&rebuilt).into();
+    if &got != expected_sha256 {
+        return Err(SubDeltaError::HashMismatch {
+            expected: *expected_sha256,
+            got,
+        });
+    }
+    Ok(rebuilt)
+}
+
 /// Estimated bytes-on-wire for an op stream: literal bytes (the only payload)
 /// plus a fixed per-op overhead. This is what level 2 saves over shipping the
 /// whole chunk — for a small edit it is ~proportional to the change.
@@ -430,6 +473,39 @@ mod tests {
         assert!(matches!(
             apply(b"short", &ops),
             Err(SubDeltaError::CopyOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn reconstruct_verified_accepts_correct_hash_and_rejects_tampered() {
+        let old: Vec<u8> = (0..8192u32).map(|i| (i * 11 + 2) as u8).collect();
+        let mut new = old.clone();
+        for k in 0..40 {
+            new[4000 + k] ^= 0x5A;
+        }
+        let expected: [u8; 32] = Sha256::digest(&new).into();
+        let ops = sub_delta(&old, &new, 1024);
+
+        // Correct hash → reconstructs the new chunk.
+        let rebuilt = reconstruct_verified(&old, &ops, &expected).expect("verified reconstruct");
+        assert_eq!(rebuilt, new);
+
+        // Tampered op stream (drop the literal that carried the edit) → the
+        // whole-chunk hash check catches it: fail-closed, no bytes committed.
+        let tampered: Vec<SubDeltaOp> = ops
+            .into_iter()
+            .filter(|op| !matches!(op, SubDeltaOp::Literal(_)))
+            .collect();
+        assert!(matches!(
+            reconstruct_verified(&old, &tampered, &expected),
+            Err(SubDeltaError::HashMismatch { .. })
+        ));
+
+        // A wrong expected hash also fails closed even with the right ops.
+        let wrong = [0u8; 32];
+        assert!(matches!(
+            reconstruct_verified(&old, &sub_delta(&old, &new, 1024), &wrong),
+            Err(SubDeltaError::HashMismatch { .. })
         ));
     }
 
