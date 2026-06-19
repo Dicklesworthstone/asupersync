@@ -193,9 +193,8 @@ fn large_k_multiblock_roundtrip_is_byte_identical() {
     // Three source blocks: two full K=512 blocks plus a smaller tail block.
     // Exercises multi-block SBN routing + cross-block assembly at large K, the
     // c8m8ha multi-block path under the ro853b regime.
-    let data = payload(
-        k512_max_block_size() * 2 + usize::from(RqConfig::default().symbol_size) / 2,
-    );
+    let data =
+        payload(k512_max_block_size() * 2 + usize::from(RqConfig::default().symbol_size) / 2);
     let src_file = src_dir.join("multik.bin");
     std::fs::write(&src_file, &data).unwrap();
 

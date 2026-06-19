@@ -5813,7 +5813,9 @@ mod tests {
         let digests = vec![EntryDigest {
             rel_path: "payload.bin".to_string(),
             size: total_bytes,
-            content_id: crate::atp::object::ObjectId::new(42, 7),
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"rq-feedback-bandwidth"),
+            ),
             content_sha256: [0x42; 32],
         }];
         let pending = BTreeSet::from([0]);
