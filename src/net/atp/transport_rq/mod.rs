@@ -203,6 +203,7 @@ const RQ_MILD_LOSS_PACING_FLOOR_FRACTION: f64 = 0.50;
 const RQ_MILD_LOSS_PACING_MAX_LOSS: f64 = 0.02;
 const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
 const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
+const RQ_SOURCE_FEC_ZERO_LOSS_CUTOFF: f64 = 0.000_5;
 
 /// Packets pulled from the UDP socket per receive-pump turn.
 ///
@@ -695,15 +696,24 @@ impl RqAdaptiveSendState {
     fn source_fec_fallback_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
         let mut tuning = self.round_tuning(config);
         let k = fixed_block_k(config);
-        let loss_bar = self.loss_bar.max(self.loss_ema).max(0.01);
+        let loss_bar = self.source_fec_fallback_loss_bar();
         let overhead = adaptive::overhead_for_target(
             k,
             loss_bar,
             RQ_SOURCE_FEC_FALLBACK_ALPHA,
             RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
         );
-        tuning.repair_overhead = tuning.repair_overhead.max(1.0 + overhead).max(1.03);
+        tuning.repair_overhead = tuning.repair_overhead.max(1.0 + overhead);
         tuning
+    }
+
+    fn source_fec_fallback_loss_bar(&self) -> f64 {
+        let measured_loss = self.pacing_loss_ema.max(self.est.loss_p_hat);
+        if measured_loss <= RQ_SOURCE_FEC_ZERO_LOSS_CUTOFF {
+            0.0
+        } else {
+            self.loss_bar.max(self.loss_ema).max(measured_loss)
+        }
     }
 
     fn observe_need_more(
@@ -2993,12 +3003,9 @@ fn max_feedback_repair_batch_per_block(block_source_n: usize) -> usize {
     (block_source_n / 4).max(16)
 }
 
-fn adaptive_feedback_repair_batch_per_block(
-    block_source_n: usize,
-    repair_overhead: f64,
-) -> usize {
+fn adaptive_feedback_repair_batch_per_block(block_source_n: usize, repair_overhead: f64) -> usize {
     if repair_overhead <= 1.0 {
-        return 1;
+        return 0;
     }
 
     let matched = ((block_source_n as f64) * (repair_overhead - 1.0)).ceil() as usize;
@@ -3231,11 +3238,7 @@ where
                 let target_repair = if with_source {
                     initial_repair_target_per_block(block.k, round_tuning.repair_overhead)
                 } else {
-                    repair_target_for_feedback_round(
-                        block.k,
-                        already,
-                        round_tuning.repair_overhead,
-                    )
+                    repair_target_for_feedback_round(block.k, already, round_tuning.repair_overhead)
                 };
                 let repair_count = target_repair.saturating_sub(already);
                 if !with_source && repair_count == 0 {
@@ -7009,9 +7012,9 @@ mod tests {
     }
 
     #[test]
-    fn source_first_feedback_repair_batch_is_minimal() {
-        assert_eq!(repair_target_for_feedback_round(512, 0, 1.0), 1);
-        assert_eq!(repair_target_for_feedback_round(512, 7, 1.0), 8);
+    fn source_first_feedback_repair_batch_is_zero_at_clean_floor() {
+        assert_eq!(repair_target_for_feedback_round(512, 0, 1.0), 0);
+        assert_eq!(repair_target_for_feedback_round(512, 7, 1.0), 7);
     }
 
     #[test]
@@ -7109,6 +7112,61 @@ mod tests {
             "fallback must apply adaptive FEC overhead: got {}, expected at least {}",
             tuning.repair_overhead,
             1.0 + expected
+        );
+    }
+
+    #[test]
+    fn source_fec_fallback_has_no_clean_link_repair_floor() {
+        let config = RqConfig {
+            symbol_size: 1024,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(101, &config, 4);
+        state.loss_ema = 0.0;
+        state.loss_bar = 0.0;
+        state.pacing_loss_ema = 0.0;
+        state.est.loss_p_hat = 0.0;
+
+        let tuning = state.source_fec_fallback_tuning(&config);
+
+        assert_eq!(state.source_fec_fallback_loss_bar(), 0.0);
+        assert_eq!(tuning.repair_overhead, 1.0);
+        assert_eq!(
+            repair_target_for_feedback_round(fixed_block_k(&config) as usize, 0, 1.0),
+            0
+        );
+    }
+
+    #[test]
+    fn source_fec_fallback_uses_calibrated_epsilon_without_fixed_three_percent_floor() {
+        let config = RqConfig {
+            symbol_size: 1024,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(102, &config, 4);
+        state.loss_ema = 0.001;
+        state.loss_bar = 0.001;
+        state.pacing_loss_ema = 0.001;
+        state.est.loss_p_hat = 0.001;
+
+        let tuning = state.source_fec_fallback_tuning(&config);
+        let expected = adaptive::overhead_for_target(
+            fixed_block_k(&config),
+            0.001,
+            RQ_SOURCE_FEC_FALLBACK_ALPHA,
+            RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+        );
+
+        assert_eq!(state.source_fec_fallback_loss_bar(), 0.001);
+        assert!(tuning.repair_overhead >= 1.0 + expected);
+        assert!(
+            tuning.repair_overhead < 1.03,
+            "fixed 3% floor must stay removed at low measured loss: {}",
+            tuning.repair_overhead
         );
     }
 
