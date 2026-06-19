@@ -461,6 +461,70 @@ mod tests {
     }
 
     #[test]
+    fn weak_collision_uses_strong_checksum_to_choose_copy_source() {
+        // For len=4, deltas [1, -2, 1, 0] preserve both rsync weak sums:
+        // sum(delta)=0 and weighted_sum(delta)=4*1 + 3*(-2) + 2*1 = 0.
+        // The blocks therefore collide weakly but differ strongly.
+        let weak_a = [10u8, 20, 30, 40];
+        let weak_b = [11u8, 18, 31, 40];
+        assert_eq!(
+            RollingWeak::new(&weak_a).digest(),
+            RollingWeak::new(&weak_b).digest(),
+            "test fixture must create a weak-checksum collision"
+        );
+        assert_ne!(
+            strong_checksum(&weak_a),
+            strong_checksum(&weak_b),
+            "strong checksum must disambiguate the collision"
+        );
+
+        let old = [weak_a, weak_b].concat();
+        let sig = signature(&old, 4);
+        let ops = diff(&weak_b, &sig);
+
+        assert_eq!(
+            ops,
+            vec![SubDeltaOp::Copy {
+                old_offset: 4,
+                len: 4,
+            }],
+            "diff must copy the strong-matching second block, not the first weak hit"
+        );
+        assert_eq!(apply(&old, &ops).expect("apply"), weak_b);
+    }
+
+    #[test]
+    fn weak_only_match_falls_back_to_literal() {
+        let old_block = [10u8, 20, 30, 40];
+        let weak_collision_without_strong_match = [12u8, 16, 32, 40];
+        assert_eq!(
+            RollingWeak::new(&old_block).digest(),
+            RollingWeak::new(&weak_collision_without_strong_match).digest(),
+            "test fixture must create a weak-checksum collision"
+        );
+        assert_ne!(
+            strong_checksum(&old_block),
+            strong_checksum(&weak_collision_without_strong_match),
+            "fixture must not be a strong match"
+        );
+
+        let sig = signature(&old_block, 4);
+        let ops = diff(&weak_collision_without_strong_match, &sig);
+
+        assert_eq!(
+            ops,
+            vec![SubDeltaOp::Literal(
+                weak_collision_without_strong_match.to_vec()
+            )],
+            "a weak-only hit must not produce a copy op"
+        );
+        assert_eq!(
+            apply(&old_block, &ops).expect("apply"),
+            weak_collision_without_strong_match
+        );
+    }
+
+    #[test]
     fn empty_and_short_buffers_roundtrip() {
         assert_eq!(apply(b"old", &sub_delta(b"old", b"", 1024)).unwrap(), b"");
         assert_eq!(
