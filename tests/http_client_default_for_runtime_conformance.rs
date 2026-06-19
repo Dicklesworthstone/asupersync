@@ -13,9 +13,9 @@
 //!   shares the same idle connection rather than dialing again (this is the
 //!   "shared pool" the no-global design hangs on);
 //! - obtaining the default client never reaches the network ambiently: a fresh
-//!   handle has dialed nothing, and two independent accessor calls produce two
-//!   independent pools (you share a pool by *cloning a handle*, not by calling
-//!   the accessor twice).
+//!   handle has dialed nothing, repeated accessor calls against the same `Cx`
+//!   share the runtime-owned lazy slot, and separate runtime contexts do not
+//!   leak through a process-global singleton.
 //!
 //! Standalone crate (mirrors the sibling `http_client_*` conformance tests).
 //! Requires `--features test-internals` for `Cx::for_testing()`.
@@ -225,19 +225,88 @@ fn default_client_is_a_cheap_clone_over_a_shared_pool() {
         .expect("server io error");
 }
 
-/// AC6 (no hidden global): two independent accessor calls yield two independent
-/// pools. You share a pool by cloning a single handle, not by re-calling the
-/// accessor — there is no process-wide ambient singleton behind it.
+/// br-asupersync-8z4uq3: repeated accessor calls against the same `Cx` share
+/// the runtime-owned lazy default-client slot rather than allocating unrelated
+/// pools.
 #[test]
-fn independent_accessor_calls_return_independent_pools() {
+fn repeated_accessors_share_the_runtime_default_pool() {
+    let (addr, server) = spawn_keepalive_once(b"RUNTIME-SLOT");
+
     block_on(async move {
         let cx = Cx::for_testing();
-        let a = Client::default_for_runtime(&cx);
-        let b = Client::default_for_runtime(&cx);
+        let first = Client::default_for_runtime(&cx);
 
-        assert_eq!(a.pool_stats().total_connections, 0);
-        assert_eq!(b.pool_stats().total_connections, 0);
-        assert_eq!(a.pool_stats().connections_created, 0);
-        assert_eq!(b.pool_stats().connections_created, 0);
+        let fresh = first.pool_stats();
+        assert_eq!(fresh.total_connections, 0);
+        assert_eq!(fresh.connections_created, 0);
+
+        let url = format!("http://{addr}/");
+        let resp = first
+            .get(url.as_str())
+            .send(&cx)
+            .await
+            .expect("request through runtime default client should succeed");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"RUNTIME-SLOT");
+
+        let first_after = first.pool_stats();
+        assert_eq!(
+            first_after.idle_connections, 1,
+            "first accessor returns the keep-alive connection to the runtime pool"
+        );
+        assert_eq!(first_after.total_connections, 1);
+
+        let second = Client::default_for_runtime(&cx);
+        let second_after = second.pool_stats();
+        assert_eq!(
+            second_after.idle_connections, 1,
+            "second accessor observes the same runtime-owned idle pool"
+        );
+        assert_eq!(second_after.total_connections, 1);
+        assert_eq!(
+            second_after.connections_created, first_after.connections_created,
+            "re-calling the accessor must not allocate or dial a fresh pool"
+        );
     });
+
+    server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+}
+
+/// AC6 (no hidden global): separate root contexts have separate lazy slots, so
+/// the runtime-owned default never degenerates into a process-wide singleton.
+#[test]
+fn separate_runtime_contexts_do_not_share_default_client_slot() {
+    let (addr, server) = spawn_keepalive_once(b"CONTEXT-A");
+
+    block_on(async move {
+        let first_cx = Cx::for_testing();
+        let second_cx = Cx::for_testing();
+        let first = Client::default_for_runtime(&first_cx);
+        let second = Client::default_for_runtime(&second_cx);
+
+        let url = format!("http://{addr}/");
+        let resp = first
+            .get(url.as_str())
+            .send(&first_cx)
+            .await
+            .expect("request through first runtime default client should succeed");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"CONTEXT-A");
+
+        assert_eq!(first.pool_stats().total_connections, 1);
+        assert_eq!(
+            second.pool_stats().total_connections,
+            0,
+            "a second root Cx must not observe the first root's default-client pool"
+        );
+        assert_eq!(second.pool_stats().connections_created, 0);
+    });
+
+    server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
 }
