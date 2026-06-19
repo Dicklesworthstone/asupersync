@@ -12,7 +12,7 @@ set -euo pipefail
 #   1. gen a base payload; do an INITIAL full sync to seed the receiver's prior
 #      state (atp into one dest, rsync into another) — UNMEASURED setup;
 #   2. MUTATE the source (0% / 1% / 10% byte flips / append / insert / rename);
-#   3. RE-SYNC (measured): atp-delta (default-on) and tuned rsync (-aW --inplace)
+#   3. RE-SYNC (measured): atp-delta (default-on) and tuned rsync delta mode
 #      each into their pre-seeded dest. Measure bytes-on-wire (netns veth tx+rx
 #      byte counters, tool-agnostic), wall, peak RSS;
 #   4. VERIFY byte-identical (tree_digest src == dst). FAIL-CLOSED: a mismatch is
@@ -100,6 +100,24 @@ tree_digest() {
         ! -path './.asupersync-atp-delta-v1/*' -print0 | sort -z \
         | while IFS= read -r -d '' f; do printf '%s:%s\n' "${f#./}" "$(sha256sum "$f" | awk '{print $1}')"; done ) \
         | sha256sum | awk '{print $1}'
+}
+tree_size_bytes() {
+    python3 - "$1" <<'PY'
+import json, sys
+total = 0
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for line in fh:
+        if line.strip():
+            total += int(json.loads(line).get("size", 0))
+print(total)
+PY
+}
+change_requested() {
+    local needle="$1" change
+    for change in $CHANGES; do
+        [ "$change" = "$needle" ] && return 0
+    done
+    return 1
 }
 
 atp_delta_state_path() {
@@ -262,6 +280,21 @@ PY
         *) die "unknown file change mode: $mode" ;;
     esac
 }
+mutate_tree_rename() {
+    local root="$1" first target
+    first="$(python3 - "$root" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+files = sorted(path for path in root.rglob("*") if path.is_file())
+print(files[0] if files else "")
+PY
+)"
+    [ -n "$first" ] || die "tree rename requested but no files found under $root"
+    target="${first}.renamed"
+    [ ! -e "$target" ] || die "tree rename target already exists: $target"
+    mv "$first" "$target"
+}
 
 sample_peak_rss() {
     local pattern="$1" stop="$2" out="$3" peak=0
@@ -354,6 +387,8 @@ resync_rsync() {
     local src="$1" rsync_root="$2" case_dir="$3" is_dir="$4"
     local st="$case_dir/rsync.time" sl="$case_dir/rsync.log"
     local s_stop="$case_dir/rs_s_stop" s_out="$case_dir/rs_s_rss"
+    local delete_args=()
+    [ "$is_dir" = "1" ] && delete_args+=(--delete)
     set +e
     sample_peak_rss "rsync " "$s_stop" "$s_out" & local samp=$!
     local before after start finish status
@@ -363,7 +398,7 @@ resync_rsync() {
     # --no-whole-file enables the rolling+strong-checksum delta; --checksum forces
     # content-based change detection (robust vs in-place same-size edits). Matches the
     # canonical loopback baseline (ledger E-RESYNC-3/4). BUG-A fix (SapphireHill).
-    ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v rsync -a --no-whole-file --checksum --inplace --no-compress \
+    ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v rsync -a --no-whole-file --checksum --inplace --no-compress "${delete_args[@]}" \
         "$src" "rsync://${HOST_IP}:1873/bench/" >"$sl" 2>"$st"
     status=$?
     finish="$(now_s)"; after="$(ns_wire_bytes)"
@@ -455,6 +490,61 @@ run_file_cell() {
     log "[$label/$regime/$change] atp wire=${a_wire}B rsync wire=${r_wire}B (re-sync bytes-on-wire)"
 }
 
+run_tree_rename_cell() {
+    local preset="$1" regime="$2" port="$3"
+    local change="rename"
+    local case_dir="$RUN_DIR/${preset}/${regime}/${change}"; mkdir -p "$case_dir"
+    apply_regime "$regime"
+    local base="$case_dir/base_tree" manifest="$case_dir/base_tree.manifest.jsonl"
+    python3 "$GEN_TREE" --root "$base" --kind "$preset" --manifest "$manifest" >"$case_dir/gen_tree.log"
+    local bytes; bytes="$(tree_size_bytes "$manifest")"
+
+    # ── atp: initial full sync (seed receiver prior state), then tree rename ──
+    local atp_dest="$case_dir/atp_dest"; mkdir -p "$atp_dest"
+    local atp_src="$case_dir/atp_tree_src"; cp -a "$base" "$atp_src"
+    log "[$preset/$regime/$change] atp initial sync"
+    set +e
+    timeout "$TIMEOUT_S" "$BIN" recv "$atp_dest" --listen "0.0.0.0:${port}" --transport rq --once \
+        --peer-id "init-tree-recv-${port}" --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
+        --symbol-size "$SYMBOL_SIZE" $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
+    local ip_pid=$!; sleep "$RECEIVER_READY_SLEEP"
+    local init_send_status init_recv_status
+    ip netns exec "$NS" timeout "$TIMEOUT_S" "$BIN" send "$atp_src" "${HOST_IP}:${port}" --transport rq \
+        --streams "$STREAMS" --symbol-size "$SYMBOL_SIZE" --peer-id "init-tree-send-${port}" \
+        --max-bytes "$MAX_BYTES" $RQ_AUTH_LAB >"$case_dir/atp_init_send.log" 2>&1
+    init_send_status=$?
+    wait "$ip_pid" 2>/dev/null
+    init_recv_status=$?
+    set -e
+    if [ "$init_send_status" != "0" ] || [ "$init_recv_status" != "0" ]; then
+        log "[$preset/$regime/$change] atp initial sync failed (send=$init_send_status recv=$init_recv_status)"
+        return 1
+    fi
+    require_atp_delta_state "$atp_dest"
+    mutate_tree_rename "$atp_src"
+    local fields; fields="$(resync_atp "$atp_src" "$atp_dest" "$((port+1))" "$case_dir")"
+    # shellcheck disable=SC2086
+    set -- $fields; local a_wire="${1:-0}" a_wall="${2:-0}" a_rss="${3:-0}" a_sc="${4:-1}"
+    local a_src_sha a_dst_sha; a_src_sha="$(tree_digest "$atp_src")"; a_dst_sha="$(tree_digest "$atp_dest/$(basename "$atp_src")")"
+    emit_row "$preset" "$bytes" "$regime" "$change" "atp-rq-delta" "$a_wire" "$a_wall" "$a_rss" "$a_src_sha" "$a_dst_sha" "$a_sc"
+
+    # ── rsync: initial sync into the daemon root, then rename+resync ──────────
+    local rroot="$case_dir/rsync_root"; mkdir -p "$rroot"
+    local rsrc="$case_dir/rsync_tree_src"; cp -a "$base" "$rsrc"
+    start_rsyncd "$rroot" "$case_dir/rsyncd.conf"
+    ip netns exec "$NS" timeout "$TIMEOUT_S" rsync -aW --inplace --no-compress "$rsrc" \
+        "rsync://${HOST_IP}:1873/bench/" >"$case_dir/rsync_init.log" 2>&1
+    mutate_tree_rename "$rsrc"
+    fields="$(resync_rsync "$rsrc" "$rroot" "$case_dir" 1)"
+    # shellcheck disable=SC2086
+    set -- $fields; local r_wire="${1:-0}" r_wall="${2:-0}" r_rss="${3:-0}" r_sc="${4:-1}"
+    stop_rsyncd
+    local r_src_sha r_dst_sha; r_src_sha="$(tree_digest "$rsrc")"; r_dst_sha="$(tree_digest "$rroot/$(basename "$rsrc")")"
+    emit_row "$preset" "$bytes" "$regime" "$change" "rsyncd-delta" "$r_wire" "$r_wall" "$r_rss" "$r_src_sha" "$r_dst_sha" "$r_sc"
+
+    log "[$preset/$regime/$change] atp wire=${a_wire}B rsync wire=${r_wire}B (tree re-sync bytes-on-wire)"
+}
+
 main() {
     log "resync_bench start -> $RESULTS (git $GIT_HEAD)"
     setup_netns
@@ -476,8 +566,15 @@ main() {
             done
         done
     done
+    if change_requested rename; then
+        for regime in $REGIMES; do
+            local port=$((PORT_BASE + port_off)); port_off=$((port_off + 4))
+            run_tree_rename_cell "$TREE_PRESET" "$regime" "$port" \
+                || { log "[WARN] cell ${TREE_PRESET}/${regime}/rename aborted (continuing matrix)"; stop_rsyncd 2>/dev/null || true; }
+        done
+    fi
     log "resync_bench complete. Headline = atp-rq-delta vs rsyncd-delta bytes_on_wire per cell."
-    log "Rename (tree) re-sync is gated behind a tree-capable atp delta path; see bzkxa5/3fr950."
+    log "Rename tree re-sync rows use TREE_PRESET=${TREE_PRESET}."
     log "results: $RESULTS"
     # Quick headline summary (atp/rsync wire-byte ratio per cell).
     python3 - "$RESULTS" <<'PY'
