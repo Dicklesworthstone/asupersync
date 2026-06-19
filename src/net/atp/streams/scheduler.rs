@@ -6,6 +6,9 @@
 use super::{StreamId, StreamPriority};
 use std::collections::{HashMap, VecDeque};
 
+const PRIORITY_LEVELS: usize = 5;
+const MAX_STRICT_PRIORITY_BURST: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamScheduleState {
     Ready,
@@ -25,6 +28,10 @@ pub struct StreamScheduler {
     round_robin_index: [usize; 5],
     /// Total streams scheduled in current round
     scheduled_count: u64,
+    /// Last priority class selected by `next_stream`.
+    last_scheduled_priority: Option<usize>,
+    /// Consecutive schedules from `last_scheduled_priority`.
+    priority_burst_len: usize,
 }
 
 impl StreamScheduler {
@@ -42,6 +49,8 @@ impl StreamScheduler {
             stream_states: HashMap::new(),
             round_robin_index: [0; 5],
             scheduled_count: 0,
+            last_scheduled_priority: None,
+            priority_burst_len: 0,
         }
     }
 
@@ -81,34 +90,17 @@ impl StreamScheduler {
 
     /// Get the next stream to schedule
     pub fn next_stream(&mut self) -> Option<StreamId> {
-        // Check each priority level from highest to lowest
-        for priority_index in 0..5 {
-            let queue_len = self.priority_queues[priority_index].len();
-            if queue_len == 0 {
-                continue;
-            }
+        let Some(priority_index) = self.next_priority_index() else {
+            self.last_scheduled_priority = None;
+            self.priority_burst_len = 0;
+            return None;
+        };
 
-            // Round-robin within this priority level
-            let start_index = self.round_robin_index[priority_index] % queue_len;
+        let stream_id = self.next_stream_in_priority(priority_index)?;
+        self.record_scheduled_priority(priority_index);
+        self.scheduled_count += 1;
 
-            // Try to find a schedulable stream starting from round-robin position
-            for i in 0..queue_len {
-                let index = (start_index + i) % queue_len;
-                if let Some(&stream_id) = self.priority_queues[priority_index].get(index) {
-                    if !self.is_ready(stream_id) {
-                        continue;
-                    }
-
-                    // Update round-robin for next time
-                    self.round_robin_index[priority_index] = (index + 1) % queue_len;
-                    self.scheduled_count += 1;
-
-                    return Some(stream_id);
-                }
-            }
-        }
-
-        None
+        Some(stream_id)
     }
 
     /// Mark a stream as ready for scheduling
@@ -172,6 +164,56 @@ impl StreamScheduler {
 
     fn is_ready(&self, stream_id: StreamId) -> bool {
         self.stream_states.get(&stream_id) == Some(&StreamScheduleState::Ready)
+    }
+
+    fn next_priority_index(&self) -> Option<usize> {
+        if let Some(last_priority) = self.last_scheduled_priority
+            && self.priority_burst_len >= MAX_STRICT_PRIORITY_BURST
+            && let Some(priority_index) =
+                ((last_priority + 1)..PRIORITY_LEVELS).find(|&index| self.priority_has_ready(index))
+        {
+            return Some(priority_index);
+        }
+
+        (0..PRIORITY_LEVELS).find(|&index| self.priority_has_ready(index))
+    }
+
+    fn priority_has_ready(&self, priority_index: usize) -> bool {
+        self.priority_queues
+            .get(priority_index)
+            .is_some_and(|queue| queue.iter().any(|stream_id| self.is_ready(*stream_id)))
+    }
+
+    fn next_stream_in_priority(&mut self, priority_index: usize) -> Option<StreamId> {
+        let queue_len = self.priority_queues[priority_index].len();
+        if queue_len == 0 {
+            return None;
+        }
+
+        let start_index = self.round_robin_index[priority_index] % queue_len;
+        for i in 0..queue_len {
+            let index = (start_index + i) % queue_len;
+            let Some(&stream_id) = self.priority_queues[priority_index].get(index) else {
+                continue;
+            };
+            if !self.is_ready(stream_id) {
+                continue;
+            }
+
+            self.round_robin_index[priority_index] = (index + 1) % queue_len;
+            return Some(stream_id);
+        }
+
+        None
+    }
+
+    fn record_scheduled_priority(&mut self, priority_index: usize) {
+        if self.last_scheduled_priority == Some(priority_index) {
+            self.priority_burst_len = self.priority_burst_len.saturating_add(1);
+        } else {
+            self.last_scheduled_priority = Some(priority_index);
+            self.priority_burst_len = 1;
+        }
     }
 
     fn ready_count(&self, priority_index: usize) -> usize {
@@ -316,6 +358,26 @@ mod tests {
         assert_eq!(scheduler.next_stream(), Some(data));
 
         scheduler.mark_ready(control);
+        assert_eq!(scheduler.next_stream(), Some(control));
+    }
+
+    #[test]
+    fn test_starvation_protection_yields_after_control_burst() {
+        let mut scheduler = StreamScheduler::new();
+
+        let control = StreamId::new(0);
+        let data = StreamId::new(4);
+        let repair = StreamId::new(8);
+
+        scheduler.register_stream(control, StreamPriority::Control);
+        scheduler.register_stream(data, StreamPriority::Data);
+        scheduler.register_stream(repair, StreamPriority::Repair);
+
+        for _ in 0..MAX_STRICT_PRIORITY_BURST {
+            assert_eq!(scheduler.next_stream(), Some(control));
+        }
+
+        assert_eq!(scheduler.next_stream(), Some(data));
         assert_eq!(scheduler.next_stream(), Some(control));
     }
 
