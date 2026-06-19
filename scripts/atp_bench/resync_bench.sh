@@ -76,7 +76,13 @@ mkdir -p "$RUN_DIR"
 now_s() { date +%s.%N; }
 elapsed_s() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", b - a }'; }
 sha256_file() { if [ -f "$1" ]; then sha256sum "$1" | awk '{print $1}'; else printf 'missing'; fi; }
-max_rss_kb_from_time() { [ -f "$1" ] && awk -F: '/Maximum resident set size/ { gsub(/^[ \t]+/,"",$2); print $2 }' "$1" | tail -n1 || printf ''; }
+max_rss_kb_from_time() {
+    local value=""
+    if [ -f "$1" ]; then
+        value="$(awk -F: '/Maximum resident set size/ { gsub(/^[ \t]+/,"",$2); print $2 }' "$1" | tail -n1)"
+    fi
+    printf '%s' "${value:-0}"
+}
 
 tree_digest() {
     local root="$1"; [ -d "$root" ] || { printf 'missing'; return; }
@@ -245,8 +251,12 @@ resync_atp() {
     wait "$recv_pid"; rs=$?
     touch "$s_stop"; wait "$samp" 2>/dev/null
     set -e
+    # Default the RSS field to 0 when /usr/bin/time produced no "Maximum resident
+    # set size" line (e.g. the process was killed): an empty field collapses under
+    # word-splitting at the call site and shifts $4 (a_sc) out of range -> unbound.
+    local rss_kb; rss_kb="$(max_rss_kb_from_time "$st")"; rss_kb="${rss_kb:-0}"
     printf '%s %s %s %s' "$((after - before))" "$(elapsed_s "$start" "$finish")" \
-        "$(max_rss_kb_from_time "$st")" "$((ss + rs))"
+        "$rss_kb" "$((ss + rs))"
 }
 
 resync_rsync() {
@@ -320,7 +330,7 @@ run_file_cell() {
     mutate_file "$atp_src" "$change"
     local fields; fields="$(resync_atp "$atp_src" "$atp_dest" "$((port+1))" "$case_dir")"
     # shellcheck disable=SC2086
-    set -- $fields; local a_wire="$1" a_wall="$2" a_rss="$3" a_sc="$4"
+    set -- $fields; local a_wire="${1:-0}" a_wall="${2:-0}" a_rss="${3:-0}" a_sc="${4:-1}"
     local a_src_sha a_dst_sha; a_src_sha="$(sha256_file "$atp_src")"; a_dst_sha="$(sha256_file "$atp_dest/$(basename "$atp_src")")"
     emit_row "file_${label}" "$bytes" "$regime" "$change" "atp-rq-delta" "$a_wire" "$a_wall" "$a_rss" "$a_src_sha" "$a_dst_sha" "$a_sc"
 
@@ -333,7 +343,7 @@ run_file_cell() {
     mutate_file "$rsrc" "$change"
     fields="$(resync_rsync "$rsrc" "$rroot" "$case_dir" 0)"
     # shellcheck disable=SC2086
-    set -- $fields; local r_wire="$1" r_wall="$2" r_rss="$3" r_sc="$4"
+    set -- $fields; local r_wire="${1:-0}" r_wall="${2:-0}" r_rss="${3:-0}" r_sc="${4:-1}"
     stop_rsyncd
     local r_src_sha r_dst_sha; r_src_sha="$(sha256_file "$rsrc")"; r_dst_sha="$(sha256_file "$rroot/$(basename "$rsrc")")"
     emit_row "file_${label}" "$bytes" "$regime" "$change" "rsyncd-delta" "$r_wire" "$r_wall" "$r_rss" "$r_src_sha" "$r_dst_sha" "$r_sc"
