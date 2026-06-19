@@ -3,7 +3,9 @@
 //! Intelligent path selection and congestion adaptation based on transport metrics.
 
 use super::metrics::{AtpTransportMetrics, PathPerformanceClass, PathRecommendation};
-use crate::net::atp::loss::{LossDetectionMethod, LossDetectionResult, LossRecommendation};
+use crate::net::atp::loss::{
+    LossDetectionMethod, LossDetectionResult, LossRecommendation, TransferLossSignal,
+};
 use crate::net::atp::protocol::outcome::{AtpOutcome, TransportError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -25,6 +27,8 @@ pub struct AtpTransferBrain {
     policy: TransferPolicy,
     /// Latest bounded loss-detector pressure that should force FEC repair.
     loss_repair_pressure: Option<LossRepairPressure>,
+    /// Latest compact loss-detector signal for congestion/FEC decisions.
+    loss_transfer_signal: Option<TransferLossSignal>,
     /// Decision history for learning.
     decision_history: DecisionHistory,
     /// Last brain update.
@@ -244,6 +248,10 @@ pub struct DecisionPressureSnapshot {
     pub selected_path_count: usize,
     /// Maximum observed loss rate among selected paths.
     pub max_loss_rate: f64,
+    /// Latest loss-detector pressure applied to this decision.
+    pub loss_detector_pressure: f64,
+    /// Confidence for the latest loss-detector pressure.
+    pub loss_detector_confidence: f64,
     /// Smallest selected congestion window in bytes.
     pub min_cwnd_bytes: u64,
     /// Count of selected paths currently congestion-limited.
@@ -273,7 +281,7 @@ pub struct CongestionParams {
 }
 
 /// Congestion control algorithms.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CongestionAlgorithm {
     /// NewReno (conservative, standard).
     NewReno,
@@ -351,6 +359,7 @@ impl AtpTransferBrain {
             paths: HashMap::new(),
             policy,
             loss_repair_pressure: None,
+            loss_transfer_signal: None,
             decision_history: DecisionHistory {
                 decisions: Vec::new(),
                 outcomes: HashMap::new(),
@@ -619,23 +628,52 @@ impl AtpTransferBrain {
         &mut self,
         result: &LossDetectionResult,
     ) -> Option<LossRepairPressure> {
-        let Some(fec_rate) = fec_rate_from_loss_detection(result) else {
-            if result.lost_packets.is_empty() {
+        let fec_rate = fec_rate_from_loss_detection(result);
+        let Some(signal) = transfer_loss_signal_from_detection_result(result, fec_rate) else {
+            if result.lost_packets.is_empty() && result.lost_packet_count == 0 {
                 self.loss_repair_pressure = None;
+                self.loss_transfer_signal = None;
             }
             return None;
         };
 
-        let pressure = LossRepairPressure {
-            fec_rate,
-            confidence: finite_unit(result.confidence),
-            lost_packet_count: result.lost_packet_count,
-            lost_packet_samples: result.lost_packets.len(),
-            lost_bytes: result.lost_bytes,
-            detection_method: result.detection_method,
-        };
-        self.loss_repair_pressure = Some(pressure);
-        Some(pressure)
+        let pressure = repair_pressure_from_transfer_signal(
+            &signal,
+            result.detection_method,
+            result.lost_packet_count,
+            result.lost_packets.len(),
+            result.lost_bytes,
+        );
+        self.loss_transfer_signal = Some(signal);
+        self.loss_repair_pressure = pressure;
+        pressure
+    }
+
+    /// Feed a compact loss-detector signal into congestion/FEC decision-making.
+    ///
+    /// This is the WIRE-4/WIRE-3 bridge for callers that already collapsed loss
+    /// evidence into a bounded transfer signal.
+    pub fn apply_transfer_loss_signal(
+        &mut self,
+        signal: TransferLossSignal,
+    ) -> Option<LossRepairPressure> {
+        let signal = bounded_transfer_loss_signal(signal);
+        if !transfer_loss_signal_is_actionable(&signal) {
+            self.loss_repair_pressure = None;
+            self.loss_transfer_signal = None;
+            return None;
+        }
+
+        let pressure = repair_pressure_from_transfer_signal(
+            &signal,
+            LossDetectionMethod::PacketThreshold,
+            0,
+            0,
+            0,
+        );
+        self.loss_transfer_signal = Some(signal);
+        self.loss_repair_pressure = pressure;
+        pressure
     }
 
     /// Return the currently latched loss-driven repair pressure.
@@ -644,9 +682,16 @@ impl AtpTransferBrain {
         self.loss_repair_pressure
     }
 
-    /// Clear the latched loss-driven repair pressure after a clean control round.
+    /// Return the currently latched compact loss-detector signal.
+    #[must_use]
+    pub fn loss_transfer_signal(&self) -> Option<TransferLossSignal> {
+        self.loss_transfer_signal
+    }
+
+    /// Clear the latched loss-driven pressure after a clean control round.
     pub fn clear_loss_repair_pressure(&mut self) {
         self.loss_repair_pressure = None;
+        self.loss_transfer_signal = None;
     }
 
     // Private helper methods
@@ -716,10 +761,14 @@ impl AtpTransferBrain {
 
         let path_rate = bounded_fec_rate(max_loss_rate * 1.5);
         let pressure_rate = self.loss_repair_pressure.map(|pressure| pressure.fec_rate);
+        let signal_rate = self
+            .loss_transfer_signal
+            .and_then(|signal| signal.repair_rate_hint);
 
         path_rate
             .into_iter()
             .chain(pressure_rate)
+            .chain(signal_rate)
             .fold(0.05, f64::max)
             .clamp(0.05, 0.3)
     }
@@ -815,13 +864,29 @@ impl AtpTransferBrain {
             .min()
             .unwrap_or(12_000);
 
+        let mut initial_cwnd = (min_cwnd / 2).max(1200);
+        // saturating_mul: `min_cwnd * 4` overflows u32 once min_cwnd exceeds
+        // ~1 GB (panic under overflow-checks, wrap in release).
+        let mut max_cwnd = min_cwnd.saturating_mul(4);
+        let mut algorithm = CongestionAlgorithm::AtpAdaptive;
+        let mut pacing_rate = None;
+
+        if let Some(signal) = self.loss_transfer_signal {
+            if let Some(factor) = signal.cwnd_reduction_factor {
+                initial_cwnd = scale_cwnd_by_factor(initial_cwnd, factor);
+                max_cwnd = scale_cwnd_by_factor(max_cwnd, factor).max(initial_cwnd);
+            }
+            if signal.prefer_bbr {
+                algorithm = CongestionAlgorithm::Bbr;
+            }
+            pacing_rate = signal.pacing_rate_hint;
+        }
+
         CongestionParams {
-            initial_cwnd: (min_cwnd / 2).max(1200),
-            // saturating_mul: `min_cwnd * 4` overflows u32 once min_cwnd exceeds
-            // ~1 GB (panic under overflow-checks, wrap in release).
-            max_cwnd: min_cwnd.saturating_mul(4),
-            algorithm: CongestionAlgorithm::AtpAdaptive,
-            pacing_rate: None,
+            initial_cwnd,
+            max_cwnd,
+            algorithm,
+            pacing_rate,
         }
     }
 
@@ -976,6 +1041,12 @@ impl AtpTransferBrain {
         DecisionPressureSnapshot {
             selected_path_count: path_ids.len(),
             max_loss_rate: finite_unit(max_loss_rate),
+            loss_detector_pressure: self
+                .loss_transfer_signal
+                .map_or(0.0, |signal| signal.loss_pressure),
+            loss_detector_confidence: self
+                .loss_transfer_signal
+                .map_or(0.0, |signal| signal.confidence),
             min_cwnd_bytes: if min_cwnd_bytes == u64::MAX {
                 0
             } else {
@@ -1116,6 +1187,126 @@ fn bounded_fec_rate(rate: f64) -> Option<f64> {
         Some(rate.clamp(0.05, 0.3))
     } else {
         None
+    }
+}
+
+fn bounded_transfer_loss_signal(signal: TransferLossSignal) -> TransferLossSignal {
+    TransferLossSignal {
+        loss_pressure: finite_unit(signal.loss_pressure),
+        repair_rate_hint: signal.repair_rate_hint.and_then(bounded_fec_rate),
+        cwnd_reduction_factor: signal
+            .cwnd_reduction_factor
+            .map(finite_unit)
+            .filter(|factor| *factor > 0.0),
+        pacing_rate_hint: signal.pacing_rate_hint.filter(|rate| *rate > 0),
+        prefer_bbr: signal.prefer_bbr,
+        confidence: finite_unit(signal.confidence),
+    }
+}
+
+fn transfer_loss_signal_is_actionable(signal: &TransferLossSignal) -> bool {
+    signal.loss_pressure > 0.0
+        || signal.repair_rate_hint.is_some()
+        || signal.cwnd_reduction_factor.is_some()
+        || signal.pacing_rate_hint.is_some()
+        || signal.prefer_bbr
+}
+
+fn transfer_loss_signal_from_detection_result(
+    result: &LossDetectionResult,
+    fec_rate: Option<f64>,
+) -> Option<TransferLossSignal> {
+    let mut signal = TransferLossSignal {
+        loss_pressure: fec_rate.unwrap_or(0.0),
+        repair_rate_hint: fec_rate,
+        cwnd_reduction_factor: None,
+        pacing_rate_hint: None,
+        prefer_bbr: false,
+        confidence: finite_unit(result.confidence),
+    };
+
+    for recommendation in &result.recommendations {
+        match recommendation {
+            LossRecommendation::ReduceCongestionWindow { factor } => {
+                let factor = finite_unit(*factor);
+                signal.cwnd_reduction_factor = Some(
+                    signal
+                        .cwnd_reduction_factor
+                        .map_or(factor, |current: f64| current.min(factor)),
+                );
+                signal.loss_pressure = signal.loss_pressure.max(1.0 - factor);
+            }
+            LossRecommendation::IncreaseReorderingThreshold { .. } => {}
+            LossRecommendation::EnablePacing { rate } => {
+                signal.pacing_rate_hint = Some(
+                    signal
+                        .pacing_rate_hint
+                        .map_or(*rate, |current: u64| current.min(*rate)),
+                );
+                signal.loss_pressure = signal.loss_pressure.max(0.05);
+            }
+            LossRecommendation::SwitchCongestionControl { algorithm } => {
+                signal.prefer_bbr |= algorithm.eq_ignore_ascii_case("bbr");
+                signal.loss_pressure = signal.loss_pressure.max(0.20);
+            }
+            LossRecommendation::EnableFec { rate } => {
+                if let Some(rate) = bounded_fec_rate(*rate) {
+                    signal.repair_rate_hint = Some(
+                        signal
+                            .repair_rate_hint
+                            .map_or(rate, |current: f64| current.max(rate)),
+                    );
+                    signal.loss_pressure = signal.loss_pressure.max(rate);
+                }
+            }
+        }
+    }
+
+    let signal = bounded_transfer_loss_signal(signal);
+    transfer_loss_signal_is_actionable(&signal).then_some(signal)
+}
+
+fn repair_pressure_from_transfer_signal(
+    signal: &TransferLossSignal,
+    detection_method: LossDetectionMethod,
+    lost_packet_count: u64,
+    lost_packet_samples: usize,
+    lost_bytes: u64,
+) -> Option<LossRepairPressure> {
+    let fec_rate = signal
+        .repair_rate_hint
+        .and_then(bounded_fec_rate)
+        .or_else(|| {
+            if signal.loss_pressure > 0.0 && signal.confidence > 0.0 {
+                bounded_fec_rate(signal.loss_pressure * signal.confidence.max(0.5) * 1.5)
+            } else {
+                None
+            }
+        })?;
+
+    Some(LossRepairPressure {
+        fec_rate,
+        confidence: signal.confidence,
+        lost_packet_count,
+        lost_packet_samples,
+        lost_bytes,
+        detection_method,
+    })
+}
+
+fn scale_cwnd_by_factor(cwnd: u32, factor: f64) -> u32 {
+    let factor = finite_unit(factor);
+    let scaled = (f64::from(cwnd) * factor).round();
+    if !scaled.is_finite() {
+        return cwnd;
+    }
+
+    if scaled >= f64::from(u32::MAX) {
+        u32::MAX
+    } else if scaled <= 1200.0 {
+        1200
+    } else {
+        scaled as u32
     }
 }
 
@@ -1317,6 +1508,102 @@ mod tests {
                 && reason.detail.contains("loss_pressure_rate=0.300000")
                 && reason.detail.contains("lost_bytes=8192")
         }));
+    }
+
+    #[test]
+    fn transfer_loss_signal_drives_congestion_and_repair_decisions() {
+        let mut brain = AtpTransferBrain::new();
+        brain.update_path_metrics(create_test_metrics("lossy_signal_path", 0.0, 50_000, 0.95));
+
+        let pressure = brain
+            .apply_transfer_loss_signal(TransferLossSignal {
+                loss_pressure: 0.12,
+                repair_rate_hint: Some(0.18),
+                cwnd_reduction_factor: Some(0.5),
+                pacing_rate_hint: Some(100_000),
+                prefer_bbr: true,
+                confidence: 0.9,
+            })
+            .expect("repair hint should latch bounded FEC pressure");
+
+        assert_eq!(pressure.fec_rate, 0.18);
+        assert_eq!(
+            brain
+                .loss_transfer_signal()
+                .expect("signal should be latched")
+                .loss_pressure,
+            0.12
+        );
+
+        let decision = brain
+            .make_transfer_decision(
+                "loss_signal_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+
+        assert!(decision.enable_repair);
+        assert_eq!(decision.fec_rate, Some(0.18));
+        assert_eq!(decision.congestion_params.initial_cwnd, 3_000);
+        assert_eq!(decision.congestion_params.max_cwnd, 24_000);
+        assert_eq!(
+            decision.congestion_params.algorithm,
+            CongestionAlgorithm::Bbr
+        );
+        assert_eq!(decision.congestion_params.pacing_rate, Some(100_000));
+        assert_eq!(decision.pressure_snapshot.loss_detector_pressure, 0.12);
+        assert_eq!(decision.pressure_snapshot.loss_detector_confidence, 0.9);
+    }
+
+    #[test]
+    fn clean_transfer_loss_signal_clears_stale_detector_pressure() {
+        let mut brain = AtpTransferBrain::new();
+        brain.update_path_metrics(create_test_metrics("clean_path", 0.0, 50_000, 0.95));
+
+        assert!(
+            brain
+                .apply_transfer_loss_signal(TransferLossSignal {
+                    loss_pressure: 0.10,
+                    repair_rate_hint: Some(0.15),
+                    cwnd_reduction_factor: Some(0.75),
+                    pacing_rate_hint: Some(250_000),
+                    prefer_bbr: false,
+                    confidence: 0.8,
+                })
+                .is_some()
+        );
+        assert!(brain.loss_transfer_signal().is_some());
+
+        assert!(
+            brain
+                .apply_transfer_loss_signal(TransferLossSignal {
+                    loss_pressure: 0.0,
+                    repair_rate_hint: None,
+                    cwnd_reduction_factor: None,
+                    pacing_rate_hint: None,
+                    prefer_bbr: false,
+                    confidence: 1.0,
+                })
+                .is_none()
+        );
+        assert_eq!(brain.loss_transfer_signal(), None);
+        assert_eq!(brain.loss_repair_pressure(), None);
+
+        let decision = brain
+            .make_transfer_decision(
+                "clean_signal_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+
+        assert!(!decision.enable_repair);
+        assert_eq!(decision.congestion_params.pacing_rate, None);
+        assert_eq!(
+            decision.congestion_params.algorithm,
+            CongestionAlgorithm::AtpAdaptive
+        );
     }
 
     #[test]
