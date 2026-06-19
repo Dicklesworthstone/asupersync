@@ -32,9 +32,9 @@ set -euo pipefail
 #   ATP_MATRIX_WORKLOAD ATP_MATRIX_WORKLOAD_PATH ATP_MATRIX_REGIME
 #   ATP_MATRIX_TIER ATP_MATRIX_METHOD ATP_MATRIX_REP ATP_MATRIX_STREAMS ATP_MATRIX_RESULTS
 #   ATP_MATRIX_NETEM_JSON ATP_MATRIX_RUN_ID ATP_MATRIX_GIT_HEAD
-# Tunables (env): BIN, WORKERS, STREAMS, SYMBOL_SIZE, MAX_BYTES, RQ_AUTH_KEY_HEX,
-#   HOST_IP, NS_IP, CIDR, ATP_MATRIX_TIMEOUT, RSS_SAMPLE_INTERVAL, REMOTE_USER,
-#   SSH_KEY, RECEIVER_READY_SLEEP, CELL_TMP.
+# Tunables (env): BIN, WORKERS, STREAMS, SYMBOL_SIZE, MAX_BLOCK_SIZE, MAX_BYTES,
+#   RQ_AUTH_KEY_HEX, HOST_IP, NS_IP, CIDR, ATP_MATRIX_TIMEOUT,
+#   RSS_SAMPLE_INTERVAL, REMOTE_USER, SSH_KEY, RECEIVER_READY_SLEEP, CELL_TMP.
 # ─────────────────────────────────────────────────────────────────────────────
 
 : "${ATP_MATRIX_WORKLOAD:?run via matrix_bench.sh --run-cell-command}"
@@ -62,6 +62,7 @@ WORKERS="${WORKERS:-4}"
 STREAMS="${STREAMS:-8}"
 STREAMS="${ATP_MATRIX_STREAMS:-$STREAMS}"
 SYMBOL_SIZE="${SYMBOL_SIZE:-1200}"
+MAX_BLOCK_SIZE="${ATP_MATRIX_MAX_BLOCK_SIZE:-${MAX_BLOCK_SIZE:-auto}}"
 MAX_BYTES="${MAX_BYTES:-6442450944}"
 RQ_AUTH_KEY_HEX="${RQ_AUTH_KEY_HEX:-00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff}"
 HOST_IP="${HOST_IP:-10.99.0.1}"
@@ -251,7 +252,12 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     local rl="$CASE_DIR/recv.log" sl="$CASE_DIR/send.log" rt="$CASE_DIR/recv.time" st="$CASE_DIR/send.time"
     local r_tag="atprecv-${SUFFIX}" s_tag="atpsend-${SUFFIX}"
     local r_stop="$CASE_DIR/r_stop" r_out="$CASE_DIR/r_rss" s_stop="$CASE_DIR/s_stop" s_out="$CASE_DIR/s_rss"
-    local -a auth_recv=() auth_send=() tls_recv=() tls_send=()
+    local -a auth_recv=() auth_send=() block_args=() delta_args=() tls_recv=() tls_send=()
+    block_args=(--max-block-size "$MAX_BLOCK_SIZE")
+    # Matrix cells are whole-object scorecard transfers, not re-sync delta cells.
+    # Disable the receiver-state sidecar probe so netns route issues cannot add
+    # fallback noise to wall-time or obscure the transport under test.
+    delta_args=(--no-delta)
     if [ "$mode" = "lab" ]; then
         auth_recv=(--rq-allow-unauthenticated-lab); auth_send=(--rq-allow-unauthenticated-lab)
     else
@@ -259,7 +265,11 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     fi
     if [ "$transport" = "quic" ]; then
         local cert="$CASE_DIR/cert.pem" key="$CASE_DIR/key.pem"
-        openssl req -x509 -newkey ed25519 -nodes -keyout "$key" -out "$cert" -days 3 \
+        # Keep the encrypted matrix on the same P-256 leaf shape used by the
+        # checked QUIC/TLS fixtures. Fall back to RSA-2048 only where the EC
+        # OpenSSL path is unavailable.
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$key" -out "$cert" -days 3 \
             -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" >/dev/null 2>&1 || \
         openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$cert" -days 3 \
             -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" >/dev/null 2>&1
@@ -276,7 +286,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" recv "$recv_dir" \
         --listen "0.0.0.0:${PORT}" --transport "$transport" --once --peer-id "$r_tag" \
         --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$SYMBOL_SIZE" \
-        "${auth_recv[@]}" "${tls_recv[@]}" >"$rl" 2>"$rt" &
+        "${block_args[@]}" "${delta_args[@]}" "${auth_recv[@]}" "${tls_recv[@]}" >"$rl" 2>"$rt" &
     local recv_pid=$!
     sample_rss "$r_tag" "$r_stop" "$r_out" & local r_samp=$!
     sleep "$RECEIVER_READY_SLEEP"
@@ -285,7 +295,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     start="$(now_s)"
     ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" send "$WL_PATH" "${HOST_IP}:${PORT}" \
         --transport "$transport" --symbol-size "$SYMBOL_SIZE" --peer-id "$s_tag" --max-bytes "$MAX_BYTES" \
-        "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}" >"$sl" 2>"$st"
+        "${block_args[@]}" "${delta_args[@]}" "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}" >"$sl" 2>"$st"
     ss=$?; [ "$ss" = "124" ] && TIMED_OUT=true
     if [ "$ss" != "0" ] && kill -0 "$recv_pid" 2>/dev/null; then kill "$recv_pid" 2>/dev/null || true; fi
     wait "$recv_pid"; rs=$?; [ "$rs" = "124" ] && TIMED_OUT=true
