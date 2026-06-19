@@ -197,7 +197,13 @@ EOF
     sleep 0.5
     kill -0 "$RSYNCD_PID" 2>/dev/null || die "rsyncd failed: $(cat "${conf}.log" 2>/dev/null)"
 }
-stop_rsyncd() { [ -n "$RSYNCD_PID" ] && { kill "$RSYNCD_PID" 2>/dev/null || true; RSYNCD_PID=""; }; }
+stop_rsyncd() {
+    if [ -n "$RSYNCD_PID" ]; then
+        kill "$RSYNCD_PID" 2>/dev/null || true
+        RSYNCD_PID=""
+    fi
+    true
+}
 
 cleanup() {
     stop_rsyncd
@@ -316,7 +322,17 @@ resync_atp() {
         log "ATP sender fell back to full-object despite sidecar state; marking cell invalid"
         ss=91
     fi
-    [ "$ss" != "0" ] && kill "$recv_pid" 2>/dev/null
+    if [ "$ss" != "0" ]; then
+        # Delta-package RQ sends can fail at the sender after the receiver has
+        # decoded and started post-receive application. Give the receiver a
+        # bounded grace window to emit its real status before forcing cleanup.
+        local grace=0
+        while kill -0 "$recv_pid" 2>/dev/null && [ "$grace" -lt 40 ]; do
+            sleep 0.25
+            grace=$((grace + 1))
+        done
+        kill -0 "$recv_pid" 2>/dev/null && kill "$recv_pid" 2>/dev/null
+    fi
     wait "$recv_pid"; rs=$?
     touch "$s_stop"; wait "$samp" 2>/dev/null
     set -e

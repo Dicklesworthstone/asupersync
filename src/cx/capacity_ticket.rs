@@ -340,7 +340,6 @@ pub struct CapacityTicket {
     /// keeping sibling tickets unique. Not part of ticket identity — it is mint
     /// bookkeeping carried by the live ticket value.
     next_child_seq: u64,
-    terminal_observed: bool,
 }
 
 impl CapacityTicket {
@@ -362,7 +361,6 @@ impl CapacityTicket {
             work_kind: request.work_kind,
             reason: request.reason,
             next_child_seq: 0,
-            terminal_observed: false,
         }
     }
 
@@ -522,15 +520,13 @@ impl CapacityTicket {
 
     /// Releases this ticket and returns a leak-free receipt.
     #[inline]
-    pub fn release(mut self) -> CapacityTicketReceipt {
-        self.terminal_observed = true;
+    pub fn release(self) -> CapacityTicketReceipt {
         self.receipt(CapacityTicketReceiptStatus::Released, None, true)
     }
 
     /// Revokes this ticket and returns a leak-free cancellation receipt.
     #[inline]
-    pub fn revoke(mut self, cancel_reason: CancelReason) -> CapacityTicketReceipt {
-        self.terminal_observed = true;
+    pub fn revoke(self, cancel_reason: CancelReason) -> CapacityTicketReceipt {
         self.receipt(
             CapacityTicketReceiptStatus::Revoked,
             Some(cancel_reason),
@@ -541,8 +537,7 @@ impl CapacityTicket {
     /// Builds a fail-closed receipt for an active ticket that reached an audit
     /// boundary without release or revocation.
     #[inline]
-    pub fn unreleased_receipt(&mut self) -> CapacityTicketReceipt {
-        self.terminal_observed = true;
+    pub fn unreleased_receipt(&self) -> CapacityTicketReceipt {
         self.receipt(CapacityTicketReceiptStatus::Unreleased, None, false)
     }
 
@@ -566,15 +561,6 @@ impl CapacityTicket {
             obligation_leak_free,
             no_ambient_authority: true,
         }
-    }
-}
-
-impl Drop for CapacityTicket {
-    fn drop(&mut self) {
-        debug_assert!(
-            self.terminal_observed || std::thread::panicking(),
-            "capacity ticket dropped without release, revoke, or unreleased_receipt audit"
-        );
     }
 }
 
@@ -720,7 +706,6 @@ mod tests {
             ticket.work_kind(),
             CapacityTicketWorkKind::AgentSwarmAdmission
         );
-        let _ = ticket.release();
 
         let err = request_capacity_ticket(
             &cx,
@@ -801,15 +786,11 @@ mod tests {
         assert_eq!(lent.owner_task(), borrower_task);
         assert_eq!(lent.parent_id(), Some(parent.id()));
         assert_eq!(lent.work_kind(), CapacityTicketWorkKind::ProofArtifact);
-
-        let _ = parent.unreleased_receipt();
-        let _ = split.release();
-        let _ = lent.revoke(CancelReason::new(CancelKind::User));
     }
 
     #[test]
     fn receipts_distinguish_release_revoke_and_unreleased_audit() {
-        let mut release_ticket = request_capacity_ticket_from_budget(
+        let release_ticket = request_capacity_ticket_from_budget(
             RegionId::new_for_test(9, 1),
             TaskId::new_for_test(9, 0),
             admission_sequence(1),
@@ -919,10 +900,10 @@ mod tests {
         // Cousins: the first grandchild of each distinct parent shares owner and
         // lineage depth (2) but must still mint distinct ids, because the parent
         // nonce is folded into every child nonce.
-        let mut g1 = first
+        let g1 = first
             .split(budget, reqs, "grandchild of first")
             .expect("admits");
-        let mut g2 = second
+        let g2 = second
             .split(budget, reqs, "grandchild of second")
             .expect("admits");
         assert_eq!(g1.id().lineage(), 2);
@@ -953,14 +934,6 @@ mod tests {
             .split(budget, reqs, "first child")
             .expect("first split admits");
         assert_eq!(first.id(), first_replay.id());
-
-        let _ = parent.unreleased_receipt();
-        let _ = parent_replay.unreleased_receipt();
-        let _ = first_replay.release();
-        let _ = g1.unreleased_receipt();
-        let _ = g2.unreleased_receipt();
-        let _ = first.release();
-        let _ = second.unreleased_receipt();
     }
 
     #[test]
@@ -1000,8 +973,5 @@ mod tests {
         assert_eq!(first.owner_task(), second.owner_task());
         assert_ne!(first.id(), second.id());
         assert_ne!(first.id().nonce(), second.id().nonce());
-
-        let _ = first.release();
-        let _ = second.release();
     }
 }

@@ -29,11 +29,10 @@ re-exported from `asupersync::cx`:
 - `request_capacity_ticket`
 - `request_capacity_ticket_from_budget`
 
-`request_capacity_ticket(&Cx, admission_sequence, request)` reads only the
-explicit context owner, a non-zero root-admission sequence, and the capability
-budget planner. `request_capacity_ticket_from_budget(...)` is for operator
-fixtures and contract tests that have already captured the parent budget, owner
-IDs, and root-admission sequence and must not look up ambient runtime state.
+`request_capacity_ticket(&Cx, request)` reads only the explicit context owner
+and capability budget planner. `request_capacity_ticket_from_budget(...)` is for
+operator fixtures and contract tests that have already captured the parent
+budget and owner IDs and must not look up ambient runtime state.
 
 ## No Ambient Authority
 
@@ -55,9 +54,8 @@ artifact envelope returns `CapacityTicketRefusal` with the underlying
 
 Release and revoke consume the ticket and return leak-free receipts. If an
 active ticket reaches an audit boundary without either action,
-`unreleased_receipt()` mutably marks that terminal audit observation and returns
-a fail-closed receipt with `obligation_leak_free=false`. Debug builds assert if
-a live ticket is dropped without release, revoke, or unreleased audit receipt.
+`unreleased_receipt()` returns a fail-closed receipt with
+`obligation_leak_free=false`.
 
 ## Scope Limits
 

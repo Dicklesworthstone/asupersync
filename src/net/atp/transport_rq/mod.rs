@@ -3907,12 +3907,33 @@ pub async fn receive_connection(
                     control
                         .send(&json_frame(FrameType::Proof, &receipt)?)
                         .await?;
-                    let _ = control
-                        .send(
-                            &Frame::empty(FrameType::Close)
-                                .map_err(|e| RqError::Frame(e.to_string()))?,
-                        )
-                        .await;
+                    for _ in 0..4 {
+                        match control.recv().await {
+                            Ok(frame) if frame.frame_type() == FrameType::Close => break,
+                            Ok(frame)
+                                if matches!(
+                                    frame.frame_type(),
+                                    FrameType::ObjectComplete | FrameType::KeepAlive
+                                ) =>
+                            {
+                                rqtrace!(
+                                    "receiver: draining late {:?} while waiting for sender Close",
+                                    frame.frame_type()
+                                );
+                            }
+                            Ok(frame) => {
+                                rqtrace!(
+                                    "receiver: expected sender Close after Proof, got {:?}",
+                                    frame.frame_type()
+                                );
+                                break;
+                            }
+                            Err(err) => {
+                                rqtrace!("receiver: sender Close after Proof unavailable: {err}");
+                                break;
+                            }
+                        }
+                    }
                     if !receipt.committed {
                         return Err(RqError::Integrity(
                             receipt

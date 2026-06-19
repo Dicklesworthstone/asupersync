@@ -32,10 +32,9 @@ use sha2::{Digest, Sha256};
 
 /// Default sub-block size for the level-2 diff.
 ///
-/// Small enough that a localized edit maps to a few literal blocks, large
-/// enough to keep the signature compact relative to a content-defined chunk
-/// (~16-64 KiB).
-pub const DEFAULT_SUBBLOCK_BYTES: usize = 1024;
+/// Small enough that sparse byte edits keep most blocks copyable, large enough
+/// to avoid byte-signature state for every position in a content-defined chunk.
+pub const DEFAULT_SUBBLOCK_BYTES: usize = 256;
 
 /// Truncated strong-checksum length (128-bit). Collisions are cryptographically
 /// negligible, and the whole-chunk hash verify is the fail-closed backstop.
