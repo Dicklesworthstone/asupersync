@@ -161,6 +161,10 @@ pub struct TransferConfig {
     /// full-object transfer. The receiver falls back to the full path whenever
     /// a safe delta cannot be proven smaller.
     pub enable_delta: bool,
+    /// Receiver-side mirror (`rsync --delete`) policy for committed directory
+    /// transfers. Defaults to [`MirrorPolicy::default`], which is a dry-run and
+    /// deletes nothing; callers must explicitly opt in to destructive mirroring.
+    pub mirror_policy: MirrorPolicy,
 }
 
 impl Default for TransferConfig {
@@ -176,6 +180,7 @@ impl Default for TransferConfig {
             sparse_files: false,
             preserve_hardlinks: false,
             enable_delta: true,
+            mirror_policy: MirrorPolicy::default(),
         }
     }
 }
@@ -2045,7 +2050,7 @@ async fn commit_verified_staging(
         }
         committed_paths.push(out_path);
     }
-    mirror_committed_manifest(cx, dest_dir, manifest).await?;
+    mirror_committed_manifest(cx, dest_dir, manifest, config.mirror_policy).await?;
     Ok(committed_paths)
 }
 
@@ -2053,8 +2058,12 @@ async fn mirror_committed_manifest(
     cx: &Cx,
     dest_dir: &Path,
     manifest: &TransferManifest,
+    policy: MirrorPolicy,
 ) -> Result<(), TransportError> {
     if !manifest.is_directory {
+        return Ok(());
+    }
+    if !policy.enabled {
         return Ok(());
     }
 
@@ -2064,10 +2073,6 @@ async fn mirror_committed_manifest(
         .iter()
         .map(|entry| entry.rel_path.clone())
         .collect::<BTreeSet<_>>();
-    let policy = MirrorPolicy {
-        enabled: true,
-        ..MirrorPolicy::default()
-    };
     mirror_dest(cx, &base, &keep_rel_paths, policy).await?;
     Ok(())
 }
@@ -3122,7 +3127,7 @@ pub async fn receive_connection(
                     expected: "ObjectComplete | Close",
                 });
             }
-            mirror_committed_manifest(cx, dest_dir, &manifest).await?;
+            mirror_committed_manifest(cx, dest_dir, &manifest, config.mirror_policy).await?;
             let receipt = ReceiveReceipt {
                 committed: true,
                 bytes_received: 0,
@@ -3445,7 +3450,7 @@ pub async fn receive_connection(
                 }
                 committed_paths.push(out_path);
             }
-            mirror_committed_manifest(cx, dest_dir, &manifest).await?;
+            mirror_committed_manifest(cx, dest_dir, &manifest, config.mirror_policy).await?;
             Ok(())
         }
         .await;
