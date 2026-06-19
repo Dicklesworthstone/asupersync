@@ -2985,14 +2985,26 @@ pub async fn send_path(
     }
 }
 
-/// Per-round repair batch size: how many *additional* repair symbols (per block)
-/// each feedback round mints. A generous batch keeps convergence fast under loss.
-fn repair_batch_per_block(config: &RqConfig) -> usize {
-    let block_k = config
-        .max_block_size
-        .div_ceil(usize::from(config.symbol_size.max(1)))
-        .max(1);
-    (block_k / 4).max(16)
+/// Legacy ceiling for per-round repair increments.
+///
+/// This preserves the old high-loss convergence cap while letting clean-link
+/// feedback rounds avoid spraying a fixed K/4 parity burst for a sparse tail.
+fn max_feedback_repair_batch_per_block(block_source_n: usize) -> usize {
+    (block_source_n / 4).max(16)
+}
+
+fn adaptive_feedback_repair_batch_per_block(
+    block_source_n: usize,
+    repair_overhead: f64,
+) -> usize {
+    if repair_overhead <= 1.0 {
+        return 1;
+    }
+
+    let matched = ((block_source_n as f64) * (repair_overhead - 1.0)).ceil() as usize;
+    matched
+        .max(1)
+        .min(max_feedback_repair_batch_per_block(block_source_n))
 }
 
 fn initial_repair_target_per_block(block_source_n: usize, repair_overhead: f64) -> usize {
@@ -3006,14 +3018,13 @@ fn initial_repair_target_per_block(block_source_n: usize, repair_overhead: f64) 
 fn repair_target_for_feedback_round(
     block_source_n: usize,
     already: usize,
-    fallback_batch: usize,
     repair_overhead: f64,
 ) -> usize {
     let calibrated_total = initial_repair_target_per_block(block_source_n, repair_overhead);
     if calibrated_total > already {
         calibrated_total
     } else {
-        already + fallback_batch.max(1)
+        already + adaptive_feedback_repair_batch_per_block(block_source_n, repair_overhead)
     }
 }
 
@@ -3120,7 +3131,6 @@ async fn spray_round<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    let batch = repair_batch_per_block(config);
     for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let mut ring = EncodeAheadRing::default();
@@ -3224,7 +3234,6 @@ where
                     repair_target_for_feedback_round(
                         block.k,
                         already,
-                        batch,
                         round_tuning.repair_overhead,
                     )
                 };
@@ -6997,6 +7006,18 @@ mod tests {
     #[test]
     fn source_first_initial_repair_target_is_zero() {
         assert_eq!(initial_repair_target_per_block(512, 1.0), 0);
+    }
+
+    #[test]
+    fn source_first_feedback_repair_batch_is_minimal() {
+        assert_eq!(repair_target_for_feedback_round(512, 0, 1.0), 1);
+        assert_eq!(repair_target_for_feedback_round(512, 7, 1.0), 8);
+    }
+
+    #[test]
+    fn feedback_repair_batch_is_rate_matched_and_capped() {
+        assert_eq!(repair_target_for_feedback_round(512, 16, 1.03), 32);
+        assert_eq!(repair_target_for_feedback_round(512, 256, 1.50), 384);
     }
 
     #[test]
