@@ -1,9 +1,9 @@
 # Why ATP loses on clean, rate-capped, low-latency links — overhead analysis (E-6/E-3)
 
 Lane: **perfect-link overhead-reduction analysis** (orchestrator lane (e)). Read-only
-code analysis; this is a scoping + blueprint doc, not a code change. It explains the loss,
-inventories the **existing** GSO/sendmmsg scaffolding in `src/net/udp.rs`, and specifies the
-remaining native-path work so the udp.rs lane (a) can be executed without re-deriving it.
+code analysis; this is a scoping + proof-gate doc, not a code change. It explains the clean-link
+loss model, inventories the **current** RQ send-batch + UDP native batching state, and names the
+remaining measurement gates before any clean-link win can be claimed.
 
 Honest-results context (docs/atp_bench_matrix_spec.md §"Honest results so far"):
 
@@ -19,28 +19,19 @@ link, what stops atp from at least matching rsync?
 
 ---
 
-## Root cause: one send syscall per ~1200-byte symbol
+## Historical root cause: one send syscall per ~1200-byte symbol
 
-The RQ sender sprays symbols one datagram at a time. In `spray_round` the inner loop is:
-
-```rust
-for sym in &syms {
-    send_symbol_datagram(cx, sockets, rr, symbols_sent, dropper, tag,
-                         enc.index, sym, config, &mut pacer, symbol_auth).await?;
-}
-```
-(`src/net/atp/transport_rq/mod.rs:2324-2338`; the sequential M=1 path at `:2342+` is the same
-one-symbol-per-send shape.) Each `send_symbol_datagram` is one `UdpSocket::send`/`send_to`,
-i.e. **one `sendto(2)` per symbol**. With `symbol_size` ≈ `UDP_DEFAULT_GSO_SEGMENT_BYTES = 1200`
-(`udp.rs:41`):
+The original RQ sender sprayed symbols one datagram at a time: one encoded symbol entered
+`send_symbol_datagram`, which called a UDP send path immediately. With `symbol_size` around
+`UDP_DEFAULT_GSO_SEGMENT_BYTES = 1200`:
 
 * 100 MB ⇒ ~87,400 source datagrams ⇒ **~87k `sendto` syscalls** on the sender, plus repair.
 * The receiver historically paid a matching per-datagram `recvfrom`; **E-6a already fixed the
   receive side** (`recv_batch_from`, bead `asupersync-mbjfzs`) — the pump drains a burst per
-  readiness wait. The **send side is still one-syscall-per-symbol**.
+  readiness wait.
 
 rsync over TCP issues a handful of large `write(2)`s (the kernel segments into MSS frames in
-the stack/NIC). So on a clean link the comparison is ~87k userspace→kernel crossings (atp) vs
+the stack/NIC). So on a clean link the old comparison was ~87k userspace-to-kernel crossings (atp) vs
 a few hundred (rsync). At a 1 gbit cap, 87k syscalls × ~1–2 µs each is ~0.1–0.2 s of pure
 syscall overhead before counting RaptorQ encode/decode CPU — consistent with the 0.71 s vs
 0.108 s gap at 10M.
@@ -65,79 +56,74 @@ clean-link CPU penalty so the loss-resilience win is no longer paid for with a c
 
 ---
 
-## What already exists in `src/net/udp.rs` (the planner is built; execution is not)
+## Current main state (2026-06-19): batching exists, proof is the gap
 
-A complete **planning/decision** layer is in place — but `native_send_batch` is `false` and
-there is **no syscall**: `grep` finds no `libc::`, `unsafe`, `as_raw_fd`, `sendmmsg`,
-`setsockopt`, or `cmsg` in the file.
+The stale "one syscall per symbol" diagnosis is no longer a literal description of `main`.
+The current tree has three layers of send-side batching:
 
-| Present (pure logic) | Location |
+| Layer | Current state |
 |---|---|
-| `UdpSendBatchStrategy` (prefer_sendmmsg/gso, segment bytes, batch caps) | `udp.rs:192-216` |
-| `UdpBatchCapabilities` / `UdpCapability` (sendmmsg Supported, gso Unknown on Linux) | `udp.rs:108-170` |
-| `plan_send_batch` → path + segments_per_packet + estimated_syscalls | `udp.rs:765-814` |
-| Bounds: `UDP_MAX_GSO_SEGMENTS=64`, `UDP_MAX_SENDMMSG_BATCH=1024`, `UDP_DEFAULT_GSO_SEGMENT_BYTES=1200` | `udp.rs:41-45` |
-| `clamped()` knob validation | `udp.rs:747-758` |
+| RQ sender queue | `RqPendingSendBatch` groups encoded symbol datagrams by socket and flushes at `RQ_SEND_BATCH_GLOBAL_SYMBOLS=64` or `RQ_SEND_BATCH_PER_SOCKET=32`. |
+| UDP portable/native entrypoint | `UdpSocket::send_batch_to` first tries connected-native send when all packets target the connected peer, then falls back to the portable loop. |
+| Native send path | On Linux/Android, `send_batch_to` plans GSO, builds super-packets, and calls `nix::sys::socket::sendmmsg` with `ControlMessage::UdpGsoSegments`; if GSO fails before progress it falls back to plain `sendmmsg`, then to portable send. |
+| Report surface | `UdpBatchIoReport` records `packets_processed`, `bytes_processed`, `fallback_used`, `native_send_batch_used`, `gso_send_used`, and a partial-batch `error`. |
 
-So the decision ("GSO 32 segments × sendmmsg 1024, est N syscalls") is already computed. The
-gap is purely **executing** that plan with a real syscall + reactor readiness.
+The new bottleneck question is therefore **not** "is native batching implemented?" It is:
+
+1. Do rate-capped perfect-link ATP-RQ runs actually reach `native_send_batch_used=true` and, on
+   Linux kernels that support it, `gso_send_used=true`?
+2. Does any fallback happen in the real RQ path because packets are not connected-peer eligible,
+   payload lengths differ, GSO is rejected by the kernel/NIC, or a non-blocking partial send leaves
+   the portable tail path hot?
+3. After native batching is confirmed, is the remaining clean-link wall per-symbol ATP work
+   (auth, encode, pacing checkpoint, feedback/control frames), RaptorQ decode, or genuine link
+   bandwidth?
+
+This lane should treat all clean-link conclusions without those fields as **inadmissible**. The
+planner can estimate a GSO/sendmmsg path, but the result only matters if the runtime report proves
+that path ran.
 
 ---
 
-## Remaining native-path work — spec for the udp.rs lane (a)
+## Remaining proof work
 
-1. **Raw fd access.** Expose the runtime `UdpSocket`'s underlying fd (`AsRawFd` or an internal
-   accessor). Required to issue the syscalls; keep it `pub(crate)`/cfg-gated.
-2. **`send_batch_native` (Linux).** `#[cfg(target_os = "linux")]` + `#[allow(unsafe_code)]`.
-   Build `Vec<libc::iovec>` + `Vec<libc::mmsghdr>` (one per super-packet), set the GSO segment
-   size via an `SOL_UDP`/`UDP_SEGMENT` `cmsg` in each `msghdr` (or `setsockopt(UDP_SEGMENT)` for
-   a uniform run), and call `libc::sendmmsg(fd, msgs.as_mut_ptr(), n, flags)`. Handle the
-   short-count return (datagrams actually queued), `EAGAIN`/`EWOULDBLOCK` → reactor wait,
-   `EMSGSIZE`/`EINVAL` (GSO unsupported) → fall back. **Never block**; this is a non-blocking fd.
-3. **Reactor integration.** A `poll_send_batch(cx, …)` mirroring the existing `poll_send`
-   (`udp.rs:942`): register writable interest on `EAGAIN`, resume from the returned count.
-4. **Capability probe.** Flip `capabilities.gso` from `Unknown` to `Supported`/`Unsupported`
-   with a one-shot `setsockopt(SOL_UDP, UDP_SEGMENT, …)` probe (or a single trial send), cached
-   per socket; only then does `plan_send_batch` choose the GSO path (`allow_unknown_gso=false`).
-5. **Safe fallback.** When native is unavailable/`Unsupported`, route through the existing
-   portable per-datagram loop (`portable_send_batch=true`). The fast path is purely additive.
-6. **Unsafe ledger.** Add the `sendmmsg`/`UDP_SEGMENT` boundary to
-   `artifacts/unsafe_boundary_ledger_v1.json` (the security gate checks it) with the
-   invariants: fd valid + non-blocking, message/iovec arrays live for the call, GSO segment ≤
-   payload, count clamped to `UDP_MAX_SENDMMSG_BATCH`.
-7. **Wire into the RQ sender.** Replace the per-symbol `send_symbol_datagram` loop
-   (`transport_rq/mod.rs:2324`) with a batched build → `send_batch` once the native path lands
-   (coordinate: that loop is the cod_2 lane — land udp.rs first, then a one-line wiring change).
-
-**Why blind-unsafe is risky here:** `mmsghdr`/`cmsg` layout, alignment, sockaddr construction,
-partial-batch + `EAGAIN` handling, and reactor readiness must all be right, and a defect is
-runtime UB or silent send-drops that `cargo check` cannot catch. This lane needs an agent who
-can build **and** run the udp microbench/integration test before landing — it should not be
-committed code-first/unverified.
+1. **Expose actual batch reports in matrix rows.** The Phase-2 matrix row should include ATP sender
+   aggregates: `udp_batches`, `udp_packets_processed`, `udp_native_batches`,
+   `udp_gso_batches`, `udp_fallback_batches`, `udp_partial_batch_errors`, and
+   `payload_bytes_per_udp_syscall_est`. `est_min_datagrams` alone is a lower-bound packet model,
+   not proof that the native fast path ran.
+2. **Classify fallback reasons.** If `native_send_batch_used=false` or `gso_send_used=false` on a
+   Linux perfect-link ATP row, record the reason: not connected, mixed destination, mixed payload
+   size, kernel rejected GSO, `sendmmsg` returned partial progress, or portable-only platform.
+3. **Keep crypto tier symmetric.** A clean-link win in `nocrypto` means atp-lab vs rsyncd. Auth and
+   encrypted claims need matched ATP auth/TLS vs rsync-over-ssh rows.
+4. **Run only the rate-capped perfect cell for this question.** The relevant proof cell is the
+   matrix `perfect` regime (1 gbit, 2 ms, 0 loss), `sha_ok=true`, bounded RSS, at least 3 reps, and
+   `cv_pct <= 5%` unless the run is explicitly marked noisy.
+5. **Compare against rsync, not old ATP.** The claimed result is an ATP-vs-rsync ratio. A lower ATP
+   syscall count than a previous ATP commit is a useful diagnosis, not a win.
 
 ---
 
 ## Sequencing + falsifiability
 
-* **Decode-bound vs syscall-bound is per-cell.** On small/medium clean cells (10M) the wall is
-  syscall/CPU overhead → GSO helps. On large cells (≥100M) single-core RaptorQ decode dominates
-  → GSO raises the sender ceiling but the receiver still bottlenecks until **parallel decode**
-  (F6.3, peer-owned `feed_symbol`) lands. Don't expect GSO alone to win 100M+ clean cells.
-* **Honest claim discipline.** GSO/sendmmsg is a *ceiling-raiser*; verify with the rate-capped
-  matrix (`scripts/atp_bench/matrix_bench.sh`, regime `perfect` = 1 gbit/2 ms) in Phase-2.
-  Keep the native path only if `perfect`-regime wall drops with sha/merkle OK and RSS bounded.
-* **Smaller, safe pre-step:** the `symbol_size` knob (currently 1200) is MTU-bound *without*
-  GSO; raising it only helps once GSO removes the per-segment MTU constraint. So GSO is the
-  unlock, not a bigger symbol.
+* **Decode-bound vs syscall-bound is per-cell.** On small/medium clean cells (10M) the wall can be
+  syscall/CPU overhead. On large cells (>=100M), RaptorQ decode or per-symbol ATP bookkeeping can
+  dominate even after GSO/sendmmsg succeeds.
+* **Honest claim discipline.** Native batching is a ceiling-raiser; verify with the rate-capped
+  matrix (`scripts/atp_bench/matrix_bench.sh`, regime `perfect` = 1 gbit/2 ms) in Phase-2. Keep the
+  fast path only if `perfect`-regime wall improves vs rsync with sha/merkle OK, bounded RSS, and
+  actual native/GSO report fields.
+* **Symbol-size tuning is downstream.** Raising logical symbol size only becomes safe once the
+  GSO path is proven and receiver decode/RSS stay bounded. Without that proof, larger symbols can
+  trade syscall overhead for decode and memory pressure.
 
 ---
 
 ## TL;DR
 
-atp's clean-link loss is **one `sendto` per 1200-byte symbol** (~87k syscalls/100 MB,
-`transport_rq/mod.rs:2324`). The fix is GSO + sendmmsg, whose **planner already exists** in
-`udp.rs` (`plan_send_batch`, `UdpSendBatchStrategy`) — only the unsafe syscall + reactor
-readiness + capability probe + unsafe-ledger entry remain (lane (a), §"Remaining native-path
-work"). It is a ceiling-raiser to **exceed** rsync on fat/lossy pipes; on large clean cells it
-must be paired with parallel decode (F6.3). Measure on the rate-capped `perfect` regime before
-claiming any clean-link win.
+The original clean-link loss was driven by one small UDP send per symbol. `main` now has the right
+shape: RQ queues symbol datagrams, connected UDP `send_batch_to` tries Linux/Android GSO+sendmmsg,
+and reports whether native/GSO actually ran. The remaining cod_7 conclusion is a proof gate:
+measure the rate-capped `perfect` regime, admit only sha-ok symmetric ATP-vs-rsync rows, and require
+actual native/GSO/fallback counters before declaring that perfect-link overhead has been reduced.

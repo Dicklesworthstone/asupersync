@@ -647,6 +647,15 @@ vs optimal rsync → keep or ledger-with-retry.
   perfect-link reduction map for E-6.2/E-3 so future agents stop treating uncapped or low-latency
   rsync wins as a vague ATP failure. The concrete next code lever remains UDP batching/GSO in
   `src/net/udp.rs`, already claimed by cod_1.
+- **Current-state correction (2026-06-19, asupersync-2uguni):** the old "sender does one
+  syscall per symbol / no true batched UDP path exists" model is stale on `main`. RQ now queues
+  outbound symbol datagrams through `RqPendingSendBatch`; `UdpSocket::send_batch_to` tries a
+  connected-peer native path; Linux/Android can build GSO super-packets and call `sendmmsg` with
+  `UdpGsoSegments`; and `UdpBatchIoReport` exposes whether native/GSO/fallback was actually used.
+  The remaining perfect-link work is therefore proof, not rediscovery: matrix rows must report
+  actual UDP batch counters (`native_send_batch_used`, `gso_send_used`, fallback/partial counts or
+  their aggregates) before claiming E-6.2 reduced clean-link overhead. Planner estimates and
+  `est_min_datagrams` alone are inadmissible.
 
 ### E-4 · max_block_size sweep (is decode superlinear in K?)
 - **Hypothesis:** default 8MiB ⇒ K=8192; if `decode_block` is superlinear in K, smaller blocks
@@ -710,17 +719,19 @@ vs optimal rsync → keep or ledger-with-retry.
 
 Per `/asupersync-mega-skill`. Findings on whether atp-rq exploits asupersync's machinery:
 
-- **L-FINDING-1 · Sender does ONE syscall per symbol.** `send_symbol_datagram`
-  (transport_rq/mod.rs:1907) → `sock.send(&dgram)` (one `send_to` per symbol; ~100k for 100M).
-- **L-FINDING-2 · Receiver does ONE `poll_recv` per symbol.** `pump_until_control`
-  (transport_rq/mod.rs:2955) polls `udp.poll_recv` for a single datagram per loop iter (biased
-  select with the control stream). It does NOT use `recv_batch_from` (udp.rs:1226), which drains
-  ALL immediately-ready packets after a single reactor-readiness wait.
-- **L-FINDING-3 · asupersync has NO true batched-syscall UDP path.** `send_batch_to` (udp.rs:1190)
-  is a portable no-op loop (`fallback_used:true`, one `send_to` each — no `sendmmsg`).
-  `grep sendmmsg|recvmmsg|UDP_SEGMENT src/net/` ⇒ none. So GSO/GRO/sendmmsg/recvmmsg are
-  UNIMPLEMENTED in the runtime. This is both a missed-leverage finding AND a runtime-enhancement
-  opportunity that would also benefit transport_quic + quic_native.
+- **L-FINDING-1 · Sender one-syscall-per-symbol is RESOLVED in shape, still needs proof.**
+  Current RQ send code queues encoded symbol datagrams through `RqPendingSendBatch` and flushes
+  them per socket via `UdpSocket::send_batch_to`. This removes the old immediate
+  `send_to`-per-symbol structure on the connected path, but the matrix must still record whether
+  each run actually used native batching or fell back to the portable loop.
+- **L-FINDING-2 · Receiver one-`poll_recv`-per-symbol is RESOLVED in shape.** The RQ inbound pump
+  now uses `recv_batch_from` with bounded burst draining, matching the E-6.1 direction. Future
+  measurements should report packet/batch counts instead of treating receive wakeups as unknown.
+- **L-FINDING-3 · true batched UDP send path is PRESENT, but not yet scorecard-proven.**
+  `UdpSocket::send_batch_to` now tries connected native sends; Linux/Android can plan GSO
+  super-packets, call `sendmmsg`, and fall back to plain `sendmmsg` or the portable loop if the
+  fast path is unavailable. This upgrades the finding from "runtime enhancement missing" to
+  "operator proof missing": clean-link results must include native/GSO/fallback counters.
 - **L-FINDING-4 · CLI blocking pool IS used** (599356511) and F3 dispatches encode to it. Good.
   spawn_blocking is region-owned + cancel-correct. The receiver decode does NOT use it (E-5).
 - **L-FINDING-5 ★ THE BIG ONE · A complete adaptive controller EXISTS but is UNWIRED.**
@@ -970,8 +981,9 @@ transfer timescale. It must not own per-packet sleeps or per-round repair math.
   pipes, not just match it.
 - **Falsifiability:** if E-0 shows the wall is feedback-rounds (not syscall/packet-rate), E-6 is a
   ceiling-raiser not a near-term win — defer behind E-1. Only matters once paced + clean.
-- **Scope/risk:** (b) needs `#[allow(unsafe_code)]` libc in udp.rs + reactor integration + the
-  unsafe ledger (artifacts/unsafe_boundary_ledger_v1.json). Benefits QUIC too.
+- **Scope/risk:** the current native send path uses the socket fd plus `nix::sys::socket::sendmmsg`
+  and Linux/Android `UdpGsoSegments`; the risk has shifted from "write the syscall path" to
+  "prove the real transfer stays on that path and classify every fallback." Benefits QUIC too.
 - **One-line:** (a) prototype recv_batch_from in pump_until_control; (b) microbench sendmmsg+GSO
   packet rate vs send_to loop on loopback.
 - **Result (2026-06-17, MossyCastle, E-6.1 + WIRE-5 current-tree loopback):**
@@ -1002,6 +1014,11 @@ transfer timescale. It must not own per-packet sleeps or per-round repair math.
     `cv_pct <= 1.0`, sha/merkle ok, and receiver peak RSS does not exceed the poll-recv control.
     If it still loses, retry only with a zero-copy/slab-backed batch receive or much smaller bounded
     batch width; the current `UdpRecvBatch` alloc/copy shape is not enough evidence for a keep.
+- **State update (2026-06-19, asupersync-2uguni):** the sender side now has RQ batching wired to
+  `UdpSocket::send_batch_to`, and `send_batch_to` can use connected native `sendmmsg` plus GSO
+  before falling back. The next admissible E-6 result is not another code inventory; it is a
+  rate-capped `perfect` matrix row with sha ok, bounded RSS, ATP-vs-rsync ratio, and actual
+  UDP batch/native/GSO/fallback counters emitted into the row or attached report.
 
 ### Synthesis — why ATP can beat rsync (the actual thesis)
 On a CLEAN link, the win path is: **lazy/paced source-symbol streaming (E-1,E-2) → systematic
