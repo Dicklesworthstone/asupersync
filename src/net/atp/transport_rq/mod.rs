@@ -233,12 +233,14 @@ const RQ_DECODE_CORES_RESERVED_FOR_IO: usize = 4;
 const RQ_DECODE_JOB_MEMORY_BUDGET_BYTES: usize = 96 * 1024 * 1024;
 const RQ_DECODE_JOB_MEMORY_FLOOR_BYTES: usize = 1024 * 1024;
 const RQ_DECODE_JOB_SYMBOL_MEMORY_MULTIPLIER: usize = 1;
-/// Retain at least this much extra repair headroom beyond K for one RQ receive block.
+/// RQ repair feedback is round/RTT-bound: do not reject symbols for an
+/// undecoded block. Decoded blocks are cleared immediately after commit.
+const RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK: usize = usize::MAX;
+/// Estimate at least this much extra repair headroom beyond K for one RQ receive block.
 ///
-/// MATRIX-5 showed the previous K+K/2 cap forced extra repair rounds by evicting
-/// still-useful equations. Keep roughly a second block's worth of repair
-/// headroom; decode job width, not repair eviction, is the primary memory
-/// throttle.
+/// This is now a decode-job memory estimate only. The RQ receiver must not
+/// reject repair symbols for an undecoded block, because MATRIX-5 showed that
+/// retention bounding adds repair rounds and dominates wall time.
 const RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA: usize = 256;
 /// Tiny quiet window used only after a full batch, matching the native QUIC pump.
 const RQ_INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
@@ -3955,10 +3957,11 @@ pub async fn receive_connection(
                 max_block_size: receiver_max_block_size,
                 repair_overhead: config.repair_overhead,
                 min_overhead: 0,
-                max_buffered_symbols: rq_max_buffered_symbols_per_block(
-                    receiver_max_block_size,
-                    symbol_size,
-                ),
+                // RQ repair rows are round-critical: dropping an undecoded
+                // block's repair symbols makes the sender re-spray another
+                // round. Keep them until block completion; mark_block_complete
+                // clears the block immediately after decode.
+                max_buffered_symbols: RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK,
                 block_timeout: std::time::Duration::from_secs(0),
                 verify_auth: symbol_auth_enabled,
             };
