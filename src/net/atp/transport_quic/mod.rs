@@ -206,9 +206,14 @@ const MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
 const MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND: usize = 2048;
 
 /// Maximum native QUIC DATAGRAM symbols decoded before returning to the async
-/// receiver loop. This keeps large real-UDP queues from monopolizing the
-/// receiver long enough for the sender's control-plane idle timer to expire.
-const NATIVE_SYMBOL_DRAIN_BATCH: usize = 32;
+/// receiver loop.
+///
+/// Keep this aligned with the native receiver pump width: one UDP pump turn can
+/// enqueue 512 symbols, so the decoder must be able to drain that full batch on
+/// arrival before asking the sender for repair. Smaller slices let the no-evict
+/// receive queue grow behind the decoder under lossy bursts and can manufacture
+/// unnecessary NeedMore rounds.
+const NATIVE_SYMBOL_DRAIN_BATCH: usize = 512;
 
 const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 
@@ -5796,6 +5801,11 @@ mod tests {
 
     fn trusted_quic_config() -> QuicConfig {
         QuicConfig::default().allow_unauthenticated_for_trusted_transport()
+    }
+
+    #[test]
+    fn native_symbol_drain_batch_matches_receiver_pump_width() {
+        assert_eq!(NATIVE_SYMBOL_DRAIN_BATCH, 512);
     }
 
     fn auth_quic_config(seed: u64) -> QuicConfig {
