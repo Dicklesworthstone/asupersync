@@ -329,8 +329,7 @@ impl SloPolicyCapacityEvidence {
     }
 
     fn exceeds_thresholds(&self, bundle: &SloPolicyBundle) -> bool {
-        self.queue_depth > bundle.resource_pressure.timer_queue_depth
-            || self.memory_basis_points > bundle.resource_pressure.memory_basis_points
+        self.memory_basis_points > bundle.resource_pressure.memory_basis_points
             || self.fd_basis_points > bundle.resource_pressure.fd_basis_points
             || self.timer_queue_depth > bundle.resource_pressure.timer_queue_depth
     }
@@ -949,6 +948,8 @@ impl SloRuntimeAdmissionStatus {
 pub enum SloRuntimeAdmissionIssueKind {
     /// The runtime policy application failed validation.
     ApplicationInvalid,
+    /// A valid runtime policy explicitly rejected admission.
+    PolicyRejected,
     /// Admission was cancelled before work was started.
     Cancelled,
     /// Queue wait exceeded the compiled threshold.
@@ -973,6 +974,7 @@ impl SloRuntimeAdmissionIssueKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ApplicationInvalid => "application_invalid",
+            Self::PolicyRejected => "policy_rejected",
             Self::Cancelled => "cancelled",
             Self::QueueWaitExceeded => "queue_wait_exceeded",
             Self::MemoryPressureExceeded => "memory_pressure_exceeded",
@@ -1228,7 +1230,7 @@ impl SloRuntimePolicyApplication {
                 SloRuntimeAdmissionStatus::Rejected,
                 None,
                 None,
-                vec![SloRuntimeAdmissionIssueKind::ApplicationInvalid],
+                vec![SloRuntimeAdmissionIssueKind::PolicyRejected],
                 0,
             );
         }
@@ -2477,7 +2479,7 @@ impl SloPolicyBundle {
         self.latency_objectives
             .iter()
             .map(normalized_p999_ms)
-            .max()
+            .min()
             .unwrap_or(0)
     }
 

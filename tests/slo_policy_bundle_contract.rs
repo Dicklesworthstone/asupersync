@@ -557,6 +557,7 @@ fn runtime_enforcement_status_tags() -> BTreeSet<String> {
 fn runtime_enforcement_issue_tags() -> BTreeSet<String> {
     [
         "application_invalid",
+        "policy_rejected",
         "cancelled",
         "queue_wait_exceeded",
         "memory_pressure_exceeded",
@@ -772,6 +773,7 @@ fn runtime_admission_status_tags() -> BTreeSet<String> {
 fn runtime_admission_issue_tags() -> BTreeSet<String> {
     [
         SloRuntimeAdmissionIssueKind::ApplicationInvalid,
+        SloRuntimeAdmissionIssueKind::PolicyRejected,
         SloRuntimeAdmissionIssueKind::Cancelled,
         SloRuntimeAdmissionIssueKind::QueueWaitExceeded,
         SloRuntimeAdmissionIssueKind::MemoryPressureExceeded,
@@ -2008,7 +2010,7 @@ fn compiler_output_id_and_budget_projection_are_stable() {
         first.provenance.capacity_evidence_fingerprint,
         Some(evidence.fingerprint())
     );
-    assert_eq!(first.budget.p999_latency_budget_ms, 250);
+    assert_eq!(first.budget.p999_latency_budget_ms, 120);
     assert_eq!(first.budget.cleanup_deadline_ms, 300);
     assert_eq!(first.budget.max_queue_wait_ms, 80);
     assert_eq!(first.budget.poll_quota, 1_200);
@@ -2057,7 +2059,7 @@ fn compiler_blocks_impossible_normalized_p999_objectives() {
         compiled_blocker_tags(&compiled)
             .contains(SloPolicyCompilerBlockerKind::ImpossibleObjective.as_str())
     );
-    assert_eq!(compiled.budget.p999_latency_budget_ms, 400);
+    assert_eq!(compiled.budget.p999_latency_budget_ms, 250);
 }
 
 #[test]
@@ -2080,6 +2082,30 @@ fn compiler_emits_no_win_fallback_when_capacity_exceeds_thresholds() {
         "capacity-evidence-exceeds-thresholds"
     );
     assert!(fallback.proof_command.contains("rch exec"));
+}
+
+#[test]
+fn compiler_does_not_compare_work_queue_depth_to_timer_queue_depth() {
+    let bundle = valid_bundle();
+    let mut evidence = valid_capacity_evidence();
+    evidence.queue_depth = bundle.resource_pressure.timer_queue_depth + 1;
+    evidence.timer_queue_depth = bundle.resource_pressure.timer_queue_depth;
+    evidence.memory_basis_points = bundle.resource_pressure.memory_basis_points;
+    evidence.fd_basis_points = bundle.resource_pressure.fd_basis_points;
+
+    let compiled = bundle.compile_for_budget_admission(Some(&evidence));
+    assert_eq!(compiled.status, SloCompiledPolicyStatus::Compiled);
+    assert_eq!(
+        compiled.admission.decision,
+        SloCompiledAdmissionDecision::Admit
+    );
+    assert!(compiled.no_win_fallback.is_none());
+
+    let mut timer_evidence = evidence;
+    timer_evidence.timer_queue_depth = bundle.resource_pressure.timer_queue_depth + 1;
+    let timer_compiled = bundle.compile_for_budget_admission(Some(&timer_evidence));
+    assert_eq!(timer_compiled.status, SloCompiledPolicyStatus::NoWin);
+    assert!(timer_compiled.no_win_fallback.is_some());
 }
 
 #[test]
@@ -2443,6 +2469,21 @@ fn runtime_slo_admission_evaluation_blocks_stale_or_cancelled_requests() {
     assert_eq!(
         cancelled_outcome.issue_kinds,
         vec![SloRuntimeAdmissionIssueKind::Cancelled]
+    );
+}
+
+#[test]
+fn runtime_slo_admission_evaluation_reports_explicit_policy_reject() {
+    let mut application = valid_runtime_application();
+    application.decision = SloRuntimePolicyDecision::Reject;
+    let outcome = application.evaluate_admission(&runtime_request("policy-reject", 2, None));
+
+    assert_eq!(outcome.status, SloRuntimeAdmissionStatus::Rejected);
+    assert_eq!(outcome.admitted_work_units, 0);
+    assert_eq!(outcome.rejected_work_units, 2);
+    assert_eq!(
+        outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::PolicyRejected]
     );
 }
 

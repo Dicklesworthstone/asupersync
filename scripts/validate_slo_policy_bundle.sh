@@ -247,6 +247,7 @@ expected_runtime_enforcement_statuses = {
 }
 expected_runtime_enforcement_issue_kinds = {
     "application_invalid",
+    "policy_rejected",
     "cancelled",
     "queue_wait_exceeded",
     "memory_pressure_exceeded",

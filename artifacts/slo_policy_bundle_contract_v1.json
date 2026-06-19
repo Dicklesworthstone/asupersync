@@ -91,6 +91,7 @@
   ],
   "runtime_enforcement_issue_kinds": [
     "application_invalid",
+    "policy_rejected",
     "cancelled",
     "queue_wait_exceeded",
     "memory_pressure_exceeded",
@@ -253,6 +254,7 @@
   ],
   "runtime_admission_issue_kinds": [
     "application_invalid",
+    "policy_rejected",
     "cancelled",
     "queue_wait_exceeded",
     "memory_pressure_exceeded",
