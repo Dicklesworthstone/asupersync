@@ -24,7 +24,7 @@ use crate::cx::Cx;
 use crate::fs;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -520,8 +520,10 @@ pub async fn recover_journal_and_bitmap(
 
     let (bitmaps, stats) = context.finalize();
 
+    let stale_bitmaps_quarantined = quarantine_stale_bitmap_files(bitmap_dir, &bitmaps).await?;
+
     // Export recovered bitmaps to disk. Each bitmap is written atomically as
-    // its canonical serialized form so a subsequent `load_or_create_bitmap`
+    // its canonical serialized form so a subsequent `load_recovered_or_create_bitmap`
     // call can reconstruct the exact same state — this is the on-disk side of
     // the crash-recovery contract.
     for (transfer_id, bitmap) in bitmaps.iter() {
@@ -531,15 +533,75 @@ pub async fn recover_journal_and_bitmap(
     }
 
     cx.trace(&format!(
-        "Recovery completed: {} transfers, {} chunks, {} records processed ({} duplicates, {} corrupted)",
+        "Recovery completed: {} transfers, {} chunks, {} records processed ({} duplicates, {} corrupted, {} stale bitmaps quarantined)",
         stats.transfers_recovered,
         stats.chunks_recovered,
         stats.total_records,
         stats.duplicates_skipped,
-        stats.corrupted_skipped
+        stats.corrupted_skipped,
+        stale_bitmaps_quarantined
     ));
 
     Ok((journal, bitmaps))
+}
+
+async fn quarantine_stale_bitmap_files(
+    bitmap_dir: &Path,
+    recovered_bitmaps: &HashMap<String, ChunkBitmap>,
+) -> Result<usize, RecoveryError> {
+    let mut entries = match fs::read_dir(bitmap_dir).await {
+        Ok(entries) => entries,
+        Err(e) => {
+            if matches!(e.kind(), io::ErrorKind::NotFound) {
+                return Ok(0);
+            }
+            return Err(RecoveryError::Io(e));
+        }
+    };
+
+    let mut quarantined = 0usize;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let Some(transfer_id) = transfer_id_from_bitmap_path(&path) else {
+            continue;
+        };
+        if recovered_bitmaps.contains_key(transfer_id) {
+            continue;
+        }
+
+        let quarantine_path = next_stale_bitmap_path(&path).await?;
+        fs::rename(&path, &quarantine_path).await?;
+        quarantined = quarantined.saturating_add(1);
+    }
+
+    Ok(quarantined)
+}
+
+fn transfer_id_from_bitmap_path(path: &Path) -> Option<&str> {
+    let file_name = path.file_name()?.to_str()?;
+    let transfer_id = file_name
+        .strip_prefix("transfer_")?
+        .strip_suffix(".bitmap")?;
+    (!transfer_id.is_empty()).then_some(transfer_id)
+}
+
+async fn next_stale_bitmap_path(path: &Path) -> Result<PathBuf, RecoveryError> {
+    let mut candidate = path.with_extension("bitmap.stale");
+    if !fs::try_exists(&candidate).await? {
+        return Ok(candidate);
+    }
+
+    for suffix in 1u32..=u32::MAX {
+        candidate = path.with_extension(format!("bitmap.stale-{suffix}"));
+        if !fs::try_exists(&candidate).await? {
+            return Ok(candidate);
+        }
+    }
+
+    Err(RecoveryError::BitmapRecovery(format!(
+        "could not find non-conflicting stale bitmap quarantine path for {}",
+        path.display()
+    )))
 }
 
 fn process_recovery_record(
@@ -560,32 +622,73 @@ fn process_recovery_record(
     }
 }
 
-/// Load an existing chunk bitmap from disk.
+/// Load an existing chunk bitmap from disk when journal replay accepted it.
 ///
-/// Returns a fresh empty bitmap if no file exists yet. Malformed or truncated
-/// bitmaps fail closed with `RecoveryError::BitmapRecovery` rather than
-/// silently degrading to an empty bitmap; losing chunk state on restart would
-/// let a partially-completed transfer re-fetch already-verified data and
-/// overwrite the disk image.
+/// Returns `Ok(None)` when the transfer id derived from `bitmap_path` was not
+/// reconstructed by the journal replay. That intentionally leaves stale bitmap
+/// files on disk without trusting them: a rolled-back or empty transfer can no
+/// longer resurrect old progress simply because `transfer_<id>.bitmap` still
+/// exists.
+///
+/// Malformed, truncated, or mismatched accepted bitmaps fail closed with
+/// `RecoveryError::BitmapRecovery` rather than silently degrading to an empty
+/// bitmap; losing chunk state on restart would let a partially-completed
+/// transfer re-fetch already-verified data and overwrite the disk image.
 ///
 /// The fallback path constructs an empty bitmap that derives its `transfer_id`
-/// from the on-disk filename (`transfer_<id>.bitmap`) so the caller's recovery
-/// loop continues to associate the bitmap with the correct transfer.
-pub async fn load_or_create_bitmap(bitmap_path: &Path) -> Result<ChunkBitmap, RecoveryError> {
+/// from the on-disk filename (`transfer_<id>.bitmap`) only after the journal
+/// replay admits that transfer id.
+pub async fn load_recovered_or_create_bitmap(
+    bitmap_path: &Path,
+    journal_recovered_transfers: &HashSet<String>,
+) -> Result<Option<ChunkBitmap>, RecoveryError> {
+    let transfer_id = required_transfer_id_from_bitmap_path(bitmap_path)?;
+    if !journal_recovered_transfers.contains(&transfer_id) {
+        return Ok(None);
+    }
+
     match fs::read(bitmap_path).await {
-        Ok(data) => ChunkBitmap::deserialize_from_bytes(&data)
-            .map_err(|e| RecoveryError::BitmapRecovery(e.to_string())),
+        Ok(data) => {
+            let bitmap = ChunkBitmap::deserialize_from_bytes(&data)
+                .map_err(|e| RecoveryError::BitmapRecovery(e.to_string()))?;
+            accept_recovered_bitmap(bitmap_path, bitmap, journal_recovered_transfers)
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let transfer_id = bitmap_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.strip_prefix("transfer_"))
-                .unwrap_or("unknown")
-                .to_string();
-            Ok(ChunkBitmap::new(transfer_id, 0, 4096, 0))
+            Ok(Some(ChunkBitmap::new(transfer_id, 0, 4096, 0)))
         }
         Err(e) => Err(RecoveryError::Io(e)),
     }
+}
+
+fn accept_recovered_bitmap(
+    bitmap_path: &Path,
+    bitmap: ChunkBitmap,
+    journal_recovered_transfers: &HashSet<String>,
+) -> Result<Option<ChunkBitmap>, RecoveryError> {
+    let transfer_id = required_transfer_id_from_bitmap_path(bitmap_path)?;
+    if !journal_recovered_transfers.contains(&transfer_id) {
+        return Ok(None);
+    }
+
+    if bitmap.transfer_id() != transfer_id {
+        return Err(RecoveryError::BitmapRecovery(format!(
+            "bitmap transfer id mismatch: path declares {transfer_id}, payload declares {}",
+            bitmap.transfer_id()
+        )));
+    }
+
+    Ok(Some(bitmap))
+}
+
+fn required_transfer_id_from_bitmap_path(bitmap_path: &Path) -> Result<String, RecoveryError> {
+    transfer_id_from_bitmap_path(bitmap_path)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            RecoveryError::BitmapRecovery(format!(
+                "bitmap path does not use transfer_<id>.bitmap naming: {}",
+                bitmap_path.display()
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -637,7 +740,6 @@ mod tests {
     async fn test_cryptographic_integrity_validation() {
         use crate::atp::manifest::MerkleRoot;
         use crate::security::AuthenticationTag;
-        use std::time::{SystemTime, UNIX_EPOCH};
 
         let mut ctx = RecoveryContext::new();
         let auth_key = test_auth_key();
@@ -648,10 +750,7 @@ mod tests {
             object_id: test_object_id(b"test123"),
             manifest_root: MerkleRoot::new([0u8; 32]),
             total_size: 1024,
-            timestamp: SystemTime::now() // ubs:ignore - test oracle non-crypto time
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: 1_000,
             auth_tag: AuthenticationTag::zero(),
         }
         .with_signature(&auth_key);
@@ -666,22 +765,16 @@ mod tests {
             object_id: test_object_id(b"test456"),
             manifest_root: MerkleRoot::new([0u8; 32]),
             total_size: 2048,
-            timestamp: SystemTime::now() // ubs:ignore - test oracle non-crypto time
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: 2_000,
             auth_tag: AuthenticationTag::zero(), // Wrong signature (all zeros)
         };
 
         // Should fail with InvalidSignature error
         let result = ctx.process_record(&invalid_record, &auth_key);
-        assert!(result.is_err(), "Invalid record should be rejected");
-        match result.unwrap_err() {
-            RecoveryError::InvalidSignature => {
-                // This is the expected error
-            }
-            other => panic!("Expected InvalidSignature error, got: {:?}", other),
-        }
+        assert!(
+            matches!(result, Err(RecoveryError::InvalidSignature)),
+            "Expected InvalidSignature error, got: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -882,6 +975,107 @@ mod tests {
         assert_eq!(decoded.total_size(), 2500);
         assert_eq!(decoded.chunk_size(), 1024);
         assert_eq!(decoded.entry_count(), 3);
+    }
+
+    #[test]
+    fn bitmap_filename_parser_only_accepts_active_transfer_bitmaps() {
+        assert_eq!(
+            transfer_id_from_bitmap_path(Path::new("transfer_alpha.bitmap")),
+            Some("alpha")
+        );
+        assert_eq!(
+            transfer_id_from_bitmap_path(Path::new("transfer_alpha.bitmap.stale")),
+            None
+        );
+        assert_eq!(
+            transfer_id_from_bitmap_path(Path::new("alpha.bitmap")),
+            None
+        );
+        assert_eq!(
+            transfer_id_from_bitmap_path(Path::new("transfer_.bitmap")),
+            None
+        );
+    }
+
+    #[test]
+    fn recovered_bitmap_loader_ignores_unadmitted_bitmap_without_deleting() {
+        let stale_bitmap = ChunkBitmap::new("rolled-back".to_string(), 2048, 1024, 1000);
+        let recovered_transfers = HashSet::new();
+
+        let accepted = accept_recovered_bitmap(
+            Path::new("transfer_rolled-back.bitmap"),
+            stale_bitmap,
+            &recovered_transfers,
+        )
+        .expect("unadmitted bitmap should be ignored without error");
+
+        assert!(accepted.is_none());
+    }
+
+    #[test]
+    fn recovered_bitmap_loader_rejects_path_payload_transfer_id_mismatch() {
+        let bitmap = ChunkBitmap::new("payload-id".to_string(), 2048, 1024, 1000);
+        let recovered_transfers = HashSet::from(["path-id".to_string()]);
+
+        let err = accept_recovered_bitmap(
+            Path::new("transfer_path-id.bitmap"),
+            bitmap,
+            &recovered_transfers,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("transfer id mismatch"));
+    }
+
+    #[test]
+    fn recovered_bitmap_loader_rejects_quarantine_suffix_paths() {
+        let err = required_transfer_id_from_bitmap_path(Path::new("transfer_alpha.bitmap.stale"))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("transfer_<id>.bitmap"));
+    }
+
+    #[test]
+    fn stale_bitmap_files_are_quarantined_without_touching_recovered_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let live_path = dir.path().join("transfer_live.bitmap");
+        let stale_path = dir.path().join("transfer_stale.bitmap");
+        let preexisting_stale = dir.path().join("transfer_stale.bitmap.stale");
+        let expected_quarantine = dir.path().join("transfer_stale.bitmap.stale-1");
+
+        let live_bitmap = ChunkBitmap::new("live".to_string(), 2048, 1024, 7);
+        let stale_bitmap = ChunkBitmap::new("stale".to_string(), 1024, 512, 3);
+        std::fs::write(&live_path, live_bitmap.serialize_to_bytes()).expect("write live bitmap");
+        std::fs::write(&stale_path, stale_bitmap.serialize_to_bytes()).expect("write stale bitmap");
+        std::fs::write(&preexisting_stale, b"occupied").expect("write existing quarantine");
+
+        let recovered = HashMap::from([("live".to_string(), live_bitmap)]);
+        let quarantined =
+            futures_lite::future::block_on(quarantine_stale_bitmap_files(dir.path(), &recovered))
+                .expect("quarantine stale bitmaps");
+
+        assert_eq!(quarantined, 1);
+        assert!(live_path.exists(), "recovered bitmap remains active");
+        assert!(
+            !stale_path.exists(),
+            "stale bitmap is moved out of active namespace"
+        );
+        assert!(
+            preexisting_stale.exists(),
+            "existing quarantine file is not overwritten"
+        );
+        assert!(
+            expected_quarantine.exists(),
+            "stale bitmap gets unique quarantine path"
+        );
+
+        let quarantined_bitmap = ChunkBitmap::deserialize_from_bytes(
+            &std::fs::read(expected_quarantine).expect("read quarantined bitmap"),
+        )
+        .expect("quarantined bitmap stays readable");
+        assert_eq!(quarantined_bitmap.transfer_id(), "stale");
+        assert_eq!(quarantined_bitmap.total_size(), 1024);
+        assert_eq!(quarantined_bitmap.chunk_size(), 512);
     }
 
     #[tokio::test]
@@ -1389,19 +1583,21 @@ mod tests {
                     );
                 }
 
-                if phase == DiskFaultPhase::Cleanup && cut == CrashCut::After {
+                let after_crash_cut = matches!(cut, CrashCut::After);
+
+                if matches!(phase, DiskFaultPhase::Cleanup) && after_crash_cut {
                     assert_eq!(recovered.disposition, RecoveryDisposition::Resume);
                     assert_eq!(recovered.chunk_state, Some(ChunkState::Committed));
                     assert!(recovered.final_file_exposed);
                     assert!(!recovered.proof_emitted);
                 }
 
-                if phase == DiskFaultPhase::ProofEmission && cut == CrashCut::After {
+                if matches!(phase, DiskFaultPhase::ProofEmission) && after_crash_cut {
                     assert_eq!(recovered.disposition, RecoveryDisposition::Finalized);
                     assert!(recovered.proof_emitted);
                 }
 
-                if phase == DiskFaultPhase::JournalCompaction && cut == CrashCut::After {
+                if matches!(phase, DiskFaultPhase::JournalCompaction) && after_crash_cut {
                     assert_eq!(recovered.disposition, RecoveryDisposition::Finalized);
                     assert!(recovered.compaction_seen);
                     assert!(recovered.proof_emitted);

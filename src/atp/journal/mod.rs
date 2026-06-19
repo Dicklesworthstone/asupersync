@@ -33,7 +33,7 @@ pub use delta_cas::{
 pub use platform_caps::{FilesystemFeatures, PlatformCapabilities};
 pub use range_tracker::{ChunkRange, RangeTracker, SparseRange};
 pub use recovery::{
-    RecoveryContext, RecoveryError, RecoveryStats, load_or_create_bitmap,
+    RecoveryContext, RecoveryError, RecoveryStats, load_recovered_or_create_bitmap,
     recover_journal_and_bitmap,
 };
 pub use sparse_writer::{SparseWriter, SparseWriterConfig, WriteOptions};
