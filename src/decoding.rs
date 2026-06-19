@@ -895,14 +895,11 @@ impl DecodingPipeline {
     }
 
     fn repair_retention_cap(&self, sbn: u8) -> Option<usize> {
-        let k = self
-            .block_plan(sbn)
-            .map(|plan| plan.k)
-            .or_else(|| {
-                self.symbols
-                    .block_progress(sbn)
-                    .and_then(|progress| progress.k.map(usize::from))
-            })?;
+        let k = self.block_plan(sbn).map(|plan| plan.k).or_else(|| {
+            self.symbols
+                .block_progress(sbn)
+                .and_then(|progress| progress.k.map(usize::from))
+        })?;
         if k == 0 {
             return Some(0);
         }
