@@ -515,6 +515,16 @@ fn default_server_name(target: &str) -> String {
     host.to_string()
 }
 
+#[cfg(feature = "tls")]
+fn quic_server_name(name: String) -> Result<rustls::pki_types::ServerName<'static>, String> {
+    if let Ok(ip) = name.parse::<std::net::IpAddr>() {
+        return Ok(rustls::pki_types::ServerName::from(ip));
+    }
+
+    rustls::pki_types::ServerName::try_from(name.clone())
+        .map_err(|e| format!("invalid --server-name {name:?}: {e}"))
+}
+
 fn default_quic_server_name_for_ssh(remote: &RemoteTarget) -> String {
     default_server_name(ssh_host_without_user(&remote.ssh_host))
 }
@@ -542,7 +552,6 @@ fn quic_config_send(
 ) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
     use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicClientTls};
     use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config};
-    use rustls::pki_types::ServerName;
 
     let roots = match args.ca.as_deref() {
         Some(path) => load_cert_chain(path)?,
@@ -552,8 +561,7 @@ fn quic_config_send(
         .server_name
         .clone()
         .unwrap_or_else(|| default_server_name(&args.target));
-    let server_name = ServerName::try_from(name.clone())
-        .map_err(|e| format!("invalid --server-name {name:?}: {e}"))?;
+    let server_name = quic_server_name(name)?;
     let config = client_config(roots, vec![ATP_QUIC_ALPN.to_vec()])
         .map_err(|e| format!("build QUIC client TLS config: {e:?}"))?;
 
