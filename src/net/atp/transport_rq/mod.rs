@@ -624,10 +624,12 @@ impl RqAdaptiveSendState {
     }
 
     fn next_control_keepalive_due(&mut self) -> bool {
-        let measurement = self.beacons.latest_rtt().map_or_else(
-            BeaconMeasurement::empty,
-            |rtt| BeaconMeasurement::with_rtt(duration_micros_u32(rtt), 0),
-        );
+        let measurement = self
+            .beacons
+            .latest_rtt()
+            .map_or_else(BeaconMeasurement::empty, |rtt| {
+                BeaconMeasurement::with_rtt(duration_micros_u32(rtt), 0)
+            });
         self.beacons
             .next_action(Instant::now(), measurement)
             .is_some()
@@ -1487,8 +1489,7 @@ async fn pack_small_files(
     // it as ranged objects.
     let symbol_size = usize::from(config.symbol_size.max(1));
     let pack_target = PACK_TARGET.min(
-        u64::try_from(max_object_size(config.max_block_size.max(symbol_size)))
-            .unwrap_or(u64::MAX),
+        u64::try_from(max_object_size(config.max_block_size.max(symbol_size))).unwrap_or(u64::MAX),
     );
 
     // Group consecutive small files into packs. Each `Vec<usize>` is a list of
@@ -1654,9 +1655,10 @@ async fn split_large_entries(
 ) -> Result<Vec<RqSourceEntry>, RqError> {
     let symbol_size = usize::from(config.symbol_size.max(1));
     let block_size = config.max_block_size.max(symbol_size);
-    let split_config = MultiObjectSplitConfig::new(u64::try_from(block_size).map_err(|_| {
-        RqError::Coding(format!("max_block_size does not fit u64: {block_size}"))
-    })?);
+    let split_config =
+        MultiObjectSplitConfig::new(u64::try_from(block_size).map_err(|_| {
+            RqError::Coding(format!("max_block_size does not fit u64: {block_size}"))
+        })?);
 
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -1693,11 +1695,7 @@ async fn split_large_entries(
         })?;
         let whole_sha256_hex = hex_encode(&logical_digest.content_sha256);
         for shard in plan.shards {
-            let object_rel_path = format!(
-                ".atp-fragment-{}-{}",
-                out.len(),
-                shard.shard_index
-            );
+            let object_rel_path = format!(".atp-fragment-{}-{}", out.len(), shard.shard_index);
             out.push(RqSourceEntry {
                 rel_path: object_rel_path,
                 abs_path: entry.abs_path.clone(),
@@ -2557,10 +2555,9 @@ pub async fn send_path(
     let mut digests = Vec::with_capacity(entries.len());
     let mut total_bytes = 0u64;
     for entry in &entries {
-        let (size, content_id, content_sha256) =
-            hash_source_entry_streaming(entry, &mut hash_buf)
-                .await
-                .map_err(|e| RqError::Source(e.into_message()))?;
+        let (size, content_id, content_sha256) = hash_source_entry_streaming(entry, &mut hash_buf)
+            .await
+            .map_err(|e| RqError::Source(e.into_message()))?;
         total_bytes = total_bytes.checked_add(size).ok_or(RqError::TooLarge {
             size: u64::MAX,
             max: config.max_transfer_bytes,
@@ -2680,10 +2677,11 @@ pub async fn send_path(
             size: digest.size,
             max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
         })?;
-        let source_offset = usize::try_from(entry.source_offset).map_err(|_| RqError::TooLarge {
-            size: entry.source_offset,
-            max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
-        })?;
+        let source_offset =
+            usize::try_from(entry.source_offset).map_err(|_| RqError::TooLarge {
+                size: entry.source_offset,
+                max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            })?;
         encoders.push(EntryEncoder {
             index,
             object_id: entry_object_id(&transfer_id, index),
@@ -2785,7 +2783,6 @@ pub async fn send_path(
             }
             FrameType::KeepAlive => {
                 adaptive.mark_control_peer_activity();
-                continue;
             }
             FrameType::ObjectRequest => {
                 let need: NeedMore = parse_json(&reply)?;
@@ -3078,9 +3075,10 @@ where
                 for (window_offset, block) in window.iter().enumerate() {
                     // Disk reads are cheap relative to the RaptorQ solve, so read each block's
                     // source range here and hand the owned bytes to the pool task.
-                    let read_start = enc.source_offset.checked_add(block.start).ok_or_else(|| {
-                        RqError::Coding("encode source range offset overflow".to_string())
-                    })?;
+                    let read_start =
+                        enc.source_offset.checked_add(block.start).ok_or_else(|| {
+                            RqError::Coding("encode source range offset overflow".to_string())
+                        })?;
                     let block_bytes =
                         read_source_range(&enc.abs_path, read_start, block.len).await?;
                     let object_id = enc.object_id;
@@ -3494,8 +3492,8 @@ where
     }
 
     if adaptive.next_control_keepalive_due() {
-        let frame = Frame::empty(FrameType::KeepAlive)
-            .map_err(|err| RqError::Frame(err.to_string()))?;
+        let frame =
+            Frame::empty(FrameType::KeepAlive).map_err(|err| RqError::Frame(err.to_string()))?;
         control.send(&frame).await?;
     }
 
@@ -3549,9 +3547,10 @@ async fn source_symbol_for_request(
     let end = (start + symbol_size).min(block_start + block_len);
     let mut buffer = vec![0u8; symbol_size];
     if start < end {
-        let read_start = enc.source_offset.checked_add(start).ok_or_else(|| {
-            RqError::Coding("source request range offset overflow".to_string())
-        })?;
+        let read_start = enc
+            .source_offset
+            .checked_add(start)
+            .ok_or_else(|| RqError::Coding("source request range offset overflow".to_string()))?;
         let bytes = read_source_range(&enc.abs_path, read_start, end - start).await?;
         buffer[..bytes.len()].copy_from_slice(&bytes);
     }
@@ -3895,7 +3894,6 @@ pub async fn receive_connection(
                             .map_err(|e| RqError::Frame(e.to_string()))?,
                     )
                     .await?;
-                continue;
             }
             FrameType::Close => {
                 return Err(RqError::Io(std::io::Error::new(
@@ -6981,7 +6979,8 @@ mod tests {
             futures_lite::future::block_on(hash_source_entry_streaming(&split[1], &mut buf))
                 .expect("range hash");
         assert_eq!(range_size, 256);
-        assert_eq!(range_sha, Sha256::digest(&bytes[256..512]).into());
+        let expected_range_sha: [u8; 32] = Sha256::digest(&bytes[256..512]).into();
+        assert_eq!(range_sha, expected_range_sha);
     }
 
     #[test]
@@ -7300,7 +7299,10 @@ mod tests {
             futures_lite::future::block_on(split_large_entries(packed, &logical_digests, &config))
                 .expect("E-12 split after E-15 pack cap");
         assert_eq!(
-            split.iter().filter(|entry| entry.fragment.is_some()).count(),
+            split
+                .iter()
+                .filter(|entry| entry.fragment.is_some())
+                .count(),
             2,
             "the over-ceiling small file remains available for ranged object splitting"
         );

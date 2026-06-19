@@ -1207,10 +1207,8 @@ fn run_ldfi(
         .ok_or_else(|| format!("unknown outcome kind '{outcome_kind}'"))?;
     let graph = support_graph_for(trace, TraceLineageConfig::default(), |ev| {
         ev.kind == kind
-            && outcome_contains.map_or(
-                true,
-                |sub| matches!(&ev.data, TraceData::Message(m) if m.contains(sub)),
-            )
+            && outcome_contains
+                .is_none_or(|sub| matches!(&ev.data, TraceData::Message(m) if m.contains(sub)))
     });
     if graph.is_empty() {
         return Err(format!(

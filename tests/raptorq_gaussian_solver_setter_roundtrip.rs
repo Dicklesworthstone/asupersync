@@ -56,7 +56,7 @@ fn vandermonde(nodes: &[u8], cols: usize) -> Vec<Vec<u8>> {
             let mut row = Vec::with_capacity(cols);
             for _ in 0..cols {
                 row.push(pow.raw());
-                pow = pow * node;
+                pow *= node;
             }
             row
         })

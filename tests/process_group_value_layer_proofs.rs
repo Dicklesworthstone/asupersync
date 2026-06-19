@@ -238,46 +238,46 @@ enum Op {
 
 #[test]
 fn monitor_stream_delivers_every_event_exactly_once() {
-    let a = member("node", 1);
-    let b = member("node", 2);
-    let c = member("node", 3);
-    let d = member("node", 4);
+    let node_one = member("node", 1);
+    let node_two = member("node", 2);
+    let node_three = member("node", 3);
+    let node_four = member("node", 4);
 
     let ops = vec![
-        Op::Join(a.clone()),
-        Op::Join(b.clone()),
-        Op::Join(c.clone()),
-        Op::Leave(b.clone()),
-        Op::Down(a.clone(), DownReason::Normal),
-        Op::Join(d.clone()),
-        Op::Down(c.clone(), DownReason::Error("crash".into())),
+        Op::Join(node_one.clone()),
+        Op::Join(node_two.clone()),
+        Op::Join(node_three.clone()),
+        Op::Leave(node_two.clone()),
+        Op::Down(node_one.clone(), DownReason::Normal),
+        Op::Join(node_four.clone()),
+        Op::Down(node_three.clone(), DownReason::Error("crash".into())),
     ];
-    let n = ops.len() as u64;
+    let operation_count = ops.len() as u64;
 
     let mut state = group("monitor");
 
     // Incremental subscriber: drains after every single op (one event each).
     let mut sub_inc = GroupEventSubscriber::new();
     let mut incremental: Vec<u64> = Vec::new();
-    let mut clock: u64 = 0;
 
-    for op in &ops {
+    for (clock, op) in (0_u64..).zip(ops.iter()) {
         match op {
-            Op::Join(m) => {
+            Op::Join(member_id) => {
                 state
-                    .join(m.clone(), Time::from_nanos(clock))
+                    .join(member_id.clone(), Time::from_nanos(clock))
                     .expect("join");
             }
-            Op::Leave(m) => {
-                state.leave(m, Time::from_nanos(clock)).expect("leave");
-            }
-            Op::Down(m, reason) => {
+            Op::Leave(member_id) => {
                 state
-                    .mark_down(m, reason.clone(), Time::from_nanos(clock))
+                    .leave(member_id, Time::from_nanos(clock))
+                    .expect("leave");
+            }
+            Op::Down(member_id, reason) => {
+                state
+                    .mark_down(member_id, reason.clone(), Time::from_nanos(clock))
                     .expect("down");
             }
         }
-        clock += 1;
 
         let batch = sub_inc.pending_batch(&state);
         assert_eq!(batch.len(), 1, "each op emits exactly one pending event");
@@ -296,7 +296,7 @@ fn monitor_stream_delivers_every_event_exactly_once() {
 
     // Metamorphic relation: chunking granularity does not change the delivered
     // sequence, and every event appears exactly once with no gaps.
-    let contiguous: Vec<u64> = (0..n).collect();
+    let contiguous: Vec<u64> = (0..operation_count).collect();
     assert_eq!(
         all_at_once, contiguous,
         "all-at-once must deliver 0..n once"

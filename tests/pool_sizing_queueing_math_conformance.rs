@@ -37,12 +37,12 @@ fn est(arrival_ppm: u64, service_micros: u64, variance: u128) -> PoolWorkloadEst
 fn offered_load_is_littles_law_product() {
     // R[ppm] = arrival_rate_per_sec_ppm * service_time_mean_micros / SCALE.
     let cases: [(u64, u64); 6] = [
-        (2 * POOL_SIZING_SCALE, 500_000),  // 2/s * 0.5s = 1.0 worker
+        (2 * POOL_SIZING_SCALE, 500_000),       // 2/s * 0.5s = 1.0 worker
         (POOL_SIZING_SCALE, POOL_SIZING_SCALE), // 1/s * 1s(=1e6us) = 1.0
-        (10 * POOL_SIZING_SCALE, 100_000), // 10/s * 0.1s = 1.0
-        (0, 1_000_000),                    // no arrivals => no load
-        (3 * POOL_SIZING_SCALE, 4_000_000), // 3/s * 4s = 12.0
-        (7 * POOL_SIZING_SCALE, 250_000),  // 7/s * 0.25s = 1.75
+        (10 * POOL_SIZING_SCALE, 100_000),      // 10/s * 0.1s = 1.0
+        (0, 1_000_000),                         // no arrivals => no load
+        (3 * POOL_SIZING_SCALE, 4_000_000),     // 3/s * 4s = 12.0
+        (7 * POOL_SIZING_SCALE, 250_000),       // 7/s * 0.25s = 1.75
     ];
     for (arrival_ppm, service_micros) in cases {
         let expected = u128::from(arrival_ppm) * u128::from(service_micros) / SCALE;
@@ -68,17 +68,19 @@ fn offered_load_is_zero_without_arrivals_or_service() {
 fn service_cv2_is_variance_over_mean_squared() {
     // CV^2[ppm] = variance * SCALE / mean^2 (0 when mean is 0).
     let cases: [(u64, u128); 5] = [
-        (1_000, 1_000_000),     // var = mean^2 => CV^2 = 1.0 (exponential-like)
-        (1_000, 0),             // deterministic service => CV^2 = 0
-        (0, 12_345),            // mean 0 => guarded to 0
-        (2_000, 4_000_000),     // 4e6 / 4e6 = 1.0
-        (500, 125_000),         // 125000 / 250000 = 0.5
+        (1_000, 1_000_000), // var = mean^2 => CV^2 = 1.0 (exponential-like)
+        (1_000, 0),         // deterministic service => CV^2 = 0
+        (0, 12_345),        // mean 0 => guarded to 0
+        (2_000, 4_000_000), // 4e6 / 4e6 = 1.0
+        (500, 125_000),     // 125000 / 250000 = 0.5
     ];
     for (mean, variance) in cases {
         let expected = if mean == 0 {
             0
         } else {
-            variance * SCALE / (u128::from(mean) * u128::from(mean))
+            let mean = u128::from(mean);
+            let mean_squared = mean * mean;
+            variance * SCALE / mean_squared
         };
         assert_eq!(
             u128::from(est(POOL_SIZING_SCALE, mean, variance).service_cv2_ppm()),
@@ -98,7 +100,10 @@ fn square_root_staffing_zero_for_no_load_and_covers_offered_load() {
 
     // No offered load => no staffing hint.
     assert_eq!(square_root_staffing_size(est(0, 500_000, 0), target), 0);
-    assert_eq!(square_root_staffing_size(est(POOL_SIZING_SCALE, 0, 0), target), 0);
+    assert_eq!(
+        square_root_staffing_size(est(POOL_SIZING_SCALE, 0, 0), target),
+        0
+    );
 
     // For positive load the hint never under-staffs below the raw offered load:
     // staffing workers * SCALE >= offered_load_ppm (utilization <= 100% at hint).
@@ -118,7 +123,8 @@ fn square_root_staffing_is_nondecreasing_in_load() {
     let target = PoolSizingTarget::conservative_wait_probability();
     let mut prev = 0usize;
     for arrival_mult in [1u64, 2, 4, 8, 16, 32] {
-        let staffing = square_root_staffing_size(est(arrival_mult * POOL_SIZING_SCALE, 500_000, 0), target);
+        let staffing =
+            square_root_staffing_size(est(arrival_mult * POOL_SIZING_SCALE, 500_000, 0), target);
         assert!(
             staffing >= prev,
             "staffing must be non-decreasing as offered load rises (got {staffing} after {prev})"
@@ -138,9 +144,19 @@ fn candidate_metrics_edge_partitions() {
     // size 0: fully saturated sentinel regardless of load.
     let busy = est(2 * POOL_SIZING_SCALE, 500_000, 0); // R = 1.0
     let zero = pool_sizing_candidate_metrics(busy, 0);
-    assert_eq!(zero.utilization_ppm, scale_u32, "0 workers => 100% utilization");
-    assert_eq!(zero.wait_probability_ppm, scale_u32, "0 workers => certain wait");
-    assert_eq!(zero.mean_wait_micros, u64::MAX, "0 workers => unbounded wait");
+    assert_eq!(
+        zero.utilization_ppm, scale_u32,
+        "0 workers => 100% utilization"
+    );
+    assert_eq!(
+        zero.wait_probability_ppm, scale_u32,
+        "0 workers => certain wait"
+    );
+    assert_eq!(
+        zero.mean_wait_micros,
+        u64::MAX,
+        "0 workers => unbounded wait"
+    );
     assert_eq!(zero.offered_load_ppm, busy.offered_load_ppm());
 
     // No offered load: every metric collapses to zero for any positive size.
@@ -158,8 +174,7 @@ fn candidate_metrics_edge_partitions() {
 
     // Underload: utilization is exactly R/k (no variability factor on util).
     let under = pool_sizing_candidate_metrics(busy, 4); // R = 1.0, k = 4
-    let expected_util =
-        u128::from(busy.offered_load_ppm()) * SCALE / (4u128 * SCALE); // = 250_000
+    let expected_util = u128::from(busy.offered_load_ppm()) * SCALE / (4u128 * SCALE); // = 250_000
     assert_eq!(u128::from(under.utilization_ppm), expected_util);
     assert!(under.utilization_ppm < scale_u32);
     assert!(under.wait_probability_ppm < scale_u32);
@@ -202,7 +217,10 @@ fn recommend_no_load_returns_floor() {
     );
     assert_eq!(rec.recommended_size, 2, "no load => recommend the floor");
     assert_eq!(rec.reason, PoolSizingReason::NoObservedLoad);
-    assert!(rec.target_met, "the floor vacuously meets the target under no load");
+    assert!(
+        rec.target_met,
+        "the floor vacuously meets the target under no load"
+    );
     assert_eq!(rec.square_root_staffing_size, 0);
 }
 
@@ -239,7 +257,11 @@ fn recommend_reason_partition_target_met_clamped_and_unmet() {
 
     // Light load with a high floor: square-root hint is below the floor, the
     // floor already meets the target => ClampedToFloor.
-    let clamped = recommend_pool_size(est(2 * POOL_SIZING_SCALE, 500_000, 0), PoolSizingBounds::new(10, 32), target);
+    let clamped = recommend_pool_size(
+        est(2 * POOL_SIZING_SCALE, 500_000, 0),
+        PoolSizingBounds::new(10, 32),
+        target,
+    );
     assert_eq!(clamped.recommended_size, 10);
     assert_eq!(clamped.reason, PoolSizingReason::ClampedToFloor);
     assert!(clamped.target_met);
@@ -250,7 +272,11 @@ fn recommend_reason_partition_target_met_clamped_and_unmet() {
 
     // Moderate load with a low floor and ample ceiling: a candidate above the
     // floor meets the target => TargetMet.
-    let met = recommend_pool_size(est(6 * POOL_SIZING_SCALE, 500_000, 0), PoolSizingBounds::new(1, 64), target);
+    let met = recommend_pool_size(
+        est(6 * POOL_SIZING_SCALE, 500_000, 0),
+        PoolSizingBounds::new(1, 64),
+        target,
+    );
     assert_eq!(met.reason, PoolSizingReason::TargetMet);
     assert!(met.target_met);
     assert!(met.recommended_size >= 1 && met.recommended_size <= 64);
@@ -258,8 +284,15 @@ fn recommend_reason_partition_target_met_clamped_and_unmet() {
     // Crushing load with a tiny ceiling and a strict target: nothing satisfies
     // it, so the ceiling is returned with target_met == false.
     let strict = PoolSizingTarget::MaxWaitProbabilityPpm(1_000); // 0.1%
-    let unmet = recommend_pool_size(est(100 * POOL_SIZING_SCALE, 500_000, 0), PoolSizingBounds::new(1, 4), strict);
-    assert_eq!(unmet.recommended_size, 4, "unmet target clamps to the ceiling");
+    let unmet = recommend_pool_size(
+        est(100 * POOL_SIZING_SCALE, 500_000, 0),
+        PoolSizingBounds::new(1, 4),
+        strict,
+    );
+    assert_eq!(
+        unmet.recommended_size, 4,
+        "unmet target clamps to the ceiling"
+    );
     assert_eq!(unmet.reason, PoolSizingReason::TargetUnmetAtCeiling);
     assert!(!unmet.target_met);
 }
@@ -271,7 +304,10 @@ fn recommend_is_pure_and_deterministic() {
     let target = PoolSizingTarget::MaxMeanWaitMicros(50_000);
     let a = recommend_pool_size(e, bounds, target);
     let b = recommend_pool_size(e, bounds, target);
-    assert_eq!(a, b, "recommend_pool_size must be a pure function of its inputs");
+    assert_eq!(
+        a, b,
+        "recommend_pool_size must be a pure function of its inputs"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -282,14 +318,21 @@ fn recommend_is_pure_and_deterministic() {
 fn explain_reports_size_bounds_reason_and_unmet_warning() {
     let target = PoolSizingTarget::conservative_wait_probability();
 
-    let met = recommend_pool_size(est(6 * POOL_SIZING_SCALE, 500_000, 0), PoolSizingBounds::new(1, 64), target);
+    let met = recommend_pool_size(
+        est(6 * POOL_SIZING_SCALE, 500_000, 0),
+        PoolSizingBounds::new(1, 64),
+        target,
+    );
     let met_text = explain_pool_sizing(est(6 * POOL_SIZING_SCALE, 500_000, 0), met);
     assert!(
         met_text.contains(&format!("recommend {} workers", met.recommended_size)),
         "explanation must state the recommended size: {met_text}"
     );
     assert!(
-        met_text.contains(&format!("bounds {}..={}", met.bounds.min_size, met.bounds.max_size)),
+        met_text.contains(&format!(
+            "bounds {}..={}",
+            met.bounds.min_size, met.bounds.max_size
+        )),
         "explanation must state the resolved bounds: {met_text}"
     );
     assert!(
@@ -302,7 +345,11 @@ fn explain_reports_size_bounds_reason_and_unmet_warning() {
     );
 
     let strict = PoolSizingTarget::MaxWaitProbabilityPpm(1_000);
-    let unmet = recommend_pool_size(est(100 * POOL_SIZING_SCALE, 500_000, 0), PoolSizingBounds::new(1, 4), strict);
+    let unmet = recommend_pool_size(
+        est(100 * POOL_SIZING_SCALE, 500_000, 0),
+        PoolSizingBounds::new(1, 4),
+        strict,
+    );
     let unmet_text = explain_pool_sizing(est(100 * POOL_SIZING_SCALE, 500_000, 0), unmet);
     assert!(
         unmet_text.contains("WARNING: target NOT met at the configured ceiling"),

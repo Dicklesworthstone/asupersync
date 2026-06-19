@@ -334,9 +334,8 @@ fn main() {
     // 4. Failure rehearsal: a multi-group topology fails closed at lowering
     //    instead of being silently mis-wired.
     let rehearsal = multi_group_manifest().compile_with_child_specs(std::iter::empty());
-    let rehearsal_error = rehearsal
-        .err()
-        .expect("multi-group topology must fail closed at builder lowering");
+    let rehearsal_error =
+        rehearsal.expect_err("multi-group topology must fail closed at builder lowering");
     events.push(json!({
         "event": "failure_rehearsal",
         "scenario": "multi_group_topology",

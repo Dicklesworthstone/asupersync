@@ -104,7 +104,7 @@ fn experiment_loop_stops_on_first_observed_violation() {
     assert_eq!(
         report.status,
         LdfiExperimentStatus::FoundViolation {
-            hypothesis: [ev(1)].into_iter().collect()
+            hypothesis: std::iter::once(ev(1)).collect()
         }
     );
     assert_eq!(report.coverage_certificate(), None);

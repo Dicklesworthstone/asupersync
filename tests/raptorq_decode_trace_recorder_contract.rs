@@ -338,7 +338,7 @@ fn cap_constant_is_the_observed_truncation_boundary() {
 
     let mut peel = PeelingTrace::default();
     let mut elim = EliminationTrace::default();
-    for i in 0..(MAX_PIVOT_EVENTS + 1) {
+    for i in 0..=MAX_PIVOT_EVENTS {
         peel.record_solved(col_at(i));
         elim.record_inactivation(col_at(i));
         elim.record_pivot(col_at(i), i);

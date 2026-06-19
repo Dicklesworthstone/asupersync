@@ -287,12 +287,17 @@ fn markowitz_oracle(
     col: usize,
 ) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize)> = None;
-    for r in start..end.min(rows.len()) {
-        if rows[r].get(col).copied().unwrap_or(0) == 0 {
+    for (r, row) in rows
+        .iter()
+        .enumerate()
+        .take(end.min(rows.len()))
+        .skip(start)
+    {
+        if row.get(col).copied().unwrap_or(0) == 0 {
             continue;
         }
-        let from = col.min(rows[r].len());
-        let nnz = rows[r][from..].iter().filter(|&&b| b != 0).count();
+        let from = col.min(row.len());
+        let nnz = row[from..].iter().filter(|&&b| b != 0).count();
         match best {
             Some((_, best_nnz)) if nnz >= best_nnz => {}
             _ => best = Some((r, nnz)),
