@@ -441,6 +441,73 @@ rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_frankenlab" ca
 
 ---
 
+## Benchmarking ATP (vs rsync)
+
+ATP performance claims are settled against **tuned rsync only**, apples-to-apples
+and fail-closed. Authoritative spec: [`docs/atp_bench_matrix_spec.md`](./docs/atp_bench_matrix_spec.md).
+Operator runbook: [`scripts/atp_bench/MATRIX.md`](./scripts/atp_bench/MATRIX.md).
+Every result — and every refuted hypothesis — is logged append-only in
+[`docs/atp_rq_beat_rsync_ledger.md`](./docs/atp_rq_beat_rsync_ledger.md).
+
+### Integrity standard (non-negotiable)
+- **Only vs rsync, optimally tuned** (`-aW --inplace --no-compress`; over ssh add
+  `-c aes128-gcm@openssh.com`). Never "vs old atp"; never atp-lab vs rsync-ssh.
+- **Crypto-symmetric** — compare the *same* tier on both sides (tiers below).
+- **SHA-256 verify every transfer** (file: digest; tree: sorted per-file digest set
+  vs the gen manifest). A timeout/error/mismatch is recorded `status!="ok"`,
+  `sha_ok=false`, and **excluded from medians** — a failure can never read as a win
+  or a "slow loss".
+- **Rate-capped links only** (netem `rate`, symmetric on both veth ends). An
+  uncapped netns link is an unreal ∞-bandwidth cell that flatters rsync.
+- Report **median wall + cv%** (cv>5% = noisy), **peak & avg RSS both ends**, and
+  atp `feedback_rounds`. REPS ≥ 3 (≥5 for tiny cells; 1 for `5G`×`broken`).
+- **Release `atp` build required** — debug large-K RaptorQ decode is far too slow.
+- **Check the WHOLE matrix; never cherry-pick cells.** atp's edge is lossy /
+  high-BDP links; its weak spots are perfect/∞-bw links, append/spread deltas, and
+  peak RSS — report all of them.
+
+### Two harnesses
+1. **Full transfer matrix (authoritative scoreboard):**
+   `scripts/atp_bench/matrix_bench.sh` (planner/resume) → `run_matrix_cell.sh`
+   (hermetic netns+veth+netem per cell) → `score_matrix.py` (→ markdown).
+   Grid: workloads `500K,5M,50M,500M,5G,tree_small,tree_big` × regimes
+   `perfect,good,bad,broken` × tiers `nocrypto,auth,encrypted`.
+2. **Delta re-sync (bytes-on-wire for edits):** `scripts/atp_bench/resync_bench.sh`
+   — append/insert/spread re-sync only; the incremental-delta scorecard.
+
+### Crypto tiers (compare like-for-like)
+| tier | atp | rsync |
+|---|---|---|
+| `nocrypto`  | `atp-rq-lab` (`--rq-allow-unauthenticated-lab`) | `rsyncd` plaintext daemon |
+| `auth`      | `atp-rq-auth` (`--rq-auth-key-hex`)            | rsync over ssh (aes128-gcm) |
+| `encrypted` | `atp-quic-tls13` (TLS-1.3 + symbol auth)       | rsync over ssh (aes128-gcm) |
+
+### Run it
+```bash
+# 0. Sanity-check the harness itself (no root):
+bash scripts/atp_bench/selftest_matrix.sh
+
+# 1. Release binary (REQUIRED):
+rch exec -- env TMPDIR=/data/tmp CARGO_TARGET_DIR=/data/tmp/rch_target_orch_atpcli \
+  cargo build --release --bin atp --features atp-cli
+
+# 2. Dry-run the resumable plan (no root, no transfers):
+bash scripts/atp_bench/matrix_bench.sh --workloads 50M,tree_small --regimes good,bad --tiers nocrypto
+
+# 3. Execute (root for netns/tc; resumable — re-run to skip cells already 'ok', retry failures):
+sudo env BIN=/data/tmp/rch_target_orch_atpcli/release/atp \
+  bash scripts/atp_bench/matrix_bench.sh --execute --generate-workloads \
+    --workloads 500K,5M,50M,500M,5G,tree_small,tree_big \
+    --regimes perfect,good,bad,broken --tiers nocrypto \
+    --run-cell-command 'bash scripts/atp_bench/run_matrix_cell.sh'
+
+# 4. Score (CI gate: --fail-on-mismatch exits non-zero if any row failed sha/completion):
+RUN=$(ls -dt artifacts/atp_bench_matrix/*/ | head -1)
+python3 scripts/atp_bench/score_matrix.py "$RUN/results.jsonl" --out-md "$RUN/scorecard.md"
+```
+Headline is **atp-vs-rsync, same workload+regime+tier, only**. Record the scorecard
+(+ any new finding) in the ledger before claiming anything.
+
 ## Audit Index — Avoiding Duplicate Audits
 
 `audit_index.jsonl` in the project root tracks every file that has been audited, by whom, when, and the verdict. **Check it before starting an audit batch** to avoid re-auditing files.
