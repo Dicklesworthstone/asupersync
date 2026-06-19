@@ -2190,8 +2190,8 @@ pub struct RuntimeBuilder {
     config: RuntimeConfig,
     reactor: Option<Arc<dyn Reactor>>,
     io_driver: Option<IoDriverHandle>,
-    /// Opt-in: construct the platform reactor at build time
-    /// (br-asupersync-1ajbtl rollout step 1).
+    /// Construct the platform reactor at build time by default
+    /// (br-asupersync-1ajbtl).
     platform_reactor: bool,
     timer_driver: Option<TimerDriverHandle>,
     entropy_source: Option<Arc<dyn EntropySource>>,
@@ -2206,7 +2206,7 @@ impl RuntimeBuilder {
             config: RuntimeConfig::default(),
             reactor: None,
             io_driver: None,
-            platform_reactor: false,
+            platform_reactor: true,
             timer_driver: None,
             entropy_source: None,
             host_services: default_runtime_host_services(),
@@ -2737,7 +2737,7 @@ impl RuntimeBuilder {
             config,
             reactor: None,
             io_driver: None,
-            platform_reactor: false,
+            platform_reactor: true,
             timer_driver: None,
             entropy_source: None,
             host_services: default_runtime_host_services(),
@@ -2775,7 +2775,7 @@ impl RuntimeBuilder {
             config,
             reactor: None,
             io_driver: None,
-            platform_reactor: false,
+            platform_reactor: true,
             timer_driver: None,
             entropy_source: None,
             host_services: default_runtime_host_services(),
@@ -2794,21 +2794,29 @@ impl RuntimeBuilder {
             entropy_source,
             host_services,
         } = self;
-        // br-asupersync-1ajbtl rollout step 1: opt-in platform reactor.
-        // Default builds attach no reactor (network I/O runs on the
-        // timer-paced fallback re-poll path); this flag constructs the
-        // platform backend at build time. Explicit with_reactor /
-        // with_io_driver injections take precedence.
+        // br-asupersync-1ajbtl: default builds construct the platform reactor
+        // so socket I/O uses readiness wakeups instead of the 1ms timer-paced
+        // fallback re-poll path. Explicit with_reactor / with_io_driver
+        // injections take precedence, and enable_platform_reactor(false) keeps
+        // the fallback regime available for burn-in/debugging.
+        #[cfg(not(target_arch = "wasm32"))]
         let reactor = if platform_reactor && reactor.is_none() && io_driver.is_none() {
-            Some(crate::runtime::reactor::create_reactor().map_err(|err| {
-                Error::new(crate::error::ErrorKind::ConfigError).with_message(format!(
-                    "enable_platform_reactor(true): failed to construct the \
-                         platform reactor: {err}"
-                ))
-            })?)
+            match crate::runtime::reactor::create_reactor() {
+                Ok(reactor) => Some(reactor),
+                Err(err) => {
+                    crate::tracing_compat::warn!(
+                        event = "runtime_builder_platform_reactor_unavailable",
+                        error = %err,
+                        "platform reactor unavailable; falling back to timer-paced I/O polling"
+                    );
+                    None
+                }
+            }
         } else {
             reactor
         };
+        #[cfg(target_arch = "wasm32")]
+        let reactor = reactor;
         // br-asupersync-8fuxnt: Sharded shape is API-reachable but not
         // yet routed through ThreeLaneScheduler. Reject at build time
         // with a message that names the tracking bead so callers see the
@@ -2961,18 +2969,17 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Opt in to the platform I/O reactor without supplying one explicitly.
+    /// Enable or disable automatic platform I/O reactor construction.
     ///
-    /// Default builds attach **no** reactor: network I/O falls back to
-    /// timer-paced re-polls (1ms wheel timers) instead of readiness events
-    /// (br-asupersync-1ajbtl). With this flag, [`build`](Self::build)
-    /// constructs the platform backend via
+    /// Default builds construct the platform backend via
     /// [`create_reactor`](crate::runtime::reactor::create_reactor) — epoll
     /// (or io_uring with the `io-uring` feature) on Linux, kqueue on
-    /// BSD/macOS, IOCP on Windows — and attaches an `IoDriver` backed by it,
-    /// so sockets get real readiness wakeups. Reactor construction failure
-    /// fails the build rather than silently downgrading to the fallback
-    /// path.
+    /// BSD/macOS, IOCP on Windows — and attach an `IoDriver` backed by it, so
+    /// sockets get readiness wakeups instead of timer-paced re-polls
+    /// (br-asupersync-1ajbtl). Passing `false` keeps the old fallback regime
+    /// available for narrow debugging and platform bring-up. If the default
+    /// reactor cannot be constructed, `build()` logs a warning and falls back
+    /// to timer-paced polling rather than failing runtime construction.
     ///
     /// An explicit [`with_reactor`](Self::with_reactor) or
     /// [`with_io_driver`](Self::with_io_driver) takes precedence; this flag
@@ -6387,35 +6394,11 @@ worker_threads = 16
         assert!(Runtime::current_handle().is_none());
     }
 
-    /// br-asupersync-1ajbtl rollout step 1: the opt-in flag attaches a real
+    /// br-asupersync-1ajbtl: the default platform reactor attaches a real
     /// IoDriver, so spawned tasks see an io-driver handle through their Cx
     /// and socket I/O uses reactor readiness instead of fallback re-polls.
     #[test]
-    fn enable_platform_reactor_attaches_io_driver() {
-        init_test_logging();
-        let runtime = RuntimeBuilder::new()
-            .worker_threads(1)
-            .enable_platform_reactor(true)
-            .build()
-            .expect("runtime build with platform reactor");
-        let has_driver = runtime.block_on(runtime.handle().spawn(async {
-            crate::cx::Cx::current()
-                .expect("spawned task has a Cx")
-                .io_driver_handle()
-                .is_some()
-        }));
-        assert!(
-            has_driver,
-            "platform reactor opt-in must attach an IoDriver"
-        );
-    }
-
-    /// Pins the current default regime: no reactor is constructed unless
-    /// opted in, and network I/O runs on the timer-paced fallback path
-    /// (br-asupersync-1ajbtl). When the default flips, update this test
-    /// together with the decision record on that bead.
-    #[test]
-    fn default_build_attaches_no_io_driver() {
+    fn default_build_attaches_platform_io_driver() {
         init_test_logging();
         let runtime = RuntimeBuilder::new()
             .worker_threads(1)
@@ -6428,8 +6411,30 @@ worker_threads = 16
                 .is_some()
         }));
         assert!(
+            has_driver,
+            "default runtime builds must attach an IoDriver"
+        );
+    }
+
+    /// Pins the explicit fallback regime: callers may still disable the
+    /// platform reactor when isolating platform bring-up issues.
+    #[test]
+    fn disabled_platform_reactor_attaches_no_io_driver() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .enable_platform_reactor(false)
+            .build()
+            .expect("runtime build");
+        let has_driver = runtime.block_on(runtime.handle().spawn(async {
+            crate::cx::Cx::current()
+                .expect("spawned task has a Cx")
+                .io_driver_handle()
+                .is_some()
+        }));
+        assert!(
             !has_driver,
-            "default builds intentionally run the fallback I/O regime today"
+            "explicitly disabled platform reactor must keep fallback I/O regime"
         );
     }
 
