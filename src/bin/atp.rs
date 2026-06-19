@@ -51,7 +51,6 @@ use asupersync::atp::delta::{
 use asupersync::atp::object::ContentId;
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
-use asupersync::net::atp::chunk::dedupe::{CdcEngine, CdcParameters};
 use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
 use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_BLOCK_SIZE, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD,
@@ -78,6 +77,7 @@ const DELTA_TREE_OBJECT_CDC_WINDOW_BYTES: usize = 64;
 const DELTA_TREE_OBJECT_MIN_CHUNK_BYTES: usize = 16 * 1024;
 const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
 const DELTA_TREE_OBJECT_MAX_CHUNK_BYTES: usize = 64 * 1024;
+const DELTA_TREE_OBJECT_BOUNDARY_MASK: u64 = (DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64) - 1;
 
 /// Standalone ATP transfer tool.
 #[derive(Parser)]
@@ -1590,42 +1590,102 @@ fn build_delta_snapshot_from_files(
 }
 
 fn split_delta_tree_object_chunks(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let mut engine = CdcEngine::new();
-    let chunks = engine
-        .compute_cdc_boundaries(bytes, &delta_tree_object_cdc_params())
-        .map_err(|err| format!("FastCDC delta chunking failed: {err}"))?;
-    chunks
-        .into_iter()
-        .map(|chunk| {
-            let start = usize::try_from(chunk.byte_offset)
-                .map_err(|_| "delta FastCDC chunk offset exceeds usize::MAX".to_string())?;
-            let end = chunk
-                .byte_offset
-                .checked_add(chunk.size_bytes)
-                .ok_or_else(|| "delta FastCDC chunk end offset overflowed".to_string())
-                .and_then(|end| {
-                    usize::try_from(end)
-                        .map_err(|_| "delta FastCDC chunk end exceeds usize::MAX".to_string())
-                })?;
-            bytes.get(start..end).map(<[u8]>::to_vec).ok_or_else(|| {
-                format!(
-                    "delta FastCDC chunk {}..{} is outside object length {}",
-                    start,
-                    end,
-                    bytes.len()
-                )
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut chunks = Vec::new();
+    let mut rolling = DeltaTreeRollingGear::new();
+    let mut chunk_start = 0usize;
+
+    for (index, &byte) in bytes.iter().enumerate() {
+        rolling.update(byte);
+        let end = index + 1;
+        let chunk_len = end - chunk_start;
+
+        if chunk_len < DELTA_TREE_OBJECT_MIN_CHUNK_BYTES {
+            continue;
+        }
+
+        let should_cut = chunk_len >= DELTA_TREE_OBJECT_MAX_CHUNK_BYTES
+            || (rolling.hash() & DELTA_TREE_OBJECT_BOUNDARY_MASK) == 0;
+
+        if should_cut {
+            chunks.push(bytes[chunk_start..end].to_vec());
+            chunk_start = end;
+        }
+    }
+
+    if chunk_start < bytes.len() {
+        if !chunks.is_empty()
+            && bytes.len() - chunk_start < DELTA_TREE_OBJECT_MIN_CHUNK_BYTES
+            && chunks.last().is_some_and(|previous| {
+                previous.len() + bytes.len() - chunk_start <= DELTA_TREE_OBJECT_MAX_CHUNK_BYTES
             })
-        })
-        .collect()
+        {
+            let tail = &bytes[chunk_start..];
+            if let Some(previous) = chunks.last_mut() {
+                previous.extend_from_slice(tail);
+            } else {
+                chunks.push(tail.to_vec());
+            }
+        } else {
+            chunks.push(bytes[chunk_start..].to_vec());
+        }
+    }
+
+    Ok(chunks)
 }
 
-const fn delta_tree_object_cdc_params() -> CdcParameters {
-    CdcParameters {
-        window_size: DELTA_TREE_OBJECT_CDC_WINDOW_BYTES,
-        min_chunk_size: DELTA_TREE_OBJECT_MIN_CHUNK_BYTES as u64,
-        max_chunk_size: DELTA_TREE_OBJECT_MAX_CHUNK_BYTES as u64,
-        normalization_constant: DELTA_TREE_OBJECT_AVG_CHUNK_BYTES as u64,
+struct DeltaTreeRollingGear {
+    hash: u64,
+    window: [u8; DELTA_TREE_OBJECT_CDC_WINDOW_BYTES],
+    cursor: usize,
+    filled: usize,
+}
+
+impl DeltaTreeRollingGear {
+    fn new() -> Self {
+        Self {
+            hash: 0,
+            window: [0; DELTA_TREE_OBJECT_CDC_WINDOW_BYTES],
+            cursor: 0,
+            filled: 0,
+        }
     }
+
+    fn update(&mut self, byte: u8) {
+        if self.filled < DELTA_TREE_OBJECT_CDC_WINDOW_BYTES {
+            self.hash = self.hash.rotate_left(1) ^ delta_tree_gear_value(byte);
+            self.window[self.cursor] = byte;
+            self.cursor = (self.cursor + 1) % DELTA_TREE_OBJECT_CDC_WINDOW_BYTES;
+            self.filled += 1;
+            return;
+        }
+
+        let old = self.window[self.cursor];
+        self.window[self.cursor] = byte;
+        self.cursor = (self.cursor + 1) % DELTA_TREE_OBJECT_CDC_WINDOW_BYTES;
+        self.hash = self.hash.rotate_left(1)
+            ^ delta_tree_gear_value(byte)
+            ^ delta_tree_gear_value(old).rotate_left(DELTA_TREE_OBJECT_CDC_WINDOW_BYTES as u32);
+    }
+
+    fn hash(&self) -> u64 {
+        self.hash
+    }
+}
+
+const fn delta_tree_gear_value(byte: u8) -> u64 {
+    delta_tree_splitmix64((byte as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+}
+
+const fn delta_tree_splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut mixed = value;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
 }
 
 fn collect_delta_dest_tree_files(dest: &Path) -> Result<Vec<DeltaTreeFile>, String> {
@@ -3659,7 +3719,7 @@ mod tests {
             .map(|idx| ((idx * 31 + idx / 7 + 13) % 251) as u8)
             .collect::<Vec<_>>();
 
-        let chunks = split_delta_tree_object_chunks(&data).expect("FastCDC chunks");
+        let chunks = split_delta_tree_object_chunks(&data).expect("delta chunks");
         let rebuilt = chunks.concat();
         let min_chunk = DELTA_TREE_OBJECT_MIN_CHUNK_BYTES;
         let max_chunk = DELTA_TREE_OBJECT_MAX_CHUNK_BYTES;
@@ -3703,6 +3763,42 @@ mod tests {
         assert!(
             shared * 2 >= original_chunks.len(),
             "content-defined chunks should resynchronize after a small insert"
+        );
+    }
+
+    #[test]
+    fn delta_tree_chunker_localizes_same_length_edit() {
+        let original = (0..(2 * 1024 * 1024))
+            .map(|idx| ((idx * 131 + idx / 17 + 91) % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut edited = original.clone();
+        let edit_start = 1024 * 1024;
+        let edit_len = 100 * 1024;
+        for (offset, byte) in edited[edit_start..edit_start + edit_len]
+            .iter_mut()
+            .enumerate()
+        {
+            *byte = ((offset * 73 + 19) % 251) as u8;
+        }
+
+        let original_chunks = split_delta_tree_object_chunks(&original).expect("original chunks");
+        let edited_chunks = split_delta_tree_object_chunks(&edited).expect("edited chunks");
+        let original_hashes = original_chunks
+            .iter()
+            .map(|chunk| (hex::encode(Sha256::digest(chunk)), chunk.len()))
+            .collect::<std::collections::BTreeSet<_>>();
+        let edited_missing_bytes = edited_chunks
+            .iter()
+            .filter(|chunk| {
+                !original_hashes.contains(&(hex::encode(Sha256::digest(chunk)), chunk.len()))
+            })
+            .map(Vec::len)
+            .sum::<usize>();
+
+        assert!(
+            edited_missing_bytes <= 192 * 1024,
+            "100KiB same-length edit should not dirty {} bytes of delta chunks",
+            edited_missing_bytes
         );
     }
 
