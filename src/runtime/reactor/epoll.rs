@@ -70,7 +70,6 @@
 use super::{Event, Events, Interest, Reactor, Source, Token};
 use hashbrown::HashMap;
 use hashbrown::hash_map::Entry;
-use libc::{F_GETFD, fcntl};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
 use std::collections::HashSet;
@@ -122,7 +121,6 @@ struct RegistrationInfo {
     /// The current interest flags.
     interest: Interest,
     /// File descriptor identity to detect reuse/TOCTOU races.
-    #[allow(dead_code)]
     fd_identity: FdIdentity,
 }
 
@@ -262,6 +260,11 @@ impl EpollReactor {
             // registrations fire once and must be re-armed with modify().
             PollMode::Oneshot
         }
+    }
+
+    #[inline]
+    fn fd_no_longer_matches(raw_fd: i32, expected: FdIdentity) -> bool {
+        FdIdentity::from_fd(raw_fd).is_none_or(|current| current != expected)
     }
 
     /// Converts polling crate's event to our Interest type.
@@ -472,9 +475,11 @@ impl Reactor for EpollReactor {
                         "token not registered",
                     ))
                 }
-                Some(libc::EBADF) if unsafe { fcntl(raw_fd, F_GETFD) } == -1 => {
+                Some(libc::EBADF)
+                    if Self::fd_no_longer_matches(raw_fd, entry.get().fd_identity) =>
+                {
                     // Determine whether the target fd itself is valid so EBADF can be
-                    // interpreted correctly (target closed vs reactor poller invalid).
+                    // interpreted correctly (target closed/reused vs reactor poller invalid).
                     // Evaluated AFTER the modify attempt to prevent TOCTOU race.
                     // We must remove it to prevent leaking the token if the fd was concurrently reused.
                     let info = entry.remove();
@@ -503,8 +508,8 @@ impl Reactor for EpollReactor {
 
     fn deregister(&self, token: Token) -> io::Result<()> {
         let mut state = self.state.lock();
-        let info = match state.tokens.get(&token) {
-            Some(info) => info,
+        let (raw_fd, fd_identity) = match state.tokens.get(&token) {
+            Some(info) => (info.raw_fd, info.fd_identity),
             None => {
                 // If a previous modify/deregister already cleaned this token
                 // up because the kernel reported its fd as closed, honor the
@@ -527,7 +532,7 @@ impl Reactor for EpollReactor {
 
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
         // Remove from epoll. Only drop bookkeeping once the source is
         // definitely gone from the kernel or the target fd itself is already
         // closed. Keeping the entry on hard failures preserves accurate retry
@@ -556,9 +561,9 @@ impl Reactor for EpollReactor {
                     }
                     Ok(())
                 }
-                Some(libc::EBADF) if unsafe { fcntl(info.raw_fd, F_GETFD) } == -1 => {
+                Some(libc::EBADF) if Self::fd_no_longer_matches(raw_fd, fd_identity) => {
                     // Determine whether the target fd itself is valid so EBADF can be
-                    // interpreted correctly (target closed vs reactor poller invalid).
+                    // interpreted correctly (target closed/reused vs reactor poller invalid).
                     // Evaluated AFTER the delete attempt to prevent TOCTOU race.
                     if let Some(info) = state.tokens.remove(&token) {
                         state.fds.remove(&info.raw_fd);
@@ -2284,6 +2289,7 @@ mod tests {
 
         let token = Token::new(105);
         let raw_fd = read_sock.as_raw_fd();
+        let fd_identity = FdIdentity::from_fd(raw_fd).expect("registered fd must have an identity");
 
         reactor
             .register(&read_sock, token, Interest::READABLE.with_oneshot())
@@ -2300,9 +2306,17 @@ mod tests {
         // Close the socket BEFORE attempting re-arm
         drop(read_sock);
 
-        // Verify fd is closed
-        let fd_closed = unsafe { fcntl(raw_fd, F_GETFD) } == -1;
-        crate::assert_with_log!(fd_closed, "fd closed before re-arm", true, fd_closed);
+        // Verify the registered source is gone. In the full parallel suite,
+        // another test may reuse the raw fd number before this assertion runs,
+        // so checking descriptor identity is the stable close-before-rearm
+        // invariant rather than requiring the numeric fd slot to stay empty.
+        let fd_closed_or_reused = EpollReactor::fd_no_longer_matches(raw_fd, fd_identity);
+        crate::assert_with_log!(
+            fd_closed_or_reused,
+            "fd closed before re-arm",
+            true,
+            fd_closed_or_reused
+        );
 
         // Attempt to re-arm after close should fail gracefully
         let modify_result = reactor.modify(token, Interest::READABLE.with_oneshot());
