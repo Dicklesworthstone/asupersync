@@ -47,9 +47,11 @@
 //!
 //! See the [`chaos`] module for detailed documentation on chaos testing.
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod atp_lab {
     pub use crate::atp::lab::*;
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub mod atp_path;
 #[cfg(feature = "benchmark-adapters")]
 pub mod benchmark_cartel;
@@ -93,6 +95,7 @@ mod deterministic_validation_tests;
 pub use crate::util::{
     StrictEntropyGuard, disable_strict_entropy, enable_strict_entropy, strict_entropy_enabled,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use atp_lab::{
     ATP_LAB_MODEL_SCHEMA_VERSION, AtpLabArtifact, AtpLabAttachment, AtpLabEvent, AtpLabFailure,
     AtpLabFault, AtpLabOracleConfig, AtpLabRegime, AtpLabReplayMetadata, AtpLabScenario,
@@ -139,6 +142,7 @@ pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
     RunResult, ScheduleExplorer, TopologyExplorer, ViolationReport,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use fixtures::{
     E2eReport, ExpectedOutcome, PerformanceImpact, ProofArtifactRef, RegimeSummary,
     RepairDecisionLog, RepairRoiE2eHarness, RepairRoiE2eResult, RepairRoiE2eScenario,

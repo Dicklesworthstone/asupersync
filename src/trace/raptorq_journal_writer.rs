@@ -13,8 +13,11 @@ use crate::decoding::{DecodingConfig, DecodingError, DecodingPipeline};
 use crate::encoding::{EncodingError, EncodingPipeline};
 use crate::security::AuthenticatedSymbol;
 use crate::trace::raptorq_journal::{
-    BlockSymbols, EpochManifest, JOURNAL_FLAG_CHECKPOINT_BOUNDARY, JournalFrame,
-    ObjectParamsRecord, latest_complete_epoch, scan_frames, serialize_epoch,
+    BlockSymbols, EpochManifest, JournalFrame, ObjectParamsRecord, serialize_epoch,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::trace::raptorq_journal::{
+    JOURNAL_FLAG_CHECKPOINT_BOUNDARY, latest_complete_epoch, scan_frames,
 };
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
@@ -110,6 +113,7 @@ pub fn stripe_file_name(epoch: u64, index: usize) -> String {
 ///
 /// Returns the underlying [`std::io::Error`] if the directory or any stripe file
 /// cannot be created or synced.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn write_epoch_stripes(
     dir: &std::path::Path,
     epoch: u64,
@@ -137,6 +141,7 @@ pub async fn write_epoch_stripes(
 ///
 /// Returns the underlying [`std::io::Error`] for any read failure other than a
 /// missing stripe file.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn read_epoch_stripes(
     dir: &std::path::Path,
     epoch: u64,
@@ -167,6 +172,7 @@ pub fn manifest_file_name(epoch: u64) -> String {
 ///
 /// Returns the underlying [`std::io::Error`] if the directory or manifest file
 /// cannot be created or synced.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn write_epoch_manifest(
     dir: &std::path::Path,
     manifest: EpochManifest,
@@ -184,6 +190,7 @@ pub async fn write_epoch_manifest(
 ///
 /// Returns [`std::io::Error`] for a read failure other than a missing file, or
 /// `InvalidData` if the record is corrupt / mis-versioned.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn read_epoch_manifest(
     dir: &std::path::Path,
     epoch: u64,
@@ -214,6 +221,7 @@ pub fn params_file_name(epoch: u64) -> String {
 ///
 /// Returns the underlying [`std::io::Error`] if the directory or params file
 /// cannot be created or synced.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn write_epoch_params(
     dir: &std::path::Path,
     record: ObjectParamsRecord,
@@ -231,6 +239,7 @@ pub async fn write_epoch_params(
 ///
 /// Returns [`std::io::Error`] for a read failure other than a missing file, or
 /// `InvalidData` if the record is corrupt / mis-versioned.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn read_epoch_params(
     dir: &std::path::Path,
     epoch: u64,
@@ -398,6 +407,7 @@ pub struct RecoveryProof {
 }
 
 /// Configuration for a [`DurableTraceJournal`].
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct DurableTraceJournalConfig {
     /// Directory the stripe and manifest files live in.
@@ -418,11 +428,13 @@ pub struct DurableTraceJournalConfig {
 /// recorder's checkpoint hook is a single [`DurableTraceJournal::record_epoch`]
 /// call, while staying decoupled from the recorder (callers pass the checkpoint
 /// bytes directly, keeping the journal independently testable).
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct DurableTraceJournal {
     config: DurableTraceJournalConfig,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl DurableTraceJournal {
     /// Build a journal handle from its configuration.
     #[must_use]
@@ -613,6 +625,7 @@ impl DurableTraceJournal {
 }
 
 /// Parse the epoch number out of a `epoch-<N>-manifest.rqm` file name.
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_manifest_epoch(file_name: &str) -> Option<u64> {
     file_name
         .strip_prefix("epoch-")?
@@ -630,6 +643,7 @@ fn parse_manifest_epoch(file_name: &str) -> Option<u64> {
 ///
 /// Returns the underlying [`std::io::Error`] for a read failure other than the
 /// directory being absent.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn discover_epochs(dir: &std::path::Path) -> std::io::Result<Vec<u64>> {
     let mut entries = match crate::fs::read_dir(dir).await {
         Ok(entries) => entries,

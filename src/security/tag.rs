@@ -151,6 +151,7 @@ impl AuthenticationTag {
     ///
     /// Construction:
     /// `HMAC-SHA256(key, journal_domain || record_type || record_payload_bytes)`.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn compute_for_journal_record(
         key: &AuthKey,

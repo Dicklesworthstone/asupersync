@@ -2794,6 +2794,8 @@ impl RuntimeBuilder {
             entropy_source,
             host_services,
         } = self;
+        #[cfg(target_arch = "wasm32")]
+        let _ = platform_reactor;
         // br-asupersync-1ajbtl: default builds construct the platform reactor
         // so socket I/O uses readiness wakeups instead of the 1ms timer-paced
         // fallback re-poll path. Explicit with_reactor / with_io_driver

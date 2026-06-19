@@ -130,6 +130,7 @@ pub enum SymbolAcceptResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum FeedDecodeMode {
     Inline,
     Deferred,
@@ -481,6 +482,7 @@ impl DecodingPipeline {
     /// Feeds a streaming symbol and returns an owned decode job when the block
     /// reaches threshold. The caller must run the job and pass its outcome to
     /// [`Self::finish_decode_job`].
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn feed_streaming_block_deferred(
         &mut self,
         auth_symbol: AuthenticatedSymbol,
@@ -867,6 +869,7 @@ impl DecodingPipeline {
 
     /// Finalizes a previously deferred decode job and updates block state.
     #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn finish_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
         if self.completed_blocks.contains(&outcome.sbn) {
             return SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded);
