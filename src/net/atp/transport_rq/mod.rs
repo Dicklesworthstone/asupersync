@@ -2599,7 +2599,7 @@ fn rq_pending_decode_jobs(decoders: &[EntryDecoder]) -> usize {
 fn rq_max_buffered_symbols_per_block(max_block_size: usize, symbol_size: u16) -> usize {
     let symbol_size = usize::from(symbol_size.max(1));
     let k = max_block_size.div_ceil(symbol_size).max(1);
-    let repair_extra = (k / 2).max(RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA);
+    let repair_extra = k.div_ceil(2).max(RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA);
     k.saturating_add(repair_extra)
 }
 
@@ -4312,15 +4312,6 @@ async fn feed_symbol_with_cx(
         )
         .await?;
     }
-    if block_decode_pending(dec, parsed.sbn) {
-        rqtrace!(
-            "receiver: entry {} skipped {:?} symbol for block {} while decode job is pending",
-            dec.index,
-            parsed.kind,
-            parsed.sbn
-        );
-        return Ok(false);
-    }
     if dec.pipeline.is_none() {
         return Ok(false);
     }
@@ -4470,27 +4461,14 @@ async fn dispatch_decode_job(
         return Ok(DecodeDispatch::Queued);
     }
 
-    if !allow_spawn_decode {
-        rqtrace!(
-            "receiver: entry {} running decode block {} inline from {trigger} because transfer decode cap {} is reached",
-            dec.index,
-            block_sbn,
-            RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
-        );
-        let outcome = run_block_decode_job(job);
-        if finalize_decode_outcome(dec, outcome).await? {
-            return Ok(DecodeDispatch::Completed);
-        }
-        return Ok(DecodeDispatch::NoProgress);
-    }
-
-    if !can_spawn_parallel_decode(dec.pending_decodes.len()) {
+    if !allow_spawn_decode || !can_spawn_parallel_decode(dec.pending_decodes.len()) {
         let joined = join_one_pending_decode(cx, dec).await?;
         rqtrace!(
-            "receiver: entry {} joined {joined} pending decode job(s) before queueing block {} from {trigger} at entry cap {}",
+            "receiver: entry {} joined {joined} pending decode job(s) before queueing block {} from {trigger} (entry_cap={}, transfer_spawn_allowed={})",
             dec.index,
             block_sbn,
-            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
+            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
+            allow_spawn_decode
         );
         if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
             return Ok(DecodeDispatch::NoProgress);
