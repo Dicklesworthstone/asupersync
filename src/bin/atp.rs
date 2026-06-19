@@ -45,9 +45,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use asupersync::atp::delta::{
-    ContentAddressedChunkStore as DeltaChunkStore, DeltaResyncMode, DeltaResyncPlan,
+    CasChunkRef, ContentAddressedChunkStore as DeltaChunkStore, DeltaResyncMode, DeltaResyncPlan,
     PersistentChunkManifest, ReceiverCasCoverage, plan_incremental_resync_with_receiver_coverage,
 };
+use asupersync::atp::delta_subchunk::{self, SubBlockSignature, SubDeltaOp};
 use asupersync::atp::object::ContentId;
 use asupersync::cx::Cx;
 use asupersync::net::TcpListener;
@@ -68,6 +69,7 @@ const RQ_AUTH_ENV: &str = "ATP_RQ_AUTH_KEY_HEX";
 const DELTA_STATE_DIR: &str = ".asupersync-atp-delta-v1";
 const DELTA_STATE_FILE: &str = "state.json";
 const DELTA_CHUNK_DIR: &str = "chunks";
+const DELTA_SUBCHUNK_DIR: &str = "subchunks";
 const DELTA_PACKAGE_PREFIX: &str = ".asupersync-atp-delta-package-";
 const DELTA_PACKAGE_FILE: &str = "delta-package.json";
 const DELTA_STATE_SCHEMA: &str = "asupersync.atp.cli-delta-state.v1";
@@ -828,7 +830,12 @@ fn add_auto_selection_metadata(
     report
 }
 
-fn annotate_direct_delta_package_report(report: &mut serde_json::Value, plan: &DeltaResyncPlan) {
+fn annotate_direct_delta_package_report(
+    report: &mut serde_json::Value,
+    plan: &DeltaResyncPlan,
+    package_payload_bytes: u64,
+    subdelta_chunks: usize,
+) {
     if let Some(object) = report.as_object_mut() {
         object.insert(
             "delta".to_string(),
@@ -841,6 +848,8 @@ fn annotate_direct_delta_package_report(report: &mut serde_json::Value, plan: &D
                 "stale_chunks": plan.stale_chunks.len(),
                 "missing_chunks": plan.missing_chunks.len(),
                 "missing_bytes": plan.missing_bytes,
+                "package_payload_bytes": package_payload_bytes,
+                "subdelta_chunks": subdelta_chunks,
             }),
         );
     }
@@ -872,15 +881,22 @@ fn run_send_to_addr(
                 print_json(&report);
                 return Ok(());
             }
-            DeltaPreparedSend::Package { package_root, plan } => {
+            DeltaPreparedSend::Package {
+                package_root,
+                plan,
+                package_payload_bytes,
+                subdelta_chunks,
+            } => {
                 eprintln!(
-                    "[atp] delta planner: direct receiver state selected {} chunk(s), {} byte(s), shared {} chunk(s)",
+                    "[atp] delta planner: direct receiver state selected {} chunk(s), {} logical byte(s), {} package byte(s), {} sub-delta chunk(s), shared {} chunk(s)",
                     plan.missing_chunks.len(),
                     plan.missing_bytes,
+                    package_payload_bytes,
+                    subdelta_chunks,
                     plan.shared_chunks
                 );
                 args.source = package_root;
-                direct_delta_plan = Some(plan);
+                direct_delta_plan = Some((plan, package_payload_bytes, subdelta_chunks));
             }
         }
     }
@@ -891,8 +907,13 @@ fn run_send_to_addr(
     } else {
         send_to_addr_with_transport(&runtime, &args, args.transport, addr)?
     };
-    if let Some(plan) = direct_delta_plan.as_ref() {
-        annotate_direct_delta_package_report(&mut report, plan);
+    if let Some((plan, package_payload_bytes, subdelta_chunks)) = direct_delta_plan.as_ref() {
+        annotate_direct_delta_package_report(
+            &mut report,
+            plan,
+            *package_payload_bytes,
+            *subdelta_chunks,
+        );
     }
     print_json(&report);
     Ok(())
@@ -1170,11 +1191,18 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
                 print_json(&report);
                 return Ok(());
             }
-            DeltaPreparedSend::Package { package_root, plan } => {
+            DeltaPreparedSend::Package {
+                package_root,
+                plan,
+                package_payload_bytes,
+                subdelta_chunks,
+            } => {
                 eprintln!(
-                    "[atp] delta planner: sending {} chunk(s), {} byte(s), shared {} chunk(s)",
+                    "[atp] delta planner: sending {} chunk(s), {} logical byte(s), {} package byte(s), {} sub-delta chunk(s), shared {} chunk(s)",
                     plan.missing_chunks.len(),
                     plan.missing_bytes,
+                    package_payload_bytes,
+                    subdelta_chunks,
                     plan.shared_chunks
                 );
                 args.source = package_root;
@@ -1217,6 +1245,8 @@ enum DeltaPreparedSend {
     Package {
         package_root: PathBuf,
         plan: DeltaResyncPlan,
+        package_payload_bytes: u64,
+        subdelta_chunks: usize,
     },
 }
 
@@ -1236,6 +1266,8 @@ struct DeltaCliState {
     object_sha256_hex: String,
     chunk_count: usize,
     logical_file_bytes: u64,
+    #[serde(default)]
+    chunk_signatures: Vec<DeltaChunkSignatureState>,
 }
 
 impl DeltaCliState {
@@ -1251,11 +1283,21 @@ impl DeltaCliState {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DeltaChunkSignatureState {
+    content_id_hex: String,
+    size_bytes: u64,
+    signature: SubBlockSignature,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DeltaPackageMetadata {
     schema: String,
     target_manifest_hex: String,
     object_sha256_hex: String,
+    #[serde(default)]
     missing_chunks: Vec<DeltaPackageChunkMetadata>,
+    #[serde(default)]
+    subdelta_chunks: Vec<DeltaPackageSubdeltaMetadata>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1263,6 +1305,46 @@ struct DeltaPackageChunkMetadata {
     content_id_hex: String,
     size_bytes: u64,
     file_name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DeltaPackageSubdeltaMetadata {
+    target_content_id_hex: String,
+    target_sha256_hex: String,
+    target_size_bytes: u64,
+    base_content_id_hex: String,
+    base_size_bytes: u64,
+    ops_file_name: String,
+    ops_wire_bytes: u64,
+}
+
+#[derive(Debug)]
+struct DeltaPackageBuild {
+    whole_chunks: Vec<DeltaWholeChunkPackage>,
+    subdelta_chunks: Vec<DeltaSubdeltaPackage>,
+    payload_bytes: u64,
+}
+
+#[derive(Debug)]
+struct DeltaWholeChunkPackage {
+    chunk: CasChunkRef,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct DeltaSubdeltaPackage {
+    target_chunk: CasChunkRef,
+    target_sha256_hex: String,
+    base_chunk: CasChunkRef,
+    encoded_ops: Vec<u8>,
+    ops_wire_bytes: u64,
+}
+
+#[derive(Debug)]
+struct DeltaPackageWrite {
+    package_root: PathBuf,
+    package_payload_bytes: u64,
+    subdelta_chunks: usize,
 }
 
 #[derive(Debug)]
@@ -1380,10 +1462,32 @@ fn prepare_delta_send_from_state(
             Ok(Some(DeltaPreparedSend::AlreadyInSync(report)))
         }
         DeltaResyncMode::DeltaChunks => {
-            let package_root = create_delta_package(&snapshot, &plan)?;
-            Ok(Some(DeltaPreparedSend::Package { package_root, plan }))
+            let package =
+                create_delta_package(&snapshot, &plan, &receiver_manifest, &receiver_state)?;
+            Ok(Some(DeltaPreparedSend::Package {
+                package_root: package.package_root,
+                plan,
+                package_payload_bytes: package.package_payload_bytes,
+                subdelta_chunks: package.subdelta_chunks,
+            }))
         }
         DeltaResyncMode::FullObjectFallback => {
+            if plan.fallback_reason == Some(asupersync::atp::delta::DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject) {
+                let package_build =
+                    build_delta_package(&snapshot, &plan, &receiver_manifest, &receiver_state)?;
+                if package_build.payload_bytes < snapshot.manifest.total_size_bytes {
+                    let mut subdelta_plan = plan.clone();
+                    subdelta_plan.mode = DeltaResyncMode::DeltaChunks;
+                    subdelta_plan.fallback_reason = None;
+                    let package = write_delta_package(&snapshot, &package_build)?;
+                    return Ok(Some(DeltaPreparedSend::Package {
+                        package_root: package.package_root,
+                        plan: subdelta_plan,
+                        package_payload_bytes: package.package_payload_bytes,
+                        subdelta_chunks: package.subdelta_chunks,
+                    }));
+                }
+            }
             eprintln!(
                 "[atp] delta planner: full-object fallback ({:?}); missing {} of {} bytes",
                 plan.fallback_reason, plan.missing_bytes, snapshot.manifest.total_size_bytes,
@@ -1455,17 +1559,23 @@ fn remote_delta_state_path(remote_path: &str) -> String {
 fn create_delta_package(
     snapshot: &DeltaSourceSnapshot,
     plan: &DeltaResyncPlan,
-) -> Result<PathBuf, String> {
-    let package_root = create_unique_delta_package_root(&snapshot.object_sha256_hex)?;
-    let chunk_dir = package_root.join(DELTA_CHUNK_DIR);
-    fs::create_dir(&chunk_dir).map_err(|err| {
-        format!(
-            "create delta package chunk dir {}: {err}",
-            chunk_dir.display()
-        )
-    })?;
+    receiver_manifest: &PersistentChunkManifest,
+    receiver_state: &DeltaCliState,
+) -> Result<DeltaPackageWrite, String> {
+    let package = build_delta_package(snapshot, plan, receiver_manifest, receiver_state)?;
+    write_delta_package(snapshot, &package)
+}
 
-    let mut missing_chunks = Vec::with_capacity(plan.missing_chunks.len());
+fn build_delta_package(
+    snapshot: &DeltaSourceSnapshot,
+    plan: &DeltaResyncPlan,
+    receiver_manifest: &PersistentChunkManifest,
+    receiver_state: &DeltaCliState,
+) -> Result<DeltaPackageBuild, String> {
+    let mut whole_chunks = Vec::new();
+    let mut subdelta_chunks = Vec::new();
+    let mut payload_bytes = 0u64;
+
     for chunk in &plan.missing_chunks {
         let content_id_hex = chunk.content_id.to_hex();
         let payload = snapshot
@@ -1480,11 +1590,117 @@ fn create_delta_package(
             ));
         }
 
+        if let Some(subdelta) =
+            build_subdelta_chunk_package(chunk, payload, receiver_manifest, receiver_state)?
+        {
+            payload_bytes = payload_bytes
+                .checked_add(subdelta.ops_wire_bytes)
+                .ok_or_else(|| "delta package payload size exceeds u64::MAX".to_string())?;
+            subdelta_chunks.push(subdelta);
+        } else {
+            payload_bytes = payload_bytes
+                .checked_add(payload_len)
+                .ok_or_else(|| "delta package payload size exceeds u64::MAX".to_string())?;
+            whole_chunks.push(DeltaWholeChunkPackage {
+                chunk: chunk.clone(),
+                payload: payload.clone(),
+            });
+        }
+    }
+
+    Ok(DeltaPackageBuild {
+        whole_chunks,
+        subdelta_chunks,
+        payload_bytes,
+    })
+}
+
+fn build_subdelta_chunk_package(
+    target_chunk: &CasChunkRef,
+    target_payload: &[u8],
+    receiver_manifest: &PersistentChunkManifest,
+    receiver_state: &DeltaCliState,
+) -> Result<Option<DeltaSubdeltaPackage>, String> {
+    let Some(base_chunk) =
+        receiver_manifest
+            .chunks
+            .get(usize::try_from(target_chunk.index).map_err(|_| {
+                format!(
+                    "delta chunk index {} does not fit usize",
+                    target_chunk.index
+                )
+            })?)
+    else {
+        return Ok(None);
+    };
+    if base_chunk.content_id == target_chunk.content_id {
+        return Ok(None);
+    }
+    let Some(signature) = receiver_subchunk_signature(receiver_state, base_chunk) else {
+        return Ok(None);
+    };
+    let ops = delta_subchunk::diff(target_payload, signature);
+    let encoded_ops =
+        serde_json::to_vec(&ops).map_err(|err| format!("encode sub-delta ops: {err}"))?;
+    if encoded_ops.len() >= target_payload.len() {
+        return Ok(None);
+    }
+    let ops_wire_bytes = u64::try_from(encoded_ops.len())
+        .map_err(|_| "sub-delta op stream exceeds u64::MAX".to_string())?;
+    Ok(Some(DeltaSubdeltaPackage {
+        target_chunk: target_chunk.clone(),
+        target_sha256_hex: hex::encode(Sha256::digest(target_payload)),
+        base_chunk: base_chunk.clone(),
+        encoded_ops,
+        ops_wire_bytes,
+    }))
+}
+
+fn receiver_subchunk_signature<'a>(
+    receiver_state: &'a DeltaCliState,
+    chunk: &CasChunkRef,
+) -> Option<&'a SubBlockSignature> {
+    let content_id_hex = chunk.content_id.to_hex();
+    receiver_state
+        .chunk_signatures
+        .iter()
+        .find(|entry| {
+            entry.content_id_hex == content_id_hex && entry.size_bytes == chunk.size_bytes
+        })
+        .map(|entry| &entry.signature)
+}
+
+fn write_delta_package(
+    snapshot: &DeltaSourceSnapshot,
+    package: &DeltaPackageBuild,
+) -> Result<DeltaPackageWrite, String> {
+    let package_root = create_unique_delta_package_root(&snapshot.object_sha256_hex)?;
+    let chunk_dir = package_root.join(DELTA_CHUNK_DIR);
+    fs::create_dir(&chunk_dir).map_err(|err| {
+        format!(
+            "create delta package chunk dir {}: {err}",
+            chunk_dir.display()
+        )
+    })?;
+    let subchunk_dir = package_root.join(DELTA_SUBCHUNK_DIR);
+    if !package.subdelta_chunks.is_empty() {
+        fs::create_dir(&subchunk_dir).map_err(|err| {
+            format!(
+                "create delta package subchunk dir {}: {err}",
+                subchunk_dir.display()
+            )
+        })?;
+    }
+
+    let mut missing_chunks = Vec::with_capacity(package.whole_chunks.len());
+    for whole in &package.whole_chunks {
+        let chunk = &whole.chunk;
+        let content_id_hex = chunk.content_id.to_hex();
         let file_name = format!("{content_id_hex}.chunk");
         let path = chunk_dir.join(&file_name);
         let mut file = fs::File::create(&path)
             .map_err(|err| format!("create delta chunk {}: {err}", path.display()))?;
-        file.write_all(payload)
+        file.write_all(&whole.payload)
             .map_err(|err| format!("write delta chunk {}: {err}", path.display()))?;
         missing_chunks.push(DeltaPackageChunkMetadata {
             content_id_hex,
@@ -1493,11 +1709,36 @@ fn create_delta_package(
         });
     }
 
+    let mut subdelta_chunks = Vec::with_capacity(package.subdelta_chunks.len());
+    for subdelta in &package.subdelta_chunks {
+        let target_content_id_hex = subdelta.target_chunk.content_id.to_hex();
+        let base_content_id_hex = subdelta.base_chunk.content_id.to_hex();
+        let file_name = format!(
+            "{target_content_id_hex}-from-{}.subdelta.json",
+            &base_content_id_hex[..16]
+        );
+        let path = subchunk_dir.join(&file_name);
+        let mut file = fs::File::create(&path)
+            .map_err(|err| format!("create delta subchunk ops {}: {err}", path.display()))?;
+        file.write_all(&subdelta.encoded_ops)
+            .map_err(|err| format!("write delta subchunk ops {}: {err}", path.display()))?;
+        subdelta_chunks.push(DeltaPackageSubdeltaMetadata {
+            target_content_id_hex,
+            target_sha256_hex: subdelta.target_sha256_hex.clone(),
+            target_size_bytes: subdelta.target_chunk.size_bytes,
+            base_content_id_hex,
+            base_size_bytes: subdelta.base_chunk.size_bytes,
+            ops_file_name: file_name,
+            ops_wire_bytes: subdelta.ops_wire_bytes,
+        });
+    }
+
     let metadata = DeltaPackageMetadata {
         schema: DELTA_PACKAGE_SCHEMA.to_string(),
         target_manifest_hex: hex::encode(snapshot.manifest.to_canonical_bytes()),
         object_sha256_hex: snapshot.object_sha256_hex.clone(),
         missing_chunks,
+        subdelta_chunks,
     };
     let manifest_path = package_root.join(DELTA_PACKAGE_FILE);
     let mut file = fs::File::create(&manifest_path).map_err(|err| {
@@ -1519,7 +1760,11 @@ fn create_delta_package(
         )
     })?;
 
-    Ok(package_root)
+    Ok(DeltaPackageWrite {
+        package_root,
+        package_payload_bytes: package.payload_bytes,
+        subdelta_chunks: package.subdelta_chunks.len(),
+    })
 }
 
 fn create_unique_delta_package_root(object_sha256_hex: &str) -> Result<PathBuf, String> {
@@ -1948,6 +2193,84 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
             .map_err(|err| format!("insert delta package chunk: {err}"))?;
     }
 
+    let subchunk_dir = package_root.join(DELTA_SUBCHUNK_DIR);
+    for subdelta in &metadata.subdelta_chunks {
+        validate_hex_hash(&subdelta.target_content_id_hex)?;
+        let target_sha256 = decode_sha256_hex(
+            &subdelta.target_sha256_hex,
+            "delta package sub-delta target sha256",
+        )?;
+        validate_hex_hash(&subdelta.base_content_id_hex)?;
+        let target_chunk = target_manifest
+            .chunks
+            .iter()
+            .find(|chunk| chunk.content_id.to_hex() == subdelta.target_content_id_hex)
+            .ok_or_else(|| {
+                format!(
+                    "delta package sub-delta target {} not present in target manifest",
+                    subdelta.target_content_id_hex
+                )
+            })?;
+        if target_chunk.size_bytes != subdelta.target_size_bytes {
+            return Err(format!(
+                "delta package sub-delta target {} size mismatch: expected {}, metadata {}",
+                subdelta.target_content_id_hex, target_chunk.size_bytes, subdelta.target_size_bytes
+            ));
+        }
+        let base_chunk = receiver_manifest
+            .chunks
+            .iter()
+            .find(|chunk| chunk.content_id.to_hex() == subdelta.base_content_id_hex)
+            .ok_or_else(|| {
+                format!(
+                    "delta package sub-delta base {} not present in receiver manifest",
+                    subdelta.base_content_id_hex
+                )
+            })?;
+        if base_chunk.size_bytes != subdelta.base_size_bytes {
+            return Err(format!(
+                "delta package sub-delta base {} size mismatch: expected {}, metadata {}",
+                subdelta.base_content_id_hex, base_chunk.size_bytes, subdelta.base_size_bytes
+            ));
+        }
+        let old_bytes = store.get(&base_chunk.content_id).ok_or_else(|| {
+            format!(
+                "receiver state missing base chunk {}",
+                subdelta.base_content_id_hex
+            )
+        })?;
+        let ops_path = subchunk_dir.join(&subdelta.ops_file_name);
+        let encoded_ops = fs::read(&ops_path).map_err(|err| {
+            format!(
+                "read delta package sub-delta ops {}: {err}",
+                ops_path.display()
+            )
+        })?;
+        let encoded_len = u64::try_from(encoded_ops.len())
+            .map_err(|_| "delta package sub-delta ops length exceeds u64::MAX".to_string())?;
+        if encoded_len != subdelta.ops_wire_bytes {
+            return Err(format!(
+                "delta package sub-delta ops {} size mismatch: expected {}, got {}",
+                subdelta.ops_file_name, subdelta.ops_wire_bytes, encoded_len
+            ));
+        }
+        let ops: Vec<SubDeltaOp> = serde_json::from_slice(&encoded_ops)
+            .map_err(|err| format!("parse delta package sub-delta ops: {err}"))?;
+        let rebuilt = delta_subchunk::reconstruct_verified(old_bytes, &ops, &target_sha256)
+            .map_err(|err| format!("reconstruct delta package sub-delta: {err}"))?;
+        let rebuilt_len = u64::try_from(rebuilt.len())
+            .map_err(|_| "delta package reconstructed chunk length exceeds u64::MAX".to_string())?;
+        if rebuilt_len != target_chunk.size_bytes {
+            return Err(format!(
+                "delta package reconstructed chunk {} size mismatch: expected {}, got {}",
+                subdelta.target_content_id_hex, target_chunk.size_bytes, rebuilt_len
+            ));
+        }
+        store
+            .insert(&rebuilt)
+            .map_err(|err| format!("insert delta package reconstructed chunk: {err}"))?;
+    }
+
     target_manifest
         .verify_store_coverage(&store)
         .map_err(|err| format!("delta package target coverage failed: {err}"))?;
@@ -1981,13 +2304,7 @@ fn refresh_delta_state(dest: &Path) -> Result<DeltaCliState, String> {
         }
     }
 
-    let state = DeltaCliState {
-        schema: DELTA_STATE_SCHEMA.to_string(),
-        manifest_hex: hex::encode(snapshot.manifest.to_canonical_bytes()),
-        object_sha256_hex: snapshot.object_sha256_hex,
-        chunk_count: snapshot.chunks_by_content.len(),
-        logical_file_bytes: snapshot.logical_file_bytes,
-    };
+    let state = delta_cli_state_from_snapshot(&snapshot)?;
     let path = state_dir.join(DELTA_STATE_FILE);
     let mut file = fs::File::create(&path)
         .map_err(|err| format!("create delta state {}: {err}", path.display()))?;
@@ -1996,6 +2313,38 @@ fn refresh_delta_state(dest: &Path) -> Result<DeltaCliState, String> {
     file.write_all(b"\n")
         .map_err(|err| format!("finish delta state {}: {err}", path.display()))?;
     Ok(state)
+}
+
+fn delta_cli_state_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<DeltaCliState, String> {
+    let mut chunk_signatures = Vec::with_capacity(snapshot.manifest.chunks.len());
+    for chunk in &snapshot.manifest.chunks {
+        let content_id_hex = chunk.content_id.to_hex();
+        let payload = snapshot
+            .chunks_by_content
+            .get(&content_id_hex)
+            .ok_or_else(|| format!("delta state source missing chunk {content_id_hex}"))?;
+        let payload_len = u64::try_from(payload.len())
+            .map_err(|_| "delta state chunk payload length exceeds u64::MAX".to_string())?;
+        if payload_len != chunk.size_bytes || ContentId::from_bytes(payload) != chunk.content_id {
+            return Err(format!(
+                "delta state source chunk {content_id_hex} does not match manifest"
+            ));
+        }
+        chunk_signatures.push(DeltaChunkSignatureState {
+            content_id_hex,
+            size_bytes: chunk.size_bytes,
+            signature: delta_subchunk::signature(payload, delta_subchunk::DEFAULT_SUBBLOCK_BYTES),
+        });
+    }
+
+    Ok(DeltaCliState {
+        schema: DELTA_STATE_SCHEMA.to_string(),
+        manifest_hex: hex::encode(snapshot.manifest.to_canonical_bytes()),
+        object_sha256_hex: snapshot.object_sha256_hex.clone(),
+        chunk_count: snapshot.chunks_by_content.len(),
+        logical_file_bytes: snapshot.logical_file_bytes,
+        chunk_signatures,
+    })
 }
 
 fn read_local_delta_state(dest: &Path) -> Result<Option<DeltaCliState>, String> {
@@ -2303,6 +2652,14 @@ fn validate_hex_hash(value: &str) -> Result<(), String> {
     } else {
         Err(format!("expected 64-character hex hash, got {value:?}"))
     }
+}
+
+fn decode_sha256_hex(value: &str, label: &str) -> Result<[u8; 32], String> {
+    validate_hex_hash(value)?;
+    let bytes = hex::decode(value).map_err(|err| format!("decode {label}: {err}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| format!("{label} did not decode to 32 bytes"))
 }
 
 struct DeltaObjectReader<'a> {
@@ -3800,6 +4157,63 @@ mod tests {
             "100KiB same-length edit should not dirty {} bytes of delta chunks",
             edited_missing_bytes
         );
+    }
+
+    fn one_chunk_delta_snapshot(tree_id: &str, bytes: Vec<u8>) -> DeltaSourceSnapshot {
+        let size_bytes = u64::try_from(bytes.len()).expect("test payload length");
+        let chunk = CasChunkRef::from_bytes(0, 0, &bytes).expect("chunk ref");
+        let manifest =
+            PersistentChunkManifest::new(tree_id, vec![chunk.clone()]).expect("manifest");
+        let object_sha256_hex = hex::encode(Sha256::digest(&bytes));
+        let mut chunks_by_content = BTreeMap::new();
+        chunks_by_content.insert(chunk.content_id.to_hex(), bytes);
+        DeltaSourceSnapshot {
+            manifest,
+            chunks_by_content,
+            object_sha256_hex,
+            file_count: 1,
+            logical_file_bytes: size_bytes,
+        }
+    }
+
+    #[test]
+    fn delta_package_build_uses_subdelta_when_whole_chunk_would_fallback() {
+        let old = (0..(64 * 1024))
+            .map(|idx| ((idx * 17 + idx / 5 + 41) % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut new = old.clone();
+        for byte in &mut new[24 * 1024..25 * 1024] {
+            *byte ^= 0x5a;
+        }
+
+        let receiver = one_chunk_delta_snapshot("tree-a", old.clone());
+        let sender = one_chunk_delta_snapshot("tree-a", new.clone());
+        let receiver_state = delta_cli_state_from_snapshot(&receiver).expect("receiver state");
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver.manifest);
+        let plan = plan_incremental_resync_with_receiver_coverage(
+            &sender.manifest,
+            Some(&receiver.manifest),
+            &receiver_coverage,
+        );
+
+        assert_eq!(plan.mode, DeltaResyncMode::FullObjectFallback);
+        assert_eq!(plan.missing_bytes, sender.manifest.total_size_bytes);
+
+        let package = build_delta_package(&sender, &plan, &receiver.manifest, &receiver_state)
+            .expect("package");
+
+        assert_eq!(package.whole_chunks.len(), 0);
+        assert_eq!(package.subdelta_chunks.len(), 1);
+        assert!(package.payload_bytes < sender.manifest.total_size_bytes);
+
+        let subdelta = &package.subdelta_chunks[0];
+        let ops: Vec<SubDeltaOp> =
+            serde_json::from_slice(&subdelta.encoded_ops).expect("sub-delta ops");
+        let expected_sha256 =
+            decode_sha256_hex(&subdelta.target_sha256_hex, "test target sha256").unwrap();
+        let rebuilt = delta_subchunk::reconstruct_verified(&old, &ops, &expected_sha256)
+            .expect("reconstruct target chunk");
+        assert_eq!(rebuilt, new);
     }
 
     #[test]
