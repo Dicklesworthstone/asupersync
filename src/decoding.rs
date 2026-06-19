@@ -17,10 +17,10 @@ use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-const REPAIR_RETENTION_MIN_SLACK: usize = 16;
-const REPAIR_RETENTION_MAX_SLACK: usize = 64;
+const REPAIR_RETENTION_MIN_SLACK: usize = 128;
+const REPAIR_RETENTION_MAX_SLACK: usize = 2048;
 
-const AUTO_REPAIR_RETENTION_MIN_EXTRA_SYMBOLS: usize = 64;
+const AUTO_REPAIR_RETENTION_MIN_EXTRA_SYMBOLS: usize = 256;
 const AUTO_REPAIR_RETENTION_MAX_EXTRA_SYMBOLS: usize = 8192;
 
 /// Errors produced by the decoding pipeline.
@@ -183,13 +183,14 @@ enum BlockDecodeResolution {
 pub(crate) struct BlockDecodeOutcome {
     sbn: u8,
     retain_decoded_block: bool,
-    repair_symbol_ids: Vec<SymbolId>,
+    elapsed: Duration,
     resolution: BlockDecodeResolution,
 }
 
 /// Runs an owned block-decode job. Intended for `Cx::spawn_blocking`.
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
+    let started = std::time::Instant::now();
     let resolution = match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
         Ok(data) => BlockDecodeResolution::Complete(data),
         Err(DecodingError::InsufficientSymbols { .. }) => {
@@ -206,21 +207,18 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
         }
         Err(_) => BlockDecodeResolution::Failed(RejectReason::InconsistentEquations),
     };
-    let repair_symbol_ids = if matches!(resolution, BlockDecodeResolution::Retry(_)) {
-        job.symbols
-            .iter()
-            .filter(|symbol| symbol.kind().is_repair())
-            .map(Symbol::id)
-            .collect()
-    } else {
-        Vec::new()
-    };
-
     BlockDecodeOutcome {
         sbn: job.sbn,
         retain_decoded_block: job.retain_decoded_block,
-        repair_symbol_ids,
+        elapsed: started.elapsed(),
         resolution,
+    }
+}
+
+impl BlockDecodeOutcome {
+    #[must_use]
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.elapsed
     }
 }
 
@@ -919,13 +917,13 @@ impl DecodingPipeline {
             self.config.repair_overhead,
             self.config.min_overhead,
         );
-        let slack = (k / 32).clamp(REPAIR_RETENTION_MIN_SLACK, REPAIR_RETENTION_MAX_SLACK);
+        let slack = k.clamp(REPAIR_RETENTION_MIN_SLACK, REPAIR_RETENTION_MAX_SLACK);
         let dynamic_cap = needed.saturating_add(slack).max(k);
         let configured_cap = self.config.max_buffered_symbols;
         Some(if configured_cap == 0 {
             dynamic_cap
         } else {
-            dynamic_cap.min(configured_cap).max(k)
+            configured_cap.max(k)
         })
     }
 
@@ -933,7 +931,7 @@ impl DecodingPipeline {
         let BlockDecodeOutcome {
             sbn,
             retain_decoded_block,
-            repair_symbol_ids,
+            elapsed: _,
             resolution,
         } = outcome;
         match resolution {
@@ -945,7 +943,6 @@ impl DecodingPipeline {
                 }
             }
             BlockDecodeResolution::Retry(reason) => {
-                self.clear_repair_symbols_for_retry(sbn, &repair_symbol_ids);
                 if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Collecting;
                 }
@@ -967,7 +964,7 @@ impl DecodingPipeline {
         let BlockDecodeOutcome {
             sbn,
             retain_decoded_block,
-            repair_symbol_ids,
+            elapsed: _,
             resolution,
         } = outcome;
         if self.completed_blocks.contains(&sbn) {
@@ -983,7 +980,6 @@ impl DecodingPipeline {
                 }
             }
             BlockDecodeResolution::Retry(reason) => {
-                self.clear_repair_symbols_for_retry(sbn, &repair_symbol_ids);
                 if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Collecting;
                 }
@@ -995,18 +991,6 @@ impl DecodingPipeline {
                 }
                 SymbolAcceptResult::Rejected(reason)
             }
-        }
-    }
-
-    fn clear_repair_symbols_for_retry(&mut self, sbn: u8, repair_symbol_ids: &[SymbolId]) {
-        let removed = self
-            .symbols
-            .clear_repair_symbols_for_block(sbn, repair_symbol_ids);
-        if removed == 0 {
-            return;
-        }
-        if let Some(counts) = self.block_symbol_counts.get_mut(&sbn) {
-            counts.repair_symbols = counts.repair_symbols.saturating_sub(removed);
         }
     }
 

@@ -214,27 +214,32 @@ const RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD: f64 = 0.03;
 const RQ_INBOUND_PUMP_BATCH: usize = 512;
 /// Maximum full batches drained after the first ready batch in one pump turn.
 const RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
-/// Maximum blocking decode jobs one receive entry may have in flight.
+/// Hard ceiling on one entry's queued RQ repair-decode jobs.
 ///
-/// The current default block sizing produces roughly 13 source blocks for a
-/// 100 MiB object, so 16 preserves the intended parallel decode fan-out while
-/// bounding queued decode memory and blocking-pool pressure.
-const RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 16;
-/// Maximum blocking decode jobs one receive transfer may have in flight.
+/// Matrix-5 showed that even two concurrent repair decoders can inflate 50M/bad
+/// receiver RSS before they improve wall time. Keep the RQ repair lane to one
+/// queued decoder; the receive pump can continue feeding symbols while that job
+/// runs, but it cannot instantiate another heavy block decoder until the first
+/// one completes.
+const RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 1;
+/// Hard ceiling on one transfer's queued RQ repair-decode jobs.
+const RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD: usize = 1;
+/// Soft memory envelope for queued RQ repair-decode jobs.
 ///
-/// The per-entry cap protects a single large file, but a repair burst can make
-/// many entries or source blocks decode-ready at once. This transfer-wide cap
-/// keeps the blocking pool and cloned decode-job symbol memory bounded; once it
-/// is full, decode joins/drains existing work before queueing more.
-const RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER: usize = RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY * 4;
-/// Retain at most this much extra repair headroom beyond K for one RQ receive block.
+/// `BlockDecodeJob` owns a cloned symbol set plus matrix-solve workspace. The
+/// width gate estimates that footprint from current block geometry and lowers
+/// the effective transfer width before queued decoders can blow past the
+/// MATRIX-5 receiver RSS target.
+const RQ_DECODE_JOB_MEMORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+const RQ_DECODE_JOB_MEMORY_FLOOR_BYTES: usize = 16 * 1024 * 1024;
+const RQ_DECODE_JOB_SYMBOL_MEMORY_MULTIPLIER: usize = 12;
+/// Retain at least this much extra repair headroom beyond K for one RQ receive block.
 ///
-/// Matrix-4's remaining 50M/bad cell is dominated by FEC-repair decode memory.
-/// The sender's aggressive source-FEC fallback is capped at 50% overhead, so
-/// keeping K plus max(K/2, 64) symbols preserves the intended repair budget
-/// while preventing a lossy round train from retaining unbounded repair symbols
-/// behind a block that is already queued for decode.
-const RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA: usize = 64;
+/// MATRIX-5 showed the previous K+K/2 cap forced extra repair rounds by evicting
+/// still-useful equations. Keep roughly a second block's worth of repair
+/// headroom; decode job width, not repair eviction, is the primary memory
+/// throttle.
+const RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA: usize = 256;
 /// Tiny quiet window used only after a full batch, matching the native QUIC pump.
 const RQ_INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
 
@@ -2584,6 +2589,30 @@ fn can_spawn_parallel_decode(pending_decodes: usize) -> bool {
     pending_decodes < RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
 }
 
+fn rq_decode_job_memory_estimate_bytes(max_block_size: usize, symbol_size: u16) -> usize {
+    let retained_symbol_bytes = rq_max_buffered_symbols_per_block(max_block_size, symbol_size)
+        .saturating_mul(usize::from(symbol_size.max(1)));
+    retained_symbol_bytes
+        .saturating_mul(RQ_DECODE_JOB_SYMBOL_MEMORY_MULTIPLIER)
+        .max(RQ_DECODE_JOB_MEMORY_FLOOR_BYTES)
+}
+
+fn rq_decode_width_budget(decoders: &[EntryDecoder], symbol_size: u16) -> usize {
+    let core_limit = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD);
+    let max_block_size = decoders
+        .iter()
+        .map(|decoder| decoder.max_block_size)
+        .max()
+        .unwrap_or(DEFAULT_MAX_BLOCK_SIZE);
+    let memory_limited = RQ_DECODE_JOB_MEMORY_BUDGET_BYTES
+        .checked_div(rq_decode_job_memory_estimate_bytes(max_block_size, symbol_size))
+        .unwrap_or(1)
+        .max(1);
+    core_limit.min(memory_limited).max(1)
+}
+
 fn block_decode_pending(dec: &EntryDecoder, block_sbn: u8) -> bool {
     dec.pending_decodes
         .iter()
@@ -2660,7 +2689,7 @@ fn source_seed_read_plan(
 fn rq_max_buffered_symbols_per_block(max_block_size: usize, symbol_size: u16) -> usize {
     let symbol_size = usize::from(symbol_size.max(1));
     let k = max_block_size.div_ceil(symbol_size).max(1);
-    let repair_extra = k.div_ceil(2).max(RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA);
+    let repair_extra = k.max(RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA);
     k.saturating_add(repair_extra)
 }
 
@@ -4527,14 +4556,26 @@ async fn dispatch_decode_job(
         return Ok(DecodeDispatch::Queued);
     }
 
-    if !allow_spawn_decode || !can_spawn_parallel_decode(dec.pending_decodes.len()) {
+    if !allow_spawn_decode {
+        rqtrace!(
+            "receiver: entry {} running decode block {} inline from {trigger} because transfer decode width is saturated",
+            dec.index,
+            block_sbn
+        );
+        let outcome = run_block_decode_job(job);
+        if finalize_decode_outcome(dec, outcome).await? {
+            return Ok(DecodeDispatch::Completed);
+        }
+        return Ok(DecodeDispatch::NoProgress);
+    }
+
+    if !can_spawn_parallel_decode(dec.pending_decodes.len()) {
         let joined = join_one_pending_decode(cx, dec).await?;
         rqtrace!(
-            "receiver: entry {} joined {joined} pending decode job(s) before queueing block {} from {trigger} (entry_cap={}, transfer_spawn_allowed={})",
+            "receiver: entry {} joined {joined} pending decode job(s) before queueing block {} from {trigger} (entry_cap={})",
             dec.index,
             block_sbn,
-            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
-            allow_spawn_decode
+            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
         );
         if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
             return Ok(DecodeDispatch::NoProgress);
@@ -5377,12 +5418,13 @@ async fn feed_datagram_to_decoders(
     let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
         return Ok(false);
     };
+    let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
     let mut pending_decode_jobs = rq_pending_decode_jobs(decoders);
-    if pending_decode_jobs >= RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER {
+    if pending_decode_jobs >= decode_width_budget {
         let _ = drain_ready_decodes(cx, decoders).await?;
         pending_decode_jobs = rq_pending_decode_jobs(decoders);
     }
-    if pending_decode_jobs >= RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER {
+    if pending_decode_jobs >= decode_width_budget {
         for dec in decoders.iter_mut() {
             if dec.pending_decodes.is_empty() {
                 continue;
@@ -5392,7 +5434,7 @@ async fn feed_datagram_to_decoders(
         }
         pending_decode_jobs = rq_pending_decode_jobs(decoders);
     }
-    let allow_spawn_decode = pending_decode_jobs < RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER;
+    let allow_spawn_decode = pending_decode_jobs < decode_width_budget;
     feed_symbol_with_cx(
         cx,
         &mut decoders[pos],
@@ -5442,6 +5484,7 @@ async fn finalize_decode_outcome(
     let Some(pipeline) = dec.pipeline.as_mut() else {
         return Ok(false);
     };
+    let decode_elapsed = outcome.elapsed();
     let result = pipeline.finish_decode_job(outcome);
     match result {
         SymbolAcceptResult::BlockComplete { block_sbn, data } => {
@@ -5456,16 +5499,18 @@ async fn finalize_decode_outcome(
                 dec.pipeline = None;
             }
             rqtrace!(
-                "receiver: entry {} completed parallel decode block {}",
+                "receiver: entry {} completed parallel decode block {} decode_ms={}",
                 dec.index,
-                block_sbn
+                block_sbn,
+                decode_elapsed.as_millis()
             );
             Ok(true)
         }
         SymbolAcceptResult::Rejected(reason) => {
             rqtrace!(
-                "receiver: entry {} parallel decode rejected reason={reason:?}",
-                dec.index
+                "receiver: entry {} parallel decode rejected reason={reason:?} decode_ms={}",
+                dec.index,
+                decode_elapsed.as_millis()
             );
             Ok(false)
         }
@@ -5811,8 +5856,12 @@ mod tests {
     #[test]
     fn parallel_decode_spawn_gate_preserves_default_fanout_with_cap() {
         assert!(
-            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY >= 16,
-            "cap should preserve the default ~13-block decode fan-out"
+            RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY <= RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
+            "entry decode width must not exceed the transfer hard cap"
+        );
+        assert_eq!(
+            RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD, 1,
+            "MATRIX-5 memory regression keeps RQ repair decode serialized at the heavy decoder boundary"
         );
         assert!(can_spawn_parallel_decode(0));
         assert!(can_spawn_parallel_decode(
