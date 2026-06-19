@@ -2857,7 +2857,7 @@ pub async fn send_path(
                 return Ok(SendReport {
                     transfer_id,
                     bytes_sent: total_bytes,
-                    files: u32::try_from(entries.len()).unwrap_or(u32::MAX),
+                    files: u32::try_from(logical_digests.len()).unwrap_or(u32::MAX),
                     symbols_sent,
                     feedback_rounds,
                     merkle_root_hex,
