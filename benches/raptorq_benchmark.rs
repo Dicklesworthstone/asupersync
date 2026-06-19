@@ -37,6 +37,8 @@ const TRACK_E_CRITERION_SAMPLE_SIZE: usize = 10;
 const TRACK_E_CRITERION_WARM_UP_SECONDS: f64 = 0.05;
 const TRACK_E_CRITERION_MEASUREMENT_SECONDS: f64 = 0.05;
 const TRACK_E_TAIL_CONFIDENCE_PROXY: &str = "criterion_interval_high_endpoint_proxy_p95p99";
+const IDMSVJ_PARALLEL_DECODE_SCHEMA_VERSION: &str = "idmsvj-receiver-parallel-decode-bench-v1";
+const IDMSVJ_PARALLEL_DECODE_REPRO_CMD: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features criterion-benches -- receiver_parallel_decode_blocks";
 
 // Track-G Performance Governance Integration
 const PERFORMANCE_BUDGETS_PATH: &str = "artifacts/raptorq_performance_budgets_v1.json";
@@ -1684,6 +1686,184 @@ fn bench_repair_campaign(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Receiver parallel decode benchmark
+// ============================================================================
+
+struct ReceiverParallelDecodeBlock {
+    index: usize,
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+    received: Vec<ReceivedSymbol>,
+    source: Vec<Vec<u8>>,
+}
+
+impl ReceiverParallelDecodeBlock {
+    fn decode_recovered_bytes(&self) -> usize {
+        let decoder = InactivationDecoder::new(self.k, self.symbol_size, self.seed);
+        let result = decoder
+            .decode(std::hint::black_box(&self.received))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "receiver parallel decode block {} failed: {:?}",
+                    self.index, err
+                )
+            });
+        result.source.iter().map(Vec::len).sum::<usize>()
+    }
+}
+
+struct ReceiverParallelDecodeCase {
+    label: &'static str,
+    block_count: usize,
+    k: usize,
+    symbol_size: usize,
+    loss_fraction: f64,
+    extra_repair: usize,
+    seed: u64,
+}
+
+fn build_receiver_parallel_decode_blocks(
+    case: &ReceiverParallelDecodeCase,
+) -> Vec<ReceiverParallelDecodeBlock> {
+    (0..case.block_count)
+        .map(|index| {
+            let seed = case
+                .seed
+                .wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let source = build_decode_source(case.k, case.symbol_size, seed);
+            let encoder = SystematicEncoder::new(&source, case.symbol_size, seed).unwrap();
+            let decoder = InactivationDecoder::new(case.k, case.symbol_size, seed);
+            let drop_indices = compute_drop_indices(case.k, case.loss_fraction, "uniform", seed);
+            let received = build_decode_received(
+                &source,
+                &encoder,
+                &decoder,
+                &drop_indices,
+                case.extra_repair,
+            );
+            let probe = decoder
+                .decode(&received)
+                .unwrap_or_else(|err| panic!("receiver decode bench precheck failed: {:?}", err));
+            assert_eq!(
+                probe.source, source,
+                "receiver decode bench precheck recovered non-identical source for block {index}"
+            );
+
+            ReceiverParallelDecodeBlock {
+                index,
+                k: case.k,
+                symbol_size: case.symbol_size,
+                seed,
+                received,
+                source,
+            }
+        })
+        .collect()
+}
+
+fn emit_receiver_parallel_decode_log(
+    case: &ReceiverParallelDecodeCase,
+    blocks: &[ReceiverParallelDecodeBlock],
+) {
+    let received_symbols: usize = blocks.iter().map(|block| block.received.len()).sum();
+    eprintln!(
+        "{{\"schema_version\":\"{}\",\"bead\":\"asupersync-idmsvj\",\"case\":\"{}\",\
+         \"block_count\":{},\"k\":{},\"symbol_size\":{},\"loss_fraction\":{:.3},\
+         \"extra_repair\":{},\"received_symbols\":{},\"recovered_bytes\":{},\
+         \"repro_command\":\"{}\"}}",
+        IDMSVJ_PARALLEL_DECODE_SCHEMA_VERSION,
+        case.label,
+        case.block_count,
+        case.k,
+        case.symbol_size,
+        case.loss_fraction,
+        case.extra_repair,
+        received_symbols,
+        blocks
+            .iter()
+            .map(|block| block.source.iter().map(Vec::len).sum::<usize>())
+            .sum::<usize>(),
+        IDMSVJ_PARALLEL_DECODE_REPRO_CMD,
+    );
+}
+
+fn decode_receiver_blocks_serial(blocks: &[ReceiverParallelDecodeBlock]) -> usize {
+    blocks
+        .iter()
+        .map(ReceiverParallelDecodeBlock::decode_recovered_bytes)
+        .sum()
+}
+
+fn decode_receiver_blocks_parallel(blocks: &[ReceiverParallelDecodeBlock]) -> usize {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = blocks
+            .iter()
+            .map(|block| scope.spawn(move || block.decode_recovered_bytes()))
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("receiver parallel decode worker panicked")
+            })
+            .sum()
+    })
+}
+
+fn bench_receiver_parallel_decode_blocks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("receiver_parallel_decode_blocks");
+    group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_millis(20));
+    group.measurement_time(std::time::Duration::from_millis(80));
+
+    let cases = [
+        ReceiverParallelDecodeCase {
+            label: "blocks4_k96_repair_heavy",
+            block_count: 4,
+            k: 96,
+            symbol_size: 1024,
+            loss_fraction: 0.75,
+            extra_repair: 4,
+            seed: 0x1D_5E_D0_04,
+        },
+        ReceiverParallelDecodeCase {
+            label: "blocks8_k96_repair_heavy",
+            block_count: 8,
+            k: 96,
+            symbol_size: 1024,
+            loss_fraction: 0.75,
+            extra_repair: 4,
+            seed: 0x1D_5E_D0_08,
+        },
+    ];
+
+    for case in &cases {
+        let blocks = build_receiver_parallel_decode_blocks(case);
+        emit_receiver_parallel_decode_log(case, &blocks);
+        let total_bytes = blocks
+            .iter()
+            .map(|block| block.source.iter().map(Vec::len).sum::<usize>())
+            .sum::<usize>();
+        group.throughput(Throughput::Bytes(total_bytes as u64));
+
+        group.bench_function(BenchmarkId::new("serial", case.label), |b| {
+            b.iter(|| std::hint::black_box(decode_receiver_blocks_serial(&blocks)));
+        });
+        group.bench_function(
+            BenchmarkId::new("parallel_scoped_threads", case.label),
+            |b| {
+                b.iter(|| std::hint::black_box(decode_receiver_blocks_parallel(&blocks)));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Criterion setup
 // ============================================================================
 
@@ -1993,6 +2173,7 @@ criterion_group!(
     bench_repair_campaign,
     bench_decoder_microbench,
     bench_decoder_dense_state,
+    bench_receiver_parallel_decode_blocks,
     bench_systematic_encoder_hot_paths,
 );
 
