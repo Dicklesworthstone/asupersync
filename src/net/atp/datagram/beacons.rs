@@ -20,7 +20,12 @@ pub const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Default missed probe budget before a path is treated as liveness-expired.
-pub const DEFAULT_MAX_MISSED_PROBES: u8 = 3;
+///
+/// RQ sprays can legitimately keep the receiver CPU-bound for minutes on harsh
+/// links while data is still arriving and will later commit. Keep the default
+/// conservative enough for those long lossy sprays; tests can still opt into a
+/// smaller budget with [`BeaconScheduler::with_missed_probe_budget`].
+pub const DEFAULT_MAX_MISSED_PROBES: u8 = 48;
 
 /// Path quality beacon payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1209,6 +1214,48 @@ mod tests {
         assert_eq!(scheduler.latest_rtt(), Some(Duration::from_millis(75)));
         assert_eq!(scheduler.missed_probes(), 0);
         assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Active);
+    }
+
+    #[test]
+    fn test_beacon_scheduler_default_budget_tolerates_long_lossy_rq_spray() {
+        let now = Instant::now();
+        let mut scheduler = BeaconScheduler::new(9, now);
+
+        let first = scheduler
+            .next_action(now, BeaconMeasurement::empty())
+            .expect("initial probe is due");
+        assert_eq!(first.beacon.beacon_type, BeaconType::Probe);
+        assert_eq!(first.missed_probes, 0);
+        assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Active);
+
+        let tolerated_silence =
+            DEFAULT_PROBE_INTERVAL * u32::from(DEFAULT_MAX_MISSED_PROBES.saturating_sub(1));
+        assert!(
+            tolerated_silence >= Duration::from_secs(180),
+            "MATRIX-1 50M/broken sprays ran about 172-185s before the old liveness trip"
+        );
+
+        for missed in 1..DEFAULT_MAX_MISSED_PROBES {
+            let at = now + DEFAULT_PROBE_INTERVAL * u32::from(missed);
+            let action = scheduler
+                .next_action(at, BeaconMeasurement::empty())
+                .expect("replacement probe remains due during long spray");
+            assert_eq!(action.beacon.beacon_type, BeaconType::Probe);
+            assert_eq!(action.missed_probes, missed);
+            assert_eq!(scheduler.missed_probes(), missed);
+            assert_eq!(scheduler.peer_health(), BeaconPeerHealth::Suspect);
+            assert!(
+                !scheduler.peer_liveness_expired(),
+                "default liveness must not fail before the full missed-probe budget"
+            );
+        }
+
+        let expired_at = now + DEFAULT_PROBE_INTERVAL * u32::from(DEFAULT_MAX_MISSED_PROBES);
+        let expired = scheduler
+            .next_action(expired_at, BeaconMeasurement::empty())
+            .expect("final missed probe schedules one more replacement probe");
+        assert_eq!(expired.missed_probes, DEFAULT_MAX_MISSED_PROBES);
+        assert!(scheduler.peer_liveness_expired());
     }
 
     #[test]
