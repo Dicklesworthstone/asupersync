@@ -141,6 +141,16 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         exempt: true,
         exemption_reason: Some("Debug server is intentionally outside runtime"),
     },
+    AmbientFinding {
+        file: "net/atp/transport_common/metadata.rs",
+        line: 924,
+        evidence_pattern: "std::fs::File::open",
+        category: AmbientCategory::Io,
+        severity: Severity::Low,
+        description: "Blocking-pool file open for applying committed entry timestamps",
+        exempt: false,
+        exemption_reason: None,
+    },
 ];
 
 /// Count findings by severity.
@@ -1470,7 +1480,7 @@ fn test_function() {
     /// and the release-prep dependency/formatting sweep.
     /// Bump this ONLY after documenting why the new production usage is
     /// intentional, or lower it when production surfaces move behind capabilities.
-    const AMBIENT_VIOLATION_CEILING: usize = 582;
+    const AMBIENT_VIOLATION_CEILING: usize = 583;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

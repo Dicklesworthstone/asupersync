@@ -865,13 +865,14 @@ pub async fn inode_key_if_regular(_abs_path: &Path) -> Result<Option<(u64, u64)>
     Ok(None)
 }
 
-/// Apply captured metadata to a committed regular file at `out_path`.
+/// Apply captured metadata to a committed filesystem entry at `out_path`.
 ///
 /// Applies in a safe order — times, then xattrs, then ownership, then mode last
 /// — so a restrictive mode (e.g. `0o444`) does not block the earlier steps.
 /// Ownership failures (typically `EPERM` without privilege) and unsupported
-/// xattrs are recorded as skipped, not fatal. Symlink entries are created by the
-/// caller's commit step, not here.
+/// xattrs are recorded as skipped, not fatal. Open-based metadata operations are
+/// skipped for special files such as FIFOs, where opening the path can block.
+/// Symlink entries are created by the caller's commit step, not here.
 ///
 /// # Errors
 ///
@@ -894,7 +895,9 @@ pub async fn apply_entry_metadata(
         (Some(u), Some(g)) => Some((u, g)),
         _ => None,
     };
-    let xattrs = (!meta.xattrs.is_empty()).then(|| meta.xattrs.clone());
+    let special_file = meta.file_kind.is_special();
+    let xattrs = (!meta.xattrs.is_empty() && !special_file).then(|| meta.xattrs.clone());
+    let open_mtime_secs = (!special_file).then_some(mtime_secs).flatten();
 
     type BlockingMetadataApply = (
         Option<Result<(), String>>,
@@ -903,7 +906,7 @@ pub async fn apply_entry_metadata(
     );
 
     let blocking: BlockingMetadataApply = crate::runtime::spawn_blocking(move || {
-        let time_res = mtime_secs.map(|secs| {
+        let time_res = open_mtime_secs.map(|secs| {
             let secs_u64 =
                 u64::try_from(secs).map_err(|_| "pre-epoch mtime not representable".to_string())?;
             // `secs`/`mtime_nanos` arrive off-wire and are untrusted. Normalise
@@ -943,6 +946,12 @@ pub async fn apply_entry_metadata(
         Some(Err(e)) => report.mark_skipped("mtime", e),
         None => {}
     }
+    if special_file && meta.mtime_unix_secs.is_some() {
+        report.mark_skipped(
+            "mtime",
+            "open-based timestamp apply skipped for special file".to_string(),
+        );
+    }
     if let Some(results) = blocking.1 {
         let mut any_applied = false;
         for (name, result) in results {
@@ -954,6 +963,9 @@ pub async fn apply_entry_metadata(
         if any_applied {
             report.mark_applied("xattr");
         }
+    }
+    if special_file && !meta.xattrs.is_empty() {
+        report.mark_skipped("xattr", "xattr apply skipped for special file".to_string());
     }
     match blocking.2 {
         Some(Ok(())) => report.mark_applied("owner"),
@@ -1000,7 +1012,7 @@ pub async fn apply_entry_metadata(
 /// Recreate a FIFO (named pipe) at `out_path` with permission `mode`.
 ///
 /// Uses `mkfifo` then `chmod` for the exact mode — neither opens the FIFO, so
-/// this never blocks waiting for a peer (unlike `File::open` on a FIFO). Only
+/// this never blocks waiting for a peer. Only
 /// FIFOs are recreated; sockets and device nodes are the caller's skip-and-log
 /// responsibility (sockets are runtime objects, device nodes need privilege).
 ///
