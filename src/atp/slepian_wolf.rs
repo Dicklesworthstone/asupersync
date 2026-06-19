@@ -10,7 +10,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::atp::delta::{ContentAddressedChunkStore, PersistentChunkManifest};
+use crate::atp::delta::{
+    CasChunkRef, ContentAddressedChunkStore, DeltaResyncPlan, PersistentChunkManifest,
+};
 use crate::raptorq::gf256::Gf256;
 
 /// Schema marker for the first B-8.11 syndrome foundation.
@@ -203,6 +205,16 @@ pub struct RatelessSyndrome {
 }
 
 impl RatelessSyndrome {
+    /// Wire bytes for syndrome values when taps are derived from `(seed, id)`.
+    ///
+    /// The in-memory frame keeps taps for deterministic tests and local decode,
+    /// but the sender does not need to serialize them: row ids are contiguous
+    /// and coefficients are reproducible from the frame seed.
+    #[must_use]
+    pub fn encoded_value_bytes(&self) -> usize {
+        self.symbols.len()
+    }
+
     /// Number of non-zero syndrome values in this frame.
     #[must_use]
     pub fn syndrome_weight(&self) -> usize {
@@ -239,6 +251,53 @@ pub struct BpDecodeResult {
     pub bytes: Vec<u8>,
     /// Convergence report.
     pub report: BpDecodeReport,
+}
+
+/// Sidecar-free syndrome payload for one sender chunk missing at the receiver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingChunkSyndrome {
+    /// Sender chunk represented by this syndrome frame.
+    pub chunk: CasChunkRef,
+    /// Number of source bytes in the sender chunk.
+    pub source_symbols: usize,
+    /// Receiver side-information bytes assumed by this first slice.
+    pub side_info_symbols: usize,
+    /// Initial contiguous syndrome rows a receiver should try before pulling
+    /// more rateless rows.
+    pub initial_symbols: usize,
+    /// Deterministic syndrome frame.
+    pub frame: RatelessSyndrome,
+}
+
+impl MissingChunkSyndrome {
+    /// Wire bytes for this frame's syndrome values.
+    #[must_use]
+    pub fn encoded_value_bytes(&self) -> usize {
+        self.frame.encoded_value_bytes()
+    }
+}
+
+/// Sender-side Slepian-Wolf package that does not require receiver signatures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarFreeSyndromePlan {
+    /// Stable schema marker.
+    pub schema: &'static str,
+    /// Per-missing-chunk syndrome frames.
+    pub chunks: Vec<MissingChunkSyndrome>,
+    /// Actual syndrome value bytes emitted by `chunks`.
+    pub payload_bytes: u64,
+    /// Whole missing chunk bytes represented before syndrome coding.
+    pub whole_chunk_bytes: u64,
+    /// Receiver sidecar/signature bytes required by this package.
+    pub receiver_sidecar_bytes: u64,
+}
+
+impl SidecarFreeSyndromePlan {
+    /// This package can be sent without receiver-side subchunk signatures.
+    #[must_use]
+    pub const fn is_sidecar_free(&self) -> bool {
+        self.receiver_sidecar_bytes == 0
+    }
 }
 
 /// B-8.11 deterministic foundation errors.
@@ -279,6 +338,8 @@ pub enum SlepianWolfError {
         source_symbols: usize,
         used_symbols: usize,
     },
+    /// Syndrome payload accounting overflowed.
+    SyndromePayloadSizeOverflow,
 }
 
 impl fmt::Display for SlepianWolfError {
@@ -334,6 +395,9 @@ impl fmt::Display for SlepianWolfError {
                 f,
                 "BP decode stalled after {used_symbols} syndrome rows: {known_symbols}/{source_symbols} symbols known"
             ),
+            Self::SyndromePayloadSizeOverflow => {
+                f.write_str("Slepian-Wolf syndrome payload size overflowed")
+            }
         }
     }
 }
@@ -463,6 +527,59 @@ pub fn encode_rateless_syndrome(
     })
 }
 
+/// Encode missing sender chunks as sidecar-free Slepian-Wolf syndrome frames.
+///
+/// This is the non-interactive append-tail lever: for chunks absent from the
+/// receiver manifest/CAS, the sender can emit systematic syndrome values derived
+/// only from its local CAS. The receiver needs no subchunk signature sidecar; it
+/// decodes with every byte marked uncertain and verifies the final manifest.
+pub fn encode_missing_chunk_syndrome_plan(
+    base_plan: &DeltaResyncPlan,
+    sender_store: &ContentAddressedChunkStore,
+    seed: u64,
+    rateless_margin_symbols: usize,
+) -> Result<SidecarFreeSyndromePlan, SlepianWolfError> {
+    let mut chunks = Vec::with_capacity(base_plan.missing_chunks.len());
+    let mut payload_bytes = 0u64;
+
+    for chunk in &base_plan.missing_chunks {
+        let payload = checked_chunk_payload(
+            sender_store,
+            &chunk.content_id,
+            chunk.index,
+            chunk.size_bytes,
+            ChunkSide::Sender,
+        )?;
+        let shape = LdpcShape::new(payload.len(), 0, 1)?;
+        let config = RatelessLdpcConfig::foundation(shape, syndrome_chunk_seed(seed, chunk))?;
+        let initial_symbols = shape.design_syndrome_symbols();
+        let symbol_count = initial_symbols
+            .checked_add(rateless_margin_symbols)
+            .ok_or(SlepianWolfError::SyndromePayloadSizeOverflow)?;
+        let frame = encode_rateless_syndrome(payload, config, symbol_count)?;
+        let encoded_value_bytes = u64::try_from(frame.encoded_value_bytes())
+            .map_err(|_| SlepianWolfError::SyndromePayloadSizeOverflow)?;
+        payload_bytes = payload_bytes
+            .checked_add(encoded_value_bytes)
+            .ok_or(SlepianWolfError::SyndromePayloadSizeOverflow)?;
+        chunks.push(MissingChunkSyndrome {
+            chunk: chunk.clone(),
+            source_symbols: payload.len(),
+            side_info_symbols: 0,
+            initial_symbols,
+            frame,
+        });
+    }
+
+    Ok(SidecarFreeSyndromePlan {
+        schema: ATP_SLEPIAN_WOLF_SYNDROME_SCHEMA,
+        chunks,
+        payload_bytes,
+        whole_chunk_bytes: base_plan.missing_bytes,
+        receiver_sidecar_bytes: 0,
+    })
+}
+
 /// Decode a rateless syndrome, pulling more rows when BP stalls.
 pub fn decode_with_side_information(
     frame: &RatelessSyndrome,
@@ -505,6 +622,22 @@ pub fn decode_with_side_information(
         stalled_windows += 1;
         used_symbols += 1;
     }
+}
+
+/// Decode a missing-chunk syndrome with no receiver side information.
+pub fn decode_missing_chunk_syndrome(
+    frame: &RatelessSyndrome,
+    initial_symbols: usize,
+) -> Result<BpDecodeResult, SlepianWolfError> {
+    let old_side_info = vec![0u8; frame.shape.n];
+    let uncertain_indices = (0..frame.shape.n).collect::<Vec<_>>();
+    decode_with_side_information(frame, &old_side_info, &uncertain_indices, initial_symbols)
+}
+
+fn syndrome_chunk_seed(seed: u64, chunk: &CasChunkRef) -> u64 {
+    seed ^ u64::from(chunk.index).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ chunk.byte_offset.rotate_left(17)
+        ^ chunk.size_bytes.rotate_left(31)
 }
 
 fn checked_chunk_payload<'a>(
@@ -684,7 +817,10 @@ fn splitmix64(state: &mut u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::delta::{ContentAddressedChunkStore, PersistentChunkManifest};
+    use crate::atp::delta::{
+        ContentAddressedChunkStore, PersistentChunkManifest,
+        plan_incremental_resync_from_verified_receiver_manifest,
+    };
 
     #[test]
     fn localize_chunks_then_rateless_syndrome_decode_round_trips() {
@@ -743,6 +879,51 @@ mod tests {
         assert!(decoded.report.stalled_windows > 0);
         assert_eq!(decoded.report.known_symbols, region.source_symbols());
         assert!(decoded.report.syndrome_weight > 0);
+    }
+
+    #[test]
+    fn sidecar_free_missing_append_syndrome_beats_rsync_target() {
+        let base = vec![0x31; 5 * 1024 * 1024];
+        let append = (0..(64 * 1024))
+            .map(|idx| ((idx * 19 + idx / 7 + 3) % 251) as u8)
+            .collect::<Vec<_>>();
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender_report = sender_store
+            .ingest_ordered_chunks([base.as_slice(), append.as_slice()])
+            .expect("sender ingest");
+        let receiver_report = receiver_store
+            .ingest_ordered_chunks([base.as_slice()])
+            .expect("receiver ingest");
+        let sender_manifest =
+            PersistentChunkManifest::new("tree", sender_report.chunks).expect("sender manifest");
+        let receiver_manifest = PersistentChunkManifest::new("tree", receiver_report.chunks)
+            .expect("receiver manifest");
+
+        let delta_plan = plan_incremental_resync_from_verified_receiver_manifest(
+            &sender_manifest,
+            Some(&receiver_manifest),
+        );
+        assert_eq!(delta_plan.missing_chunks.len(), 1);
+        assert_eq!(delta_plan.missing_bytes, append.len() as u64);
+
+        let syndrome_plan =
+            encode_missing_chunk_syndrome_plan(&delta_plan, &sender_store, 0x51de_cafe, 0)
+                .expect("syndrome plan");
+
+        assert!(syndrome_plan.is_sidecar_free());
+        assert_eq!(syndrome_plan.payload_bytes, append.len() as u64);
+        assert_eq!(syndrome_plan.whole_chunk_bytes, append.len() as u64);
+        assert!(syndrome_plan.payload_bytes < 96 * 1024);
+
+        let chunk = &syndrome_plan.chunks[0];
+        assert_eq!(chunk.side_info_symbols, 0);
+        assert_eq!(chunk.initial_symbols, append.len());
+        assert_eq!(chunk.encoded_value_bytes(), append.len());
+        let decoded = decode_missing_chunk_syndrome(&chunk.frame, chunk.initial_symbols)
+            .expect("missing chunk decode");
+        assert_eq!(decoded.bytes, append);
     }
 
     #[test]
