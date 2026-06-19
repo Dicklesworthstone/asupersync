@@ -1077,7 +1077,7 @@ impl LossDetectionResult {
             self.lost_packet_count.min(sent_units) as f64 / sent_units as f64
         };
 
-        let mut recommendation_pressure = 0.0_f64;
+        let mut loss_pressure = observed_pressure;
         let mut repair_rate_hint = None;
         let mut cwnd_reduction_factor = None;
         let mut pacing_rate_hint = None;
@@ -1090,31 +1090,31 @@ impl LossDetectionResult {
                     cwnd_reduction_factor = Some(
                         cwnd_reduction_factor.map_or(factor, |current: f64| current.min(factor)),
                     );
-                    recommendation_pressure = recommendation_pressure.max(1.0 - factor);
                 }
                 LossRecommendation::IncreaseReorderingThreshold { .. } => {}
                 LossRecommendation::EnablePacing { rate } => {
                     pacing_rate_hint =
                         Some(pacing_rate_hint.map_or(*rate, |current: u64| current.min(*rate)));
-                    recommendation_pressure = recommendation_pressure.max(0.05);
                 }
                 LossRecommendation::SwitchCongestionControl { algorithm } => {
                     prefer_bbr |= algorithm.eq_ignore_ascii_case("bbr");
-                    recommendation_pressure = recommendation_pressure.max(0.20);
                 }
                 LossRecommendation::EnableFec { rate } => {
-                    let rate = finite_unit(*rate);
-                    repair_rate_hint =
-                        Some(repair_rate_hint.map_or(rate, |current: f64| current.max(rate)));
-                    recommendation_pressure = recommendation_pressure.max(rate);
+                    if let Some(rate) = bounded_repair_rate(*rate) {
+                        repair_rate_hint =
+                            Some(repair_rate_hint.map_or(rate, |current: f64| current.max(rate)));
+                        loss_pressure = loss_pressure.max(rate);
+                    }
                 }
             }
         }
 
-        let loss_pressure = observed_pressure.max(recommendation_pressure);
         let confidence = finite_unit(self.confidence);
-        let repair_rate_hint = repair_rate_hint
-            .or_else(|| (loss_pressure > 0.0).then_some((loss_pressure * 1.5).clamp(0.05, 0.30)));
+        let repair_rate_hint = repair_rate_hint.or_else(|| {
+            (observed_pressure > 0.0)
+                .then(|| bounded_repair_rate(observed_pressure * 1.5))
+                .flatten()
+        });
 
         TransferLossSignal {
             loss_pressure: finite_unit(loss_pressure),
@@ -1132,6 +1132,14 @@ fn finite_unit(value: f64) -> f64 {
         value.clamp(0.0, 1.0)
     } else {
         0.0
+    }
+}
+
+fn bounded_repair_rate(rate: f64) -> Option<f64> {
+    if rate.is_finite() && rate > 0.0 {
+        Some(rate.clamp(0.05, 0.30))
+    } else {
+        None
     }
 }
 
@@ -1271,15 +1279,66 @@ mod tests {
         assert_eq!(result.lost_packet_count, 10);
         assert_eq!(result.lost_bytes, 12_000);
         let signal = result.transfer_signal(100);
-        assert_eq!(signal.loss_pressure, 0.5);
+        assert_eq!(signal.loss_pressure, 0.1);
         assert_eq!(signal.cwnd_reduction_factor, Some(0.5));
-        assert_eq!(signal.repair_rate_hint, Some(0.3));
+        assert!(
+            signal
+                .repair_rate_hint
+                .is_some_and(|rate| (rate - 0.15).abs() < f64::EPSILON)
+        );
         assert!(result.recommendations.iter().any(|recommendation| {
             matches!(
                 recommendation,
                 LossRecommendation::ReduceCongestionWindow { .. }
             )
         }));
+    }
+
+    #[test]
+    fn transfer_signal_keeps_congestion_hints_out_of_fec_pressure() {
+        let result = LossDetectionResult {
+            lost_packets: Vec::new(),
+            lost_packet_count: 0,
+            lost_bytes: 0,
+            detection_method: LossDetectionMethod::PacketThreshold,
+            confidence: 0.9,
+            recommendations: vec![
+                LossRecommendation::ReduceCongestionWindow { factor: 0.5 },
+                LossRecommendation::EnablePacing { rate: 75_000 },
+                LossRecommendation::SwitchCongestionControl {
+                    algorithm: "bbr".to_string(),
+                },
+            ],
+        };
+
+        let signal = result.transfer_signal(100);
+
+        assert_eq!(signal.loss_pressure, 0.0);
+        assert_eq!(signal.repair_rate_hint, None);
+        assert_eq!(signal.cwnd_reduction_factor, Some(0.5));
+        assert_eq!(signal.pacing_rate_hint, Some(75_000));
+        assert!(signal.prefer_bbr);
+    }
+
+    #[test]
+    fn transfer_signal_bounds_explicit_fec_pressure() {
+        let result = LossDetectionResult {
+            lost_packets: Vec::new(),
+            lost_packet_count: 0,
+            lost_bytes: 0,
+            detection_method: LossDetectionMethod::PacketThreshold,
+            confidence: 1.0,
+            recommendations: vec![
+                LossRecommendation::EnableFec { rate: 0.01 },
+                LossRecommendation::EnableFec { rate: 0.9 },
+                LossRecommendation::EnableFec { rate: f64::NAN },
+            ],
+        };
+
+        let signal = result.transfer_signal(0);
+
+        assert_eq!(signal.loss_pressure, 0.3);
+        assert_eq!(signal.repair_rate_hint, Some(0.3));
     }
 
     #[test]
