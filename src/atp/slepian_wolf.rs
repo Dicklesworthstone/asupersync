@@ -945,6 +945,53 @@ mod tests {
         ContentAddressedChunkStore, PersistentChunkManifest,
         plan_incremental_resync_from_verified_receiver_manifest,
     };
+    use proptest::prelude::*;
+
+    const SMALL_APPEND_LIKE_DELTA_BYTES: usize = 4 * 1024;
+    const COMPACT_RECEIVER_SIDECAR_BASELINE_BYTES: usize = 14 * 1024;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct SyndromeSidecarMeasurement {
+        append_delta_bytes: usize,
+        syndrome_value_bytes: usize,
+        receiver_sidecar_baseline_bytes: usize,
+    }
+
+    impl SyndromeSidecarMeasurement {
+        fn syndrome_minus_sidecar_bytes(self) -> usize {
+            self.syndrome_value_bytes
+                .saturating_sub(self.receiver_sidecar_baseline_bytes)
+        }
+
+        fn sidecar_minus_syndrome_bytes(self) -> usize {
+            self.receiver_sidecar_baseline_bytes
+                .saturating_sub(self.syndrome_value_bytes)
+        }
+
+        fn syndrome_to_sidecar_ratio_milli(self) -> usize {
+            self.syndrome_value_bytes * 1000 / self.receiver_sidecar_baseline_bytes
+        }
+    }
+
+    fn deterministic_append_payload(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|idx| ((idx * 19 + idx / 7 + 3) % 251) as u8)
+            .collect()
+    }
+
+    fn small_append_like_syndrome_sidecar_measurement() -> SyndromeSidecarMeasurement {
+        let append = deterministic_append_payload(SMALL_APPEND_LIKE_DELTA_BYTES);
+        let shape = LdpcShape::new(append.len(), 0, 1).expect("shape");
+        let config = RatelessLdpcConfig::foundation(shape, 0x51de_cafe).expect("config");
+        let frame =
+            encode_rateless_syndrome(&append, config, shape.n).expect("small append syndrome");
+
+        SyndromeSidecarMeasurement {
+            append_delta_bytes: append.len(),
+            syndrome_value_bytes: frame.encoded_value_bytes(),
+            receiver_sidecar_baseline_bytes: COMPACT_RECEIVER_SIDECAR_BASELINE_BYTES,
+        }
+    }
 
     #[test]
     fn localize_chunks_then_rateless_syndrome_decode_round_trips() {
@@ -1041,9 +1088,7 @@ mod tests {
     #[test]
     fn sidecar_free_missing_append_syndrome_beats_rsync_target() {
         let base = vec![0x31; 5 * 1024 * 1024];
-        let append = (0..(64 * 1024))
-            .map(|idx| ((idx * 19 + idx / 7 + 3) % 251) as u8)
-            .collect::<Vec<_>>();
+        let append = deterministic_append_payload(64 * 1024);
 
         let mut sender_store = ContentAddressedChunkStore::new();
         let mut receiver_store = ContentAddressedChunkStore::new();
@@ -1084,6 +1129,24 @@ mod tests {
     }
 
     #[test]
+    fn small_append_like_syndrome_measurement_beats_compact_sidecar_baseline() {
+        let measurement = small_append_like_syndrome_sidecar_measurement();
+
+        assert_eq!(
+            measurement.append_delta_bytes,
+            SMALL_APPEND_LIKE_DELTA_BYTES
+        );
+        assert_eq!(measurement.syndrome_value_bytes, 4_096);
+        assert_eq!(
+            measurement.receiver_sidecar_baseline_bytes,
+            COMPACT_RECEIVER_SIDECAR_BASELINE_BYTES
+        );
+        assert_eq!(measurement.syndrome_minus_sidecar_bytes(), 0);
+        assert_eq!(measurement.sidecar_minus_syndrome_bytes(), 10_240);
+        assert_eq!(measurement.syndrome_to_sidecar_ratio_milli(), 285);
+    }
+
+    #[test]
     fn old_file_side_info_decode_reports_stall_when_rows_are_exhausted() {
         let source = b"wxyz";
         let old = b"abcd";
@@ -1121,5 +1184,51 @@ mod tests {
                 used_symbols: 2,
             }
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 64,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn bp_decode_old_file_side_info_converges_for_random_sparse_edits(
+            cells in proptest::collection::vec((any::<u8>(), any::<u8>(), any::<bool>()), 1..65),
+            seed in any::<u64>(),
+        ) {
+            let old = cells.iter().map(|(byte, _, _)| *byte).collect::<Vec<_>>();
+            let new = cells
+                .iter()
+                .map(|(old, raw_delta, should_change)| {
+                    if *should_change {
+                        *old ^ (*raw_delta | 1)
+                    } else {
+                        *old
+                    }
+                })
+                .collect::<Vec<_>>();
+            let changed_symbols = old
+                .iter()
+                .zip(new.iter())
+                .filter(|(old, new)| old != new)
+                .count();
+            let shape = LdpcShape::new(new.len(), new.len() - changed_symbols, 3).expect("shape");
+            let config = RatelessLdpcConfig::foundation(shape, seed).expect("config");
+            let frame = encode_rateless_syndrome(&new, config, shape.n).expect("syndrome");
+
+            let decoded =
+                decode_with_old_file_side_information(&frame, &old, shape.design_syndrome_symbols())
+                    .expect("old-file side-info BP decode");
+
+            prop_assert_eq!(decoded.bytes, new);
+            prop_assert!(decoded.report.converged);
+            prop_assert_eq!(decoded.report.known_symbols, shape.n);
+            prop_assert!(decoded.report.used_symbols <= shape.n);
+            prop_assert_eq!(
+                decoded.report.pulled_symbols,
+                decoded.report.used_symbols.saturating_sub(shape.design_syndrome_symbols())
+            );
+        }
     }
 }
