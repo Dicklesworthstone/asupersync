@@ -6,3 +6,8 @@
 # can vanish while rch is syncing the tree to a worker.
 .fastembed_cache/
 .*-smoke-artifacts/
+
+# ATP benchmark matrix outputs are generated evidence roots. The checked source
+# of truth is docs/atp_bench_matrix_spec.md plus scripts/atp_bench/*; local
+# run directories can be multi-GB and must not be part of remote proof sync.
+artifacts/atp_bench_matrix/
