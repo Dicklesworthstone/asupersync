@@ -332,7 +332,7 @@ fn tailscale_provider_is_optional_ranked_and_redacted_in_path_doctor() {
     assert_eq!(selected.endpoint_scope, "tailscale-ipv4:41641");
     assert_eq!(
         selected.evidence,
-        "tailscale_fake_provider_candidate_validated"
+        "tailscale_lab_provider_candidate_validated"
     );
     assert!(
         doctor
