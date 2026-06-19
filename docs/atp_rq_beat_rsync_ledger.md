@@ -1257,3 +1257,15 @@ FINDINGS:
 
 ## MATRIX-3 (2026-06-19) — ENCRYPTED tier (atp-quic-tls13) NON-FUNCTIONAL: 32/32 atp-quic cells fail instantly (status=error, sha_ok=false)
 Run `artifacts/atp_bench_matrix/20260619T200606Z/` (5M,tree_small × perfect,good,bad,broken × encrypted). atp-quic-tls13: **32/32 rows status=error, sha_ok=false, wall ~0.11s (instant fail, no data), peak_rss ~6MB, streams=1**. Paired rsync-ssh-aes128gcm: 32/32 sha+status ok. So the QUIC/TLS-1.3 ATP data-plane is NOT usable from the atp CLI bench path — it errors out immediately on every cell/regime. The encrypted tier is therefore UNMEASURABLE for atp until fixed (bead z0v7ri). NO-CLAIM: no encrypted-tier atp result exists; do not infer anything about atp-over-QUIC perf. The working secure tier is AUTH (HMAC-over-RaptorQ/UDP, MATRIX-2), where atp wins most cells. Action: bead z0v7ri (root-cause atp-quic-tls13 CLI transfer fail) — relates to QUIC.1 (port winning rq levers to transport_quic). The atp secure-transfer story currently rests entirely on the auth/HMAC tier.
+
+## MATRIX-4 (2026-06-19) — 50M LEVER PAYOFF re-bench: max-block-size + nsbub4 turn 50M from "loses-everywhere + crashes" into parity/near-parity + 4× less clean memory + zero failures
+Re-ran 50M nocrypto on a fresh atp 0.3.5 @dea99ff41 (carries hs9ztp `--max-block-size`/auto-bound-block-size + nsbub4 beacon-budget/credit-sha-clean-dirty-exit + QUIC-side parallel decode). Run `artifacts/atp_bench_matrix/20260619T205327Z/`, 24 reps, ALL cells sha+status ok (MATRIX-1 had a 3-rep hard failure). Before = MATRIX-1.
+
+| 50M cell | MATRIX-1 wall ATP/rsync (atp peak RSS) | MATRIX-4 wall ATP/rsync (atp peak RSS) | delta |
+|---|---|---|---|
+| perfect | 3.55× (213 MB) | 3.06× (49 MB, atp 3.75s) | mem 4.3× better; clean raw-speed gap remains |
+| good (0.1%/200mbit) | 1.21× (212 MB) | **1.006× = PARITY** (48 MB, atp 3.96s) | now ties rsync + mem 4.4× |
+| bad (2%/50mbit) | 4.89× (483 MB) | 3.88× (475 MB, atp 58.7s) | improved but STILL WORST cell |
+| broken (10%/10mbit) | **EXIT 144 (hard fail)** | **1.118× = near-parity** (471 MB, atp 121s vs rsync 108s) | converges now + nearly ties |
+
+WINS: (1) max-block-size cut CLEAN-cell peak RSS ~4.3× (213→49 MB at perfect/good). (2) 50M/good → PARITY (1.21×→1.006×). (3) nsbub4 CLEARED the 50M/broken exit-144 → it now completes status=ok sha-clean and loses only ~1.12× (rsync is also slow at 10% loss). (4) Zero failures (was 1). NO-CLAIM/OPEN: (a) 50M/bad (2% loss, 4 repair rounds) still 3.88× (58.7s) with 475 MB repair-path RSS — the rq FEC-REPAIR decode loop is still serial + repair-symbol memory unbounded (the parallel-decode that landed was QUIC-side). This is the #1 remaining big-file lever. (b) 50M/perfect still 3.06× — clean-link raw-speed gap (atp pays decode even at 0 loss; needs faster decode / GSO send). RETRY-COND: after the rq-repair decode is parallelized + repair memory bounded → re-bench 50M/bad (target <1.5×, RSS <100 MB) and 500M.
