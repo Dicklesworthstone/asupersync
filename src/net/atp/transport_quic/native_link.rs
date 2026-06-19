@@ -50,6 +50,7 @@
 //! symbol loss for tests is injected before a symbol is sprayed
 //! ([`QuicConfig::debug_drop_one_in`]), so the control channel stays intact.
 
+use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -341,6 +342,7 @@ pub struct QuicLink {
     max_app_payload: usize,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
+    pending_control_frames: VecDeque<Frame>,
     udp_packets_received: u64,
     one_rtt_packets_ingested: u64,
     non_one_rtt_packets_dropped: u64,
@@ -481,10 +483,14 @@ impl QuicLink {
         while let Some(frame) = control.try_recv(cx, &mut self.conn)? {
             match frame.frame_type() {
                 FrameType::KeepAlive => self.mark_peer_activity(),
+                FrameType::ObjectRequest | FrameType::Proof => {
+                    self.mark_peer_activity();
+                    self.pending_control_frames.push_back(frame);
+                }
                 got => {
                     return Err(QuicTransportError::Unexpected {
                         got,
-                        expected: "KeepAlive while spraying",
+                        expected: "KeepAlive | ObjectRequest | Proof while spraying",
                     });
                 }
             }
@@ -785,6 +791,9 @@ impl QuicLink {
     ) -> Result<Frame, QuicTransportError> {
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            if let Some(frame) = self.pending_control_frames.pop_front() {
+                return Ok(frame);
+            }
             if let Some(frame) = control.try_recv(cx, &mut self.conn)? {
                 return Ok(frame);
             }
@@ -894,6 +903,7 @@ fn link_from_handshake(
         max_app_payload,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
+        pending_control_frames: VecDeque::new(),
         udp_packets_received: 0,
         one_rtt_packets_ingested: 0,
         non_one_rtt_packets_dropped: 0,
