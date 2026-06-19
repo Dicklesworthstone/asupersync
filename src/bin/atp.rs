@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, ExitCode, ExitStatus, Stdio};
 use std::sync::{
@@ -75,6 +75,10 @@ const DELTA_SUBCHUNK_DIR: &str = "subchunks";
 const DELTA_PACKAGE_PREFIX: &str = ".asupersync-atp-delta-package-";
 const DELTA_PACKAGE_FILE: &str = "delta-package.json";
 const DELTA_STATE_SCHEMA: &str = "asupersync.atp.cli-delta-state.v1";
+const DELTA_SUBCHUNK_SIGNATURE_REQUEST_SCHEMA: &str =
+    "asupersync.atp.cli-delta-subchunk-signature-request.v1";
+const DELTA_SUBCHUNK_SIGNATURE_RESPONSE_SCHEMA: &str =
+    "asupersync.atp.cli-delta-subchunk-signature-response.v1";
 const DELTA_PACKAGE_SCHEMA: &str = "asupersync.atp.cli-delta-package.v1";
 const DELTA_TREE_OBJECT_MAGIC: &[u8] = b"ASUP_ATP_CLI_DELTA_TREE_OBJECT_V1\0";
 const DELTA_TREE_OBJECT_CDC_WINDOW_BYTES: usize = 64;
@@ -1268,7 +1272,7 @@ struct DeltaCliState {
     object_sha256_hex: String,
     chunk_count: usize,
     logical_file_bytes: u64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     chunk_signatures: Vec<DeltaChunkSignatureState>,
 }
 
@@ -1289,6 +1293,24 @@ struct DeltaChunkSignatureState {
     content_id_hex: String,
     size_bytes: u64,
     signature: SubBlockSignature,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DeltaSubchunkSignatureRequest {
+    schema: String,
+    chunks: Vec<DeltaSubchunkSignatureRequestChunk>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DeltaSubchunkSignatureRequestChunk {
+    content_id_hex: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DeltaSubchunkSignatureResponse {
+    schema: String,
+    signatures: Vec<DeltaChunkSignatureState>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1372,7 +1394,7 @@ fn prepare_delta_ssh_send(
             return Ok(None);
         }
     };
-    prepare_delta_send_from_state(args, receiver_state)
+    prepare_delta_send_from_state(args, receiver_state, None)
 }
 
 fn prepare_direct_delta_send(
@@ -1409,12 +1431,13 @@ fn prepare_direct_delta_send(
             return Ok(None);
         }
     };
-    prepare_delta_send_from_state(args, receiver_state)
+    prepare_delta_send_from_state(args, receiver_state, Some(state_addr))
 }
 
 fn prepare_delta_send_from_state(
     args: &SendArgs,
     receiver_state: DeltaCliState,
+    lazy_signature_addr: Option<SocketAddr>,
 ) -> Result<Option<DeltaPreparedSend>, String> {
     let receiver_manifest = match receiver_state.manifest() {
         Ok(manifest) => manifest,
@@ -1464,8 +1487,14 @@ fn prepare_delta_send_from_state(
             Ok(Some(DeltaPreparedSend::AlreadyInSync(report)))
         }
         DeltaResyncMode::DeltaChunks => {
+            let receiver_signatures = receiver_subchunk_signatures_for_plan(
+                &plan,
+                &receiver_manifest,
+                &receiver_state,
+                lazy_signature_addr,
+            )?;
             let package =
-                create_delta_package(&snapshot, &plan, &receiver_manifest, &receiver_state)?;
+                create_delta_package(&snapshot, &plan, &receiver_manifest, &receiver_signatures)?;
             Ok(Some(DeltaPreparedSend::Package {
                 package_root: package.package_root,
                 plan,
@@ -1475,8 +1504,14 @@ fn prepare_delta_send_from_state(
         }
         DeltaResyncMode::FullObjectFallback => {
             if plan.fallback_reason == Some(asupersync::atp::delta::DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject) {
+                let receiver_signatures = receiver_subchunk_signatures_for_plan(
+                    &plan,
+                    &receiver_manifest,
+                    &receiver_state,
+                    lazy_signature_addr,
+                )?;
                 let package_build =
-                    build_delta_package(&snapshot, &plan, &receiver_manifest, &receiver_state)?;
+                    build_delta_package(&snapshot, &plan, &receiver_manifest, &receiver_signatures)?;
                 if package_build.payload_bytes < snapshot.manifest.total_size_bytes {
                     let mut subdelta_plan = plan.clone();
                     subdelta_plan.mode = DeltaResyncMode::DeltaChunks;
@@ -1549,6 +1584,58 @@ fn fetch_direct_delta_state(state_addr: SocketAddr) -> Result<Option<DeltaCliSta
         .map_err(|err| format!("parse direct receiver delta state: {err}"))
 }
 
+fn fetch_direct_subchunk_signatures(
+    state_addr: SocketAddr,
+    chunks: &[CasChunkRef],
+) -> Result<Vec<DeltaChunkSignatureState>, String> {
+    if chunks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stream = std::net::TcpStream::connect_timeout(&state_addr, Duration::from_millis(750))
+        .map_err(|err| format!("connect: {err}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|err| format!("set read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|err| format!("set write timeout: {err}"))?;
+
+    let request = DeltaSubchunkSignatureRequest {
+        schema: DELTA_SUBCHUNK_SIGNATURE_REQUEST_SCHEMA.to_string(),
+        chunks: chunks
+            .iter()
+            .map(|chunk| DeltaSubchunkSignatureRequestChunk {
+                content_id_hex: chunk.content_id.to_hex(),
+                size_bytes: chunk.size_bytes,
+            })
+            .collect(),
+    };
+    serde_json::to_writer(&mut stream, &request)
+        .map_err(|err| format!("write subchunk signature request: {err}"))?;
+    stream
+        .write_all(b"\n")
+        .and_then(|_| stream.flush())
+        .map_err(|err| format!("finish subchunk signature request: {err}"))?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|err| format!("shutdown subchunk signature request: {err}"))?;
+
+    let mut body = String::new();
+    stream
+        .read_to_string(&mut body)
+        .map_err(|err| format!("read subchunk signature response: {err}"))?;
+    let response: DeltaSubchunkSignatureResponse = serde_json::from_str(body.trim())
+        .map_err(|err| format!("parse subchunk signature response: {err}"))?;
+    if response.schema != DELTA_SUBCHUNK_SIGNATURE_RESPONSE_SCHEMA {
+        return Err(format!(
+            "unsupported subchunk signature response schema: {}",
+            response.schema
+        ));
+    }
+    Ok(response.signatures)
+}
+
 fn remote_delta_state_path(remote_path: &str) -> String {
     let base = remote_path.trim_end_matches('/');
     if base.is_empty() {
@@ -1562,9 +1649,9 @@ fn create_delta_package(
     snapshot: &DeltaSourceSnapshot,
     plan: &DeltaResyncPlan,
     receiver_manifest: &PersistentChunkManifest,
-    receiver_state: &DeltaCliState,
+    receiver_signatures: &[ReceiverSubchunkSignature],
 ) -> Result<DeltaPackageWrite, String> {
-    let package = build_delta_package(snapshot, plan, receiver_manifest, receiver_state)?;
+    let package = build_delta_package(snapshot, plan, receiver_manifest, receiver_signatures)?;
     write_delta_package(snapshot, &package)
 }
 
@@ -1572,13 +1659,11 @@ fn build_delta_package(
     snapshot: &DeltaSourceSnapshot,
     plan: &DeltaResyncPlan,
     receiver_manifest: &PersistentChunkManifest,
-    receiver_state: &DeltaCliState,
+    receiver_signatures: &[ReceiverSubchunkSignature],
 ) -> Result<DeltaPackageBuild, String> {
     let sender_store = delta_store_from_snapshot(snapshot)?;
-    let receiver_signatures =
-        receiver_subchunk_signatures_from_state(receiver_manifest, receiver_state);
     let send_plan =
-        build_delta_resync_send_plan(plan, &sender_store, receiver_manifest, &receiver_signatures)
+        build_delta_resync_send_plan(plan, &sender_store, receiver_manifest, receiver_signatures)
             .map_err(|err| format!("build delta send plan: {err}"))?;
 
     let mut whole_chunks = Vec::new();
@@ -1615,34 +1700,89 @@ fn build_delta_package(
     })
 }
 
-fn receiver_subchunk_signature<'a>(
-    receiver_state: &'a DeltaCliState,
-    chunk: &CasChunkRef,
-) -> Option<&'a SubBlockSignature> {
-    let content_id_hex = chunk.content_id.to_hex();
-    receiver_state
-        .chunk_signatures
-        .iter()
-        .find(|entry| {
-            entry.content_id_hex == content_id_hex && entry.size_bytes == chunk.size_bytes
-        })
-        .map(|entry| &entry.signature)
-}
-
-fn receiver_subchunk_signatures_from_state(
+fn receiver_subchunk_signatures_for_plan(
+    plan: &DeltaResyncPlan,
     receiver_manifest: &PersistentChunkManifest,
     receiver_state: &DeltaCliState,
+    lazy_signature_addr: Option<SocketAddr>,
+) -> Result<Vec<ReceiverSubchunkSignature>, String> {
+    let candidates = receiver_subchunk_signature_candidates(plan, receiver_manifest)?;
+    let mut signatures =
+        receiver_subchunk_signatures_from_states(&candidates, &receiver_state.chunk_signatures);
+    let mut signed_keys = signatures
+        .iter()
+        .map(|entry| (entry.chunk.content_id.to_hex(), entry.chunk.size_bytes))
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing_candidates = candidates
+        .iter()
+        .filter(|chunk| !signed_keys.contains(&(chunk.content_id.to_hex(), chunk.size_bytes)))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(addr) = lazy_signature_addr.filter(|_| !missing_candidates.is_empty()) {
+        match fetch_direct_subchunk_signatures(addr, &missing_candidates) {
+            Ok(lazy_states) => {
+                for signature in
+                    receiver_subchunk_signatures_from_states(&missing_candidates, &lazy_states)
+                {
+                    let key = (
+                        signature.chunk.content_id.to_hex(),
+                        signature.chunk.size_bytes,
+                    );
+                    if signed_keys.insert(key) {
+                        signatures.push(signature);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "[atp] delta planner: lazy receiver subchunk signatures unavailable ({err}); using whole changed chunks where needed"
+                );
+            }
+        }
+    }
+
+    Ok(signatures)
+}
+
+fn receiver_subchunk_signature_candidates(
+    plan: &DeltaResyncPlan,
+    receiver_manifest: &PersistentChunkManifest,
+) -> Result<Vec<CasChunkRef>, String> {
+    let mut candidates = BTreeMap::<(String, u64), CasChunkRef>::new();
+    for target in &plan.missing_chunks {
+        let target_index = usize::try_from(target.index)
+            .map_err(|_| "delta target chunk index exceeds usize::MAX".to_string())?;
+        let Some(base) = receiver_manifest.chunks.get(target_index) else {
+            continue;
+        };
+        if base.content_id == target.content_id {
+            continue;
+        }
+        candidates
+            .entry((base.content_id.to_hex(), base.size_bytes))
+            .or_insert_with(|| base.clone());
+    }
+    Ok(candidates.into_values().collect())
+}
+
+fn receiver_subchunk_signatures_from_states(
+    candidates: &[CasChunkRef],
+    states: &[DeltaChunkSignatureState],
 ) -> Vec<ReceiverSubchunkSignature> {
-    receiver_manifest
-        .chunks
+    candidates
         .iter()
         .filter_map(|chunk| {
-            receiver_subchunk_signature(receiver_state, chunk).map(|signature| {
-                ReceiverSubchunkSignature {
+            let content_id_hex = chunk.content_id.to_hex();
+            states
+                .iter()
+                .find(|entry| {
+                    entry.content_id_hex == content_id_hex && entry.size_bytes == chunk.size_bytes
+                })
+                .map(|entry| ReceiverSubchunkSignature {
                     chunk: chunk.clone(),
-                    signature: signature.clone(),
-                }
-            })
+                    signature: entry.signature.clone(),
+                })
         })
         .collect()
 }
@@ -2315,7 +2455,6 @@ fn refresh_delta_state(dest: &Path) -> Result<DeltaCliState, String> {
 }
 
 fn delta_cli_state_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<DeltaCliState, String> {
-    let mut chunk_signatures = Vec::with_capacity(snapshot.manifest.chunks.len());
     for chunk in &snapshot.manifest.chunks {
         let content_id_hex = chunk.content_id.to_hex();
         let payload = snapshot
@@ -2329,11 +2468,6 @@ fn delta_cli_state_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<Delta
                 "delta state source chunk {content_id_hex} does not match manifest"
             ));
         }
-        chunk_signatures.push(DeltaChunkSignatureState {
-            content_id_hex,
-            size_bytes: chunk.size_bytes,
-            signature: delta_subchunk::signature(payload, delta_subchunk::DEFAULT_SUBBLOCK_BYTES),
-        });
     }
 
     Ok(DeltaCliState {
@@ -2342,7 +2476,7 @@ fn delta_cli_state_from_snapshot(snapshot: &DeltaSourceSnapshot) -> Result<Delta
         object_sha256_hex: snapshot.object_sha256_hex.clone(),
         chunk_count: snapshot.chunks_by_content.len(),
         logical_file_bytes: snapshot.logical_file_bytes,
-        chunk_signatures,
+        chunk_signatures: Vec::new(),
     })
 }
 
@@ -2422,6 +2556,20 @@ fn spawn_delta_state_server(
 }
 
 fn serve_delta_state_connection(mut stream: std::net::TcpStream, dest: &Path) {
+    match read_delta_state_sidecar_request(&mut stream) {
+        Ok(Some(body)) => {
+            if let Err(err) = serve_delta_subchunk_signature_request(&mut stream, dest, &body) {
+                eprintln!("atp: delta state sidecar signature request failed: {err}");
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("atp: delta state sidecar request read failed: {err}");
+            return;
+        }
+    }
+
     match read_local_delta_state(dest) {
         Ok(Some(state)) => {
             if let Err(err) = serde_json::to_writer(&mut stream, &state) {
@@ -2435,6 +2583,97 @@ fn serve_delta_state_connection(mut stream: std::net::TcpStream, dest: &Path) {
         Ok(None) => {}
         Err(err) => eprintln!("atp: delta state sidecar could not read state: {err}"),
     }
+}
+
+fn read_delta_state_sidecar_request(
+    stream: &mut std::net::TcpStream,
+) -> std::io::Result<Option<String>> {
+    stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+    let mut body = String::new();
+    match stream.read_to_string(&mut body) {
+        Ok(_) => {
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn serve_delta_subchunk_signature_request(
+    stream: &mut std::net::TcpStream,
+    dest: &Path,
+    body: &str,
+) -> Result<(), String> {
+    let request: DeltaSubchunkSignatureRequest = serde_json::from_str(body)
+        .map_err(|err| format!("parse subchunk signature request: {err}"))?;
+    let response = build_delta_subchunk_signature_response(dest, request)?;
+    serde_json::to_writer(&mut *stream, &response)
+        .map_err(|err| format!("write subchunk signature response: {err}"))?;
+    stream
+        .write_all(b"\n")
+        .and_then(|_| stream.flush())
+        .map_err(|err| format!("finish subchunk signature response: {err}"))
+}
+
+fn build_delta_subchunk_signature_response(
+    dest: &Path,
+    request: DeltaSubchunkSignatureRequest,
+) -> Result<DeltaSubchunkSignatureResponse, String> {
+    if request.schema != DELTA_SUBCHUNK_SIGNATURE_REQUEST_SCHEMA {
+        return Err(format!(
+            "unsupported subchunk signature request schema: {}",
+            request.schema
+        ));
+    }
+    let receiver_state = read_local_delta_state(dest)?.ok_or_else(|| {
+        "subchunk signature request received but receiver has no delta state".to_string()
+    })?;
+    let receiver_manifest = receiver_state.manifest()?;
+    let store = load_delta_store_from_state(dest, &receiver_manifest)?;
+
+    let mut signatures = Vec::new();
+    for requested in request.chunks {
+        validate_hex_hash(&requested.content_id_hex)?;
+        let Some(chunk) = receiver_manifest.chunks.iter().find(|chunk| {
+            chunk.content_id.to_hex() == requested.content_id_hex
+                && chunk.size_bytes == requested.size_bytes
+        }) else {
+            continue;
+        };
+        let Some(payload) = store.get(&chunk.content_id) else {
+            continue;
+        };
+        let payload_len = u64::try_from(payload.len())
+            .map_err(|_| "delta state chunk payload length exceeds u64::MAX".to_string())?;
+        if payload_len != chunk.size_bytes || ContentId::from_bytes(payload) != chunk.content_id {
+            return Err(format!(
+                "delta state source chunk {} does not match manifest",
+                requested.content_id_hex
+            ));
+        }
+        signatures.push(DeltaChunkSignatureState {
+            content_id_hex: requested.content_id_hex,
+            size_bytes: requested.size_bytes,
+            signature: delta_subchunk::signature(payload, delta_subchunk::DEFAULT_SUBBLOCK_BYTES),
+        });
+    }
+
+    Ok(DeltaSubchunkSignatureResponse {
+        schema: DELTA_SUBCHUNK_SIGNATURE_RESPONSE_SCHEMA.to_string(),
+        signatures,
+    })
 }
 
 fn load_delta_store_from_state(
@@ -4176,6 +4415,59 @@ mod tests {
     }
 
     #[test]
+    fn delta_state_omits_eager_subchunk_signatures() {
+        let receiver = one_chunk_delta_snapshot("tree-a", vec![7; 64 * 1024]);
+        let state = delta_cli_state_from_snapshot(&receiver).expect("receiver state");
+        let encoded = serde_json::to_string(&state).expect("state json");
+
+        assert!(state.chunk_signatures.is_empty());
+        assert!(
+            !encoded.contains("chunk_signatures"),
+            "compact sidecar state must not eagerly ship per-chunk subchunk signatures: {encoded}"
+        );
+    }
+
+    #[test]
+    fn lazy_signature_response_returns_only_requested_chunks() {
+        let receiver = one_chunk_delta_snapshot("tree-a", vec![3; 64 * 1024]);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dest = temp.path();
+        let state_dir = dest.join(DELTA_STATE_DIR);
+        let chunk_dir = state_dir.join(DELTA_CHUNK_DIR);
+        fs::create_dir_all(&chunk_dir).expect("state chunk dir");
+
+        let state = delta_cli_state_from_snapshot(&receiver).expect("receiver state");
+        let state_path = state_dir.join(DELTA_STATE_FILE);
+        fs::write(&state_path, serde_json::to_vec(&state).expect("state json"))
+            .expect("write state");
+        for (content_id_hex, payload) in &receiver.chunks_by_content {
+            fs::write(chunk_dir.join(format!("{content_id_hex}.chunk")), payload)
+                .expect("write chunk");
+        }
+
+        let chunk = &receiver.manifest.chunks[0];
+        let response = build_delta_subchunk_signature_response(
+            dest,
+            DeltaSubchunkSignatureRequest {
+                schema: DELTA_SUBCHUNK_SIGNATURE_REQUEST_SCHEMA.to_string(),
+                chunks: vec![DeltaSubchunkSignatureRequestChunk {
+                    content_id_hex: chunk.content_id.to_hex(),
+                    size_bytes: chunk.size_bytes,
+                }],
+            },
+        )
+        .expect("signature response");
+
+        assert_eq!(response.schema, DELTA_SUBCHUNK_SIGNATURE_RESPONSE_SCHEMA);
+        assert_eq!(response.signatures.len(), 1);
+        assert_eq!(
+            response.signatures[0].content_id_hex,
+            chunk.content_id.to_hex()
+        );
+        assert_eq!(response.signatures[0].size_bytes, chunk.size_bytes);
+    }
+
+    #[test]
     fn delta_package_build_uses_subdelta_when_whole_chunk_would_fallback() {
         let old = (0..(64 * 1024))
             .map(|idx| ((idx * 17 + idx / 5 + 41) % 251) as u8)
@@ -4187,7 +4479,6 @@ mod tests {
 
         let receiver = one_chunk_delta_snapshot("tree-a", old.clone());
         let sender = one_chunk_delta_snapshot("tree-a", new.clone());
-        let receiver_state = delta_cli_state_from_snapshot(&receiver).expect("receiver state");
         let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver.manifest);
         let plan = plan_incremental_resync_with_receiver_coverage(
             &sender.manifest,
@@ -4198,7 +4489,11 @@ mod tests {
         assert_eq!(plan.mode, DeltaResyncMode::FullObjectFallback);
         assert_eq!(plan.missing_bytes, sender.manifest.total_size_bytes);
 
-        let package = build_delta_package(&sender, &plan, &receiver.manifest, &receiver_state)
+        let receiver_signatures = vec![ReceiverSubchunkSignature {
+            chunk: receiver.manifest.chunks[0].clone(),
+            signature: delta_subchunk::signature(&old, delta_subchunk::DEFAULT_SUBBLOCK_BYTES),
+        }];
+        let package = build_delta_package(&sender, &plan, &receiver.manifest, &receiver_signatures)
             .expect("package");
 
         assert_eq!(package.whole_chunks.len(), 0);
