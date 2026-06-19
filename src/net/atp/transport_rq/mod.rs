@@ -4584,19 +4584,19 @@ async fn seed_source_streaming_pipeline(
         return Ok(());
     }
     let symbol_size = usize::from(symbol_size);
+    let target_sbn_index = usize::from(target_sbn);
+    if !source_streaming_block_ready_to_seed(dec, target_sbn_index) {
+        return Ok(());
+    }
     let Some(mut reader) = crate::fs::File::open(&dec.staging_path).await.ok() else {
         return Ok(());
     };
 
     for sbn in 0..dec.source_blocks.len() {
-        // E-11 fix: seed ONLY the block this repair symbol targets. The previous code re-seeded
-        // EVERY incomplete block's received source back into the in-memory pipeline on each repair,
-        // making receiver RSS O(file) (≈9× the file — measured 895 MB for 100 MB) → at 500M ≈ 4.5 GB
-        // → swap → the 500M/bad TIMEOUT. A block is seeded when its OWN repair arrives; blocks that
-        // converge via source never enter the pipeline. Bounds in-memory seeded source to the few
-        // FEC blocks actually being decoded. (Byte-identical: same symbols fed to the same block's
-        // decode, just not pre-loaded for blocks that don't yet have repair.)
-        if sbn != usize::from(target_sbn) {
+        // Seed only the repair block and only once retained repair equations plus staged source
+        // symbols can reach K. This keeps lossy transfers from retaining source payloads for many
+        // partially-repaired blocks while still feeding the same symbols before decode.
+        if sbn != target_sbn_index {
             continue;
         }
         if dec.source_blocks[sbn].complete {
@@ -4605,28 +4605,11 @@ async fn seed_source_streaming_pipeline(
 
         let k = dec.source_blocks[sbn].k;
         for esi in 0..k {
-            if !dec.source_blocks[sbn].received[esi] || dec.source_blocks[sbn].pipeline_seeded[esi]
-            {
+            let Some((offset, take, auth_tag)) =
+                source_seed_read_plan(dec, sbn, esi, symbol_size)?
+            else {
                 continue;
-            }
-
-            let Some(within_block) = esi.checked_mul(symbol_size) else {
-                return Err(RqError::Coding(format!(
-                    "entry {} source seed offset overflow",
-                    dec.index
-                )));
             };
-            if within_block >= dec.source_blocks[sbn].len {
-                continue;
-            }
-
-            let take = symbol_size.min(dec.source_blocks[sbn].len - within_block);
-            let offset = dec.source_blocks[sbn]
-                .start
-                .checked_add(u64::try_from(within_block).unwrap_or(u64::MAX))
-                .ok_or_else(|| {
-                    RqError::Coding(format!("entry {} source seed offset overflow", dec.index))
-                })?;
             let mut payload = vec![0u8; symbol_size];
             reader.seek(std::io::SeekFrom::Start(offset)).await?;
             reader.read_exact(&mut payload[..take]).await?;
@@ -4643,7 +4626,7 @@ async fn seed_source_streaming_pipeline(
                 SymbolKind::Source,
             );
             let auth_symbol = if symbol_auth.is_some() {
-                let tag = dec.source_blocks[sbn].auth_tags[esi].ok_or_else(|| {
+                let tag = auth_tag.ok_or_else(|| {
                     RqError::Authentication(format!(
                         "entry {} source seed missing verified auth tag for sbn={sbn} esi={esi}",
                         dec.index
@@ -4658,7 +4641,9 @@ async fn seed_source_streaming_pipeline(
                 .as_mut()
                 .expect("checked above")
                 .feed_streaming_block_deferred(auth_symbol);
-            dec.source_blocks[sbn].pipeline_seeded[esi] = true;
+            if result.is_ok() {
+                dec.source_blocks[sbn].pipeline_seeded[esi] = true;
+            }
             match result {
                 Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
                     block_sbn,
@@ -5397,8 +5382,22 @@ async fn feed_datagram_to_decoders(
     let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
         return Ok(false);
     };
-    let allow_spawn_decode =
-        rq_pending_decode_jobs(decoders) < RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER;
+    let mut pending_decode_jobs = rq_pending_decode_jobs(decoders);
+    if pending_decode_jobs >= RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER {
+        let _ = drain_ready_decodes(cx, decoders).await?;
+        pending_decode_jobs = rq_pending_decode_jobs(decoders);
+    }
+    if pending_decode_jobs >= RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER {
+        for dec in decoders.iter_mut() {
+            if dec.pending_decodes.is_empty() {
+                continue;
+            }
+            let _ = join_one_pending_decode(cx, dec).await?;
+            break;
+        }
+        pending_decode_jobs = rq_pending_decode_jobs(decoders);
+    }
+    let allow_spawn_decode = pending_decode_jobs < RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER;
     feed_symbol_with_cx(
         cx,
         &mut decoders[pos],
