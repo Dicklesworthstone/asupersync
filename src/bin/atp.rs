@@ -203,9 +203,9 @@ struct SendArgs {
     /// Number of UDP sockets to spray across (rq only).
     #[arg(long, default_value_t = DEFAULT_UDP_FANOUT)]
     streams: usize,
-    /// Maximum RaptorQ source-block size in bytes (rq/quic only).
-    #[arg(long, default_value_t = DEFAULT_MAX_BLOCK_SIZE)]
-    max_block_size: usize,
+    /// Maximum RaptorQ source-block size in bytes, or `auto` (rq/quic only).
+    #[arg(long, default_value_t = MaxBlockSizeArg::Auto)]
+    max_block_size: MaxBlockSizeArg,
     /// Round-0 repair overhead factor, >= 1.0 (rq only).
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
     repair_overhead: f64,
@@ -280,9 +280,9 @@ struct RecvArgs {
     /// RaptorQ symbol size in bytes (rq only; must match the sender).
     #[arg(long, default_value_t = DEFAULT_SYMBOL_SIZE)]
     symbol_size: u16,
-    /// Maximum RaptorQ source-block size in bytes (rq/quic only; must match the sender).
-    #[arg(long, default_value_t = DEFAULT_MAX_BLOCK_SIZE)]
-    max_block_size: usize,
+    /// Maximum RaptorQ source-block size in bytes, or `auto` (rq/quic only; must match the sender).
+    #[arg(long, default_value_t = MaxBlockSizeArg::Auto)]
+    max_block_size: MaxBlockSizeArg,
     /// Round-0 repair overhead factor (rq only).
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
     repair_overhead: f64,
@@ -307,6 +307,58 @@ struct RecvArgs {
     /// Disable receiver-side delta package application and state refresh.
     #[arg(long)]
     no_delta: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaxBlockSizeArg {
+    Auto,
+    Bytes(usize),
+}
+
+impl Default for MaxBlockSizeArg {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl std::fmt::Display for MaxBlockSizeArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Bytes(bytes) => write!(f, "{bytes}"),
+        }
+    }
+}
+
+impl std::str::FromStr for MaxBlockSizeArg {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let value = raw.trim();
+        if value.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        let bytes = value
+            .parse::<usize>()
+            .map_err(|err| format!("invalid --max-block-size {value:?}: {err}"))?;
+        if bytes == 0 {
+            return Err("--max-block-size must be greater than 0".to_string());
+        }
+        Ok(Self::Bytes(bytes))
+    }
+}
+
+impl MaxBlockSizeArg {
+    fn effective(self, symbol_size: u16) -> Result<usize, String> {
+        match self {
+            Self::Auto => normalize_max_block_size(symbol_size, DEFAULT_MAX_BLOCK_SIZE),
+            Self::Bytes(bytes) => normalize_max_block_size(symbol_size, bytes),
+        }
+    }
+
+    fn remote_arg(self) -> String {
+        self.to_string()
+    }
 }
 
 fn tcp_config(max_bytes: u64, enable_delta: bool) -> TransferConfig {
@@ -477,7 +529,7 @@ fn quic_config_send(
 
     let base = QuicConfig {
         symbol_size: args.symbol_size,
-        max_block_size: normalize_max_block_size(args.symbol_size, args.max_block_size)?,
+        max_block_size: args.max_block_size.effective(args.symbol_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         max_transfer_bytes: args.max_bytes,
         bwlimit_bps: normalize_bwlimit_bps(args.bwlimit_bps)?,
@@ -518,7 +570,7 @@ fn quic_config_recv(
 
     let base = QuicConfig {
         symbol_size: args.symbol_size,
-        max_block_size: normalize_max_block_size(args.symbol_size, args.max_block_size)?,
+        max_block_size: args.max_block_size.effective(args.symbol_size)?,
         repair_overhead: args.repair_overhead.max(1.0),
         max_transfer_bytes: args.max_bytes,
         handshake_timeout: Duration::from_millis(args.quic_handshake_timeout_ms),
@@ -1036,7 +1088,7 @@ fn send_to_addr_with_transport(
                 args.max_bytes,
                 args.symbol_size,
                 args.streams,
-                args.max_block_size,
+                args.max_block_size.effective(args.symbol_size)?,
                 args.repair_overhead,
                 args.rq_tail_drain_ms,
                 args.rq_auth_key_hex.as_deref(),
@@ -3016,7 +3068,7 @@ fn spawn_remote_receiver(
         "--symbol-size".to_string(),
         args.symbol_size.to_string(),
         "--max-block-size".to_string(),
-        args.max_block_size.to_string(),
+        args.max_block_size.remote_arg(),
         "--repair-overhead".to_string(),
         args.repair_overhead.to_string(),
         "--rq-tail-drain-ms".to_string(),
@@ -3766,7 +3818,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 args.max_bytes,
                 args.symbol_size,
                 1,
-                args.max_block_size,
+                args.max_block_size.effective(args.symbol_size)?,
                 args.repair_overhead,
                 args.rq_tail_drain_ms,
                 args.rq_auth_key_hex.as_deref(),
@@ -4180,6 +4232,41 @@ mod tests {
 
         assert_eq!(config.max_block_size, 512 * 1024);
         assert_eq!(config.max_block_size / usize::from(config.symbol_size), 512);
+    }
+
+    #[test]
+    fn max_block_size_arg_accepts_auto_and_numeric_overrides() {
+        assert_eq!("auto".parse::<MaxBlockSizeArg>(), Ok(MaxBlockSizeArg::Auto));
+        assert_eq!("AUTO".parse::<MaxBlockSizeArg>(), Ok(MaxBlockSizeArg::Auto));
+        assert_eq!(
+            (512 * 1024).to_string().parse::<MaxBlockSizeArg>(),
+            Ok(MaxBlockSizeArg::Bytes(512 * 1024))
+        );
+        assert_eq!(
+            "0".parse::<MaxBlockSizeArg>(),
+            Err("--max-block-size must be greater than 0".to_string())
+        );
+        assert_eq!(
+            "not-bytes".parse::<MaxBlockSizeArg>(),
+            Err(
+                "invalid --max-block-size \"not-bytes\": invalid digit found in string".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn max_block_size_arg_auto_uses_transport_default_ceiling() {
+        assert_eq!(
+            MaxBlockSizeArg::Auto.effective(1024),
+            Ok(DEFAULT_MAX_BLOCK_SIZE)
+        );
+        assert_eq!(MaxBlockSizeArg::Bytes(512).effective(1024), Ok(1024));
+        assert_eq!(
+            MaxBlockSizeArg::Bytes(512 * 1024).effective(1024),
+            Ok(512 * 1024)
+        );
+        assert_eq!(MaxBlockSizeArg::Auto.remote_arg(), "auto");
+        assert_eq!(MaxBlockSizeArg::Bytes(512 * 1024).remote_arg(), "524288");
     }
 
     #[test]
