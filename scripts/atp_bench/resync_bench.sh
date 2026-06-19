@@ -24,7 +24,9 @@ set -euo pipefail
 #   python3 scripts/atp_bench/score_matrix.py <RUN_DIR>/resync.jsonl   # reuses the scorer
 #
 # atp delta is default-on; --no-delta forces a full send (the fallback baseline).
-# This harness is transport-rq (nocrypto lab) vs rsyncd — crypto-symmetric.
+# This harness is transport-rq (nocrypto lab) vs rsyncd by default, so it
+# exercises changed-chunk negotiation on the RaptorQ path that previously sent
+# the full object. Set ATP_TRANSPORT=tcp to compare the streaming TCP delta path.
 # ─────────────────────────────────────────────────────────────────────────────
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,6 +44,7 @@ REGIMES="${REGIMES:-perfect good bad}"
 CHANGES="${CHANGES:-0pct 1pct 10pct append insert rename}"
 
 WORKERS="${WORKERS:-4}"
+ATP_TRANSPORT="${ATP_TRANSPORT:-rq}"
 STREAMS="${STREAMS:-8}"
 SYMBOL_SIZE="${SYMBOL_SIZE:-1200}"
 MAX_BYTES="${MAX_BYTES:-6442450944}"
@@ -210,10 +213,24 @@ resync_atp() {
     local rl="$case_dir/atp_recv.log" sl="$case_dir/atp_send.log" rt="$case_dir/atp_recv.time" st="$case_dir/atp_send.time"
     local s_tag="atprs-send-${port}" r_tag="atprs-recv-${port}"
     local s_stop="$case_dir/atp_s_stop" s_out="$case_dir/atp_s_rss"
+    local recv_args=(--transport "$ATP_TRANSPORT")
+    local send_args=(--transport "$ATP_TRANSPORT")
+    case "$ATP_TRANSPORT" in
+        tcp) ;;
+        rq)
+            recv_args+=(--symbol-size "$SYMBOL_SIZE")
+            send_args+=(--streams "$STREAMS" --symbol-size "$SYMBOL_SIZE")
+            # shellcheck disable=SC2206
+            [ -n "$RQ_AUTH_LAB" ] && recv_args+=($RQ_AUTH_LAB)
+            # shellcheck disable=SC2206
+            [ -n "$RQ_AUTH_LAB" ] && send_args+=($RQ_AUTH_LAB)
+            ;;
+        *) die "unsupported ATP_TRANSPORT for resync benchmark: $ATP_TRANSPORT" ;;
+    esac
     set +e
     timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" recv "$dest_dir" \
-        --listen "0.0.0.0:${port}" --transport rq --once --peer-id "$r_tag" \
-        --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$SYMBOL_SIZE" $RQ_AUTH_LAB \
+        --listen "0.0.0.0:${port}" "${recv_args[@]}" --once --peer-id "$r_tag" \
+        --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
         >"$rl" 2>"$rt" &
     local recv_pid=$!
     sample_peak_rss "$s_tag" "$s_stop" "$s_out" & local samp=$!
@@ -221,8 +238,7 @@ resync_atp() {
     local before after start finish ss rs
     before="$(ns_wire_bytes)"; start="$(now_s)"
     ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" send "$src" "${HOST_IP}:${port}" \
-        --transport rq --streams "$STREAMS" --symbol-size "$SYMBOL_SIZE" --peer-id "$s_tag" \
-        --max-bytes "$MAX_BYTES" $RQ_AUTH_LAB >"$sl" 2>"$st"
+        "${send_args[@]}" --peer-id "$s_tag" --max-bytes "$MAX_BYTES" >"$sl" 2>"$st"
     ss=$?
     finish="$(now_s)"; after="$(ns_wire_bytes)"
     [ "$ss" != "0" ] && kill "$recv_pid" 2>/dev/null

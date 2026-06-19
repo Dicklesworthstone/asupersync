@@ -36,7 +36,11 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, ExitCode, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -718,7 +722,7 @@ fn run_send(args: SendArgs) -> Result<(), String> {
         return run_send_dry_run(&args);
     }
     match resolve(&args.target) {
-        Ok(addr) => run_send_to_addr(args, addr),
+        Ok(addr) => run_send_to_addr(args, addr, true),
         Err(resolve_error) => {
             if let Some(remote) = RemoteTarget::parse(&args.target) {
                 run_send_via_ssh(args, &remote)
@@ -816,6 +820,24 @@ fn add_auto_selection_metadata(
     report
 }
 
+fn annotate_direct_delta_package_report(report: &mut serde_json::Value, plan: &DeltaResyncPlan) {
+    if let Some(object) = report.as_object_mut() {
+        object.insert(
+            "delta".to_string(),
+            serde_json::json!({
+                "mode": "delta_chunks",
+                "negotiation": "direct_receiver_state_sidecar",
+                "sender_merkle_root": plan.sender_merkle_root.to_string(),
+                "receiver_merkle_root": plan.receiver_merkle_root.as_ref().map(ToString::to_string),
+                "shared_chunks": plan.shared_chunks,
+                "stale_chunks": plan.stale_chunks.len(),
+                "missing_chunks": plan.missing_chunks.len(),
+                "missing_bytes": plan.missing_bytes,
+            }),
+        );
+    }
+}
+
 fn auto_transport_exhausted_error(attempts: &[TransportAttempt]) -> String {
     let details = attempts
         .iter()
@@ -830,13 +852,40 @@ fn auto_transport_exhausted_error(attempts: &[TransportAttempt]) -> String {
     format!("atp --transport auto exhausted fallback order (quic -> rq -> tcp): {details}")
 }
 
-fn run_send_to_addr(args: SendArgs, addr: SocketAddr) -> Result<(), String> {
+fn run_send_to_addr(
+    mut args: SendArgs,
+    addr: SocketAddr,
+    use_direct_delta_probe: bool,
+) -> Result<(), String> {
+    let mut direct_delta_plan = None;
+    if use_direct_delta_probe && let Some(delta) = prepare_direct_delta_send(&args, addr)? {
+        match delta {
+            DeltaPreparedSend::AlreadyInSync(report) => {
+                print_json(&report);
+                return Ok(());
+            }
+            DeltaPreparedSend::Package { package_root, plan } => {
+                eprintln!(
+                    "[atp] delta planner: direct receiver state selected {} chunk(s), {} byte(s), shared {} chunk(s)",
+                    plan.missing_chunks.len(),
+                    plan.missing_bytes,
+                    plan.shared_chunks
+                );
+                args.source = package_root;
+                direct_delta_plan = Some(plan);
+            }
+        }
+    }
+
     let runtime = build_runtime(args.workers)?;
-    let report = if args.transport == Transport::Auto {
+    let mut report = if args.transport == Transport::Auto {
         run_send_auto_to_addr(&runtime, &args, addr)?
     } else {
         send_to_addr_with_transport(&runtime, &args, args.transport, addr)?
     };
+    if let Some(plan) = direct_delta_plan.as_ref() {
+        annotate_direct_delta_package_report(&mut report, plan);
+    }
     print_json(&report);
     Ok(())
 }
@@ -1106,11 +1155,11 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
     };
     if let Some(delta) = delta_package {
         match delta {
-            DeltaSshSend::AlreadyInSync(report) => {
+            DeltaPreparedSend::AlreadyInSync(report) => {
                 print_json(&report);
                 return Ok(());
             }
-            DeltaSshSend::Package { package_root, plan } => {
+            DeltaPreparedSend::Package { package_root, plan } => {
                 eprintln!(
                     "[atp] delta planner: sending {} chunk(s), {} byte(s), shared {} chunk(s)",
                     plan.missing_chunks.len(),
@@ -1129,7 +1178,7 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
         Duration::from_secs(args.ssh_ready_timeout_secs.max(1)),
     )?;
 
-    let send_result = run_send_to_addr(args, addr);
+    let send_result = run_send_to_addr(args, addr, false);
     if send_result.is_err() {
         let _ = child.kill();
         let _ = child.wait();
@@ -1152,7 +1201,7 @@ fn run_send_via_ssh(mut args: SendArgs, remote: &RemoteTarget) -> Result<(), Str
 }
 
 #[derive(Debug)]
-enum DeltaSshSend {
+enum DeltaPreparedSend {
     AlreadyInSync(serde_json::Value),
     Package {
         package_root: PathBuf,
@@ -1214,7 +1263,7 @@ struct DeltaTreeFile {
 fn prepare_delta_ssh_send(
     args: &SendArgs,
     remote: &RemoteTarget,
-) -> Result<Option<DeltaSshSend>, String> {
+) -> Result<Option<DeltaPreparedSend>, String> {
     let receiver_state = match fetch_remote_delta_state(args, remote) {
         Ok(Some(state)) => state,
         Ok(None) => {
@@ -1228,6 +1277,50 @@ fn prepare_delta_ssh_send(
             return Ok(None);
         }
     };
+    prepare_delta_send_from_state(args, receiver_state)
+}
+
+fn prepare_direct_delta_send(
+    args: &SendArgs,
+    addr: SocketAddr,
+) -> Result<Option<DeltaPreparedSend>, String> {
+    if args.no_delta
+        || !matches!(
+            args.transport,
+            Transport::Auto | Transport::Rq | Transport::Quic
+        )
+    {
+        return Ok(None);
+    }
+
+    let Some(state_addr) = delta_state_addr(addr) else {
+        eprintln!(
+            "[atp] delta planner: no receiver state sidecar port; using full-object transfer"
+        );
+        return Ok(None);
+    };
+    let receiver_state = match fetch_direct_delta_state(state_addr) {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            eprintln!(
+                "[atp] delta planner: receiver state sidecar {state_addr} returned no state; using full-object transfer"
+            );
+            return Ok(None);
+        }
+        Err(err) => {
+            eprintln!(
+                "[atp] delta planner: receiver state sidecar {state_addr} unavailable ({err}); using full-object transfer"
+            );
+            return Ok(None);
+        }
+    };
+    prepare_delta_send_from_state(args, receiver_state)
+}
+
+fn prepare_delta_send_from_state(
+    args: &SendArgs,
+    receiver_state: DeltaCliState,
+) -> Result<Option<DeltaPreparedSend>, String> {
     let receiver_manifest = match receiver_state.manifest() {
         Ok(manifest) => manifest,
         Err(err) => {
@@ -1273,11 +1366,11 @@ fn prepare_delta_ssh_send(
                 "sha256": snapshot.object_sha256_hex,
                 "peer": args.peer_id,
             });
-            Ok(Some(DeltaSshSend::AlreadyInSync(report)))
+            Ok(Some(DeltaPreparedSend::AlreadyInSync(report)))
         }
         DeltaResyncMode::DeltaChunks => {
             let package_root = create_delta_package(&snapshot, &plan)?;
-            Ok(Some(DeltaSshSend::Package { package_root, plan }))
+            Ok(Some(DeltaPreparedSend::Package { package_root, plan }))
         }
         DeltaResyncMode::FullObjectFallback => {
             eprintln!(
@@ -1314,6 +1407,29 @@ fn fetch_remote_delta_state(
     serde_json::from_str(trimmed)
         .map(Some)
         .map_err(|err| format!("parse remote delta state {}: {err}", state_path))
+}
+
+fn fetch_direct_delta_state(state_addr: SocketAddr) -> Result<Option<DeltaCliState>, String> {
+    let mut stream = std::net::TcpStream::connect_timeout(&state_addr, Duration::from_millis(750))
+        .map_err(|err| format!("connect: {err}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|err| format!("set read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|err| format!("set write timeout: {err}"))?;
+
+    let mut body = String::new();
+    stream
+        .read_to_string(&mut body)
+        .map_err(|err| format!("read state: {err}"))?;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(trimmed)
+        .map(Some)
+        .map_err(|err| format!("parse direct receiver delta state: {err}"))
 }
 
 fn remote_delta_state_path(remote_path: &str) -> String {
@@ -1785,6 +1901,85 @@ fn read_local_delta_state(dest: &Path) -> Result<Option<DeltaCliState>, String> 
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|err| format!("parse delta state {}: {err}", path.display()))
+}
+
+fn delta_state_addr(base: SocketAddr) -> Option<SocketAddr> {
+    let port = base.port().checked_add(1)?;
+    Some(SocketAddr::new(base.ip(), port))
+}
+
+struct DeltaStateServerGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for DeltaStateServerGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_delta_state_server(
+    dest: PathBuf,
+    listen: SocketAddr,
+    enabled: bool,
+) -> Option<DeltaStateServerGuard> {
+    if !enabled || listen.port() == 0 {
+        return None;
+    }
+    let state_addr = delta_state_addr(listen)?;
+    let listener = match std::net::TcpListener::bind(state_addr) {
+        Ok(listener) => listener,
+        Err(err) => {
+            eprintln!("atp: delta state sidecar disabled on {state_addr}: bind failed: {err}");
+            return None;
+        }
+    };
+    if let Err(err) = listener.set_nonblocking(true) {
+        eprintln!("atp: delta state sidecar disabled on {state_addr}: nonblocking failed: {err}");
+        return None;
+    }
+
+    eprintln!("atp: delta state sidecar listening on {state_addr}");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        while !stop_for_thread.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _peer)) => serve_delta_state_connection(stream, &dest),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(err) => {
+                    eprintln!("atp: delta state sidecar accept failed: {err}");
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    });
+    Some(DeltaStateServerGuard {
+        stop,
+        handle: Some(handle),
+    })
+}
+
+fn serve_delta_state_connection(mut stream: std::net::TcpStream, dest: &Path) {
+    match read_local_delta_state(dest) {
+        Ok(Some(state)) => {
+            if let Err(err) = serde_json::to_writer(&mut stream, &state) {
+                eprintln!("atp: delta state sidecar write failed: {err}");
+                return;
+            }
+            if let Err(err) = stream.write_all(b"\n").and_then(|_| stream.flush()) {
+                eprintln!("atp: delta state sidecar finish failed: {err}");
+            }
+        }
+        Ok(None) => {}
+        Err(err) => eprintln!("atp: delta state sidecar could not read state: {err}"),
+    }
 }
 
 fn load_delta_store_from_state(
@@ -2885,6 +3080,8 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                     .await
                     .map_err(|e| format!("bind {listen}: {e}"))?;
                 let bound = listener.local_addr().map_err(|e| e.to_string())?;
+                let _delta_state_server =
+                    spawn_delta_state_server(dest.clone(), bound, delta_enabled);
                 eprintln!(
                     "atp: rq control listening on {bound} (udp on {udp_bind_ip}), dest {}",
                     dest.display()
@@ -2970,6 +3167,11 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         let endpoint = bind_server_endpoint(&cx, listen)
                             .await
                             .map_err(|e| e.to_string())?;
+                        let _delta_state_server = spawn_delta_state_server(
+                            dest.clone(),
+                            endpoint.local_addr(),
+                            delta_enabled,
+                        );
                         eprintln!(
                             "atp: quic listening on {}, dest {}",
                             endpoint.local_addr(),
@@ -2996,6 +3198,8 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                         Ok::<(), String>(())
                     } else {
                         eprintln!("atp: quic listening on {listen}, dest {}", dest.display());
+                        let _delta_state_server =
+                            spawn_delta_state_server(dest.clone(), listen, delta_enabled);
                         // Each accepted transfer consumes the endpoint; rebind the
                         // same address for the next one. `--listen` must use a fixed
                         // port for persistent serving (port 0 would drift).
@@ -3395,6 +3599,18 @@ mod tests {
             &[Transport::Quic, Transport::Rq, Transport::Tcp]
         );
         assert_eq!(Transport::Auto.cli_arg(), "auto");
+    }
+
+    #[test]
+    fn delta_state_addr_uses_next_port_for_direct_sidecar() {
+        let base: SocketAddr = "127.0.0.1:8472".parse().unwrap();
+        assert_eq!(
+            delta_state_addr(base).unwrap().to_string(),
+            "127.0.0.1:8473"
+        );
+
+        let max: SocketAddr = "127.0.0.1:65535".parse().unwrap();
+        assert!(delta_state_addr(max).is_none());
     }
 
     #[test]
