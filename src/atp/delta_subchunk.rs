@@ -27,6 +27,7 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Default sub-block size for the level-2 diff. Small enough that a localized
@@ -43,7 +44,7 @@ const STRONG_LEN: usize = 16;
 const OP_OVERHEAD_BYTES: usize = 10;
 
 /// One signed sub-block of the OLD buffer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BlockSig {
     weak: u32,
     strong: [u8; STRONG_LEN],
@@ -53,7 +54,7 @@ struct BlockSig {
 
 /// The receiver's signature of an OLD chunk: enough for the sender to find
 /// reusable sub-ranges without ever sending the old bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubBlockSignature {
     block_size: u32,
     total_len: u64,
@@ -75,7 +76,7 @@ impl SubBlockSignature {
 }
 
 /// One reconstruction op: copy a range of the OLD buffer, or insert literal bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubDeltaOp {
     /// Copy `len` bytes from the OLD buffer starting at `old_offset`.
     Copy { old_offset: u64, len: u32 },
@@ -87,7 +88,11 @@ pub enum SubDeltaOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubDeltaError {
     /// A `Copy` op references a range outside the OLD buffer.
-    CopyOutOfRange { old_offset: u64, len: u32, old_len: usize },
+    CopyOutOfRange {
+        old_offset: u64,
+        len: u32,
+        old_len: usize,
+    },
 }
 
 impl std::fmt::Display for SubDeltaError {
@@ -331,7 +336,11 @@ mod tests {
     fn identical_buffers_are_all_copy_zero_literal() {
         let old: Vec<u8> = (0..8192u32).map(|i| (i * 31) as u8).collect();
         let ops = roundtrip(&old, &old, 1024);
-        assert_eq!(literal_bytes(&ops), 0, "identical content sends no literals");
+        assert_eq!(
+            literal_bytes(&ops),
+            0,
+            "identical content sends no literals"
+        );
         assert!(ops.iter().all(|o| matches!(o, SubDeltaOp::Copy { .. })));
     }
 
@@ -362,7 +371,10 @@ mod tests {
             "literal {} should be ~one block, not the whole chunk",
             literal_bytes(&ops)
         );
-        assert!(wire_bytes(&ops) < new.len(), "wire must beat shipping the whole chunk");
+        assert!(
+            wire_bytes(&ops) < new.len(),
+            "wire must beat shipping the whole chunk"
+        );
     }
 
     #[test]
@@ -386,15 +398,24 @@ mod tests {
     #[test]
     fn disjoint_buffers_are_all_literal_and_still_exact() {
         let old: Vec<u8> = (0..4096u32).map(|i| i as u8).collect();
-        let new: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(251).wrapping_add(99)) as u8).collect();
+        let new: Vec<u8> = (0..4096u32)
+            .map(|i| (i.wrapping_mul(251).wrapping_add(99)) as u8)
+            .collect();
         let ops = roundtrip(&old, &new, 1024);
-        assert_eq!(literal_bytes(&ops), new.len(), "no shared blocks → all literal");
+        assert_eq!(
+            literal_bytes(&ops),
+            new.len(),
+            "no shared blocks → all literal"
+        );
     }
 
     #[test]
     fn empty_and_short_buffers_roundtrip() {
         assert_eq!(apply(b"old", &sub_delta(b"old", b"", 1024)).unwrap(), b"");
-        assert_eq!(apply(b"", &sub_delta(b"", b"new bytes", 1024)).unwrap(), b"new bytes");
+        assert_eq!(
+            apply(b"", &sub_delta(b"", b"new bytes", 1024)).unwrap(),
+            b"new bytes"
+        );
         // new shorter than block_size → single literal.
         let ops = sub_delta(b"abcdefgh", b"xyz", 1024);
         assert_eq!(apply(b"abcdefgh", &ops).unwrap(), b"xyz");
@@ -402,11 +423,35 @@ mod tests {
 
     #[test]
     fn copy_out_of_range_is_rejected_fail_closed() {
-        let ops = vec![SubDeltaOp::Copy { old_offset: 100, len: 50 }];
+        let ops = vec![SubDeltaOp::Copy {
+            old_offset: 100,
+            len: 50,
+        }];
         assert!(matches!(
             apply(b"short", &ops),
             Err(SubDeltaError::CopyOutOfRange { .. })
         ));
+    }
+
+    #[test]
+    fn signature_and_ops_serde_roundtrip_and_still_reconstruct() {
+        // The protocol sends the signature (receiver->sender) and the op stream
+        // (sender->receiver), so both must survive serialization unchanged and
+        // still reconstruct the new chunk byte-identically.
+        let old: Vec<u8> = (0..4096u32).map(|i| (i * 5 + 1) as u8).collect();
+        let mut new = old.clone();
+        new.extend_from_slice(b"appended-tail");
+        let sig = signature(&old, 1024);
+        let ops = diff(&new, &sig);
+
+        let sig2: SubBlockSignature =
+            serde_json::from_slice(&serde_json::to_vec(&sig).expect("ser sig")).expect("de sig");
+        assert_eq!(sig, sig2);
+
+        let ops2: Vec<SubDeltaOp> =
+            serde_json::from_slice(&serde_json::to_vec(&ops).expect("ser ops")).expect("de ops");
+        assert_eq!(ops, ops2);
+        assert_eq!(apply(&old, &ops2).expect("apply"), new);
     }
 
     #[test]
