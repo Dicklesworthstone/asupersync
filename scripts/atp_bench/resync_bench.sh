@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────────────────────
+# resync_bench.sh — the incremental RE-SYNC benchmark (B-8.7, asupersync-0kh4jm):
+# the evidence gate for the rsync-killer claim. The headline metric is
+# BYTES-ON-WIRE for a re-sync after an edit — atp-delta should be ~proportional
+# to the change, beating rsync's delta algorithm; for a tiny edit atp must send
+# ~O(change), not O(file).
+#
+# Per (size x regime x change-mode):
+#   1. gen a base payload; do an INITIAL full sync to seed the receiver's prior
+#      state (atp into one dest, rsync into another) — UNMEASURED setup;
+#   2. MUTATE the source (0% / 1% / 10% byte flips / append / insert / rename);
+#   3. RE-SYNC (measured): atp-delta (default-on) and tuned rsync (-aW --inplace)
+#      each into their pre-seeded dest. Measure bytes-on-wire (netns veth tx+rx
+#      byte counters, tool-agnostic), wall, peak RSS;
+#   4. VERIFY byte-identical (tree_digest src == dst). FAIL-CLOSED: a mismatch is
+#      recorded status!=ok + sha_ok=false and can never score as a win.
+# Emits one JSONL row per (size, regime, change-mode, method) + a summary table
+# of the atp/rsync bytes-on-wire ratio (the headline). Requires root (netns/tc).
+#
+#   sudo env BIN=/tmp/atp_bench/atp bash scripts/atp_bench/resync_bench.sh
+#   python3 scripts/atp_bench/score_matrix.py <RUN_DIR>/resync.jsonl   # reuses the scorer
+#
+# atp delta is default-on; --no-delta forces a full send (the fallback baseline).
+# This harness is transport-rq (nocrypto lab) vs rsyncd — crypto-symmetric.
+# ─────────────────────────────────────────────────────────────────────────────
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GEN_TREE="${GEN_TREE:-$HERE/gen_tree.py}"
+BIN="${BIN:-/tmp/atp_bench/atp}"
+OUT_DIR="${OUT_DIR:-/tmp/atp_resync_bench}"
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+RUN_DIR="${RUN_DIR:-${OUT_DIR}/${RUN_ID}}"
+RESULTS="${RESULTS:-${RUN_DIR}/resync.jsonl}"
+
+# label:bytes for single-file workloads; trees handled via CHANGE=rename.
+SIZES="${SIZES:-5M:5242880 100M:104857600 500M:524288000}"
+REGIMES="${REGIMES:-perfect good bad}"
+# 0pct/1pct/10pct/append/insert mutate a file; rename mutates a tree.
+CHANGES="${CHANGES:-0pct 1pct 10pct append insert rename}"
+
+WORKERS="${WORKERS:-4}"
+STREAMS="${STREAMS:-8}"
+SYMBOL_SIZE="${SYMBOL_SIZE:-1200}"
+MAX_BYTES="${MAX_BYTES:-6442450944}"
+HOST_IP="${HOST_IP:-10.99.0.1}"
+NS_IP="${NS_IP:-10.99.0.2}"
+CIDR="${CIDR:-24}"
+PORT_BASE="${PORT_BASE:-41000}"
+TIMEOUT_S="${TIMEOUT_S:-3600}"
+RECEIVER_READY_SLEEP="${RECEIVER_READY_SLEEP:-0.75}"
+RSS_SAMPLE_INTERVAL="${RSS_SAMPLE_INTERVAL:-0.2}"
+RQ_AUTH_LAB="${RQ_AUTH_LAB:---rq-allow-unauthenticated-lab}"
+TREE_PRESET="${TREE_PRESET:-tree_small}"
+GIT_HEAD="$(git -C "$HERE" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+
+NS=""; IF_HOST=""; IF_NS=""; RSYNCD_PID=""
+
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+die() { echo "resync_bench.sh: $*" >&2; exit 2; }
+
+[ "$(id -u)" = "0" ] || die "needs root (netns/tc)"
+[ -x "$BIN" ] || die "BIN not executable: $BIN"
+[ -f "$GEN_TREE" ] || die "gen_tree.py missing: $GEN_TREE"
+for c in awk dd ip tc rsync sha256sum python3 pgrep timeout /usr/bin/time; do
+    command -v "$c" >/dev/null 2>&1 || die "missing command: $c"
+done
+
+mkdir -p "$RUN_DIR"
+
+now_s() { date +%s.%N; }
+elapsed_s() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", b - a }'; }
+sha256_file() { if [ -f "$1" ]; then sha256sum "$1" | awk '{print $1}'; else printf 'missing'; fi; }
+max_rss_kb_from_time() { [ -f "$1" ] && awk -F: '/Maximum resident set size/ { gsub(/^[ \t]+/,"",$2); print $2 }' "$1" | tail -n1 || printf ''; }
+
+tree_digest() {
+    local root="$1"; [ -d "$root" ] || { printf 'missing'; return; }
+    ( cd "$root" && find . -type f ! -name 'SHA256SUMS' ! -name '*.manifest.jsonl' \
+        ! -path './.asupersync-atp-delta-v1/*' -print0 | sort -z \
+        | while IFS= read -r -d '' f; do printf '%s:%s\n' "${f#./}" "$(sha256sum "$f" | awk '{print $1}')"; done ) \
+        | sha256sum | awk '{print $1}'
+}
+
+# bytes-on-wire = sender (netns) veth tx+rx delta around the measured transfer.
+ns_wire_bytes() {
+    local tx rx
+    tx="$(ip netns exec "$NS" cat "/sys/class/net/${IF_NS}/statistics/tx_bytes" 2>/dev/null || echo 0)"
+    rx="$(ip netns exec "$NS" cat "/sys/class/net/${IF_NS}/statistics/rx_bytes" 2>/dev/null || echo 0)"
+    printf '%s' "$((tx + rx))"
+}
+
+regime_netem() {
+    case "$1" in
+        perfect) printf 'delay 2ms rate 1gbit' ;;
+        good)    printf 'delay 25ms loss 0.1%% rate 200mbit' ;;
+        bad)     printf 'delay 80ms 20ms loss 2%% rate 50mbit' ;;
+        *) die "unknown regime: $1" ;;
+    esac
+}
+apply_regime() {
+    local netem; netem="$(regime_netem "$1")"
+    # shellcheck disable=SC2086
+    tc qdisc replace dev "$IF_HOST" root netem $netem
+    # shellcheck disable=SC2086
+    ip netns exec "$NS" tc qdisc replace dev "$IF_NS" root netem $netem
+}
+
+setup_netns() {
+    local sfx; sfx="$(printf '%s' "$RUN_ID" | cksum | awk '{print substr($1,1,6)}')"
+    NS="atprs${sfx}"; IF_HOST="vrh${sfx}"; IF_NS="vrn${sfx}"
+    ip netns add "$NS"
+    ip link add "$IF_HOST" type veth peer name "$IF_NS"
+    ip link set "$IF_NS" netns "$NS"
+    ip addr add "${HOST_IP}/${CIDR}" dev "$IF_HOST"; ip link set "$IF_HOST" up
+    ip netns exec "$NS" ip addr add "${NS_IP}/${CIDR}" dev "$IF_NS"
+    ip netns exec "$NS" ip link set lo up
+    ip netns exec "$NS" ip link set "$IF_NS" up
+}
+start_rsyncd() {
+    local root="$1" conf="$2"
+    cat >"$conf" <<EOF
+use chroot = no
+max connections = 0
+reverse lookup = no
+[bench]
+    path = ${root}
+    read only = false
+    uid = root
+    gid = root
+EOF
+    rsync --daemon --no-detach --address="$HOST_IP" --port=1873 --config="$conf" >"${conf}.log" 2>&1 &
+    RSYNCD_PID=$!
+    sleep 0.5
+    kill -0 "$RSYNCD_PID" 2>/dev/null || die "rsyncd failed: $(cat "${conf}.log" 2>/dev/null)"
+}
+stop_rsyncd() { [ -n "$RSYNCD_PID" ] && { kill "$RSYNCD_PID" 2>/dev/null || true; RSYNCD_PID=""; }; }
+
+cleanup() {
+    stop_rsyncd
+    [ -n "$NS" ] && ip netns del "$NS" >/dev/null 2>&1 || true
+    [ -n "$IF_HOST" ] && ip link del "$IF_HOST" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+# ── payload + mutation ───────────────────────────────────────────────────────
+gen_file() {
+    local path="$1" bytes="$2" mb=$(( $2 / 1048576 )) rem=$(( $2 % 1048576 ))
+    [ "$mb" -gt 0 ] && dd if=/dev/urandom of="$path" bs=1M count="$mb" status=none || : >"$path"
+    [ "$rem" -gt 0 ] && dd if=/dev/urandom bs=1 count="$rem" status=none >>"$path"
+}
+# Apply a change mode to a FILE in place (operates on a copy passed as $1).
+mutate_file() {
+    local path="$1" mode="$2" size; size="$(stat -c%s "$path")"
+    case "$mode" in
+        0pct) : ;; # no change — re-sync should be ~0 bytes (AlreadyInSync)
+        1pct)  python3 - "$path" "$size" 0.01 <<'PY'
+import os, random, sys
+p, size, frac = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+rng = random.Random(1234)
+n = max(1, int(size * frac))
+with open(p, "r+b") as f:
+    for _ in range(n):
+        f.seek(rng.randrange(size)); f.write(bytes([rng.randrange(256)]))
+PY
+            ;;
+        10pct) python3 - "$path" "$size" 0.10 <<'PY'
+import os, random, sys
+p, size, frac = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+rng = random.Random(5678)
+n = max(1, int(size * frac))
+with open(p, "r+b") as f:
+    for _ in range(n):
+        f.seek(rng.randrange(size)); f.write(bytes([rng.randrange(256)]))
+PY
+            ;;
+        append) dd if=/dev/urandom bs=64K count=1 status=none >>"$path" ;;
+        insert) python3 - "$path" <<'PY'
+import os, sys
+p = sys.argv[1]
+with open(p, "rb") as f: data = f.read()
+mid = len(data)//2
+ins = os.urandom(65536)
+with open(p, "wb") as f: f.write(data[:mid] + ins + data[mid:])
+PY
+            ;;
+        *) die "unknown file change mode: $mode" ;;
+    esac
+}
+
+sample_peak_rss() {
+    local pattern="$1" stop="$2" out="$3" peak=0
+    while [ ! -e "$stop" ]; do
+        local total=0 pid rss
+        for pid in $(pgrep -f "$pattern" 2>/dev/null || true); do
+            rss="$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+            [ -n "$rss" ] && total=$((total + rss))
+        done
+        [ "$total" -gt "$peak" ] && peak="$total"
+        sleep "$RSS_SAMPLE_INTERVAL"
+    done
+    printf '%s' "$peak" >"$out"
+}
+
+# ── measured re-sync for one method ──────────────────────────────────────────
+# echoes: WIRE_BYTES WALL PEAK_RSS_KB STATUS_CODE
+resync_atp() {
+    local src="$1" dest_dir="$2" port="$3" case_dir="$4"
+    local rl="$case_dir/atp_recv.log" sl="$case_dir/atp_send.log" rt="$case_dir/atp_recv.time" st="$case_dir/atp_send.time"
+    local s_tag="atprs-send-${port}" r_tag="atprs-recv-${port}"
+    local s_stop="$case_dir/atp_s_stop" s_out="$case_dir/atp_s_rss"
+    set +e
+    timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" recv "$dest_dir" \
+        --listen "0.0.0.0:${port}" --transport rq --once --peer-id "$r_tag" \
+        --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$SYMBOL_SIZE" $RQ_AUTH_LAB \
+        >"$rl" 2>"$rt" &
+    local recv_pid=$!
+    sample_peak_rss "$s_tag" "$s_stop" "$s_out" & local samp=$!
+    sleep "$RECEIVER_READY_SLEEP"
+    local before after start finish ss rs
+    before="$(ns_wire_bytes)"; start="$(now_s)"
+    ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" send "$src" "${HOST_IP}:${port}" \
+        --transport rq --streams "$STREAMS" --symbol-size "$SYMBOL_SIZE" --peer-id "$s_tag" \
+        --max-bytes "$MAX_BYTES" $RQ_AUTH_LAB >"$sl" 2>"$st"
+    ss=$?
+    finish="$(now_s)"; after="$(ns_wire_bytes)"
+    [ "$ss" != "0" ] && kill "$recv_pid" 2>/dev/null
+    wait "$recv_pid"; rs=$?
+    touch "$s_stop"; wait "$samp" 2>/dev/null
+    set -e
+    printf '%s %s %s %s' "$((after - before))" "$(elapsed_s "$start" "$finish")" \
+        "$(max_rss_kb_from_time "$st")" "$((ss + rs))"
+}
+
+resync_rsync() {
+    local src="$1" rsync_root="$2" case_dir="$3" is_dir="$4"
+    local st="$case_dir/rsync.time" sl="$case_dir/rsync.log"
+    local s_stop="$case_dir/rs_s_stop" s_out="$case_dir/rs_s_rss"
+    set +e
+    sample_peak_rss "rsync " "$s_stop" "$s_out" & local samp=$!
+    local before after start finish status
+    before="$(ns_wire_bytes)"; start="$(now_s)"
+    ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v rsync -aW --inplace --no-compress \
+        "$src" "rsync://${HOST_IP}:1873/bench/" >"$sl" 2>"$st"
+    status=$?
+    finish="$(now_s)"; after="$(ns_wire_bytes)"
+    touch "$s_stop"; wait "$samp" 2>/dev/null
+    set -e
+    printf '%s %s %s %s' "$((after - before))" "$(elapsed_s "$start" "$finish")" \
+        "$(max_rss_kb_from_time "$st")" "$status"
+}
+
+emit_row() {
+    # workload size_bytes regime change method wire wall rss src_sha dst_sha status_code
+    ROW_RUN="$RUN_ID" ROW_GIT="$GIT_HEAD" ROW_WL="$1" ROW_SIZE="$2" ROW_REGIME="$3" \
+    ROW_CHANGE="$4" ROW_METHOD="$5" ROW_WIRE="$6" ROW_WALL="$7" ROW_RSS="$8" \
+    ROW_SRC="$9" ROW_DST="${10}" ROW_SC="${11}" \
+    python3 - >>"$RESULTS" <<'PY'
+import json, os
+e = os.environ.get
+def num(n, d=0):
+    try:
+        f = float(e(n) or "")
+        return int(f) if f.is_integer() else f
+    except ValueError:
+        return d
+sha_ok = e("ROW_SRC", "") == e("ROW_DST", "x") and e("ROW_SRC", "") not in ("", "missing")
+status = "ok" if (sha_ok and e("ROW_SC", "1") == "0") else ("error" if e("ROW_SC","1") != "0" else "sha_mismatch")
+row = {
+    "schema": "atp-bench-resync-result-v1", "run_id": e("ROW_RUN","adhoc"), "git_head": e("ROW_GIT","?"),
+    "phase": "resync", "workload": e("ROW_WL",""), "size_bytes": num("ROW_SIZE"),
+    "regime": e("ROW_REGIME",""), "crypto_tier": "nocrypto", "change_mode": e("ROW_CHANGE",""),
+    "method": e("ROW_METHOD",""), "rep": 1, "bytes_on_wire": num("ROW_WIRE"),
+    "wall_s": num("ROW_WALL"), "peak_rss_kb": num("ROW_RSS"), "avg_rss_kb": num("ROW_RSS"),
+    "source_sha": e("ROW_SRC",""), "dest_sha": e("ROW_DST",""),
+    "sha_ok": sha_ok, "status_code": num("ROW_SC", 1), "status": status,
+}
+print(json.dumps(row, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+# ── per-cell flow: initial sync -> mutate -> measured re-sync -> verify ──────
+run_file_cell() {
+    local label="$1" bytes="$2" regime="$3" change="$4" port="$5"
+    local case_dir="$RUN_DIR/file_${label}/${regime}/${change}"; mkdir -p "$case_dir"
+    apply_regime "$regime"
+    local base="$case_dir/base.bin"; gen_file "$base" "$bytes"
+
+    # ── atp: initial full sync (seed receiver prior state), then mutate+resync ─
+    local atp_dest="$case_dir/atp_dest"; mkdir -p "$atp_dest"
+    local atp_src="$case_dir/atp_src.bin"; cp "$base" "$atp_src"
+    log "[$label/$regime/$change] atp initial sync"
+    set +e
+    timeout "$TIMEOUT_S" "$BIN" recv "$atp_dest" --listen "0.0.0.0:${port}" --transport rq --once \
+        --peer-id "init-recv-${port}" --workers "$WORKERS" --max-bytes "$MAX_BYTES" \
+        --symbol-size "$SYMBOL_SIZE" $RQ_AUTH_LAB >"$case_dir/atp_init_recv.log" 2>&1 &
+    local ip_pid=$!; sleep "$RECEIVER_READY_SLEEP"
+    ip netns exec "$NS" timeout "$TIMEOUT_S" "$BIN" send "$atp_src" "${HOST_IP}:${port}" --transport rq \
+        --streams "$STREAMS" --symbol-size "$SYMBOL_SIZE" --peer-id "init-send-${port}" \
+        --max-bytes "$MAX_BYTES" $RQ_AUTH_LAB >"$case_dir/atp_init_send.log" 2>&1
+    wait "$ip_pid" 2>/dev/null
+    set -e
+    mutate_file "$atp_src" "$change"
+    local fields; fields="$(resync_atp "$atp_src" "$atp_dest" "$((port+1))" "$case_dir")"
+    # shellcheck disable=SC2086
+    set -- $fields; local a_wire="$1" a_wall="$2" a_rss="$3" a_sc="$4"
+    local a_src_sha a_dst_sha; a_src_sha="$(sha256_file "$atp_src")"; a_dst_sha="$(sha256_file "$atp_dest/$(basename "$atp_src")")"
+    emit_row "file_${label}" "$bytes" "$regime" "$change" "atp-rq-delta" "$a_wire" "$a_wall" "$a_rss" "$a_src_sha" "$a_dst_sha" "$a_sc"
+
+    # ── rsync: initial sync into the daemon root, then mutate+resync ──────────
+    local rroot="$case_dir/rsync_root"; mkdir -p "$rroot"
+    local rsrc="$case_dir/rsync_src.bin"; cp "$base" "$rsrc"
+    start_rsyncd "$rroot" "$case_dir/rsyncd.conf"
+    ip netns exec "$NS" timeout "$TIMEOUT_S" rsync -aW --inplace --no-compress "$rsrc" \
+        "rsync://${HOST_IP}:1873/bench/" >"$case_dir/rsync_init.log" 2>&1
+    mutate_file "$rsrc" "$change"
+    fields="$(resync_rsync "$rsrc" "$rroot" "$case_dir" 0)"
+    # shellcheck disable=SC2086
+    set -- $fields; local r_wire="$1" r_wall="$2" r_rss="$3" r_sc="$4"
+    stop_rsyncd
+    local r_src_sha r_dst_sha; r_src_sha="$(sha256_file "$rsrc")"; r_dst_sha="$(sha256_file "$rroot/$(basename "$rsrc")")"
+    emit_row "file_${label}" "$bytes" "$regime" "$change" "rsyncd-delta" "$r_wire" "$r_wall" "$r_rss" "$r_src_sha" "$r_dst_sha" "$r_sc"
+
+    log "[$label/$regime/$change] atp wire=${a_wire}B rsync wire=${r_wire}B (re-sync bytes-on-wire)"
+}
+
+main() {
+    log "resync_bench start -> $RESULTS (git $GIT_HEAD)"
+    setup_netns
+    local port_off=0
+    for spec in $SIZES; do
+        local label="${spec%%:*}" bytes="${spec##*:}"
+        for regime in $REGIMES; do
+            for change in $CHANGES; do
+                [ "$change" = "rename" ] && continue  # rename is a tree case (see TREE note)
+                local port=$((PORT_BASE + port_off)); port_off=$((port_off + 2))
+                run_file_cell "$label" "$bytes" "$regime" "$change" "$port"
+            done
+        done
+    done
+    log "resync_bench complete. Headline = atp-rq-delta vs rsyncd-delta bytes_on_wire per cell."
+    log "Rename (tree) re-sync is gated behind a tree-capable atp delta path; see bzkxa5/3fr950."
+    log "results: $RESULTS"
+    # Quick headline summary (atp/rsync wire-byte ratio per cell).
+    python3 - "$RESULTS" <<'PY'
+import json, sys, collections
+cells = collections.defaultdict(dict)
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line: continue
+    r = json.loads(line)
+    cells[(r["workload"], r["regime"], r["change_mode"])][r["method"]] = r
+print("\n# re-sync bytes-on-wire (atp-rq-delta vs rsyncd-delta)\n")
+print("| workload | regime | change | atp wire | rsync wire | ratio atp/rsync | atp sha |")
+print("|---|---|---|--:|--:|--:|---|")
+for k in sorted(cells):
+    a = cells[k].get("atp-rq-delta"); s = cells[k].get("rsyncd-delta")
+    aw = a["bytes_on_wire"] if a else None
+    sw = s["bytes_on_wire"] if s else None
+    ratio = (aw / sw) if (aw is not None and sw) else None
+    print("| {} | {} | {} | {} | {} | {} | {} |".format(
+        k[0], k[1], k[2], aw if aw is not None else "—", sw if sw is not None else "—",
+        ("%.2f" % ratio) if ratio is not None else "—",
+        "ok" if (a and a["sha_ok"]) else "FAIL"))
+PY
+}
+
+main "$@"
