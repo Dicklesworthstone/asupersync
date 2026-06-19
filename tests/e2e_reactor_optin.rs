@@ -1,12 +1,10 @@
-//! Burn-in smoke for the opt-in platform reactor
-//! (br-asupersync-1ajbtl, rollout step 1).
+//! Burn-in smoke for the default platform reactor
+//! (br-asupersync-1ajbtl).
 //!
-//! Default-built runtimes attach no I/O reactor: network reads/writes are
-//! driven by 1ms fallback wheel-timer re-polls. With
-//! `RuntimeBuilder::enable_platform_reactor(true)`, `build()` constructs the
-//! platform backend (epoll on Linux) and attaches the `IoDriver`, so socket
-//! readiness drives wakeups. These tests exercise that previously
-//! never-exercised full-builder reactor path with real TCP traffic:
+//! Default-built runtimes now construct the platform backend (epoll on Linux)
+//! and attach the `IoDriver`, so socket readiness drives wakeups instead of
+//! 1ms fallback wheel-timer re-polls. These tests exercise that full-builder
+//! default reactor path with real TCP traffic:
 //!   - `platform_reactor_serves_tcp_round_trip`: connect, write, delayed
 //!     echo read, EOF-clean close.
 //!   - `platform_reactor_read_with_far_timeout_completes_promptly`: the
@@ -48,7 +46,6 @@ fn platform_reactor_serves_tcp_round_trip() {
 
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
-        .enable_platform_reactor(true)
         .build()
         .expect("build runtime with platform reactor");
     let echoed = runtime.block_on(runtime.handle().spawn(async move {
@@ -73,7 +70,6 @@ fn platform_reactor_read_with_far_timeout_completes_promptly() {
 
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
-        .enable_platform_reactor(true)
         .build()
         .expect("build runtime with platform reactor");
     let started = std::time::Instant::now();

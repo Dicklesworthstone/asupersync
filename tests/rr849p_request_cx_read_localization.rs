@@ -12,12 +12,13 @@
 //!     scripted PG backends.
 //!
 //! Historical root cause (fixed in src/runtime/scheduler/three_lane.rs):
-//! default-built runtimes have no I/O reactor (br-asupersync-1ajbtl), so
-//! reads re-poll through ~1ms `fallback_rewake` wheel timers. Workers only
-//! pump the timer wheel in `next_task()`; a worker stuck in the inner backoff
-//! loop never fired due wheel timers, and the block_on thread could park all
-//! the way to the far `timeout()` Sleep deadline — stranding the due re-poll
-//! timer and stalling the read for the full timeout.
+//! before the br-asupersync-1ajbtl default-reactor flip, default-built
+//! runtimes had no I/O reactor, so reads re-polled through ~1ms
+//! `fallback_rewake` wheel timers. Workers only pump the timer wheel in
+//! `next_task()`; a worker stuck in the inner backoff loop never fired due
+//! wheel timers, and the block_on thread could park all the way to the far
+//! `timeout()` Sleep deadline — stranding the due re-poll timer and stalling
+//! the read for the full timeout.
 
 #![cfg(all(feature = "postgres", feature = "test-internals"))]
 
@@ -194,14 +195,14 @@ fn region_server(listener: &TcpListener) {
 /// identical read WITHOUT the timeout wrapper; phase B wraps it in
 /// `timeout(4s)`.
 ///
-/// Root cause this guards against: default-built runtimes have no I/O
-/// reactor (br-asupersync-1ajbtl), so reads re-poll through ~1ms
-/// `fallback_rewake` wheel timers. Workers only pump the timer wheel in
-/// `next_task()`; before the rr849p fix, a worker in the inner backoff loop
-/// never processed due wheel timers, and the block_on thread could park all
-/// the way to the far `timeout()` Sleep deadline — stranding the due 1ms
-/// re-poll timer (`timer_next_ms=Some(0)` frozen) and stalling the read for
-/// the full timeout.
+/// Root cause this guards against: before the br-asupersync-1ajbtl
+/// default-reactor flip, default-built runtimes had no I/O reactor, so reads
+/// re-polled through ~1ms `fallback_rewake` wheel timers. Workers only pump
+/// the timer wheel in `next_task()`; before the rr849p fix, a worker in the
+/// inner backoff loop never processed due wheel timers, and the block_on
+/// thread could park all the way to the far `timeout()` Sleep deadline —
+/// stranding the due 1ms re-poll timer (`timer_next_ms=Some(0)` frozen) and
+/// stalling the read for the full timeout.
 ///
 /// The `[RR849P-DIAG ...]` monitor timeline prints io stats (when a reactor
 /// exists) and the timer wheel's next-deadline/pending view to keep the
@@ -258,8 +259,10 @@ fn rr849p_minimal_tcp_timeout_read_diag() {
 
     // Monitor thread: samples io + timer driver state on a 50ms cadence for
     // the whole test, printing only on change so the timeline stays readable.
-    // The io handle is optional because default-built runtimes currently have
-    // no reactor (br-asupersync-1ajbtl); the timer view is the critical one.
+    // The io handle is optional because explicitly reactorless builds and
+    // platforms without a native backend still use the timer fallback regime;
+    // default-built non-wasm runtimes should normally expose it
+    // (br-asupersync-1ajbtl).
     #[allow(clippy::type_complexity)]
     let (handle_tx, handle_rx) = mpsc::channel::<(
         Option<asupersync::runtime::IoDriverHandle>,

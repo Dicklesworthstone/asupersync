@@ -2804,6 +2804,8 @@ impl RuntimeBuilder {
             match crate::runtime::reactor::create_reactor() {
                 Ok(reactor) => Some(reactor),
                 Err(err) => {
+                    #[cfg(not(feature = "tracing-integration"))]
+                    let _ = &err;
                     crate::tracing_compat::warn!(
                         event = "runtime_builder_platform_reactor_unavailable",
                         error = %err,
@@ -6410,10 +6412,7 @@ worker_threads = 16
                 .io_driver_handle()
                 .is_some()
         }));
-        assert!(
-            has_driver,
-            "default runtime builds must attach an IoDriver"
-        );
+        assert!(has_driver, "default runtime builds must attach an IoDriver");
     }
 
     /// Pins the explicit fallback regime: callers may still disable the
