@@ -102,10 +102,10 @@ pub const DEFAULT_SYMBOL_SIZE: u16 = 1400;
 
 /// Default source-block ceiling.
 ///
-/// With 1 KiB symbols this bounds a block at ~8192 source symbols (well under
-/// the RFC 6330 K=56403 cap) and lets a single entry span up to 256 blocks (SBN
-/// is a `u8`), i.e. up to ~2 GiB per encoded object at this default block size.
-/// Larger logical files are split into ordered RaptorQ objects by
+/// With 1400-byte symbols this bounds a block at ~5992 source symbols (well
+/// under the RFC 6330 K=56403 cap) and lets a single entry span up to 256
+/// blocks (SBN is a `u8`), i.e. up to ~2 GiB per encoded object at this default
+/// block size. Larger logical files are split into ordered RaptorQ objects by
 /// [`split_large_entries`] so each object's K stays bounded (E-12).
 pub const DEFAULT_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 
@@ -7007,30 +7007,43 @@ mod tests {
     }
 
     #[test]
-    fn effective_block_size_uses_streaming_target_for_normal_files() {
+    fn effective_block_size_preserves_k512_streaming_target_for_normal_files() {
         let config = RqConfig::default();
         let symbol_size = usize::from(config.symbol_size);
+        assert_eq!(config.symbol_size, DEFAULT_SYMBOL_SIZE);
+
         let expected_target = symbol_size
             .saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK)
             .min(TARGET_STREAMING_BLOCK_BYTES)
             .min(config.max_block_size);
+        assert_eq!(
+            expected_target.div_ceil(symbol_size),
+            TARGET_SOURCE_SYMBOLS_PER_BLOCK,
+            "default streaming target must stay at K512 even after symbol-size changes"
+        );
+
         let effective = effective_max_block_size_for_largest_entry(&config, 10 * 1024 * 1024)
             .expect("10MiB should fit");
         assert_eq!(effective, expected_target);
         assert_eq!(
             max_block_source_symbol_count(10 * 1024 * 1024, config.symbol_size, effective),
-            expected_target.div_ceil(symbol_size)
+            TARGET_SOURCE_SYMBOLS_PER_BLOCK
         );
     }
 
     #[test]
-    fn effective_block_size_grows_only_to_fit_sbn_limit() {
+    fn effective_block_size_grows_from_k512_only_to_fit_sbn_limit() {
         let config = RqConfig::default();
         let one_gib: usize = 1024 * 1024 * 1024;
         let symbol_size = usize::from(config.symbol_size);
         let streaming_target = symbol_size
             .saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK)
             .min(TARGET_STREAMING_BLOCK_BYTES);
+        assert_eq!(
+            streaming_target.div_ceil(symbol_size),
+            TARGET_SOURCE_SYMBOLS_PER_BLOCK,
+            "fixture starts from the default K512 streaming target"
+        );
         let min_symbol_aligned_block = one_gib
             .div_ceil(MAX_SOURCE_BLOCKS)
             .max(symbol_size)
@@ -7088,13 +7101,24 @@ mod tests {
 
     #[test]
     fn max_block_source_symbols_uses_effective_block_not_entry_size() {
+        let config = RqConfig::default();
+        let symbol_size = usize::from(config.symbol_size);
+        let effective_k512_block = symbol_size * TARGET_SOURCE_SYMBOLS_PER_BLOCK;
         assert_eq!(
-            max_block_source_symbol_count(10 * 1024 * 1024, 1024, 512 * 1024),
-            512
+            max_block_source_symbol_count(
+                10 * 1024 * 1024,
+                config.symbol_size,
+                effective_k512_block
+            ),
+            TARGET_SOURCE_SYMBOLS_PER_BLOCK
         );
         assert_eq!(
-            max_block_source_symbol_count(10 * 1024 * 1024, 1024, 8 * 1024 * 1024),
-            8192
+            max_block_source_symbol_count(
+                10 * 1024 * 1024,
+                config.symbol_size,
+                DEFAULT_MAX_BLOCK_SIZE
+            ),
+            DEFAULT_MAX_BLOCK_SIZE.div_ceil(symbol_size)
         );
     }
 
