@@ -41,7 +41,9 @@ sudo env BIN=/tmp/atp_bench/atp \
 ```
 
 `BIN` must be a **release** `atp` build (large-K RaptorQ decode is too slow in
-debug). The runner picks the method per `(tier)`:
+debug). Build it with `--features atp-cli` from this source tree; that feature
+includes the TLS support required by the encrypted `atp-quic-tls13` tier. The
+runner picks the method per `(tier)`:
 
 | tier | atp method | rsync method (optimally tuned) |
 |---|---|---|
