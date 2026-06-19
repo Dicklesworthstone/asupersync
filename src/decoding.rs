@@ -592,11 +592,11 @@ impl DecodingPipeline {
             InsertResult::Duplicate => Ok(DeferredSymbolAcceptResult::Immediate(
                 SymbolAcceptResult::Duplicate,
             )),
-            InsertResult::MemoryLimitReached | InsertResult::BlockLimitReached { .. } => Ok(
-                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
-                    RejectReason::MemoryLimitReached,
-                )),
-            ),
+            InsertResult::MemoryLimitReached | InsertResult::BlockLimitReached { .. } => {
+                Ok(DeferredSymbolAcceptResult::Immediate(
+                    SymbolAcceptResult::Rejected(RejectReason::MemoryLimitReached),
+                ))
+            }
             InsertResult::Inserted {
                 block_progress,
                 threshold_reached: _,
@@ -634,9 +634,7 @@ impl DecodingPipeline {
                     )
                 });
                 if k.is_some_and(|k| source_received >= k || received >= needed) {
-                    if matches!(mode, FeedDecodeMode::Deferred)
-                        && self.block_is_decoding(sbn)
-                    {
+                    if matches!(mode, FeedDecodeMode::Deferred) && self.block_is_decoding(sbn) {
                         return Ok(DeferredSymbolAcceptResult::Immediate(
                             SymbolAcceptResult::Accepted { received, needed },
                         ));
@@ -647,10 +645,9 @@ impl DecodingPipeline {
                         block.state = BlockDecodingState::Decoding;
                     }
                     if matches!(mode, FeedDecodeMode::Deferred) {
-                        if let Some(result) = self.try_complete_source_block(
-                            sbn,
-                            retain_decoded_block,
-                        ) {
+                        if let Some(result) =
+                            self.try_complete_source_block(sbn, retain_decoded_block)
+                        {
                             return Ok(DeferredSymbolAcceptResult::Immediate(result));
                         }
                         if let Some(job) = self.prepare_decode_job(sbn, retain_decoded_block) {
@@ -815,11 +812,7 @@ impl DecodingPipeline {
         })
     }
 
-    fn prepare_decode_job(
-        &self,
-        sbn: u8,
-        retain_decoded_block: bool,
-    ) -> Option<BlockDecodeJob> {
+    fn prepare_decode_job(&self, sbn: u8, retain_decoded_block: bool) -> Option<BlockDecodeJob> {
         let block_plan = self.block_plan(sbn)?.clone();
         if block_plan.k == 0 {
             return None;
@@ -874,10 +867,7 @@ impl DecodingPipeline {
 
     /// Finalizes a previously deferred decode job and updates block state.
     #[must_use]
-    pub(crate) fn finish_decode_job(
-        &mut self,
-        outcome: BlockDecodeOutcome,
-    ) -> SymbolAcceptResult {
+    pub(crate) fn finish_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
         if self.completed_blocks.contains(&outcome.sbn) {
             return SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded);
         }
@@ -3051,7 +3041,14 @@ mod tests {
         };
         let object_id = ObjectId::new_for_test(113);
         let data = b"ABCDEFGH".to_vec();
-        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let encoder_pool = SymbolPool::new(PoolConfig {
+            symbol_size: config.symbol_size,
+            initial_size: 16,
+            max_size: 16,
+            allow_growth: false,
+            growth_increment: 0,
+        });
+        let mut encoder = EncodingPipeline::new(config.clone(), encoder_pool);
         let mut source_zero = None;
         let mut first_repair = None;
         for encoded in encoder.encode_single_block_with_repair(object_id, 0, &data, 1) {
@@ -3104,7 +3101,10 @@ mod tests {
         let outcome = run_block_decode_job(job);
         let result = decoder.finish_decode_job(outcome);
         match result {
-            SymbolAcceptResult::BlockComplete { block_sbn, data: got } => {
+            SymbolAcceptResult::BlockComplete {
+                block_sbn,
+                data: got,
+            } => {
                 assert_eq!(block_sbn, 0);
                 assert_eq!(got, data);
             }
@@ -3112,6 +3112,110 @@ mod tests {
         }
         assert!(decoder.is_complete());
         crate::test_complete!("deferred_streaming_feed_finishes_via_decode_job");
+    }
+
+    #[test]
+    fn deferred_streaming_feed_does_not_spawn_duplicate_decode_for_pending_block() {
+        init_test("deferred_streaming_feed_does_not_spawn_duplicate_decode_for_pending_block");
+        let config = crate::config::EncodingConfig {
+            symbol_size: 4,
+            max_block_size: 8,
+            repair_overhead: 1.0,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let object_id = ObjectId::new_for_test(114);
+        let data = b"ABCDEFGH".to_vec();
+        let encoder_pool = SymbolPool::new(PoolConfig {
+            symbol_size: config.symbol_size,
+            initial_size: 16,
+            max_size: 16,
+            allow_growth: false,
+            growth_increment: 0,
+        });
+        let mut encoder = EncodingPipeline::new(config.clone(), encoder_pool);
+        let mut source_zero = None;
+        let mut repairs = Vec::new();
+        for encoded in encoder.encode_single_block_with_repair(object_id, 0, &data, 2) {
+            let symbol = encoded.expect("encode").into_symbol();
+            match symbol.kind() {
+                SymbolKind::Source if symbol.esi() == 0 => source_zero = Some(symbol),
+                SymbolKind::Repair => repairs.push(symbol),
+                _ => {}
+            }
+        }
+        assert!(
+            repairs.len() >= 2,
+            "test fixture must provide at least two repair symbols"
+        );
+
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 8192,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data.len() as u64,
+                config.symbol_size,
+                1,
+                2,
+            ))
+            .expect("set params");
+
+        let first = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                source_zero.expect("source zero"),
+            ))
+            .expect("feed source");
+        assert!(matches!(
+            first,
+            DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. })
+        ));
+
+        let started = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                repairs.remove(0),
+            ))
+            .expect("feed first repair");
+        let DeferredSymbolAcceptResult::Decode(job) = started else {
+            panic!("first repair should start deferred decode");
+        };
+
+        let duplicate = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                repairs.remove(0),
+            ))
+            .expect("feed second repair while decode pending");
+        assert!(
+            matches!(
+                duplicate,
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. })
+            ),
+            "extra symbols for a pending block must not spawn duplicate decode jobs: {duplicate:?}"
+        );
+
+        let outcome = run_block_decode_job(job);
+        let result = decoder.finish_decode_job(outcome);
+        match result {
+            SymbolAcceptResult::BlockComplete {
+                block_sbn,
+                data: got,
+            } => {
+                assert_eq!(block_sbn, 0);
+                assert_eq!(got, data);
+            }
+            other => panic!("deferred decode should complete block, got {other:?}"),
+        }
+        assert!(decoder.is_complete());
+        crate::test_complete!(
+            "deferred_streaming_feed_does_not_spawn_duplicate_decode_for_pending_block"
+        );
     }
 
     #[test]
