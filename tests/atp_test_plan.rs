@@ -12,6 +12,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+const COVERAGE_LEDGER_MD: &str = include_str!("../docs/atp_coverage_ledger.md");
+const ATP_TEST_CONTRACT_MD: &str = include_str!("../docs/atp_test_contract.md");
+
 /// Test that all ATP modules are tracked in the coverage ledger
 #[test]
 fn test_atp_modules_are_tracked_in_ledger() {
@@ -51,18 +54,15 @@ fn test_critical_path_modules_have_test_requirements() {
         "src/atp/sdk.rs",
     ];
 
-    let ledger_content = fs::read_to_string("docs/atp_coverage_ledger.md")
-        .expect("Could not read atp_coverage_ledger.md");
-
     for module in critical_modules {
         assert!(
-            ledger_content.contains(module),
+            COVERAGE_LEDGER_MD.contains(module),
             "Critical path module '{}' must be tracked in coverage ledger",
             module
         );
 
         // Verify the module has a complete test requirements row
-        let module_line = ledger_content
+        let module_line = COVERAGE_LEDGER_MD
             .lines()
             .find(|line| line.contains(module))
             .unwrap_or_else(|| panic!("Could not find module '{}' in ledger", module));
@@ -81,9 +81,6 @@ fn test_critical_path_modules_have_test_requirements() {
 /// Test that the test contract document exists and has required sections
 #[test]
 fn test_contract_document_completeness() {
-    let contract_content = fs::read_to_string("docs/atp_test_contract.md")
-        .expect("ATP test contract document must exist at docs/atp_test_contract.md");
-
     let required_sections = vec![
         "Test Classification",
         "Unit Tests",
@@ -98,7 +95,7 @@ fn test_contract_document_completeness() {
 
     for section in required_sections {
         assert!(
-            contract_content.contains(section),
+            ATP_TEST_CONTRACT_MD.contains(section),
             "Test contract must contain '{}' section",
             section
         );
@@ -170,17 +167,8 @@ fn test_configuration_requirements() {
 fn discover_atp_modules() -> HashSet<String> {
     let mut modules = HashSet::new();
 
-    // Scan src/atp/ directory
-    if let Ok(entries) = fs::read_dir("src/atp") {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|s| s == "rs") {
-                if let Some(path_str) = path.to_str() {
-                    modules.insert(path_str.to_string());
-                }
-            }
-        }
-    }
+    // Scan src/atp/ directory recursively
+    scan_directory_recursive("src/atp", &mut modules);
 
     // Scan src/net/atp/ directory recursively
     scan_directory_recursive("src/net/atp", &mut modules);
@@ -228,23 +216,21 @@ fn scan_directory_recursive(dir: &str, modules: &mut HashSet<String>) {
 fn parse_ledger_modules() -> HashSet<String> {
     let mut modules = HashSet::new();
 
-    if let Ok(content) = fs::read_to_string("docs/atp_coverage_ledger.md") {
-        for line in content.lines() {
-            // Look for table rows that start with | and contain src/
-            if line.starts_with('|') && line.contains("src/") {
-                // Extract the module path from the first column
-                if let Some(first_col) = line.split('|').nth(1) {
-                    let module_path = first_col
-                        .trim()
-                        .trim_start_matches('`')
-                        .trim_end_matches('`');
-                    if module_path.starts_with("src/")
-                        && Path::new(module_path)
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-                    {
-                        modules.insert(module_path.to_string());
-                    }
+    for line in COVERAGE_LEDGER_MD.lines() {
+        // Look for table rows that start with | and contain src/
+        if line.starts_with('|') && line.contains("src/") {
+            // Extract the module path from the first column
+            if let Some(first_col) = line.split('|').nth(1) {
+                let module_path = first_col
+                    .trim()
+                    .trim_start_matches('`')
+                    .trim_end_matches('`');
+                if module_path.starts_with("src/")
+                    && Path::new(module_path)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+                {
+                    modules.insert(module_path.to_string());
                 }
             }
         }
