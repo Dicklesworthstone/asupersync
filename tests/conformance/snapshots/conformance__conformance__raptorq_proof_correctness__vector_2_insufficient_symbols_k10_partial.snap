@@ -1,6 +1,5 @@
 ---
 source: tests/conformance/raptorq_proof_correctness.rs
-assertion_line: 378
 expression: scrubbed
 ---
 {
@@ -14,7 +13,7 @@ expression: scrubbed
     "seed": "[deterministic]",
     "symbol_size": 48
   },
-  "content_hash": "0xe9c82a8fba8501f10d1b5869a28e72c88e86022cdbc4c9d23a5936ff0767f993",
+  "content_hash": "0xf323d60bf330e358b89af734424194bdb777e8997d2c0548f2dbed1f70aafd69",
   "elimination": {
     "inactivated": 0,
     "inactive_cols_preview": [],
