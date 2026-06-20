@@ -3,8 +3,8 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 81,
-  "dormant_module_count": 11,
+  "active_module_count": 91,
+  "dormant_module_count": 9,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
@@ -14,6 +14,11 @@
     "cx_capability_semantics",
     "messaging_broker_parity",
     "tls_handshake",
+    "harness",
+    "kernel_conformance",
+    "reactor_conformance",
+    "remote_conformance",
+    "scheduler_conformance",
     "h1_body_framing",
     "h1_content_encoding",
     "h1_expect_continue",
@@ -26,6 +31,7 @@
     "h1_rfc9112",
     "h1_trailer_restrictions",
     "h1_methods",
+    "http_h1_chunked_rfc9112",
     "h2_alpn_negotiation_rfc7540",
     "h2_connect",
     "h2_continuation_ordering",
@@ -65,6 +71,7 @@
     "consistent_hash_ring",
     "grpc_deadline",
     "grpc_health",
+    "grpc_status",
     "grpc_max_message_size",
     "grpc_message_framing",
     "grpc_status_mapping",
@@ -87,7 +94,10 @@
     "tls_sni",
     "udp_socket",
     "unix_listener",
-    "jetstream"
+    "jetstream",
+    "atp_capability_security_conformance",
+    "atp_proof_artifacts_conformance",
+    "atp_protocol_conformance"
   ],
   "dormant_modules": [
     {
@@ -134,33 +144,12 @@
       "retention_reason": "File deletion is forbidden; retained for comparison."
     },
     {
-      "module": "grpc_status",
-      "line": 122,
-      "disposition": "superseded_by_named_live_suite",
-      "superseded_by": [
-        "grpc_status_mapping"
-      ],
-      "reason": "The current registry wires grpc_status_mapping; the old grpc_status module has API drift.",
-      "retention_reason": "File deletion is forbidden; retained for comparison."
-    },
-    {
       "module": "h3_settings",
       "line": 123,
       "disposition": "intentionally_deferred_with_owner_bead",
       "owner_bead": "asupersync-rckh3q",
       "reason": "HTTP/3/QPACK reality-check work owns H3 settings parity and the private Setting API gap.",
       "retention_reason": "File deletion is forbidden; retained until the H3 lane is repaired."
-    },
-    {
-      "module": "http_h1_chunked_rfc9112",
-      "line": 124,
-      "disposition": "superseded_by_named_live_suite",
-      "superseded_by": [
-        "h1_rfc9112",
-        "h1_protocol"
-      ],
-      "reason": "Current RFC9112/protocol suites are live; the older file depends on reorganized crate::http and crate::io paths.",
-      "retention_reason": "File deletion is forbidden; retained for comparison."
     },
     {
       "module": "obligation_recovery",
@@ -240,13 +229,13 @@
       },
       {
         "case_id": "unwired-reference-pass-rejected",
-        "surface_id": "otel-trace-context-propagation",
+        "surface_id": "otel-logs-exporter",
         "candidate_verdict": "pass",
         "expected_error": "UnwiredReferencePass"
       },
       {
         "case_id": "unregistered-verdict-rejected",
-        "surface_id": "otel-trace-context-propagation",
+        "surface_id": "otel-logs-exporter",
         "candidate_verdict": "unavailable",
         "expected_error": "DisallowedVerdict"
       }
@@ -281,18 +270,18 @@
       "binary": "otel_baggage_propagation_conformance",
       "source_path": "conformance/src/bin/otel_baggage_propagation_conformance.rs",
       "reference_family": "OpenTelemetry baggage propagation",
-      "reference_status": "live_reference_not_wired",
-      "fail_closed_without_live_reference": true,
+      "reference_status": "live_reference_wired",
+      "fail_closed_without_live_reference": false,
       "runtime_allowed_verdicts": [
-        "xfail",
+        "pass",
         "fail"
       ],
       "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_baggage_registry CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --manifest-path conformance/Cargo.toml --bin otel_baggage_propagation_conformance -- --nocapture",
-      "proof_lane": "binary-unit-fail-closed",
+      "proof_lane": "binary-unit-live-reference",
       "required_source_markers": [
-        "fail-closed conformance guard",
-        "XFAIL",
-        "Live independent reference: unavailable"
+        "OpenTelemetry SDK BaggagePropagator",
+        "live baggage reference matched",
+        "Production header matches SDK reference"
       ],
       "forbidden_source_tokens": [
         "Use same implementation as our version for now",
@@ -353,18 +342,18 @@
       "binary": "otel_trace_context_propagation_conformance",
       "source_path": "conformance/src/bin/otel_trace_context_propagation_conformance.rs",
       "reference_family": "OpenTelemetry trace context propagation",
-      "reference_status": "live_reference_not_wired",
-      "fail_closed_without_live_reference": true,
+      "reference_status": "live_reference_wired",
+      "fail_closed_without_live_reference": false,
       "runtime_allowed_verdicts": [
-        "xfail",
+        "pass",
         "fail"
       ],
       "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_trace_context_registry CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --manifest-path conformance/Cargo.toml --bin otel_trace_context_propagation_conformance -- --nocapture",
-      "proof_lane": "binary-unit-fail-closed",
+      "proof_lane": "binary-unit-live-reference",
       "required_source_markers": [
-        "fail-closed conformance guard",
-        "XFAIL",
-        "Live opentelemetry trace-context reference: unavailable"
+        "TraceContextPropagator",
+        "TRACE_CONTEXT_SPEC_ORACLE",
+        "live trace-context reference matched"
       ],
       "forbidden_source_tokens": [
         "Overall score: 100%",

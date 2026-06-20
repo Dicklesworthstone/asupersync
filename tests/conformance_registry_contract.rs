@@ -415,31 +415,22 @@ fn reference_registry_api_rejects_unregistered_and_unwired_pass_claims() {
         object_array(&contract, "reference_surfaces").len()
     );
 
-    let trace_context = registry
-        .surface("otel-trace-context-propagation")
-        .expect("trace-context reference surface row");
-    assert_eq!(
-        trace_context.binary,
-        "otel_trace_context_propagation_conformance"
-    );
-    assert!(!trace_context.has_live_reference());
+    let logs_exporter = registry
+        .surface("otel-logs-exporter")
+        .expect("logs exporter reference surface row");
+    assert_eq!(logs_exporter.binary, "otel_logs_exporter_conformance");
+    assert!(!logs_exporter.has_live_reference());
 
     let pass_error = registry
-        .admit_runtime_verdict(
-            "otel-trace-context-propagation",
-            RuntimeConformanceVerdict::Pass,
-        )
+        .admit_runtime_verdict("otel-logs-exporter", RuntimeConformanceVerdict::Pass)
         .expect_err("unwired reference must reject pass");
     assert!(matches!(
         pass_error,
         ReferenceRegistryError::UnwiredReferencePass { surface_id, .. }
-            if surface_id == "otel-trace-context-propagation"
+            if surface_id == "otel-logs-exporter"
     ));
     registry
-        .admit_runtime_verdict(
-            "otel-trace-context-propagation",
-            RuntimeConformanceVerdict::Xfail,
-        )
+        .admit_runtime_verdict("otel-logs-exporter", RuntimeConformanceVerdict::Xfail)
         .expect("xfail is the admitted fail-closed verdict");
 
     let missing_error = registry
