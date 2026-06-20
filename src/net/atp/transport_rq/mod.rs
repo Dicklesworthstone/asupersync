@@ -851,7 +851,9 @@ impl RqAdaptiveSendState {
             sent_payload_bytes,
             cwnd_bytes,
         );
-        self.apply_loss_recommendations(&loss_result.recommendations);
+        let mild_wire_loss = wire_loss_hat <= RQ_MILD_LOSS_PACING_MAX_LOSS
+            && self.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS;
+        self.apply_loss_recommendations(&loss_result.recommendations, mild_wire_loss);
         self.controller.observe_path_signals(
             sent_symbols,
             received_symbols,
@@ -866,7 +868,11 @@ impl RqAdaptiveSendState {
         );
     }
 
-    fn apply_loss_recommendations(&mut self, recommendations: &[LossRecommendation]) {
+    fn apply_loss_recommendations(
+        &mut self,
+        recommendations: &[LossRecommendation],
+        mild_wire_loss: bool,
+    ) {
         for recommendation in recommendations {
             match recommendation {
                 LossRecommendation::ReduceCongestionWindow { factor } => {
@@ -884,7 +890,7 @@ impl RqAdaptiveSendState {
                 LossRecommendation::EnableFec { rate } => {
                     self.loss_fec_floor = self.loss_fec_floor.max((*rate).clamp(0.0, 0.50));
                 }
-                LossRecommendation::SwitchCongestionControl { .. } => {
+                LossRecommendation::SwitchCongestionControl { .. } if !mild_wire_loss => {
                     self.regime_shift = true;
                     let cap = if self.bw_ema_bps > 0.0 {
                         (self.bw_ema_bps * 0.5).ceil() as u64
@@ -894,6 +900,7 @@ impl RqAdaptiveSendState {
                     self.lower_pacing_cap(cap);
                     self.loss_fec_floor = self.loss_fec_floor.max(0.03);
                 }
+                LossRecommendation::SwitchCongestionControl { .. } => {}
                 LossRecommendation::IncreaseReorderingThreshold { .. } => {}
             }
         }
@@ -6370,13 +6377,16 @@ mod tests {
         let mut state = RqAdaptiveSendState::new(7, &config, 1);
         state.bw_ema_bps = 10_000_000.0;
 
-        state.apply_loss_recommendations(&[
-            LossRecommendation::ReduceCongestionWindow { factor: 0.5 },
-            LossRecommendation::EnableFec { rate: 0.10 },
-            LossRecommendation::SwitchCongestionControl {
-                algorithm: "bbr".to_string(),
-            },
-        ]);
+        state.apply_loss_recommendations(
+            &[
+                LossRecommendation::ReduceCongestionWindow { factor: 0.5 },
+                LossRecommendation::EnableFec { rate: 0.10 },
+                LossRecommendation::SwitchCongestionControl {
+                    algorithm: "bbr".to_string(),
+                },
+            ],
+            false,
+        );
 
         assert_eq!(state.loss_pacing_cap_bps, Some(5_000_000));
         assert!(state.loss_fec_floor >= 0.10);
