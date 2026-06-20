@@ -8,7 +8,7 @@
 
 #![cfg(test)]
 
-use asupersync::http::h1::server::{Http1Config, Http1Server};
+use asupersync::http::h1::server::{HostPolicy, Http1Config, Http1Server};
 use asupersync::http::h1::types::{Method, Request, Response};
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::runtime::RuntimeBuilder;
@@ -103,10 +103,21 @@ fn make_http_request(method: &str, path: &str, version: &str, headers: &[(&str, 
     req
 }
 
+fn keepalive_test_config() -> Http1Config {
+    Http1Config::default().host_policy(HostPolicy::AllowList(vec![
+        "example.com".to_string(),
+        "localhost".to_string(),
+    ]))
+}
+
 /// Helper to parse HTTP response from written bytes.
 fn parse_response_count(written: &[u8]) -> usize {
-    let response_str = String::from_utf8_lossy(written);
-    response_str.matches("HTTP/1.1 200 OK").count()
+    const HTTP11_OK: &[u8] = b"HTTP/1.1 200 OK";
+    const HTTP10_OK: &[u8] = b"HTTP/1.0 200 OK";
+    written
+        .windows(HTTP11_OK.len())
+        .filter(|window| *window == HTTP11_OK || *window == HTTP10_OK)
+        .count()
 }
 
 /// Helper to check if response contains specific header.
@@ -127,9 +138,12 @@ fn test_http11_keepalive_connection_reuse() {
         closed: false,
     };
 
-    let server = Http1Server::new(|req: Request| async move {
-        Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
-    });
+    let server = Http1Server::with_config(
+        |req: Request| async move {
+            Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
+        },
+        keepalive_test_config(),
+    );
 
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -139,14 +153,21 @@ fn test_http11_keepalive_connection_reuse() {
         .block_on(async { server.serve(transport).await })
         .expect("serve keep-alive requests");
 
-    // Should have served 3 requests on the same connection
-    assert_eq!(state.requests_served, 3);
-
     let written_data = written.lock().unwrap();
     let response_str = String::from_utf8_lossy(&written_data);
 
+    // Should have served 3 requests on the same connection
+    assert_eq!(
+        state.requests_served, 3,
+        "final state: {state:?}; response bytes:\n{response_str}"
+    );
+
     // Should have 3 responses
-    assert_eq!(parse_response_count(&written_data), 3);
+    assert_eq!(
+        parse_response_count(&written_data),
+        3,
+        "response bytes:\n{response_str}"
+    );
 
     // Should contain at least one Connection header
     assert!(response_str.contains("Connection:"));
@@ -175,9 +196,12 @@ fn test_connection_close_terminates_pipeline() {
 
         let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
-        let server = Http1Server::new(|req: Request| async move {
-            Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
-        });
+        let server = Http1Server::with_config(
+            |req: Request| async move {
+                Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
+            },
+            keepalive_test_config(),
+        );
 
         let result = server.serve(transport).await;
         assert!(result.is_ok());
@@ -220,9 +244,12 @@ fn test_chunked_connection_close_terminates_pipeline() {
 
         let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
-        let server = Http1Server::new(|req: Request| async move {
-            Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
-        });
+        let server = Http1Server::with_config(
+            |req: Request| async move {
+                Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
+            },
+            keepalive_test_config(),
+        );
 
         let result = server.serve(transport).await;
         assert!(result.is_ok());
@@ -271,9 +298,12 @@ fn test_chunked_keepalive_preserves_followup_pipeline() {
 
         let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
-        let server = Http1Server::new(|req: Request| async move {
-            Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
-        });
+        let server = Http1Server::with_config(
+            |req: Request| async move {
+                Response::new(200, "OK", format!("Response for {}", req.uri).into_bytes())
+            },
+            keepalive_test_config(),
+        );
 
         let result = server.serve(transport).await;
         assert!(result.is_ok());
@@ -331,13 +361,16 @@ Hello World\
 
         let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
-        let server = Http1Server::new(|req: Request| async move {
-            if req.method == Method::Post {
-                Response::new(201, "Created", b"Upload successful".to_vec())
-            } else {
-                Response::new(200, "OK", b"OK".to_vec())
-            }
-        });
+        let server = Http1Server::with_config(
+            |req: Request| async move {
+                if req.method == Method::Post {
+                    Response::new(201, "Created", b"Upload successful".to_vec())
+                } else {
+                    Response::new(200, "OK", b"OK".to_vec())
+                }
+            },
+            keepalive_test_config(),
+        );
 
         let result = server.serve(transport).await;
         assert!(result.is_ok());
@@ -374,7 +407,7 @@ fn test_idle_timeout_eviction() {
         let (transport, written) = TestTransport::new(req1.into_bytes());
 
         // Configure server with very short idle timeout
-        let config = Http1Config::default().idle_timeout(Some(Duration::from_millis(10)));
+        let config = keepalive_test_config().idle_timeout(Some(Duration::from_millis(10)));
 
         let server = Http1Server::with_config(
             |_req: Request| async move { Response::new(200, "OK", b"OK".to_vec()) },
@@ -409,7 +442,7 @@ fn test_max_requests_per_connection_enforcement() {
             TestTransport::with_multiple_requests(vec![&req1, &req2, &req3, &req4]);
 
         // Configure server with max 3 requests per connection
-        let config = Http1Config::default().max_requests(Some(3));
+        let config = keepalive_test_config().max_requests(Some(3));
 
         let server = Http1Server::with_config(
             |req: Request| async move {
@@ -446,7 +479,10 @@ fn test_http10_explicit_keepalive_required() {
         closed: false,
     };
 
-    let server = Http1Server::new(|_req: Request| async move { Response::new(200, "OK", b"OK") });
+    let server = Http1Server::with_config(
+        |_req: Request| async move { Response::new(200, "OK", b"OK") },
+        keepalive_test_config(),
+    );
 
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -484,7 +520,10 @@ fn test_http10_explicit_keepalive_works() {
 
     let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
-    let server = Http1Server::new(|_req: Request| async move { Response::new(200, "OK", b"OK") });
+    let server = Http1Server::with_config(
+        |_req: Request| async move { Response::new(200, "OK", b"OK") },
+        keepalive_test_config(),
+    );
 
     let runtime = RuntimeBuilder::current_thread()
         .build()
@@ -522,7 +561,7 @@ fn test_keepalive_disabled_server_wide() {
         let (transport, written) = TestTransport::with_multiple_requests(vec![&req1, &req2]);
 
         // Disable keep-alive server-wide
-        let config = Http1Config::default().keep_alive(false);
+        let config = keepalive_test_config().keep_alive(false);
 
         let server = Http1Server::with_config(
             |_req: Request| async move { Response::new(200, "OK", b"OK".to_vec()) },
