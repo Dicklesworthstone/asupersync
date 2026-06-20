@@ -863,7 +863,12 @@ fn recvmsg_with_raw_ancillary(
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = control_ptr;
-        msg.msg_controllen = control_len;
+        msg.msg_controllen = control_len.try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ancillary buffer length exceeds msg_controllen",
+            )
+        })?;
 
         let bytes = loop {
             let rc = libc::recvmsg(fd, &mut msg, 0);
