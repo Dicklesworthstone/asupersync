@@ -123,7 +123,7 @@ fn test_rfc6455_sec_websocket_key_validation() {
         "dGhlIHNhbXBsZSBub25jZQ==", // RFC 6455 example
         "AQIDBAUGBwgJCgsMDQ4PEA==", // Sequential bytes 0x01-0x10
         "AAAAAAAAAAAAAAAAAAAAAA==", // All zero bytes
-        "////////////////////",     // All 0xFF bytes
+        "/////////////////////w==", // All 0xFF bytes
     ];
 
     for (i, key) in valid_keys.iter().enumerate() {
@@ -562,10 +562,10 @@ fn test_rfc6455_subprotocol_negotiation() {
     // Test 5: Protocol parsing edge cases
     let protocol_test_cases = vec![
         ("chat", "chat"),
-        ("chat, superchat", "chat"),          // First in list
-        ("  chat  ,  superchat  ", "chat"),   // Whitespace handling
-        ("superchat,chat,echo", "superchat"), // No spaces
-        ("unknown, chat, unknown2", "chat"),  // Mixed known/unknown
+        ("chat, superchat", "chat"),         // First in list
+        ("  chat  ,  superchat  ", "chat"),  // Whitespace handling
+        ("superchat,chat,echo", "chat"),     // No spaces; server only supports chat
+        ("unknown, chat, unknown2", "chat"), // Mixed known/unknown
     ];
 
     let server_chat = ServerHandshake::new().protocol("chat");

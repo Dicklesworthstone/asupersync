@@ -715,9 +715,8 @@ impl ServerHandshake {
         // subprotocols, honoring the client's preference order. Iterate the
         // client's list first and return the first entry the server supports.
         //
-        // If the server has been configured with a non-empty set of supported
-        // protocols and the client offers protocols, fail the handshake with
-        // `ProtocolMismatch` when none of the client's offers are supported.
+        // If no client-offered protocol is supported, omit
+        // Sec-WebSocket-Protocol and still complete the opening handshake.
         let selected_protocol = if let Some(requested) = request.header("sec-websocket-protocol") {
             let offered: Vec<String> = requested
                 .split(',')
@@ -732,12 +731,6 @@ impl ServerHandshake {
             });
             match selected {
                 Some(s) => Some(s.clone()),
-                None if !self.supported_protocols.is_empty() && !offered.is_empty() => {
-                    return Err(HandshakeError::ProtocolMismatch {
-                        requested: offered,
-                        offered: None,
-                    });
-                }
                 None => None,
             }
         } else {
@@ -2072,16 +2065,13 @@ Connection: Upgrade\n\
         let request = HttpRequest::parse(request_data.as_bytes())
             .expect("Unsupported protocol request should parse");
 
-        let result = server_limited.accept(&request);
-        assert!(result.is_err(), "Should reject when no protocols match");
-
-        if let Err(error) = result {
-            assert!(
-                matches!(error, HandshakeError::ProtocolMismatch { .. }),
-                "Should fail with ProtocolMismatch error: {:?}",
-                error
-            );
-        }
+        let accept = server_limited
+            .accept(&request)
+            .expect("Should accept connection even when no protocols match");
+        assert_eq!(
+            accept.protocol, None,
+            "Should omit Sec-WebSocket-Protocol when no protocol matches"
+        );
 
         // Test case 3: Single protocol negotiation
         let server_single = ServerHandshake::new().protocol("websocket-chat");
@@ -2187,8 +2177,13 @@ Connection: Upgrade\n\
 
         let result = server_case.accept(&request);
         assert!(
-            result.is_err(),
-            "Protocol matching should be case-sensitive: 'Chat' != 'chat'"
+            result.is_ok(),
+            "Protocol matching should be case-sensitive and no match should omit protocol"
+        );
+        assert_eq!(
+            result.unwrap().protocol,
+            None,
+            "Case-sensitive protocol mismatch should not select a protocol"
         );
     }
 
