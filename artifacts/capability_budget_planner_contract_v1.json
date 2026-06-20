@@ -172,7 +172,7 @@
       "required_markers": [
         "pub fn capability_budget(&self) -> CapabilityBudget",
         "pub async fn region_with_budget_and_capability_budget",
-        "state.create_child_region_with_capability_budget(",
+        "state.create_child_region_with_capability_budget_and_priority(",
         "crate::record::RegionRecord::capability_budget",
         "child_cx.apply_child_capability_budget("
       ],
