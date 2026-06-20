@@ -8,14 +8,20 @@ pub mod append_recovery_e2e;
 use asupersync::atp::object::{ContentId, ObjectId, ObjectKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
+
+static TEMP_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), nanos))
+    let seq = TEMP_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join(format!("{}_{}_{}", prefix, std::process::id(), nanos))
+        .join(seq.to_string())
 }
 
 /// Test-only constructor shim for historical E2E harness code.

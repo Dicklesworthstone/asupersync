@@ -106,6 +106,120 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 | `src/net/atp/sdk/object.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Object manipulation API |
 | `src/net/atp/sdk/diagnostics.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Diagnostic and monitoring API |
 
+### Discovered ATP Modules
+
+| Module | Status | Unit Tests | Property Tests | Metamorphic Tests | Edge Cases | Error Cases | Cancellation | Leak Check | Notes |
+|--------|--------|------------|----------------|-------------------|------------|-------------|--------------|------------|-------|
+| `src/atp/adapter.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/adaptive_raptorq.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/autotune.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/cache_seeding_integration_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/cas.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/daemon_control.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/delta.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/delta_subchunk.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/early_usability_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/planner.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/repair_coordinator.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/repair_coordinator_integration_test.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/repair_roi.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/repair_scheduler.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/safety.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/slepian_wolf.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/telemetry.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/timing_security.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/transfer_actor.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/transfer_brain.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/transfer_integration_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/upgrade_integration.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/cli/atp_user_journey.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/cli/atp_workflows.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding/assignment.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding/descriptor.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding/esi.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding/handshake.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/bonding/receiver.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/channel_bonding.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/chunk/bulk_file.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/chunk/cas.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/chunk/change_detect.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/chunk/delta_stream.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/chunk/reassembly.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/chunk/reconcile.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/chunk/sparse_image.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/chunk/sync_tree.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/compress/algorithms.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/compress/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/compress/policy.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/compress/validation.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/crypto/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/crypto/policy.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/datagram/beacons.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/datagram/congestion.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/datagram/frame.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/datagram/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/datagram/probes.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/datagram/tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/datagram/transport.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/discovery/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/handshake/key_schedule.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/handshake/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/handshake/retry.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/handshake/state_machine.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/handshake/traces.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/handshake/transport_params.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/handshake/version_negotiation.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/object/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/ops/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/byzantine_defense.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/codec.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/frames.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/outcome.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/packet_assembly.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/quic_frames.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/resource_manager.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/session.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/transcript.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/transport_params.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/protocol/varint.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/quic/connection/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/quic/metrics.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/quic/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/quic/packet_protection.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/quic/recovery.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/quic/transfer_brain.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/relay/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sink/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sink/writer.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/streams/flow_control.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/streams/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/streams/reassembly.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/streams/scheduler.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/streams/stream.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/test_utils.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/compression.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/filter.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/metadata.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/mirror.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/multi_object.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/multisource.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/progress.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_common/streaming.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_quic/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_quic/native_link.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_quic/symbol_datagram.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_quic/symbol_envelope.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_rq/adaptive.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_rq/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_tcp/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/udp/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+
 ## CLI Integration
 
 | Module | Status | Unit Tests | Property Tests | Metamorphic Tests | Edge Cases | Error Cases | Cancellation | Leak Check | Notes |
@@ -135,10 +249,10 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 
 ### Compliance Tracking
 
-Total Modules: 33
+Total Modules: 150
 - TESTED: 0 (0%)
 - PARTIAL: 0 (0%) 
-- PLANNED: 33 (100%)
+- PLANNED: 150 (100%)
 - MISSING: 0 (0%)
 
 **Critical Path Modules** (must be TESTED before any release):

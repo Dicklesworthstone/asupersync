@@ -1916,19 +1916,12 @@ mod tests {
         let first = block_on(rx.recv(&cx)).expect("recv failed");
         crate::assert_with_log!(first == 1, "first recv", 1, first);
 
-        // Wait for worker
-        for _ in 0..10_000 {
-            if finished.load(Ordering::SeqCst) {
-                break;
-            }
-            std::thread::yield_now();
-        }
-        let finished_now = finished.load(Ordering::SeqCst);
-        crate::assert_with_log!(finished_now, "worker finished", true, finished_now);
         let second = block_on(rx.recv(&cx)).expect("recv failed");
         crate::assert_with_log!(second == 2, "second recv", 2, second);
 
         handle.join().expect("sender thread panicked");
+        let finished_now = finished.load(Ordering::SeqCst);
+        crate::assert_with_log!(finished_now, "worker finished", true, finished_now);
         crate::test_complete!("backpressure_blocks_until_recv");
     }
 

@@ -4303,10 +4303,7 @@ mod tests {
             Ok(MaxBlockSizeArg::Bytes(8 * 1024 * 1024))
         );
         assert_eq!("0".parse::<MaxBlockSizeArg>(), Ok(MaxBlockSizeArg::Auto));
-        assert_eq!(
-            "0b".parse::<MaxBlockSizeArg>(),
-            Ok(MaxBlockSizeArg::Auto)
-        );
+        assert_eq!("0b".parse::<MaxBlockSizeArg>(), Ok(MaxBlockSizeArg::Auto));
         assert_eq!(
             "not-bytes".parse::<MaxBlockSizeArg>(),
             Err(

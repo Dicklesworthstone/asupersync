@@ -6,6 +6,7 @@
 
 use asupersync::atp::object::{MetadataPolicy, ObjectId, ObjectKind};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 mod atp {
@@ -19,15 +20,19 @@ use atp::object::{
     ObjectTestConfig, RecoveryState, TestArtifact, VerificationResult,
 };
 
+static SUITE_TEMP_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
 fn unique_suite_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let seq = SUITE_TEMP_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "atp_e2e_proof_suite_{}_{}",
+        "atp_e2e_proof_suite_{}_{}_{}",
         std::process::id(),
-        nanos
+        nanos,
+        seq
     ))
 }
 

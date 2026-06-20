@@ -27,6 +27,8 @@ include = [
     "Cargo.toml",
     "README.md",
     "LICENSE",
+    "docs/atp_coverage_ledger.md",
+    "docs/atp_test_contract.md",
     "assets/dashboard.html",
     "examples/channel_mpsc_select_e2e.rs",
     "src/**",
