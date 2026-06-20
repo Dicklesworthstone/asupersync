@@ -233,13 +233,16 @@ fn cx_set_current_docstring_documents_raii_guard_semantics() {
     // documented as RAII; pops the frame on drop.
     let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {";
-    let pos = source.find(fn_marker).expect("set_current fn");
+    let pos = source
+        .find("pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {")
+        .or_else(|| source.find("pub fn set_current(cx: Option<Self>) -> CurrentCxGuard {"))
+        .expect("set_current fn");
     let preceding = &source[pos.saturating_sub(2000)..pos];
 
     assert!(
         preceding.contains("Sets the current task context for the duration of the guard")
-            || preceding.contains("ambient current-context installation"),
+            || preceding.contains("Installs `cx` as the current ambient task context")
+            || preceding.contains("public ambient-install primitive"),
         "REGRESSION: Cx::set_current docstring no longer \
          documents the RAII semantic. Users may forget \
          to retain the guard for the desired scope.",
