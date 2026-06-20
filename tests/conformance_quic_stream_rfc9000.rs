@@ -605,18 +605,19 @@ fn run_conformance_test(test_case: &StreamStateTestCase) -> TestResult {
         state_machine.recv_state = Some(initial_recv);
     }
 
-    // Apply event sequence
+    // Apply the explicit event sequence. Intermediate RFC states are
+    // observable: `AppFinish` reaches `Send`, and peer FIN reaches
+    // `SizeKnown`. Background completion is modeled only by vectors with no
+    // explicit event, such as `Send -> DataSent` or `SizeKnown -> DataRecvd`.
     let mut error = None;
     for event in &test_case.events {
         if let Err(e) = state_machine.apply_event(event) {
             error = Some(e.to_string());
             break;
         }
-        state_machine.apply_automatic_transitions();
     }
 
-    // Apply automatic transitions after events
-    if error.is_none() {
+    if error.is_none() && test_case.events.is_empty() {
         state_machine.apply_automatic_transitions();
     }
 
