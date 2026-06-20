@@ -12,7 +12,7 @@
     {
       "name": "@asupersync/browser-core",
       "manifest": "packages/browser-core/package.json",
-      "manifest_version": "0.3.4",
+      "manifest_version": "0.3.5",
       "kind": "wasm-runtime-boundary",
       "required_committed_files": [
         "packages/browser-core/package.json",
@@ -30,7 +30,7 @@
     {
       "name": "@asupersync/browser",
       "manifest": "packages/browser/package.json",
-      "manifest_version": "0.3.4",
+      "manifest_version": "0.3.5",
       "kind": "browser-sdk",
       "required_committed_files": [
         "packages/browser/package.json",
@@ -42,7 +42,7 @@
     {
       "name": "@asupersync/react",
       "manifest": "packages/react/package.json",
-      "manifest_version": "0.3.4",
+      "manifest_version": "0.3.5",
       "kind": "react-adapter",
       "required_committed_files": [
         "packages/react/package.json",
@@ -53,7 +53,7 @@
     {
       "name": "@asupersync/next",
       "manifest": "packages/next/package.json",
-      "manifest_version": "0.3.4",
+      "manifest_version": "0.3.5",
       "kind": "next-adapter",
       "required_committed_files": [
         "packages/next/package.json",

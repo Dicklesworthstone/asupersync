@@ -25,7 +25,7 @@
     "decision_id": "browser-ga-js-ts-scoped-2026-06-12",
     "reviewed_as_of": "2026-06-12",
     "release_channel": "stable",
-    "candidate_package_version": "0.3.4",
+    "candidate_package_version": "0.3.5",
     "final_verdict": "pass_scoped_js_ts_ga",
     "js_ts_package_ga_allowed": true,
     "rust_browser_api_stable_allowed": false,
@@ -128,9 +128,9 @@
   "package_versions": [
     {
       "package_name": "@asupersync/browser-core",
-      "version": "0.3.4",
+      "version": "0.3.5",
       "manifest": "packages/browser-core/package.json",
-      "manifest_sha256": "8399095872c47f1a7010b4c66ebff7a035edf4396606be6391df8384bc7e41e7",
+      "manifest_sha256": "d5dcfce1c590ac6022c33fe39c554353580617b65dd735f664f074f7ae4b2e80",
       "artifact_hashes": [
         {
           "path": "packages/browser-core/index.js",
@@ -142,11 +142,11 @@
         },
         {
           "path": "packages/browser-core/asupersync.js",
-          "sha256": "9c7110be3da3e3372a6273df25482c54f2868ab8d409c3cf73d655f2f60681f1"
+          "sha256": "547f6a607032e08c07e06fbfa172bf800f4821db725fea0956a5f42accee27f0"
         },
         {
           "path": "packages/browser-core/asupersync.d.ts",
-          "sha256": "f7ed0dc477decc114a42a310a715259ec8739f1d8ce2f1a8f3d248225b6c9c9b"
+          "sha256": "d19cd91c0544a0a6e3120f49231fff16ca16e58effd84b24e11282f312b3272b"
         },
         {
           "path": "packages/browser-core/types.d.ts",
@@ -154,11 +154,11 @@
         },
         {
           "path": "packages/browser-core/asupersync_bg.wasm",
-          "sha256": "df617eba513cdf72d4acea14088c05efb7dca05af9adff85ef4296b0d51f9aae"
+          "sha256": "2206f641a0d2a83d7968aa301e8c30552539b6330050deb87708fd000868951a"
         },
         {
           "path": "packages/browser-core/asupersync_bg.wasm.d.ts",
-          "sha256": "b2c6e5bc662390c76e656ab63e244a0f10b3f90b6c364784f79589fad46718c0"
+          "sha256": "77c67b3be2083c45aec8cc57930e903236ce584bbdf7e263b4e4fdabed422211"
         },
         {
           "path": "packages/browser-core/abi-metadata.json",
@@ -172,13 +172,13 @@
     },
     {
       "package_name": "@asupersync/browser",
-      "version": "0.3.4",
+      "version": "0.3.5",
       "manifest": "packages/browser/package.json",
-      "manifest_sha256": "84854f51129affd2c7addf033c36be87d971de84030047f52f409c2f8c2fe45f",
+      "manifest_sha256": "d19e3b67521d88eba9485c327a26b92b28c21d009b8878ba982710508aa1885e",
       "artifact_hashes": [
         {
           "path": "packages/browser/src/index.ts",
-          "sha256": "6df74db4ddfb9169cbe84da935e6fcecb00f97cea51b2d4c1e2edbd1589d9db1"
+          "sha256": "9795a81ca48ade51af52187e07dfbb1dca154dec6531993f37161f64f4fc3129"
         },
         {
           "path": "packages/browser/src/tracing.ts",
@@ -192,13 +192,13 @@
     },
     {
       "package_name": "@asupersync/react",
-      "version": "0.3.4",
+      "version": "0.3.5",
       "manifest": "packages/react/package.json",
-      "manifest_sha256": "127ece19a1d851e972fd7df293ace6e9050f8a2958dbb398f057748b55b72cc1",
+      "manifest_sha256": "434b63c424fd31f99e2844b77943e8d8f9494c04ef436ae4bf97055efea27da3",
       "artifact_hashes": [
         {
           "path": "packages/react/src/index.ts",
-          "sha256": "cf060089c53a9d9136790caca9ab16463e342591fd35262253f6475dd975973a"
+          "sha256": "d764f6409c747d100772bddf38a2b76b1578466e597bc0d1fa78923e9349a356"
         },
         {
           "path": "packages/react/tsconfig.json",
@@ -208,13 +208,13 @@
     },
     {
       "package_name": "@asupersync/next",
-      "version": "0.3.4",
+      "version": "0.3.5",
       "manifest": "packages/next/package.json",
-      "manifest_sha256": "ec30a6b57ac56c995704d1f6e902626c06ac4be2e5adf7c7d6e54dc15206af35",
+      "manifest_sha256": "da6aa1e36bf58cd8984fbcdd4274407994f64ecaf6ddf418f974663affee7242",
       "artifact_hashes": [
         {
           "path": "packages/next/src/index.ts",
-          "sha256": "7df9e31a48a5a21578808b911eaa1be2471f13e8af4ab5317b5bca3c91212c86"
+          "sha256": "0d4c0b84c37d5dfa0478e4f653c17909c62ced435e2e639d99c089100c3b76e7"
         },
         {
           "path": "packages/next/tsconfig.json",
