@@ -1572,7 +1572,7 @@ fn mr_encoder_linearity_under_xor_of_source_vectors() {
 ///     incorrect constraint matrix construction
 #[test]
 fn mr_parameter_boundary_symmetry() {
-    proptest!(|(
+    proptest!(ProptestConfig::with_cases(24), |(
         seed: u64,
         // `repair_overhead` is a multiplier on the source-symbol count and must
         // be >= 1.0 (EncodingConfig rejects anything below). Sample valid

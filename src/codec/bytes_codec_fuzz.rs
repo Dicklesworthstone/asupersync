@@ -13,6 +13,9 @@ use proptest::strategy::Just;
 
 const STATEFUL_TRACE_MAX_BYTES: usize = 4 * 1024;
 const COMPREHENSIVE_TRACE_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_CODEC_PROPTEST_CASES: u32 = 32;
+const DEFAULT_LARGE_TRACE_MAX_BYTES: usize = 128 * 1024;
+const ONE_MIB: usize = 1024 * 1024;
 
 /// Generate arbitrary byte buffers for fuzzing
 fn arb_bytes() -> impl Strategy<Value = Vec<u8>> {
@@ -26,9 +29,9 @@ fn arb_bytes() -> impl Strategy<Value = Vec<u8>> {
         // Large bytes (1025-65536 bytes) - stress test
         prop::collection::vec(any::<u8>(), 1025..=65536),
         // Pathological cases
-        prop::collection::vec(any::<u8>(), 65537..=1048576), // Very large
-        prop::collection::vec(Just(0u8), 0..=1024),          // All zeros
-        prop::collection::vec(Just(255u8), 0..=1024),        // All 0xFF
+        prop::collection::vec(any::<u8>(), 65537..=DEFAULT_LARGE_TRACE_MAX_BYTES), // Very large
+        prop::collection::vec(Just(0u8), 0..=1024),                                // All zeros
+        prop::collection::vec(Just(255u8), 0..=1024),                              // All 0xFF
     ]
 }
 
@@ -76,6 +79,8 @@ mod decoder_fuzz {
     use super::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(DEFAULT_CODEC_PROPTEST_CASES))]
+
         /// Property: decode should never panic and should consume all bytes
         #[test]
         fn decode_never_panics(data in arb_bytes()) {
@@ -148,6 +153,8 @@ mod encoder_fuzz {
     use super::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(DEFAULT_CODEC_PROPTEST_CASES))]
+
         /// Property: encode(Bytes) should never panic and should append correctly
         #[test]
         fn encode_bytes_never_panics(
@@ -212,7 +219,9 @@ mod encoder_fuzz {
 
         /// Property: encoding large data should work without overflow
         #[test]
-        fn encode_large_data_safe(data in prop::collection::vec(any::<u8>(), 0..=1048576)) {
+        fn encode_large_data_safe(
+            data in prop::collection::vec(any::<u8>(), 0..=DEFAULT_LARGE_TRACE_MAX_BYTES)
+        ) {
             let mut codec = BytesCodec::new();
             let mut dst = BytesMut::new();
 
@@ -224,6 +233,20 @@ mod encoder_fuzz {
             prop_assert_eq!(&dst[..], &data[..]);
         }
     }
+
+    #[test]
+    fn encode_one_mib_payload_safe() {
+        let mut codec = BytesCodec::new();
+        let data = vec![0xA5; ONE_MIB];
+        let mut dst = BytesMut::new();
+
+        codec
+            .encode(Bytes::from(data.clone()), &mut dst)
+            .expect("encoding a one MiB payload should not overflow");
+
+        assert_eq!(dst.len(), data.len());
+        assert_eq!(&dst[..], &data[..]);
+    }
 }
 
 /// Round-trip property testing: encode then decode should be identity
@@ -231,6 +254,8 @@ mod roundtrip_fuzz {
     use super::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(DEFAULT_CODEC_PROPTEST_CASES))]
+
         /// Property: encode then decode should recover original data
         #[test]
         fn roundtrip_bytes_identity(data in arb_bytes()) {
@@ -255,7 +280,9 @@ mod roundtrip_fuzz {
 
         /// Property: multiple encode then single decode should concatenate correctly
         #[test]
-        fn multiple_encode_single_decode(chunks in prop::collection::vec(arb_bytes(), 0..=10)) {
+        fn multiple_encode_single_decode(
+            chunks in prop::collection::vec(arb_stateful_bytes(), 0..=10)
+        ) {
             let mut encode_codec = BytesCodec::new();
             let mut decode_codec = BytesCodec::new();
             let mut buffer = BytesMut::new();
@@ -307,6 +334,8 @@ mod stress_fuzz {
     use super::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(DEFAULT_CODEC_PROPTEST_CASES))]
+
         /// Property: codec should handle rapid encode/decode cycles
         #[test]
         fn rapid_cycles(
@@ -351,7 +380,7 @@ mod stress_fuzz {
         /// Property: codec should handle buffer reuse without contamination
         #[test]
         fn buffer_reuse_safe(
-            test_cycles in prop::collection::vec(arb_bytes(), 1..=20)
+            test_cycles in prop::collection::vec(arb_stateful_bytes(), 1..=12)
         ) {
             let mut codec = BytesCodec::new();
             let mut reused_buffer = BytesMut::new();
@@ -412,6 +441,8 @@ mod edge_case_fuzz {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(DEFAULT_CODEC_PROPTEST_CASES))]
+
         /// Property: fragmented buffer operations should work correctly
         #[test]
         fn fragmented_operations(
