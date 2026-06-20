@@ -39,7 +39,7 @@ const G2_REPRO_CMD: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch
 const G2_ARTIFACT_PATH: &str = "artifacts/ci_regression_gate_report.ndjson";
 
 /// Minimum calibration runs before gate checks activate.
-const GATE_CALIBRATION_RUNS: usize = 15;
+const GATE_CALIBRATION_RUNS: usize = 20;
 
 /// Number of gate-check runs per scenario.
 const GATE_CHECK_RUNS: usize = 20;
