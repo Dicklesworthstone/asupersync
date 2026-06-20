@@ -1,6 +1,6 @@
 [package]
 name = "asupersync-macros"
-version = "0.3.5"
+version = "0.3.4"
 edition = "2024"
 license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Proc macros for asupersync structured concurrency runtime"
@@ -18,7 +18,7 @@ quote = "1.0"
 proc-macro2 = "1.0"
 
 [dev-dependencies]
-asupersync = { version = "0.3.5", path = "..", default-features = false, features = ["test-internals"] }
+asupersync = { version = "0.3.4", path = "..", default-features = false, features = ["test-internals"] }
 trybuild = "1.0"
 
 [lints.rust]
