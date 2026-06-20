@@ -27,7 +27,10 @@
 //!         .load(std::sync::atomic::Ordering::Acquire);   // (A)
 //!     let exhausted = !cancelled
 //!         && Self::checkpoint_budget_exhaustion(...).is_some();
-//!     if !cancelled && !exhausted {
+//!     let has_message = guard.checkpoint_state.last_message.is_some();
+//!     let is_first_checkpoint = guard.checkpoint_state.checkpoint_count == 0
+//!         && guard.fast_path_count.load(Relaxed) == 0;
+//!     if !cancelled && !exhausted && !has_message && !is_first_checkpoint {
 //!         // ── progress recording ONLY when healthy ──
 //!         guard.fast_path_last_checkpoint_ns.store(...);
 //!         guard.fast_path_count.fetch_add(1, ...);
@@ -170,9 +173,9 @@ fn checkpoint_fast_path_loads_fast_cancel_with_acquire_first() {
 #[test]
 fn checkpoint_fast_path_skips_progress_recording_when_cancelled() {
     // Pin: the fast-path progress-recording stores are
-    // gated by `if !cancelled && !exhausted`. If cancelled
-    // OR exhausted, control falls through to the slow path
-    // WITHOUT recording.
+    // gated by the full healthy fast-path predicate, which
+    // must include `!cancelled`. If cancelled OR exhausted,
+    // control falls through to the slow path WITHOUT recording.
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
@@ -180,18 +183,19 @@ fn checkpoint_fast_path_skips_progress_recording_when_cancelled() {
     let body_window = &source[pos..pos + 4000];
 
     assert!(
-        body_window.contains("if !cancelled && !exhausted {")
+        body_window
+            .contains("if !cancelled && !exhausted && !has_message && !is_first_checkpoint {")
             && body_window.contains("fast_path_last_checkpoint_ns.store(")
             && body_window.contains("fast_path_count"),
-        "REGRESSION: the fast-path gate `if !cancelled && \
-         !exhausted` is gone or progress recording is no \
-         longer inside it. Checkpoint now records progress \
-         even when cancelled.",
+        "REGRESSION: the fast-path gate no longer includes \
+         `!cancelled` or progress recording is no longer \
+         inside that healthy path. Checkpoint now records \
+         progress even when cancelled.",
     );
 
     // Verify the gate appears BEFORE the stores in source order.
     let gate_pos = body_window
-        .find("if !cancelled && !exhausted {")
+        .find("if !cancelled && !exhausted && !has_message && !is_first_checkpoint {")
         .expect("cancel/exhaustion gate");
     let store_pos = body_window
         .find("fast_path_last_checkpoint_ns.store(")
