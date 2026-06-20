@@ -148,8 +148,8 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         category: AmbientCategory::Io,
         severity: Severity::Low,
         description: "Blocking-pool file open for applying committed entry timestamps",
-        exempt: false,
-        exemption_reason: None,
+        exempt: true,
+        exemption_reason: Some("ATP metadata applier owns this filesystem provider boundary"),
     },
 ];
 
@@ -1922,6 +1922,7 @@ fn test_function() {
             "web/debug.rs",
             "util/entropy.rs",
             "fs/",
+            "net/atp/transport_common/",
         ];
         for finding in KNOWN_FINDINGS.iter().filter(|f| f.exempt) {
             let in_provider = provider_paths.iter().any(|p| finding.file.starts_with(p));
