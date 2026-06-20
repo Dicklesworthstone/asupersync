@@ -208,6 +208,14 @@ const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
 const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
 const RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR: f64 = 0.01;
 const RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD: f64 = 0.03;
+/// Hard cap on the per-round fractional repair overhead taken from the controller's
+/// wire-loss-driven `plan.overhead` (round_tuning). Without this, a round-0 spray that
+/// over-paces a slow link self-inflicts high real loss, the wire-loss estimate clamps near
+/// 0.9, and plan.overhead explodes (~9.4 ⇒ ~10.7× total), which both crushes the pacing rate
+/// (base/(1+overhead)) and sprays ~10× the data. Bounding the fractional overhead at 1.0
+/// (≤2× total) covers any realistic wire loss (≤~50%) in one repair round while preventing
+/// the pathological blow-up. (MATRIX-12; bead atp-dataplane-redesign-317hxr.2.5.)
+const RQ_MAX_ROUND_REPAIR_OVERHEAD: f64 = 1.0;
 
 /// Packets pulled from the UDP socket per receive-pump turn.
 ///
@@ -692,9 +700,12 @@ impl RqAdaptiveSendState {
             repair_overhead: config.repair_overhead.max(1.0),
             pacing: RqSprayPacing::cold_start(config.symbol_size),
         };
-        let Some(plan) = self.controller.next_block_plan(self.symbol_size) else {
+        let Some(mut plan) = self.controller.next_block_plan(self.symbol_size) else {
             return fixed;
         };
+        // Bound the wire-loss-driven overhead before it feeds either the repair budget or the
+        // pacing rate, so a round-0 over-pace artifact can't blow it up to ~10× (MATRIX-12).
+        plan.overhead = plan.overhead.min(RQ_MAX_ROUND_REPAIR_OVERHEAD);
 
         let mut repair_overhead = config
             .repair_overhead
@@ -734,7 +745,13 @@ impl RqAdaptiveSendState {
         tuning.repair_overhead = tuning
             .repair_overhead
             .max(1.0 + overhead)
-            .max(1.0 + RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD);
+            .max(1.0 + RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD)
+            // Bound the FEC-fallback budget the same as round_tuning: when the wire-loss
+            // estimate is inflated by a round-0 over-pace artifact (loss_bar≈0.9),
+            // overhead_for_target returns ~9.7 ⇒ ~10.7× and a single round sprays ~10× the
+            // object (~518MB for 50M → 1.7GB recv RSS). Cap at ≤2× total so repair stays
+            // bounded; convergence still completes in ~2 rounds for realistic loss (MATRIX-13).
+            .min(1.0 + RQ_MAX_ROUND_REPAIR_OVERHEAD);
         tuning
     }
 
