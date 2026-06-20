@@ -319,7 +319,7 @@ pub fn total_delay_budget(policy: &RetryPolicy) -> Duration {
 
         total = total.saturating_add(additional);
 
-        if delay == policy.max_delay || total == Duration::MAX {
+        if delay == policy.max_delay || max_delay_nanos == u64::MAX || total == Duration::MAX {
             // remaining loop iterations: the loop runs 1..max_attempts, so at
             // position `attempt` there are (max_attempts - 1 - attempt) left.
             let remaining_iters = (policy.max_attempts - 1).saturating_sub(attempt);
@@ -2276,10 +2276,7 @@ mod tests {
                 .with_jitter(1.0);
             // Must not panic.
             let got = total_delay_budget(&policy);
-            assert!(
-                got <= Duration::MAX,
-                "RETRY-BUDGET-6: budget must remain bounded by Duration::MAX",
-            );
+            assert_eq!(got, Duration::MAX, "RETRY-BUDGET-6: budget must saturate");
         }
 
         /// RETRY-BUDGET-7 (MUST): validate() rejects configurations that

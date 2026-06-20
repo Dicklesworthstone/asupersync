@@ -4494,6 +4494,7 @@ mod tests {
 
         // Spawn a thread that will block on acquire.
         let pool2 = Arc::clone(&pool);
+        let (queued_tx, queued_rx) = mpsc::channel();
         let blocker = std::thread::spawn(move || {
             let cx2: crate::cx::Cx = crate::cx::Cx::for_testing();
             let waker = noop_pool_waker();
@@ -4501,7 +4502,7 @@ mod tests {
             let mut acquire_fut = std::pin::pin!(pool2.acquire(&cx2));
 
             match acquire_fut.as_mut().poll(&mut task_cx) {
-                Poll::Pending => {}
+                Poll::Pending => queued_tx.send(()).expect("signal queued pool waiter"),
                 Poll::Ready(result) => return result,
             }
 
@@ -4513,14 +4514,10 @@ mod tests {
             }
         });
 
-        let mut waiter_registered = false;
-        for _ in 0..4_096 {
-            if pool.stats().waiters == 1 {
-                waiter_registered = true;
-                break;
-            }
-            std::thread::yield_now();
-        }
+        queued_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("blocker should queue before resource return");
+        let waiter_registered = pool.stats().waiters == 1;
         crate::assert_with_log!(
             waiter_registered,
             "blocker should register as a waiter without sleep-based synchronization",
