@@ -33,15 +33,20 @@
 //!      let guard = self.inner.read();
 //!      let cancelled = guard.fast_cancel.load(Acquire);
 //!      let exhausted = !cancelled && checkpoint_budget_exhaustion(...).is_some();
-//!      if !cancelled && !exhausted {
+//!      let has_message = guard.checkpoint_state.last_message.is_some();
+//!      let is_first_checkpoint = guard.checkpoint_state.checkpoint_count == 0
+//!          && guard.fast_path_count.load(Relaxed) == 0;
+//!      if !cancelled && !exhausted && !has_message && !is_first_checkpoint {
 //!          // accounting via Relaxed atomics
 //!          return Ok(());
 //!      }
 //!      ```
-//!      The `!cancelled && !exhausted` predicate is BOTH
-//!      conditions. When EITHER is set, the fast path
-//!      falls through to the slow path. There is no
-//!      branch that returns Ok when cancel is set.
+//!      The fast-return predicate must include `!cancelled`.
+//!      When cancellation is set, the fast path falls through
+//!      to the slow path. There is no branch that returns Ok
+//!      when cancel is set. The extra message/first-checkpoint
+//!      guards preserve checkpoint-history accounting and do
+//!      not weaken fail-fast cancellation.
 //!
 //!   2. **Slow path runs same-call** (cx.rs:1684+): when
 //!      the fast-path predicate is false, control falls
@@ -97,10 +102,10 @@
 //! critical sections complete before cleanup begins.
 //!
 //! A regression that:
-//!   - changed the fast-path predicate from `!cancelled
-//:     && !exhausted` to just `!exhausted` (would let
-//!     the early Ok return when cancel is set — operator's
-//!     "extra work" answer becomes true),
+//!   - removed `!cancelled` from the fast-path predicate
+//!     (for example, by changing it to just `!exhausted`)
+//!     would let the early Ok return when cancel is set —
+//!     operator's "extra work" answer becomes true,
 //!   - moved the slow-path acknowledgment after the
 //!     check_cancel_from_values call (would defer ack
 //!     past the user-visible Err — extra observability
@@ -131,9 +136,10 @@ fn read(rel: &str) -> String {
 #[test]
 fn checkpoint_fast_path_early_return_gated_on_not_cancelled_and_not_exhausted() {
     // Pin (link 1): the fast path returns Ok ONLY when
-    // BOTH !cancelled AND !exhausted are true. The Ok
-    // early-return is the structural mechanism that
-    // enforces fail-fast at the user-API level.
+    // the predicate includes !cancelled. The Ok early-return
+    // is the structural mechanism that enforces fail-fast at
+    // the user-API level; the additional message and first-
+    // checkpoint guards preserve checkpoint-history accounting.
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
@@ -147,14 +153,14 @@ fn checkpoint_fast_path_early_return_gated_on_not_cancelled_and_not_exhausted() 
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("if !cancelled && !exhausted {"),
+        body.contains("if !cancelled && !exhausted && !has_message && !is_first_checkpoint {"),
         "REGRESSION: fast-path early-return predicate \
-         changed. The `!cancelled && !exhausted` gate is \
-         what enforces fail-fast — without it, the early \
-         Ok return may fire when cancel is set, allowing \
-         user code to proceed past the cancel observation. \
-         Operator's 'extra work after cancellation' failure \
-         mode becomes possible.",
+         changed. The fast-return gate must include \
+         `!cancelled`; without it, the early Ok return may \
+         fire when cancel is set, allowing user code to \
+         proceed past the cancel observation. Operator's \
+         'extra work after cancellation' failure mode \
+         becomes possible.",
     );
 }
 
