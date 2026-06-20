@@ -182,6 +182,7 @@ enum BlockDecodeResolution {
 #[derive(Debug)]
 pub(crate) struct BlockDecodeOutcome {
     sbn: u8,
+    input_symbols: usize,
     retain_decoded_block: bool,
     elapsed: Duration,
     resolution: BlockDecodeResolution,
@@ -208,6 +209,7 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
     };
     BlockDecodeOutcome {
         sbn: job.sbn,
+        input_symbols: job.symbols.len(),
         retain_decoded_block: job.retain_decoded_block,
         elapsed: Duration::ZERO,
         resolution,
@@ -930,6 +932,7 @@ impl DecodingPipeline {
     fn finish_inline_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
         let BlockDecodeOutcome {
             sbn,
+            input_symbols: _,
             retain_decoded_block,
             elapsed: _,
             resolution,
@@ -963,6 +966,7 @@ impl DecodingPipeline {
     pub(crate) fn finish_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
         let BlockDecodeOutcome {
             sbn,
+            input_symbols,
             retain_decoded_block,
             elapsed: _,
             resolution,
@@ -982,6 +986,12 @@ impl DecodingPipeline {
             BlockDecodeResolution::Retry(reason) => {
                 if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Collecting;
+                }
+                let current_symbols = self.symbols.symbols_for_block(sbn).count();
+                if current_symbols > input_symbols {
+                    if let Some(result) = self.try_decode_block(sbn, retain_decoded_block) {
+                        return result;
+                    }
                 }
                 SymbolAcceptResult::Rejected(reason)
             }
@@ -3323,6 +3333,112 @@ mod tests {
         crate::test_complete!(
             "deferred_streaming_feed_does_not_spawn_duplicate_decode_for_pending_block"
         );
+    }
+
+    #[test]
+    fn deferred_retry_rechecks_symbols_buffered_during_pending_decode() {
+        init_test("deferred_retry_rechecks_symbols_buffered_during_pending_decode");
+        let config = crate::config::EncodingConfig {
+            symbol_size: 4,
+            max_block_size: 8,
+            repair_overhead: 1.0,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let object_id = ObjectId::new_for_test(115);
+        let data = b"ABCDEFGH".to_vec();
+        let encoder_pool = SymbolPool::new(PoolConfig {
+            symbol_size: config.symbol_size,
+            initial_size: 16,
+            max_size: 16,
+            allow_growth: false,
+            growth_increment: 0,
+        });
+        let mut encoder = EncodingPipeline::new(config.clone(), encoder_pool);
+        let mut source_zero = None;
+        let mut source_one = None;
+        let mut first_repair = None;
+        for encoded in encoder.encode_single_block_with_repair(object_id, 0, &data, 1) {
+            let symbol = encoded.expect("encode").into_symbol();
+            match symbol.kind() {
+                SymbolKind::Source if symbol.esi() == 0 => source_zero = Some(symbol),
+                SymbolKind::Source if symbol.esi() == 1 => source_one = Some(symbol),
+                SymbolKind::Repair if first_repair.is_none() => first_repair = Some(symbol),
+                _ => {}
+            }
+        }
+
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 8192,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data.len() as u64,
+                config.symbol_size,
+                1,
+                2,
+            ))
+            .expect("set params");
+
+        let first = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                source_zero.expect("source zero"),
+            ))
+            .expect("feed source zero");
+        assert!(matches!(
+            first,
+            DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. })
+        ));
+
+        let started = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                first_repair.expect("repair"),
+            ))
+            .expect("feed repair");
+        let DeferredSymbolAcceptResult::Decode(job) = started else {
+            panic!("repair should start deferred decode");
+        };
+
+        let buffered = decoder
+            .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
+                source_one.expect("source one"),
+            ))
+            .expect("feed source one while decode pending");
+        assert!(
+            matches!(
+                buffered,
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted { .. })
+            ),
+            "new symbols accepted during a pending decode must stay buffered: {buffered:?}"
+        );
+
+        let stale_retry = BlockDecodeOutcome {
+            sbn: job.sbn(),
+            input_symbols: 2,
+            retain_decoded_block: false,
+            elapsed: Duration::ZERO,
+            resolution: BlockDecodeResolution::Retry(RejectReason::InconsistentEquations),
+        };
+        let result = decoder.finish_decode_job(stale_retry);
+        match result {
+            SymbolAcceptResult::BlockComplete {
+                block_sbn,
+                data: got,
+            } => {
+                assert_eq!(block_sbn, 0);
+                assert_eq!(got, data);
+            }
+            other => panic!("stale deferred retry should recheck buffered symbols, got {other:?}"),
+        }
+        assert!(decoder.is_complete());
+        crate::test_complete!("deferred_retry_rechecks_symbols_buffered_during_pending_decode");
     }
 
     #[test]
