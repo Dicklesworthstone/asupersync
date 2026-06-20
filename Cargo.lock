@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "arbitrary",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-browser-core"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "asupersync",
  "js-sys",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-conformance"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "asupersync",
  "bytes",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "asupersync",
  "proc-macro2",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-tokio-compat"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "asupersync",
  "bytes",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "insta",
  "proptest",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "proptest",
  "serde",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "frankenlab"
-version = "0.3.5"
+version = "0.3.4"
 dependencies = [
  "asupersync",
  "clap",
