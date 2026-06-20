@@ -306,21 +306,44 @@ fn cx_cancel_reason_exposes_kind_for_caller_dispatch() {
 
 #[test]
 fn region_with_budget_uses_budget_meet_semantics() {
-    // Pin: region_with_budget delegates to create_child_region
-    // which applies the parent.meet(child) clamp. The
-    // operator's "limit a future's CPU budget" semantic
-    // is enforced at region creation.
-    let source = read("src/cx/scope.rs");
+    // Pin: region_with_budget forwards the explicit child budget through the
+    // current generalized child-admission path, whose RegionTable constructor
+    // applies the parent.meet(child) clamp. The operator's "limit a future's
+    // CPU budget" semantic is enforced at region creation.
+    let scope_source = read("src/cx/scope.rs");
 
     let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let pos = source.find(fn_marker).expect("region_with_budget fn");
-    let body_window = &source[pos..pos + 1500];
+    let pos = scope_source.find(fn_marker).expect("region_with_budget fn");
+    let body_window = &scope_source[pos..pos + 1500];
 
     assert!(
-        body_window.contains("create_child_region(self.region, budget)?"),
-        "REGRESSION: region_with_budget no longer creates \
-         a child region with the supplied budget. The \
-         structured budget-bound is broken.",
+        body_window.contains(
+            "self.region_with_budget_and_priority(state, _cx, budget, RegionPriority::Normal, _policy, f)"
+        ),
+        "REGRESSION: region_with_budget no longer forwards \
+         the supplied budget into the child-region admission path. \
+         The structured budget-bound is broken.",
+    );
+
+    let admission_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let admission_pos = scope_source
+        .find(admission_marker)
+        .expect("region_with_child_admission fn");
+    let admission_window = &scope_source[admission_pos..admission_pos + 1800];
+
+    assert!(
+        admission_window.contains("state.create_child_region_with_capability_budget_and_priority(")
+            && admission_window.contains("admission.budget,"),
+        "REGRESSION: child-region admission no longer passes \
+         the explicit scheduler budget into RuntimeState.",
+    );
+
+    let table_source = read("src/runtime/region_table.rs");
+
+    assert!(
+        table_source.contains("let effective_budget = parent_budget.meet(budget);"),
+        "REGRESSION: generalized child-region creation no longer \
+         applies parent.meet(child) to the scheduler budget.",
     );
 }
 
