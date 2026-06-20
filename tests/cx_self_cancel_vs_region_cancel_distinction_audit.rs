@@ -383,7 +383,7 @@ fn scope_public_methods_do_not_include_cancel() {
     let expected_methods = [
         "pub fn region_id(&self) -> RegionId {",
         "pub fn budget(&self) -> Budget {",
-        "pub fn spawn<",
+        "pub fn spawn_registered<",
         "pub async fn region<",
         "pub async fn race<",
         "pub async fn join_all<",
