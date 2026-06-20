@@ -1,0 +1,8 @@
+# RCH project config — worker routing.
+# asupersync's cargo target "pool" grows very large (~120G observed), which can
+# fill and wedge a small-disk worker's root filesystem. Pin its remote builds to
+# the big-disk workers. The daemon selects ONLY these workers when any is
+# eligible, and falls back to all eligible workers only if none are.
+# (Merged with the RCH_WORKER env var if set.)
+[routing]
+preferred_workers = ["hz2", "vmi1264463"]
