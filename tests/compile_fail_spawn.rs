@@ -5,6 +5,7 @@
 //! (br-asupersync-server-stack-hardening-eeexl1.5).
 
 #[test]
+#[ignore = "cold trybuild compile-fail lane; run explicitly with `cargo test --test compile_fail_spawn -- --ignored`"]
 fn compile_fail() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/spawn_without_capability.rs");

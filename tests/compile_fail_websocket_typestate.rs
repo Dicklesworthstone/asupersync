@@ -12,11 +12,12 @@
 //! `#[test]` in `split.rs` and the dynamic write tests; this harness only proves
 //! the negatives.
 //!
-//! Repro: `cargo test --test compile_fail_websocket_typestate`
+//! Repro: `cargo test --test compile_fail_websocket_typestate -- --ignored`
 //! Regenerate goldens after an intended diagnostic change: prefix with
 //! `TRYBUILD=overwrite` and re-run on the gate toolchain.
 
 #[test]
+#[ignore = "cold trybuild compile-fail lane; run explicitly with `cargo test --test compile_fail_websocket_typestate -- --ignored`"]
 fn compile_fail() {
     let t = trybuild::TestCases::new();
     // close() consumes the open write half: a later send through the moved

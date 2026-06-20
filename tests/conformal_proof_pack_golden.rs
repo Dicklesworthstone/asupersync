@@ -194,7 +194,9 @@ fn passing_proof_pack() -> ScenarioProofPack {
     let config = ConformalConfig::new(0.05).min_samples(5);
     let mut calibrator = ConformalCalibrator::new(config.clone());
 
-    for offset in 0..8 {
+    // Alpha 0.05 needs at least 20 calibration samples for finite conformal
+    // thresholds; this golden pins rendered proof packs, not the +inf boundary.
+    for offset in 0..20 {
         calibrator.calibrate(&clean_report(
             1_000 + offset,
             8 + (offset as usize % 2),
@@ -223,7 +225,8 @@ fn failing_proof_pack() -> ScenarioProofPack {
     let config = ConformalConfig::new(0.05).min_samples(5);
     let mut calibrator = ConformalCalibrator::new(config.clone());
 
-    for offset in 0..8 {
+    // Keep the failure-rendering golden in the finite-threshold regime too.
+    for offset in 0..20 {
         calibrator.calibrate(&clean_report(
             2_000 + offset,
             7 + (offset as usize % 3),
