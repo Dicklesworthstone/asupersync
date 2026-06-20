@@ -4558,7 +4558,7 @@ async fn feed_symbol(
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<bool, RqError> {
     let cx = Cx::for_testing();
-    feed_symbol_with_cx(
+    let accepted = feed_symbol_with_cx(
         &cx,
         dec,
         parsed,
@@ -4568,7 +4568,11 @@ async fn feed_symbol(
         true,
         RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
     )
-    .await
+    .await?;
+    while !dec.pending_decodes.is_empty() {
+        let _ = join_one_pending_decode(&cx, dec).await?;
+    }
+    Ok(accepted)
 }
 
 async fn dispatch_decode_job(
@@ -4626,6 +4630,15 @@ async fn dispatch_decode_job(
                 block_sbn
             );
             Ok(DecodeDispatch::Queued)
+        }
+        Err(crate::runtime::state::SpawnError::RuntimeUnavailable) => {
+            let _ = finalize_decode_outcome(dec, run_block_decode_job(retry_job)).await?;
+            rqtrace!(
+                "receiver: entry {} ran decode block {} inline from {trigger} because no runtime spawn gateway is available",
+                dec.index,
+                block_sbn
+            );
+            Ok(DecodeDispatch::NoProgress)
         }
         Err(err) => {
             let joined = join_one_pending_decode(cx, dec).await?;

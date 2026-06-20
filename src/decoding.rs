@@ -190,7 +190,6 @@ pub(crate) struct BlockDecodeOutcome {
 /// Runs an owned block-decode job. Intended for `Cx::spawn_blocking`.
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
-    let started = std::time::Instant::now();
     let resolution = match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
         Ok(data) => BlockDecodeResolution::Complete(data),
         Err(DecodingError::InsufficientSymbols { .. }) => {
@@ -210,7 +209,7 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
     BlockDecodeOutcome {
         sbn: job.sbn,
         retain_decoded_block: job.retain_decoded_block,
-        elapsed: started.elapsed(),
+        elapsed: Duration::ZERO,
         resolution,
     }
 }
