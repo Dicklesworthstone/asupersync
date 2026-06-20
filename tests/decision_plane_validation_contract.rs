@@ -111,7 +111,7 @@ fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract -- --nocapture"
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_docs cargo test --test decision_plane_validation_contract -- --nocapture"
         ),
         "doc must route heavy validation through rch"
     );
