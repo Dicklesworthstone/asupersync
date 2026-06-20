@@ -210,7 +210,7 @@ impl DualityTest for SendPermitEndpointDualityTest {
     }
 
     fn run(&self) -> DualityTestResult {
-        let (sender, _receiver) = send_permit::new_session::<String>(42);
+        let (sender, receiver) = send_permit::new_session::<String>(42);
 
         // Both endpoints must share the same channel_id
         // Note: We can only test this indirectly through protocol completion
@@ -224,6 +224,16 @@ impl DualityTest for SendPermitEndpointDualityTest {
         let sender_proof = sender.select_left().send("test".to_string()).close();
         assert_eq!(sender_proof.obligation_kind, ObligationKind::SendPermit);
         assert_eq!(sender_proof.channel_id, 42);
+
+        let (_, receiver) = receiver.recv(send_permit::ReserveMsg);
+        let Selected::Left(receiver) = receiver.offer(Branch::Left) else {
+            unreachable!("pure typestate offer must follow the simulated branch");
+        };
+        let (message, receiver) = receiver.recv("test".to_string());
+        let receiver_proof = receiver.close();
+        assert_eq!(message, "test");
+        assert_eq!(receiver_proof.obligation_kind, ObligationKind::SendPermit);
+        assert_eq!(receiver_proof.channel_id, sender_proof.channel_id);
 
         DualityTestResult::Pass
     }
@@ -246,7 +256,7 @@ impl DualityTest for LeaseEndpointDualityTest {
     }
 
     fn run(&self) -> DualityTestResult {
-        let (holder, _resource) = lease::new_session(99);
+        let (holder, resource) = lease::new_session(99);
 
         // Test that holder can complete its protocol
         let holder_proof = holder
@@ -257,6 +267,15 @@ impl DualityTest for LeaseEndpointDualityTest {
 
         assert_eq!(holder_proof.obligation_kind, ObligationKind::Lease);
         assert_eq!(holder_proof.channel_id, 99);
+
+        let (_, resource) = resource.recv(lease::AcquireMsg);
+        let Selected::Right(resource) = resource.offer(Branch::Right) else {
+            unreachable!("pure typestate offer must follow the simulated branch");
+        };
+        let (_, resource) = resource.recv(lease::ReleaseMsg);
+        let resource_proof = resource.close();
+        assert_eq!(resource_proof.obligation_kind, ObligationKind::Lease);
+        assert_eq!(resource_proof.channel_id, holder_proof.channel_id);
 
         DualityTestResult::Pass
     }
@@ -279,7 +298,7 @@ impl DualityTest for TwoPhaseEndpointDualityTest {
     }
 
     fn run(&self) -> DualityTestResult {
-        let (initiator, _executor) = two_phase::new_session(123, ObligationKind::IoOp);
+        let (initiator, executor) = two_phase::new_session(123, ObligationKind::IoOp);
 
         // Test that initiator can complete its protocol
         let initiator_proof = initiator
@@ -292,6 +311,17 @@ impl DualityTest for TwoPhaseEndpointDualityTest {
 
         assert_eq!(initiator_proof.obligation_kind, ObligationKind::IoOp);
         assert_eq!(initiator_proof.channel_id, 123);
+
+        let (_, executor) = executor.recv(two_phase::ReserveMsg {
+            kind: ObligationKind::IoOp,
+        });
+        let Selected::Left(executor) = executor.offer(Branch::Left) else {
+            unreachable!("pure typestate offer must follow the simulated branch");
+        };
+        let (_, executor) = executor.recv(two_phase::CommitMsg);
+        let executor_proof = executor.close();
+        assert_eq!(executor_proof.obligation_kind, ObligationKind::IoOp);
+        assert_eq!(executor_proof.channel_id, initiator_proof.channel_id);
 
         DualityTestResult::Pass
     }
@@ -408,10 +438,10 @@ impl DualityTest for TransportBackingConsistencyTest {
         // can be created and have consistent structure
 
         // Pure typestate version
-        let (pure_sender, _pure_receiver) = send_permit::new_session::<u64>(300);
+        let (pure_sender, pure_receiver) = send_permit::new_session::<u64>(300);
 
         // Transport-backed version
-        let (transport_sender, _transport_receiver) =
+        let (transport_sender, transport_receiver) =
             send_permit::new_session_with_transport::<u64>(300, 10);
 
         // Both should be able to complete the protocol
@@ -427,9 +457,29 @@ impl DualityTest for TransportBackingConsistencyTest {
             .send(42_u64)
             .close();
 
+        let (_, pure_receiver) = pure_receiver.recv(send_permit::ReserveMsg);
+        let Selected::Left(pure_receiver) = pure_receiver.offer(Branch::Left) else {
+            unreachable!("pure typestate offer must follow the simulated branch");
+        };
+        let (pure_message, pure_receiver) = pure_receiver.recv(42_u64);
+        let pure_receiver_proof = pure_receiver.close();
+
+        let (_, transport_receiver) = transport_receiver.recv(send_permit::ReserveMsg);
+        let Selected::Left(transport_receiver) = transport_receiver.offer(Branch::Left) else {
+            unreachable!("transport-backed typestate offer must follow the simulated branch");
+        };
+        let (transport_message, transport_receiver) = transport_receiver.recv(42_u64);
+        let transport_receiver_proof = transport_receiver.close();
+
         // Both should have same structural properties
         assert_eq!(pure_proof.channel_id, transport_proof.channel_id);
         assert_eq!(pure_proof.obligation_kind, transport_proof.obligation_kind);
+        assert_eq!(pure_receiver_proof.channel_id, pure_proof.channel_id);
+        assert_eq!(
+            transport_receiver_proof.channel_id,
+            transport_proof.channel_id
+        );
+        assert_eq!(pure_message, transport_message);
 
         DualityTestResult::Pass
     }
