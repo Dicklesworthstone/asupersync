@@ -529,7 +529,7 @@ impl RuntimeInterface for AsupersyncRuntime {
 
 #[test]
 fn run_conformance_tests() {
-    init_test_logging();
+    init_test_logging_with_level(tracing::Level::WARN);
     test_phase!("run_conformance_tests");
     let runtime = AsupersyncRuntime::new();
     let summary = run_conformance_suite(&runtime, "asupersync", RunConfig::new());
@@ -546,7 +546,7 @@ fn run_conformance_tests() {
 
 #[test]
 fn mpsc_backpressure_cancellation_recovers_channel_flow() {
-    init_test_logging();
+    init_test_logging_with_level(tracing::Level::WARN);
     test_phase!("mpsc_backpressure_cancellation_recovers_channel_flow");
 
     let runtime = AsupersyncRuntime::new();

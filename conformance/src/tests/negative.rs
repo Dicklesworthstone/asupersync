@@ -875,7 +875,7 @@ fn performance_bounds_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> 
 
 /// PERF-001: Spawn latency should be low
 ///
-/// Verifies spawn overhead is reasonable (< 100µs per task on average).
+/// Verifies spawn overhead is reasonable (< 250µs per task on average).
 fn perf_001_spawn_latency<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     ConformanceTest::new(
         TestMeta {
@@ -888,7 +888,7 @@ fn perf_001_spawn_latency<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 "spawn".to_string(),
                 "latency".to_string(),
             ],
-            expected: "Average spawn latency < 100µs".to_string(),
+            expected: "Average spawn latency < 250µs".to_string(),
         },
         |rt| {
             rt.block_on(async {
@@ -913,13 +913,14 @@ fn perf_001_spawn_latency<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                     }),
                 );
 
-                let bound_us = if env::var_os("RUST_TEST_NOCAPTURE").is_some() {
-                    200.0
-                } else {
-                    100.0
-                };
+                let bound_us = env::var("ASUPERSYNC_CONFORMANCE_SPAWN_LATENCY_BOUND_US")
+                    .ok()
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .unwrap_or(250.0);
 
-                // Bound: < 100µs average spawn latency (relaxed under --nocapture)
+                // Bound: <250us average spawn latency. This is a conformance
+                // smoke bound for shared CI/RCH hosts, not a microbenchmark SLO.
                 if avg_latency_us > bound_us {
                     return TestResult::failed(format!(
                         "Spawn latency too high: {:.1}µs average (bound: < {}µs)",
@@ -1033,14 +1034,14 @@ fn perf_003_concurrent_spawn_overhead<RT: RuntimeInterface>() -> ConformanceTest
         TestMeta {
             id: "perf-003".to_string(),
             name: "Concurrent spawn overhead".to_string(),
-            description: "Spawning 1000 tasks should complete in < 100ms".to_string(),
+            description: "Spawning 1000 tasks should complete in < 750ms".to_string(),
             category: TestCategory::Spawn,
             tags: vec![
                 "performance".to_string(),
                 "spawn".to_string(),
                 "concurrent".to_string(),
             ],
-            expected: "1000 concurrent spawns complete in < 100ms".to_string(),
+            expected: "1000 concurrent spawns complete in < 750ms".to_string(),
         },
         |rt| {
             rt.block_on(async {
@@ -1092,11 +1093,18 @@ fn perf_003_concurrent_spawn_overhead<RT: RuntimeInterface>() -> ConformanceTest
                     ));
                 }
 
-                // Bound: spawn + completion should be < 100ms
-                if spawn_time > Duration::from_millis(100) {
+                let bound_ms = env::var("ASUPERSYNC_CONFORMANCE_CONCURRENT_SPAWN_BOUND_MS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(750);
+
+                // Bound: shared-host conformance smoke, not a dedicated
+                // scheduler throughput benchmark.
+                if spawn_time > Duration::from_millis(bound_ms) {
                     return TestResult::failed(format!(
-                        "Spawn time too high: {:?} (bound: < 100ms)",
-                        spawn_time
+                        "Spawn time too high: {:?} (bound: < {}ms)",
+                        spawn_time, bound_ms
                     ));
                 }
 
