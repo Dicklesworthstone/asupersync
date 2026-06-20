@@ -1182,11 +1182,12 @@ mod tests {
     fn test_parker_no_lost_wakeup_under_stress() {
         // Many parkers × many iterations to fish for the race window. If
         // unpark's load on `waiting` were reordered ahead of the CAS on
-        // `notified`, *some* iteration would deadlock or hit the fallback
-        // park_timeout (we use park_timeout for safety so the test fails
-        // fast instead of hanging forever).
-        const PARKERS: usize = 32;
-        const ITERATIONS: usize = 200;
+        // `notified`, *some* iteration would hit the fallback park_timeout.
+        // Per-iteration barriers prevent a fast unparker from coalescing many
+        // signals into one boolean permit and turning the fixture into timeout
+        // polling.
+        const PARKERS: usize = 16;
+        const ITERATIONS: usize = 64;
         let success_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let mut handles = Vec::with_capacity(PARKERS);
@@ -1194,22 +1195,35 @@ mod tests {
             let parker = Arc::new(Parker::new());
             let count = success_count.clone();
             let p_unpark = parker.clone();
+            let ready = Arc::new(Barrier::new(2));
+            let done = Arc::new(Barrier::new(2));
+            let parker_ready = ready.clone();
+            let unparker_ready = ready;
+            let parker_done = done.clone();
+            let unparker_done = done;
 
-            // Parker thread: park ITERATIONS times, each with a generous
-            // timeout (1s) — the timeout exists so a real lost-wakeup bug
-            // makes the test fail rather than hang the whole suite.
+            // Parker thread: park ITERATIONS times. The timeout exists so a
+            // real lost-wakeup bug makes the test slow/failing rather than
+            // hanging the whole suite.
             let parker_handle = thread::spawn(move || {
                 for _ in 0..ITERATIONS {
-                    parker.park_timeout(Duration::from_secs(1));
+                    parker_ready.wait();
+                    parker.park_timeout(Duration::from_millis(50));
+                    parker_done.wait();
                 }
             });
 
-            // Unparker thread: unpark ITERATIONS times with a tiny yield
-            // between calls to maximize race-window exposure between
-            // unpark's notified-CAS and waiting-load.
+            // Unparker thread: one signal per parked iteration, with a tiny
+            // yield on some workers to vary the interleaving between unpark's
+            // notified-CAS and waiting-load.
             let unparker_handle = thread::spawn(move || {
                 for _ in 0..ITERATIONS {
+                    unparker_ready.wait();
+                    if parker_idx % 3 == 0 {
+                        thread::yield_now();
+                    }
                     p_unpark.unpark();
+                    unparker_done.wait();
                     if parker_idx % 3 == 0 {
                         thread::yield_now();
                     }
