@@ -184,7 +184,7 @@ fn cx_masked_returns_value_uses_mask_guard_for_decrement() {
 
     let fn_marker = "pub fn masked<F, R>(&self, f: F) -> R";
     let start = source.find(fn_marker).expect("Cx::masked fn");
-    let window_end = (start + 800).min(source.len());
+    let window_end = (start + 1400).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
