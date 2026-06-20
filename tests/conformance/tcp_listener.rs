@@ -6,7 +6,7 @@
 //! options and listener behavior per RFC 793, RFC 6056, and Linux kernel
 //! documentation. The tests systematically validate:
 //!
-//! 1. **SO_REUSEADDR allows TIME_WAIT rebinds** (RFC 793/6056)
+//! 1. **SO_REUSEADDR supports immediate listener restart** (RFC 793/6056)
 //! 2. **SO_REUSEPORT load-balances across listeners** (Linux kernel docs)
 //! 3. **Backlog parameter honored** (TCP/IP stack behavior)
 //! 4. **Bind to port 0 returns OS-assigned port** (POSIX behavior)
@@ -16,8 +16,11 @@
 //!
 //! **RFC 793 Section 3.9:**
 //! TIME_WAIT state prevents immediate reuse of socket address pairs to avoid
-//! delayed segments from previous connection. SO_REUSEADDR allows override
-//! when binding to same address for server restart scenarios.
+//! delayed segments from previous connection. Listener restart behavior is
+//! OS-dependent, so these tests verify the deterministic contract this socket
+//! wrapper owns: when both listener generations opt into SO_REUSEADDR, the
+//! replacement listener can bind and accept on the same address immediately
+//! after the previous listener is dropped.
 //!
 //! # RFC 6056 Local Port Selection
 //!
@@ -75,73 +78,53 @@ impl TcpListenerTestResult {
     }
 }
 
-/// RFC 793/6056 Test 1: SO_REUSEADDR allows TIME_WAIT rebinds
+/// RFC 793/6056 Test 1: SO_REUSEADDR supports immediate listener restart.
 ///
-/// Validates that SO_REUSEADDR enables binding to an address that might be
-/// in TIME_WAIT state from a previous connection. This is essential for
-/// server restart scenarios where the server needs to rebind to the same
-/// port immediately after shutdown.
+/// Validates that a listener created with SO_REUSEADDR can be replaced by a
+/// second SO_REUSEADDR listener on the same address immediately after shutdown.
+/// Linux does not guarantee that a new SO_REUSEADDR socket can reclaim a port
+/// previously used by a socket that did not also opt into SO_REUSEADDR, so the
+/// test avoids a negative probe that would mutate kernel socket state before
+/// the positive contract is checked.
 #[test]
 #[allow(dead_code)]
-fn test_so_reuseaddr_allows_time_wait_rebinds() {
+fn test_so_reuseaddr_supports_immediate_listener_restart() {
     // Get a free port for testing
     let addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
 
-    // Create first listener without REUSEADDR
+    // Create first listener with REUSEADDR.
     let socket1 = TcpSocket::new_v4().expect("create socket1");
+    socket1.set_reuseaddr(true).expect("set REUSEADDR socket1");
     socket1.bind(addr).expect("bind socket1");
     let listener1 = socket1.listen(128).expect("listen socket1");
     let bound_addr = listener1.local_addr().expect("get local addr");
 
-    // Create a connection to establish socket state
+    // Verify the first listener is functional.
     let _client = StdTcpStream::connect(bound_addr).expect("client connect");
 
-    // Close first listener (would normally enter TIME_WAIT)
+    // Close first listener generation before starting the replacement.
     drop(listener1);
 
     // Small delay to ensure the socket state propagates
     thread::sleep(Duration::from_millis(10));
 
-    // Try to bind to the same address without REUSEADDR (should fail)
-    let socket2 = TcpSocket::new_v4().expect("create socket2");
-    let bind_result = socket2.bind(bound_addr);
-
-    match bind_result {
-        Ok(_) => {
-            // If bind succeeds, try listen (might fail there)
-            match socket2.listen(128) {
-                Ok(_) => {
-                    println!(
-                        "Warning: Bind without REUSEADDR succeeded (OS might have fast cleanup)"
-                    );
-                }
-                Err(e) => {
-                    println!("Listen failed as expected without REUSEADDR: {}", e);
-                }
-            }
-        }
-        Err(e) => {
-            println!("Bind failed as expected without REUSEADDR: {}", e);
-        }
-    }
-
     // Now try with REUSEADDR enabled (should succeed)
-    let socket3 = TcpSocket::new_v4().expect("create socket3");
-    socket3.set_reuseaddr(true).expect("set REUSEADDR");
-    socket3.bind(bound_addr).expect("bind with REUSEADDR");
-    let listener3 = socket3.listen(128).expect("listen with REUSEADDR");
+    let socket2 = TcpSocket::new_v4().expect("create socket2");
+    socket2.set_reuseaddr(true).expect("set REUSEADDR socket2");
+    socket2.bind(bound_addr).expect("bind with REUSEADDR");
+    let listener2 = socket2.listen(128).expect("listen with REUSEADDR");
 
     // Verify we can actually use the listener
-    let bound_addr3 = listener3.local_addr().expect("get bound addr");
+    let bound_addr2 = listener2.local_addr().expect("get bound addr");
     assert_eq!(
-        bound_addr, bound_addr3,
+        bound_addr, bound_addr2,
         "REUSEADDR listener bound to correct address"
     );
 
     // Test that we can connect to the new listener
-    let _client2 = StdTcpStream::connect(bound_addr3).expect("connect to REUSEADDR listener");
+    let _client2 = StdTcpStream::connect(bound_addr2).expect("connect to REUSEADDR listener");
 
-    println!("✓ SO_REUSEADDR enables TIME_WAIT rebinds");
+    println!("✓ SO_REUSEADDR enables immediate listener restart");
 }
 
 /// Linux Test 2: SO_REUSEPORT enables load balancing
@@ -446,21 +429,21 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
 
     println!("Running TCP Listener Socket Options Conformance Tests...\n");
 
-    // Test 1: SO_REUSEADDR TIME_WAIT rebinds
-    print!("Test 1: SO_REUSEADDR allows TIME_WAIT rebinds... ");
-    match std::panic::catch_unwind(|| test_so_reuseaddr_allows_time_wait_rebinds()) {
+    // Test 1: SO_REUSEADDR listener restart
+    print!("Test 1: SO_REUSEADDR supports immediate listener restart... ");
+    match std::panic::catch_unwind(|| test_so_reuseaddr_supports_immediate_listener_restart()) {
         Ok(()) => {
             println!("✓ PASS");
             results.push(TcpListenerTestResult::pass(
                 "rfc-793-6056-test1",
-                "SO_REUSEADDR allows TIME_WAIT rebinds",
+                "SO_REUSEADDR supports immediate listener restart",
             ));
         }
         Err(e) => {
             println!("✗ FAIL");
             results.push(TcpListenerTestResult::fail(
                 "rfc-793-6056-test1",
-                "SO_REUSEADDR allows TIME_WAIT rebinds",
+                "SO_REUSEADDR supports immediate listener restart",
                 &format!("Test panicked: {:?}", e),
             ));
         }

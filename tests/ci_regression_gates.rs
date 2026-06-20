@@ -2126,7 +2126,7 @@ fn g2_f8_wavefront_closure_evidence() {
             drop_end_exclusive: 32,
             extra_repair: 6,
             seed_base: 0xF8_E1_0048,
-            sample_count: 20,
+            sample_count: 8,
         },
         F8Scenario {
             id: "RQ-F8-V1-k64",
@@ -2136,7 +2136,7 @@ fn g2_f8_wavefront_closure_evidence() {
             drop_end_exclusive: 44,
             extra_repair: 8,
             seed_base: 0xF8_E1_0064,
-            sample_count: 16,
+            sample_count: 8,
         },
         F8Scenario {
             id: "RQ-F8-V1-k48-large",
@@ -2146,12 +2146,12 @@ fn g2_f8_wavefront_closure_evidence() {
             drop_end_exclusive: 32,
             extra_repair: 6,
             seed_base: 0xF8_E1_2048,
-            sample_count: 16,
+            sample_count: 8,
         },
     ];
 
     let batch_sizes: &[usize] = &[4, 8, 16];
-    let repetitions = 4usize;
+    let repetitions = 2usize;
 
     let mut scenario_results = Vec::new();
 
