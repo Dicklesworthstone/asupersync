@@ -201,7 +201,9 @@ const RQ_PENDING_PRESSURE_LOSS_FLOOR: f64 = 0.05;
 const RQ_REGIME_SHIFT_LOSS_DELTA: f64 = 0.20;
 /// Keep mild-loss repair rounds from turning sparse feedback into a self-reinforcing crawl.
 const RQ_MILD_LOSS_PACING_FLOOR_FRACTION: f64 = 0.50;
-const RQ_MILD_LOSS_PACING_MAX_LOSS: f64 = 0.02;
+const RQ_MILD_LOSS_PACING_MAX_LOSS: f64 = 0.03;
+const RQ_STALLED_REPAIR_PRESSURE_MIN: f64 = 0.50;
+const RQ_STALLED_REPAIR_PAYLOAD_FRACTION_MAX: f64 = 0.50;
 const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
 const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
 const RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR: f64 = 0.01;
@@ -604,6 +606,7 @@ struct RqAdaptiveSendState {
     symbol_size: u16,
     loss_ema: f64,
     pacing_loss_ema: f64,
+    pacing_loss_bar: f64,
     loss_bar: f64,
     bw_ema_bps: f64,
     bw_trough_bps: f64,
@@ -643,6 +646,7 @@ impl RqAdaptiveSendState {
             symbol_size: config.symbol_size,
             loss_ema: 0.0,
             pacing_loss_ema: 0.0,
+            pacing_loss_bar: 0.0,
             loss_bar: 0.0,
             bw_ema_bps: 0.0,
             bw_trough_bps: 0.0,
@@ -700,7 +704,7 @@ impl RqAdaptiveSendState {
         if let Some(cap) = self.loss_pacing_cap_bps {
             rate = rate.min(self.loss_pacing_cap_for_current_regime(cap));
         }
-        if self.regime_shift || self.loss_bar >= RQ_REGIME_SHIFT_LOSS_DELTA {
+        if self.regime_shift || self.pacing_loss_bar >= RQ_REGIME_SHIFT_LOSS_DELTA {
             repair_overhead = repair_overhead.max(1.03);
             rate = rate.min(RQ_COLD_START_PACING_BPS / 2);
         }
@@ -712,7 +716,7 @@ impl RqAdaptiveSendState {
                 config.symbol_size,
                 RQ_ADAPTIVE_BURST_SYMBOLS,
                 Some(duration_from_secs(self.est.rtt_s)),
-                self.loss_ema > 0.0,
+                self.pacing_loss_ema > 0.0,
             ),
         }
     }
@@ -748,6 +752,7 @@ impl RqAdaptiveSendState {
         digests: &[EntryDigest],
         pending: &BTreeSet<u32>,
         sent_this_round: u64,
+        received_this_round: u64,
         send_wall: Duration,
         control_wait: Duration,
         total_bytes: u64,
@@ -759,42 +764,68 @@ impl RqAdaptiveSendState {
         let pending_bytes = pending_bytes(digests, pending);
         let sent_symbols = sent_this_round.max(1);
         let pending_units = u64::try_from(pending.len()).unwrap_or(u64::MAX).max(1);
-        let pacing_loss_hat = (pending_units as f64 / sent_symbols as f64).clamp(0.0, 0.90);
+        let received_symbols = received_this_round.min(sent_symbols);
+        let decode_pending_loss = (pending_units as f64 / sent_symbols as f64).clamp(0.0, 0.90);
+        let wire_loss_hat = if sent_this_round == 0 {
+            0.0
+        } else {
+            (1.0 - received_symbols as f64 / sent_symbols as f64).clamp(0.0, 0.90)
+        };
         let byte_pressure = if total_bytes == 0 {
             0.0
         } else {
             (pending_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0)
         };
         let pressure_loss = byte_pressure * RQ_PENDING_PRESSURE_LOSS_FLOOR;
-        let loss_hat = pacing_loss_hat.max(pressure_loss).clamp(0.0, 0.90);
+        let repair_loss_hat = wire_loss_hat
+            .max(decode_pending_loss)
+            .max(pressure_loss)
+            .clamp(0.0, 0.90);
 
         self.regime_shift = self.pacing_loss_ema > 0.0
-            && pacing_loss_hat > (self.pacing_loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
-        self.loss_ema = ema(self.loss_ema, loss_hat, RQ_LOSS_EMA_ALPHA);
-        self.pacing_loss_ema = ema(self.pacing_loss_ema, pacing_loss_hat, RQ_LOSS_EMA_ALPHA);
-        let raw_loss_bar = loss_hat.max(self.loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
+            && wire_loss_hat > (self.pacing_loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
+        self.loss_ema = ema(self.loss_ema, repair_loss_hat, RQ_LOSS_EMA_ALPHA);
+        self.pacing_loss_ema = ema(self.pacing_loss_ema, wire_loss_hat, RQ_LOSS_EMA_ALPHA);
+        let raw_loss_bar = repair_loss_hat.max(self.loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
         self.loss_bar = if self.loss_bar <= 0.0 {
             raw_loss_bar
         } else {
-            ema(self.loss_bar, raw_loss_bar, RQ_LOSS_EMA_ALPHA).max(loss_hat)
+            ema(self.loss_bar, raw_loss_bar, RQ_LOSS_EMA_ALPHA).max(repair_loss_hat)
+        }
+        .clamp(0.0, 0.90);
+        let raw_pacing_loss_bar = wire_loss_hat.max(self.pacing_loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
+        self.pacing_loss_bar = if self.pacing_loss_bar <= 0.0 {
+            raw_pacing_loss_bar
+        } else {
+            ema(self.pacing_loss_bar, raw_pacing_loss_bar, RQ_LOSS_EMA_ALPHA).max(wire_loss_hat)
         }
         .clamp(0.0, 0.90);
 
         let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
         let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
         let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
-        let useful_factor = (1.0 - loss_hat * 0.5).clamp(0.25, 1.0);
+        let useful_factor = (1.0 - wire_loss_hat * 0.5).clamp(0.25, 1.0);
         let bw_sample = offered_bps * useful_factor;
-        self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
-            bw_sample
+        let sent_payload_fraction = if pending_bytes == 0 {
+            1.0
         } else {
-            ema(self.bw_ema_bps, bw_sample, RQ_BW_EMA_ALPHA)
+            (sent_payload_bytes as f64 / pending_bytes as f64).clamp(0.0, 1.0)
         };
-        self.update_bw_trough(bw_sample);
+        let stalled_repair_sample = byte_pressure >= RQ_STALLED_REPAIR_PRESSURE_MIN
+            && sent_payload_fraction < RQ_STALLED_REPAIR_PAYLOAD_FRACTION_MAX
+            && wire_loss_hat <= RQ_MILD_LOSS_PACING_MAX_LOSS;
+        if self.bw_ema_bps <= 0.0 || !stalled_repair_sample {
+            self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
+                bw_sample
+            } else {
+                ema(self.bw_ema_bps, bw_sample, RQ_BW_EMA_ALPHA)
+            };
+            self.update_bw_trough(bw_sample);
+        }
 
         self.est = PathEstimate {
             rtt_s,
-            loss_p_hat: self.loss_ema,
+            loss_p_hat: self.pacing_loss_ema,
             loss_p_bar: self.loss_bar,
             bw_median_bps: self.bw_ema_bps,
             bw_trough_bps: self.bw_trough_bps.max(self.bw_ema_bps * 0.5),
@@ -806,14 +837,13 @@ impl RqAdaptiveSendState {
         };
         self.controller.update_estimate(self.est);
 
-        let received = ((sent_symbols as f64) * (1.0 - pacing_loss_hat)).max(0.0) as u64;
-        let useful_bytes = ((sent_payload_bytes as f64) * (1.0 - pacing_loss_hat)).max(0.0) as u64;
+        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
         let cwnd_bytes = (self.bw_ema_bps * rtt_s)
             .max(f64::from(config.symbol_size.max(1)))
             .ceil() as u64;
         self.loss_pacing_cap_bps = None;
         self.loss_fec_floor = 0.0;
-        let lost_symbols = ((sent_symbols as f64) * pacing_loss_hat).ceil() as u64;
+        let lost_symbols = sent_symbols.saturating_sub(received_symbols);
         let loss_result = self.loss_detector.observe_datagram_loss_sample(
             sent_symbols,
             lost_symbols,
@@ -824,14 +854,14 @@ impl RqAdaptiveSendState {
         self.apply_loss_recommendations(&loss_result.recommendations);
         self.controller.observe_path_signals(
             sent_symbols,
-            received,
+            received_symbols,
             send_wall_s,
             useful_bytes,
             config.symbol_size,
             PathSignalSample {
                 smoothed_rtt_s: rtt_s,
                 congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
-                loss_rate: pacing_loss_hat,
+                loss_rate: wire_loss_hat,
             },
         );
     }
@@ -910,12 +940,13 @@ impl RqAdaptiveSendState {
         self.loss_ema = ema(self.loss_ema, 0.0, RQ_LOSS_EMA_ALPHA);
         self.pacing_loss_ema = ema(self.pacing_loss_ema, 0.0, RQ_LOSS_EMA_ALPHA);
         self.loss_bar = ema(self.loss_bar, 0.0, RQ_LOSS_EMA_ALPHA);
+        self.pacing_loss_bar = ema(self.pacing_loss_bar, 0.0, RQ_LOSS_EMA_ALPHA);
         self.loss_pacing_cap_bps = None;
         self.loss_fec_floor = 0.0;
 
         self.est = PathEstimate {
             rtt_s,
-            loss_p_hat: self.loss_ema,
+            loss_p_hat: self.pacing_loss_ema,
             loss_p_bar: self.loss_bar,
             bw_median_bps: self.bw_ema_bps,
             bw_trough_bps: self.bw_trough_bps.max(self.bw_ema_bps * 0.5),
@@ -983,13 +1014,10 @@ impl RqAdaptiveSendState {
     }
 
     fn mild_loss_pacing_floor_applies(&self) -> bool {
-        let pacing_loss = if self.pacing_loss_ema > 0.0 {
-            self.pacing_loss_ema
-        } else {
-            self.loss_ema
-        };
+        let pacing_loss = self.pacing_loss_ema;
+        let has_repair_pressure = self.loss_bar > 0.0 || self.pacing_loss_bar > 0.0;
         !self.regime_shift
-            && pacing_loss > 0.0
+            && has_repair_pressure
             && pacing_loss <= RQ_MILD_LOSS_PACING_MAX_LOSS
             && self.est.bw_median_bps > 0.0
     }
@@ -1223,6 +1251,18 @@ struct NeedMore {
     /// Sparse systematic source symbols missing from incomplete blocks.
     #[serde(default)]
     source_symbols: Vec<SourceSymbolRequest>,
+    /// Matching RQ symbols observed by the receiver in the completed spray round.
+    ///
+    /// This is the pacing/loss signal: duplicates and symbols that fail to
+    /// advance decode rank still prove the datagram arrived on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    round_symbols_observed: Option<u64>,
+    /// Matching RQ symbols accepted into a decoder in the completed spray round.
+    ///
+    /// This remains diagnostic only; accepted symbols can stall on duplicate or
+    /// dependent repair rows and must not be treated as packet loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    round_symbols_accepted: Option<u64>,
 }
 
 /// Request for retransmission of one systematic source symbol.
@@ -3041,6 +3081,16 @@ pub async fn send_path(
                 }
                 let source_symbols = need.source_symbols;
                 pending = need.pending.into_iter().collect();
+                let fallback_received = sent_this_round.saturating_sub(
+                    u64::try_from(pending.len())
+                        .unwrap_or(u64::MAX)
+                        .min(sent_this_round),
+                );
+                let received_this_round = need
+                    .round_symbols_observed
+                    .or(need.round_symbols_accepted)
+                    .unwrap_or(fallback_received)
+                    .min(sent_this_round);
                 if pending.is_empty() {
                     // Receiver says nothing pending but did not send Proof yet;
                     // loop again to fetch the Proof.
@@ -3051,6 +3101,7 @@ pub async fn send_path(
                     &digests,
                     &pending,
                     sent_this_round,
+                    received_this_round,
                     round_send_wall,
                     control_wait,
                     total_bytes,
@@ -3068,10 +3119,11 @@ pub async fn send_path(
                 };
                 pacer.configure(round_tuning.pacing);
                 rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} loss_ema={:.4} pacing_loss_ema={:.4} loss_bar={:.4} fec_fallback={}",
+                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
                     pending.len(),
                     source_symbols.len(),
                     sent_this_round,
+                    received_this_round,
                     round_send_wall.as_millis(),
                     control_wait.as_millis(),
                     round_tuning.repair_overhead,
@@ -3079,6 +3131,7 @@ pub async fn send_path(
                     adaptive.loss_ema,
                     adaptive.pacing_loss_ema,
                     adaptive.loss_bar,
+                    adaptive.pacing_loss_bar,
                     source_fec_fallback_active,
                 );
                 if source_symbols.is_empty() {
@@ -4014,6 +4067,7 @@ pub async fn receive_connection(
 
     let tag = transfer_tag(&manifest.transfer_id);
     let mut symbols_accepted: u64 = 0;
+    let mut round_stats = RqDatagramRoundStats::default();
     let mut feedback_rounds: u32 = 0;
     let datagram_header_len = if symbol_auth_enabled {
         AUTH_DGRAM_HEADER
@@ -4046,6 +4100,7 @@ pub async fn receive_connection(
             &mut decoders,
             symbol_size,
             &mut symbols_accepted,
+            &mut round_stats,
         )
         .await?;
         rqtrace!(
@@ -4066,6 +4121,7 @@ pub async fn receive_connection(
                     &mut decoders,
                     symbol_size,
                     &mut symbols_accepted,
+                    &mut round_stats,
                 )
                 .await?;
                 if drained > 0 {
@@ -4178,9 +4234,11 @@ pub async fn receive_connection(
                 if std::env::var_os("ATP_RQ_TRACE").is_some() {
                     let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
-                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} symbols_accepted={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
+                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_observed={} round_symbols_accepted={} symbols_accepted={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
                         pending.len(),
                         source_symbols.len(),
+                        round_stats.observed,
+                        round_stats.accepted,
                         symbols_accepted,
                         progress.source_received,
                         progress.source_needed,
@@ -4198,9 +4256,12 @@ pub async fn receive_connection(
                         &NeedMore {
                             pending,
                             source_symbols,
+                            round_symbols_observed: Some(round_stats.observed),
+                            round_symbols_accepted: Some(round_stats.accepted),
                         },
                     )?)
                     .await?;
+                round_stats = RqDatagramRoundStats::default();
             }
             FrameType::KeepAlive => {
                 control
@@ -5482,6 +5543,34 @@ fn parse_symbol_datagram_payload(
     Some((parsed, &buf[start..end]))
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct RqDatagramIngest {
+    observed: bool,
+    accepted: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RqDatagramRoundStats {
+    observed: u64,
+    accepted: u64,
+}
+
+impl RqDatagramRoundStats {
+    fn record(&mut self, ingest: RqDatagramIngest) {
+        if ingest.observed {
+            self.observed = self.observed.saturating_add(1);
+        }
+        if ingest.accepted {
+            self.accepted = self.accepted.saturating_add(1);
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.observed = self.observed.saturating_add(other.observed);
+        self.accepted = self.accepted.saturating_add(other.accepted);
+    }
+}
+
 async fn feed_datagram_to_decoders(
     cx: &Cx,
     buf: &[u8],
@@ -5491,12 +5580,12 @@ async fn feed_datagram_to_decoders(
     symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
-) -> Result<bool, RqError> {
+) -> Result<RqDatagramIngest, RqError> {
     let Some((parsed, payload)) = parse_symbol_datagram_payload(buf, n, tag, auth_required) else {
-        return Ok(false);
+        return Ok(RqDatagramIngest::default());
     };
     let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
-        return Ok(false);
+        return Ok(RqDatagramIngest::default());
     };
     let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
     let mut pending_decode_jobs = rq_pending_decode_jobs(decoders);
@@ -5505,7 +5594,7 @@ async fn feed_datagram_to_decoders(
         pending_decode_jobs = rq_pending_decode_jobs(decoders);
     }
     let allow_spawn_decode = pending_decode_jobs < decode_width_budget;
-    feed_symbol_with_cx(
+    let accepted = feed_symbol_with_cx(
         cx,
         &mut decoders[pos],
         &parsed,
@@ -5515,7 +5604,11 @@ async fn feed_datagram_to_decoders(
         allow_spawn_decode,
         decode_width_budget,
     )
-    .await
+    .await?;
+    Ok(RqDatagramIngest {
+        observed: true,
+        accepted,
+    })
 }
 
 async fn feed_datagram_batch_to_decoders(
@@ -5526,26 +5619,25 @@ async fn feed_datagram_batch_to_decoders(
     symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
-) -> Result<u64, RqError> {
-    let mut accepted = 0u64;
+) -> Result<RqDatagramRoundStats, RqError> {
+    let mut stats = RqDatagramRoundStats::default();
     for packet in &batch.packets {
-        if feed_datagram_to_decoders(
-            cx,
-            &packet.payload,
-            packet.payload.len(),
-            tag,
-            auth_required,
-            symbol_auth,
-            decoders,
-            symbol_size,
-        )
-        .await?
-        {
-            accepted = accepted.saturating_add(1);
-        }
+        stats.record(
+            feed_datagram_to_decoders(
+                cx,
+                &packet.payload,
+                packet.payload.len(),
+                tag,
+                auth_required,
+                symbol_auth,
+                decoders,
+                symbol_size,
+            )
+            .await?,
+        );
     }
     let _ = drain_ready_decodes(cx, decoders).await?;
-    Ok(accepted)
+    Ok(stats)
 }
 
 async fn finalize_decode_outcome(
@@ -5667,6 +5759,7 @@ async fn pump_until_control<S>(
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
     symbols_accepted: &mut u64,
+    round_stats: &mut RqDatagramRoundStats,
 ) -> Result<Frame, RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -5730,7 +5823,7 @@ where
             Ready::Udp(batch) => {
                 let mut received_len = batch.packets.len();
                 let mut batches = 1usize;
-                let accepted = feed_datagram_batch_to_decoders(
+                let stats = feed_datagram_batch_to_decoders(
                     cx,
                     &batch,
                     tag,
@@ -5740,8 +5833,9 @@ where
                     symbol_size,
                 )
                 .await?;
-                pumped = pumped.saturating_add(accepted);
-                *symbols_accepted = (*symbols_accepted).saturating_add(accepted);
+                pumped = pumped.saturating_add(stats.observed);
+                *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
+                round_stats.merge(stats);
                 let _ = drain_ready_decodes(cx, decoders).await?;
 
                 while received_len == RQ_INBOUND_PUMP_BATCH {
@@ -5767,7 +5861,7 @@ where
                     if received_len == 0 {
                         break;
                     }
-                    let accepted = feed_datagram_batch_to_decoders(
+                    let stats = feed_datagram_batch_to_decoders(
                         cx,
                         &tail,
                         tag,
@@ -5777,8 +5871,9 @@ where
                         symbol_size,
                     )
                     .await?;
-                    pumped = pumped.saturating_add(accepted);
-                    *symbols_accepted = (*symbols_accepted).saturating_add(accepted);
+                    pumped = pumped.saturating_add(stats.observed);
+                    *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
+                    round_stats.merge(stats);
                     let _ = drain_ready_decodes(cx, decoders).await?;
                     batches = batches.saturating_add(1);
                 }
@@ -5820,6 +5915,7 @@ async fn drain_round_tail(
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
     symbols_accepted: &mut u64,
+    round_stats: &mut RqDatagramRoundStats,
 ) -> Result<u64, RqError> {
     if quiet_window.is_zero() {
         return Ok(0);
@@ -5860,7 +5956,7 @@ async fn drain_round_tail(
             return Ok(drained);
         };
 
-        if feed_datagram_to_decoders(
+        let ingest = feed_datagram_to_decoders(
             cx,
             rbuf,
             n,
@@ -5870,10 +5966,13 @@ async fn drain_round_tail(
             decoders,
             symbol_size,
         )
-        .await?
-        {
+        .await?;
+        if ingest.observed {
             drained += 1;
-            *symbols_accepted = (*symbols_accepted).saturating_add(1);
+            round_stats.record(ingest);
+            if ingest.accepted {
+                *symbols_accepted = (*symbols_accepted).saturating_add(1);
+            }
             quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
         }
         let _ = drain_ready_decodes(cx, decoders).await?;
@@ -6079,12 +6178,14 @@ mod tests {
             content_sha256: [0; 32],
         }];
         let pending = BTreeSet::from([0_u32]);
+        let sent_symbols = total_bytes / u64::from(config.symbol_size);
 
         state.observe_need_more(
             &config,
             &digests,
             &pending,
-            total_bytes / u64::from(config.symbol_size),
+            sent_symbols,
+            sent_symbols.saturating_sub(1),
             Duration::from_secs(120),
             Duration::from_millis(50),
             total_bytes,
@@ -6106,6 +6207,108 @@ mod tests {
         assert!(
             rate >= RQ_COLD_START_PACING_BPS / 2,
             "mild residual repair should recover from the slow-sample floor, got {rate} B/s"
+        );
+    }
+
+    #[test]
+    fn rq_need_more_mild_wire_loss_keeps_pending_pressure_out_of_pacing() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "large.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"large.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        for (sent_symbols, send_wall) in [
+            (43_700_u64, Duration::from_millis(3_300)),
+            (15_992, Duration::from_millis(12_300)),
+            (15_992, Duration::from_millis(13_300)),
+            (7_800, Duration::from_millis(12_000)),
+            (7_800, Duration::from_millis(13_800)),
+            (7_800, Duration::from_millis(15_000)),
+        ] {
+            let lost_symbols = sent_symbols.div_ceil(50);
+            state.observe_need_more(
+                &config,
+                &digests,
+                &pending,
+                sent_symbols,
+                sent_symbols.saturating_sub(lost_symbols),
+                send_wall,
+                Duration::from_millis(200),
+                total_bytes,
+            );
+        }
+
+        assert!(
+            state.loss_bar >= RQ_PENDING_PRESSURE_LOSS_FLOOR,
+            "pending pressure should remain available for FEC sizing"
+        );
+        assert!(
+            state.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS,
+            "2% receiver-observed wire loss should keep the mild pacing floor active"
+        );
+        assert!(
+            state.mild_loss_pacing_floor_applies(),
+            "entry-granular pending pressure must not disable the pacing floor"
+        );
+        assert!(
+            state.pacing_rate_for(rq_test_block_plan(&config))
+                >= state.mild_loss_pacing_floor_bps(),
+            "stalled repair rounds must not drag pacing below the mild-loss floor"
+        );
+    }
+
+    #[test]
+    fn rq_need_more_broken_wire_loss_disables_mild_floor() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "large.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"large.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+        let sent_symbols = 43_700_u64;
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            sent_symbols,
+            sent_symbols.saturating_sub(sent_symbols.div_ceil(10)),
+            Duration::from_millis(3_300),
+            Duration::from_millis(200),
+            total_bytes,
+        );
+
+        assert!(
+            state.pacing_loss_ema > RQ_MILD_LOSS_PACING_MAX_LOSS,
+            "10% receiver-observed wire loss should exceed the mild-loss threshold"
+        );
+        assert!(
+            !state.mild_loss_pacing_floor_applies(),
+            "broken-link wire loss must still allow conservative pacing"
+        );
+        assert!(
+            state.loss_bar >= RQ_PENDING_PRESSURE_LOSS_FLOOR,
+            "broken-link pending pressure should still size repair FEC"
         );
     }
 
@@ -6184,6 +6387,7 @@ mod tests {
             &config,
             &digests,
             &pending,
+            sent_symbols,
             sent_symbols,
             Duration::from_millis(300),
             Duration::from_secs(120),
