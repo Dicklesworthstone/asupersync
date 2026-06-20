@@ -5882,6 +5882,13 @@ fn trace_config_summary(cx: &Cx, operation: &str, config: &QuicConfig, peer_id: 
             ("max_active_connections", &max_active_connections),
             ("max_feedback_rounds", &max_feedback_rounds),
             ("datagram_fanout", &datagram_fanout),
+        ],
+    );
+    cx.trace_with_fields(
+        "atp_quic.transport.config",
+        &[
+            ("operation", operation),
+            ("peer_id", peer_id),
             ("bwlimit_bps", &bwlimit_bps),
             ("max_spray_symbols_per_flush", &max_spray_symbols_per_flush),
             ("responsiveness_pressure", &responsiveness_pressure),
