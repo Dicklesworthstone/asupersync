@@ -21,7 +21,10 @@
 //!      let cancelled = guard.fast_cancel.load(Acquire);
 //!      let exhausted = !cancelled
 //!          && Self::checkpoint_budget_exhaustion(...).is_some();
-//!      if !cancelled && !exhausted {
+//!      let has_message = guard.checkpoint_state.last_message.is_some();
+//!      let is_first_checkpoint = guard.checkpoint_state.checkpoint_count == 0
+//!          && guard.fast_path_count.load(Relaxed) == 0;
+//!      if !cancelled && !exhausted && !has_message && !is_first_checkpoint {
 //!          // accounting via Relaxed atomics
 //!          return Ok(());
 //!      }

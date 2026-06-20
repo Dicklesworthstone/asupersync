@@ -39,7 +39,10 @@
 //!              guard.region, guard.task, guard.budget,
 //!              checkpoint_time,
 //!          ).is_some();
-//!      if !cancelled && !exhausted {
+//!      let has_message = guard.checkpoint_state.last_message.is_some();
+//!      let is_first_checkpoint = guard.checkpoint_state.checkpoint_count == 0
+//!          && guard.fast_path_count.load(Relaxed) == 0;
+//!      if !cancelled && !exhausted && !has_message && !is_first_checkpoint {
 //!          return Ok(());
 //!      }
 //!      ```
@@ -47,9 +50,11 @@
 //!      `budget.is_past_deadline(now)` first (cx/cx.rs:
 //!      1962). When true, returns
 //!      `Some((CancelReason{kind:Deadline,...}, "time", ...))`.
-//!      The `if !cancelled && !exhausted` predicate
-//!      EXCLUDES the early Ok return — control falls into
-//!      the slow path on the SAME call.
+//!      The fast-return predicate includes `!exhausted`, so
+//!      a past-deadline task is EXCLUDED from the early Ok
+//!      return — control falls into the slow path on the
+//!      SAME call. The extra message/first-checkpoint guards
+//!      only narrow the healthy fast path further.
 //!
 //!   2. **`Budget::is_past_deadline` is the source-of-truth
 //:      predicate** (types/budget.rs:298):
@@ -223,11 +228,10 @@ fn checkpoint_budget_exhaustion_checks_is_past_deadline_first() {
 
 #[test]
 fn checkpoint_fast_path_falls_through_when_exhausted_is_some() {
-    // Pin (link 1): the fast-path early-return predicate is
-    // `if !cancelled && !exhausted`. When past-deadline
-    // makes exhausted = Some(...), the predicate is false
-    // and control falls through to the slow path on the
-    // SAME call.
+    // Pin (link 1): the fast-path early-return predicate
+    // includes `!exhausted`. When past-deadline makes
+    // exhausted = Some(...), the predicate is false and
+    // control falls through to the slow path on the SAME call.
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
@@ -241,10 +245,11 @@ fn checkpoint_fast_path_falls_through_when_exhausted_is_some() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("if !cancelled && !exhausted {") && body.contains("return Ok(());"),
+        body.contains("if !cancelled && !exhausted && !has_message && !is_first_checkpoint {")
+            && body.contains("return Ok(());"),
         "REGRESSION: fast-path early-return predicate is no \
-         longer `!cancelled && !exhausted`. Past-deadline \
-         tasks may take the early Ok path — operators \
+         longer gated on `!exhausted`. Past-deadline \
+         tasks may take the early Ok path — operator's \
          'extra work after deadline' failure mode.",
     );
 }

@@ -237,13 +237,16 @@ fn checkpoint_fast_path_inline_checks_budget_exhaustion() {
     );
 
     // The fast path must short-circuit on exhausted=true OR
-    // cancelled=true.
+    // cancelled=true. Additional guards may send message
+    // clearing and first-checkpoint initialization through
+    // the slow path, but the Ok return must stay behind the
+    // cancellation and exhaustion gates.
     assert!(
-        body.contains("if !cancelled && !exhausted {"),
+        body.contains("if !cancelled && !exhausted && !has_message && !is_first_checkpoint {"),
         "REGRESSION: Cx::checkpoint fast path no longer guards \
-         the Ok(()) return on `!cancelled && !exhausted`. \
-         Without this guard, an exhausted task could observe \
-         Ok(()) and continue running.\n\nfn body:\n{body}",
+         the Ok(()) return on `!cancelled` and `!exhausted`. \
+         Without these guards, an exhausted or cancelled task \
+         could observe Ok(()) and continue running.\n\nfn body:\n{body}",
     );
 }
 
