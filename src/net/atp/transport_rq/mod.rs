@@ -826,7 +826,7 @@ impl RqAdaptiveSendState {
         self.est = PathEstimate {
             rtt_s,
             loss_p_hat: self.pacing_loss_ema,
-            loss_p_bar: self.loss_bar,
+            loss_p_bar: self.pacing_loss_bar,
             bw_median_bps: self.bw_ema_bps,
             bw_trough_bps: self.bw_trough_bps.max(self.bw_ema_bps * 0.5),
             enc_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
@@ -947,7 +947,7 @@ impl RqAdaptiveSendState {
         self.est = PathEstimate {
             rtt_s,
             loss_p_hat: self.pacing_loss_ema,
-            loss_p_bar: self.loss_bar,
+            loss_p_bar: self.pacing_loss_bar,
             bw_median_bps: self.bw_ema_bps,
             bw_trough_bps: self.bw_trough_bps.max(self.bw_ema_bps * 0.5),
             enc_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
@@ -4261,7 +4261,6 @@ pub async fn receive_connection(
                         },
                     )?)
                     .await?;
-                round_stats = RqDatagramRoundStats::default();
             }
             FrameType::KeepAlive => {
                 control
@@ -6199,6 +6198,10 @@ mod tests {
             state.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS,
             "entry-level residual pressure must not masquerade as pacing loss"
         );
+        assert!(
+            state.est.loss_p_bar < state.loss_bar,
+            "adaptive path estimate must stay on wire loss; FEC pressure lives in loss_bar"
+        );
         assert_eq!(
             state.loss_pacing_cap_bps, None,
             "one residual pending entry must not manufacture a congestion cap"
@@ -6260,6 +6263,14 @@ mod tests {
         assert!(
             state.mild_loss_pacing_floor_applies(),
             "entry-granular pending pressure must not disable the pacing floor"
+        );
+        assert_eq!(
+            state.est.loss_p_bar, state.pacing_loss_bar,
+            "PathEstimate loss bar must use receiver-observed wire loss, not FEC pressure"
+        );
+        assert!(
+            state.est.loss_p_bar < state.loss_bar,
+            "FEC pressure may stay high without entering the pacing/adaptive path estimate"
         );
         assert!(
             state.pacing_rate_for(rq_test_block_plan(&config))
