@@ -826,7 +826,7 @@ impl RqAdaptiveSendState {
         self.est = PathEstimate {
             rtt_s,
             loss_p_hat: self.pacing_loss_ema,
-            loss_p_bar: self.pacing_loss_bar,
+            loss_p_bar: self.loss_bar,
             bw_median_bps: self.bw_ema_bps,
             bw_trough_bps: self.bw_trough_bps.max(self.bw_ema_bps * 0.5),
             enc_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
@@ -947,7 +947,7 @@ impl RqAdaptiveSendState {
         self.est = PathEstimate {
             rtt_s,
             loss_p_hat: self.pacing_loss_ema,
-            loss_p_bar: self.pacing_loss_bar,
+            loss_p_bar: self.loss_bar,
             bw_median_bps: self.bw_ema_bps,
             bw_trough_bps: self.bw_trough_bps.max(self.bw_ema_bps * 0.5),
             enc_symbols_per_s: RQ_ASSUMED_DECODE_SYMBOLS_PER_S,
@@ -4261,6 +4261,7 @@ pub async fn receive_connection(
                         },
                     )?)
                     .await?;
+                round_stats = RqDatagramRoundStats::default();
             }
             FrameType::KeepAlive => {
                 control
@@ -6198,9 +6199,13 @@ mod tests {
             state.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS,
             "entry-level residual pressure must not masquerade as pacing loss"
         );
+        assert_eq!(
+            state.est.loss_p_bar, state.loss_bar,
+            "adaptive path estimate must preserve pending-aware FEC pressure"
+        );
         assert!(
-            state.est.loss_p_bar < state.loss_bar,
-            "adaptive path estimate must stay on wire loss; FEC pressure lives in loss_bar"
+            state.pacing_loss_bar < state.loss_bar,
+            "wire-loss pacing bar must remain below pending-aware FEC pressure"
         );
         assert_eq!(
             state.loss_pacing_cap_bps, None,
@@ -6265,12 +6270,12 @@ mod tests {
             "entry-granular pending pressure must not disable the pacing floor"
         );
         assert_eq!(
-            state.est.loss_p_bar, state.pacing_loss_bar,
-            "PathEstimate loss bar must use receiver-observed wire loss, not FEC pressure"
+            state.est.loss_p_bar, state.loss_bar,
+            "PathEstimate loss bar must keep pending-aware FEC pressure for repair sizing"
         );
         assert!(
-            state.est.loss_p_bar < state.loss_bar,
-            "FEC pressure may stay high without entering the pacing/adaptive path estimate"
+            state.pacing_loss_bar < state.loss_bar,
+            "receiver-observed wire loss may stay mild while FEC pressure remains high"
         );
         assert!(
             state.pacing_rate_for(rq_test_block_plan(&config))
