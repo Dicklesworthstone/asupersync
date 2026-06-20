@@ -958,6 +958,17 @@ impl RqAdaptiveSendState {
             self.est.decode_symbols_per_s_at(plan.k) * f64::from(self.symbol_size.max(1));
         let base = network_bps.min(decode_bps.max(1.0));
         let rate = base / (1.0 + plan.overhead.max(0.0));
+        rqtrace!(
+            "pacing_rate_for: network_bps={:.0} decode_bps={:.0} base={:.0} overhead={:.4} rate={:.0} bw_median={:.0} bw_trough={:.0} mild_floor={}",
+            network_bps,
+            decode_bps,
+            base,
+            plan.overhead.max(0.0),
+            rate,
+            self.est.bw_median_bps,
+            self.est.bw_trough_bps,
+            self.mild_loss_pacing_floor_applies()
+        );
         rate.ceil()
             .clamp(RQ_MIN_PACING_BPS as f64, RQ_MAX_PACING_BPS as f64) as u64
     }
