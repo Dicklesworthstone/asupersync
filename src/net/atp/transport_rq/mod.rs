@@ -765,7 +765,15 @@ impl RqAdaptiveSendState {
         } else {
             (pending_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0)
         };
-        let pressure_loss = byte_pressure * RQ_PENDING_PRESSURE_LOSS_FLOOR;
+        // Decode-pending backlog is NOT wire loss. `pending` is entry-granular, so a
+        // single stuck RaptorQ block makes the whole entry "pending" (byte_pressure≈1.0).
+        // Previously that produced pressure_loss=0.05, which pushed loss_ema past
+        // RQ_MILD_LOSS_PACING_MAX_LOSS (0.02) and DISABLED the mild-loss pacing floor,
+        // collapsing the path rate far below link capacity (MATRIX-8/11 trace). Cap the
+        // decode-pending contribution so it can gently inform pacing but cannot by itself
+        // cross the mild-floor / regime-shift thresholds and trigger a rate-collapse spiral.
+        let pressure_loss = (byte_pressure * RQ_PENDING_PRESSURE_LOSS_FLOOR)
+            .min(RQ_MILD_LOSS_PACING_MAX_LOSS * 0.5);
         let loss_hat = pacing_loss_hat.max(pressure_loss).clamp(0.0, 0.90);
 
         self.regime_shift = self.pacing_loss_ema > 0.0
