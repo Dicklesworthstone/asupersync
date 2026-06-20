@@ -21,6 +21,14 @@ fn count_to_f64(count: usize) -> f64 {
     f64::from(u32::try_from(clamped).expect("clamped to u32 max"))
 }
 
+fn assert_same_f64(label: &str, a: f64, b: f64) {
+    if a.is_finite() && b.is_finite() {
+        assert!((a - b).abs() < f64::EPSILON, "{label} mismatch: {a} vs {b}");
+    } else {
+        assert_eq!(a.to_bits(), b.to_bits(), "{label} mismatch: {a} vs {b}");
+    }
+}
+
 /// Run a lab runtime with a single task and return the oracle report.
 fn single_task_report(seed: u64) -> OracleReport {
     let mut runtime = LabRuntime::new(LabConfig::new(seed));
@@ -226,7 +234,9 @@ fn e2e_conformal_report_json_roundtrip() {
     let config = ConformalConfig::new(0.05).min_samples(5);
     let mut cal = ConformalCalibrator::new(config);
 
-    for i in 0..10 {
+    // Alpha 0.05 needs at least 20 calibration samples for a finite threshold:
+    // ceil(0.95 * (n + 1)) <= n.
+    for i in 0..20 {
         cal.calibrate(&clean_oracle_report(i * 1000));
     }
     let report = cal
@@ -247,6 +257,16 @@ fn e2e_conformal_report_json_roundtrip() {
         report.prediction_sets.len(),
         deserialized.prediction_sets.len()
     );
+    for (actual, roundtripped) in report
+        .prediction_sets
+        .iter()
+        .zip(deserialized.prediction_sets.iter())
+    {
+        assert_eq!(actual.invariant, roundtripped.invariant);
+        assert_same_f64("score", actual.score, roundtripped.score);
+        assert_same_f64("threshold", actual.threshold, roundtripped.threshold);
+        assert_eq!(actual.conforming, roundtripped.conforming);
+    }
     assert_eq!(report.calibration_samples, deserialized.calibration_samples);
 
     test_complete!("e2e_conformal_report_json_roundtrip");
@@ -262,7 +282,8 @@ fn e2e_conformal_deterministic() {
     let run = || {
         let config = ConformalConfig::new(0.05).min_samples(5);
         let mut cal = ConformalCalibrator::new(config);
-        for i in 0..10 {
+        // Keep this deterministic fixture in the finite-threshold regime.
+        for i in 0..20 {
             cal.calibrate(&clean_oracle_report(i * 1000));
         }
         cal.predict(&clean_oracle_report(99_000))
@@ -275,8 +296,8 @@ fn e2e_conformal_deterministic() {
     assert_eq!(r1.prediction_sets.len(), r2.prediction_sets.len());
     for (a, b) in r1.prediction_sets.iter().zip(r2.prediction_sets.iter()) {
         assert_eq!(a.invariant, b.invariant);
-        assert!((a.score - b.score).abs() < f64::EPSILON);
-        assert!((a.threshold - b.threshold).abs() < f64::EPSILON);
+        assert_same_f64("score", a.score, b.score);
+        assert_same_f64("threshold", a.threshold, b.threshold);
         assert_eq!(a.conforming, b.conforming);
     }
 
