@@ -142,6 +142,7 @@ impl ConnectionPair {
             .on_1rtt_keys_available(cx)
             .expect("server 1rtt keys");
 
+        self.client.record_verified_server_identity();
         // Handshake is confirmed on both sides.
         self.client
             .on_handshake_confirmed(cx)
@@ -221,6 +222,7 @@ fn handshake_lifecycle_with_packet_exchange() {
         .expect("server hs keys");
     pair.client.on_1rtt_keys_available(cx).expect("client 1rtt");
     pair.server.on_1rtt_keys_available(cx).expect("server 1rtt");
+    pair.client.record_verified_server_identity();
     pair.client
         .on_handshake_confirmed(cx)
         .expect("client confirmed");

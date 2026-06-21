@@ -68,6 +68,12 @@ fn init_test(name: &str) {
     test_phase!(name);
 }
 
+fn install_remote_reflection_cx() -> asupersync::cx::cx::CurrentCxGuard {
+    Cx::set_current(Some(Cx::for_testing_with_remote(
+        asupersync::remote::RemoteCap::new(),
+    )))
+}
+
 trait TestHandlerSyncExt: Handler {
     fn call_sync(&self, req: Request) -> Response {
         futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
@@ -300,7 +306,9 @@ fn t53_extract_03_form_body() {
         "/form",
         post(FnHandler1::<_, Form<HashMap<String, String>>>::new(handler)),
     );
-    let req = Request::new("POST", "/form").with_body(Bytes::from_static(b"user=bob&age=30"));
+    let req = Request::new("POST", "/form")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(Bytes::from_static(b"user=bob&age=30"));
     let resp = router.handle(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "user=bob");
@@ -872,6 +880,7 @@ fn t57_health_03_reflection_list_services() {
     reflection.register_handler(&echo);
     reflection.register_handler(&chat);
 
+    let _remote_cx = install_remote_reflection_cx();
     let services = reflection
         .list_services()
         .expect("list_services must succeed");
@@ -895,6 +904,7 @@ fn t57_health_04_reflection_describe_service() {
     let echo = MockEchoService;
     reflection.register_handler(&echo);
 
+    let _remote_cx = install_remote_reflection_cx();
     let desc = reflection.describe_service("test.Echo");
     assert!(desc.is_ok(), "service must be found");
     let info = desc.unwrap();

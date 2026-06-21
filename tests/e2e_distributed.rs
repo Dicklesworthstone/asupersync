@@ -28,10 +28,10 @@ use asupersync::record::distributed_region::{
 };
 use asupersync::record::region::RegionState;
 use asupersync::remote::NodeId;
-use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
+use asupersync::security::{AuthenticationTag, SecurityContext};
 use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::budget::Budget;
-use asupersync::types::{Outcome, RegionId, TaskId, Time};
+use asupersync::types::{Outcome, RegionId, Symbol, TaskId, Time};
 use asupersync::util::DetRng;
 
 const TEST_RING_SEED: u64 = 0;
@@ -95,6 +95,32 @@ fn test_replicas(count: usize) -> Vec<ReplicaInfo> {
     (0..count)
         .map(|i| ReplicaInfo::new(&format!("node-{i}"), &format!("10.0.0.{i}:9000")))
         .collect()
+}
+
+fn authorized_security_context(seed: u64, replicas: &[ReplicaInfo]) -> SecurityContext {
+    let context = SecurityContext::for_testing(seed);
+    for replica in replicas {
+        context
+            .authorize_replica(&replica.id, None)
+            .expect("test replica id should authorize");
+    }
+    context
+}
+
+fn signed_collected_symbol(
+    context: &SecurityContext,
+    symbol: &Symbol,
+    source_replica: String,
+    collected_at: Time,
+) -> CollectedSymbol {
+    let signed = context.sign_symbol(symbol);
+    CollectedSymbol {
+        symbol: signed.symbol().clone(),
+        tag: *signed.tag(),
+        source_replica,
+        collected_at,
+        verified: false,
+    }
 }
 
 fn make_ack(id: &str, count: u32) -> ReplicaAck {
@@ -293,7 +319,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
     // Phase 3: Assign with all 3 strategies
     test_phase!("Assign");
     let replicas = test_replicas(3);
-    let security_context = SecurityContext::for_testing(42);
+    let security_context = authorized_security_context(42, &replicas);
 
     for strategy in [
         AssignmentStrategy::Full,
@@ -430,16 +456,18 @@ fn e2e_full_encode_distribute_recover_pipeline() {
 
     // Phase 6: Recover
     test_phase!("Recover");
+    let recovery_context = SecurityContext::for_testing(0xD157_0001);
     let symbols: Vec<CollectedSymbol> = encoded_state
         .symbols
         .iter()
         .enumerate()
-        .map(|(i, s)| CollectedSymbol {
-            symbol: s.clone(),
-            tag: AuthenticationTag::zero(),
-            source_replica: format!("node-{}", i % 2), // from surviving replicas
-            collected_at: Time::from_secs(u64::try_from(i).unwrap()),
-            verified: true,
+        .map(|(i, s)| {
+            signed_collected_symbol(
+                &recovery_context,
+                s,
+                format!("node-{}", i % 2), // from surviving replicas
+                Time::from_secs(u64::try_from(i).unwrap()),
+            )
         })
         .collect();
 
@@ -449,8 +477,13 @@ fn e2e_full_encode_distribute_recover_pipeline() {
         required_quorum: 2,
     };
 
-    let mut orchestrator =
-        RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+    let mut orchestrator = RecoveryOrchestrator::new(
+        RecoveryConfig::default(),
+        RecoveryDecodingConfig {
+            auth_context: Some(recovery_context),
+            ..RecoveryDecodingConfig::default()
+        },
+    );
     let result = orchestrator
         .recover_from_symbols(
             &trigger,
@@ -496,7 +529,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
     assert_eq!(result.snapshot.parent, snapshot.parent);
     assert_eq!(result.snapshot.metadata, snapshot.metadata);
     assert_eq!(result.snapshot.content_hash(), original_hash);
-    assert!(!result.verified);
+    assert!(result.verified);
 
     test_complete!(
         "e2e_full_pipeline",
@@ -660,9 +693,13 @@ fn e2e_bridge_upgrade_snapshot_close() {
 
     test_section!("Encode + decode upgraded snapshot");
     let encoded = encode_snapshot(&snap_after);
-    let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+    let recovery_context = SecurityContext::for_testing(0xD157_0001);
+    let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+        auth_context: Some(recovery_context.clone()),
+        ..RecoveryDecodingConfig::default()
+    });
     for sym in &encoded.symbols {
-        let sym = SecurityContext::for_testing(0xD157_0001).sign_symbol(sym);
+        let sym = recovery_context.sign_symbol(sym);
         decoder.add_symbol(&sym).unwrap();
     }
     let recovered = decoder.decode_snapshot(&encoded.params).unwrap();
@@ -762,16 +799,11 @@ fn e2e_recover_source_only() {
 
     let snapshot = make_region_snapshot();
     let encoded = encode_snapshot(&snapshot);
+    let recovery_context = SecurityContext::for_testing(0xD157_0001);
 
     let source_symbols: Vec<CollectedSymbol> = encoded
         .source_symbols()
-        .map(|s| CollectedSymbol {
-            symbol: s.clone(),
-            tag: AuthenticationTag::zero(),
-            source_replica: "node-0".to_string(),
-            collected_at: Time::ZERO,
-            verified: false,
-        })
+        .map(|s| signed_collected_symbol(&recovery_context, s, "node-0".to_string(), Time::ZERO))
         .collect();
 
     tracing::info!(
@@ -786,8 +818,13 @@ fn e2e_recover_source_only() {
         reason: Some("source-only recovery test".to_string()),
     };
 
-    let mut orchestrator =
-        RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+    let mut orchestrator = RecoveryOrchestrator::new(
+        RecoveryConfig::default(),
+        RecoveryDecodingConfig {
+            auth_context: Some(recovery_context),
+            ..RecoveryDecodingConfig::default()
+        },
+    );
     let result = orchestrator
         .recover_from_symbols(
             &trigger,
@@ -798,7 +835,7 @@ fn e2e_recover_source_only() {
         .unwrap();
 
     assert_eq!(result.snapshot.content_hash(), snapshot.content_hash());
-    assert!(!result.verified);
+    assert!(result.verified);
 
     test_complete!("e2e_recover_source_only");
 }

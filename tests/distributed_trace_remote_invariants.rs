@@ -865,7 +865,9 @@ fn snapshot_all_task_states_roundtrip() {
 
 #[test]
 fn snapshot_invalid_magic_rejected() {
-    let err = RegionSnapshot::from_bytes(b"NOPE\x01").unwrap_err();
+    let mut bytes = vec![0_u8; 5 + 32];
+    bytes[..5].copy_from_slice(b"NOPE\x01");
+    let err = RegionSnapshot::from_bytes(&bytes).unwrap_err();
     assert_eq!(err, SnapshotError::InvalidMagic);
 }
 
@@ -952,7 +954,7 @@ fn bridge_config_defaults() {
     assert_eq!(config.sync_mode, SyncMode::Synchronous);
     assert_eq!(
         config.conflict_resolution,
-        ConflictResolution::DistributedWins
+        ConflictResolution::VectorClockBased
     );
 }
 

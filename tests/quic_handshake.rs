@@ -100,7 +100,7 @@ fn test_retry_token_validation() {
     let handler = RetryTokenHandler::new(secret_key, 300); // 5 minute lifetime
 
     let client_addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 100).into(), 12345);
-    let original_dest_cid = b"original_connection_id";
+    let original_dest_cid = b"original_conn_id";
 
     // Generate token
     let token = handler
@@ -266,15 +266,18 @@ fn test_key_schedule_lifecycle() {
     assert!(schedule.keys_established(PacketSpace::Initial));
 
     // Install Handshake keys
+    let handshake_secret = [0x48u8; 32];
     let (local_handshake, remote_handshake) =
-        KeyDerivation::derive_handshake_keys(b"handshake_secret").unwrap();
+        KeyDerivation::derive_handshake_keys(&handshake_secret).unwrap();
     schedule
         .install_handshake_keys(local_handshake, remote_handshake)
         .unwrap();
     assert!(schedule.keys_established(PacketSpace::Handshake));
 
     // Install 1-RTT keys
-    let (local_app, remote_app) = KeyDerivation::derive_application_keys(b"app_secret").unwrap();
+    let application_secret = [0xA5u8; 32];
+    let (local_app, remote_app) =
+        KeyDerivation::derive_application_keys(&application_secret).unwrap();
     schedule
         .install_application_keys(local_app, remote_app)
         .unwrap();

@@ -396,6 +396,7 @@ impl ConnectionPair {
         self.server
             .on_1rtt_keys_available(cx)
             .expect("server 1rtt keys");
+        self.client.record_verified_server_identity();
         self.client
             .on_handshake_confirmed(cx)
             .expect("client confirmed");

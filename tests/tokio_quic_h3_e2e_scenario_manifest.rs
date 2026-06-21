@@ -76,6 +76,7 @@ fn establish_pair(cx: &Cx, client: &mut NativeQuicConnection, server: &mut Nativ
         .expect("server handshake keys");
     client.on_1rtt_keys_available(cx).expect("client 1rtt keys");
     server.on_1rtt_keys_available(cx).expect("server 1rtt keys");
+    client.record_verified_server_identity();
     client
         .on_handshake_confirmed(cx)
         .expect("client handshake confirmed");
@@ -126,6 +127,7 @@ fn es_02_zero_rtt_resumption() {
     assert!(client.can_send_0rtt());
 
     // After confirmation, 0-RTT no longer available
+    client.record_verified_server_identity();
     client.on_handshake_confirmed(&cx).expect("confirmed");
     assert!(!client.can_send_0rtt());
     assert!(client.can_send_1rtt());

@@ -66,6 +66,7 @@ fn establish_pair(cx: &Cx, client: &mut NativeQuicConnection, server: &mut Nativ
         .expect("server handshake keys");
     client.on_1rtt_keys_available(cx).expect("client 1rtt keys");
     server.on_1rtt_keys_available(cx).expect("server 1rtt keys");
+    client.record_verified_server_identity();
     client
         .on_handshake_confirmed(cx)
         .expect("client handshake confirmed");
@@ -254,6 +255,7 @@ fn mp_01_connection_setup() {
     conn.begin_handshake(&cx).expect("begin");
     conn.on_handshake_keys_available(&cx).expect("hs keys");
     conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+    conn.record_verified_server_identity();
     conn.on_handshake_confirmed(&cx).expect("confirmed");
     assert_eq!(conn.state(), QuicConnectionState::Established);
 }
@@ -363,6 +365,7 @@ fn mp_06_key_update_and_0rtt() {
 
     // Complete handshake — 0-RTT no longer available after confirmation
     client.on_1rtt_keys_available(&cx).expect("1rtt keys");
+    client.record_verified_server_identity();
     client.on_handshake_confirmed(&cx).expect("confirmed");
     assert!(!client.can_send_0rtt()); // Post-confirmation, 0-RTT is closed
 

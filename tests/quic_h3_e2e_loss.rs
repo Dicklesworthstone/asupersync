@@ -131,6 +131,7 @@ impl ConnectionPair {
             .on_1rtt_keys_available(cx)
             .expect("server 1rtt keys");
 
+        self.client.record_verified_server_identity();
         self.client
             .on_handshake_confirmed(cx)
             .expect("client confirmed");
@@ -544,10 +545,10 @@ fn pto_fire_after_timeout() {
     // The second PTO deadline (computed from same now) should be further out
     // because pto_count=1 means 2x backoff.
     let base_pto_timeout = pto_deadline - t1;
-    let after_pto_timeout = pto_deadline2 - pair.clock.now();
+    let after_pto_timeout = pto_deadline2 - t1;
     assert!(
-        after_pto_timeout > base_pto_timeout,
-        "PTO should be backed off: {after_pto_timeout} > {base_pto_timeout}"
+        after_pto_timeout >= base_pto_timeout.saturating_mul(2),
+        "PTO should be backed off at least 2x: {after_pto_timeout} >= {base_pto_timeout} * 2"
     );
 }
 
@@ -563,7 +564,13 @@ fn pto_backoff_capping() {
     t.on_established().expect("est");
 
     // Send a packet to enable PTO deadline computation.
-    t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 1200, 10_000));
+    let oldest_sent = 10_000;
+    t.on_packet_sent(sent(
+        PacketNumberSpace::ApplicationData,
+        0,
+        1200,
+        oldest_sent,
+    ));
 
     // Establish RTT.
     t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 1200, 10_100));
@@ -573,14 +580,14 @@ fn pto_backoff_capping() {
 
     // Get base PTO timeout (pto_count=0).
     let base_deadline = t.pto_deadline_micros(now).expect("base deadline");
-    let base_timeout = base_deadline - now;
+    let base_timeout = base_deadline - oldest_sent;
 
     // Fire PTO 10 times.
     for _ in 0..10 {
         t.on_pto_expired();
     }
     let deadline_at_10 = t.pto_deadline_micros(now).expect("deadline at 10");
-    let timeout_at_10 = deadline_at_10 - now;
+    let timeout_at_10 = deadline_at_10 - oldest_sent;
 
     // Should be 2^10 = 1024x.
     assert_eq!(
@@ -594,7 +601,7 @@ fn pto_backoff_capping() {
         t.on_pto_expired();
     }
     let deadline_at_15 = t.pto_deadline_micros(now).expect("deadline at 15");
-    let timeout_at_15 = deadline_at_15 - now;
+    let timeout_at_15 = deadline_at_15 - oldest_sent;
 
     // Should still be capped at 2^10 = 1024x (min(15, 10) = 10).
     assert_eq!(
@@ -878,6 +885,7 @@ fn bytes_in_flight_across_spaces() {
         .expect("hs keys");
     pair.client.on_1rtt_keys_available(cx).expect("1rtt keys");
     pair.server.on_1rtt_keys_available(cx).expect("1rtt keys");
+    pair.client.record_verified_server_identity();
     pair.client.on_handshake_confirmed(cx).expect("confirmed");
     pair.server.on_handshake_confirmed(cx).expect("confirmed");
 
@@ -1050,18 +1058,24 @@ fn pto_counter_resets_on_ack() {
     let _ = t.on_ack_received(PacketNumberSpace::ApplicationData, &[0], 0, 30_000);
 
     // Send a packet, don't ack, fire PTO multiple times.
-    t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 1200, 40_000));
+    let oldest_sent = 40_000;
+    t.on_packet_sent(sent(
+        PacketNumberSpace::ApplicationData,
+        1,
+        1200,
+        oldest_sent,
+    ));
 
     let now = 50_000u64;
     let base_deadline = t.pto_deadline_micros(now).expect("base");
-    let base_timeout = base_deadline - now;
+    let base_timeout = base_deadline - oldest_sent;
 
     // Fire 5 PTOs.
     for _ in 0..5 {
         t.on_pto_expired();
     }
     let backed_off_deadline = t.pto_deadline_micros(now).expect("backed off");
-    let backed_off_timeout = backed_off_deadline - now;
+    let backed_off_timeout = backed_off_deadline - oldest_sent;
     assert_eq!(backed_off_timeout, base_timeout * 32, "2^5 = 32x backoff");
 
     // Now ACK pn 1 -- this should reset pto_count to 0.

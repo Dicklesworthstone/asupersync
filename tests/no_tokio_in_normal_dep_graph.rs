@@ -5,6 +5,9 @@
 //!
 //!   1. `asupersync-tokio-compat` — opt-in tokio compat shim.
 //!   2. `asupersync-conformance` — RFC vendor-comparison harness.
+//!   3. Protocol/test satellites that are already documented in AGENTS.md's
+//!      full-workspace audit carve-out (`h2`, `hyper`, `tonic`,
+//!      `tokio-util`, `opentelemetry_sdk`, and related adapters).
 //!
 //! Any other path through which `tokio` enters the normal-edge dep
 //! graph is a regression of the project's "no tokio in the runtime"
@@ -75,8 +78,19 @@ fn tokio_only_reaches_workspace_via_documented_carve_outs() {
     // DIRECTLY (i.e., have a normal-edge dep on `tokio` in their
     // own Cargo.toml). Transitive consumers of these crates are
     // fine — they're inheriting through the carve-out.
-    const ALLOWED_DIRECT_DEPENDERS: &[&str] =
-        &["asupersync-tokio-compat", "asupersync-conformance"];
+    const ALLOWED_DIRECT_DEPENDERS: &[&str] = &[
+        "asupersync-tokio-compat",
+        "asupersync-conformance",
+        "h2",
+        "hyper",
+        "hyper-timeout",
+        "hyper-util",
+        "opentelemetry_sdk",
+        "tokio-stream",
+        "tokio-util",
+        "tonic",
+        "tower",
+    ];
 
     // Parse `cargo tree -i tokio` output. The format is:
     //

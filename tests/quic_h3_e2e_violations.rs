@@ -131,6 +131,7 @@ impl ConnectionPair {
             .on_1rtt_keys_available(cx)
             .expect("server 1rtt keys");
 
+        self.client.record_verified_server_identity();
         self.client
             .on_handshake_confirmed(cx)
             .expect("client confirmed");
@@ -260,7 +261,9 @@ fn appdata_packet_before_1rtt_and_any_packet_after_close_are_rejected() {
         .expect_err("packet send after close must fail");
     assert_eq!(
         err,
-        NativeQuicConnectionError::InvalidState("packet send requires non-closed connection state")
+        NativeQuicConnectionError::InvalidState(
+            "packet send requires non-draining, non-closed connection state"
+        )
     );
 }
 
@@ -453,14 +456,14 @@ fn h3_goaway_increasing_stream_id_rejected() {
         .expect("first goaway=100");
     assert_eq!(h3.goaway_id(), Some(100));
 
-    // Send GOAWAY with lower stream ID 50 -- allowed (decreasing).
-    h3.on_control_frame(&H3Frame::Goaway(50))
-        .expect("goaway=50 (decreasing, allowed)");
-    assert_eq!(h3.goaway_id(), Some(50));
+    // Send GOAWAY with lower stream ID 48 -- allowed (decreasing).
+    h3.on_control_frame(&H3Frame::Goaway(48))
+        .expect("goaway=48 (decreasing, allowed)");
+    assert_eq!(h3.goaway_id(), Some(48));
 
-    // Send GOAWAY with same stream ID 50 -- allowed (not increasing).
-    h3.on_control_frame(&H3Frame::Goaway(50))
-        .expect("goaway=50 again (same, allowed)");
+    // Send GOAWAY with same stream ID 48 -- allowed (not increasing).
+    h3.on_control_frame(&H3Frame::Goaway(48))
+        .expect("goaway=48 again (same, allowed)");
 
     // Send GOAWAY with HIGHER stream ID 80 -- MUST be rejected.
     let err = h3
@@ -472,7 +475,7 @@ fn h3_goaway_increasing_stream_id_rejected() {
     );
 
     // State should still reflect the last valid goaway_id.
-    assert_eq!(h3.goaway_id(), Some(50));
+    assert_eq!(h3.goaway_id(), Some(48));
 }
 
 // ===========================================================================
@@ -666,7 +669,7 @@ fn h3_disallowed_frames_on_control_stream_after_settings() {
     );
 
     // GOAWAY frame on control stream after SETTINGS -- allowed.
-    h3.on_control_frame(&H3Frame::Goaway(10))
+    h3.on_control_frame(&H3Frame::Goaway(8))
         .expect("GOAWAY on control stream is valid");
 
     // CANCEL_PUSH on control stream after SETTINGS -- allowed.

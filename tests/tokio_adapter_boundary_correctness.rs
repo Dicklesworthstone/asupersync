@@ -99,8 +99,14 @@ fn cc04_cancel_request_is_callable_via_pin() {
         "request_cancel must take Pin<&mut Self>"
     );
     assert!(
-        src.contains("*self.project().cancel_requested = true"),
-        "request_cancel must set cancel_requested flag"
+        src.contains("self.project().cancel_signal.cancel();"),
+        "request_cancel must publish cancellation through the stored CancelSignal"
+    );
+    assert!(
+        src.contains("pub struct CancelSignal")
+            && src.contains("requested: Arc<AtomicBool>")
+            && src.contains("self.requested.store(true, Ordering::Release)"),
+        "CancelSignal must own the shared atomic cancel flag and publish cancellation with Release ordering"
     );
 }
 

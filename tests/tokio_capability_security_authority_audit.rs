@@ -405,17 +405,69 @@ fn bi_02_doc_covers_feature_flags() {
 #[test]
 fn bi_03_no_tokio_in_main_cargo() {
     let cargo_toml = include_str!("../Cargo.toml");
-    // Main crate should not have a direct tokio dependency
-    // (it may appear in dev-dependencies or feature-gated optional deps)
-    let in_deps = cargo_toml
+    // Main crate should not have a direct production tokio dependency. A
+    // feature-gated optional edge is permitted only for quarantined benchmark
+    // tooling, outside the default and metrics production graphs.
+    let tokio_dependency_lines: Vec<_> = cargo_toml
         .lines()
         .skip_while(|l| !l.starts_with("[dependencies]"))
         .skip(1)
         .take_while(|l| !l.starts_with('['))
-        .any(|l| l.starts_with("tokio"));
+        .map(str::trim)
+        .filter(|l| l.starts_with("tokio ") || l.starts_with("tokio="))
+        .collect();
     assert!(
-        !in_deps,
-        "Main crate Cargo.toml must not have tokio in [dependencies]"
+        tokio_dependency_lines
+            .iter()
+            .all(|line| line.contains("optional = true")),
+        "Main crate Cargo.toml must not have non-optional tokio in [dependencies]: {tokio_dependency_lines:?}"
+    );
+
+    let features_section: String = cargo_toml
+        .lines()
+        .skip_while(|l| !l.starts_with("[features]"))
+        .skip(1)
+        .take_while(|l| !l.starts_with('['))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let default_line = features_section
+        .lines()
+        .find(|l| l.trim_start().starts_with("default ="))
+        .expect("root Cargo.toml should declare default features");
+    let metrics_line = features_section
+        .lines()
+        .find(|l| l.trim_start().starts_with("metrics ="))
+        .expect("root Cargo.toml should declare metrics feature");
+    let ci_cross_platform_block = features_section
+        .split("ci-cross-platform = [")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("root Cargo.toml should declare ci-cross-platform feature");
+    let benchmark_block = features_section
+        .split("benchmark-adapters = [")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("root Cargo.toml should declare benchmark-adapters feature");
+
+    assert!(
+        benchmark_block.contains("\"dep:tokio\""),
+        "benchmark-adapters is the only admitted root feature that may enable the optional tokio edge"
+    );
+    for (name, feature_text) in [
+        ("default", default_line),
+        ("metrics", metrics_line),
+        ("ci-cross-platform", ci_cross_platform_block),
+    ] {
+        assert!(
+            !feature_text.contains("dep:tokio")
+                && !feature_text.contains("tokio/")
+                && !feature_text.contains("benchmark-adapters"),
+            "{name} must not enable a tokio dependency edge or benchmark-adapters"
+        );
+    }
+    assert!(
+        !tokio_dependency_lines.is_empty(),
+        "This audit should explicitly observe the optional benchmark tokio quarantine"
     );
 }
 

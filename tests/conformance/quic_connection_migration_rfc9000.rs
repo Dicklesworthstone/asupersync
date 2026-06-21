@@ -798,6 +798,7 @@ fn established_conn() -> NativeQuicConnection {
     conn.begin_handshake(&cx).expect("begin");
     conn.on_handshake_keys_available(&cx).expect("hs keys");
     conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+    conn.record_verified_server_identity();
     conn.on_handshake_confirmed(&cx).expect("confirmed");
     conn
 }
