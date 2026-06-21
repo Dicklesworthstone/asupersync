@@ -1512,3 +1512,22 @@ Swarm landed 3 levers past the restore (HEAD `c3aff3ca7`): GSO eligibility (`ecd
 4. **decode-fanout (7.3) is live but off-bottleneck** (decode already cleared in MATRIX-20); it appears to have nudged broken to fr=6 (+1 round, +19.5s) — investigate/possibly revert that hunk.
 
 **Verdict / no-claim.** No win this round; all sha-ok (no correctness break). The REAL levers, now sharper: (clean) **ramp round-0 cold-start pacing toward link rate** — a slow-start probe that climbs from a safe floor to `RQ_MAX_PACING` and backs off on observed loss (must NOT flat-raise the cold-start constant: slow lossy links need the conservative start — that was the lever-1 over-pace failure). (lossy) cut feedback rounds, but the repair-overhead calibration must be wired into the **LIVE `spray_round`/`round_tuning`**, not `adaptive.rs`. **Orchestration lesson: a lever only counts when it lands on the live hot path AND moves a benched cell — `cargo check` green ≠ benchmark win.** Evidence dir: `artifacts/atp_bench_matrix/20260621T222617Z/`.
+
+## MATRIX-22 (2026-06-21) — ROUND-0 PACING RAMP REFUTED (3rd pacing-up failure); the clean-link ceiling is the RECEIVER drain rate, NOT sender pacing
+
+The MATRIX-21 hypothesis (raise round-0 pacing → beat rsync clean) was implemented as `a8a6792f6` (839ykg, "ramp RQ round-0 pacing": `RqPacingRamp` doubling ×2/burst up to `RQ_MAX_PACING_BPS`=64 MiB/s, gated `!loss_detected`). Benched 50M nocrypto ×4, 3 reps, run `20260621T231513Z`:
+
+| regime | RAMP | baseline (MATRIX-19) | rsyncd | fr | verdict |
+|---|---|---|---|---|---|
+| perfect | **55.70s** | 3.72s | 1.23s | 0→**4** | **15× WORSE** |
+| good | **68.51s** | 3.95s | 3.93s | 0→**5** | **17× WORSE** |
+| bad | 70.81s | 73.41s | 14.44s | 5 | ~same (noise) |
+| broken | 111.70s | 114.44s | 70.48s | 6 | ~same (noise) |
+
+All sha-ok (correct, just slow). **Trace proof of the failure mechanism** (perfect rep1 send.time): round 0 sprayed 43700 symbols at `path_rate_bps=67108864` (ramp hit the 64 MiB/s max); round 1 `received_this_round=26425` of 43700 → **~40% loss on a ZERO-LOSS netem link** = pure receiver-buffer overflow; `repair_loss_bar` shot to 0.69→0.90 → 4 feedback rounds → 55.7s.
+
+**Re-diagnosis — this REFUTES the pacing hypothesis and pins the real ceiling.** On a 0-loss link the only way to get loss is buffer overflow, so the receiver's drain/decode pipeline tops out around the original cold-start rate (~13–16 MB/s). **The 16 MiB/s `RQ_COLD_START_PACING_BPS` is NOT an arbitrary cap — it is ~matched to the receiver's intake/decode/disk throughput.** Spraying faster (this ramp) just overflows the receiver → self-inflicted loss → more rounds → far slower. This is now the **THIRD** sender-pacing-up failure (lever-1 v2 estimator-collapse, lever-1 v3 control-frame break, and this ramp). **Conclusion: sender-side "spray faster" is a dead end — you cannot beat the receiver's drain rate by sending harder.**
+
+**The real clean-link lever is RECEIVER throughput.** atp clean ≈13.4 MB/s vs rsync ≈40 MB/s; to beat rsync clean we must raise the receiver's symbol-intake/decode/commit pipeline above ~40 MB/s. Decode itself is already parallel and block-insensitive (MATRIX-20), so the suspect is the **serial per-symbol intake/drain loop** (recv → auth-verify → `feed_symbol_with_cx` → dispatch) and/or staging disk write — the part that runs single-threaded between the socket and the parallel decoders. Next diagnostic: profile/instrument the receiver pump to find the ~13 MB/s bottleneck (intake batching, auth cost per symbol, disk write path).
+
+**Action.** `a8a6792f6` is a clean-link regression on `main` (perfect/good 15–17× slower) — recommend REVERT it to restore the overhead-cap baseline (3.72/3.95s clean), then pursue the receiver-throughput lever. Filed to bead 839ykg. Do NOT attempt further round-0 pacing-up levers. Evidence dir: `artifacts/atp_bench_matrix/20260621T231513Z/`.
