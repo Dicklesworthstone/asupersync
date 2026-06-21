@@ -24,11 +24,11 @@ faults:
   - at_ms: 150
     action: host_crash
     args:
-      target: "worker-b"
+      host: "worker-b"
   - at_ms: 400
     action: host_restart
     args:
-      target: "worker-b"
+      host: "worker-b"
 
 participants:
   - name: supervisor

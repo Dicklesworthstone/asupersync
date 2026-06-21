@@ -8,6 +8,23 @@
   },
   "examples": [
     {
+      "name": "appspec_reference_journey",
+      "file": "examples/appspec_reference_journey.rs",
+      "loc": {
+        "start": 1,
+        "end": 382
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "appspec",
+        "deterministic-lab-runtime",
+        "fail-closed-lowering"
+      ],
+      "feature_flags": [],
+      "run_command": "cargo run --example appspec_reference_journey",
+      "description": "Production reference AppSpec journey proving explicit Cx ownership, quiescence, and fail-closed lowering."
+    },
+    {
       "name": "atp_daemon_basic",
       "file": "examples/atp_daemon_basic.rs",
       "loc": {
@@ -116,7 +133,7 @@
       "file": "examples/demo_benchmark.rs",
       "loc": {
         "start": 1,
-        "end": 665
+        "end": 663
       },
       "kind": "rust",
       "demonstrates": [
@@ -273,7 +290,7 @@
       "file": "examples/macros_race.rs",
       "loc": {
         "start": 1,
-        "end": 67
+        "end": 71
       },
       "kind": "rust",
       "demonstrates": [
@@ -284,6 +301,25 @@
       "feature_flags": [],
       "run_command": "cargo run --example macros_race",
       "description": "Race macro example focused on winner selection and loser cleanup."
+    },
+    {
+      "name": "production_service",
+      "file": "examples/production_service.rs",
+      "loc": {
+        "start": 1,
+        "end": 174
+      },
+      "kind": "rust",
+      "demonstrates": [
+        "http1-listener",
+        "sqlite-handler",
+        "graceful-drain"
+      ],
+      "feature_flags": [
+        "sqlite"
+      ],
+      "run_command": "cargo run --example production_service --features sqlite",
+      "description": "Production-style HTTP service fixture with SQLite-backed handler and request-aware graceful drain."
     },
     {
       "name": "prometheus_metrics",
@@ -496,7 +532,7 @@
       "file": "examples/spawn_fanout.rs",
       "loc": {
         "start": 1,
-        "end": 15
+        "end": 20
       },
       "kind": "rust",
       "demonstrates": [

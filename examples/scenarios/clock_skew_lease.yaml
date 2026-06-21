@@ -22,12 +22,12 @@ faults:
   - at_ms: 50
     action: clock_skew
     args:
-      target: "node-b"
-      drift_ns_per_sec: 1000000
+      host: "node-b"
+      skew_ms: 1
   - at_ms: 300
     action: clock_reset
     args:
-      target: "node-b"
+      host: "node-b"
 
 participants:
   - name: node-a
