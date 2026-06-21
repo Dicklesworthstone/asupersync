@@ -10,6 +10,69 @@ This document defines the operational semantics of Asupersync 4.0 in a style sui
 3. Translation to TLA+ for model checking
 4. Reasoning about correctness without excessive formalism
 
+### Normative Classification
+
+Sections are **normative** by default unless their heading carries one of these
+classification markers:
+
+- `[Explanatory]`: intuition, proof sketches, and background that do not by
+  themselves define runtime behavior.
+- `[Implementation]`: implementation mapping, verifier contracts, or tooling
+  interfaces that bind the semantics to concrete Rust/test artifacts.
+
+### Canonical Rule Index
+
+The canonical rule IDs are included here in the stable numbering used by the
+semantic contract, runtime gap matrix, and docs lints:
+
+- `rule.cancel.request` (#1)
+- `rule.cancel.acknowledge` (#2)
+- `rule.cancel.drain` (#3)
+- `rule.cancel.finalize` (#4)
+- `inv.cancel.idempotence` (#5)
+- `inv.cancel.propagates_down` (#6)
+- `def.cancel.reason_kinds` (#7)
+- `def.cancel.severity_ordering` (#8)
+- `prog.cancel.drains` (#9)
+- `rule.cancel.checkpoint_masked` (#10)
+- `inv.cancel.mask_bounded` (#11)
+- `inv.cancel.mask_monotone` (#12)
+- `rule.obligation.reserve` (#13)
+- `rule.obligation.commit` (#14)
+- `rule.obligation.abort` (#15)
+- `rule.obligation.leak` (#16)
+- `inv.obligation.no_leak` (#17)
+- `inv.obligation.linear` (#18)
+- `inv.obligation.bounded` (#19)
+- `inv.obligation.ledger_empty_on_close` (#20)
+- `prog.obligation.resolves` (#21)
+- `rule.region.close_begin` (#22)
+- `rule.region.close_cancel_children` (#23)
+- `rule.region.close_children_done` (#24)
+- `rule.region.close_run_finalizer` (#25)
+- `rule.region.close_complete` (#26)
+- `inv.region.quiescence` (#27)
+- `prog.region.close_terminates` (#28)
+- `def.outcome.four_valued` (#29)
+- `def.outcome.severity_lattice` (#30)
+- `def.outcome.join_semantics` (#31)
+- `def.cancel.reason_ordering` (#32)
+- `inv.ownership.single_owner` (#33)
+- `inv.ownership.task_owned` (#34)
+- `def.ownership.region_tree` (#35)
+- `rule.ownership.spawn` (#36)
+- `comb.join` (#37)
+- `comb.race` (#38)
+- `comb.timeout` (#39)
+- `inv.combinator.loser_drained` (#40)
+- `law.race.never_abandon` (#41)
+- `law.join.assoc` (#42)
+- `law.race.comm` (#43)
+- `inv.capability.no_ambient` (#44)
+- `def.capability.cx_scope` (#45)
+- `inv.determinism.replayable` (#46)
+- `def.determinism.seed_equivalence` (#47)
+
 ---
 
 ## 1. Domains
@@ -57,7 +120,7 @@ Severity tiers (total order):
          < ParentCancelled=ResourceUnavailable(4) < Shutdown(5)
 ```
 
-### 1.4 Budgets
+### 1.4 Budgets [Explanatory]
 
 Product semiring with componentwise min (except priority: max):
 
@@ -107,7 +170,7 @@ ObligationState ::= Reserved | Committed | Aborted | Leaked
 ObligationKind  ::= SendPermit | Ack | Lease | IoOp
 ```
 
-### 1.8 Trace labels, independence, and true concurrency
+### 1.8 Trace labels, independence, and true concurrency [Explanatory]
 
 Small-step semantics is written as interleavings, but Asupersync’s *spec* is intentionally stronger:
 many interleavings are observationally the same because they differ only by reordering **independent** actions.
@@ -159,7 +222,7 @@ Held(t) = { o ∈ dom(O) | O[o].holder = t ∧ O[o].state = Reserved }
 The intended rule is: reaching `Completed(_)` with `Held(t) ≠ ∅` is a semantic error (a leak).
 The operational rule `LEAK` below is the runtime witness of this linearity violation.
 
-### 1.10 (Optional extension) Distributed time as causal partial order
+### 1.10 Distributed time [Explanatory] (optional causal partial order extension)
 
 For distributed structured concurrency, traces should be **causally ordered**, not totally ordered.
 A standard representation is a vector clock:
@@ -172,7 +235,7 @@ e1 ∥ e2  iff  neither VC(e1) ≤ VC(e2) nor VC(e2) ≤ VC(e1)
 
 This lets remote traces remain honest: concurrent events stay unordered until causality forces an order.
 
-### 1.11 Scheduler lanes (priority model)
+### 1.11 Scheduler lanes [Implementation] (priority model)
 
 Asupersync scheduling is modeled as **three priority lanes**:
 
@@ -339,7 +402,7 @@ Preconditions:
 If `t` yields, it is re-enqueued via `ENQUEUE`. If `t` completes, it is not re-enqueued.
 This captures the lane priority model without committing to a specific queue implementation.
 
-##### Scheduler state + fairness model
+##### Scheduler fairness [Explanatory]
 
 We model the three-lane scheduler with explicit **cancel fairness** via a streak
 counter, matching `src/runtime/scheduler/three_lane.rs`.
@@ -530,7 +593,7 @@ Under fair scheduling and **sufficient cleanup budgets**, every task that enters
 Therefore, cancellation completes in a bounded number of steps assuming budgets
 cover required cleanup and finalizers are themselves terminating.
 
-#### 3.2.4 Mapping to runtime transitions
+#### 3.2.4 Mapping to runtime transitions [Implementation]
 
 The semantic states correspond directly to runtime records:
 
@@ -642,7 +705,7 @@ Preconditions:
 Masking is never “free”: it consumes a finite mask budget.
 Primitives that use masking must account for it explicitly (via budgets/policy) so cancellation has a quantitative bound.
 
-#### Game-theoretic view (spec): cancellation as an adversarial, budgeted protocol
+#### Game-theoretic view [Explanatory]: cancellation as an adversarial, budgeted protocol
 
 For reasoning (and eventually mechanized proofs), it is useful to interpret cancellation as a two-player, quantitative game:
 
@@ -820,7 +883,7 @@ Then:
 
 This provides simple linear invariants and fast trace checks for “no leaks.”
 
-#### 3.4.1 Linear logic view (affine, single-use tokens)
+#### 3.4.1 Linear logic view [Explanatory] (affine, single-use tokens)
 
 We model obligations as **linear resources** in a judgmental style:
 
@@ -861,7 +924,7 @@ LEAK:
 This matches the runtime behavior: uncommitted obligations are detected and reported
 when a task completes.
 
-#### 3.4.2 Mapping to runtime state
+#### 3.4.2 Mapping to runtime state [Implementation]
 
 The linear context `Δ` is *represented concretely* by the obligation registry `O`:
 
@@ -877,7 +940,7 @@ Transitions in §3.4 correspond directly to mutations of `O`:
 
 This is the concrete embedding of linear logic into the runtime’s operational state.
 
-#### 3.4.3 Mapping to oracles and tests
+#### 3.4.3 Mapping to oracles [Implementation] and tests
 
 The lab runtime’s **ObligationLeakOracle** and trace checks implement the same rule:
 
@@ -945,7 +1008,7 @@ to survive task completion.)
 This lemma underpins the lab-runtime oracle: when the oracle reports no leaks,
 region close is safe w.r.t. obligations.
 
-#### 3.4.6 No silent drop (safety theorem, sketch)
+#### 3.4.6 No silent drop [Explanatory] (safety theorem, sketch)
 
 **Theorem (No Silent Drop):** For any obligation `o`, the system records
 either `commit(o)` or `abort(o)` **before** the holder task completes,
@@ -1373,7 +1436,7 @@ After race(f1, f2) returns:
   t ∈ S.ready_lane   ⇒ lane(t) = Ready
 ```
 
-### Meta: Compositional specs (separation + rely/guarantee)
+### Meta: Compositional specs [Explanatory] (separation + rely/guarantee)
 
 The invariants above are global; in practice we want *local* reasoning that composes.
 A standard approach is:
@@ -1456,7 +1519,7 @@ Operational oracle (what the lab checks):
 
 We do **not** require identical step-by-step schedules; only independence-respecting equivalence.
 
-### 7.2 Side-condition schema for rewrite rules
+### 7.2 Side-condition schema [Implementation] for rewrite rules
 
 Every rewrite rule must declare the side conditions it relies on in a machine-checkable form.
 This is the contract between the rule author, the analyzer, and the certificate verifier.
@@ -1532,7 +1595,7 @@ race(join(a, b), join(a, c)) ≃ join(a, race(b, c))
 // Don't run 'a' twice
 ```
 
-### 7.8 Denotational sketch (powerdomains for nondeterminism)
+### 7.8 Denotational sketch [Explanatory] (powerdomains for nondeterminism)
 
 Operational semantics is the executable truth; still, it is useful to keep a denotational picture in mind.
 Interpret a closed computation as a set of possible outcomes (nondeterminism from scheduling):
@@ -1551,7 +1614,7 @@ Adequacy (“operational steps generate exactly the denotation”) is the target
 
 ---
 
-## 8. Test Oracle Usage
+## 8. Test Oracle Usage [Implementation]
 
 The lab runtime implements these semantics exactly. Property tests verify:
 
@@ -1604,7 +1667,7 @@ Result: exploration cost becomes proportional to the number of equivalence class
 Dynamic traces catch real bugs; static analysis catches *likely* bugs early.
 A sound (possibly conservative) abstract interpreter can track “may hold unresolved obligations” per scope/task and warn on scope exit.
 
-### 8.3 Proof-carrying trace certificate (spec)
+### 8.3 Proof-carrying trace certificate [Implementation] (spec)
 
 Each trace can carry a compact certificate: a machine-verifiable witness that
 the run respected invariants. The certificate must be deterministic and stable
@@ -1719,7 +1782,7 @@ directly onto the existing small-step rules and the lab/runtime tests.
 - M3: obligation rules + no-leak lemmas.
 - M4: trace equivalence + canonicalization lemmas.
 
-## 10. TLA+ Sketch
+## 10. TLA+ Sketch [Implementation]
 
 For model checking, translate to TLA+:
 

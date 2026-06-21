@@ -249,7 +249,8 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 
 ```toml
 [features]
-default = ["proc-macros"]
+default = ["proc-macros", "nightly-outcome-try"]
+nightly-outcome-try = []       # Nightly Outcome Try/? ergonomics for default contributor lanes
 messaging-fabric = []          # Native FABRIC messaging lane
 wasm-browser-preview = []      # Guarded browser-targeted compilation surface
 wasm-runtime = ["wasm-browser-preview"]

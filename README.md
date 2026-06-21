@@ -217,8 +217,9 @@ The key differences: `reserve`/`send` two-phase pattern prevents message loss on
 
 ### 1. Structured Concurrency by Construction
 
-Tasks don't float free. Every runtime-spawned task is owned by a region.
-Regions form a tree. When a region closes, it *guarantees* all children are
+Tasks don't float free. Every task is owned by a region. Runtime-spawned tasks
+carry that ownership through admission, execution, and teardown. Regions form a
+tree. When a region closes, it *guarantees* all children are
 complete, all finalizers have run, and all registered obligations are resolved.
 This is the "no orphans" invariant, enforced by the public API shape, region
 accounting, and runtime/oracle checks rather than by discipline. It is not a
@@ -1131,9 +1132,10 @@ async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
 ```
 
 These macros are available in the default feature set. The default production
-feature set is intentionally limited to `proc-macros`; test-only internals are
-opt-in. If you opt out of default features for a minimal core-only build,
-re-enable `proc-macros` explicitly.
+feature set is intentionally limited to `proc-macros` plus
+`nightly-outcome-try`; test-only internals are opt-in. If you opt out of
+default features for a minimal core-only build, re-enable `proc-macros`
+explicitly.
 
 Current contract:
 
@@ -1749,7 +1751,7 @@ for the JS/TS package line while keeping the Rust browser API preview-only.
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; virtual/lab baseline plus production TCP loopback RemoteRuntime lifecycle proof shipped; deployment discovery, TLS/authentication, WAN retry policy, and stable production wire format remain adapter-scoped |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
-| Browser Edition (WASM, JS/TS consumers) | ✅ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust browser API preview-only |
+| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
 | Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported |
 | Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded coordinator attach/detach/fallback supported |
 | Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |

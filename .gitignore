@@ -95,6 +95,7 @@ storage.sqlite3-*
 
 # Ephemeral files (agent-generated, build artifacts, test detritus)
 ci-artifacts/
+*.proptest-regressions
 proptest-regressions/
 test_logs/
 test_meminfo
