@@ -4744,6 +4744,7 @@ async fn dispatch_decode_job(
                 cx,
                 dec,
                 run_block_decode_job(retry_job),
+                false,
                 transfer_decode_width,
             )
             .await?;
@@ -5731,6 +5732,7 @@ async fn finalize_decode_outcome(
     cx: &Cx,
     dec: &mut EntryDecoder,
     outcome: BlockDecodeOutcome,
+    allow_spawn_decode: bool,
     transfer_decode_width: usize,
 ) -> Result<bool, RqError> {
     let Some(pipeline) = dec.pipeline.as_mut() else {
@@ -5872,6 +5874,7 @@ async fn join_pending_decode(
         cx,
         dec,
         outcome,
+        true,
         RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
     )
     .await?
