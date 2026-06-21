@@ -5749,7 +5749,8 @@ async fn finalize_decode_outcome(
                 block_sbn,
                 decode_elapsed.as_millis()
             );
-            queue_stale_decode_retry(cx, dec, job, transfer_decode_width).await?;
+            queue_stale_decode_retry(cx, dec, job, allow_spawn_decode, transfer_decode_width)
+                .await?;
             Ok(false)
         }
     }
@@ -5759,6 +5760,7 @@ async fn queue_stale_decode_retry(
     cx: &Cx,
     dec: &mut EntryDecoder,
     job: BlockDecodeJob,
+    allow_spawn_decode: bool,
     transfer_decode_width: usize,
 ) -> Result<(), RqError> {
     let block_sbn = job.sbn();
@@ -5770,12 +5772,14 @@ async fn queue_stale_decode_retry(
     }
 
     let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
-    if !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width) {
+    if !allow_spawn_decode
+        || !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width)
+    {
         if let Some(pipeline) = dec.pipeline.as_mut() {
             pipeline.cancel_decode_job(block_sbn);
         }
         rqtrace!(
-            "receiver: entry {} deferred stale decode retry for block {} because entry_cap={entry_decode_width} is saturated",
+            "receiver: entry {} deferred stale decode retry for block {} because decode width is saturated (entry_cap={entry_decode_width})",
             dec.index,
             block_sbn
         );
