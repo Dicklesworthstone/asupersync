@@ -45,6 +45,14 @@ const MAX_PATH_LOSS_RATE: f64 = 0.999;
 /// conservative RaptorQ inactivation-floor model. Feedback can still request
 /// repair later if actual loss appears.
 const CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND: f64 = 0.0015;
+/// Loss level where the round-budget repair margin reaches full strength.
+///
+/// The pure decode-failure curve is byte-efficient, but MATRIX-20 shows lossy
+/// transfers are feedback-round bound. At a 2% path loss we deliberately spend
+/// extra bounded repair in the first lossy repair round to avoid another RTT.
+const LOSSY_ROUND_BUDGET_FULL_STRENGTH_LOSS: f64 = 0.02;
+/// Maximum multiplier applied to the pure decode-failure repair budget.
+const LOSSY_ROUND_BUDGET_MAX_REPAIR_MULTIPLIER: f64 = 2.0;
 /// Conservative cold-start pacing floor used before path evidence is usable.
 ///
 /// This is deliberately below the historic RQ fixed cap: malformed feedback or
@@ -391,6 +399,11 @@ pub fn overhead_for_target(k: u32, loss_p_bar: f64, alpha: f64, max_overhead: f6
     } else {
         1e-3
     };
+    let base = decode_failure_overhead_for_target(k, p, alpha, max_overhead);
+    round_budgeted_repair_overhead(base, p, max_overhead)
+}
+
+fn decode_failure_overhead_for_target(k: u32, p: f64, alpha: f64, max_overhead: f64) -> f64 {
     let kf = f64::from(k);
     let z = z_for_alpha(alpha);
     // First-order analytic seed.
@@ -414,6 +427,23 @@ pub fn overhead_for_target(k: u32, loss_p_bar: f64, alpha: f64, max_overhead: f6
         }
     }
     hi.clamp(0.0, max_overhead)
+}
+
+fn round_budgeted_repair_overhead(base: f64, p: f64, max_overhead: f64) -> f64 {
+    if base <= 0.0 {
+        return 0.0;
+    }
+    (base * lossy_round_budget_multiplier(p)).clamp(0.0, max_overhead)
+}
+
+fn lossy_round_budget_multiplier(p: f64) -> f64 {
+    if p <= CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND {
+        return 1.0;
+    }
+    let span = (LOSSY_ROUND_BUDGET_FULL_STRENGTH_LOSS - CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND)
+        .max(f64::EPSILON);
+    let t = ((p - CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND) / span).clamp(0.0, 1.0);
+    1.0 + t * (LOSSY_ROUND_BUDGET_MAX_REPAIR_MULTIPLIER - 1.0)
 }
 
 /// Steady-state goodput `G(K, ε, N)` in bytes/s.
@@ -1160,6 +1190,41 @@ mod tests {
         assert!(
             decode_fail_probability(2048, lossy, 0.02) <= alpha * 1.000_001,
             "lossy calibrated overhead must still hit the decode-failure target"
+        );
+    }
+
+    #[test]
+    fn overhead_adds_round_budget_margin_for_bad_regime_loss() {
+        let alpha = 1e-6;
+        let k = 437;
+        let loss = LOSSY_ROUND_BUDGET_FULL_STRENGTH_LOSS;
+        let base = decode_failure_overhead_for_target(k, loss, alpha, 0.5);
+        let budgeted = overhead_for_target(k, loss, alpha, 0.5);
+
+        assert!(
+            budgeted >= base * 1.99,
+            "2% bad-regime loss should spend a full round-budget repair margin: base={base} budgeted={budgeted}"
+        );
+        assert!(
+            decode_fail_probability(k, budgeted, loss) <= alpha * 1.000_001,
+            "round-budgeted overhead must preserve the decode-failure target"
+        );
+    }
+
+    #[test]
+    fn overhead_round_budget_margin_does_not_touch_near_clean_paths() {
+        let alpha = 1e-6;
+        assert_eq!(
+            overhead_for_target(437, CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND, alpha, 0.5),
+            0.0
+        );
+        assert_eq!(
+            lossy_round_budget_multiplier(CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND),
+            1.0
+        );
+        assert_eq!(
+            lossy_round_budget_multiplier(LOSSY_ROUND_BUDGET_FULL_STRENGTH_LOSS),
+            LOSSY_ROUND_BUDGET_MAX_REPAIR_MULTIPLIER
         );
     }
 
