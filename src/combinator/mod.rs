@@ -71,7 +71,7 @@ pub use join::{
     Join, Join2Result, JoinAll, JoinAllError, JoinAllResult, JoinError, aggregate_outcomes,
     join_all_outcomes, join_all_to_result, join2_outcomes, join2_to_result, make_join_all_result,
 };
-pub use join_set::JoinSet;
+pub use join_set::{JoinSet, JoinSummary};
 pub use map_reduce::{
     MapReduce, MapReduceError, MapReduceResult, make_map_reduce_result, map_reduce_outcomes,
     map_reduce_to_result, reduce_successes,

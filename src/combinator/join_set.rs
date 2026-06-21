@@ -19,23 +19,25 @@
 //!
 //! # Scope of this slice
 //!
-//! This first slice lands the most common server pattern — fan-out N members
-//! and collect them — via [`JoinSet::new`], [`JoinSet::spawn`],
-//! [`JoinSet::join_all`], [`JoinSet::cancel_all`],
-//! [`JoinSet::len`]/[`JoinSet::is_empty`], and abort-on-drop. The streaming
-//! [`join_next`]-as-they-complete API, `in_cx`/`in_child_region`
-//! constructors, and the `JoinSummary` severity aggregation are tracked
-//! follow-up slices on the same bead (asupersync-dx-core-api-v2-u1z5hn.5).
+//! The API covers the common server patterns: [`JoinSet::in_cx`] for the
+//! current region, [`JoinSet::new`] for an explicit scope, [`JoinSet::spawn`]
+//! and [`JoinSet::spawn_local`] for member admission, [`JoinSet::join_next`]
+//! for completion-order collection, [`JoinSet::join_all`] for spawn-order
+//! collection, [`JoinSet::cancel_all`] for explicit drain after cancellation,
+//! [`JoinSet::summary`] for severity aggregation, and abort-on-drop for
+//! best-effort cancellation requests.
 //!
 //! [`join_next`]: JoinSet
 
 use std::future::Future;
+use std::task::Poll;
 
 use crate::cx::{Cx, Scope};
 use crate::runtime::JoinError;
 use crate::runtime::TaskHandle;
 use crate::runtime::state::SpawnError;
-use crate::types::{Outcome, PanicPayload, Policy};
+use crate::types::policy::FailFast;
+use crate::types::{Outcome, PanicPayload, Policy, Severity};
 
 /// A dynamically-sized collection of tasks spawned into a single region, whose
 /// results are collected as four-valued [`Outcome`]s.
@@ -47,8 +49,9 @@ pub struct JoinSet<'scope, T, E, P>
 where
     P: Policy,
 {
-    scope: &'scope Scope<'scope, P>,
+    scope: Scope<'scope, P>,
     handles: Vec<TaskHandle<Result<T, E>>>,
+    summary: JoinSummary,
 }
 
 impl<'scope, T, E, P> JoinSet<'scope, T, E, P>
@@ -64,8 +67,9 @@ where
     #[must_use]
     pub fn new(scope: &'scope Scope<'scope, P>) -> Self {
         Self {
-            scope,
+            scope: clone_scope(scope),
             handles: Vec::new(),
+            summary: JoinSummary::default(),
         }
     }
 
@@ -85,7 +89,26 @@ where
         F: FnOnce(Cx) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
-        let handle = cx.spawn_in(self.scope, f)?;
+        let handle = cx.spawn_in(&self.scope, f)?;
+        self.handles.push(handle);
+        Ok(())
+    }
+
+    /// Spawns a `!Send` member into the set's region, pinned to the current
+    /// worker thread.
+    ///
+    /// This mirrors [`Cx::spawn_local_in`]: it fails off-worker or without a
+    /// local spawn lane instead of silently falling back to a migratable task.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same [`SpawnError`] variants as [`Cx::spawn_local_in`].
+    pub fn spawn_local<F, Fut>(&mut self, cx: &Cx, f: F) -> Result<(), SpawnError>
+    where
+        F: FnOnce(Cx) -> Fut + 'static,
+        Fut: Future<Output = Result<T, E>> + 'static,
+    {
+        let handle = cx.spawn_local_in(&self.scope, f)?;
         self.handles.push(handle);
         Ok(())
     }
@@ -114,6 +137,45 @@ where
         self.drain_all(cx).await
     }
 
+    /// Waits for the next member to complete and returns its terminal outcome.
+    ///
+    /// Results are yielded in completion order. When multiple members are
+    /// already complete in the same poll, the earliest spawned ready member is
+    /// selected as the deterministic tie-break. Pending members are polled with
+    /// their join future's drop-abort path defused, so scanning for readiness
+    /// never cancels still-running work.
+    pub async fn join_next(&mut self, cx: &Cx) -> Option<Outcome<T, E>> {
+        std::future::poll_fn(|task_cx| {
+            if self.handles.is_empty() {
+                return Poll::Ready(None);
+            }
+
+            for index in 0..self.handles.len() {
+                let joined = {
+                    let handle = &mut self.handles[index];
+                    let mut join = handle.join(cx);
+                    match std::pin::Pin::new(&mut join).poll(task_cx) {
+                        Poll::Ready(joined) => Some(joined),
+                        Poll::Pending => {
+                            join.defuse_drop_abort();
+                            None
+                        }
+                    }
+                };
+
+                if let Some(joined) = joined {
+                    let outcome = join_to_outcome(joined);
+                    self.summary.record(&outcome);
+                    self.handles.remove(index);
+                    return Poll::Ready(Some(outcome));
+                }
+            }
+
+            Poll::Pending
+        })
+        .await
+    }
+
     /// Requests cancellation for every member and drains all terminal outcomes
     /// in spawn order.
     ///
@@ -128,13 +190,46 @@ where
         self.drain_all(cx).await
     }
 
+    /// Returns the terminal-outcome summary observed so far by
+    /// [`join_next`](Self::join_next).
+    ///
+    /// `join_all` and `cancel_all` consume the set and return all outcomes
+    /// directly, so callers can build their own aggregate from that complete
+    /// vector when they choose the spawn-order APIs.
+    #[must_use]
+    pub fn summary(&self) -> JoinSummary {
+        self.summary
+    }
+
     async fn drain_all(&mut self, cx: &Cx) -> Vec<Outcome<T, E>> {
         let mut handles = std::mem::take(&mut self.handles);
         let mut outcomes = Vec::with_capacity(handles.len());
         for handle in &mut handles {
-            outcomes.push(join_to_outcome(handle.join(cx).await));
+            let outcome = join_to_outcome(handle.join(cx).await);
+            self.summary.record(&outcome);
+            outcomes.push(outcome);
         }
         outcomes
+    }
+}
+
+impl<T, E> JoinSet<'static, T, E, FailFast>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    /// Creates an empty set bound to `cx`'s current region.
+    ///
+    /// This is the shortest blessed constructor for ordinary capability
+    /// holders: it snapshots `cx.scope()` internally, so the caller does not
+    /// need to bind a temporary [`Scope`] just to create a set.
+    #[must_use]
+    pub fn in_cx(cx: &Cx) -> Self {
+        Self {
+            scope: cx.scope(),
+            handles: Vec::new(),
+            summary: JoinSummary::default(),
+        }
     }
 }
 
@@ -166,6 +261,49 @@ fn join_to_outcome<T, E>(joined: Result<Result<T, E>, JoinError>) -> Outcome<T, 
     }
 }
 
+fn clone_scope<'scope, P>(scope: &'scope Scope<'scope, P>) -> Scope<'scope, P>
+where
+    P: Policy,
+{
+    Scope::new_with_capability_budget(scope.region_id(), scope.budget(), scope.capability_budget())
+        .with_pending_spawn_counter(scope.pending_spawn_counter_handle())
+}
+
+/// Severity aggregation for outcomes already observed from a [`JoinSet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinSummary {
+    completed: usize,
+    worst: Severity,
+}
+
+impl Default for JoinSummary {
+    fn default() -> Self {
+        Self {
+            completed: 0,
+            worst: Severity::Ok,
+        }
+    }
+}
+
+impl JoinSummary {
+    /// Number of terminal outcomes included in this summary.
+    #[must_use]
+    pub const fn completed(&self) -> usize {
+        self.completed
+    }
+
+    /// Worst observed severity using the [`Outcome`] severity lattice.
+    #[must_use]
+    pub const fn worst(&self) -> Severity {
+        self.worst
+    }
+
+    fn record<T, E>(&mut self, outcome: &Outcome<T, E>) {
+        self.completed += 1;
+        self.worst = self.worst.max(outcome.severity());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +328,19 @@ mod tests {
             }
             other => panic!("expected panic outcome, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn join_summary_tracks_completed_and_worst_severity() {
+        let mut summary = JoinSummary::default();
+
+        summary.record(&Outcome::<(), ()>::Ok(()));
+        summary.record(&Outcome::<(), ()>::Err(()));
+        summary.record(&Outcome::<(), ()>::Cancelled(crate::CancelReason::user(
+            "cancelled",
+        )));
+
+        assert_eq!(summary.completed(), 3);
+        assert_eq!(summary.worst(), Severity::Cancelled);
     }
 }

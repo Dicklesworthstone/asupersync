@@ -107,7 +107,7 @@ pub use crate::{Cx, Scope};
 pub use crate::{Budget, CancelKind, CancelReason, Error, Outcome, Time};
 
 // ── Runtime entry points + task handles ───────────────────────────────────
-pub use crate::combinator::JoinSet;
+pub use crate::combinator::{JoinSet, JoinSummary};
 pub use crate::runtime::{Runtime, RuntimeBuilder, RuntimeHandle, TaskHandle};
 
 // ── Channel constructors (module re-exports, never a glob) ─────────────────

@@ -314,28 +314,25 @@ fn join_all_results_vec_capacity_matches_input_handles_for_one_to_one_mapping() 
 }
 
 #[test]
-fn no_literal_join_set_type_avoid_conflation_with_region() {
-    // Pin (audit): there is NO literal `JoinSet` type that
-    // could conflate join_all's independence with region's
-    // cancel-on-failure. The two semantics are exposed via
-    // different methods on Scope.
-    let scope_source = read("src/cx/scope.rs");
+fn literal_join_set_documents_region_semantics_explicitly() {
+    // Pin (audit): the public JoinSet type exists now, but it must not
+    // imply an independent ownership boundary. Its docs must say that
+    // members run in a real region and that drop is only a cancellation
+    // request, with region close as the quiescence backstop.
+    let join_set_source = read("src/combinator/join_set.rs");
 
-    let suspect_join_set_definitions = [
-        "pub struct JoinSet<",
-        "pub struct JoinSet {",
-        "pub struct TaskSet<",
-    ];
-    for pat in &suspect_join_set_definitions {
-        assert!(
-            !scope_source.contains(pat),
-            "REGRESSION: a literal JoinSet type appeared \
-             (`{pat}`). Without careful design, this could \
-             conflate join_all (independent) with region \
-             (cancel-on-failure). Either spec the semantics \
-             explicitly or remove the type.",
-        );
-    }
+    assert!(
+        join_set_source.contains("pub struct JoinSet<"),
+        "REGRESSION: JoinSet disappeared from its documented combinator module",
+    );
+    assert!(
+        join_set_source.contains("region's quiescence guarantee"),
+        "REGRESSION: JoinSet docs no longer state that region quiescence still applies",
+    );
+    assert!(
+        join_set_source.contains("*cancellation request*"),
+        "REGRESSION: JoinSet docs no longer distinguish drop from guaranteed drain",
+    );
 }
 
 #[test]
