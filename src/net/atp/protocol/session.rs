@@ -2393,6 +2393,58 @@ mod tests {
     }
 
     #[test]
+    fn mixed_dataplane_peer_downgrades_extended_features_to_legacy() {
+        let offered = [
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::BoundedK,
+            AtpFeature::ExactDeficitNeedMore,
+            AtpFeature::DeliveryRateCredit,
+            AtpFeature::ControlArqBeacon,
+            AtpFeature::FanOut,
+            AtpFeature::MultiPeer,
+        ];
+        let hello = hello_for(SessionContextKind::Direct).with_features(&offered);
+        let mut policy = policy_for(SessionContextKind::Direct)
+            .with_supported_features(&[AtpFeature::EncryptionPolicy]);
+        let mut client = SessionNegotiator::client(hello.initiator);
+        let mut server = SessionNegotiator::server(policy.local_peer);
+
+        client.start_client_hello(&hello).unwrap();
+        let (server_hello, _frame, server_proof) =
+            server.accept_client_hello(&hello, &mut policy).unwrap();
+        let (session, client_proof) = client
+            .finish_client(&hello, &server_hello, &policy)
+            .unwrap();
+
+        assert_eq!(
+            session.selected_features,
+            FeatureSet::from_slice(&[AtpFeature::EncryptionPolicy])
+        );
+        for feature in ATP_DATAPLANE_REDESIGN_FEATURES {
+            assert!(
+                !session.selected_features.contains(feature),
+                "legacy peer must not silently enable {}",
+                feature.code()
+            );
+        }
+
+        let warnings = server_hello
+            .downgrade_warnings
+            .iter()
+            .map(|warning| (warning.feature, warning.reason_code))
+            .collect::<BTreeSet<_>>();
+        for feature in ATP_DATAPLANE_REDESIGN_FEATURES {
+            assert!(
+                warnings.contains(&(feature, feature.downgrade_reason_code())),
+                "missing downgrade warning for {}",
+                feature.code()
+            );
+        }
+        assert_eq!(client_proof.selected_features, vec!["encryption_policy"]);
+        assert_eq!(server_proof.selected_features, vec!["encryption_policy"]);
+    }
+
+    #[test]
     fn missing_required_dataplane_capability_fails_closed() {
         let hello = hello_for(SessionContextKind::Direct)
             .with_features(&[AtpFeature::EncryptionPolicy, AtpFeature::BoundedK]);
@@ -2417,6 +2469,84 @@ mod tests {
                 .and_then(|proof| proof.rejected_reason.as_deref()),
             Some("missing_required_feature")
         );
+    }
+
+    #[test]
+    fn downgraded_server_reply_cannot_drop_client_required_dataplane_capability() {
+        let hello = hello_for(SessionContextKind::Direct).with_features(&[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::ExactDeficitNeedMore,
+        ]);
+        let client_policy = SessionPolicy::new(hello.initiator, 100).with_required_features(&[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::ExactDeficitNeedMore,
+        ]);
+        let mut client = SessionNegotiator::client(hello.initiator);
+        client.start_client_hello(&hello).unwrap();
+
+        let selected_features = FeatureSet::from_slice(&[AtpFeature::EncryptionPolicy]);
+        let server_hello = ServerHello {
+            session_id: derive_session_id(&hello, &selected_features),
+            acceptor: hello.responder,
+            initiator: hello.initiator,
+            nonce: hello.nonce,
+            version: ProtocolVersion::CURRENT,
+            context: SessionContextKind::Direct,
+            selected_features,
+            downgrade_warnings: vec![DowngradeWarning {
+                feature: AtpFeature::ExactDeficitNeedMore,
+                reason_code: AtpFeature::ExactDeficitNeedMore.downgrade_reason_code(),
+            }],
+            accepted_grants: Vec::new(),
+            trace_id: hello.trace_id,
+        };
+
+        let error = client
+            .finish_client(&hello, &server_hello, &client_policy)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SessionError::MissingRequiredFeature(AtpFeature::ExactDeficitNeedMore)
+        ));
+        assert_eq!(error.code(), "missing_required_feature");
+    }
+
+    #[test]
+    fn server_cannot_silently_select_unoffered_dataplane_capability() {
+        let hello = hello_for(SessionContextKind::Direct)
+            .with_features(&[AtpFeature::EncryptionPolicy, AtpFeature::BoundedK]);
+        let policy = policy_for(SessionContextKind::Direct);
+        let mut client = SessionNegotiator::client(hello.initiator);
+        client.start_client_hello(&hello).unwrap();
+
+        let selected_features = FeatureSet::from_slice(&[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::BoundedK,
+            AtpFeature::DeliveryRateCredit,
+        ]);
+        let server_hello = ServerHello {
+            session_id: derive_session_id(&hello, &selected_features),
+            acceptor: hello.responder,
+            initiator: hello.initiator,
+            nonce: hello.nonce,
+            version: ProtocolVersion::CURRENT,
+            context: SessionContextKind::Direct,
+            selected_features,
+            downgrade_warnings: Vec::new(),
+            accepted_grants: Vec::new(),
+            trace_id: hello.trace_id,
+        };
+
+        let error = client
+            .finish_client(&hello, &server_hello, &policy)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SessionError::FeatureConfusion(AtpFeature::DeliveryRateCredit)
+        ));
+        assert_eq!(error.code(), "feature_confusion");
     }
 
     #[test]
