@@ -294,7 +294,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
         # SYMBOL_SIZE). atp rejects the transfer fail-closed otherwise. This is an
         # atp-internal framing detail and does not affect the rsync-ssh comparison,
         # so the encrypted tier stays apples-to-apples. (z0v7ri encrypted-tier fix.)
-        if [ "$sym" -gt 1144 ]; then sym=1144; fi
+        if [ "$sym" -gt 1141 ]; then sym=1141; fi
         # quic adds TLS identity ON TOP of the per-symbol auth posture; keep the
         # key/lab flags so the encrypted tier stays crypto-symmetric vs rsync-ssh
         # and the receiver does not fail closed for missing symbol auth.
