@@ -1,0 +1,71 @@
+---
+source: tests/three_lane_scheduler_state_dump_golden.rs
+assertion_line: 374
+expression: fairness_dump
+---
+{
+  "cancel_lane": {
+    "pending_tasks": [
+      {
+        "priority": 240,
+        "task_id": "600:0"
+      },
+      {
+        "priority": 240,
+        "task_id": "601:0"
+      },
+      {
+        "priority": 240,
+        "task_id": "602:0"
+      },
+      {
+        "priority": 240,
+        "task_id": "603:0"
+      },
+      {
+        "priority": 240,
+        "task_id": "604:0"
+      },
+      {
+        "priority": 240,
+        "task_id": "605:0"
+      }
+    ],
+    "queue_length": 6
+  },
+  "counters": {
+    "cancel_streak": 0,
+    "cancel_streak_limit": 4,
+    "steal_attempts": 0,
+    "total_dispatched": 0
+  },
+  "fairness_bounds": {
+    "cancel_tasks_above_limit": true,
+    "next_fairness_dispatch_due": true,
+    "ready_tasks_awaiting_fairness": 3
+  },
+  "local_ready": {
+    "pending_tasks": [
+      {
+        "task_id": "700:0"
+      },
+      {
+        "task_id": "701:0"
+      },
+      {
+        "task_id": "702:0"
+      }
+    ],
+    "queue_length": 3
+  },
+  "ready_lane": {
+    "pending_tasks": [],
+    "queue_length": 0
+  },
+  "scenario": "fairness_bounds",
+  "timed_lane": {
+    "pending_tasks": [],
+    "queue_length": 0
+  },
+  "worker_id": 0
+}

@@ -576,13 +576,23 @@ impl Signal {
         #[cfg(any(unix, windows))]
         {
             loop {
-                let notified = self.slot.notify.notified();
-                let current = self.slot.deliveries.load(Ordering::Acquire);
-                if current > self.seen_deliveries {
+                let seen = self.seen_deliveries;
+                let slot = Arc::clone(&self.slot);
+                let mut notified = std::pin::pin!(slot.notify.notified());
+                std::future::poll_fn(|cx| {
+                    if Future::poll(notified.as_mut(), cx).is_ready()
+                        || slot.deliveries.load(Ordering::Acquire) > seen
+                    {
+                        return std::task::Poll::Ready(());
+                    }
+                    std::task::Poll::Pending
+                })
+                .await;
+
+                if self.slot.deliveries.load(Ordering::Acquire) > self.seen_deliveries {
                     self.seen_deliveries = self.seen_deliveries.saturating_add(1);
                     return Some(());
                 }
-                notified.await;
             }
         }
 

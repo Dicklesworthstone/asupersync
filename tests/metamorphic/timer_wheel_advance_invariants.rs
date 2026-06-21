@@ -47,7 +47,7 @@ fn expired_signatures(expired: &[ExpiredTimer]) -> Vec<(u64, u64)> {
 // MR1: Time Monotonicity (Equivalence Pattern)
 // ============================================================================
 
-/// MR1: advance_to(A) then advance_to(B) where B >= A should equal advance_to(B)
+/// MR1: cumulative advance_to(A) then advance_to(B) where B >= A should equal advance_to(B)
 #[test]
 fn mr1_time_monotonicity() {
     proptest!(|(
@@ -67,15 +67,17 @@ fn mr1_time_monotonicity() {
         }
 
         // Wheel1: advance_to(tick_a) then advance_to(tick_b)
-        let _expired_a = wheel1.advance_to(tick_a);
-        let expired_b1 = wheel1.advance_to(tick_b);
+        let mut expired_split = wheel1.advance_to(tick_a);
+        expired_split.extend(wheel1.advance_to(tick_b));
 
         // Wheel2: advance_to(tick_b) directly
         let expired_b2 = wheel2.advance_to(tick_b);
 
         // Results should be identical
-        let sig1 = expired_signatures(&expired_b1);
-        let sig2 = expired_signatures(&expired_b2);
+        let mut sig1 = expired_signatures(&expired_split);
+        let mut sig2 = expired_signatures(&expired_b2);
+        sig1.sort_unstable();
+        sig2.sort_unstable();
 
         prop_assert_eq!(sig1, sig2,
             "Time monotonicity violated: advance_to({}) then advance_to({}) != advance_to({})",

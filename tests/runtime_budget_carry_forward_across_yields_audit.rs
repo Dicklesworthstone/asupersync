@@ -120,10 +120,14 @@ fn budget_deadline_field_is_absolute_time_not_relative_duration() {
     // reset on every re-poll — defeating the carry-forward
     // semantics.
     let source = read("src/types/budget.rs");
+    let struct_marker = "pub struct Budget {";
+    let start = source.find(struct_marker).expect("Budget struct");
+    let end = source[start..].find("\n}\n").expect("Budget struct close");
+    let budget_struct = &source[start..start + end];
 
     assert!(
-        source.contains("pub deadline: Option<Time>,")
-            || source.contains("deadline: Option<Time>,"),
+        budget_struct.contains("pub deadline: Option<Time>,")
+            || budget_struct.contains("deadline: Option<Time>,"),
         "REGRESSION: Budget.deadline is no longer Option<Time>. \
          If it became Option<Duration> (relative), the deadline \
          would naturally reset at each re-poll — gaming the \
@@ -133,8 +137,8 @@ fn budget_deadline_field_is_absolute_time_not_relative_duration() {
     // Forbid Duration-typed deadline (would be the gaming-
     // scheduler regression).
     assert!(
-        !source.contains("pub deadline: Option<Duration>,")
-            && !source.contains("deadline: Option<Duration>,"),
+        !budget_struct.contains("pub deadline: Option<Duration>,")
+            && !budget_struct.contains("deadline: Option<Duration>,"),
         "REGRESSION: Budget.deadline is now Duration — a \
          relative type that resets on yield. The carry-forward \
          contract requires absolute Time.",

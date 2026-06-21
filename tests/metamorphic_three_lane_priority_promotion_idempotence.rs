@@ -38,6 +38,20 @@ fn sorted_task_multiset(tasks: &[TaskId]) -> Vec<TaskId> {
     sorted
 }
 
+fn unique_tasks(raw: Vec<(u64, u8)>) -> Vec<(TaskId, u8)> {
+    let mut tasks = Vec::with_capacity(raw.len());
+    for (id, priority) in raw {
+        let task = task_id(id);
+        if !tasks
+            .iter()
+            .any(|&(existing, _): &(TaskId, u8)| existing == task)
+        {
+            tasks.push((task, priority));
+        }
+    }
+    tasks
+}
+
 /// Test harness for priority promotion idempotence testing
 struct PromotionIdempotenceHarness {
     scheduler: ThreeLaneScheduler,
@@ -116,14 +130,8 @@ impl Arbitrary for PromotionScenario {
             2usize..8usize,                                              // num_promotions
         )
             .prop_map(|(ready_raw, cancel_raw, target_raw, num_promotions)| {
-                let ready_tasks = ready_raw
-                    .into_iter()
-                    .map(|(id, prio)| (task_id(id), prio))
-                    .collect();
-                let cancel_tasks = cancel_raw
-                    .into_iter()
-                    .map(|(id, prio)| (task_id(id), prio))
-                    .collect();
+                let ready_tasks = unique_tasks(ready_raw);
+                let cancel_tasks = unique_tasks(cancel_raw);
                 let target_task = (task_id(target_raw.0), target_raw.1);
 
                 PromotionScenario {

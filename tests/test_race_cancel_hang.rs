@@ -4,7 +4,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::runtime::{JoinError, RuntimeState};
-use asupersync::types::{Budget, CancelKind, CancelReason, Outcome};
+use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, TaskId};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,9 +26,15 @@ impl Wake for CountWaker {
 #[test]
 fn test_race_empty_wakes_on_cancel() {
     let mut state = RuntimeState::new();
-    let cx = Cx::for_testing();
-    let region = state.create_root_region(Budget::INFINITE);
-    assert_eq!(region, cx.region_id());
+    let root_region = state.create_root_region(Budget::INFINITE);
+    let cx: Cx = Cx::new_with_observability(
+        root_region,
+        TaskId::new_for_test(0, 0),
+        Budget::INFINITE,
+        None,
+        None,
+        None,
+    );
 
     let mut handle = cx
         .scope()
@@ -79,7 +85,7 @@ fn test_race_empty_wakes_on_cancel() {
     }
 
     match handle.try_join() {
-        Err(JoinError::Cancelled(reason)) => {
+        Ok(Some(Err(JoinError::Cancelled(reason)))) => {
             assert_eq!(reason.kind, CancelKind::User);
         }
         other => panic!("expected race([]) cancellation result, got {other:?}"),

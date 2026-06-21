@@ -67,8 +67,8 @@ impl Ord for TimedEntry {
             .deadline
             .cmp(&self.deadline)
             .then_with(|| {
-                // Safe comparison without overflow: earlier generation wins
-                self.generation.cmp(&other.generation).reverse()
+                let diff = other.generation.wrapping_sub(self.generation).cast_signed();
+                diff.cmp(&0)
             })
             .then_with(|| other.task.cmp(&self.task))
     }

@@ -462,25 +462,19 @@ impl Reactor for EpollReactor {
                 drop(state);
                 Ok(())
             }
-            Err(err) => match err.raw_os_error() {
-                Some(libc::ENOENT) => {
-                    let info = entry.remove();
-                    fds.remove(&info.raw_fd);
-                    orphaned.insert(token);
-                    drop(state);
-                    // Decrement count after removing registration
-                    self.registration_count.fetch_sub(1, Ordering::Relaxed);
-                    Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "token not registered",
-                    ))
-                }
-                Some(libc::EBADF)
-                    if Self::fd_no_longer_matches(raw_fd, entry.get().fd_identity) =>
-                {
-                    // Determine whether the target fd itself is valid so EBADF can be
-                    // interpreted correctly (target closed/reused vs reactor poller invalid).
-                    // Evaluated AFTER the modify attempt to prevent TOCTOU race.
+            Err(err) => {
+                let target_fd_stale = Self::fd_no_longer_matches(raw_fd, entry.get().fd_identity);
+                let stale_registration =
+                    err.raw_os_error() == Some(libc::ENOENT) || target_fd_stale;
+                if stale_registration {
+                    // Determine whether the target fd itself is valid so hard
+                    // epoll_ctl failures can be interpreted correctly (target
+                    // closed/reused vs reactor poller invalid). Evaluate this
+                    // AFTER the modify attempt to prevent a TOCTOU race. If the
+                    // identity no longer matches, remove bookkeeping regardless
+                    // of the specific errno; full-suite fd churn can reuse the
+                    // raw fd slot before the syscall and surface EINVAL/EPERM
+                    // instead of EBADF.
                     // We must remove it to prevent leaking the token if the fd was concurrently reused.
                     let info = entry.remove();
                     fds.remove(&info.raw_fd);
@@ -497,12 +491,11 @@ impl Reactor for EpollReactor {
                         io::ErrorKind::NotFound,
                         "token not registered",
                     ))
-                }
-                _ => {
+                } else {
                     drop(state);
                     Err(err)
                 }
-            },
+            }
         }
     }
 
@@ -549,8 +542,19 @@ impl Reactor for EpollReactor {
                 }
                 Ok(())
             }
-            Err(err) => match err.raw_os_error() {
-                Some(libc::ENOENT) => {
+            Err(err) => {
+                let target_fd_stale = Self::fd_no_longer_matches(raw_fd, fd_identity);
+                let stale_registration =
+                    err.raw_os_error() == Some(libc::ENOENT) || target_fd_stale;
+                if stale_registration {
+                    // Determine whether the target fd itself is valid so hard
+                    // epoll_ctl failures can be interpreted correctly (target
+                    // closed/reused vs reactor poller invalid). Evaluate this
+                    // AFTER the delete attempt to prevent a TOCTOU race. If the
+                    // identity no longer matches, cleanup is already complete
+                    // from the reactor contract's point of view regardless of
+                    // whether the kernel surfaced ENOENT, EBADF, EINVAL, or
+                    // another fd-reuse-shaped errno.
                     if let Some(info) = state.tokens.remove(&token) {
                         state.fds.remove(&info.raw_fd);
                         drop(state);
@@ -560,26 +564,11 @@ impl Reactor for EpollReactor {
                         drop(state);
                     }
                     Ok(())
-                }
-                Some(libc::EBADF) if Self::fd_no_longer_matches(raw_fd, fd_identity) => {
-                    // Determine whether the target fd itself is valid so EBADF can be
-                    // interpreted correctly (target closed/reused vs reactor poller invalid).
-                    // Evaluated AFTER the delete attempt to prevent TOCTOU race.
-                    if let Some(info) = state.tokens.remove(&token) {
-                        state.fds.remove(&info.raw_fd);
-                        drop(state);
-                        // Decrement count only if we actually removed a registration
-                        self.registration_count.fetch_sub(1, Ordering::Relaxed);
-                    } else {
-                        drop(state);
-                    }
-                    Ok(())
-                }
-                _ => {
+                } else {
                     drop(state);
                     Err(err)
                 }
-            },
+            }
         }
     }
 

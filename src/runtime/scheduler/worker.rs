@@ -2461,7 +2461,7 @@ mod tests {
         let new_token = MAX_SEEN_IO_TOKENS as u64;
         assert!(seen.observe(new_token));
         assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
-        assert!(seen.contains(&new_token));
+        assert!(seen.contains(new_token));
         assert!(!seen.contains(0));
         assert!(seen.contains(1));
         assert_eq!(seen.raw_order_len(), MAX_SEEN_IO_TOKENS);

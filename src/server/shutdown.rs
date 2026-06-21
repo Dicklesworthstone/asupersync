@@ -501,6 +501,8 @@ struct SignalState {
     phase: AtomicU8,
     controller: ShutdownController,
     phase_notify: Notify,
+    force_close_notify: Notify,
+    stopped_notify: Notify,
     time_source: ShutdownTimeSource,
     has_drain_deadline: AtomicBool,
     drain_deadline: AtomicU64,
@@ -559,6 +561,8 @@ impl ShutdownSignal {
                 phase: AtomicU8::new(ShutdownPhase::Running as u8),
                 controller: ShutdownController::new(),
                 phase_notify: Notify::new(),
+                force_close_notify: Notify::new(),
+                stopped_notify: Notify::new(),
                 time_source,
                 has_drain_deadline: AtomicBool::new(false),
                 drain_deadline: AtomicU64::new(0),
@@ -671,6 +675,7 @@ impl ShutdownSignal {
             Ordering::Acquire,
         );
         if result.is_ok() {
+            self.state.force_close_notify.notify_waiters();
             self.state.phase_notify.notify_waiters();
             true
         } else {
@@ -690,6 +695,8 @@ impl ShutdownSignal {
             .phase
             .store(ShutdownPhase::Stopped as u8, Ordering::Release);
         self.state.controller.shutdown();
+        self.state.stopped_notify.notify_waiters();
+        self.state.force_close_notify.notify_waiters();
         self.state.phase_notify.notify_waiters();
     }
 
@@ -704,7 +711,12 @@ impl ShutdownSignal {
                 return;
             }
 
-            let mut notified = std::pin::pin!(state.phase_notify.notified());
+            let notify = match target {
+                ShutdownPhase::ForceClosing => &state.force_close_notify,
+                ShutdownPhase::Stopped => &state.stopped_notify,
+                ShutdownPhase::Running | ShutdownPhase::Draining => &state.phase_notify,
+            };
+            let mut notified = std::pin::pin!(notify.notified());
             std::future::poll_fn(|cx| {
                 if std::future::Future::poll(notified.as_mut(), cx).is_ready()
                     || ShutdownPhase::from_u8(state.phase.load(Ordering::Acquire)) as u8
@@ -762,6 +774,8 @@ impl ShutdownSignal {
     pub fn trigger_immediate(&self) {
         if self.phase() == ShutdownPhase::Stopped {
             self.state.controller.shutdown();
+            self.state.stopped_notify.notify_waiters();
+            self.state.force_close_notify.notify_waiters();
             self.state.phase_notify.notify_waiters();
             return;
         }
@@ -772,6 +786,8 @@ impl ShutdownSignal {
             .fetch_max(ShutdownPhase::ForceClosing as u8, Ordering::AcqRel);
         if self.phase() == ShutdownPhase::Stopped {
             self.state.controller.shutdown();
+            self.state.stopped_notify.notify_waiters();
+            self.state.force_close_notify.notify_waiters();
             self.state.phase_notify.notify_waiters();
             return;
         }
@@ -786,6 +802,7 @@ impl ShutdownSignal {
             self.state.has_drain_start.store(true, Ordering::Release);
         }
         self.state.controller.shutdown();
+        self.state.force_close_notify.notify_waiters();
         self.state.phase_notify.notify_waiters();
     }
 }
@@ -1136,6 +1153,51 @@ mod tests {
             signal.phase()
         );
         crate::test_complete!("force_close_from_draining");
+    }
+
+    #[test]
+    fn force_close_waiter_is_not_consumed_by_drain_transition() {
+        init_test("force_close_waiter_is_not_consumed_by_drain_transition");
+        let signal = ShutdownSignal::new();
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = std::task::Waker::from(Arc::new(FlagWaker(Arc::clone(&woke))));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        let mut wait = Box::pin(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+
+        let first_poll = std::future::Future::poll(wait.as_mut(), &mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "force-close waiter starts pending",
+            true,
+            first_poll.is_pending()
+        );
+
+        let began = signal.begin_drain(Duration::from_secs(1));
+        crate::assert_with_log!(began, "begin drain", true, began);
+        crate::assert_with_log!(
+            !woke.load(Ordering::SeqCst),
+            "drain transition does not consume force-close waiter",
+            false,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let forced = signal.begin_force_close();
+        crate::assert_with_log!(forced, "force close", true, forced);
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "force-close transition wakes force-close waiter",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second_poll = std::future::Future::poll(wait.as_mut(), &mut task_cx);
+        crate::assert_with_log!(
+            second_poll.is_ready(),
+            "force-close waiter completes after target transition",
+            true,
+            second_poll.is_ready()
+        );
+        crate::test_complete!("force_close_waiter_is_not_consumed_by_drain_transition");
     }
 
     #[test]

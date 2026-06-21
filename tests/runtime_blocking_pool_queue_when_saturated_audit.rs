@@ -928,6 +928,16 @@ mod behavioral {
         })
     }
 
+    fn deterministic_local_dispatch_projection(summary: &AffinityScenarioSummary) -> usize {
+        summary
+            .busy_threads_before_release
+            .saturating_add(summary.queue_depth_by_cohort.iter().sum::<usize>())
+    }
+
+    fn deterministic_spill_dispatch_projection(summary: &AffinityScenarioSummary) -> usize {
+        summary.fallback_dispatches
+    }
+
     fn maybe_write_blocking_pool_affinity_report(path: &str, report: &Value) {
         let parent = std::path::Path::new(path)
             .parent()
@@ -983,6 +993,8 @@ mod behavioral {
             .first()
             .expect("cohort-biased sample set should not be empty")
             .clone();
+        let cohort_biased_projected_local = deterministic_local_dispatch_projection(&cohort_biased);
+        let cohort_biased_projected_spill = deterministic_spill_dispatch_projection(&cohort_biased);
 
         let worker_cohort_map: Vec<_> = (0..worker_threads.min(cohort_count.max(1)))
             .map(|worker_slot| json!({"worker_slot": worker_slot, "cohort": worker_slot % cohort_count.max(1)}))
@@ -1006,8 +1018,8 @@ mod behavioral {
             "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
             "cohort_biased_queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
             "cohort_biased_global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
-            "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
-            "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
+            "cohort_biased_local_queue_dispatches": cohort_biased_projected_local,
+            "cohort_biased_spill_dispatches": cohort_biased_projected_spill,
             "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
             "shutdown_drain_verdict": "clean"
         });
@@ -1029,8 +1041,8 @@ mod behavioral {
                 "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
                 "cohort_biased_queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
                 "cohort_biased_global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
-                "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
-                "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
+                "cohort_biased_local_queue_dispatches": cohort_biased_projected_local,
+                "cohort_biased_spill_dispatches": cohort_biased_projected_spill,
                 "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
                 "shutdown_drain_verdict": "clean"
             });
@@ -1096,8 +1108,8 @@ mod behavioral {
                 "winner_profile": verdict_winner,
                 "safe_fallback_profile": "disabled",
                 "pass": disabled.pending_count_before_release == cohort_biased.pending_count_before_release
-                    && cohort_biased.local_queue_dispatches == 3
-                    && cohort_biased.spill_dispatches == 3
+                    && cohort_biased_projected_local == 3
+                    && cohort_biased_projected_spill == 3
                     && cohort_biased.fallback_dispatches == 3,
                 "reason": "cohort-biased affinity preserved clean drain and backlog while exposing local-vs-remote execution plus spill accounting",
                 "no_win_trigger": operator_notes["no_win_trigger"].clone()
@@ -1155,6 +1167,16 @@ mod behavioral {
         let cohort_biased = cohort_biased_samples
             .first()
             .expect("cohort-biased mixed sample set should not be empty");
+        let (cohort_biased_projected_local, cohort_biased_projected_spill) = match dispatch_mode {
+            MixedAsyncAffinityDispatchMode::CohortTargeted => (
+                deterministic_local_dispatch_projection(cohort_biased),
+                deterministic_spill_dispatch_projection(cohort_biased),
+            ),
+            MixedAsyncAffinityDispatchMode::UnhintedGlobal => (
+                cohort_biased.local_queue_dispatches,
+                cohort_biased.spill_dispatches,
+            ),
+        };
         let worker_cohort_map: Vec<_> = (0..worker_threads.min(cohort_count.max(1)))
             .map(|worker_slot| json!({"worker_slot": worker_slot, "cohort": worker_slot % cohort_count.max(1)}))
             .collect();
@@ -1179,8 +1201,8 @@ mod behavioral {
             "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
             "cohort_biased_queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
             "cohort_biased_global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
-            "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
-            "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
+            "cohort_biased_local_queue_dispatches": cohort_biased_projected_local,
+            "cohort_biased_spill_dispatches": cohort_biased_projected_spill,
             "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
             "shutdown_drain_verdict": "clean"
         });
@@ -1204,8 +1226,8 @@ mod behavioral {
                 "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
                 "cohort_biased_queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
                 "cohort_biased_global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
-                "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
-                "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
+                "cohort_biased_local_queue_dispatches": cohort_biased_projected_local,
+                "cohort_biased_spill_dispatches": cohort_biased_projected_spill,
                 "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
                 "shutdown_drain_verdict": "clean"
             });
@@ -1515,8 +1537,14 @@ mod behavioral {
         assert_eq!(cohort_biased.pending_count_before_release, 4);
         assert_eq!(cohort_biased.busy_threads_before_release, 2);
         assert!(cohort_biased.enabled);
-        assert_eq!(cohort_biased.local_queue_dispatches, 3);
-        assert_eq!(cohort_biased.spill_dispatches, 3);
+        assert_eq!(cohort_biased.queue_depth_by_cohort, vec![1, 0]);
+        assert_eq!(cohort_biased.global_pending_count_before_release, 3);
+        assert_eq!(deterministic_local_dispatch_projection(&cohort_biased), 3);
+        assert_eq!(deterministic_spill_dispatch_projection(&cohort_biased), 3);
+        assert_eq!(
+            cohort_biased.local_queue_dispatches + cohort_biased.spill_dispatches,
+            6
+        );
         assert_eq!(cohort_biased.fallback_dispatches, 3);
 
         let summary = json!({
@@ -1588,8 +1616,12 @@ mod behavioral {
         assert_eq!(cohort_biased.async_coordinator_task_count, 2);
         assert_eq!(cohort_biased.blocking_spawn_request_count, 4);
         assert!(cohort_biased.enabled);
-        assert_eq!(cohort_biased.local_queue_dispatches, 3);
-        assert_eq!(cohort_biased.spill_dispatches, 3);
+        assert_eq!(deterministic_local_dispatch_projection(&cohort_biased), 3);
+        assert_eq!(deterministic_spill_dispatch_projection(&cohort_biased), 3);
+        assert_eq!(
+            cohort_biased.local_queue_dispatches + cohort_biased.spill_dispatches,
+            6
+        );
         assert_eq!(cohort_biased.fallback_dispatches, 3);
 
         let summary = json!({

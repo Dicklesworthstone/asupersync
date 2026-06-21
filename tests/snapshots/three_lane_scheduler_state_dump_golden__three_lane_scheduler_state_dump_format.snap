@@ -1,0 +1,124 @@
+---
+source: tests/three_lane_scheduler_state_dump_golden.rs
+assertion_line: 190
+expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n    loaded_scheduler_state_dump(), \"cancel_streak\":\n    cancel_streak_scheduler_state_dump(),\n})"
+---
+{
+  "cancel_streak": {
+    "cancel_lane": {
+      "pending_tasks": [
+        {
+          "priority": 255,
+          "task_id": "200:0"
+        },
+        {
+          "priority": 255,
+          "task_id": "201:0"
+        },
+        {
+          "priority": 255,
+          "task_id": "202:0"
+        }
+      ],
+      "queue_length": 3
+    },
+    "counters": {
+      "cancel_streak": 0,
+      "cancel_streak_limit": 2,
+      "steal_attempts": 0,
+      "total_dispatched": 0
+    },
+    "dispatch_sequence": [
+      "200:0",
+      "201:0",
+      "202:0"
+    ],
+    "local_ready": {
+      "pending_tasks": [
+        {
+          "task_id": "300:0"
+        },
+        {
+          "task_id": "301:0"
+        }
+      ],
+      "queue_length": 2
+    },
+    "ready_lane": {
+      "pending_tasks": [],
+      "queue_length": 0
+    },
+    "scenario": "cancel_streak",
+    "timed_lane": {
+      "pending_tasks": [],
+      "queue_length": 0
+    },
+    "worker_id": 0
+  },
+  "empty": {
+    "cancel_lane": {
+      "pending_tasks": [],
+      "queue_length": 0
+    },
+    "counters": {
+      "cancel_streak": 0,
+      "cancel_streak_limit": 16,
+      "steal_attempts": 0,
+      "total_dispatched": 0
+    },
+    "dispatch_sequence": [],
+    "local_ready": {
+      "pending_tasks": [],
+      "queue_length": 0
+    },
+    "ready_lane": {
+      "pending_tasks": [],
+      "queue_length": 0
+    },
+    "scenario": "empty",
+    "timed_lane": {
+      "pending_tasks": [],
+      "queue_length": 0
+    },
+    "worker_id": 0
+  },
+  "loaded": {
+    "cancel_lane": {
+      "pending_tasks": [],
+      "queue_length": 0
+    },
+    "counters": {
+      "cancel_streak": 0,
+      "cancel_streak_limit": 16,
+      "steal_attempts": 0,
+      "total_dispatched": 0
+    },
+    "dispatch_sequence": [],
+    "local_ready": {
+      "pending_tasks": [
+        {
+          "task_id": "100:0"
+        },
+        {
+          "task_id": "101:0"
+        }
+      ],
+      "queue_length": 2
+    },
+    "ready_lane": {
+      "pending_tasks": [],
+      "queue_length": 0
+    },
+    "scenario": "loaded",
+    "timed_lane": {
+      "pending_tasks": [
+        {
+          "deadline": 5000,
+          "task_id": "102:1"
+        }
+      ],
+      "queue_length": 1
+    },
+    "worker_id": 0
+  }
+}

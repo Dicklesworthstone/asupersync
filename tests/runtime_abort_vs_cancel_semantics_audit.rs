@@ -308,10 +308,11 @@ fn no_unsafe_thread_termination_in_abort_or_cancel_paths() {
 
 #[test]
 fn abort_path_uses_weak_handle_to_avoid_keeping_task_alive() {
-    // Pin (link 3): TaskHandle holds Weak<RwLock<CxInner>>
-    // — the parent's reference doesn't keep the child task
-    // alive. Symmetric with the rest of the cancel/abort
-    // contract.
+    // Pin (link 3): TaskHandle resolves cancellation through
+    // Weak<RwLock<CxInner>> handles — either the mailbox
+    // admission weak handle or the original construction-time
+    // weak. The parent's reference doesn't keep the child task
+    // alive. Symmetric with the rest of the cancel/abort contract.
     let source = read("src/runtime/task_handle.rs");
 
     let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
@@ -322,11 +323,18 @@ fn abort_path_uses_weak_handle_to_avoid_keeping_task_alive() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("self.inner.upgrade()"),
-        "REGRESSION: abort no longer uses self.inner.upgrade(). \
-         The Weak handle pattern is broken — abort either \
-         keeps the task alive (semantic leak) or panics on \
-         no-upgrade.",
+        body.contains("self.live_inner()"),
+        "REGRESSION: abort no longer resolves through live_inner(). \
+         Mailbox-admitted task aborts may use a stale provisional \
+         weak handle instead of the canonical weak handle.",
+    );
+
+    assert!(
+        source.contains("admitted.cx_inner.upgrade()") && source.contains("self.inner.upgrade()"),
+        "REGRESSION: live_inner no longer upgrades only weak \
+         handles. The weak-handle pattern is broken — abort \
+         either keeps the task alive (semantic leak) or panics \
+         on no-upgrade.",
     );
 }
 

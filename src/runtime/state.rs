@@ -2902,7 +2902,7 @@ impl RuntimeState {
         let validation_result = self.validate_obligation_protocol_transition(
             obligation_id,
             ObligationEvent::Reserve {
-                token: obligation_id.arena_index().index() as u64,
+                token: obligation_id.as_u64().saturating_add(1),
             },
             &context,
         );

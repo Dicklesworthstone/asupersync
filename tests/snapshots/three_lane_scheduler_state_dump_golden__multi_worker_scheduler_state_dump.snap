@@ -1,0 +1,79 @@
+---
+source: tests/three_lane_scheduler_state_dump_golden.rs
+assertion_line: 300
+expression: multi_worker_dump
+---
+{
+  "scenario": "multi_worker",
+  "worker_count": 2,
+  "workers": [
+    {
+      "cancel_lane": {
+        "pending_tasks": [
+          {
+            "priority": 200,
+            "task_id": "400:0"
+          }
+        ],
+        "queue_length": 1
+      },
+      "counters": {
+        "cancel_streak": 0,
+        "cancel_streak_limit": 16,
+        "steal_attempts": 0,
+        "total_dispatched": 0
+      },
+      "local_ready": {
+        "pending_tasks": [
+          {
+            "task_id": "401:0"
+          }
+        ],
+        "queue_length": 1
+      },
+      "ready_lane": {
+        "pending_tasks": [],
+        "queue_length": 0
+      },
+      "timed_lane": {
+        "pending_tasks": [],
+        "queue_length": 0
+      },
+      "worker_id": 0
+    },
+    {
+      "cancel_lane": {
+        "pending_tasks": [],
+        "queue_length": 0
+      },
+      "counters": {
+        "cancel_streak": 0,
+        "cancel_streak_limit": 16,
+        "steal_attempts": 0,
+        "total_dispatched": 0
+      },
+      "local_ready": {
+        "pending_tasks": [
+          {
+            "task_id": "501:0"
+          }
+        ],
+        "queue_length": 1
+      },
+      "ready_lane": {
+        "pending_tasks": [],
+        "queue_length": 0
+      },
+      "timed_lane": {
+        "pending_tasks": [
+          {
+            "deadline": 10000,
+            "task_id": "500:0"
+          }
+        ],
+        "queue_length": 1
+      },
+      "worker_id": 1
+    }
+  ]
+}

@@ -333,7 +333,8 @@ fn worker_coordinator_wake_one_unparks_via_round_robin_cursor() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("self.next_wake.fetch_add(1, Ordering::Relaxed)")
+        (body.contains("self.next_wake.fetch_add(1, Ordering::Relaxed)")
+            || body.contains("self.next_wake.fetch_add(1, Ordering::AcqRel)"))
             && body.contains("self.parkers[slot].unpark();"),
         "REGRESSION: WorkerCoordinator.wake_one no longer uses \
          round-robin via next_wake.fetch_add. Cross-thread \
@@ -392,7 +393,8 @@ fn three_lane_local_waker_routes_cancelled_local_task_to_cancel_lane() {
     );
 
     assert!(
-        body.contains("local.move_to_cancel_lane(self.task_id, priority);")
+        (body.contains("move_local_ready_task_to_cancel_lane(")
+            || body.contains("local.move_to_cancel_lane(self.task_id, priority);"))
             && body.contains("self.parker.unpark();"),
         "REGRESSION: ThreeLaneLocalWaker.schedule no longer \
          promotes cancelled local tasks to the cancel lane + \

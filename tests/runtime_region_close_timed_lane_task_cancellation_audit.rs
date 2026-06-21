@@ -288,7 +288,8 @@ fn inject_cancel_routes_to_move_to_cancel_lane_for_local_tasks() {
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     assert!(
-        source.contains("local.lock().move_to_cancel_lane(task, priority);"),
+        source.contains("local_guard.move_to_cancel_lane(task, priority);")
+            && source.contains("local_ready.lock().tombstone(task);"),
         "REGRESSION: inject_cancel no longer routes local tasks \
          through move_to_cancel_lane. Timed-lane tombstones \
          would no longer be lazily skipped — and the cancel \

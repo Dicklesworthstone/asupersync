@@ -211,16 +211,27 @@ fn sleep_ready_branch_cancels_timer_handle_if_any() {
     // Future::poll cancels any registered timer handle.
     // This is harmless on the past-deadline path (no
     // timer ever registered) but matters when ready was
-    // signalled by a fired timer.
+    // signalled by a fired timer. The actual cancellation
+    // may live in a helper, but Future::poll must route
+    // the Ready branch through that helper.
     let source = read("src/time/sleep.rs");
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(fn_marker).expect("Future::poll");
     let body_window = &source[pos..pos + 2500];
 
+    let helper_marker =
+        "fn complete_ready_registration(&self, now: Time, timer_driver: Option<TimerDriverHandle>)";
+    let helper_pos = source
+        .find(helper_marker)
+        .expect("complete_ready_registration helper");
+    let helper_window = &source[helper_pos..helper_pos + 1200];
+
     assert!(
         body_window.contains("Poll::Ready(()) => {")
-            && body_window.contains("state.timer_handle.take()"),
+            && body_window.contains("self.complete_ready_registration(now, timer_driver.clone())")
+            && helper_window.contains("state.timer_handle.take()")
+            && helper_window.contains("driver.cancel(&handle)"),
         "REGRESSION: Sleep::Future::poll Ready branch no \
          longer cancels any registered timer handle. \
          Could leak timer-wheel slots after firing.",

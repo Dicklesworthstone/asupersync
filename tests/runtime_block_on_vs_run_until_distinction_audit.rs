@@ -287,7 +287,8 @@ fn block_on_returns_future_output_not_step_count() {
 
     let block_on_marker = "pub fn block_on<F: Future>(&self, future: F) -> F::Output {";
     let pos = source.find(block_on_marker).expect("block_on fn");
-    let body = &source[pos..pos + 500];
+    let body_end = source[pos..].find("\n    }\n").expect("block_on close");
+    let body = &source[pos..pos + body_end];
 
     // The body must call run_future_with_budget which
     // returns F::Output. If it called something returning

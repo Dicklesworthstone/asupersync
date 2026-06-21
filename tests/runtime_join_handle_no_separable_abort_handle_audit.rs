@@ -315,11 +315,17 @@ fn task_handle_holds_weak_for_multi_handle_safety() {
     let body = &source[pos..pos + 1000];
 
     assert!(
-        body.contains("if let Some(inner) = self.inner.upgrade() {"),
+        body.contains("if let Some(inner) = self.live_inner() {"),
         "REGRESSION: TaskHandle::abort_with_reason no longer \
-         upgrades a Weak. Either the multi-handle safety is \
-         broken, or the cancel channel has shifted to a \
-         strong Arc that prevents drop.",
+         upgrades a Weak through live_inner(). Either the \
+         multi-handle safety is broken, or the cancel channel \
+         has shifted to a strong Arc that prevents drop.",
+    );
+    assert!(
+        source.contains("fn live_inner(&self) -> Option<std::sync::Arc<RwLock<CxInner>>>")
+            && source.contains("self.inner.upgrade()"),
+        "REGRESSION: TaskHandle::live_inner no longer exposes \
+         the Weak upgrade boundary used by abort_with_reason.",
     );
 
     // Strong-only patterns are wrong here.

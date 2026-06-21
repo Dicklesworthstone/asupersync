@@ -305,6 +305,12 @@ fn e2e_finalizer_lifo_async_masked_execution() {
     let o3 = order.clone();
     state.register_sync_finalizer(region, move || o3.lock().push("f3"));
 
+    {
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+    }
+
     let mut finalizers = Vec::new();
     while let Some(finalizer) = state.pop_region_finalizer(region) {
         finalizers.push(finalizer);

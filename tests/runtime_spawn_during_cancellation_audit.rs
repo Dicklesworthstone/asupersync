@@ -247,7 +247,7 @@ fn spawn_finalizer_task_uses_cleanup_admission_path() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("self.create_task_infrastructure::<()>(region_id, budget, true)"),
+        body.contains("self.create_task_infrastructure::<()>(&system_cx, region_id, budget, true)"),
         "REGRESSION: spawn_finalizer_task no longer calls \
          create_task_infrastructure with is_cleanup=true. \
          Without the cleanup flag, finalizer admission goes \

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ffbddfff668fb5a645fd26958f1b68c9992d90555c13ce2bed8ad7e4e9a38cd1 # shrinks to task_count = 4, steal_batch_size = 1
+cc 62d2f3530f08b64290f0277d10a032e79adab3c20c01c6d1426b6c389d5cda1a # shrinks to params = (3, 4, 19, 6)

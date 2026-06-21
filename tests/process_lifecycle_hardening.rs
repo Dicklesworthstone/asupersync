@@ -413,7 +413,7 @@ fn pl_g1_02_output_async_captures_stdio() {
     let output = futures_lite::future::block_on(async {
         let mut cmd = Command::new("echo");
         cmd.arg("async_output_test");
-        let cx = Cx::current().expect("cx");
+        let cx = Cx::for_testing();
         cmd.output_async(&cx).await
     })
     .expect("output_async should succeed");
@@ -430,7 +430,7 @@ fn pl_g1_03_status_async_returns_correct_exit_code() {
     let status = futures_lite::future::block_on(async {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("exit 7");
-        let cx = Cx::current().expect("cx");
+        let cx = Cx::for_testing();
         cmd.status_async(&cx).await
     })
     .expect("status_async should succeed");

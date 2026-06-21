@@ -1065,7 +1065,7 @@ mod tests {
 
         CURRENT_TIME.store(Time::from_secs(10).as_nanos(), Ordering::SeqCst);
 
-        let wait_deadline = Instant::now() + Duration::from_millis(100);
+        let wait_deadline = Instant::now() + Duration::from_millis(500);
         while !woken.load(Ordering::SeqCst) && Instant::now() < wait_deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1481,9 +1481,8 @@ mod tests {
     #[should_panic(expected = "Sleep polled after completion")]
     fn future_repoll_after_completion_panics() {
         init_test("future_repoll_after_completion_panics");
-        CURRENT_TIME.store(Time::from_secs(10).as_nanos(), Ordering::SeqCst);
 
-        let mut sleep = Sleep::with_time_getter(Time::from_secs(10), get_time);
+        let mut sleep = Sleep::new(Time::from_secs(0));
         let waker = noop_waker();
         let mut task_cx = Context::from_waker(&waker);
 

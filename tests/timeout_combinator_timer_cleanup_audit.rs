@@ -36,13 +36,14 @@
 //!      `let _ =` ignores the cancel result (the timer may
 //!      have already fired — both branches are safe).
 //!
-//!   2. **`Sleep::poll` Ready branch** (sleep.rs:502-518):
-//!      when poll_with_time returns Ready, the outer poll
-//!      fn cancels the timer immediately via the same
-//!      `driver.cancel(&handle)` call. This handles the
-//!      case where the deadline arrives BEFORE the future
-//!      is dropped (e.g., the timer fires and the next
-//:      poll completes Ready).
+//!   2. **`Sleep::poll` Ready branch**: when poll_with_time
+//!      returns Ready, the outer poll fn routes through
+//!      `complete_ready_registration`, which takes the
+//!      registered handle and cancels it via
+//!      `driver.cancel(&handle)`. This handles the case
+//!      where the deadline arrives BEFORE the future is
+//:      dropped (e.g., the timer fires and the next poll
+//!      completes Ready).
 //!
 //!   3. **`Sleep::reset_after`** (sleep.rs:398-431): when
 //!      the Sleep is reset to a new deadline, the OLD
@@ -169,15 +170,24 @@ fn sleep_poll_ready_branch_cancels_timer_immediately() {
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
+    let helper_marker =
+        "fn complete_ready_registration(&self, now: Time, timer_driver: Option<TimerDriverHandle>)";
+    let helper_start = source
+        .find(helper_marker)
+        .expect("complete_ready_registration helper");
+    let helper_end = (helper_start + 1200).min(source.len());
+    let helper_body = &source[helper_start..helper_end];
+
     assert!(
         body.contains("Poll::Ready(()) => {")
-            && body.contains("(state.timer_handle.take(), state.timer_driver.clone())")
-            && body.contains("driver.cancel(&handle);"),
+            && body.contains("self.complete_ready_registration(now, timer_driver.clone())")
+            && helper_body.contains("state.timer_handle.take()")
+            && helper_body.contains("driver.cancel(&handle)"),
         "REGRESSION: Sleep::poll Ready branch no longer \
-         cancels the timer. The just-fired timer's \
-         bookkeeping persists until Sleep::Drop runs — \
-         minor leak, but measurable in long-running \
-         servers with many timeouts.",
+         cancels the timer through complete_ready_registration. \
+         The just-fired timer's bookkeeping persists until \
+         Sleep::Drop runs — minor leak, but measurable in \
+         long-running servers with many timeouts.",
     );
 }
 

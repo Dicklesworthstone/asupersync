@@ -68,6 +68,7 @@ fn regression_throughput_10k_schedule_pop() {
 fn regression_local_queue_100k() {
     let queue = LocalQueue::new(setup_runtime_state(99_999));
     let start = Instant::now();
+    let threshold_ms = if cfg!(debug_assertions) { 1_500 } else { 100 };
 
     for i in 0..100_000u32 {
         queue.push(task(i));
@@ -80,9 +81,10 @@ fn regression_local_queue_100k() {
     let elapsed = start.elapsed();
     assert_eq!(popped, 100_000);
     assert!(
-        elapsed.as_millis() < 100,
-        "local queue regression: 100K push+pop took {}ms (threshold: 100ms)",
-        elapsed.as_millis()
+        elapsed.as_millis() < threshold_ms,
+        "local queue regression: 100K push+pop took {}ms (threshold: {}ms)",
+        elapsed.as_millis(),
+        threshold_ms
     );
 }
 

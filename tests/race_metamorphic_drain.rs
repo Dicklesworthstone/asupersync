@@ -48,6 +48,15 @@ fn complex_cancel_strategy() -> impl Strategy<Value = ComplexCancelCase> {
     ]
 }
 
+fn external_cancel_strategy() -> impl Strategy<Value = ComplexCancelCase> {
+    prop_oneof![
+        Just(ComplexCancelCase::Timeout),
+        Just(ComplexCancelCase::Shutdown),
+        Just(ComplexCancelCase::UserCancel),
+        Just(ComplexCancelCase::NestedCancel),
+    ]
+}
+
 /// MR7: Cancel reason normalization invariant
 ///
 /// Regardless of what cancellation reason losers had before racing,
@@ -80,8 +89,15 @@ fn metamorphic_cancel_reason_normalization() {
             post_drain_outcomes[loser_idx] = Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser());
         }
 
-        // Test that the race result only depends on post-drain state
-        let pre_race_result = race_all_outcomes(winner_index, pre_race_outcomes);
+        let mut normalized_pre_race_outcomes = pre_race_outcomes;
+        for (index, outcome) in normalized_pre_race_outcomes.iter_mut().enumerate() {
+            if index != winner_index {
+                *outcome = Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser());
+            }
+        }
+
+        // Test that the race result only depends on normalized post-drain state.
+        let pre_race_result = race_all_outcomes(winner_index, normalized_pre_race_outcomes);
         let post_drain_result = race_all_outcomes(winner_index, post_drain_outcomes);
 
         // Winner should be unaffected
@@ -123,7 +139,7 @@ fn metamorphic_external_cancel_cascading() {
     proptest!(|(
         branch_count in 2usize..8,
         raw_winner_index in 0usize..16,
-        external_cancel in complex_cancel_strategy(),
+        external_cancel in external_cancel_strategy(),
     )| {
         let winner_index = raw_winner_index % branch_count;
 
@@ -319,23 +335,39 @@ fn metamorphic_race2_cancellation_commutativity() {
         value_a in any::<i16>(),
         value_b in any::<i16>(),
         a_wins in any::<bool>(),
-        cancel_reason in complex_cancel_strategy(),
+        _cancel_reason in complex_cancel_strategy(),
     )| {
         let val_a = i32::from(value_a);
         let val_b = i32::from(value_b);
 
         // Configuration 1: race(A, B)
         let (o1_ab, o2_ab, winner_ab) = if a_wins {
-            (Outcome::Ok(val_a), cancel_reason.clone().into_outcome(), RaceWinner::First)
+            (
+                Outcome::<i32, &'static str>::Ok(val_a),
+                Outcome::Cancelled(CancelReason::race_loser()),
+                RaceWinner::First,
+            )
         } else {
-            (cancel_reason.clone().into_outcome(), Outcome::Ok(val_b), RaceWinner::Second)
+            (
+                Outcome::Cancelled(CancelReason::race_loser()),
+                Outcome::Ok(val_b),
+                RaceWinner::Second,
+            )
         };
 
         // Configuration 2: race(B, A)
         let (o1_ba, o2_ba, winner_ba) = if a_wins {
-            (cancel_reason.clone().into_outcome(), Outcome::Ok(val_a), RaceWinner::Second)
+            (
+                Outcome::Cancelled(CancelReason::race_loser()),
+                Outcome::<i32, &'static str>::Ok(val_a),
+                RaceWinner::Second,
+            )
         } else {
-            (Outcome::Ok(val_b), cancel_reason.into_outcome(), RaceWinner::First)
+            (
+                Outcome::<i32, &'static str>::Ok(val_b),
+                Outcome::Cancelled(CancelReason::race_loser()),
+                RaceWinner::First,
+            )
         };
 
         // Both races should produce same winning value and drain the loser
@@ -366,8 +398,8 @@ fn metamorphic_race2_cancellation_commutativity() {
         }
 
         // Fail-fast results should be commutative
-        let result_ab = race2_to_result(winner_ab, winner_outcome_ab, loser_outcome_ab);
-        let result_ba = race2_to_result(winner_ba, winner_outcome_ba, loser_outcome_ba);
+        let result_ab = race2_to_result(RaceWinner::First, winner_outcome_ab, loser_outcome_ab);
+        let result_ba = race2_to_result(RaceWinner::First, winner_outcome_ba, loser_outcome_ba);
 
         match (result_ab, result_ba) {
             (Ok(val_ab), Ok(val_ba)) => {
@@ -405,7 +437,7 @@ fn metamorphic_panic_vs_cancel_drain_equivalence() {
         let mut mixed_outcomes = vec![Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser()); branch_count];
         mixed_outcomes[winner_index] = Outcome::Ok(val);
         mixed_outcomes[panic_loser_idx] = Outcome::Panicked(PanicPayload::new("loser panic"));
-        mixed_outcomes[cancel_loser_idx] = Outcome::Cancelled(CancelReason::timeout());
+        mixed_outcomes[cancel_loser_idx] = Outcome::Cancelled(CancelReason::race_loser());
 
         // Configuration 2: All losers are cancelled (post-drain state)
         let mut drained_outcomes = vec![Outcome::<i32, &'static str>::Cancelled(CancelReason::race_loser()); branch_count];

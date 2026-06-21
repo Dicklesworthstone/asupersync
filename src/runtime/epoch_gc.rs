@@ -145,7 +145,7 @@ impl LocalEpoch {
 
     /// Update local epoch to match global epoch.
     pub fn sync_to_global(&self, global_epoch: u64) {
-        self.local.store(global_epoch, Ordering::Release);
+        self.local.fetch_max(global_epoch, Ordering::AcqRel);
     }
 
     /// Check if this thread is lagging behind the global epoch.
@@ -393,24 +393,58 @@ impl DeferredCleanupQueue {
         }
     }
 
-    /// Drain all queued work items whose epoch is strictly less than
+    fn increment_size_estimate(&self) -> usize {
+        let previous = self
+            .size
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(1))
+            })
+            .expect("epoch GC size increment closure always succeeds");
+        previous.saturating_add(1)
+    }
+
+    fn decrement_size_estimate(&self) -> usize {
+        match self
+            .size
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_sub(1)
+            }) {
+            Ok(previous) => previous - 1,
+            Err(current) => current,
+        }
+    }
+
+    fn refresh_current_queue_size(&self) {
+        self.stats
+            .current_queue_size
+            .store(self.size.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    fn record_peak_queue_size(&self, size: usize) {
+        self.stats
+            .peak_queue_size
+            .fetch_max(size, Ordering::Relaxed);
+    }
+
+    /// Drain all queued work items whose epoch is less than or equal to
     /// `safe_epoch` without executing them. Intended for tests that want to
     /// inspect what would be cleaned up.
     pub fn collect_expired(&self, safe_epoch: u64) -> Vec<CleanupWork> {
         let mut drained = Vec::new();
         let mut held_back = Vec::new();
         while let Some(epoch_work) = self.queue.pop() {
-            self.size.fetch_sub(1, Ordering::Relaxed);
-            if epoch_work.epoch < safe_epoch {
+            self.decrement_size_estimate();
+            if epoch_work.epoch <= safe_epoch {
                 drained.push(epoch_work.work);
             } else {
                 held_back.push(epoch_work);
             }
         }
         for epoch_work in held_back {
-            self.size.fetch_add(1, Ordering::Relaxed);
             self.queue.push(epoch_work);
+            self.increment_size_estimate();
         }
+        self.refresh_current_queue_size();
         drained
     }
 
@@ -434,20 +468,12 @@ impl DeferredCleanupQueue {
         };
 
         self.queue.push(epoch_work);
-        let new_size = self.size.fetch_add(1, Ordering::Relaxed) + 1;
+        let new_size = self.increment_size_estimate();
         self.stats.total_enqueued.fetch_add(1, Ordering::Relaxed);
         self.stats
             .current_queue_size
             .store(new_size, Ordering::Relaxed);
-
-        // Update peak queue size
-        let current_peak = self.stats.peak_queue_size.load(Ordering::Relaxed);
-        if new_size > current_peak {
-            self.stats
-                .peak_queue_size
-                .compare_exchange_weak(current_peak, new_size, Ordering::Relaxed, Ordering::Relaxed)
-                .ok(); // Ignore race condition
-        }
+        self.record_peak_queue_size(new_size);
 
         Ok(())
     }
@@ -469,7 +495,7 @@ impl DeferredCleanupQueue {
         // Collect a batch of work items that are safe to process
         while processed_count < self.config.max_batch_size {
             if let Some(epoch_work) = self.queue.pop() {
-                self.size.fetch_sub(1, Ordering::Relaxed);
+                self.decrement_size_estimate();
 
                 if epoch_work.epoch < safe_epoch {
                     // This work is from a safe epoch - can be processed
@@ -494,7 +520,7 @@ impl DeferredCleanupQueue {
         // later advances.
         for epoch_work in held_back {
             self.queue.push(epoch_work);
-            self.size.fetch_add(1, Ordering::Relaxed);
+            self.increment_size_estimate();
         }
 
         // Process the collected batch
@@ -521,11 +547,7 @@ impl DeferredCleanupQueue {
             }
         }
 
-        // Update current queue size
-        let current_size = self.size.load(Ordering::Relaxed);
-        self.stats
-            .current_queue_size
-            .store(current_size, Ordering::Relaxed);
+        self.refresh_current_queue_size();
 
         processed_count
     }

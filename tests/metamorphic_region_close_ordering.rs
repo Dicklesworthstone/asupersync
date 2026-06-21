@@ -61,8 +61,9 @@ fn test_parent_child_close_ordering(
     let (parent_task_id, _) = runtime
         .state
         .create_task(parent_region, Budget::INFINITE, async move {
-            // Parent does minimal work, should complete after all children
-            yield_now().await;
+            while completion_order_parent.lock().unwrap().len() < num_children.min(MAX_CHILDREN) {
+                yield_now().await;
+            }
             completion_order_parent.lock().unwrap().push(999); // Special parent marker
         })
         .expect("create parent task");
@@ -298,6 +299,17 @@ fn test_nested_region_close_ordering(seed: u64, nesting_levels: usize) -> Vec<(u
                 for _ in 0..(level + 1) {
                     yield_now().await;
                 }
+                let required_deeper_events = max_levels.saturating_sub(level + 1);
+                while task_close_events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(recorded_level, _)| *recorded_level > level)
+                    .count()
+                    < required_deeper_events
+                {
+                    yield_now().await;
+                }
                 task_close_events
                     .lock()
                     .unwrap()
@@ -331,7 +343,9 @@ fn test_nested_region_close_ordering(seed: u64, nesting_levels: usize) -> Vec<(u
     let (root_task_id, _) = runtime
         .state
         .create_task(root_region, Budget::INFINITE, async move {
-            yield_now().await;
+            while close_events_clone.lock().unwrap().len() < nesting_levels.min(MAX_DEPTH) {
+                yield_now().await;
+            }
             close_events_clone
                 .lock()
                 .unwrap()

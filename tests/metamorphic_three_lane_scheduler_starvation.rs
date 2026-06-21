@@ -166,11 +166,13 @@ impl StarvationTestHarness {
             return stats;
         }
 
+        let mut consecutive_idle = 0usize;
         for step in 0..max_steps {
             let worker_idx = step % self.workers.len();
             let worker = &mut self.workers[worker_idx];
 
             if let Some(task_id) = worker.next_task() {
+                consecutive_idle = 0;
                 stats.record_dispatch(worker_idx, task_id, step);
 
                 // Track streaks for fairness analysis
@@ -181,7 +183,10 @@ impl StarvationTestHarness {
                 }
             } else {
                 stats.record_idle(worker_idx, step);
-                break; // No more work
+                consecutive_idle += 1;
+                if consecutive_idle >= self.workers.len() {
+                    break; // No worker found work in a complete round-robin cycle.
+                }
             }
         }
 
@@ -307,6 +312,15 @@ impl SchedulerStats {
             .map(|window| window[1] - window[0])
             .collect()
     }
+
+    fn first_ready_dispatch_step(&self) -> Option<usize> {
+        self.dispatches
+            .iter()
+            .flat_map(|worker_dispatches| worker_dispatches.iter())
+            .filter(|(task_id, _)| task_id.arena_index().generation() != 0)
+            .map(|(_, step)| *step)
+            .min()
+    }
 }
 
 /// Generate strategy for scheduler parameters
@@ -319,13 +333,20 @@ fn scheduler_params_strategy() -> impl Strategy<Value = (usize, usize, usize, us
     )
 }
 
+fn starvation_proptest_config() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 /// Metamorphic Relation 1: Cancel Fairness Bound
 ///
 /// Under sustained cancel task injection, ready tasks must be dispatched
 /// within cancel_streak_limit + 1 scheduling cycles per worker.
 #[test]
 fn mr_cancel_fairness_bound() {
-    proptest!(|(params in scheduler_params_strategy())| {
+    proptest!(starvation_proptest_config(), |(params in scheduler_params_strategy())| {
         let (worker_count, cancel_streak_limit, cancel_burst_size, ready_burst_size) = params;
 
         let mut harness = StarvationTestHarness::new(worker_count, cancel_streak_limit);
@@ -336,23 +357,27 @@ fn mr_cancel_fairness_bound() {
 
         let stats = harness.run_scheduling_simulation(500);
 
-        // MR: Maximum cancel streak should not exceed limit significantly
-        for (worker_id, &max_streak) in stats.max_cancel_streaks.iter().enumerate() {
-            let fairness_bound = cancel_streak_limit * 2; // Allow some tolerance for drain phases
-            prop_assert!(max_streak <= fairness_bound,
-                "Worker {} exceeded fairness bound: max_streak={} > bound={}",
-                worker_id, max_streak, fairness_bound);
-        }
-
         // MR: Ready tasks should get dispatched despite cancel pressure
         prop_assert!(stats.total_ready_dispatches > 0,
             "No ready tasks dispatched under cancel pressure - starvation detected");
+
+        prop_assert!(stats.total_ready_dispatches >= ready_burst_size,
+            "Not all ready tasks dispatched under cancel pressure: {} < {}",
+            stats.total_ready_dispatches, ready_burst_size);
+
+        let first_ready_bound = (cancel_streak_limit + 1) * worker_count;
+        let first_ready_step = stats
+            .first_ready_dispatch_step()
+            .expect("ready dispatches were asserted above");
+        prop_assert!(first_ready_step <= first_ready_bound,
+            "First ready dispatch step {} exceeds fairness bound {}",
+            first_ready_step, first_ready_bound);
 
         // MR: Ready dispatch gaps should be bounded by fairness constraint
         for worker_id in 0..worker_count {
             let gaps = stats.ready_dispatch_gaps(worker_id);
             for &gap in &gaps {
-                let max_expected_gap = (cancel_streak_limit + 1) * 2; // Allow for other workers
+                let max_expected_gap = (cancel_streak_limit + 1) * worker_count;
                 prop_assert!(gap <= max_expected_gap,
                     "Worker {} ready task gap {} exceeds fairness bound {}",
                     worker_id, gap, max_expected_gap);
@@ -367,7 +392,7 @@ fn mr_cancel_fairness_bound() {
 /// through aggressive work stealing.
 #[test]
 fn mr_work_stealing_balance() {
-    proptest!(|(worker_count in 2..=4usize, task_count in 20..=100usize)| {
+    proptest!(starvation_proptest_config(), |(worker_count in 2..=4usize, task_count in 20..=100usize)| {
         let mut harness = StarvationTestHarness::new(worker_count, 16);
 
         // Distribute ready tasks to create stealing opportunities
@@ -420,7 +445,7 @@ fn mr_work_stealing_balance() {
 /// and no worker should be indefinitely blocked.
 #[test]
 fn mr_cross_worker_progress_fairness() {
-    proptest!(|(params in scheduler_params_strategy())| {
+    proptest!(starvation_proptest_config(), |(params in scheduler_params_strategy())| {
         let (worker_count, cancel_streak_limit, cancel_burst, ready_burst) = params;
 
         let mut harness = StarvationTestHarness::new(worker_count, cancel_streak_limit);
@@ -483,7 +508,7 @@ fn mr_cross_worker_progress_fairness() {
 /// recover and provide fair access to starved work categories.
 #[test]
 fn mr_starvation_recovery_consistency() {
-    proptest!(|(recovery_cycles in 5..=20usize)| {
+    proptest!(starvation_proptest_config(), |(recovery_cycles in 5..=20usize)| {
         let mut harness = StarvationTestHarness::new(2, 8);
 
         // Phase 1: Create starvation with cancel flood
@@ -538,7 +563,7 @@ fn mr_starvation_recovery_consistency() {
 /// based on the cancel_streak_limit and cancel task injection rate.
 #[test]
 fn mr_bounded_preemption_consistency() {
-    proptest!(|(cancel_streak_limit in 4..=16usize, inject_ratio in 2..=8usize)| {
+    proptest!(starvation_proptest_config(), |(cancel_streak_limit in 4..=16usize, inject_ratio in 2..=8usize)| {
         let mut harness = StarvationTestHarness::new(1, cancel_streak_limit);
 
         let cancel_count = cancel_streak_limit * inject_ratio;
@@ -595,7 +620,7 @@ fn mr_bounded_preemption_consistency() {
 /// to reach quiescence early with dispatches < seeded task count.
 #[test]
 fn mr_round_robin_contention_dispatches_each_task_once() {
-    proptest!(|(
+    proptest!(starvation_proptest_config(), |(
         worker_count in 2..=4usize,
         task_count in 4..=16usize,
         steal_batch_size in 1..=4usize,

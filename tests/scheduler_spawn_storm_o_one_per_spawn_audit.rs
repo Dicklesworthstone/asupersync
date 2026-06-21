@@ -32,7 +32,7 @@
 //!
 //!   4. **Schedule**: depending on the path:
 //!      - **`inject_ready`** (cross-thread/global) →
-//!        `FaaFifoQueue::push` → fetch_add + FAA-array
+//!        `GlobalFifoQueue::push` → fetch_add + FIFO enqueue
 //!        enqueue. Lock-free, O(1).
 //!      - **`schedule_local_task`** (worker-local !Send) →
 //:        thread-local LocalReadyQueue.push_back. O(1).
@@ -63,7 +63,7 @@
 //! No bead filed. The spawn path is hot-path optimized.
 //!
 //! A regression that:
-//!   - replaced FaaFifoQueue with a Mutex<VecDeque> (would
+//!   - replaced GlobalFifoQueue with a Mutex<VecDeque> (would
 //!     add lock contention — per-spawn becomes O(N) under
 //!     concurrent spawn-storm),
 //!   - replaced the arena with Box-per-task (would lose the
@@ -94,22 +94,22 @@ fn read(rel: &str) -> String {
 #[test]
 fn global_injector_uses_faa_fifo_queue_for_lock_free_push() {
     // Pin (link 4): GlobalInjector.ready_queue is a
-    // FaaFifoQueue. Lock-free enqueue is what gives O(1)
-    // per-spawn cost under concurrent spawn-storm.
+    // GlobalFifoQueue. Lock-free native enqueue is what gives
+    // O(1) per-spawn cost under concurrent spawn-storm.
     let source = read("src/runtime/scheduler/global_injector.rs");
 
     assert!(
-        source.contains("ready_queue: FaaFifoQueue<PriorityTask>,"),
+        source.contains("ready_queue: GlobalFifoQueue<PriorityTask>,"),
         "REGRESSION: GlobalInjector.ready_queue is no longer \
-         FaaFifoQueue. If it became a Mutex<VecDeque> or \
+         GlobalFifoQueue. If it became a Mutex<VecDeque> or \
          similar, concurrent spawn-storm becomes serialized \
          on the lock — per-spawn latency under contention \
          grows linearly with worker count.",
     );
 
     assert!(
-        source.contains("cancel_queue: FaaFifoQueue<PriorityTask>,"),
-        "REGRESSION: cancel_queue lost FaaFifoQueue too — \
+        source.contains("cancel_queue: GlobalFifoQueue<PriorityTask>,"),
+        "REGRESSION: cancel_queue lost GlobalFifoQueue too — \
          cancel-injection becomes serialized.",
     );
 }

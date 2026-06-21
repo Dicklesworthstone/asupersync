@@ -36,6 +36,7 @@ struct PromotionTestHarness {
     state: Arc<ContendedMutex<RuntimeState>>,
     task_table: Arc<ContendedMutex<TaskTable>>,
     base_time: Time,
+    promoted_to_cancel: HashSet<TaskId>,
 }
 
 impl PromotionTestHarness {
@@ -52,7 +53,7 @@ impl PromotionTestHarness {
             worker_count,
             &state,
             Some(Arc::clone(&task_table)),
-            8,     // reasonable cancel streak limit
+            64,    // promotion tests isolate priority ordering from cancel fairness yields
             false, // disable governor for deterministic testing
             1,
         );
@@ -65,6 +66,7 @@ impl PromotionTestHarness {
             state,
             task_table,
             base_time: Time::from_nanos(1000), // Start at t=1000
+            promoted_to_cancel: HashSet::new(),
         }
     }
 
@@ -105,6 +107,7 @@ impl PromotionTestHarness {
     /// Promote ready tasks to cancel lane
     fn promote_ready_to_cancel(&mut self, task_priorities: &[(TaskId, u8)]) {
         for &(task_id, priority) in task_priorities {
+            self.promoted_to_cancel.insert(task_id);
             // Promote to cancel lane with higher priority
             self.scheduler.inject_cancel(task_id, priority + 50);
         }
@@ -124,12 +127,17 @@ impl PromotionTestHarness {
             return stats;
         }
 
+        let mut logical_dispatches = HashSet::new();
+
         for step in 0..max_steps {
             let worker_idx = step % self.workers.len();
             let worker = &mut self.workers[worker_idx];
 
             if let Some(task_id) = worker.next_task() {
-                let lane = Self::classify_task_lane(task_id);
+                if !logical_dispatches.insert(task_id) {
+                    continue;
+                }
+                let lane = self.classify_task_lane(task_id);
                 stats.record_dispatch(task_id, lane, step);
             } else {
                 stats.record_idle(step);
@@ -142,7 +150,11 @@ impl PromotionTestHarness {
         stats
     }
 
-    fn classify_task_lane(task_id: TaskId) -> TaskLane {
+    fn classify_task_lane(&self, task_id: TaskId) -> TaskLane {
+        if self.promoted_to_cancel.contains(&task_id) {
+            return TaskLane::Cancel;
+        }
+
         // Use task generation to classify original lane intent
         match task_id.arena_index().generation() {
             0 => TaskLane::Ready,  // Originally ready
@@ -295,21 +307,29 @@ fn promotion_test_params_strategy() -> impl Strategy<Value = (usize, usize, usiz
     )
 }
 
+fn promotion_proptest_config() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 /// Metamorphic Relation 1: Promotion Priority Preservation
 ///
 /// When tasks are promoted between lanes, they should maintain correct
 /// priority ordering within the target lane.
 #[test]
 fn mr_promotion_priority_preservation() {
-    proptest!(|(params in promotion_test_params_strategy())| {
+    proptest!(promotion_proptest_config(), |(params in promotion_test_params_strategy())| {
         let (worker_count, tasks_per_lane, ready_promotions, _timed_promotions) = params;
 
         let mut harness = PromotionTestHarness::new(worker_count);
         let task_set = harness.setup_multi_lane_tasks(tasks_per_lane, 1000);
 
         // Promote some ready tasks to cancel lane
-        if ready_promotions > 0 && ready_promotions <= task_set.ready_tasks.len() {
-            let to_promote = &task_set.ready_tasks[..ready_promotions];
+        let effective_ready_promotions = ready_promotions.min(task_set.ready_tasks.len());
+        if effective_ready_promotions > 0 {
+            let to_promote = &task_set.ready_tasks[..effective_ready_promotions];
             harness.promote_ready_to_cancel(to_promote);
         }
 
@@ -339,9 +359,13 @@ fn mr_promotion_priority_preservation() {
         if tasks_per_lane > 0 {
             for lane in [TaskLane::Ready, TaskLane::Timed, TaskLane::Cancel] {
                 let has_tasks = match lane {
-                    TaskLane::Ready => !task_set.ready_tasks.is_empty(),
+                    TaskLane::Ready => {
+                        task_set.ready_tasks.len() > effective_ready_promotions
+                    }
                     TaskLane::Timed => !task_set.timed_tasks.is_empty(),
-                    TaskLane::Cancel => !task_set.cancel_tasks.is_empty() || ready_promotions > 0,
+                    TaskLane::Cancel => {
+                        !task_set.cancel_tasks.is_empty() || effective_ready_promotions > 0
+                    }
                 };
 
                 if has_tasks {
@@ -360,7 +384,7 @@ fn mr_promotion_priority_preservation() {
 /// order when their deadlines become due.
 #[test]
 fn mr_edf_promotion_fairness() {
-    proptest!(|(worker_count in 1..=2usize, timed_task_count in 3..=8usize)| {
+    proptest!(promotion_proptest_config(), |(worker_count in 1..=2usize, timed_task_count in 3..=8usize)| {
         let mut harness = PromotionTestHarness::new(worker_count);
 
         // Create timed tasks with staggered deadlines
@@ -412,7 +436,7 @@ fn mr_edf_promotion_fairness() {
 /// dispatched from multiple lanes or appear to exist in multiple lanes.
 #[test]
 fn mr_promotion_atomicity() {
-    proptest!(|(worker_count in 1..=2usize, base_tasks in 3..=6usize, promotions in 1..=4usize)| {
+    proptest!(promotion_proptest_config(), |(worker_count in 1..=2usize, base_tasks in 3..=6usize, promotions in 1..=4usize)| {
         let mut harness = PromotionTestHarness::new(worker_count);
         let task_set = harness.setup_multi_lane_tasks(base_tasks, 3000);
 
@@ -460,7 +484,7 @@ fn mr_promotion_atomicity() {
 /// lower-priority lanes, respecting existing cancel lane ordering.
 #[test]
 fn mr_cancel_promotion_precedence() {
-    proptest!(|(worker_count in 1..=2usize)| {
+    proptest!(promotion_proptest_config(), |(worker_count in 1..=2usize)| {
         let mut harness = PromotionTestHarness::new(worker_count);
 
         // Setup scenario: existing cancel task, ready task, then promote ready task
@@ -514,7 +538,7 @@ fn mr_cancel_promotion_precedence() {
 /// fairness violations in the target lane.
 #[test]
 fn mr_promotion_frequency_stability() {
-    proptest!(|(worker_count in 1..=2usize, burst_size in 5..=12usize, promotion_ratio in 0.3..=0.8f64)| {
+    proptest!(promotion_proptest_config(), |(worker_count in 1..=2usize, burst_size in 5..=12usize, promotion_ratio in 0.3..=0.8f64)| {
         let mut harness = PromotionTestHarness::new(worker_count);
 
         // Create a larger task set
@@ -544,6 +568,7 @@ fn mr_promotion_frequency_stability() {
 
         for i in 0..promotion_count {
             if i < ready_tasks.len() {
+                harness.promoted_to_cancel.insert(ready_tasks[i]);
                 harness.scheduler.inject_cancel(ready_tasks[i], 120 + i as u8);
             }
         }
