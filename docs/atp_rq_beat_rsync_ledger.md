@@ -1493,3 +1493,22 @@ The swarm reverted within ~1 min of the MATRIX-18 report: `8e7536806 "restore RQ
 - **bad: 50M / 73.41s = 0.68 MB/s — far below BOTH the 6.25 MB/s link cap AND the 13.4 MB/s decode rate** → dominated by the **4 feedback rounds** (each ≈ 80 ms RTT + a re-spray of repair) on a 2%-loss link, NOT decode CPU. Lever = **cut the rounds**: fix `317hxr.6.1.1` (FEC fallback self-disables after `source_retransmit_rounds`=2 via the `requested_sources==0` guard at mod.rs ~2153 → rounds 3..N degrade to inefficient source-only retransmits) + calibrate round-0 repair overhead so it converges in 1–2 rounds.
 
 **Verdict / no-claim.** Decode parallelism and block-size are NOT the 50M/500M levers. Do not re-attempt "build parallel decode" (done) or "shrink max_block_size" (refuted: 1 MiB made bad worse, perfect unchanged). The evidence-backed levers are (clean) **GSO/sendmmsg syscall batching** and (lossy) **feedback-round reduction (FEC-fallback fix 317hxr.6.1.1 + overhead calibration)**. Evidence dirs: `artifacts/atp_bench_matrix/20260621T210830Z/` (auto baseline), `.../20260621T214824Z/` (1 MiB A/B).
+
+## MATRIX-21 (2026-06-21) — 3 levers landed but DELIVERED NOTHING (off-live-path); the clean wall is actually round-0 COLD-START PACING (16 MiB/s)
+
+Swarm landed 3 levers past the restore (HEAD `c3aff3ca7`): GSO eligibility (`ecdc160be`, wfrvuq), repair-overhead calibration (`ad6499110`, j91wza), widen RQ decode fanout + retry fixes (`ba256f440`+7.3). Rebuilt fresh `atp 0.3.5`, benched 50M nocrypto ×4, 3 reps, run `20260621T222617Z`:
+
+| regime | combined levers | baseline (MATRIX-19) | rsyncd | Δ |
+|---|---|---|---|---|
+| perfect | 3.82s (fr=0, sha 3/3) | 3.72s | 1.23s | ~same |
+| good | 3.95s (fr=[2,1,1], sha 3/3) | 3.95s | 3.93s | same (TIE rsync) |
+| bad | 73.11s (fr=4, sha 3/3) | 73.41s | 14.74s | ~same |
+| broken | 133.96s (fr=6, sha 3/3) | 114.44s | 76.19s | **+19.5s / +1 round WORSE** |
+
+**Why nothing moved (root causes — the levers missed the live hot path):**
+1. **GSO `ecdc160be` only touched `src/net/udp.rs` (eligibility + segment ceiling) + a benchmark — NOT the spray.** And the spray ALREADY batches via `socket.send_batch_to()` (mod.rs:568, `RqPendingSendBatch`). So syscall rate was never the binding clean-link constraint; GSO has nothing to bite.
+2. **★REAL CLEAN-LINK WALL = round-0 COLD-START PACING.** `RQ_COLD_START_PACING_BPS = 16 MiB/s` (mod.rs:186); round 0 sprays at `RqSprayPacing::cold_start()` (mod.rs:703). perfect/good complete in ONE round (fr=0) so they're capped at 16.8 MB/s and **never ramp to `RQ_MAX_PACING_BPS = 64 MiB/s`**. 50M / 16.8 MB/s = 2.98s theoretical ≈ observed 3.82s. **If round-0 sprayed at link rate, 50M perfect → <1s, BEATING rsync's 1.23s.** This is the highest-EV clean-link lever — and it's pacing, not syscalls/decode/encode.
+3. **j91wza `ad6499110` only added +65 lines to `adaptive.rs`, which is UNWIRED** (not on the live transfer path) → zero effect; bad stayed fr=4.
+4. **decode-fanout (7.3) is live but off-bottleneck** (decode already cleared in MATRIX-20); it appears to have nudged broken to fr=6 (+1 round, +19.5s) — investigate/possibly revert that hunk.
+
+**Verdict / no-claim.** No win this round; all sha-ok (no correctness break). The REAL levers, now sharper: (clean) **ramp round-0 cold-start pacing toward link rate** — a slow-start probe that climbs from a safe floor to `RQ_MAX_PACING` and backs off on observed loss (must NOT flat-raise the cold-start constant: slow lossy links need the conservative start — that was the lever-1 over-pace failure). (lossy) cut feedback rounds, but the repair-overhead calibration must be wired into the **LIVE `spray_round`/`round_tuning`**, not `adaptive.rs`. **Orchestration lesson: a lever only counts when it lands on the live hot path AND moves a benched cell — `cargo check` green ≠ benchmark win.** Evidence dir: `artifacts/atp_bench_matrix/20260621T222617Z/`.
