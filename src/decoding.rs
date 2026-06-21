@@ -15,7 +15,7 @@ use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const REPAIR_RETENTION_MIN_SLACK: usize = 128;
 const REPAIR_RETENTION_MAX_SLACK: usize = 2048;
@@ -191,6 +191,7 @@ pub(crate) struct BlockDecodeOutcome {
 /// Runs an owned block-decode job. Intended for `Cx::spawn_blocking`.
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
+    let started = Instant::now();
     let resolution = match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
         Ok(data) => BlockDecodeResolution::Complete(data),
         Err(DecodingError::InsufficientSymbols { .. }) => {
@@ -211,7 +212,7 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
         sbn: job.sbn,
         input_symbols: job.symbols.len(),
         retain_decoded_block: job.retain_decoded_block,
-        elapsed: Duration::ZERO,
+        elapsed: started.elapsed(),
         resolution,
     }
 }
@@ -965,6 +966,25 @@ impl DecodingPipeline {
     #[must_use]
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn finish_decode_job(&mut self, outcome: BlockDecodeOutcome) -> SymbolAcceptResult {
+        match self.finish_decode_job_deferred(outcome) {
+            DeferredSymbolAcceptResult::Immediate(result) => result,
+            DeferredSymbolAcceptResult::Decode(job) => {
+                let outcome = run_block_decode_job(job);
+                self.finish_inline_decode_job(outcome)
+            }
+        }
+    }
+
+    /// Finalizes a previously deferred decode job without running any CPU-heavy
+    /// retry inline. If newer symbols arrived while the job was in flight, the
+    /// caller gets a fresh owned job that can be sent back through its blocking
+    /// decode queue.
+    #[must_use]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn finish_decode_job_deferred(
+        &mut self,
+        outcome: BlockDecodeOutcome,
+    ) -> DeferredSymbolAcceptResult {
         let BlockDecodeOutcome {
             sbn,
             input_symbols,
@@ -973,16 +993,18 @@ impl DecodingPipeline {
             resolution,
         } = outcome;
         if self.completed_blocks.contains(&sbn) {
-            return SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded);
+            return DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
+                RejectReason::BlockAlreadyDecoded,
+            ));
         }
 
         match resolution {
             BlockDecodeResolution::Complete(block_data) => {
                 self.mark_block_complete(sbn, retain_decoded_block.then(|| block_data.clone()));
-                SymbolAcceptResult::BlockComplete {
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
                     block_sbn: sbn,
                     data: block_data,
-                }
+                })
             }
             BlockDecodeResolution::Retry(reason) => {
                 if let Some(block) = self.blocks.get_mut(&sbn) {
@@ -990,17 +1012,24 @@ impl DecodingPipeline {
                 }
                 let current_symbols = self.symbols.symbols_for_block(sbn).count();
                 if current_symbols > input_symbols {
-                    if let Some(result) = self.try_decode_block(sbn, retain_decoded_block) {
-                        return result;
+                    if let Some(result) = self.try_complete_source_block(sbn, retain_decoded_block)
+                    {
+                        return DeferredSymbolAcceptResult::Immediate(result);
+                    }
+                    if let Some(job) = self.prepare_decode_job(sbn, retain_decoded_block) {
+                        if let Some(block) = self.blocks.get_mut(&sbn) {
+                            block.state = BlockDecodingState::Decoding;
+                        }
+                        return DeferredSymbolAcceptResult::Decode(job);
                     }
                 }
-                SymbolAcceptResult::Rejected(reason)
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(reason))
             }
             BlockDecodeResolution::Failed(reason) => {
                 if let Some(block) = self.blocks.get_mut(&sbn) {
                     block.state = BlockDecodingState::Failed;
                 }
-                SymbolAcceptResult::Rejected(reason)
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(reason))
             }
         }
     }
@@ -3357,17 +3386,19 @@ mod tests {
         });
         let mut encoder = EncodingPipeline::new(config.clone(), encoder_pool);
         let mut source_zero = None;
-        let mut source_one = None;
-        let mut first_repair = None;
-        for encoded in encoder.encode_single_block_with_repair(object_id, 0, &data, 1) {
+        let mut repairs = Vec::new();
+        for encoded in encoder.encode_single_block_with_repair(object_id, 0, &data, 2) {
             let symbol = encoded.expect("encode").into_symbol();
             match symbol.kind() {
                 SymbolKind::Source if symbol.esi() == 0 => source_zero = Some(symbol),
-                SymbolKind::Source if symbol.esi() == 1 => source_one = Some(symbol),
-                SymbolKind::Repair if first_repair.is_none() => first_repair = Some(symbol),
+                SymbolKind::Repair => repairs.push(symbol),
                 _ => {}
             }
         }
+        assert!(
+            repairs.len() >= 2,
+            "test fixture must provide two repair symbols"
+        );
 
         let mut decoder = DecodingPipeline::new(DecodingConfig {
             symbol_size: config.symbol_size,
@@ -3400,7 +3431,7 @@ mod tests {
 
         let started = decoder
             .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
-                first_repair.expect("repair"),
+                repairs.remove(0),
             ))
             .expect("feed repair");
         let DeferredSymbolAcceptResult::Decode(job) = started else {
@@ -3409,9 +3440,9 @@ mod tests {
 
         let buffered = decoder
             .feed_streaming_block_deferred(AuthenticatedSymbol::new_unauthenticated(
-                source_one.expect("source one"),
+                repairs.remove(0),
             ))
-            .expect("feed source one while decode pending");
+            .expect("feed second repair while decode pending");
         assert!(
             matches!(
                 buffered,
@@ -3427,7 +3458,16 @@ mod tests {
             elapsed: Duration::ZERO,
             resolution: BlockDecodeResolution::Retry(RejectReason::InconsistentEquations),
         };
-        let result = decoder.finish_decode_job(stale_retry);
+        let retry = decoder.finish_decode_job_deferred(stale_retry);
+        let DeferredSymbolAcceptResult::Decode(retry_job) = retry else {
+            panic!("stale deferred retry should return a fresh decode job, got {retry:?}");
+        };
+        assert!(
+            !decoder.is_complete(),
+            "deferred retry must not run the heavy decode inline"
+        );
+
+        let result = decoder.finish_decode_job(run_block_decode_job(retry_job));
         match result {
             SymbolAcceptResult::BlockComplete {
                 block_sbn,

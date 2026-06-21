@@ -232,8 +232,10 @@ const RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
 const RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 48;
 /// Hard ceiling on one transfer's queued RQ repair-decode jobs.
 const RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD: usize = 48;
-/// CPU cores left for the UDP/control receive pump and filesystem work.
-const RQ_DECODE_CORES_RESERVED_FOR_IO: usize = 4;
+/// Minimum CPU cores left for the UDP/control receive pump and filesystem work.
+const RQ_DECODE_MIN_CORES_RESERVED_FOR_IO: usize = 1;
+/// Upper bound on CPU cores held back from RQ decode on large machines.
+const RQ_DECODE_MAX_CORES_RESERVED_FOR_IO: usize = 4;
 /// Soft memory envelope for queued RQ repair-decode jobs.
 ///
 /// `BlockDecodeJob` owns a cloned symbol set plus matrix-solve workspace. The
@@ -2683,14 +2685,30 @@ fn rq_decode_job_memory_estimate_bytes(max_block_size: usize, symbol_size: u16) 
         .max(RQ_DECODE_JOB_MEMORY_FLOOR_BYTES)
 }
 
+fn rq_decode_reserved_io_cores(available: usize) -> usize {
+    if available <= 1 {
+        return 0;
+    }
+    (available / 4)
+        .clamp(
+            RQ_DECODE_MIN_CORES_RESERVED_FOR_IO,
+            RQ_DECODE_MAX_CORES_RESERVED_FOR_IO,
+        )
+        .min(available.saturating_sub(1))
+}
+
+fn rq_decode_core_limit_for_available(available: usize) -> usize {
+    available
+        .saturating_sub(rq_decode_reserved_io_cores(available))
+        .max(1)
+        .min(RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD)
+}
+
 fn rq_decode_width_budget(decoders: &[EntryDecoder], symbol_size: u16) -> usize {
     static CORE_LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     let core_limit = *CORE_LIMIT.get_or_init(|| {
         let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        available
-            .saturating_sub(RQ_DECODE_CORES_RESERVED_FOR_IO)
-            .max(1)
-            .min(RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD)
+        rq_decode_core_limit_for_available(available)
     });
     let max_block_size = decoders
         .iter()
@@ -2747,12 +2765,12 @@ fn source_streaming_block_ready_to_seed(dec: &EntryDecoder, sbn: usize) -> bool 
     status.symbols_received.saturating_add(unseeded_sources) >= block.k
 }
 
-fn source_seed_read_plan(
+fn source_seed_symbol_plan(
     dec: &EntryDecoder,
     sbn: usize,
     esi: usize,
     symbol_size: usize,
-) -> Result<Option<(u64, usize, Option<AuthenticationTag>)>, RqError> {
+) -> Result<Option<(usize, usize, Option<AuthenticationTag>)>, RqError> {
     let Some(block) = dec.source_blocks.get(sbn) else {
         return Ok(None);
     };
@@ -2771,13 +2789,7 @@ fn source_seed_read_plan(
     }
 
     let take = symbol_size.min(block.len - within_block);
-    let offset = block
-        .start
-        .checked_add(u64::try_from(within_block).unwrap_or(u64::MAX))
-        .ok_or_else(|| {
-            RqError::Coding(format!("entry {} source seed offset overflow", dec.index))
-        })?;
-    Ok(Some((offset, take, block.auth_tags[esi])))
+    Ok(Some((within_block, take, block.auth_tags[esi])))
 }
 
 fn rq_max_buffered_symbols_per_block(max_block_size: usize, symbol_size: u16) -> usize {
@@ -4728,7 +4740,14 @@ async fn dispatch_decode_job(
             Ok(DecodeDispatch::Queued)
         }
         Err(crate::runtime::state::SpawnError::RuntimeUnavailable) => {
-            let _ = finalize_decode_outcome(dec, run_block_decode_job(retry_job)).await?;
+            let _ = finalize_decode_outcome(
+                cx,
+                dec,
+                run_block_decode_job(retry_job),
+                false,
+                transfer_decode_width,
+            )
+            .await?;
             rqtrace!(
                 "receiver: entry {} ran decode block {} inline from {trigger} because no runtime spawn gateway is available",
                 dec.index,
@@ -4806,14 +4825,20 @@ async fn seed_source_streaming_pipeline(
 
     let sbn = target_sbn_index;
     let k = dec.source_blocks[sbn].k;
+    let block_start = dec.source_blocks[sbn].start;
+    let block_len = dec.source_blocks[sbn].len;
+    let mut source_block = vec![0u8; block_len];
+    reader.seek(std::io::SeekFrom::Start(block_start)).await?;
+    reader.read_exact(&mut source_block).await?;
+
     for esi in 0..k {
-        let Some((offset, take, auth_tag)) = source_seed_read_plan(dec, sbn, esi, symbol_size)?
+        let Some((within_block, take, auth_tag)) =
+            source_seed_symbol_plan(dec, sbn, esi, symbol_size)?
         else {
             continue;
         };
         let mut payload = vec![0u8; symbol_size];
-        reader.seek(std::io::SeekFrom::Start(offset)).await?;
-        reader.read_exact(&mut payload[..take]).await?;
+        payload[..take].copy_from_slice(&source_block[within_block..within_block + take]);
 
         let sbn_u8 = u8::try_from(sbn).map_err(|_| {
             RqError::Coding(format!("entry {} source seed SBN overflow", dec.index))
@@ -5664,15 +5689,11 @@ async fn feed_datagram_batch_to_decoders(
     Ok(stats)
 }
 
-async fn finalize_decode_outcome(
+async fn apply_decode_result(
     dec: &mut EntryDecoder,
-    outcome: BlockDecodeOutcome,
+    result: SymbolAcceptResult,
+    decode_elapsed: Duration,
 ) -> Result<bool, RqError> {
-    let Some(pipeline) = dec.pipeline.as_mut() else {
-        return Ok(false);
-    };
-    let decode_elapsed = outcome.elapsed();
-    let result = pipeline.finish_decode_job(outcome);
     match result {
         SymbolAcceptResult::BlockComplete { block_sbn, data } => {
             persist_decoded_block(dec, block_sbn, &data).await?;
@@ -5704,6 +5725,43 @@ async fn finalize_decode_outcome(
         SymbolAcceptResult::Accepted { .. }
         | SymbolAcceptResult::DecodingStarted { .. }
         | SymbolAcceptResult::Duplicate => Ok(false),
+    }
+}
+
+async fn finalize_decode_outcome(
+    cx: &Cx,
+    dec: &mut EntryDecoder,
+    outcome: BlockDecodeOutcome,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
+) -> Result<bool, RqError> {
+    let Some(pipeline) = dec.pipeline.as_mut() else {
+        return Ok(false);
+    };
+    let decode_elapsed = outcome.elapsed();
+    match pipeline.finish_decode_job_deferred(outcome) {
+        DeferredSymbolAcceptResult::Immediate(result) => {
+            apply_decode_result(dec, result, decode_elapsed).await
+        }
+        DeferredSymbolAcceptResult::Decode(job) => {
+            let block_sbn = job.sbn();
+            rqtrace!(
+                "receiver: entry {} requeued stale parallel decode block {} decode_ms={}",
+                dec.index,
+                block_sbn,
+                decode_elapsed.as_millis()
+            );
+            let _ = dispatch_decode_job(
+                cx,
+                dec,
+                job,
+                "stale deferred decode retry",
+                allow_spawn_decode,
+                transfer_decode_width,
+            )
+            .await?;
+            Ok(false)
+        }
     }
 }
 
@@ -5758,7 +5816,15 @@ async fn join_pending_decode(
             dec.index, block_sbn
         ))
     })?;
-    if finalize_decode_outcome(dec, outcome).await? {
+    if finalize_decode_outcome(
+        cx,
+        dec,
+        outcome,
+        true,
+        RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
+    )
+    .await?
+    {
         Ok(1)
     } else {
         Ok(0)
@@ -6069,6 +6135,19 @@ mod tests {
             RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
             RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
         ));
+    }
+
+    #[test]
+    fn decode_core_limit_keeps_parallelism_on_four_core_hosts() {
+        assert_eq!(rq_decode_core_limit_for_available(1), 1);
+        assert_eq!(rq_decode_core_limit_for_available(2), 1);
+        assert_eq!(rq_decode_core_limit_for_available(4), 3);
+        assert_eq!(rq_decode_core_limit_for_available(8), 6);
+        assert_eq!(rq_decode_core_limit_for_available(16), 12);
+        assert_eq!(
+            rq_decode_core_limit_for_available(64),
+            RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD
+        );
     }
 
     #[test]
