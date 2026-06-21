@@ -9,15 +9,21 @@
 //! *cancellation request* to every still-running member (region close is the
 //! quiescence backstop that guarantees no orphans).
 //!
-//! ```ignore
-//! let mut set = JoinSet::new(&scope);
-//! for i in 0..n {
-//!     set.spawn(&cx, move |_cx| async move { Ok::<_, MyError>(work(i)) })?;
-//! }
-//! let outcomes = set.join_all(&cx).await; // Vec<Outcome<T, MyError>>, in spawn order
-//! ```
+//! ```no_run
+//! use asupersync::{main, prelude::*};
 //!
-//! # Scope of this slice
+//! #[main]
+//! async fn main(cx: &Cx) {
+//!     let mut set = JoinSet::in_cx(cx);
+//!     for i in 0..10_u32 {
+//!         set.spawn(cx, move |_| async move { Ok::<_, ()>(i) }).expect("spawn");
+//!     }
+//!     let total = set.join_all(cx).await.into_iter().fold(0, |sum, outcome| {
+//!         sum + outcome.expect("member ok")
+//!     });
+//!     assert_eq!(total, 45);
+//! }
+//! ```
 //!
 //! The API covers the common server patterns: [`JoinSet::in_cx`] for the
 //! current region, [`JoinSet::new`] for an explicit scope, [`JoinSet::spawn`]
