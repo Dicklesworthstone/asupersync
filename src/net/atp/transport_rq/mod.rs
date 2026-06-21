@@ -4105,6 +4105,7 @@ pub async fn receive_connection(
     let mut symbols_accepted: u64 = 0;
     let mut round_stats = RqDatagramRoundStats::default();
     let mut feedback_rounds: u32 = 0;
+    let trace_receiver_intake = std::env::var_os("ATP_RQ_TRACE").is_some();
     let datagram_header_len = if symbol_auth_enabled {
         AUTH_DGRAM_HEADER
     } else {
@@ -4137,6 +4138,7 @@ pub async fn receive_connection(
             symbol_size,
             &mut symbols_accepted,
             &mut round_stats,
+            trace_receiver_intake,
         )
         .await?;
         rqtrace!(
@@ -4158,6 +4160,7 @@ pub async fn receive_connection(
                     symbol_size,
                     &mut symbols_accepted,
                     &mut round_stats,
+                    trace_receiver_intake,
                 )
                 .await?;
                 if drained > 0 {
@@ -4176,9 +4179,19 @@ pub async fn receive_connection(
                     .map(|d| d.index)
                     .collect();
                 rqtrace!(
-                    "receiver: ObjectComplete; {} of {} entries still pending",
+                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_observed={} round_symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={}",
                     pending.len(),
-                    decoders.len()
+                    decoders.len(),
+                    round_stats.observed,
+                    round_stats.accepted,
+                    round_stats.payload_bytes,
+                    round_stats.intake_micros(),
+                    round_stats.intake_symbols_per_s(),
+                    round_stats.intake_bytes_per_s(),
+                    round_stats.parse_micros,
+                    round_stats.feed_micros,
+                    round_stats.recv_micros,
+                    round_stats.drain_micros
                 );
 
                 if pending.is_empty() {
@@ -4270,12 +4283,20 @@ pub async fn receive_connection(
                 if std::env::var_os("ATP_RQ_TRACE").is_some() {
                     let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
-                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_observed={} round_symbols_accepted={} symbols_accepted={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
+                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_observed={} round_symbols_accepted={} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
                         pending.len(),
                         source_symbols.len(),
                         round_stats.observed,
                         round_stats.accepted,
                         symbols_accepted,
+                        round_stats.payload_bytes,
+                        round_stats.intake_micros(),
+                        round_stats.intake_symbols_per_s(),
+                        round_stats.intake_bytes_per_s(),
+                        round_stats.parse_micros,
+                        round_stats.feed_micros,
+                        round_stats.recv_micros,
+                        round_stats.drain_micros,
                         progress.source_received,
                         progress.source_needed,
                         progress.pending_decode_jobs,
@@ -5596,28 +5617,88 @@ fn parse_symbol_datagram_payload(
 struct RqDatagramIngest {
     observed: bool,
     accepted: bool,
+    payload_bytes: u64,
+    // Per-symbol receiver-intake stage timing (LEVER-R1): the clean-link wall
+    // is the receiver's ~13 MB/s intake rate, not the sender. Auth verification,
+    // decode feed/dispatch, and staging writes currently land in feed_micros.
+    parse_micros: u64,
+    feed_micros: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 struct RqDatagramRoundStats {
     observed: u64,
     accepted: u64,
+    payload_bytes: u64,
+    // LEVER-R1 receiver-intake throughput instrumentation (sums over the round).
+    parse_micros: u64,
+    feed_micros: u64,
+    recv_micros: u64,
+    drain_micros: u64,
 }
 
 impl RqDatagramRoundStats {
     fn record(&mut self, ingest: RqDatagramIngest) {
         if ingest.observed {
             self.observed = self.observed.saturating_add(1);
+            self.payload_bytes = self.payload_bytes.saturating_add(ingest.payload_bytes);
         }
         if ingest.accepted {
             self.accepted = self.accepted.saturating_add(1);
         }
+        self.parse_micros = self.parse_micros.saturating_add(ingest.parse_micros);
+        self.feed_micros = self.feed_micros.saturating_add(ingest.feed_micros);
     }
 
     fn merge(&mut self, other: Self) {
         self.observed = self.observed.saturating_add(other.observed);
         self.accepted = self.accepted.saturating_add(other.accepted);
+        self.payload_bytes = self.payload_bytes.saturating_add(other.payload_bytes);
+        self.parse_micros = self.parse_micros.saturating_add(other.parse_micros);
+        self.feed_micros = self.feed_micros.saturating_add(other.feed_micros);
+        self.recv_micros = self.recv_micros.saturating_add(other.recv_micros);
+        self.drain_micros = self.drain_micros.saturating_add(other.drain_micros);
     }
+
+    fn record_recv_elapsed(&mut self, elapsed: Duration) {
+        self.recv_micros = self
+            .recv_micros
+            .saturating_add(duration_micros_saturating(elapsed));
+    }
+
+    fn record_tail_drain_elapsed(&mut self, elapsed: Duration) {
+        self.drain_micros = self
+            .drain_micros
+            .saturating_add(duration_micros_saturating(elapsed));
+    }
+
+    fn intake_micros(self) -> u64 {
+        self.parse_micros.saturating_add(self.feed_micros)
+    }
+
+    fn intake_symbols_per_s(self) -> u64 {
+        rate_per_second(self.observed, self.intake_micros())
+    }
+
+    fn intake_bytes_per_s(self) -> u64 {
+        rate_per_second(self.payload_bytes, self.intake_micros())
+    }
+}
+
+fn duration_micros_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn elapsed_micros_since(started: Option<Instant>) -> u64 {
+    started.map_or(0, |instant| duration_micros_saturating(instant.elapsed()))
+}
+
+fn rate_per_second(units: u64, elapsed_micros: u64) -> u64 {
+    if elapsed_micros == 0 {
+        return 0;
+    }
+    let rate = u128::from(units).saturating_mul(1_000_000) / u128::from(elapsed_micros);
+    u64::try_from(rate).unwrap_or(u64::MAX)
 }
 
 async fn feed_datagram_to_decoders(
@@ -5629,8 +5710,12 @@ async fn feed_datagram_to_decoders(
     symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
+    trace_intake: bool,
 ) -> Result<RqDatagramIngest, RqError> {
-    let Some((parsed, payload)) = parse_symbol_datagram_payload(buf, n, tag, auth_required) else {
+    let parse_start = trace_intake.then(Instant::now);
+    let parsed_opt = parse_symbol_datagram_payload(buf, n, tag, auth_required);
+    let parse_micros = elapsed_micros_since(parse_start);
+    let Some((parsed, payload)) = parsed_opt else {
         return Ok(RqDatagramIngest::default());
     };
     let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
@@ -5643,6 +5728,7 @@ async fn feed_datagram_to_decoders(
         pending_decode_jobs = rq_pending_decode_jobs(decoders);
     }
     let allow_spawn_decode = pending_decode_jobs < decode_width_budget;
+    let feed_start = trace_intake.then(Instant::now);
     let accepted = feed_symbol_with_cx(
         cx,
         &mut decoders[pos],
@@ -5654,9 +5740,13 @@ async fn feed_datagram_to_decoders(
         decode_width_budget,
     )
     .await?;
+    let feed_micros = elapsed_micros_since(feed_start);
     Ok(RqDatagramIngest {
         observed: true,
         accepted,
+        payload_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
+        parse_micros,
+        feed_micros,
     })
 }
 
@@ -5668,6 +5758,7 @@ async fn feed_datagram_batch_to_decoders(
     symbol_auth: Option<&SecurityContext>,
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
+    trace_intake: bool,
 ) -> Result<RqDatagramRoundStats, RqError> {
     let mut stats = RqDatagramRoundStats::default();
     for packet in &batch.packets {
@@ -5681,6 +5772,7 @@ async fn feed_datagram_batch_to_decoders(
                 symbol_auth,
                 decoders,
                 symbol_size,
+                trace_intake,
             )
             .await?,
         );
@@ -5904,6 +5996,7 @@ async fn pump_until_control<S>(
     symbol_size: u16,
     symbols_accepted: &mut u64,
     round_stats: &mut RqDatagramRoundStats,
+    trace_intake: bool,
 ) -> Result<Frame, RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -5942,6 +6035,7 @@ where
         //    Whichever is ready makes progress; if only UDP is ready we keep
         //    pumping symbols. Both register their waker via task_cx, so the task
         //    parks until EITHER fd is ready — a biased two-way select.
+        let recv_started = trace_intake.then(Instant::now);
         let ready = {
             let mut udp_batch = Box::pin(udp.recv_batch_from(RQ_INBOUND_PUMP_BATCH, packet_size));
             poll_fn(|task_cx| {
@@ -5962,12 +6056,13 @@ where
             })
             .await?
         };
+        let recv_elapsed = recv_started.map(|started| started.elapsed());
 
         match ready {
             Ready::Udp(batch) => {
                 let mut received_len = batch.packets.len();
                 let mut batches = 1usize;
-                let stats = feed_datagram_batch_to_decoders(
+                let mut stats = feed_datagram_batch_to_decoders(
                     cx,
                     &batch,
                     tag,
@@ -5975,8 +6070,12 @@ where
                     symbol_auth,
                     decoders,
                     symbol_size,
+                    trace_intake,
                 )
                 .await?;
+                if let Some(elapsed) = recv_elapsed {
+                    stats.record_recv_elapsed(elapsed);
+                }
                 pumped = pumped.saturating_add(stats.observed);
                 *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                 round_stats.merge(stats);
@@ -5990,6 +6089,7 @@ where
                         break;
                     }
 
+                    let tail_recv_started = trace_intake.then(Instant::now);
                     let tail = match crate::time::timeout(
                         cx.now(),
                         RQ_INBOUND_PUMP_DRAIN_GRACE,
@@ -6001,11 +6101,12 @@ where
                         Ok(Err(e)) => return Err(RqError::Io(e)),
                         Err(_elapsed) => break,
                     };
+                    let tail_recv_elapsed = tail_recv_started.map(|started| started.elapsed());
                     received_len = tail.packets.len();
                     if received_len == 0 {
                         break;
                     }
-                    let stats = feed_datagram_batch_to_decoders(
+                    let mut stats = feed_datagram_batch_to_decoders(
                         cx,
                         &tail,
                         tag,
@@ -6013,8 +6114,12 @@ where
                         symbol_auth,
                         decoders,
                         symbol_size,
+                        trace_intake,
                     )
                     .await?;
+                    if let Some(elapsed) = tail_recv_elapsed {
+                        stats.record_tail_drain_elapsed(elapsed);
+                    }
                     pumped = pumped.saturating_add(stats.observed);
                     *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                     round_stats.merge(stats);
@@ -6060,6 +6165,7 @@ async fn drain_round_tail(
     symbol_size: u16,
     symbols_accepted: &mut u64,
     round_stats: &mut RqDatagramRoundStats,
+    trace_intake: bool,
 ) -> Result<u64, RqError> {
     if quiet_window.is_zero() {
         return Ok(0);
@@ -6077,6 +6183,7 @@ async fn drain_round_tail(
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
 
+        let drain_started = trace_intake.then(Instant::now);
         let ready = poll_fn(|task_cx| {
             if Pin::new(&mut hard_sleep).poll(task_cx).is_ready() {
                 return Poll::Ready(Ok::<Option<usize>, std::io::Error>(None));
@@ -6095,6 +6202,7 @@ async fn drain_round_tail(
             Poll::Pending
         })
         .await?;
+        let drain_elapsed = drain_started.map(|started| started.elapsed());
 
         let Some(n) = ready else {
             return Ok(drained);
@@ -6109,11 +6217,15 @@ async fn drain_round_tail(
             symbol_auth,
             decoders,
             symbol_size,
+            trace_intake,
         )
         .await?;
         if ingest.observed {
             drained += 1;
             round_stats.record(ingest);
+            if let Some(elapsed) = drain_elapsed {
+                round_stats.record_tail_drain_elapsed(elapsed);
+            }
             if ingest.accepted {
                 *symbols_accepted = (*symbols_accepted).saturating_add(1);
             }
