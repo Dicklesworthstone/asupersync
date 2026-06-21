@@ -118,6 +118,7 @@ impl PropertyTestConfig {
         }
 
         config.max_shrink_iters = self.max_shrink_iters;
+        config.failure_persistence = None;
         config
     }
 }

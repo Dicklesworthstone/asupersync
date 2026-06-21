@@ -47,17 +47,17 @@
     },
     {
       "path": "artifacts/proof_lane_manifest_v1.json",
-      "sha256": "67cf41259a9b84c5cb5b428e823fa6a2f7c835feb64c18ab7eee2d28ea99ee40",
+      "sha256": "e36b365d2914c49fee81f7ff62eccfc0e4b4aebabba40d05656b1519fc6c3436",
       "covers": "RCH lane command policy and cache-hit claim scopes"
     },
     {
       "path": "artifacts/proof_status_snapshot_v1.json",
-      "sha256": "4ff15d618e13f76f86e1fd126f6a88780e5a8019c74c51468e6bb7303a42a2c9",
+      "sha256": "97e438e202804b36c81fc15b45ba44f7626062b955610bd44fd071c07a8e256f",
       "covers": "fresh pass, approved cache hit, rerun-required, blocked, no-win, and unsupported status rows"
     },
     {
       "path": "scripts/proof_artifact_freshness_receipt.py",
-      "sha256": "46495166efd6f3be6b89d872ccfe0063a8e7c6b389bc23c4f50bc3ce1c5dc322",
+      "sha256": "5b3bcee954e62296cccf82431aa0632040a914c6d5443120f1c86924899a4e77",
       "covers": "proof freshness receipt classifier, index, and query implementation"
     },
     {

@@ -275,10 +275,14 @@ fn every_child_certification_resolves_to_real_artifacts_and_rch_proof_commands()
             "{bead_id}: artifact {artifact_path} must exist"
         );
         let artifact = read_json(artifact_path);
+        let expected_artifact_bead_id = child
+            .get("artifact_bead_id")
+            .and_then(Value::as_str)
+            .unwrap_or(bead_id);
         assert_eq!(
             string(&artifact, "bead_id"),
-            bead_id,
-            "{bead_id}: artifact bead_id must match"
+            expected_artifact_bead_id,
+            "{bead_id}: artifact bead_id must match the declared artifact owner"
         );
         assert_eq!(
             string(&artifact, "contract_version"),

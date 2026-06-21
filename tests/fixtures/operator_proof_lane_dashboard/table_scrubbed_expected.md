@@ -1,8 +1,8 @@
 # Asupersync Proof Lane Dashboard - [TIMESTAMP]
 
 ## Summary
-Total lanes: 40 | Green: 13 | Yellow: 17 | Red: 0 | Unknown: 10
-Total guarantees: 40 | Green: 13 | Red: 0
+Total lanes: 57 | Green: 13 | Yellow: 32 | Red: 0 | Unknown: 12
+Total guarantees: 57 | Green: 13 | Red: 0
 
 ## Production Graph Proofs
 ✅ default-production-tokio-tree (dependency_graph)
@@ -21,6 +21,8 @@ Total guarantees: 40 | Green: 13 | Red: 0
 ## Fuzz Smoke Evidence
 🟡 fuzz-manifest-smoke (compile_frontier)
    The fuzz manifest and registered fuzz targets typecheck as a cargo-fuzz workspac...
+🟡 arq-quic-symbol-envelope-fuzz-smoke (test_frontier)
+   Runs the proptest/property fuzz smoke for the RaptorQ-over-QUIC symbol-envelope ...
 
 ## Rustdoc Frontier
 🟡 rustdoc-api (documentation_frontier)
@@ -43,8 +45,20 @@ Total guarantees: 40 | Green: 13 | Red: 0
    The runtime crate's lib, bins, tests, examples, and benches compile under the se...
 🟡 clippy-all-targets (lint_frontier)
    Clippy warning-deny frontier for the runtime crate all-target profile....
+❓ cli-feature-clippy (lint_frontier)
+   Clippy warning-deny frontier for the runtime crate's non-default cli feature sur...
 ❓ rustfmt-check (format_frontier)
    Workspace rustfmt formatting frontier....
+🟡 arq-quic-loopback-e2e (test_frontier)
+   Runs the retained ARQ/QUIC loopback E2E script through the ignored real-transfer...
+🟡 arq-quic-lab-determinism (test_frontier)
+   Runs the ATP-over-QUIC LabRuntime contract that checks quiescence, cancellation ...
+🟡 arq-quic-bounded-memory-loopback (test_frontier)
+   Runs the ARQ/QUIC loopback script with a larger deterministic payload and valida...
+🟡 arq-quic-wire-conformance (test_frontier)
+   Runs the external byte-level conformance suite for the ATP-over-QUIC RaptorQ sym...
+🟡 arq-quic-fleet-benchmark (test_frontier)
+   Canonical G2 fleet benchmark command for RaptorQ-over-QUIC versus tuned rsync ov...
 🟡 downstream-consumer-default-run (test_frontier)
    Runs the downstream fixture as an external crate against default asupersync feat...
 🟡 downstream-consumer-metrics-run (test_frontier)
@@ -57,3 +71,5 @@ Total guarantees: 40 | Green: 13 | Red: 0
 ## Known Blockers
 - dirty-shared-main-rch-contention-2026-06-09 (blocked 2026-06-09T17:30:00Z)
   Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-...
+- asupersync-arq-quic-epic-b0k8qo.7.2 (blocked 2026-06-17T06:20:00Z)
+  G2 fleet benchmark has no fresh remote-required result recorded for the full RaptorQ-over-QUIC versu...

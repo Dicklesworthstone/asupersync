@@ -1655,6 +1655,7 @@ fn proof_runner_emits_validation_frontier_compatible_records() {
         "rustfmt-check",
         "--touched-files",
         "src/lib.rs",
+        "--skip-dirty-check",
         "--output",
         "json",
     ]);
@@ -1749,6 +1750,7 @@ fn proof_runner_generates_appropriate_supplemental_proofs() {
         "rustfmt-check",
         "--touched-files",
         "src/runtime/state.rs",
+        "--skip-dirty-check",
         "--output",
         "json",
     ]);
@@ -1770,6 +1772,7 @@ fn proof_runner_generates_appropriate_supplemental_proofs() {
         "--touched-files",
         "src/sync/mutex.rs",
         "src/sync/pool.rs",
+        "--skip-dirty-check",
         "--output",
         "json",
     ]);
@@ -1804,6 +1807,7 @@ fn proof_runner_generates_appropriate_supplemental_proofs() {
         "lib-tests",
         "--touched-files",
         "tests/proof_runner_contract.rs",
+        "--skip-dirty-check",
         "--output",
         "json",
     ]);
@@ -1839,6 +1843,7 @@ fn proof_runner_uses_manifest_commands_correctly() {
             lane_id,
             "--touched-files",
             "src/lib.rs",
+            "--skip-dirty-check",
             "--output",
             "json",
         ]);
@@ -2849,6 +2854,7 @@ fn proof_runner_record_schema_matches_validation_frontier_contract() {
         "rustfmt-check",
         "--touched-files",
         "README.md",
+        "--skip-dirty-check",
         "--output",
         "json",
     ]);
@@ -2891,6 +2897,7 @@ fn proof_runner_produces_deterministic_output_for_same_inputs() {
         "rustfmt-check",
         "--touched-files",
         "src/types/outcome.rs",
+        "--skip-dirty-check",
         "--output",
         "json",
     ];
@@ -2922,6 +2929,7 @@ fn proof_runner_output_format_is_machine_readable() {
         "lib-tests",
         "--touched-files",
         "src/channel/mpsc.rs",
+        "--skip-dirty-check",
         "--output",
         "json",
     ]);

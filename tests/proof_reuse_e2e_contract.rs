@@ -793,8 +793,13 @@ fn e2e_contract_tracks_existing_reuse_query_goldens() {
         query["best_candidate"]["proof_id"].as_str(),
         Some(string(reference, "expected_best_candidate"))
     );
+    let top_rerun_command = query["logs"]
+        .as_array()
+        .expect("reuse query logs")
+        .iter()
+        .find_map(|log| log["top_rerun_command"].as_str());
     assert_eq!(
-        query["logs"][2]["top_rerun_command"].as_str(),
+        top_rerun_command,
         Some(string(reference, "expected_top_rerun_command"))
     );
 

@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SCRIPT_PATH: &str = "scripts/atp_perf/workflow_acceptance_smoke.py";
 const CONTRACT_VERSION: &str = "atp-n9-workflow-acceptance-v1";
@@ -10,6 +11,7 @@ const EVENT_SCHEMA_VERSION: &str = "atp-n9-workflow-event-v1";
 const SCHEDULER_PROFILE_SCHEMA_VERSION: &str = "atp-e5-scheduler-workload-profile-v1";
 const SCHEDULER_GATE_SCHEMA_VERSION: &str = "atp-e5-scheduler-benchmark-gate-v1";
 const BENCHMARK_REPORT_SCHEMA_VERSION: &str = "atp-l3-public-regression-report-v1";
+static RUN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,12 +27,17 @@ fn read_script() -> String {
 
 fn run_contract_smoke() -> Value {
     let output_root = repo_path("target/atp_perf_acceptance_contract");
+    let run_id = format!(
+        "atp-n9-contract-{}-{}",
+        std::process::id(),
+        RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
     let output = Command::new("python3")
         .arg(repo_path(SCRIPT_PATH))
         .args([
             "--contract-only",
             "--run-id",
-            "atp-n9-contract",
+            &run_id,
             "--output-root",
             output_root
                 .to_str()

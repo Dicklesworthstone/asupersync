@@ -48,6 +48,7 @@
       "title": "[idea-wizard][swarm-ops][rch] Build proof-lane planner with remote-only provenance",
       "expected_status": "closed",
       "artifact": "artifacts/swarm_proof_lane_planner_contract_v1.json",
+      "artifact_bead_id": "asupersync-bt63nr.8",
       "artifact_contract_version": "swarm-proof-lane-planner-v1",
       "contract_test": "tests/swarm_proof_lane_planner_contract.rs",
       "runtime_source": "src/lab/swarm_replay.rs",

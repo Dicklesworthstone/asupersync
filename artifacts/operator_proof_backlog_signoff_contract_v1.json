@@ -15,22 +15,22 @@
     {
       "bead_id": "asupersync-xeh8m0.1",
       "path": "artifacts/proof_console_report_contract_v1.json",
-      "sha256": "c5f5c9aed3120aaa34ca31aa7c51490134ccfe41d2c68e8230e3f37341eaa39b"
+      "sha256": "849105aee98460586abe2e9fc2062387defbae99f6c1e30038c18dffca02962d"
     },
     {
       "bead_id": "asupersync-xeh8m0.2",
       "path": "artifacts/proof_runner_rch_outcome_contract_v1.json",
-      "sha256": "fb52b743f6aecebf7edf7c78e14ef6c03c737f263d8710f6dccf568c2352498f"
+      "sha256": "7344683dbcfe11f4ca1e576ef0946e42adc9620cb000d8b54eb33ad583f54f2d"
     },
     {
       "bead_id": "asupersync-xeh8m0.3",
       "path": "artifacts/perf/asupersync-xeh8m0-large-core-scheduler-evidence-v1.json",
-      "sha256": "db7f961eb9d77c9b1e4eb1f9e14b87d82060cc7dc8a35de39f77c50e022840c1"
+      "sha256": "be7e22b6c6f1951672e6d1dae0a78904222165f495487f7dad1e2846bf09d6c0"
     },
     {
       "bead_id": "asupersync-xeh8m0.3",
       "path": "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
-      "sha256": "cf5250b464151cc1b942b8265901b40f93d56eee3b54fde8b655755e9fe118dd"
+      "sha256": "a9f1967f65a5991a69336cc3b4d7d6159df4ead2d780471cbddebeb8746ff1ba"
     },
     {
       "bead_id": "asupersync-xeh8m0.4",

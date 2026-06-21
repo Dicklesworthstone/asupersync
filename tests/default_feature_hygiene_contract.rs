@@ -51,7 +51,7 @@ fn default_features_do_not_enable_test_internals_for_downstream_consumers() {
 
     assert_eq!(
         default,
-        &vec!["proc-macros".to_string()],
+        &vec!["proc-macros".to_string(), "nightly-outcome-try".to_string()],
         "default features must stay production-safe; test-internals is opt-in"
     );
     assert!(
@@ -79,12 +79,12 @@ fn docs_match_default_feature_policy() {
         "README feature table must document test-internals as non-default"
     );
     assert!(
-        readme
-            .contains("default production\nfeature set is intentionally limited to `proc-macros`"),
+        readme.contains("default production\nfeature set is intentionally limited")
+            && readme.contains("`proc-macros` plus\n`nightly-outcome-try`"),
         "README must explain the production default feature boundary"
     );
     assert!(
-        agents.contains("default = [\"proc-macros\"]"),
+        agents.contains("default = [\"proc-macros\", \"nightly-outcome-try\"]"),
         "AGENTS feature summary must not put test-internals in default"
     );
 }

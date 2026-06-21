@@ -84,7 +84,7 @@
       "invariant_name": "region_close_quiescence",
       "classification": "no_loss_case",
       "tokio_reference_observation": "A detached Tokio JoinHandle can keep running after its logical parent exits unless the parent keeps and awaits or aborts the handle.",
-      "asupersync_proof_row": "Cx::spawn and Cx::spawn_in bind the task to a region, and region close requires owned children to quiesce before close completes.",
+      "asupersync_proof_row": "asupersync Cx::spawn and Cx::spawn_in bind the task to a region, and region close requires owned children to quiesce before close completes.",
       "caveat_text": "Tokio programs can enforce this with JoinSet or explicit handle management; this proof targets migrations from unstructured spawn ownership.",
       "safe_migration_rewrite": "Move unstructured tokio::spawn sites into Cx::spawn or Cx::spawn_in and close the owning region at shutdown boundaries.",
       "expected_projection": {

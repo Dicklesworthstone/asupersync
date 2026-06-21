@@ -376,7 +376,7 @@
         "reason": "G2 fleet benchmark has no fresh remote-required result recorded for the full RaptorQ-over-QUIC versus tuned rsync payload matrix.",
         "required_followup": "Rerun the exact arq-quic-fleet-benchmark manifest command from a committed main tree with SENDER, RECEIVER, RECEIVER_IP, and ATP_BIN_LOCAL set, then replace this no-fresh-result row with the measured evidence."
       },
-      "notes": "This row intentionally records the benchmark lane without claiming a win. Until G2 runs, it proves no performance improvement, no rsync-beating result, no release readiness, and no broad workspace health."
+      "notes": "This no-claim row intentionally records the benchmark lane without claiming a win. Until G2 runs, it proves no performance improvement, no rsync-beating result, no release readiness, and no broad workspace health."
     },
     {
       "claim_id": "admission-aware-proof-lane-atlas",

@@ -110,8 +110,8 @@ fn live_docs_cover_every_snapshot_marker() {
     let claims = receipt["claims"].as_array().expect("claims array");
     assert_eq!(
         claims.len(),
-        20,
-        "live snapshot should still cover 20 claim rows"
+        33,
+        "live snapshot should still cover 33 claim rows"
     );
     for claim in claims {
         assert_eq!(claim["fresh"].as_bool(), Some(true));
