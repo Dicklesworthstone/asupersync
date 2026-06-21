@@ -1355,6 +1355,40 @@ mod tests {
     }
 
     #[test]
+    fn rate_matched_pacing_plan_flow_credit_preserves_repair_overhead_accounting() {
+        let mut policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        policy.max_overhead = 0.50;
+        let est = PathEstimate {
+            rtt_s: 0.050,
+            dec_symbols_per_s: 50_000_000.0,
+            ..est(0.08, 100_000_000.0)
+        };
+
+        let plan =
+            rate_matched_pacing_plan_with_flow_credit(&est, &policy, 1200, 8_000_000.0, 32, 24_000)
+                .expect("lossy path with receiver credit should still produce a pacing plan");
+
+        assert!(
+            plan.block.overhead > 0.0,
+            "loss evidence should keep calibrated repair overhead enabled"
+        );
+        let raw_bytes_per_s = plan.raw_pacing_bits_per_s as f64 / 8.0;
+        let overhead_factor = 1.0 + plan.block.overhead;
+        assert!(
+            plan.useful_pacing_bytes_per_s <= raw_bytes_per_s / overhead_factor + 1.0,
+            "flow-credit capping must not forget repair overhead: useful={} raw={} overhead={}",
+            plan.useful_pacing_bytes_per_s,
+            raw_bytes_per_s,
+            plan.block.overhead
+        );
+    }
+
+    #[test]
     fn rate_matched_pacing_plan_declines_zero_or_too_small_credit() {
         let policy = AdaptivePolicy {
             min_samples_to_activate: 1,
