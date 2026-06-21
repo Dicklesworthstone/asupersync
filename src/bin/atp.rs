@@ -548,8 +548,6 @@ impl rustls::client::danger::ServerCertVerifier for QuicCliServerVerifier {
         ocsp_response: &[u8],
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        use rustls::client::danger::ServerCertVerifier;
-
         match self.webpki.verify_server_cert(
             end_entity,
             intermediates,
@@ -649,6 +647,7 @@ fn verify_quic_cli_pinned_leaf(
                 _ => false,
             })
         }
+        _ => false,
     };
 
     if name_matches {
