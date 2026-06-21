@@ -30,7 +30,7 @@ fn snapshot_empty_ledger() {
     let snapshot = ledger.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_empty", snapshot);
     });
@@ -50,7 +50,7 @@ fn snapshot_reserved_obligations() {
     let snapshot = ledger.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_reserved", snapshot);
     });
@@ -72,7 +72,7 @@ fn snapshot_reserve_to_commit() {
     let snapshot = ledger.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_reserve_to_commit", snapshot);
     });
@@ -94,7 +94,7 @@ fn snapshot_reserve_to_abort() {
     let snapshot = ledger.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_reserve_to_abort", snapshot);
     });
@@ -117,7 +117,7 @@ fn snapshot_commit_to_close() {
     let snapshot = ledger.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_commit_to_close", snapshot);
     });
@@ -140,7 +140,7 @@ fn snapshot_abort_to_close() {
     let snapshot = ledger.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_abort_to_close", snapshot);
     });
@@ -168,7 +168,7 @@ fn snapshot_conflicts() {
     let snapshot = ledger1.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_conflicts", snapshot);
     });
@@ -192,7 +192,7 @@ fn snapshot_linearity_violations() {
     let snapshot = ledger1.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_linearity_violations", snapshot);
     });
@@ -237,7 +237,7 @@ fn snapshot_no_leak_witness() {
     );
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_no_leak_witness", snapshot);
     });
@@ -270,7 +270,7 @@ fn snapshot_mixed_states() {
     let snapshot = ledger.snapshot();
 
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_mixed_states", snapshot);
     });
@@ -296,7 +296,7 @@ fn snapshot_binary_format_stability() {
     // Test that the binary format itself is stable using debug representation
     // Changes to field order, types, or serialization will be caught
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots");
+    settings.set_snapshot_path("snapshots");
     settings.bind(|| {
         assert_debug_snapshot!("ledger_snapshot_binary_format", snapshot);
     });

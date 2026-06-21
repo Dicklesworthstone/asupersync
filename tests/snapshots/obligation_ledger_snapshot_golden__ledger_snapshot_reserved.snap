@@ -1,0 +1,15 @@
+---
+source: tests/obligation_ledger_snapshot_golden.rs
+expression: snapshot
+---
+LedgerSnapshot {
+    node: NodeId(
+        "test-node-1",
+    ),
+    total: 3,
+    pending: 3,
+    committed: 0,
+    aborted: 0,
+    conflicts: 0,
+    linearity_violations: 0,
+}

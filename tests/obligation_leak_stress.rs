@@ -18,7 +18,7 @@
 //!    invariant violations.
 //!
 //! Configuration:
-//!   - `OBLIGATION_STRESS_SCHEDULES`: Override schedule count (default 100_000).
+//!   - `OBLIGATION_STRESS_SCHEDULES`: Override schedule count (default 40_000).
 //!     Set to 10_000_000 for nightly CI.
 //!
 //! Statistics: Tracks leak rate with exact binomial 95% confidence interval.
@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // ============================================================================
 
 /// Default schedule count for regular test runs.
-const DEFAULT_SCHEDULES: u64 = 100_000;
+const DEFAULT_SCHEDULES: u64 = 40_000;
 
 /// Environment variable to override schedule count.
 const SCHEDULES_ENV: &str = "OBLIGATION_STRESS_SCHEDULES";

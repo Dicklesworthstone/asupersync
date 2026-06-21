@@ -25,6 +25,23 @@ fn arb_time() -> impl Strategy<Value = Time> {
     (1u64..=1_000_000_000u64).prop_map(Time::from_nanos)
 }
 
+/// Generate three strictly ordered time values.
+fn arb_ordered_times3() -> impl Strategy<Value = (Time, Time, Time)> {
+    (
+        1u64..=1_000_000u64,
+        1u64..=1_000_000u64,
+        1u64..=1_000_000u64,
+    )
+        .prop_map(|(start, delta1, delta2)| {
+            let middle = start + delta1;
+            (
+                Time::from_nanos(start),
+                Time::from_nanos(middle),
+                Time::from_nanos(middle + delta2),
+            )
+        })
+}
+
 /// Generate arbitrary obligation IDs
 fn arb_obligation_id() -> impl Strategy<Value = ObligationId> {
     (any::<u32>(), any::<u32>())
@@ -148,14 +165,9 @@ fn mr_terminal_state_absorption() {
         kind in arb_obligation_kind(),
         holder in arb_task_id(),
         region in arb_region_id(),
-        reserved_at in arb_time(),
-        resolve_at in arb_time(),
-        later_time in arb_time(),
+        (reserved_at, resolve_at, later_time) in arb_ordered_times3(),
         abort_reason in arb_abort_reason(),
     )| {
-        prop_assume!(resolve_at > reserved_at);
-        prop_assume!(later_time > resolve_at);
-
         // Test committed state absorption
         let mut ob = create_obligation(id, kind, holder, region, reserved_at);
         ob.commit(resolve_at);
@@ -399,14 +411,8 @@ fn mr_time_monotonicity_preservation() {
         kind in arb_obligation_kind(),
         holder in arb_task_id(),
         region in arb_region_id(),
-        reserved_at in arb_time(),
-        resolve_at1 in arb_time(),
-        resolve_at2 in arb_time(),
+        (reserved_at, resolve_at1, resolve_at2) in arb_ordered_times3(),
     )| {
-        prop_assume!(resolve_at1 > reserved_at);
-        prop_assume!(resolve_at2 > reserved_at);
-        prop_assume!(resolve_at1 < resolve_at2);
-
         let mut ob1 = create_obligation(id, kind, holder, region, reserved_at);
         let mut ob2 = create_obligation(id, kind, holder, region, reserved_at);
 
@@ -467,14 +473,9 @@ fn mr_commit_after_abort_consistent_error() {
         kind in arb_obligation_kind(),
         holder in arb_task_id(),
         region in arb_region_id(),
-        reserved_at in arb_time(),
-        abort_at in arb_time(),
-        commit_at in arb_time(),
+        (reserved_at, abort_at, commit_at) in arb_ordered_times3(),
         abort_reason in arb_abort_reason(),
     )| {
-        prop_assume!(abort_at > reserved_at);
-        prop_assume!(commit_at > abort_at);
-
         let mut ob = create_obligation(id, kind, holder, region, reserved_at);
         ob.abort(abort_at, abort_reason);
 
@@ -496,13 +497,8 @@ fn mr_double_operation_consistent_error() {
         kind in arb_obligation_kind(),
         holder in arb_task_id(),
         region in arb_region_id(),
-        reserved_at in arb_time(),
-        first_time in arb_time(),
-        second_time in arb_time(),
+        (reserved_at, first_time, second_time) in arb_ordered_times3(),
     )| {
-        prop_assume!(first_time > reserved_at);
-        prop_assume!(second_time > first_time);
-
         // Test double commit
         let mut ob1 = create_obligation(id, kind, holder, region, reserved_at);
         ob1.commit(first_time);

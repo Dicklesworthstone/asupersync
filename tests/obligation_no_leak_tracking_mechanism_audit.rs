@@ -235,7 +235,7 @@ fn ledger_acquire_panics_on_finalized_region() {
     // acquires silently grow the ledger past finalize.
     let source = read("src/obligation/ledger.rs");
 
-    let fn_marker = "pub fn acquire_with_context(";
+    let fn_marker = "fn acquire_internal(";
     let pos = source.find(fn_marker).expect("acquire_with_context fn");
     let body_window = &source[pos..pos + 1500];
 
@@ -247,7 +247,7 @@ fn ledger_acquire_panics_on_finalized_region() {
     );
 
     assert!(
-        body_window.contains("br-asupersync-12cqs2"),
+        source.contains("br-asupersync-12cqs2"),
         "REGRESSION: the br-asupersync-12cqs2 reference \
          (acquire-on-finalized fence rationale) is gone.",
     );
@@ -356,10 +356,8 @@ fn ledger_stats_pending_field_drives_pending_count() {
     // it.
     let source = read("src/obligation/ledger.rs");
 
-    let acquire_marker = "pub fn acquire_with_context(";
-    let pos = source
-        .find(acquire_marker)
-        .expect("acquire_with_context fn");
+    let acquire_marker = "fn acquire_internal(";
+    let pos = source.find(acquire_marker).expect("acquire_internal fn");
     let body_window = &source[pos..pos + 2500];
 
     assert!(

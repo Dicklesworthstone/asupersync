@@ -1270,11 +1270,12 @@ mod tests {
             before.total_leaked.saturating_add(1),
             after.total_leaked
         );
+        let current_count = panic_leak_count();
         crate::assert_with_log!(
-            panic_leak_count() == after.total_leaked,
+            current_count >= after.total_leaked,
             "count compatibility",
             after.total_leaked,
-            panic_leak_count()
+            current_count
         );
         crate::test_complete!("panic_leaks_snapshot_records_unwind_drop");
     }

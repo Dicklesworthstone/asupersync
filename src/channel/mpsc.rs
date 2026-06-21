@@ -551,17 +551,10 @@ impl<T> Sender<T> {
     /// Here we lock once, commit-or-fail, and never touch the `reserved`
     /// counter at all.
     ///
-    /// Capacity-only semantics (br-asupersync-m02s6r). Returns `Full` only
-    /// when no slot is physically available (`used_slots() >= capacity`);
-    /// queued waiters do *not* block a `try_send`. Rationale: `try_send` is
-    /// the load-shed primitive — callers expect "slot exists → push". A
-    /// stricter FIFO interpretation made backoff loops miss real capacity
-    /// windows during transient contention. Fairness for waiting senders is
-    /// preserved through the two-phase `reserve`/`send` path: when a `recv`
-    /// frees a slot, the head waiter's waker is invoked; if a `try_send`
-    /// races in and steals that slot, the waiter's next poll re-registers at
-    /// the head and is woken again on the following `recv`. `try_reserve`
-    /// retains strict FIFO so the two-phase path remains a fair queue.
+    /// Strict sender FIFO semantics. Returns `Full` while live reserve waiters
+    /// exist, even if a receiver has just freed physical capacity. That freed
+    /// slot belongs to the head queued reserver until it polls and either
+    /// claims or cancels its reservation; a later `try_send` must not steal it.
     #[inline]
     pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
         let recv_waker = {
@@ -571,7 +564,7 @@ impl<T> Sender<T> {
                 return Err(SendError::Disconnected(value));
             }
 
-            if !inner.has_capacity(self.shared.capacity) {
+            if inner.has_waiting_sender() || !inner.has_capacity(self.shared.capacity) {
                 return Err(SendError::Full(value));
             }
 
@@ -2009,15 +2002,15 @@ mod tests {
         crate::test_complete!("try_send_when_full");
     }
 
-    /// br-asupersync-m02s6r — try_send with capacity-only semantics.
+    /// br-asupersync-m02s6r / FIFO correction — try_send honors queued waiters.
     ///
     /// Builds the state "1 queued reserve waiter, 2 free slots" (cap=4) and
-    /// asserts that `try_send` succeeds rather than returning `Full`. The
-    /// stricter old behavior treated any queued waiter as blocking — that
-    /// made backoff loops miss real capacity windows.
+    /// asserts that `try_send` returns `Full` until the head waiter claims or
+    /// cancels its reservation. Physical capacity alone is not enough because
+    /// the freed slot is already promised to the FIFO reserve queue.
     #[test]
-    fn try_send_succeeds_with_free_slots_despite_queued_waiter() {
-        init_test("try_send_succeeds_with_free_slots_despite_queued_waiter");
+    fn try_send_respects_queued_waiter_fifo() {
+        init_test("try_send_respects_queued_waiter_fifo");
         let (tx, mut rx) = channel::<i32>(4);
         let cx = test_cx();
 
@@ -2048,25 +2041,36 @@ mod tests {
         let (qlen, rlen) = tx.debug_counts();
         crate::assert_with_log!(qlen == 2 && rlen == 0, "after drain", (2, 0), (qlen, rlen));
 
-        // Old behavior: try_send returns Full because send_wakers is non-empty.
-        // New behavior: try_send succeeds because used_slots (2) < capacity (4).
+        // The queued waiter owns the next capacity handoff, so a later
+        // try_send must not steal it even though physical slots are free.
         let result = tx.try_send(99);
         crate::assert_with_log!(
-            result.is_ok(),
-            "try_send succeeds with free slot + queued waiter",
-            true,
-            result.is_ok()
+            matches!(result, Err(SendError::Full(99))),
+            "try_send blocked by queued waiter",
+            "Err(Full(99))",
+            format!("{:?}", result)
         );
 
-        // Sanity: the waiter is still polled-able. After we re-poll it, the
-        // next free slot (created by another recv) goes to the waiter,
-        // confirming the two-phase reserve/send path remains live.
-        let m3 = rx.try_recv().expect("recv 3");
-        crate::assert_with_log!(m3 == 3, "recv 3", 3, m3);
+        let permit = match reserve_fut.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("head waiter should claim freed slot, got {other:?}"),
+        };
+        crate::assert_with_log!(
+            matches!(permit.send(99), Outcome::Ok(())),
+            "waiter commit",
+            "Outcome::Ok",
+            "Outcome::Ok"
+        );
+        let committed = rx.try_recv().expect("waiter commit recv");
+        crate::assert_with_log!(committed == 3, "recv existing third", 3, committed);
+        let committed = rx.try_recv().expect("waiter committed value");
+        crate::assert_with_log!(committed == 4, "recv existing fourth", 4, committed);
+        let committed = rx.try_recv().expect("waiter committed value");
+        crate::assert_with_log!(committed == 99, "recv waiter value", 99, committed);
         // Drop the waiter to release its queue position cleanly.
         drop(reserve_fut);
 
-        crate::test_complete!("try_send_succeeds_with_free_slots_despite_queued_waiter");
+        crate::test_complete!("try_send_respects_queued_waiter_fifo");
     }
 
     #[test]

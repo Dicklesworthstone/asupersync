@@ -259,19 +259,22 @@ proptest! {
         let result1 = state.join(VarState::Empty);
         let result2 = VarState::Empty.join(state);
 
-        // Empty should be absorbed, except when joining with Resolved
+        // Empty represents absence of evidence. Joining it with a held
+        // obligation records conservative "may hold" knowledge rather than
+        // preserving the stronger single-branch state.
         let expected = match state {
             VarState::Empty => VarState::Empty,
             VarState::Resolved => VarState::Resolved,
-            _ => state,
+            VarState::Held(kind) | VarState::MayHold(kind) => VarState::MayHold(kind),
+            VarState::MayHoldAmbiguous => VarState::MayHoldAmbiguous,
         };
 
-        prop_assert!(result1 == expected || (state == VarState::Resolved && result1 == VarState::Resolved),
-            "Empty should act as identity for non-Resolved states: {} ⊔ Empty = {} (expected behavior varies)",
+        prop_assert_eq!(result1, expected,
+            "Joining with Empty should preserve conservative reachability: {} ⊔ Empty = {}",
             state, result1);
 
-        prop_assert!(result2 == expected || (state == VarState::Resolved && result2 == VarState::Resolved),
-            "Empty should act as identity for non-Resolved states: Empty ⊔ {} = {} (expected behavior varies)",
+        prop_assert_eq!(result2, expected,
+            "Joining with Empty should preserve conservative reachability: Empty ⊔ {} = {}",
             state, result2);
 
         asupersync::test_complete!("mr4_join_identity");
@@ -289,6 +292,15 @@ proptest! {
         // Skip if mapping is empty or creates conflicts
         if mapping.is_empty() {
             return Ok(());
+        }
+
+        let vars = extract_variables(&body.instructions);
+        let mut renamed_vars = BTreeSet::new();
+        for var in vars {
+            let renamed = mapping.get(&var).copied().unwrap_or(var);
+            if !renamed_vars.insert(renamed) {
+                return Ok(());
+            }
         }
 
         let renamed_body = rename_body(&body, &mapping);

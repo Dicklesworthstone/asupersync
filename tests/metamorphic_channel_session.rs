@@ -492,7 +492,6 @@ fn mr_channel_capacity_consistency() {
         let rt = RuntimeBuilder::new().build().expect("runtime creation failed");
 
         rt.block_on(async {
-            let cx = Cx::for_testing();
             let capacity = 3;
             let (sender, _receiver) = tracked_channel::<i32>(capacity);
 
@@ -501,15 +500,17 @@ fn mr_channel_capacity_consistency() {
 
             // Try to send more than capacity
             for i in 0..send_count {
-                match sender.send(&cx, i as i32).await {
-                    Ok(_) => successful_sends += 1,
+                match sender.try_reserve() {
+                    Ok(permit) => match permit.send(i as i32) {
+                        Ok(_) => successful_sends += 1,
+                        Err(_) => failed_sends += 1,
+                    },
                     Err(_) => failed_sends += 1,
                 }
             }
 
             // Without receiver consuming, we should hit capacity limits
-            // The exact behavior depends on backpressure handling
-            prop_assert!(successful_sends <= send_count);
+            prop_assert!(successful_sends <= capacity);
             prop_assert_eq!(successful_sends + failed_sends, send_count);
             Ok::<(), TestCaseError>(())
         })?;

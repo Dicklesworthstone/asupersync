@@ -1045,8 +1045,8 @@ fn obligation_commit_records_hold_duration() {
         .create_obligation(ObligationKind::SendPermit, task_id, root, None)
         .expect("create obligation");
 
-    // Advance virtual time
-    runtime.state.now = Time::from_nanos(1_000_000);
+    // Advance virtual time through the lab clock used by RuntimeState.
+    runtime.advance_time(1_000_000);
 
     let hold_ns = runtime.state.commit_obligation(obl).expect("commit");
     tracing::info!(hold_ns, "obligation committed with hold duration");
