@@ -97,6 +97,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--wire-loss", type=float, default=None,
                     help="regime's true wire loss fraction (for inflation judgment)")
     ap.add_argument("--min-rounds", type=int, default=2)
+    ap.add_argument("--max-rounds", type=int, default=None,
+                    help="FAIL if convergence took more feedback rounds than this "
+                         "(MATRIX-20 lossy wall = feedback rounds; LEVER-B/F target fr<=2). "
+                         "Off by default so non-lossy traces aren't flagged.")
     args = ap.parse_args(argv)
 
     src = open(args.log, encoding="utf-8") if args.log else sys.stdin
@@ -138,7 +142,15 @@ def main(argv: list[str]) -> int:
                 flags.append(f"round {r['round']}: loss_bar inflated "
                              f"{r['loss_bar']:.3f} > {base:.3f}×{args.loss_inflate}")
 
+    # 4. feedback-rounds budget — MATRIX-20 proved the lossy wall IS the feedback
+    #    rounds (50M/bad fr=4 ≈ 4×80ms RTT + re-spray). LEVER-B/F must cut them.
+    max_round = max((r["round"] for r in rounds), default=0)
+    if args.max_rounds is not None and max_round > args.max_rounds:
+        flags.append(f"convergence took {max_round} feedback rounds > budget "
+                     f"{args.max_rounds} (MATRIX-20 lossy wall; LEVER-B/F must cut rounds)")
+
     print("\n## Verdict\n")
+    print(f"- parsed {len(rounds)} round record(s); highest feedback round = {max_round}.")
     if len(rounds) < args.min_rounds:
         print(f"- only {len(rounds)} round(s) parsed (need ≥{args.min_rounds}); not a collapse sample.")
         return 0
