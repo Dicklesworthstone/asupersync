@@ -14,7 +14,8 @@ use crate::tracing_compat::trace;
 use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -24,21 +25,85 @@ use std::time::Duration;
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
 
-/// Cap on the per-worker `seen_io_tokens` HashSet (br-asupersync-414j0b).
+/// Cap on the per-worker `seen_io_tokens` generation ring (br-asupersync-414j0b).
 ///
-/// At the cap (~64K distinct tokens) memory footprint is roughly:
-///   * 65_536 entries × ~24 B/entry (HashSet bucket + u64) ≈ 1.5 MiB
-///
-/// On overflow the set is CLEARED (full reset) rather than LRU-evicted —
-/// the io_requested trace event's contract is "emit the first time this
-/// token is observed," so a periodic reset re-emits some old tokens'
-/// first-sight events after long uptimes. That re-emission is the
-/// documented tradeoff vs unbounded growth.
+/// The ring evicts incrementally instead of clearing all history at the cap.
+/// That preserves the memory ceiling while avoiding a burst of re-admitted
+/// tokens exactly when a busy worker crosses the boundary.
 ///
 /// Pre-fix the set grew monotonically with cumulative distinct I/O
 /// tokens (~24 B × 100k tokens/day → 2.4 MiB/day per worker leaked
 /// silently). Post-fix the worst-case footprint is bounded.
 pub const MAX_SEEN_IO_TOKENS: usize = 65_536;
+
+#[derive(Debug, Default)]
+struct SeenIoTokens {
+    latest_generation: HashMap<u64, u64>,
+    generation_order: VecDeque<(u64, u64)>,
+    next_generation: u64,
+}
+
+impl SeenIoTokens {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            latest_generation: HashMap::with_capacity(capacity),
+            generation_order: VecDeque::with_capacity(capacity),
+            next_generation: 0,
+        }
+    }
+
+    fn observe(&mut self, token: u64) -> bool {
+        let generation = self.allocate_generation();
+        let is_first_observation = match self.latest_generation.entry(token) {
+            Entry::Occupied(mut entry) => {
+                *entry.get_mut() = generation;
+                false
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(generation);
+                true
+            }
+        };
+
+        self.generation_order.push_back((token, generation));
+        self.trim_to_capacity();
+
+        is_first_observation
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.latest_generation.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, token: u64) -> bool {
+        self.latest_generation.contains_key(&token)
+    }
+
+    #[cfg(test)]
+    fn raw_order_len(&self) -> usize {
+        self.generation_order.len()
+    }
+
+    fn allocate_generation(&mut self) -> u64 {
+        self.next_generation = self.next_generation.wrapping_add(1);
+        if self.next_generation == 0 {
+            self.next_generation = 1;
+        }
+        self.next_generation
+    }
+
+    fn trim_to_capacity(&mut self) {
+        while self.generation_order.len() > MAX_SEEN_IO_TOKENS {
+            if let Some((token, generation)) = self.generation_order.pop_front() {
+                if self.latest_generation.get(&token) == Some(&generation) {
+                    self.latest_generation.remove(&token);
+                }
+            }
+        }
+    }
+}
 
 /// A worker thread that executes tasks.
 pub struct Worker {
@@ -64,17 +129,13 @@ pub struct Worker {
     pub trace: TraceBufferHandle,
     /// Timer driver for timestamps (optional).
     pub timer_driver: Option<TimerDriverHandle>,
-    /// Tokens seen for I/O trace emission (HashSet for O(1) insert vs BTreeSet O(log n)).
+    /// Tokens seen for I/O trace emission (generation ring for O(1)-style dedup).
     ///
-    /// br-asupersync-414j0b: bounded at [`MAX_SEEN_IO_TOKENS`] entries.
-    /// On overflow the set is CLEARED (not LRU-evicted) — the contract for
-    /// the io_requested trace event is "emit the first time we see a token,"
-    /// so a periodic reset re-emits some old tokens' first-sight events
-    /// after long uptimes. That re-emission is the documented tradeoff vs
-    /// unbounded growth (~24 B/entry × cumulative distinct tokens, which
-    /// for a long-running SaaS server with hours/days of uptime would
-    /// otherwise leak silently — see bead description for precedent).
-    seen_io_tokens: HashSet<u64>,
+    /// br-asupersync-414j0b first bounded the set by clearing the whole map
+    /// at cap. br-asupersync-sched-hot-path-perf-bt4y5f.9 replaces that
+    /// compromise with incremental eviction so a single new token does not
+    /// re-admit every recently-seen token.
+    seen_io_tokens: SeenIoTokens,
     /// Cached metrics provider — avoids Arc clone per task execution.
     metrics: Arc<dyn MetricsProvider>,
     /// Panic isolation framework for safe task execution.
@@ -131,7 +192,7 @@ impl Worker {
             io_driver,
             trace,
             timer_driver,
-            seen_io_tokens: HashSet::with_capacity(32),
+            seen_io_tokens: SeenIoTokens::with_capacity(32),
             metrics,
             panic_isolator,
             scratch_local: Cell::new(Vec::with_capacity(16)),
@@ -186,15 +247,7 @@ impl Worker {
                     io.try_turn_with(Some(Duration::from_millis(1)), |event, interest| {
                         let polling_token = event.token.0 as u64;
                         let interest_bits = interest.unwrap_or(event.ready).bits();
-                        // br-asupersync-414j0b: enforce MAX_SEEN_IO_TOKENS
-                        // cap. On overflow, full-clear so subsequent
-                        // tokens are once-again first-sight (re-emits
-                        // some old tokens' io_requested event — the
-                        // documented tradeoff vs unbounded growth).
-                        if seen.len() >= MAX_SEEN_IO_TOKENS && !seen.contains(&polling_token) {
-                            seen.clear();
-                        }
-                        if seen.insert(polling_token) {
+                        if seen.observe(polling_token) {
                             trace.record_event(|seq| {
                                 TraceEvent::io_requested(seq, now, polling_token, interest_bits)
                             });
@@ -2390,61 +2443,66 @@ mod tests {
 
     #[test]
     fn seen_io_tokens_respects_max_cap() {
-        // Replicate the bound logic in isolation. The Worker construction
-        // requires significant scaffolding (RuntimeState, GlobalQueue,
-        // stealers) so we test the algorithmic invariant directly: when
-        // the set hits MAX_SEEN_IO_TOKENS, inserting a NEW token clears
-        // the set first, and the result still respects the cap.
-        let mut seen: HashSet<u64> = HashSet::with_capacity(32);
+        let mut seen = SeenIoTokens::with_capacity(32);
 
         // Fill to one below the cap.
         for token in 0..(MAX_SEEN_IO_TOKENS as u64 - 1) {
-            seen.insert(token);
+            assert!(seen.observe(token));
         }
         assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS - 1);
 
         // Insert one more — should be allowed (still below cap).
         let pre_cap_token = MAX_SEEN_IO_TOKENS as u64 - 1;
-        if seen.len() >= MAX_SEEN_IO_TOKENS && !seen.contains(&pre_cap_token) {
-            seen.clear();
-        }
-        seen.insert(pre_cap_token);
+        assert!(seen.observe(pre_cap_token));
         assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
 
-        // Now AT cap: a new token must trigger clear.
+        // Now AT cap: a new token must evict incrementally rather than
+        // full-clear all prior observations.
         let new_token = MAX_SEEN_IO_TOKENS as u64;
-        if seen.len() >= MAX_SEEN_IO_TOKENS && !seen.contains(&new_token) {
-            seen.clear();
-        }
-        seen.insert(new_token);
-        // Post-clear, only the new token remains.
-        assert_eq!(seen.len(), 1);
+        assert!(seen.observe(new_token));
+        assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
         assert!(seen.contains(&new_token));
+        assert!(!seen.contains(0));
+        assert!(seen.contains(1));
+        assert_eq!(seen.raw_order_len(), MAX_SEEN_IO_TOKENS);
     }
 
     #[test]
-    fn seen_io_tokens_at_cap_with_existing_token_no_clear() {
-        // If the token is ALREADY in the set, even at cap, no clear
-        // needed — the dedup short-circuits.
-        let mut seen: HashSet<u64> = (0..MAX_SEEN_IO_TOKENS as u64).collect();
+    fn seen_io_tokens_at_cap_with_existing_token_no_full_clear() {
+        let mut seen = SeenIoTokens::with_capacity(32);
+        for token in 0..MAX_SEEN_IO_TOKENS as u64 {
+            assert!(seen.observe(token));
+        }
         assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
 
         let existing = 42u64;
-        if seen.len() >= MAX_SEEN_IO_TOKENS && !seen.contains(&existing) {
-            seen.clear();
+        assert!(!seen.observe(existing));
+        assert!(seen.contains(existing));
+        assert!(seen.len() >= MAX_SEEN_IO_TOKENS - 1);
+        assert_eq!(seen.raw_order_len(), MAX_SEEN_IO_TOKENS);
+    }
+
+    #[test]
+    fn seen_io_tokens_boundary_does_not_readmit_retained_tokens() {
+        let mut seen = SeenIoTokens::with_capacity(32);
+        for token in 0..MAX_SEEN_IO_TOKENS as u64 {
+            assert!(seen.observe(token));
         }
-        let was_new = seen.insert(existing);
-        // Token already there → no clear, no new insert (insert returns false).
-        assert!(!was_new);
-        assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
+
+        assert!(seen.observe(MAX_SEEN_IO_TOKENS as u64));
+        assert!(!seen.contains(0));
+
+        // Under the previous full-clear-at-cap strategy, token 1 would have
+        // been re-admitted as "new" immediately after the boundary crossing.
+        assert!(seen.contains(1));
+        assert!(!seen.observe(1));
     }
 
     #[test]
     fn max_seen_io_tokens_const_is_documented_value() {
-        // br-asupersync-414j0b docs the cap as 65_536. Regression guard
-        // so a casual change to the constant trips this test and the
-        // bead's "~1.5 MiB worst-case footprint" calculation gets
-        // re-validated.
+        // br-asupersync-414j0b documents the cap as 65_536. Regression guard
+        // so a casual change to the constant trips this test and the memory
+        // ceiling calculation gets re-validated.
         assert_eq!(MAX_SEEN_IO_TOKENS, 65_536);
     }
 
