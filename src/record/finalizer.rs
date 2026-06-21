@@ -5,6 +5,7 @@
 //! order to ensure proper resource release ordering.
 
 use crate::types::Budget;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -43,6 +44,9 @@ pub const FINALIZER_POLL_BUDGET: u32 = 100;
 /// Default time budget for finalizers (5 seconds).
 pub const FINALIZER_TIME_BUDGET_NANOS: u64 = 5_000_000_000;
 
+/// Stable error-code token for finalizer timeout diagnostics.
+pub const FINALIZER_TIMEOUT_ASUP_CODE: &str = "ASUP-E303";
+
 /// Returns the default budget for finalizer execution.
 #[must_use]
 #[inline]
@@ -59,13 +63,13 @@ pub fn finalizer_budget() -> Budget {
     );
     debug_assert!(
         FINALIZER_TIME_BUDGET_NANOS > 0,
-        "br-asupersync-mg70eb: finalizer time budget must be positive \
+        "[ASUP-E303] finalizer time budget must be positive \
          (time_budget_nanos={})",
         FINALIZER_TIME_BUDGET_NANOS
     );
     debug_assert!(
         FINALIZER_TIME_BUDGET_NANOS <= 300_000_000_000, // 5 minutes max
-        "br-asupersync-mg70eb: finalizer time budget seems excessive, may indicate configuration error \
+        "[ASUP-E303] finalizer time budget seems excessive, may indicate configuration error \
          (time_budget_nanos={}, max_reasonable=300_000_000_000)",
         FINALIZER_TIME_BUDGET_NANOS
     );
@@ -136,6 +140,53 @@ impl FinalizerEscalation {
                 Ok(())
             }
         }
+    }
+}
+
+/// Rendered finalizer timeout diagnostic used by runtime and docs surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinalizerTimeoutDiagnostic {
+    /// Stable finalizer id within the runtime state.
+    pub finalizer_id: u64,
+    /// Configured finalizer completion budget in nanoseconds.
+    pub time_budget_nanos: u64,
+    /// Escalation policy active when the timeout was detected.
+    pub escalation: FinalizerEscalation,
+}
+
+impl FinalizerTimeoutDiagnostic {
+    /// Create a finalizer timeout diagnostic with an explicit time budget.
+    #[must_use]
+    #[inline]
+    pub const fn new(
+        finalizer_id: u64,
+        time_budget_nanos: u64,
+        escalation: FinalizerEscalation,
+    ) -> Self {
+        Self {
+            finalizer_id,
+            time_budget_nanos,
+            escalation,
+        }
+    }
+
+    /// Create a finalizer timeout diagnostic using the default finalizer budget.
+    #[must_use]
+    #[inline]
+    pub const fn for_default_budget(finalizer_id: u64, escalation: FinalizerEscalation) -> Self {
+        Self::new(finalizer_id, FINALIZER_TIME_BUDGET_NANOS, escalation)
+    }
+}
+
+impl fmt::Display for FinalizerTimeoutDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[{FINALIZER_TIMEOUT_ASUP_CODE}] finalizer {} exceeded {}ns completion budget \
+             (escalation={:?}); move blocking cleanup behind a bounded capability or avoid \
+             waiting on same-region tasks from finalizer code",
+            self.finalizer_id, self.time_budget_nanos, self.escalation
+        )
     }
 }
 
@@ -398,6 +449,18 @@ mod tests {
         let panic_cont = FinalizerEscalation::BoundedPanic.allows_continuation();
         crate::assert_with_log!(!panic_cont, "panic no continue", false, panic_cont);
         crate::test_complete!("finalizer_escalation_policies");
+    }
+
+    #[test]
+    fn finalizer_timeout_diagnostic_has_asup_e303_prefix() {
+        let diagnostic =
+            FinalizerTimeoutDiagnostic::for_default_budget(42, FinalizerEscalation::BoundedPanic);
+        let rendered = diagnostic.to_string();
+
+        assert!(rendered.starts_with("[ASUP-E303]"), "{rendered}");
+        assert!(rendered.contains("finalizer 42"), "{rendered}");
+        assert!(rendered.contains("5000000000ns"), "{rendered}");
+        assert!(rendered.contains("BoundedPanic"), "{rendered}");
     }
 
     #[test]

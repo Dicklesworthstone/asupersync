@@ -451,7 +451,7 @@
       "code": "ASUP-E303",
       "name": "finalizer-timeout",
       "area": "cancellation-drain",
-      "status": "reserved",
+      "status": "live",
       "summary": "A region finalizer exceeded its configured completion budget.",
       "probable_causes": [
         "Cleanup performed unbounded I/O or blocking work.",
@@ -462,8 +462,10 @@
         "Avoid waiting on same-region tasks from finalizer code."
       ],
       "doc_path": "docs/error_codes/ASUP-E303.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.5",
+      "source_refs": [
+        "src/record/finalizer.rs"
+      ]
     },
     {
       "code": "ASUP-E401",

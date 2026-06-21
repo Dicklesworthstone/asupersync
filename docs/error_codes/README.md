@@ -40,7 +40,7 @@ lands.
 | ASUP-E205 | live | channels-sync | [Lock-order violation](./ASUP-E205.md) |
 | ASUP-E301 | live | cancellation-drain | [Cancel drain timeout](./ASUP-E301.md) |
 | ASUP-E302 | live | cancellation-drain | [Race loser not drained](./ASUP-E302.md) |
-| ASUP-E303 | reserved | cancellation-drain | [Finalizer timeout](./ASUP-E303.md) |
+| ASUP-E303 | live | cancellation-drain | [Finalizer timeout](./ASUP-E303.md) |
 | ASUP-E401 | live | lab-replay | [Replay divergence](./ASUP-E401.md) |
 | ASUP-E402 | live | lab-replay | [Futurelock detected](./ASUP-E402.md) |
 | ASUP-E403 | live | lab-replay | [Lab seed nondeterminism](./ASUP-E403.md) |
