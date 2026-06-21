@@ -29,6 +29,13 @@ fn arb_auth_key() -> impl Strategy<Value = AuthKey> {
     any::<u64>().prop_map(AuthKey::from_seed)
 }
 
+fn macaroon_proptest_config() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 /// Generate arbitrary capability identifiers
 fn arb_identifier() -> impl Strategy<Value = String> {
     prop_oneof![
@@ -62,7 +69,7 @@ fn arb_resource_pattern() -> impl Strategy<Value = String> {
         Just("files/*".to_string()),
         Just("regions/*/tasks".to_string()),
         Just("net/tcp/**".to_string()),
-        "^[a-z]+(/\\*{1,2})?$".prop_map(|s| s),
+        "[a-z]+(/\\*{1,2})?".prop_map(|s| s),
     ]
 }
 
@@ -299,7 +306,7 @@ fn mr_caveat_order_independence() {
         true
     }
 
-    proptest!(|(
+    proptest!(macaroon_proptest_config(), |(
         key in arb_auth_key(),
         identifier in arb_identifier(),
         location in arb_location(),
@@ -369,7 +376,7 @@ fn mr_attenuation_monotonicity() {
         true
     }
 
-    proptest!(|(
+    proptest!(macaroon_proptest_config(), |(
         key in arb_auth_key(),
         identifier in arb_identifier(),
         location in arb_location(),
@@ -428,7 +435,7 @@ fn mr_signature_chain_preservation() {
         true
     }
 
-    proptest!(|(
+    proptest!(macaroon_proptest_config(), |(
         key in arb_auth_key(),
         identifier in arb_identifier(),
         location in arb_location(),
@@ -502,7 +509,7 @@ fn mr_serialize_deserialize_roundtrip() {
         true
     }
 
-    proptest!(|(
+    proptest!(macaroon_proptest_config(), |(
         key in arb_auth_key(),
         identifier in arb_identifier(),
         location in arb_location(),
@@ -636,7 +643,7 @@ fn mr_deterministic_verification_replay() {
         true
     }
 
-    proptest!(|(
+    proptest!(macaroon_proptest_config(), |(
         key in arb_auth_key(),
         identifier in arb_identifier(),
         location in arb_location(),

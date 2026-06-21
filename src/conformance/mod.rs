@@ -590,6 +590,92 @@ fn request_lab_region_cancel(
     }
 }
 
+async fn join_runtime_task<T>(
+    mut handle: crate::runtime::TaskHandle<T>,
+    join_cx: Cx,
+) -> Outcome<T, ()>
+where
+    T: Send + 'static,
+{
+    match handle.join(&join_cx).await {
+        Ok(value) => Outcome::Ok(value),
+        Err(crate::runtime::task_handle::JoinError::Cancelled(reason)) => {
+            Outcome::Cancelled(reason)
+        }
+        Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
+            Outcome::Panicked(payload)
+        }
+        Err(crate::runtime::task_handle::JoinError::PolledAfterCompletion) => Outcome::Err(()),
+    }
+}
+
+impl LabRuntimeTarget {
+    /// Spawn a conformance task directly in the provided lab-backed region.
+    ///
+    /// The trait-level `spawn` follows the current `Cx` scope. Formal
+    /// region-lifecycle tests need the spawned task to be owned by the
+    /// synthetic `RegionHandle` they later cancel or close, so this helper uses
+    /// `RuntimeState::create_task(region, ...)` and schedules that concrete
+    /// task in the lab runtime.
+    #[must_use]
+    pub fn spawn_in_region<T, F>(
+        cx: &Cx,
+        region: &RegionHandle,
+        budget: Budget,
+        f: F,
+    ) -> TaskHandle<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+    {
+        let session = LabConformanceSession::current();
+        let task_id = Arc::new(Mutex::new(None));
+        let task_id_for_op = Arc::clone(&task_id);
+        let task_id_for_probe = Arc::clone(&task_id);
+        let region_id = Arc::clone(&region.region_id);
+        let op_cx = cx.clone();
+        let join_cx = cx.clone();
+        let (registration_tx, mut registration_rx) = oneshot::channel();
+
+        session.enqueue(Box::new(move |runtime| {
+            let region_id_value = (*region_id.lock())
+                .expect("conformance region spawn issued before region registration completed");
+            let (runtime_task_id, handle) = runtime
+                .state
+                .create_task(region_id_value, budget, f)
+                .expect("failed to create region-backed conformance task");
+            let task_cx_inner = runtime
+                .state
+                .task(runtime_task_id)
+                .and_then(|task| task.cx_inner.clone())
+                .expect("region-backed conformance task must have a CxInner");
+            runtime
+                .scheduler
+                .lock()
+                .schedule(runtime_task_id, budget.priority);
+            *task_id_for_op.lock() = Some(runtime_task_id);
+            let _ = registration_tx.send(&op_cx, (handle, task_cx_inner));
+        }));
+
+        let id_probe: Arc<dyn Fn() -> Option<TaskId> + Send + Sync> =
+            Arc::new(move || *task_id_for_probe.lock());
+
+        TaskHandle::pending_with_id_probe(
+            task_id,
+            async move {
+                let (handle, task_cx_inner) = registration_rx
+                    .recv_uninterruptible()
+                    .await
+                    .expect("conformance region task registration dropped before delivery");
+                let outcome = join_runtime_task(handle, join_cx).await;
+                drop(task_cx_inner);
+                outcome
+            },
+            id_probe,
+        )
+    }
+}
+
 impl ConformanceTarget for LabRuntimeTarget {
     type Runtime = crate::lab::LabRuntime;
 
@@ -713,7 +799,7 @@ impl ConformanceTarget for LabRuntimeTarget {
                     .recv_uninterruptible()
                     .await
                     .expect("conformance task registration dropped before delivery");
-                let mut handle = runtime_handle_for_join
+                let handle = runtime_handle_for_join
                     .lock()
                     .take()
                     .expect("conformance runtime handle missing after registration");
@@ -721,18 +807,7 @@ impl ConformanceTarget for LabRuntimeTarget {
                 if !crate::runtime::spawn_mailbox::is_spawn_mailbox_id(current_task_id) {
                     *task_id_for_join.lock() = Some(current_task_id);
                 }
-                match handle.join(&join_cx).await {
-                    Ok(value) => Outcome::Ok(value),
-                    Err(crate::runtime::task_handle::JoinError::Cancelled(reason)) => {
-                        Outcome::Cancelled(reason)
-                    }
-                    Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
-                        Outcome::Panicked(payload)
-                    }
-                    Err(crate::runtime::task_handle::JoinError::PolledAfterCompletion) => {
-                        Outcome::Err(())
-                    }
-                }
+                join_runtime_task(handle, join_cx).await
             },
             id_probe,
         )
@@ -742,6 +817,7 @@ impl ConformanceTarget for LabRuntimeTarget {
         let session = LabConformanceSession::current();
         let region_id = Arc::new(Mutex::new(None));
         let region_id_for_op = Arc::clone(&region_id);
+        let region_id_for_close = Arc::clone(&region_id);
         let op_cx = cx.clone();
         let (registration_tx, mut registration_rx) = oneshot::channel();
 
@@ -765,6 +841,24 @@ impl ConformanceTarget for LabRuntimeTarget {
                 .recv_uninterruptible()
                 .await
                 .expect("conformance region registration dropped before delivery");
+
+            {
+                let session = LabConformanceSession::current();
+                session.enqueue(Box::new(move |runtime| {
+                    let region_id_value = (*region_id_for_close.lock()).expect(
+                        "conformance region close issued before region registration completed",
+                    );
+                    if runtime.state.region_was_closed(region_id_value) {
+                        return;
+                    }
+                    if runtime.state.region(region_id_value).is_some() {
+                        if let Some(region) = runtime.state.region(region_id_value) {
+                            let _ = region.begin_close(None);
+                        }
+                        runtime.state.advance_region_state(region_id_value);
+                    }
+                }));
+            }
 
             poll_fn(move |cx| {
                 let mut state = close_notify.lock();

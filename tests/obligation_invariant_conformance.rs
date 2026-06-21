@@ -9,8 +9,10 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, ObligationId, RegionId};
 use asupersync::util::ArenaIndex;
 
-#[path = "conformance/mod.rs"]
-mod conformance;
+mod conformance {
+    #[path = "obligation_invariants/mod.rs"]
+    pub mod obligation_invariants;
+}
 
 use conformance::obligation_invariants::{
     InvariantViolationType, ObligationTracker, ResourceHandle, WakerHandle,

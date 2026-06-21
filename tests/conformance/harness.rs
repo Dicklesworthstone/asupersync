@@ -254,7 +254,11 @@ impl CoverageStats {
             | MUST | {:.1}% | {} |\n\
             | SHOULD | {:.1}% | {} |\n\
             | MAY | {:.1}% | {} |\n\n\
-            ## Overall Conformance: {}\n",
+            ## Overall Conformance: {}\n\n\
+            ## Detailed Test Results\n\n\
+            Detailed per-test rows are exposed by the harness result vectors; \
+            this aggregate report intentionally carries summary counts and \
+            compliance scores only.\n",
             self.total_tests,
             self.passing,
             self.failing,

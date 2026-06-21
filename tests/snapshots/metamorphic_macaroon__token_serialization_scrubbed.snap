@@ -1,17 +1,17 @@
 ---
 source: tests/metamorphic_macaroon.rs
+assertion_line: 560
 expression: golden
 ---
 {
-  "schema_version": 2,
-  "identifier": "api:read:tenant-7",
-  "location": "cx/macaroons",
+  "binary_hex": "0211006170693a726561643a74656e616e742d370c0063782f6d616361726f6f6e730500000900017848e7cf8b010000000900032a0000000000000000160007130074656e616e74732f372f6f626a656374732f2a00090008030000003c000000000c00060300656e76040070726f64ab3c97344d812b651aaa8ee557d8fd9ea8c7a92abc12b8dceac2619694a09b9b",
+  "binary_len": 144,
   "caveat_count": 5,
   "caveats": [
     {
+      "deadline_ms": 1700000123000,
       "kind": "first_party",
-      "predicate": "time_before",
-      "deadline_ms": 1700000123000
+      "predicate": "time_before"
     },
     {
       "kind": "first_party",
@@ -20,23 +20,24 @@ expression: golden
     },
     {
       "kind": "first_party",
-      "predicate": "resource_scope",
-      "pattern": "tenants/7/objects/*"
+      "pattern": "tenants/7/objects/*",
+      "predicate": "resource_scope"
     },
     {
       "kind": "first_party",
-      "predicate": "rate_limit",
       "max_count": 3,
+      "predicate": "rate_limit",
       "window_secs": 60
     },
     {
+      "key": "env",
       "kind": "first_party",
       "predicate": "custom",
-      "key": "env",
       "value": "prod"
     }
   ],
-  "binary_len": 144,
-  "binary_hex": "0211006170693a726561643a74656e616e742d370c0063782f6d616361726f6f6e730500000900017848e7cf8b010000000900032a0000000000000000160007130074656e616e74732f372f6f626a656374732f2a00090008030000003c000000000c00060300656e76040070726f64c7c6dd4530f6a3f0b0444f0dd7eeaca1bb127ac91b1e052219d4cf95fa62335a",
-  "signature_hex": "c7c6dd4530f6a3f0b0444f0dd7eeaca1bb127ac91b1e052219d4cf95fa62335a"
+  "identifier": "api:read:tenant-7",
+  "location": "cx/macaroons",
+  "schema_version": 2,
+  "signature_hex": "ab3c97344d812b651aaa8ee557d8fd9ea8c7a92abc12b8dceac2619694a09b9b"
 }

@@ -57,25 +57,28 @@ conformance_test!(
             let parent_region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
 
             // Spawn multiple tasks in the region
-            let task1 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-                yield_now().await;
-                42
-            });
+            let task1 =
+                LabRuntimeTarget::spawn_in_region(&cx, &parent_region, Budget::INFINITE, async {
+                    yield_now().await;
+                    42
+                });
 
-            let task2 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-                yield_now().await;
-                yield_now().await;
-                24
-            });
+            let task2 =
+                LabRuntimeTarget::spawn_in_region(&cx, &parent_region, Budget::INFINITE, async {
+                    yield_now().await;
+                    yield_now().await;
+                    24
+                });
 
             // Create a child region
             let child_region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
 
             // Spawn task in child region
-            let child_task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-                yield_now().await;
-                100
-            });
+            let child_task =
+                LabRuntimeTarget::spawn_in_region(&cx, &child_region, Budget::INFINITE, async {
+                    yield_now().await;
+                    100
+                });
 
             // Wait for all tasks to complete
             let result1 = task1.await;
@@ -113,7 +116,7 @@ conformance_test!(test_quiescence_with_cancellation, |config: &TestConfig| {
         // Create region and spawn long-running task
         let region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
 
-        let long_task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+        let long_task = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async {
             // Simulate long-running work that can be cancelled
             for _ in 0..1000 {
                 yield_now().await;
@@ -165,7 +168,7 @@ conformance_test!(test_cancel_idempotence, |config: &TestConfig| {
         let cancel_counter = Arc::new(AtomicU32::new(0));
         let counter_clone = cancel_counter.clone();
 
-        let task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async move {
+        let task = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async move {
             // Track how many times cancel is observed
             loop {
                 yield_now().await;
@@ -219,7 +222,7 @@ conformance_test!(test_cancel_strengthen_severity, |config: &TestConfig| {
 
         let region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
 
-        let task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+        let task = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async {
             // Long enough to be cancelled
             for _ in 0..100 {
                 yield_now().await;
@@ -273,12 +276,12 @@ conformance_test!(test_losers_drained_after_races, |config: &TestConfig| {
         let region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
 
         // Spawn two competing tasks
-        let fast_task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+        let fast_task = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async {
             yield_now().await;
             "fast winner"
         });
 
-        let slow_task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+        let slow_task = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async {
             // Slower task that should lose the race
             for _ in 0..10 {
                 yield_now().await;
@@ -328,26 +331,26 @@ conformance_test!(test_multiple_losers_all_drained, |config: &TestConfig| {
         let region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
 
         // Create a race with one fast task and multiple slow tasks
-        let winner = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+        let winner = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async {
             yield_now().await;
             "winner"
         });
 
-        let loser1 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+        let loser1 = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async {
             for _ in 0..20 {
                 yield_now().await;
             }
             "loser1"
         });
 
-        let loser2 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+        let loser2 = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async {
             for _ in 0..30 {
                 yield_now().await;
             }
             "loser2"
         });
 
-        let loser3 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+        let loser3 = LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async {
             for _ in 0..40 {
                 yield_now().await;
             }
@@ -405,24 +408,27 @@ conformance_test!(test_all_properties_compose, |config: &TestConfig| {
         let inner_region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
 
         // Race in inner region
-        let race_winner = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-            yield_now().await;
-            "race_winner"
-        });
-
-        let race_loser = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-            for _ in 0..50 {
+        let race_winner =
+            LabRuntimeTarget::spawn_in_region(&cx, &inner_region, Budget::INFINITE, async {
                 yield_now().await;
-            }
-            "race_loser"
-        });
+                "race_winner"
+            });
+
+        let race_loser =
+            LabRuntimeTarget::spawn_in_region(&cx, &inner_region, Budget::INFINITE, async {
+                for _ in 0..50 {
+                    yield_now().await;
+                }
+                "race_loser"
+            });
 
         // Additional task in outer region
-        let outer_task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-            yield_now().await;
-            yield_now().await;
-            "outer_task"
-        });
+        let outer_task =
+            LabRuntimeTarget::spawn_in_region(&cx, &outer_region, Budget::INFINITE, async {
+                yield_now().await;
+                yield_now().await;
+                "outer_task"
+            });
 
         // Winner completes
         let winner_result = race_winner.await;
