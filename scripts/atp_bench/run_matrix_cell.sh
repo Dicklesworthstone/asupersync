@@ -253,6 +253,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     local r_tag="atprecv-${SUFFIX}" s_tag="atpsend-${SUFFIX}"
     local r_stop="$CASE_DIR/r_stop" r_out="$CASE_DIR/r_rss" s_stop="$CASE_DIR/s_stop" s_out="$CASE_DIR/s_rss"
     local -a auth_recv=() auth_send=() block_args=() delta_args=() tls_recv=() tls_send=()
+    local sym="$SYMBOL_SIZE"
     # "auto" means let atp pick its built-in (auto-bound) block size — the CLI
     # flag parses strictly as a number, so omit it rather than passing "auto"
     # (passing the literal "auto" makes atp reject the arg and instant-fail).
@@ -273,12 +274,27 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
         # Keep the encrypted matrix on the same P-256 leaf shape used by the
         # checked QUIC/TLS fixtures. Fall back to RSA-2048 only where the EC
         # OpenSSL path is unavailable.
+        # rustls-webpki's server-cert verifier requires the leaf to carry
+        # extendedKeyUsage=serverAuth (a bare -x509 cert omits it → the client
+        # rejects the server cert and the QUIC/TLS handshake dies with a fatal
+        # alert). Add EKU serverAuth + keyUsage so the self-signed leaf validates.
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$key" -out "$cert" -days 3 \
-            -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" >/dev/null 2>&1 || \
+            -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" \
+            -addext "keyUsage=critical,digitalSignature" \
+            -addext "extendedKeyUsage=serverAuth" >/dev/null 2>&1 || \
         openssl req -x509 -newkey rsa:2048 -nodes -keyout "$key" -out "$cert" -days 3 \
-            -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" >/dev/null 2>&1
+            -subj "/CN=${HOST_IP}" -addext "subjectAltName=IP:${HOST_IP}" \
+            -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+            -addext "extendedKeyUsage=serverAuth" >/dev/null 2>&1
         tls_recv=(--server-cert "$cert" --server-key "$key"); tls_send=(--ca "$cert" --server-name "$HOST_IP")
+        # QUIC carries each RaptorQ symbol in one DATAGRAM whose max_datagram_size
+        # is 1200; the 56-byte authenticated envelope header must also fit, so the
+        # symbol payload is capped at 1200-56=1144 (the rq tier keeps the full
+        # SYMBOL_SIZE). atp rejects the transfer fail-closed otherwise. This is an
+        # atp-internal framing detail and does not affect the rsync-ssh comparison,
+        # so the encrypted tier stays apples-to-apples. (z0v7ri encrypted-tier fix.)
+        if [ "$sym" -gt 1144 ]; then sym=1144; fi
         # quic adds TLS identity ON TOP of the per-symbol auth posture; keep the
         # key/lab flags so the encrypted tier stays crypto-symmetric vs rsync-ssh
         # and the receiver does not fail closed for missing symbol auth.
@@ -290,7 +306,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     set +e
     timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" recv "$recv_dir" \
         --listen "0.0.0.0:${PORT}" --transport "$transport" --once --peer-id "$r_tag" \
-        --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$SYMBOL_SIZE" \
+        --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$sym" \
         "${block_args[@]}" "${delta_args[@]}" "${auth_recv[@]}" "${tls_recv[@]}" >"$rl" 2>"$rt" &
     local recv_pid=$!
     sample_rss "$r_tag" "$r_stop" "$r_out" & local r_samp=$!
@@ -299,7 +315,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     local start finish ss rs; TIMED_OUT=false
     start="$(now_s)"
     ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" send "$WL_PATH" "${HOST_IP}:${PORT}" \
-        --transport "$transport" --symbol-size "$SYMBOL_SIZE" --peer-id "$s_tag" --max-bytes "$MAX_BYTES" \
+        --transport "$transport" --symbol-size "$sym" --peer-id "$s_tag" --max-bytes "$MAX_BYTES" \
         "${block_args[@]}" "${delta_args[@]}" "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}" >"$sl" 2>"$st"
     ss=$?; [ "$ss" = "124" ] && TIMED_OUT=true
     if [ "$ss" != "0" ] && kill -0 "$recv_pid" 2>/dev/null; then kill "$recv_pid" 2>/dev/null || true; fi
