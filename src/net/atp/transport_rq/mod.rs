@@ -169,10 +169,13 @@ pub const DEFAULT_ROUND_TAIL_DRAIN_MS: u64 = 2;
 /// transport falls back to fountain repair for bursty or non-sparse loss.
 pub const DEFAULT_SOURCE_RETRANSMIT_ROUNDS: u32 = 2;
 
-/// Hard cap on source-symbol retransmit requests in one feedback frame. Larger
-/// loss bursts fall back to fountain repair rather than creating huge JSON
-/// control messages.
-pub const DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS: usize = 8192;
+/// Default source-symbol retransmit request cap in one feedback frame.
+///
+/// `0` keeps the already round-budgeted source-resend path bulk-oriented: after
+/// a bounded round-0 probe, the receiver can ask for every missing source
+/// symbol in one feedback frame instead of splitting clean-link replay across
+/// many 8k-symbol rounds.
+pub const DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS: usize = 0;
 
 /// Default receiver-side quiet drain after each round-complete marker.
 pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROUND_TAIL_DRAIN_MS);
@@ -183,7 +186,7 @@ pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROU
 /// only uses the default 2 ms tail drain, the next `NeedMore` can report
 /// `round_symbols_observed=0` even though the datagrams arrive shortly after.
 /// That zero sample poisons the sender's wire-loss estimate.
-const RQ_SOURCE_RETRANSMIT_TAIL_DRAIN: Duration = Duration::from_millis(25);
+const RQ_SOURCE_RETRANSMIT_TAIL_DRAIN: Duration = Duration::from_millis(75);
 /// Round-0 only probes one receive block, then yields to feedback for the
 /// measured-rate bulk spray.
 const RQ_ROUND0_PROBE_MAX_BLOCKS: u64 = 1;
@@ -311,9 +314,8 @@ pub struct RqConfig {
     /// Number of early feedback rounds that may request missing systematic
     /// source symbols instead of repair symbols when `repair_overhead <= 1.0`.
     ///
-    /// Defaults to zero for WAN throughput. Positive values are intended for
-    /// controlled lab or very low-loss links where sparse source retransmit is
-    /// known to converge faster than constructing repair symbols.
+    /// Defaults to a small positive budget so a bounded round-0 probe can be
+    /// followed by measured-rate source replay before falling back to repair.
     pub source_retransmit_rounds: u32,
     /// Maximum source-symbol retransmit requests in one feedback frame.
     ///
@@ -793,15 +795,17 @@ impl RqAdaptiveSendState {
         let pending_bytes = pending_bytes(digests, pending);
         let sent_symbols = sent_this_round.max(1);
         let pending_units = u64::try_from(pending.len()).unwrap_or(u64::MAX).max(1);
-        let zero_source_resend_sample =
-            source_resend_round && sent_this_round > 0 && received_this_round == 0;
-        let received_symbols = if zero_source_resend_sample {
+        // Source-resend rounds replay requested source symbols. Their delivery
+        // ratio is not a wire-loss sample, especially while receiver accounting
+        // can credit the source tail one round late.
+        let source_resend_excluded = source_resend_round && sent_this_round > 0;
+        let received_symbols = if source_resend_excluded {
             sent_symbols
         } else {
             received_this_round.min(sent_symbols)
         };
         let decode_pending_loss = (pending_units as f64 / sent_symbols as f64).clamp(0.0, 0.90);
-        let wire_loss_hat = if sent_this_round == 0 || zero_source_resend_sample {
+        let wire_loss_hat = if sent_this_round == 0 || source_resend_excluded {
             self.pacing_loss_ema.min(RQ_MILD_LOSS_PACING_MAX_LOSS)
         } else {
             (1.0 - received_symbols as f64 / sent_symbols as f64).clamp(0.0, 0.90)
@@ -817,10 +821,14 @@ impl RqAdaptiveSendState {
             .max(pressure_loss)
             .clamp(0.0, 0.90);
 
-        self.regime_shift = self.pacing_loss_ema > 0.0
-            && wire_loss_hat > (self.pacing_loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
+        if !source_resend_excluded {
+            self.regime_shift = self.pacing_loss_ema > 0.0
+                && wire_loss_hat > (self.pacing_loss_ema * 3.0 + RQ_REGIME_SHIFT_LOSS_DELTA);
+        }
         self.loss_ema = ema(self.loss_ema, repair_loss_hat, RQ_LOSS_EMA_ALPHA);
-        self.pacing_loss_ema = ema(self.pacing_loss_ema, wire_loss_hat, RQ_LOSS_EMA_ALPHA);
+        if !source_resend_excluded {
+            self.pacing_loss_ema = ema(self.pacing_loss_ema, wire_loss_hat, RQ_LOSS_EMA_ALPHA);
+        }
         let raw_loss_bar = repair_loss_hat.max(self.loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
         self.loss_bar = if self.loss_bar <= 0.0 {
             raw_loss_bar
@@ -828,13 +836,16 @@ impl RqAdaptiveSendState {
             ema(self.loss_bar, raw_loss_bar, RQ_LOSS_EMA_ALPHA).max(repair_loss_hat)
         }
         .clamp(0.0, 0.90);
-        let raw_pacing_loss_bar = wire_loss_hat.max(self.pacing_loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
-        self.pacing_loss_bar = if self.pacing_loss_bar <= 0.0 {
-            raw_pacing_loss_bar
-        } else {
-            ema(self.pacing_loss_bar, raw_pacing_loss_bar, RQ_LOSS_EMA_ALPHA).max(wire_loss_hat)
+        if !source_resend_excluded {
+            let raw_pacing_loss_bar =
+                wire_loss_hat.max(self.pacing_loss_ema) * RQ_LOSS_BAR_MULTIPLIER;
+            self.pacing_loss_bar = if self.pacing_loss_bar <= 0.0 {
+                raw_pacing_loss_bar
+            } else {
+                ema(self.pacing_loss_bar, raw_pacing_loss_bar, RQ_LOSS_EMA_ALPHA).max(wire_loss_hat)
+            }
+            .clamp(0.0, 0.90);
         }
-        .clamp(0.0, 0.90);
 
         let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
         let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
@@ -849,7 +860,7 @@ impl RqAdaptiveSendState {
         let stalled_repair_sample = byte_pressure >= RQ_STALLED_REPAIR_PRESSURE_MIN
             && sent_payload_fraction < RQ_STALLED_REPAIR_PAYLOAD_FRACTION_MAX
             && wire_loss_hat <= RQ_MILD_LOSS_PACING_MAX_LOSS;
-        if !zero_source_resend_sample && (self.bw_ema_bps <= 0.0 || !stalled_repair_sample) {
+        if !source_resend_excluded && (self.bw_ema_bps <= 0.0 || !stalled_repair_sample) {
             self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
                 bw_sample
             } else {
@@ -879,7 +890,7 @@ impl RqAdaptiveSendState {
         self.loss_pacing_cap_bps = None;
         self.loss_fec_floor = 0.0;
         let lost_symbols = sent_symbols.saturating_sub(received_symbols);
-        if !zero_source_resend_sample {
+        if !source_resend_excluded {
             let loss_result = self.loss_detector.observe_datagram_loss_sample(
                 sent_symbols,
                 lost_symbols,
@@ -6400,7 +6411,7 @@ mod tests {
     }
 
     #[test]
-    fn rq_need_more_zero_source_resend_sample_does_not_collapse_pacing() {
+    fn rq_need_more_source_resend_excluded_does_not_collapse_pacing() {
         let config = RqConfig {
             symbol_size: 1200,
             ..RqConfig::default()
@@ -6429,13 +6440,15 @@ mod tests {
             total_bytes,
         );
         let prior_bw = state.bw_ema_bps;
+        let prior_pacing_loss_ema = state.pacing_loss_ema;
+        let prior_pacing_loss_bar = state.pacing_loss_bar;
 
         state.observe_need_more(
             &config,
             &digests,
             &pending,
             15_992,
-            0,
+            1_884,
             true,
             Duration::from_millis(12_300),
             Duration::from_millis(5),
@@ -6444,15 +6457,23 @@ mod tests {
 
         assert!(
             state.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS,
-            "zero source-resend accounting sample must not become wire loss"
+            "under-credited source-resend accounting sample must not become wire loss"
+        );
+        assert_eq!(
+            state.pacing_loss_ema, prior_pacing_loss_ema,
+            "source-resend rounds must not update pacing loss EMA"
+        );
+        assert_eq!(
+            state.pacing_loss_bar, prior_pacing_loss_bar,
+            "source-resend rounds must not update pacing loss bar"
         );
         assert_eq!(
             state.loss_pacing_cap_bps, None,
-            "zero source-resend accounting sample must not create a congestion cap"
+            "under-credited source-resend accounting sample must not create a congestion cap"
         );
         assert_eq!(
             state.bw_ema_bps, prior_bw,
-            "unknown source-resend delivery sample must not drag bandwidth down"
+            "source-resend delivery ratio must not drag bandwidth down"
         );
         assert!(
             state.pacing_rate_for(rq_test_block_plan(&config))
@@ -7770,7 +7791,7 @@ mod tests {
     }
 
     #[test]
-    fn source_retransmit_is_bounded_by_default_in_source_first_mode() {
+    fn source_retransmit_is_bulk_by_default_in_source_first_mode() {
         let config = RqConfig {
             repair_overhead: 1.0,
             ..RqConfig::default()
