@@ -176,6 +176,17 @@ pub const DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS: usize = 8192;
 
 /// Default receiver-side quiet drain after each round-complete marker.
 pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROUND_TAIL_DRAIN_MS);
+/// Extra receive-side drain grace for rounds that resend requested source symbols.
+///
+/// A source-retransmit spray is normally a large UDP burst followed by a tiny
+/// TCP `ObjectComplete` marker. If TCP wins the readiness race and the receiver
+/// only uses the default 2 ms tail drain, the next `NeedMore` can report
+/// `round_symbols_observed=0` even though the datagrams arrive shortly after.
+/// That zero sample poisons the sender's wire-loss estimate.
+const RQ_SOURCE_RETRANSMIT_TAIL_DRAIN: Duration = Duration::from_millis(25);
+/// Round-0 only probes one receive block, then yields to feedback for the
+/// measured-rate bulk spray.
+const RQ_ROUND0_PROBE_MAX_BLOCKS: u64 = 1;
 
 /// Cold-start aggregate sender pace before feedback evidence exists.
 ///
@@ -770,6 +781,7 @@ impl RqAdaptiveSendState {
         pending: &BTreeSet<u32>,
         sent_this_round: u64,
         received_this_round: u64,
+        source_resend_round: bool,
         send_wall: Duration,
         control_wait: Duration,
         total_bytes: u64,
@@ -781,10 +793,16 @@ impl RqAdaptiveSendState {
         let pending_bytes = pending_bytes(digests, pending);
         let sent_symbols = sent_this_round.max(1);
         let pending_units = u64::try_from(pending.len()).unwrap_or(u64::MAX).max(1);
-        let received_symbols = received_this_round.min(sent_symbols);
+        let zero_source_resend_sample =
+            source_resend_round && sent_this_round > 0 && received_this_round == 0;
+        let received_symbols = if zero_source_resend_sample {
+            sent_symbols
+        } else {
+            received_this_round.min(sent_symbols)
+        };
         let decode_pending_loss = (pending_units as f64 / sent_symbols as f64).clamp(0.0, 0.90);
-        let wire_loss_hat = if sent_this_round == 0 {
-            0.0
+        let wire_loss_hat = if sent_this_round == 0 || zero_source_resend_sample {
+            self.pacing_loss_ema.min(RQ_MILD_LOSS_PACING_MAX_LOSS)
         } else {
             (1.0 - received_symbols as f64 / sent_symbols as f64).clamp(0.0, 0.90)
         };
@@ -831,7 +849,7 @@ impl RqAdaptiveSendState {
         let stalled_repair_sample = byte_pressure >= RQ_STALLED_REPAIR_PRESSURE_MIN
             && sent_payload_fraction < RQ_STALLED_REPAIR_PAYLOAD_FRACTION_MAX
             && wire_loss_hat <= RQ_MILD_LOSS_PACING_MAX_LOSS;
-        if self.bw_ema_bps <= 0.0 || !stalled_repair_sample {
+        if !zero_source_resend_sample && (self.bw_ema_bps <= 0.0 || !stalled_repair_sample) {
             self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
                 bw_sample
             } else {
@@ -861,28 +879,30 @@ impl RqAdaptiveSendState {
         self.loss_pacing_cap_bps = None;
         self.loss_fec_floor = 0.0;
         let lost_symbols = sent_symbols.saturating_sub(received_symbols);
-        let loss_result = self.loss_detector.observe_datagram_loss_sample(
-            sent_symbols,
-            lost_symbols,
-            Some(control_wait),
-            sent_payload_bytes,
-            cwnd_bytes,
-        );
-        let mild_wire_loss = wire_loss_hat <= RQ_MILD_LOSS_PACING_MAX_LOSS
-            && self.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS;
-        self.apply_loss_recommendations(&loss_result.recommendations, mild_wire_loss);
-        self.controller.observe_path_signals(
-            sent_symbols,
-            received_symbols,
-            send_wall_s,
-            useful_bytes,
-            config.symbol_size,
-            PathSignalSample {
-                smoothed_rtt_s: rtt_s,
-                congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
-                loss_rate: wire_loss_hat,
-            },
-        );
+        if !zero_source_resend_sample {
+            let loss_result = self.loss_detector.observe_datagram_loss_sample(
+                sent_symbols,
+                lost_symbols,
+                Some(control_wait),
+                sent_payload_bytes,
+                cwnd_bytes,
+            );
+            let mild_wire_loss = wire_loss_hat <= RQ_MILD_LOSS_PACING_MAX_LOSS
+                && self.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS;
+            self.apply_loss_recommendations(&loss_result.recommendations, mild_wire_loss);
+            self.controller.observe_path_signals(
+                sent_symbols,
+                received_symbols,
+                send_wall_s,
+                useful_bytes,
+                config.symbol_size,
+                PathSignalSample {
+                    smoothed_rtt_s: rtt_s,
+                    congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
+                    loss_rate: wire_loss_hat,
+                },
+            );
+        }
     }
 
     fn apply_loss_recommendations(
@@ -1063,6 +1083,23 @@ fn fixed_block_k(config: &RqConfig) -> u32 {
     let symbol_size = usize::from(config.symbol_size.max(1));
     let k = config.max_block_size.div_ceil(symbol_size).max(1);
     u32::try_from(k).unwrap_or(u32::MAX)
+}
+
+fn round0_probe_symbol_limit(config: &RqConfig) -> u64 {
+    u64::from(fixed_block_k(config))
+        .saturating_mul(RQ_ROUND0_PROBE_MAX_BLOCKS)
+        .max(1)
+}
+
+fn round_tail_drain_for_completed_round(
+    config: &RqConfig,
+    completed_source_resend_round: bool,
+) -> Duration {
+    if completed_source_resend_round {
+        config.round_tail_drain.max(RQ_SOURCE_RETRANSMIT_TAIL_DRAIN)
+    } else {
+        config.round_tail_drain
+    }
 }
 
 fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
@@ -3007,6 +3044,7 @@ pub async fn send_path(
     let mut dropper = 0u32;
     let mut feedback_rounds = 0u32;
     let mut source_fec_fallback_active = false;
+    let mut last_round_sent_source_requests = false;
 
     // Parallel per-block encode is on by default, but only while the transfer is small enough that
     // the receiver's recv buffer can absorb the burst (see PARALLEL_ENCODE_MAX_BYTES); larger
@@ -3021,6 +3059,7 @@ pub async fn send_path(
     let mut pacer = RqSprayPacer::new(round_tuning.pacing);
     let mut round_started = Instant::now();
     let mut round_symbols_start = symbols_sent;
+    let round0_probe_limit = round0_probe_symbol_limit(&config);
     spray_round(
         cx,
         &mut control,
@@ -3037,11 +3076,14 @@ pub async fn send_path(
         &round_tuning,
         symbol_auth.as_ref(),
         /* with_source */ true,
-        parallel_encode,
+        /* parallel_encode */ false,
+        Some(round0_probe_limit),
     )
     .await?;
     let mut round_send_wall = round_started.elapsed();
-    rqtrace!("sender: round 0 sprayed, symbols_sent={symbols_sent}");
+    rqtrace!(
+        "sender: round 0 sprayed, symbols_sent={symbols_sent} probe_limit={round0_probe_limit}"
+    );
 
     // Feedback loop.
     loop {
@@ -3126,6 +3168,7 @@ pub async fn send_path(
                     &pending,
                     sent_this_round,
                     received_this_round,
+                    last_round_sent_source_requests,
                     round_send_wall,
                     control_wait,
                     total_bytes,
@@ -3181,8 +3224,10 @@ pub async fn send_path(
                         symbol_auth.as_ref(),
                         /* with_source */ false,
                         parallel_encode,
+                        None,
                     )
                     .await?;
+                    last_round_sent_source_requests = false;
                     round_send_wall = round_started.elapsed();
                 } else {
                     round_started = Instant::now();
@@ -3203,6 +3248,7 @@ pub async fn send_path(
                         symbol_auth.as_ref(),
                     )
                     .await?;
+                    last_round_sent_source_requests = true;
                     if source_fec_fallback_active {
                         spray_round(
                             cx,
@@ -3221,6 +3267,7 @@ pub async fn send_path(
                             symbol_auth.as_ref(),
                             /* with_source */ false,
                             parallel_encode,
+                            None,
                         )
                         .await?;
                     }
@@ -3376,11 +3423,16 @@ async fn spray_round<S>(
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
     parallel_encode: bool,
+    max_symbols_this_round: Option<u64>,
 ) -> Result<(), RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
+    let mut remaining_symbols = max_symbols_this_round.unwrap_or(u64::MAX);
+    'entries: for enc in encoders.iter_mut().filter(|e| pending.contains(&e.index)) {
+        if remaining_symbols == 0 {
+            break;
+        }
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         let mut ring = EncodeAheadRing::default();
         let blocks = encode_ahead_blocks(enc.size, config)?;
@@ -3391,8 +3443,9 @@ where
             enc.repair_cursors.resize(blocks.len(), 0);
         }
 
-        let use_parallel_source_encode =
-            with_source && should_parallel_encode_source_blocks(blocks.len(), parallel_encode);
+        let use_parallel_source_encode = with_source
+            && max_symbols_this_round.is_none()
+            && should_parallel_encode_source_blocks(blocks.len(), parallel_encode);
         if use_parallel_source_encode {
             // Parallel per-block encode on the runtime blocking pool. Each RaptorQ source block
             // solves independently, so for multi-block objects we fan the K-symbol solves across
@@ -3471,6 +3524,9 @@ where
             }
         } else {
             for (block_index, block) in blocks.iter().enumerate() {
+                if remaining_symbols == 0 {
+                    break 'entries;
+                }
                 // Cumulative repair count requested from the encoder for this
                 // block. The encoder always yields repair symbols at
                 // deterministic ESIs starting at the block's K'; requesting
@@ -3509,6 +3565,7 @@ where
                 let block_bytes = read_source_range(&enc.abs_path, read_start, block.len).await?;
 
                 let mut send_batch = RqPendingSendBatch::new(sockets.len());
+                let mut repair_sent_this_block = 0usize;
                 if with_source {
                     for encoded in pipeline.encode_single_block_with_repair(
                         enc.object_id,
@@ -3516,9 +3573,13 @@ where
                         &block_bytes,
                         target_repair,
                     ) {
+                        if remaining_symbols == 0 {
+                            break;
+                        }
                         let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
                         ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
                         let produced = ring.pop().expect("M=1 ring drains immediately");
+                        let produced_is_repair = produced.symbol.kind().is_repair();
                         queue_symbol_datagram(
                             cx,
                             control,
@@ -3536,6 +3597,10 @@ where
                             &mut send_batch,
                         )
                         .await?;
+                        if produced_is_repair {
+                            repair_sent_this_block = repair_sent_this_block.saturating_add(1);
+                        }
+                        remaining_symbols = remaining_symbols.saturating_sub(1);
                         debug_assert!(ring.is_empty());
                     }
                 } else {
@@ -3546,6 +3611,9 @@ where
                         already,
                         repair_count,
                     ) {
+                        if remaining_symbols == 0 {
+                            break;
+                        }
                         let encoded = encoded.map_err(|e| RqError::Coding(e.to_string()))?;
                         ring.push(EncodeAheadSymbol::from_encoded(enc.index, encoded))?;
                         let produced = ring.pop().expect("M=1 ring drains immediately");
@@ -3566,12 +3634,23 @@ where
                             &mut send_batch,
                         )
                         .await?;
+                        repair_sent_this_block = repair_sent_this_block.saturating_add(1);
+                        remaining_symbols = remaining_symbols.saturating_sub(1);
                         debug_assert!(ring.is_empty());
                     }
                 }
                 send_batch.flush(sockets, symbols_sent).await?;
                 service_rq_spray_control(cx, control, adaptive).await?;
-                enc.repair_cursors[block_index] = target_repair;
+                enc.repair_cursors[block_index] = if with_source {
+                    already
+                        .saturating_add(repair_sent_this_block)
+                        .min(target_repair)
+                } else {
+                    already.saturating_add(repair_sent_this_block)
+                };
+                if remaining_symbols == 0 {
+                    break 'entries;
+                }
             }
         }
     }
@@ -4093,6 +4172,7 @@ pub async fn receive_connection(
     let mut symbols_accepted: u64 = 0;
     let mut round_stats = RqDatagramRoundStats::default();
     let mut feedback_rounds: u32 = 0;
+    let mut last_round_requested_source_symbols = false;
     let datagram_header_len = if symbol_auth_enabled {
         AUTH_DGRAM_HEADER
     } else {
@@ -4134,6 +4214,10 @@ pub async fn receive_connection(
 
         match frame.frame_type() {
             FrameType::ObjectComplete => {
+                let tail_drain = round_tail_drain_for_completed_round(
+                    &config,
+                    last_round_requested_source_symbols,
+                );
                 let drained = drain_round_tail(
                     cx,
                     &mut udp,
@@ -4141,15 +4225,18 @@ pub async fn receive_connection(
                     symbol_auth_enabled,
                     symbol_auth.as_ref(),
                     &mut rbuf,
-                    config.round_tail_drain,
+                    tail_drain,
                     &mut decoders,
                     symbol_size,
                     &mut symbols_accepted,
                     &mut round_stats,
                 )
                 .await?;
+                let completed_source_resend_round = last_round_requested_source_symbols;
                 if drained > 0 {
                     rqtrace!("receiver: tail-drained {drained} datagrams after ObjectComplete");
+                } else if completed_source_resend_round {
+                    rqtrace!("receiver: source-retransmit round tail drain observed no datagrams");
                 }
                 let completed_decodes = join_all_pending_decodes(cx, &mut decoders).await?;
                 if completed_decodes > 0 {
@@ -4274,6 +4361,7 @@ pub async fn receive_connection(
                     );
                 }
 
+                let next_round_requests_source_symbols = !source_symbols.is_empty();
                 control
                     .send(&json_frame(
                         FrameType::ObjectRequest,
@@ -4285,6 +4373,7 @@ pub async fn receive_connection(
                         },
                     )?)
                     .await?;
+                last_round_requested_source_symbols = next_round_requests_source_symbols;
                 round_stats = RqDatagramRoundStats::default();
             }
             FrameType::KeepAlive => {
@@ -6210,6 +6299,7 @@ mod tests {
             &pending,
             sent_symbols,
             sent_symbols.saturating_sub(1),
+            false,
             Duration::from_secs(120),
             Duration::from_millis(50),
             total_bytes,
@@ -6275,6 +6365,7 @@ mod tests {
                 &pending,
                 sent_symbols,
                 sent_symbols.saturating_sub(lost_symbols),
+                false,
                 send_wall,
                 Duration::from_millis(200),
                 total_bytes,
@@ -6309,6 +6400,68 @@ mod tests {
     }
 
     #[test]
+    fn rq_need_more_zero_source_resend_sample_does_not_collapse_pacing() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "large.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"large.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            1_311,
+            1_311,
+            false,
+            Duration::from_millis(330),
+            Duration::from_millis(5),
+            total_bytes,
+        );
+        let prior_bw = state.bw_ema_bps;
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            15_992,
+            0,
+            true,
+            Duration::from_millis(12_300),
+            Duration::from_millis(5),
+            total_bytes,
+        );
+
+        assert!(
+            state.pacing_loss_ema <= RQ_MILD_LOSS_PACING_MAX_LOSS,
+            "zero source-resend accounting sample must not become wire loss"
+        );
+        assert_eq!(
+            state.loss_pacing_cap_bps, None,
+            "zero source-resend accounting sample must not create a congestion cap"
+        );
+        assert_eq!(
+            state.bw_ema_bps, prior_bw,
+            "unknown source-resend delivery sample must not drag bandwidth down"
+        );
+        assert!(
+            state.pacing_rate_for(rq_test_block_plan(&config))
+                >= state.mild_loss_pacing_floor_bps(),
+            "source-resend accounting gap must not collapse pacing"
+        );
+    }
+
+    #[test]
     fn rq_need_more_broken_wire_loss_disables_mild_floor() {
         let config = RqConfig {
             symbol_size: 1200,
@@ -6333,6 +6486,7 @@ mod tests {
             &pending,
             sent_symbols,
             sent_symbols.saturating_sub(sent_symbols.div_ceil(10)),
+            false,
             Duration::from_millis(3_300),
             Duration::from_millis(200),
             total_bytes,
@@ -6432,6 +6586,7 @@ mod tests {
             &pending,
             sent_symbols,
             sent_symbols,
+            false,
             Duration::from_millis(300),
             Duration::from_secs(120),
             total_bytes,
@@ -6441,6 +6596,37 @@ mod tests {
             state.bw_ema_bps > 8.0 * 1024.0 * 1024.0,
             "feedback timeout must not collapse a fast spray sample to {} B/s",
             state.bw_ema_bps
+        );
+    }
+
+    #[test]
+    fn rq_round0_probe_limit_is_one_configured_source_block() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            ..RqConfig::default()
+        };
+
+        assert_eq!(
+            round0_probe_symbol_limit(&config),
+            u64::from(fixed_block_k(&config))
+        );
+    }
+
+    #[test]
+    fn rq_source_resend_round_gets_extended_tail_drain() {
+        let config = RqConfig {
+            round_tail_drain: Duration::from_millis(2),
+            ..RqConfig::default()
+        };
+
+        assert_eq!(
+            round_tail_drain_for_completed_round(&config, false),
+            Duration::from_millis(2)
+        );
+        assert_eq!(
+            round_tail_drain_for_completed_round(&config, true),
+            RQ_SOURCE_RETRANSMIT_TAIL_DRAIN
         );
     }
 
