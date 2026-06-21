@@ -94,13 +94,24 @@ fn large_k_scenarios() -> [LargeKScenario; 6] {
 }
 
 const E4_FIXED_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+const E4_ATP_SYMBOL_SIZE: usize = 1400;
 const E4_LOSS_FRACTION: f64 = 0.02;
 const E4_MIN_EXTRA_REPAIR: usize = 32;
 const E4_MAX_REPAIR_SYMBOLS: usize = 512;
 const E4_DECODE_K_VALUES: [usize; 4] = [256, 1024, 4096, 8192];
+const E4_ATP_DECODE_K_VALUES: [usize; 6] = [256, 512, 1024, 2048, 4096, 8192];
+const E4_DECODE_BASELINE_K: usize = 256;
+const E4_DECODE_BASELINE_SYMBOL_SIZE: usize = E4_FIXED_TOTAL_BYTES / E4_DECODE_BASELINE_K;
+const E4_FIXED_TOTAL_MIB: usize = E4_FIXED_TOTAL_BYTES / (1024 * 1024);
 const E4_TREE_ALPHA: f64 = 1.35;
 const E4_TREE_MAX_DEPTH: usize = 6;
 const E4_DECODE_VS_K_RESULT_SCHEMA: &str = "e4_decode_vs_k_result_v1";
+const E4_DECODE_VS_K_COMPARISON_FAMILY: &str = "fixed_total_bytes_decode_vs_k";
+const E4_DECODE_VS_K_DECISION_SIGNAL: &str =
+    "compare_wall_time_per_byte_across_k_for_fixed_total_bytes";
+const E4_ATP_FIXED_SYMBOL_COMPARISON_FAMILY: &str = "atp_fixed_symbol_size_decode_vs_k";
+const E4_ATP_FIXED_SYMBOL_DECISION_SIGNAL: &str =
+    "compare_wall_time_per_byte_across_k_for_atp_candidate_block_bytes";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DecodeVsKResult {
@@ -117,7 +128,13 @@ struct DecodeVsKResult {
     loss_basis_points: u64,
     repair_bytes: usize,
     decoder_input_bytes: usize,
+    decoder_input_bytes_per_total_basis_points: u64,
     rank_slack_symbols: usize,
+    baseline_k: usize,
+    k_relative_to_baseline_basis_points: u64,
+    symbol_size_relative_to_baseline_basis_points: u64,
+    quadratic_k_work_units: u64,
+    quadratic_work_units_per_mib: u64,
 }
 
 impl DecodeVsKResult {
@@ -142,6 +159,27 @@ impl DecodeVsKResult {
         } else {
             u64::try_from(missing_source_symbols.saturating_mul(10_000) / k).unwrap_or(u64::MAX)
         };
+        let decoder_input_bytes = total_received_symbols.saturating_mul(symbol_size);
+        let decoder_input_bytes_per_total_basis_points = if total_bytes == 0 {
+            0
+        } else {
+            u64::try_from(decoder_input_bytes.saturating_mul(10_000) / total_bytes)
+                .unwrap_or(u64::MAX)
+        };
+        let k_relative_to_baseline_basis_points =
+            u64::try_from(k.saturating_mul(10_000) / E4_DECODE_BASELINE_K).unwrap_or(u64::MAX);
+        let symbol_size_relative_to_baseline_basis_points = if E4_DECODE_BASELINE_SYMBOL_SIZE == 0 {
+            0
+        } else {
+            u64::try_from(symbol_size.saturating_mul(10_000) / E4_DECODE_BASELINE_SYMBOL_SIZE)
+                .unwrap_or(u64::MAX)
+        };
+        let quadratic_k_work_units = u64::try_from(k.saturating_mul(k)).unwrap_or(u64::MAX);
+        let quadratic_work_units_per_mib = if E4_FIXED_TOTAL_MIB == 0 {
+            quadratic_k_work_units
+        } else {
+            quadratic_k_work_units / u64::try_from(E4_FIXED_TOTAL_MIB).unwrap_or(1)
+        };
 
         Self {
             k,
@@ -156,14 +194,20 @@ impl DecodeVsKResult {
             overhead_basis_points,
             loss_basis_points,
             repair_bytes: repair_symbols.saturating_mul(symbol_size),
-            decoder_input_bytes: total_received_symbols.saturating_mul(symbol_size),
+            decoder_input_bytes,
+            decoder_input_bytes_per_total_basis_points,
             rank_slack_symbols: total_received_symbols.saturating_sub(required_symbols),
+            baseline_k: E4_DECODE_BASELINE_K,
+            k_relative_to_baseline_basis_points,
+            symbol_size_relative_to_baseline_basis_points,
+            quadratic_k_work_units,
+            quadratic_work_units_per_mib,
         }
     }
 
     fn benchmark_id(self) -> String {
         format!(
-            "{}_k{}_sym{}_total{}_required{}_source{}_missing{}_loss{}bp_repair{}_received{}_repairbytes{}_inputbytes{}_slack{}_overhead{}bp",
+            "{}_k{}_sym{}_total{}_required{}_source{}_missing{}_loss{}bp_repair{}_received{}_repairbytes{}_inputbytes{}_input{}bp_slack{}_overhead{}bp_krel{}bp_symrel{}bp_k2{}_k2pmib{}",
             E4_DECODE_VS_K_RESULT_SCHEMA,
             self.k,
             self.symbol_size,
@@ -176,14 +220,25 @@ impl DecodeVsKResult {
             self.total_received_symbols,
             self.repair_bytes,
             self.decoder_input_bytes,
+            self.decoder_input_bytes_per_total_basis_points,
             self.rank_slack_symbols,
-            self.overhead_basis_points
+            self.overhead_basis_points,
+            self.k_relative_to_baseline_basis_points,
+            self.symbol_size_relative_to_baseline_basis_points,
+            self.quadratic_k_work_units,
+            self.quadratic_work_units_per_mib
         )
     }
 
-    fn artifact_json(self) -> serde_json::Value {
+    fn artifact_json_for(
+        self,
+        comparison_family: &'static str,
+        decision_signal: &'static str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "schema_version": E4_DECODE_VS_K_RESULT_SCHEMA,
+            "comparison_family": comparison_family,
+            "decision_signal": decision_signal,
             "benchmark_id": self.benchmark_id(),
             "k": self.k,
             "symbol_size": self.symbol_size,
@@ -198,12 +253,34 @@ impl DecodeVsKResult {
             "loss_basis_points": self.loss_basis_points,
             "repair_bytes": self.repair_bytes,
             "decoder_input_bytes": self.decoder_input_bytes,
+            "decoder_input_bytes_per_total_basis_points": self.decoder_input_bytes_per_total_basis_points,
             "rank_slack_symbols": self.rank_slack_symbols,
+            "baseline_k": self.baseline_k,
+            "k_relative_to_baseline_basis_points": self.k_relative_to_baseline_basis_points,
+            "symbol_size_relative_to_baseline_basis_points": self.symbol_size_relative_to_baseline_basis_points,
+            "quadratic_k_work_units": self.quadratic_k_work_units,
+            "quadratic_work_units_per_mib": self.quadratic_work_units_per_mib,
         })
+    }
+
+    fn artifact_json(self) -> serde_json::Value {
+        self.artifact_json_for(
+            E4_DECODE_VS_K_COMPARISON_FAMILY,
+            E4_DECODE_VS_K_DECISION_SIGNAL,
+        )
     }
 
     fn artifact_json_line(self) -> String {
         serde_json::to_string(&self.artifact_json())
+            .expect("E-4 decode-vs-K result envelope must serialize")
+    }
+
+    fn artifact_json_line_for(
+        self,
+        comparison_family: &'static str,
+        decision_signal: &'static str,
+    ) -> String {
+        serde_json::to_string(&self.artifact_json_for(comparison_family, decision_signal))
             .expect("E-4 decode-vs-K result envelope must serialize")
     }
 }
@@ -299,15 +376,8 @@ struct FixedTotalDecodeScenario {
     expected_source_symbols: Vec<Vec<u8>>,
 }
 
-fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
-    assert_eq!(
-        E4_FIXED_TOTAL_BYTES % k,
-        0,
-        "fixed total bytes must divide K"
-    );
-
-    let symbol_size = E4_FIXED_TOTAL_BYTES / k;
-    let seed = 0xE400_0000_u64 ^ k as u64;
+fn build_decode_scenario(k: usize, symbol_size: usize, seed: u64) -> FixedTotalDecodeScenario {
+    let total_bytes = k.saturating_mul(symbol_size);
     let source_symbols = generate_source_symbols(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source_symbols, symbol_size, seed)
         .expect("encoder creation failed");
@@ -370,7 +440,7 @@ fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
     let result = DecodeVsKResult::new(
         k,
         symbol_size,
-        E4_FIXED_TOTAL_BYTES,
+        total_bytes,
         received_source_symbols,
         repair_symbols,
         required_symbols,
@@ -384,12 +454,27 @@ fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
     FixedTotalDecodeScenario {
         k,
         symbol_size,
-        total_bytes: E4_FIXED_TOTAL_BYTES,
+        total_bytes,
         seed,
         result,
         received_symbols,
         expected_source_symbols: source_symbols,
     }
+}
+
+fn build_fixed_total_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
+    assert_eq!(
+        E4_FIXED_TOTAL_BYTES % k,
+        0,
+        "fixed total bytes must divide K"
+    );
+
+    let symbol_size = E4_FIXED_TOTAL_BYTES / k;
+    build_decode_scenario(k, symbol_size, 0xE400_0000_u64 ^ k as u64)
+}
+
+fn build_atp_fixed_symbol_decode_scenario(k: usize) -> FixedTotalDecodeScenario {
+    build_decode_scenario(k, E4_ATP_SYMBOL_SIZE, 0xE4A7_0000_u64 ^ k as u64)
 }
 
 #[cfg(test)]
@@ -410,10 +495,16 @@ mod e4_decode_vs_k_tests {
         assert_eq!(result.loss_basis_points, 195);
         assert_eq!(result.repair_bytes, 212_992);
         assert_eq!(result.decoder_input_bytes, 4_325_376);
+        assert_eq!(result.decoder_input_bytes_per_total_basis_points, 10_312);
         assert_eq!(result.rank_slack_symbols, 32);
+        assert_eq!(result.baseline_k, 256);
+        assert_eq!(result.k_relative_to_baseline_basis_points, 40_000);
+        assert_eq!(result.symbol_size_relative_to_baseline_basis_points, 2_500);
+        assert_eq!(result.quadratic_k_work_units, 1_048_576);
+        assert_eq!(result.quadratic_work_units_per_mib, 262_144);
         assert_eq!(
             result.benchmark_id(),
-            "e4_decode_vs_k_result_v1_k1024_sym4096_total4194304_required1024_source1004_missing20_loss195bp_repair52_received1056_repairbytes212992_inputbytes4325376_slack32_overhead312bp"
+            "e4_decode_vs_k_result_v1_k1024_sym4096_total4194304_required1024_source1004_missing20_loss195bp_repair52_received1056_repairbytes212992_inputbytes4325376_input10312bp_slack32_overhead312bp_krel40000bp_symrel2500bp_k21048576_k2pmib262144"
         );
     }
 
@@ -427,6 +518,8 @@ mod e4_decode_vs_k_tests {
             envelope,
             serde_json::json!({
                 "schema_version": E4_DECODE_VS_K_RESULT_SCHEMA,
+                "comparison_family": E4_DECODE_VS_K_COMPARISON_FAMILY,
+                "decision_signal": E4_DECODE_VS_K_DECISION_SIGNAL,
                 "benchmark_id": benchmark_id,
                 "k": 1024,
                 "symbol_size": 4096,
@@ -441,7 +534,13 @@ mod e4_decode_vs_k_tests {
                 "loss_basis_points": 195,
                 "repair_bytes": 212_992,
                 "decoder_input_bytes": 4_325_376,
+                "decoder_input_bytes_per_total_basis_points": 10_312,
                 "rank_slack_symbols": 32,
+                "baseline_k": 256,
+                "k_relative_to_baseline_basis_points": 40_000,
+                "symbol_size_relative_to_baseline_basis_points": 2_500,
+                "quadratic_k_work_units": 1_048_576,
+                "quadratic_work_units_per_mib": 262_144,
             })
         );
 
@@ -461,6 +560,24 @@ mod e4_decode_vs_k_tests {
             E4_DECODE_K_VALUES
                 .iter()
                 .all(|k| E4_FIXED_TOTAL_BYTES % k == 0)
+        );
+    }
+
+    #[test]
+    fn atp_fixed_symbol_values_map_k_to_candidate_block_bytes() {
+        assert_eq!(E4_ATP_SYMBOL_SIZE, 1400);
+        assert_eq!(E4_ATP_DECODE_K_VALUES, [256, 512, 1024, 2048, 4096, 8192]);
+
+        let candidate_block_bytes: Vec<usize> = E4_ATP_DECODE_K_VALUES
+            .iter()
+            .map(|k| k.saturating_mul(E4_ATP_SYMBOL_SIZE))
+            .collect();
+
+        assert_eq!(
+            candidate_block_bytes,
+            vec![
+                358_400, 716_800, 1_433_600, 2_867_200, 5_734_400, 11_468_800
+            ]
         );
     }
 
@@ -495,6 +612,58 @@ fn bench_e4_decode_vs_k_fixed_total_bytes(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(scenario.total_bytes as u64));
         let bench_name = scenario.result.benchmark_id();
         let result_envelope = scenario.result.artifact_json_line();
+        let bench_input = (scenario, result_envelope);
+
+        group.bench_with_input(
+            BenchmarkId::new("decode_block_path", &bench_name),
+            &bench_input,
+            |b, bench_input| {
+                let scenario = &bench_input.0;
+                let result_envelope = bench_input.1.as_str();
+                b.iter(|| {
+                    black_box(result_envelope);
+                    let decoder =
+                        InactivationDecoder::new(scenario.k, scenario.symbol_size, scenario.seed);
+                    let decoded = decoder
+                        .decode(black_box(&scenario.received_symbols))
+                        .expect("decode failed");
+                    assert_eq!(
+                        decoded.source.len(),
+                        scenario.expected_source_symbols.len(),
+                        "decoded source symbol count mismatch"
+                    );
+                    assert_eq!(
+                        decoded.source, scenario.expected_source_symbols,
+                        "decoded source symbols must match exactly"
+                    );
+                    black_box(decoded);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_e4_decode_vs_k_atp_fixed_symbol_size(c: &mut Criterion) {
+    let mut group = c.benchmark_group("e4_decode_vs_k_atp_fixed_symbol_size");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+    group.warm_up_time(Duration::from_secs(2));
+
+    for &k in &E4_ATP_DECODE_K_VALUES {
+        let scenario = build_atp_fixed_symbol_decode_scenario(k);
+        group.throughput(Throughput::Bytes(scenario.total_bytes as u64));
+        let bench_name = format!(
+            "atp_sym{}_blockbytes{}_{}",
+            E4_ATP_SYMBOL_SIZE,
+            scenario.total_bytes,
+            scenario.result.benchmark_id()
+        );
+        let result_envelope = scenario.result.artifact_json_line_for(
+            E4_ATP_FIXED_SYMBOL_COMPARISON_FAMILY,
+            E4_ATP_FIXED_SYMBOL_DECISION_SIGNAL,
+        );
         let bench_input = (scenario, result_envelope);
 
         group.bench_with_input(
@@ -845,6 +1014,7 @@ criterion_group!(
     targets =
         bench_large_k_encoder_roundtrip,
         bench_e4_decode_vs_k_fixed_total_bytes,
+        bench_e4_decode_vs_k_atp_fixed_symbol_size,
         bench_gf256_bulk_operations,
         bench_matrix_operations_stress,
         bench_row_scale_add_batching_optimization,
