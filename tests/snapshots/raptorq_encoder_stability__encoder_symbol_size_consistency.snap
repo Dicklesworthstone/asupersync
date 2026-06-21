@@ -1,0 +1,39 @@
+---
+source: tests/raptorq_encoder_stability.rs
+assertion_line: 251
+expression: final_output
+---
+EncoderOutput {
+    config: EncoderTestCase {
+        k: 100,
+        symbol_size: 256,
+        seed: 1145324612,
+        repair_count: 3,
+    },
+    source_symbols_hash: "7455ba0d38e45757",
+    repair_symbols: [
+        RepairSymbolData {
+            esi: 100,
+            symbol_data_hex: "5a8378e7d59153ec1abe33d0b986aaa84d0bf6ed232d789c36d407ba2a42a6e9e39f3c59e7f6fa5484d97ac96b1821f7691a41b8c16b955d9f3d2888ec3495e52c9f41337050c3d1cb7bcfb55535fc3f09af0d057a3192595b33fe1affd638fec07b80685e7489a9da8ba1d91ef4e52225e9f0dbe780d981664dab9518b53d2720f9029dafeb299660c449aac3fcd0d237718c97595702e64cae7dc05038dc9399e546239d8c802efea300b311625b8d13603bc2bb11ef27e54752f2964eef9f56e53b490a2ab9abb101b5cf2f4f864573d5777f004be8232149846085ac4284ba01fa12240ef3d3a0f1dba3648e9f585f938aa19dfaa3fb1c37d1ef62cf475d",
+            symbol_length: 256,
+        },
+        RepairSymbolData {
+            esi: 101,
+            symbol_data_hex: "44f8b140e03785685e0ab4a340900cd9bbda6219da38978de75bf944890fb23dc4aa73c9ca8db971634e2b4b328ba4602c68cb8823bbf7f843b34832ffead489fe17ba0da6756c491ed54603a4279fa129c8e14bc32bb25f3155f8f50dac9467cf52f2f65a90a11a99d7d13e0ed3d8e80f8dcf013b6a9a4b52ffd004892fe7781fa3ea1bbb6cde330551eff81bcb5782e08139428163ccd6bc00a21fd254e9669ff1289291d6e22a3815701069d0ff3b773390d378e0aca318e81369a4b18fd2a54ce156fd2e3712458e1d58ff7cc4fa7293ba109870e9046a0ea3ae56f7cf3c9409a9ad01cbfa41c28c8a65558883b354d6945a6031c11009a48b5fd274bc23",
+            symbol_length: 256,
+        },
+        RepairSymbolData {
+            esi: 102,
+            symbol_data_hex: "9cf2e35e02e21d16a91c61934711dc9dfb539f3a19170b224950421a3509a0c264644dd2af9b491fc3d8d2f9ef4b05fafbb76818083b3aa10e3990b26b6512f001de2f30a1630930a3453a164a3187914bd1f3863e13d7c01d6de5d9ada96e7f906d5a3a3129e6a80f70d99637af5a0ecfd25962a78aadda9c519eeafc11beec513f2e93cf2fd0db64d1ac5e8adc1150369e52f7d4dac6ef849d8fd7f8c46d0fa9a9801f625684d20e151f342286c837367aa5d5c5f6f76cc3f45d7fa6a8df3dcc13e2fd6caec4fd6e88f7db87fc4a5c861c3e4bf3de1a0dd0a028146064a3b25da097f7fce42b65c2bd145bfa6297c3021f94af6a476017519c532731dc7321",
+            symbol_length: 256,
+        },
+    ],
+    params_summary: {
+        "h": 10,
+        "k": 100,
+        "k_prime": 101,
+        "l": 128,
+        "s": 17,
+        "w": 113,
+    },
+}

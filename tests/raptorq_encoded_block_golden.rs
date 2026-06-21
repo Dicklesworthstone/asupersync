@@ -159,7 +159,7 @@ fn encode_to_golden(
 fn test_encode_small_block_no_repair() {
     // Test encoding a small block that fits in a single source symbol with no repair overhead
     let input = b"Hello, RaptorQ!";
-    let config = create_test_encoding_config(1280, 0.0); // No repair symbols
+    let config = create_test_encoding_config(1280, 1.0); // No extra repair symbols
     let seed = 42;
 
     let golden = encode_to_golden(
@@ -176,7 +176,7 @@ fn test_encode_small_block_no_repair() {
 fn test_encode_small_block_with_repair() {
     // Test encoding a small block with repair overhead
     let input = b"Hello, RaptorQ with repair symbols!";
-    let config = create_test_encoding_config(1280, 0.25); // 25% repair overhead
+    let config = create_test_encoding_config(1280, 1.25); // 25% repair overhead
     let seed = 123;
 
     let golden = encode_to_golden(input, config, seed, "Small block with 25% repair overhead");
@@ -188,7 +188,7 @@ fn test_encode_small_block_with_repair() {
 fn test_encode_multi_symbol_block() {
     // Test encoding data that spans multiple source symbols
     let input = vec![0xAB; 3000]; // 3KB of test data
-    let config = create_test_encoding_config(1000, 0.1); // 10% repair overhead, 1KB symbols
+    let config = create_test_encoding_config(1000, 1.10); // 10% repair overhead, 1KB symbols
     let seed = 456;
 
     let golden = encode_to_golden(
@@ -204,7 +204,7 @@ fn test_encode_multi_symbol_block() {
 #[test]
 fn test_encode_boundary_conditions() {
     // Test encoding at symbol size boundary
-    let config = create_test_encoding_config(64, 0.5); // Small symbols, high repair overhead
+    let config = create_test_encoding_config(64, 1.5); // Small symbols, high repair overhead
     let seed = 789;
 
     // Exactly one symbol size
@@ -234,7 +234,7 @@ fn test_encode_boundary_conditions() {
 fn test_encode_empty_data() {
     // Test edge case of empty input
     let input = b"";
-    let config = create_test_encoding_config(1280, 0.2);
+    let config = create_test_encoding_config(1280, 1.2);
     let seed = 999;
 
     let golden = encode_to_golden(input, config, seed, "Empty input data");
@@ -246,7 +246,7 @@ fn test_encode_empty_data() {
 fn test_encode_deterministic_reproducibility() {
     // Test that encoding is deterministic - same input/config/seed produces identical output
     let input = b"Deterministic test data for RaptorQ encoding";
-    let config = create_test_encoding_config(512, 0.15);
+    let config = create_test_encoding_config(512, 1.15);
     let seed = 2023;
 
     let golden1 = encode_to_golden(input, config.clone(), seed, "First encoding");
@@ -263,7 +263,7 @@ fn test_encode_deterministic_reproducibility() {
 #[test]
 fn test_encode_varying_sizes() {
     // Test a series of different input sizes to ensure symbol boundaries are handled correctly
-    let config = create_test_encoding_config(256, 0.0); // Small symbols, no repair for simplicity
+    let config = create_test_encoding_config(256, 1.0); // Small symbols, no extra repair for simplicity
     let base_seed = 1000;
 
     let test_sizes = [1, 50, 100, 255, 256, 257, 500, 512, 1000];
@@ -287,7 +287,7 @@ fn test_encode_varying_sizes() {
 fn test_encode_systematic_properties() {
     // Test that systematic encoding preserves source symbols
     let input = b"Systematic encoding test - source symbols should be preserved";
-    let config = create_test_encoding_config(32, 1.0); // 100% repair overhead for clear source/repair split
+    let config = create_test_encoding_config(32, 2.0); // 100% repair overhead for clear source/repair split
     let seed = 1337;
 
     let golden = encode_to_golden(

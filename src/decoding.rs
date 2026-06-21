@@ -833,9 +833,10 @@ impl DecodingPipeline {
         if max_k == 0 {
             return;
         }
-        let extra = max_k
-            .max(AUTO_REPAIR_RETENTION_MIN_EXTRA_SYMBOLS)
-            .min(AUTO_REPAIR_RETENTION_MAX_EXTRA_SYMBOLS);
+        let extra = max_k.clamp(
+            AUTO_REPAIR_RETENTION_MIN_EXTRA_SYMBOLS,
+            AUTO_REPAIR_RETENTION_MAX_EXTRA_SYMBOLS,
+        );
         self.symbols.set_max_per_block(max_k.saturating_add(extra));
     }
 

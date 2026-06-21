@@ -119,10 +119,14 @@ fn test_parameter_stability() {
         println!("{:4}   -> {:4} {:4} {:3} {:3} {:4}", k, k_prime, l, s, h, w);
     }
 
-    // Verify specific known values (regression detection)
-    assert_eq!(params_table[&10], (12, 13, 1, 0, 13));
-    assert_eq!(params_table[&100], (101, 102, 1, 0, 102));
-    assert_eq!(params_table[&1000], (1001, 1002, 1, 0, 1002));
+    // Verify specific RFC 6330 Table 2 values (regression detection).
+    assert_eq!(params_table[&10], (10, 27, 7, 10, 17));
+    assert_eq!(params_table[&25], (26, 47, 11, 10, 37));
+    assert_eq!(params_table[&50], (55, 78, 13, 10, 67));
+    assert_eq!(params_table[&100], (101, 128, 17, 10, 113));
+    assert_eq!(params_table[&256], (257, 296, 29, 10, 271));
+    assert_eq!(params_table[&500], (511, 558, 37, 10, 523));
+    assert_eq!(params_table[&1000], (1002, 1071, 59, 10, 1021));
 
-    println!("✓ Parameter derivation matches expected RFC 6330 values");
+    println!("✓ Parameter derivation matches expected RFC 6330 Table 2 values");
 }

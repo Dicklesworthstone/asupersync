@@ -1,0 +1,23 @@
+---
+source: tests/raptorq_encoded_block_golden.rs
+assertion_line: 242
+expression: golden
+---
+{
+  "description": "Empty input data",
+  "input_bytes": [],
+  "config": {
+    "symbol_size": 1280,
+    "max_block_size": 8192,
+    "repair_overhead": 1.2,
+    "encoding_parallelism": 1,
+    "decoding_parallelism": 1,
+    "deterministic_seed": 999
+  },
+  "symbols": [],
+  "stats": {
+    "source_symbols": 0,
+    "repair_symbols": 0,
+    "total_symbols": 0
+  }
+}

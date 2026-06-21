@@ -174,8 +174,8 @@ fn calibration_completes_and_activates_thresholds() {
     let mut monitor = RegressionMonitor::new();
     assert!(!monitor.is_calibrated());
 
-    // Feed comfortably more than MIN_CALIBRATION_SAMPLES (10) baseline draws.
-    for tick in 0..15 {
+    // Feed comfortably more than MIN_CALIBRATION_SAMPLES (20) baseline draws.
+    for tick in 0..25 {
         monitor.calibrate(&baseline_stats(tick));
     }
 
@@ -183,7 +183,7 @@ fn calibration_completes_and_activates_thresholds() {
         monitor.is_calibrated(),
         "monitor must calibrate after >= MIN_CALIBRATION_SAMPLES baseline observations"
     );
-    assert_eq!(monitor.total_observations(), 15);
+    assert_eq!(monitor.total_observations(), 25);
     for metric in TRACKED {
         assert!(
             monitor.threshold(metric).is_some(),
@@ -197,7 +197,7 @@ fn engine_is_deterministic_across_independent_monitors() {
     // Identical calibrate-then-check program on two fresh monitors.
     fn drive() -> RegressionMonitor {
         let mut monitor = RegressionMonitor::new();
-        for tick in 0..15 {
+        for tick in 0..25 {
             monitor.calibrate(&baseline_stats(tick));
         }
         for tick in 15..40 {

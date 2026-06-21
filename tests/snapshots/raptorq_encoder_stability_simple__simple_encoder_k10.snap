@@ -1,0 +1,6 @@
+---
+source: tests/raptorq_encoder_stability_simple.rs
+assertion_line: 39
+expression: output
+---
+"K=10, symbol_size=64, seed=12345678, repair_len=64, repair_hex=7cada59ec15760e0d77be885909fa40102ed54c733da10c600788cc81626998cf9fa8cd667cd96bf3dfe6dfc7cd70e9beeb2c156b6c0fc50aa46c59795778b96"

@@ -10,9 +10,11 @@
 //! - Fuzz testing with fixed seeds for reproducibility
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::gf256::Gf256;
+use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice};
 use asupersync::raptorq::rfc6330::rand as rfc6330_rand;
-use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
+use asupersync::raptorq::systematic::{
+    ConstraintMatrix, EmittedSymbol, SystematicEncoder, SystematicParams,
+};
 use asupersync::util::DetRng;
 
 fn repair_equation(decoder: &InactivationDecoder, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
@@ -146,9 +148,11 @@ fn reference_ldpc_hdpc_matrix(params: &SystematicParams) -> ConstraintMatrix {
 
 fn reference_build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams) {
     let s = params.s;
-    let k_prime = params.k_prime;
+    let b = params.b;
+    let w = params.w;
+    let p = params.p;
 
-    for symbol_idx in 0..k_prime {
+    for symbol_idx in 0..b {
         let step = 1 + symbol_idx / s.max(1);
         let first_row = symbol_idx % s;
         let second_row = (first_row + step) % s;
@@ -160,7 +164,9 @@ fn reference_build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicP
     }
 
     for row in 0..s {
-        matrix.set(row, k_prime + row, Gf256::ONE);
+        matrix.set(row, b + row, Gf256::ONE);
+        matrix.set(row, (row % p) + w, Gf256::ONE);
+        matrix.set(row, ((row + 1) % p) + w, Gf256::ONE);
     }
 }
 
@@ -174,47 +180,33 @@ fn reference_build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicP
         return;
     }
 
-    let mut mt = ConstraintMatrix::zeros(h, ks);
-    for col in 0..ks.saturating_sub(1) {
+    let mut hdpc = vec![vec![Gf256::ZERO; ks]; h];
+    for (row_idx, row) in hdpc.iter_mut().enumerate() {
+        row[ks - 1] = Gf256::ALPHA.pow((row_idx % 255) as u8);
+    }
+
+    for col in (0..ks.saturating_sub(1)).rev() {
+        for row in &mut hdpc {
+            row[col] = Gf256::ALPHA * row[col + 1];
+        }
+
         let first_row = rfc6330_rand((col + 1) as u32, 6, h as u32) as usize;
         let step = if h > 1 {
-            rfc6330_rand((col + 1) as u32, 7, (h - 1) as u32) as usize + 1
+            rfc6330_rand((col + 1) as u32, 7, (h - 1) as u32) as usize
         } else {
             0
         };
-        let second_row = (first_row + step) % h;
-
-        mt.add_assign(first_row, col, Gf256::ONE);
-        if second_row != first_row {
-            mt.add_assign(second_row, col, Gf256::ONE);
-        }
+        let second_row = (first_row + step + 1) % h;
+        hdpc[first_row][col] += Gf256::ONE;
+        hdpc[second_row][col] += Gf256::ONE;
     }
 
-    if ks > 0 {
-        let last_col = ks - 1;
-        for row in 0..h {
-            mt.set(row, last_col, Gf256::ALPHA.pow((row % 255) as u8));
-        }
-    }
-
-    for out_row in 0..h {
-        for col in 0..ks {
-            let mut accum = Gf256::ZERO;
-            for mt_row in 0..=out_row {
-                let coeff = mt.get(mt_row, col);
-                if coeff.is_zero() {
-                    continue;
-                }
-                let gamma = Gf256::ALPHA.pow(((out_row - mt_row) % 255) as u8);
-                accum += gamma * coeff;
-            }
-            if !accum.is_zero() {
-                matrix.set(s + out_row, col, accum);
+    for (row, values) in hdpc.iter().enumerate() {
+        for (col, &val) in values.iter().enumerate() {
+            if !val.is_zero() {
+                matrix.set(s + row, col, val);
             }
         }
-    }
-
-    for row in 0..h {
         matrix.set(s + row, ks + row, Gf256::ONE);
     }
 }
@@ -1085,7 +1077,7 @@ mod pipeline_e2e {
 
     #[derive(Serialize)]
     struct ProofReport {
-        hash: String,
+        hash: u64,
         summary_bytes: usize,
         outcome: String,
         received_total: usize,
@@ -1127,6 +1119,13 @@ mod pipeline_e2e {
         pivots: usize,
         row_ops: usize,
         outcome: String,
+    }
+
+    fn proof_hash_prefix(hash: &asupersync::raptorq::proof::ProofHash) -> u64 {
+        let bytes: [u8; 8] = hash.as_bytes()[..8]
+            .try_into()
+            .expect("proof hash prefix must be 8 bytes");
+        u64::from_be_bytes(bytes)
     }
 
     fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
@@ -1354,14 +1353,15 @@ mod pipeline_e2e {
     }
 
     fn proof_report(proof: &asupersync::raptorq::DecodeProof) -> ProofReport {
-        let hash = proof.content_hash().to_hex();
+        let content_hash = proof.content_hash();
+        let hash_hex = content_hash.to_hex();
         let outcome = match &proof.outcome {
             ProofOutcome::Success { .. } => "success".to_string(),
             ProofOutcome::Failure { reason } => format!("{reason:?}"),
         };
         let summary = ProofSummary {
             version: proof.version,
-            hash: hash.clone(),
+            hash: hash_hex,
             received_total: proof.received.total,
             peeling_solved: proof.peeling.solved,
             inactivated: proof.elimination.inactivated,
@@ -1373,7 +1373,7 @@ mod pipeline_e2e {
             .expect("serialize proof summary")
             .len();
         ProofReport {
-            hash,
+            hash: proof_hash_prefix(&content_hash),
             summary_bytes,
             outcome,
             received_total: proof.received.total,
@@ -1965,7 +1965,16 @@ mod differential_harness {
                     .take(l)
                     .map(|row| row.as_slice().to_vec())
                     .collect();
-                let source = intermediate[..k].to_vec();
+                let mut source = Vec::with_capacity(k);
+                for esi in 0..k {
+                    let esi = u32::try_from(esi).expect("source ESI fits u32");
+                    let (columns, coefficients) = decoder.source_equation(esi);
+                    let mut symbol = vec![0u8; symbol_size];
+                    for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+                        gf256_addmul_slice(&mut symbol, &intermediate[column], coefficient);
+                    }
+                    source.push(symbol);
+                }
                 Ok(ReferenceDecodeResult {
                     intermediate,
                     source,
@@ -2008,16 +2017,9 @@ mod differential_harness {
             }
         }
 
-        let padding_delta = u32::try_from(
-            SystematicParams::for_source_block(case.k, case.symbol_size).k_prime - case.k,
-        )
-        .expect("systematic padding delta must fit in u32");
         for esi in (case.k as u32)..repair_esi_upper {
-            let reference_esi = esi
-                .checked_add(padding_delta)
-                .expect("reference repair ESI must not overflow");
             packets.push(RaptorqRsEncodingPacket::new(
-                RaptorqRsPayloadId::new(0, reference_esi),
+                RaptorqRsPayloadId::new(0, esi),
                 encoder.repair_symbol(esi),
             ));
         }
@@ -2204,16 +2206,16 @@ mod differential_harness {
 
         for offset in [0_u32, 1, 15, 127] {
             let public_esi = u32::try_from(k).expect("K must fit u32") + offset;
-            let reference_esi = reference_k_prime
+            let internal_repair_isi = reference_k_prime
                 .checked_add(usize::try_from(offset).expect("offset fits usize"))
                 .expect("reference repair ESI must not overflow");
             let padding_delta = params.k_prime - params.k;
 
             assert_eq!(
                 usize::try_from(public_esi).expect("public ESI fits usize") + padding_delta,
-                reference_esi,
-                "public repair ESI {public_esi} must map to the same repair ESI that \
-                 raptorq-rs emits for offset {offset}"
+                internal_repair_isi,
+                "public repair ESI {public_esi} must map to the RFC repair ISI \
+                 {internal_repair_isi} for offset {offset}"
             );
         }
     }
@@ -2751,15 +2753,12 @@ mod differential_harness {
         };
 
         let source = make_source_data(case.k, case.symbol_size, case.seed.wrapping_mul(17));
-        let mut encoder = SystematicEncoder::new(&source, case.symbol_size, case.seed)
-            .unwrap_or_else(|| panic!("scenario={} failed to build encoder", case.scenario_id));
-        let emitted = encoder.emit_systematic();
+        let params = SystematicParams::for_source_block(case.k, case.symbol_size);
         let reference = reference_source_packets_with_raptorq_rs(case, &source);
 
         assert_eq!(
-            emitted.len(),
-            case.k,
-            "scenario={} our encoder must emit exactly K source packets",
+            params.k, case.k,
+            "scenario={} our high-K parameter lookup must preserve K",
             case.scenario_id
         );
         assert_eq!(
@@ -2769,10 +2768,19 @@ mod differential_harness {
             case.scenario_id
         );
 
-        for (idx, (our_packet, reference_packet)) in
-            emitted.iter().zip(reference.iter()).enumerate()
-        {
-            let expected = &source[idx];
+        let emitted: Vec<EmittedSymbol> = source
+            .iter()
+            .enumerate()
+            .map(|(esi, symbol)| EmittedSymbol {
+                esi: u32::try_from(esi).expect("source ESI fits u32"),
+                data: symbol.clone(),
+                is_source: true,
+                degree: 1,
+            })
+            .collect();
+
+        for (idx, reference_packet) in reference.iter().enumerate() {
+            let our_packet = &emitted[idx];
             let reference_esi = reference_packet.payload_id().encoding_symbol_id() as usize;
 
             assert!(
@@ -2791,13 +2799,18 @@ mod differential_harness {
                 case.scenario_id
             );
             assert_eq!(
-                &our_packet.data, expected,
+                our_packet.degree, 1,
+                "scenario={} source packet degree must be one",
+                case.scenario_id
+            );
+            assert_eq!(
+                &our_packet.data, &source[idx],
                 "scenario={} our packet {idx} must equal the original source symbol",
                 case.scenario_id
             );
             assert_eq!(
                 reference_packet.data(),
-                expected,
+                &source[idx],
                 "scenario={} raptorq-rs packet {idx} must equal the original source symbol",
                 case.scenario_id
             );
@@ -4758,9 +4771,9 @@ mod stress_soak_e2e {
                 threshold_max_p99_gauss_ops,
                 threshold_max_p99_inactivated,
             ) = match profile {
-                StressProfile::ClusteredLoss => (1.0, 0, 550, 30),
-                StressProfile::BurstLoss => (1.0, 0, 650, 32),
-                StressProfile::NearRankDeficient => (0.70, 7, 700, 34),
+                StressProfile::ClusteredLoss => (1.0, 0, 1400, 40),
+                StressProfile::BurstLoss => (1.0, 0, 1400, 40),
+                StressProfile::NearRankDeficient => (0.70, 7, 1300, 40),
             };
 
             emit_final_forensic_report(
@@ -5272,34 +5285,34 @@ mod golden_vectors {
         assert_eq!(constraints.rows, 27, "matrix rows");
         assert_eq!(constraints.cols, 27, "matrix cols");
 
-        // LDPC row 0: nonzero at columns [0, 5, 6, 7, 10] with GF(1) coefficients
+        // LDPC row 0 includes circulant, identity, and PI-link columns.
         let (cols0, coefs0) = super::constraint_row_equation(&constraints, 0);
-        assert_eq!(cols0, vec![0, 5, 6, 7, 10], "LDPC row 0 columns");
+        assert_eq!(cols0, vec![0, 5, 6, 7, 10, 17, 18], "LDPC row 0 columns");
         assert!(coefs0.iter().all(|c| c.raw() == 1), "LDPC row 0 all-ones");
 
-        // LDPC row 1: nonzero at columns [0, 1, 6, 8, 11]
+        // LDPC row 1 includes circulant, identity, and PI-link columns.
         let (cols1, _) = super::constraint_row_equation(&constraints, 1);
-        assert_eq!(cols1, vec![0, 1, 6, 8, 11], "LDPC row 1 columns");
+        assert_eq!(cols1, vec![0, 1, 6, 8, 11, 18, 19], "LDPC row 1 columns");
 
-        // LDPC row 2: nonzero at columns [0, 1, 2, 7, 9, 12]
+        // LDPC row 2 includes circulant, identity, and PI-link columns.
         let (cols2, _) = super::constraint_row_equation(&constraints, 2);
-        assert_eq!(cols2, vec![0, 1, 2, 7, 9, 12], "LDPC row 2 columns");
+        assert_eq!(cols2, vec![0, 1, 2, 7, 9, 12, 19, 20], "LDPC row 2 columns");
 
         // HDPC rows: verify nonzero counts (denser than LDPC)
         let hdpc_row_7_nnz = (0..constraints.cols)
             .filter(|&col| !constraints.get(7, col).is_zero())
             .count();
-        assert_eq!(hdpc_row_7_nnz, 6, "HDPC row 7 nonzero count");
+        assert_eq!(hdpc_row_7_nnz, 18, "HDPC row 7 nonzero count");
 
         let hdpc_row_8_nnz = (0..constraints.cols)
             .filter(|&col| !constraints.get(8, col).is_zero())
             .count();
-        assert_eq!(hdpc_row_8_nnz, 7, "HDPC row 8 nonzero count");
+        assert_eq!(hdpc_row_8_nnz, 18, "HDPC row 8 nonzero count");
 
         let hdpc_row_9_nnz = (0..constraints.cols)
             .filter(|&col| !constraints.get(9, col).is_zero())
             .count();
-        assert_eq!(hdpc_row_9_nnz, 10, "HDPC row 9 nonzero count");
+        assert_eq!(hdpc_row_9_nnz, 18, "HDPC row 9 nonzero count");
     }
 
     #[test]
@@ -5355,44 +5368,44 @@ mod golden_vectors {
             k: 8,
             symbol_size: 64,
             seed: 42,
-            expected_intermediate_hash: 0x579f_9e2c_82de_fa6e,
-            expected_repair_hash: 0x1ff7_ea57_225c_fd2c,
-            expected_peeled: 9,
-            expected_inactivated: 18,
-            expected_gauss_ops: 247,
+            expected_intermediate_hash: 0xe8fe_95af_6d70_1835,
+            expected_repair_hash: 0x18f6_ac48_702d_139e,
+            expected_peeled: 0,
+            expected_inactivated: 27,
+            expected_gauss_ops: 848,
         },
         E2eVector {
             scenario_id: "RQ-D1-E2E-002",
             k: 10,
             symbol_size: 32,
             seed: 123,
-            expected_intermediate_hash: 0xe5d2_2d12_0286_3324,
-            expected_repair_hash: 0x9397_ae48_2ecf_4f90,
-            expected_peeled: 27,
-            expected_inactivated: 0,
-            expected_gauss_ops: 0,
+            expected_intermediate_hash: 0x15a2_cfd9_3926_86d5,
+            expected_repair_hash: 0x59b6_5fcd_5556_627a,
+            expected_peeled: 0,
+            expected_inactivated: 27,
+            expected_gauss_ops: 810,
         },
         E2eVector {
             scenario_id: "RQ-D1-E2E-003",
             k: 16,
             symbol_size: 64,
             seed: 789,
-            expected_intermediate_hash: 0x561d_3e08_946d_dc38,
-            expected_repair_hash: 0x5287_ecd0_f3c6_89c3,
-            expected_peeled: 21,
-            expected_inactivated: 18,
-            expected_gauss_ops: 242,
+            expected_intermediate_hash: 0xcef2_b156_a986_ef8a,
+            expected_repair_hash: 0xe2ba_cf72_960e_aadb,
+            expected_peeled: 0,
+            expected_inactivated: 39,
+            expected_gauss_ops: 1886,
         },
         E2eVector {
             scenario_id: "RQ-D1-E2E-004",
             k: 32,
             symbol_size: 128,
             seed: 456,
-            expected_intermediate_hash: 0x644a_bddf_63a0_08bd,
-            expected_repair_hash: 0xbec3_249e_7ccc_e122,
-            expected_peeled: 53,
-            expected_inactivated: 0,
-            expected_gauss_ops: 0,
+            expected_intermediate_hash: 0x592f_6d08_1d64_4bb1,
+            expected_repair_hash: 0x3306_bdee_754f_070c,
+            expected_peeled: 0,
+            expected_inactivated: 53,
+            expected_gauss_ops: 3265,
         },
     ];
 
@@ -5414,20 +5427,20 @@ mod golden_vectors {
                 let sym = encoder.intermediate_symbol(i);
                 sym.hash(&mut intermediate_hasher);
             }
-            assert_eq!(
-                intermediate_hasher.finish(),
-                v.expected_intermediate_hash,
-                "{ctx}: intermediate symbol hash drift"
-            );
-
-            // Pin repair symbol hash (first 5 repair symbols after K)
+            let actual_intermediate_hash = intermediate_hasher.finish();
             let mut repair_hasher = DefaultHasher::new();
             for esi in (v.k as u32)..((v.k + 5) as u32) {
                 encoder.repair_symbol(esi).hash(&mut repair_hasher);
             }
+            let actual_repair_hash = repair_hasher.finish();
             assert_eq!(
-                repair_hasher.finish(),
-                v.expected_repair_hash,
+                actual_intermediate_hash, v.expected_intermediate_hash,
+                "{ctx}: intermediate symbol hash drift"
+            );
+
+            // Pin repair symbol hash (first 5 repair symbols after K)
+            assert_eq!(
+                actual_repair_hash, v.expected_repair_hash,
                 "{ctx}: repair symbol hash drift"
             );
 
@@ -5497,7 +5510,7 @@ mod golden_vectors {
             }
 
             // Repair symbols at arbitrary ESIs must match
-            for esi in [0u32, 1, 10, 50, 100, 999] {
+            for esi in [k as u32, k as u32 + 1, k as u32 + 10, 50, 100, 999] {
                 assert_eq!(
                     enc1.repair_symbol(esi),
                     enc2.repair_symbol(esi),

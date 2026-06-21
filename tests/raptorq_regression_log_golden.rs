@@ -7,7 +7,7 @@ use asupersync::raptorq::regression::{
 use insta::assert_json_snapshot;
 use serde_json::{Value, json};
 
-const CALIBRATION_WARMUP: usize = 15;
+const CALIBRATION_WARMUP: usize = 25;
 
 fn make_baseline_stats(gauss_ops: usize, inactivated: usize) -> DecodeStats {
     DecodeStats {

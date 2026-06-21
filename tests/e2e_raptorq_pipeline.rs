@@ -20,6 +20,8 @@ use asupersync::util::DetRng;
 use common::e2e_harness::E2eLabHarness;
 use std::collections::BTreeMap;
 
+const TEST_AUTH_SEED: u64 = 0xE2E4_A11C;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -80,8 +82,19 @@ fn encode_snapshot(snapshot: &RegionSnapshot, symbol_size: u16, seed: u64) -> En
         .expect("encoding should succeed")
 }
 
+fn test_security_context() -> SecurityContext {
+    SecurityContext::for_testing(TEST_AUTH_SEED)
+}
+
+fn decoding_config_with_test_auth() -> RecoveryDecodingConfig {
+    RecoveryDecodingConfig {
+        auth_context: Some(test_security_context()),
+        ..RecoveryDecodingConfig::default()
+    }
+}
+
 fn sign_symbol(symbol: &asupersync::types::Symbol) -> AuthenticatedSymbol {
-    SecurityContext::for_testing(0xE2E4_A11C).sign_symbol(symbol)
+    test_security_context().sign_symbol(symbol)
 }
 
 fn deterministic_exact_budget_symbols(
@@ -134,7 +147,7 @@ fn e2e_raptorq_roundtrip_no_loss() {
     );
 
     h.phase("decode — no loss");
-    let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+    let mut decoder = StateDecoder::new(decoding_config_with_test_auth());
     for sym in &encoded.symbols {
         let authed = sign_symbol(sym);
         decoder.add_symbol(&authed).unwrap();
@@ -189,7 +202,7 @@ fn e2e_raptorq_recovery_30pct_loss() {
 
     h.phase("simulate 30% erasure");
     let mut rng = DetRng::new(0xE2E4_1002);
-    let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+    let mut decoder = StateDecoder::new(decoding_config_with_test_auth());
     let mut kept = 0usize;
     let total = encoded.symbols.len();
     for sym in &encoded.symbols {
@@ -342,7 +355,7 @@ fn e2e_raptorq_recovery_exact_budget_deterministic() {
     );
 
     h.phase("decode");
-    let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+    let mut decoder = StateDecoder::new(decoding_config_with_test_auth());
     for symbol in &kept_symbols {
         decoder.add_symbol(symbol).unwrap();
     }

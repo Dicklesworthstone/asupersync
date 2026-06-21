@@ -372,7 +372,7 @@ pub struct DecodeStats {
 pub struct DecodeResult {
     /// Recovered intermediate symbols (L symbols).
     pub intermediate: Vec<Vec<u8>>,
-    /// Recovered source symbols (first K of intermediate).
+    /// Recovered source symbols reconstructed from the RFC source equations.
     pub source: Vec<Vec<u8>>,
     /// Decode statistics.
     pub stats: DecodeStats,
@@ -1545,13 +1545,6 @@ impl InactivationDecoder {
         // br-asupersync-ju2k01: Create compute budget for dense operations
         let mut compute_budget = ComputeBudget::new(MAX_DENSE_COMPUTE_BUDGET);
 
-        if symbols.len() < required {
-            return Err(DecodeError::InsufficientSymbols {
-                received: symbols.len(),
-                required,
-            });
-        }
-
         for sym in symbols {
             if sym.data.len() != symbol_size {
                 return Err(DecodeError::SymbolSizeMismatch {
@@ -1603,6 +1596,13 @@ impl InactivationDecoder {
                     });
                 }
             }
+        }
+
+        if symbols.len() < required {
+            return Err(DecodeError::InsufficientSymbols {
+                received: symbols.len(),
+                required,
+            });
         }
 
         Ok(())

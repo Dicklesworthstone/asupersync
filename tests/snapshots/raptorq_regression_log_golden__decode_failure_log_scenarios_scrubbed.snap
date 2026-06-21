@@ -1,5 +1,6 @@
 ---
 source: tests/raptorq_regression_log_golden.rs
+assertion_line: 105
 expression: snapshot
 ---
 {
@@ -8,7 +9,7 @@ expression: snapshot
     "k": 10,
     "log_lines": [
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "gauss_ops",
@@ -16,12 +17,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 12.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 82.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "dense_core_rows",
@@ -29,12 +30,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 6.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 41.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "dense_core_cols",
@@ -42,12 +43,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 4.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 27.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "inactivated",
@@ -55,12 +56,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 2.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 5.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "pivots_selected",
@@ -68,12 +69,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 2.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 5.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 0.630249,
         "exceeds_threshold": false,
         "metric": "peel_frontier_peak",
@@ -81,7 +82,7 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 4.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 4.0,
         "verdict": "accept"
       }
@@ -95,7 +96,7 @@ expression: snapshot
     "k": 100,
     "log_lines": [
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "gauss_ops",
@@ -103,12 +104,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 52.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 302.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "dense_core_rows",
@@ -116,12 +117,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 26.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 151.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "dense_core_cols",
@@ -129,12 +130,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 17.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 100.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "inactivated",
@@ -142,12 +143,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 13.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 48.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "pivots_selected",
@@ -155,12 +156,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 13.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 48.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 0.630249,
         "exceeds_threshold": false,
         "metric": "peel_frontier_peak",
@@ -168,7 +169,7 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 4.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 4.0,
         "verdict": "accept"
       }
@@ -182,7 +183,7 @@ expression: snapshot
     "k": 1000,
     "log_lines": [
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "gauss_ops",
@@ -190,12 +191,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 502.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 2502.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "dense_core_rows",
@@ -203,12 +204,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 251.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 1251.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "dense_core_cols",
@@ -216,12 +217,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 167.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 834.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "inactivated",
@@ -229,12 +230,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 126.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 375.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 28.334269,
         "exceeds_threshold": true,
         "metric": "pivots_selected",
@@ -242,12 +243,12 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 126.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 375.0,
         "verdict": "regressed"
       },
       {
-        "calibration_n": 15,
+        "calibration_n": 25,
         "e_value": 0.630249,
         "exceeds_threshold": false,
         "metric": "peel_frontier_peak",
@@ -255,7 +256,7 @@ expression: snapshot
         "replay_ref": "replay:rq-track-g-regression-v1",
         "schema_version": "raptorq-g8-anytime-regression-v1",
         "threshold": 4.0,
-        "total_observations": 24,
+        "total_observations": 34,
         "value": 4.0,
         "verdict": "accept"
       }

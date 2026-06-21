@@ -2349,48 +2349,54 @@ mod tests {
     }
 
     #[test]
-    fn k200_repair_symbols_match_raptorq_rs_reference_encoder() {
-        let k = 200usize;
-        let symbol_size = 64usize;
+    fn repair_symbols_match_raptorq_rs_reference_encoder() {
         let repair_count = 30u32;
-        let seed = 0x6330_0200_u64;
-        let source = make_source_symbols(k, symbol_size);
-        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
-        let source_bytes = source.concat();
-        let transfer_length = u64::try_from(source_bytes.len()).expect("transfer length fits u64");
-        let symbol_size_u16 =
-            u16::try_from(symbol_size).expect("symbol size must fit in u16 for raptorq-rs");
-        let reference_config =
-            RaptorqRsObjectTransmissionInformation::new(transfer_length, symbol_size_u16, 1, 1, 1);
-        let reference_encoder =
-            RaptorqRsSourceBlockEncoder::new(0, &reference_config, &source_bytes);
-        let expected_reference_esi_start =
-            u32::try_from(encoder.params().k_prime).expect("K' must fit in u32");
-        let public_repair_esi_start = u32::try_from(k).expect("K must fit in u32");
-
-        let reference_repairs = reference_encoder.repair_packets(0, repair_count);
-        assert_eq!(
-            reference_repairs.len(),
-            usize::try_from(repair_count).expect("repair count fits usize"),
-            "raptorq-rs must emit the requested number of repair packets"
-        );
-
-        for (offset, packet) in reference_repairs.iter().enumerate() {
-            let offset_u32 = u32::try_from(offset).expect("repair offset must fit in u32");
-            let public_esi = public_repair_esi_start + offset_u32;
-            let reference_esi = packet.payload_id().encoding_symbol_id();
-
-            assert_eq!(
-                reference_esi,
-                expected_reference_esi_start + offset_u32,
-                "raptorq-rs repair packet ESI should start at K' for offset {offset}"
+        for (k, symbol_size, seed) in [
+            (200usize, 64usize, 0x6330_0200_u64),
+            (842usize, 32usize, 0x6330_0842_u64),
+        ] {
+            let source = make_source_symbols(k, symbol_size);
+            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+            let source_bytes = source.concat();
+            let transfer_length =
+                u64::try_from(source_bytes.len()).expect("transfer length fits u64");
+            let symbol_size_u16 =
+                u16::try_from(symbol_size).expect("symbol size must fit in u16 for raptorq-rs");
+            let reference_config = RaptorqRsObjectTransmissionInformation::new(
+                transfer_length,
+                symbol_size_u16,
+                1,
+                1,
+                1,
             );
+            let reference_encoder =
+                RaptorqRsSourceBlockEncoder::new(0, &reference_config, &source_bytes);
+            let public_repair_esi_start = u32::try_from(k).expect("K must fit in u32");
+
+            let reference_repairs = reference_encoder.repair_packets(0, repair_count);
             assert_eq!(
-                encoder.repair_symbol(public_esi),
-                packet.data(),
-                "repair payload mismatch at K={k}, public_esi={public_esi}, \
-                 reference_esi={reference_esi}, offset={offset}"
+                reference_repairs.len(),
+                usize::try_from(repair_count).expect("repair count fits usize"),
+                "raptorq-rs must emit the requested number of repair packets for K={k}"
             );
+
+            for (offset, packet) in reference_repairs.iter().enumerate() {
+                let offset_u32 = u32::try_from(offset).expect("repair offset must fit in u32");
+                let public_esi = public_repair_esi_start + offset_u32;
+                let reference_esi = packet.payload_id().encoding_symbol_id();
+
+                assert_eq!(
+                    reference_esi,
+                    public_repair_esi_start + offset_u32,
+                    "raptorq-rs repair packet ESI should start at K for K={k}, offset {offset}"
+                );
+                assert_eq!(
+                    encoder.repair_symbol(public_esi),
+                    packet.data(),
+                    "repair payload mismatch at K={k}, public_esi={public_esi}, \
+                     reference_esi={reference_esi}, offset={offset}"
+                );
+            }
         }
     }
 
