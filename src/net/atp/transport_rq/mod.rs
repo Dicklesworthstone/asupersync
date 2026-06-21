@@ -4744,7 +4744,6 @@ async fn dispatch_decode_job(
                 cx,
                 dec,
                 run_block_decode_job(retry_job),
-                false,
                 transfer_decode_width,
             )
             .await?;
@@ -5732,7 +5731,6 @@ async fn finalize_decode_outcome(
     cx: &Cx,
     dec: &mut EntryDecoder,
     outcome: BlockDecodeOutcome,
-    allow_spawn_decode: bool,
     transfer_decode_width: usize,
 ) -> Result<bool, RqError> {
     let Some(pipeline) = dec.pipeline.as_mut() else {
@@ -5751,16 +5749,66 @@ async fn finalize_decode_outcome(
                 block_sbn,
                 decode_elapsed.as_millis()
             );
-            let _ = dispatch_decode_job(
-                cx,
-                dec,
-                job,
-                "stale deferred decode retry",
-                allow_spawn_decode,
-                transfer_decode_width,
-            )
-            .await?;
+            queue_stale_decode_retry(cx, dec, job, transfer_decode_width).await?;
             Ok(false)
+        }
+    }
+}
+
+async fn queue_stale_decode_retry(
+    cx: &Cx,
+    dec: &mut EntryDecoder,
+    job: BlockDecodeJob,
+    transfer_decode_width: usize,
+) -> Result<(), RqError> {
+    let block_sbn = job.sbn();
+    if dec.complete || dec.pipeline.is_none() {
+        return Ok(());
+    }
+    if block_decode_pending(dec, block_sbn) {
+        return Ok(());
+    }
+
+    let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
+    if !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width) {
+        if let Some(pipeline) = dec.pipeline.as_mut() {
+            pipeline.cancel_decode_job(block_sbn);
+        }
+        rqtrace!(
+            "receiver: entry {} deferred stale decode retry for block {} because entry_cap={entry_decode_width} is saturated",
+            dec.index,
+            block_sbn
+        );
+        return Ok(());
+    }
+
+    let inline_job = job.clone();
+    match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+        Ok(handle) => {
+            dec.pending_decodes
+                .push(PendingDecode { block_sbn, handle });
+            Ok(())
+        }
+        Err(crate::runtime::state::SpawnError::RuntimeUnavailable) => {
+            let outcome = run_block_decode_job(inline_job);
+            let decode_elapsed = outcome.elapsed();
+            let Some(pipeline) = dec.pipeline.as_mut() else {
+                return Ok(());
+            };
+            let result = pipeline.finish_decode_job(outcome);
+            let _ = apply_decode_result(dec, result, decode_elapsed).await?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Some(pipeline) = dec.pipeline.as_mut() {
+                pipeline.cancel_decode_job(block_sbn);
+            }
+            rqtrace!(
+                "receiver: entry {} deferred stale decode retry for block {} after spawn denial: {err:?}",
+                dec.index,
+                block_sbn
+            );
+            Ok(())
         }
     }
 }
@@ -5820,7 +5868,6 @@ async fn join_pending_decode(
         cx,
         dec,
         outcome,
-        true,
         RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
     )
     .await?
