@@ -304,20 +304,20 @@ mod tests {
 
             // Should have created a span
             {
-                let spans = spans.lock();
-                let span_count = spans.len();
+                let (span_count, creation) = {
+                    let spans = spans.lock();
+                    let span_count = spans.len();
+                    let creation = spans.iter().find(|s| s.contains("region_new")).cloned();
+                    (span_count, creation)
+                };
+
                 assert_with_log!(
                     span_count > 0,
                     "should have recorded region span creation",
                     "> 0",
                     span_count
                 );
-                let creation = spans
-                    .iter()
-                    .find(|s| s.contains("region_new"))
-                    .unwrap()
-                    .clone();
-                drop(spans);
+                let creation = creation.expect("region_new span should exist");
                 assert_with_log!(
                     creation.contains("region_id"),
                     "region_new should include region_id",

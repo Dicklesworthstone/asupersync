@@ -280,7 +280,7 @@ fn e2e_w5_1_join_associativity() {
     let outcomes: Vec<Outcome<(), ()>> = vec![
         Outcome::Ok(()),
         Outcome::Err(()),
-        Outcome::Cancelled(CancelReason::timeout()),
+        Outcome::Cancelled(CancelReason::race_loser()),
         Outcome::Panicked(PanicPayload::new("x")),
     ];
 
@@ -330,7 +330,7 @@ fn e2e_w5_2_race_commutativity() {
     let outcomes: Vec<Outcome<(), ()>> = vec![
         Outcome::Ok(()),
         Outcome::Err(()),
-        Outcome::Cancelled(CancelReason::timeout()),
+        Outcome::Cancelled(CancelReason::race_loser()),
         Outcome::Panicked(PanicPayload::new("x")),
     ];
 

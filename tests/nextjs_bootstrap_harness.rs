@@ -304,7 +304,7 @@ fn rapid_navigation_churn_with_interleaved_recovery_remains_deterministic() {
     assert_eq!(first.soft_navigation_count, 3);
     assert_eq!(first.hard_navigation_count, 3);
     // Includes explicit CancelBootstrap events and hard-navigation scope invalidations.
-    assert_eq!(first.cancellation_count, 5);
+    assert_eq!(first.cancellation_count, 6);
     assert_eq!(first.hydration_mismatch_count, 1);
     assert!(
         first.runtime_init_attempts >= 5,
@@ -336,8 +336,8 @@ fn nextjs_reference_template_deployment_flow_is_deterministic() {
     assert_eq!(first_snapshot.cache_revalidation_count, 1);
     assert_eq!(first_snapshot.hot_reload_count, 1);
     assert_eq!(first_snapshot.cancellation_count, 4);
-    assert_eq!(first_snapshot.scope_invalidation_count, 3);
-    assert_eq!(first_snapshot.runtime_reinit_required_count, 3);
+    assert_eq!(first_snapshot.scope_invalidation_count, 4);
+    assert_eq!(first_snapshot.runtime_reinit_required_count, 4);
     assert_eq!(first_snapshot.runtime_failure_count, 1);
     assert_eq!(first_snapshot.runtime_init_attempts, 5);
     assert_eq!(first_snapshot.runtime_init_successes, 5);

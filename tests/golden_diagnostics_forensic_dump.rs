@@ -62,19 +62,24 @@ pub struct ForensicDumpMetadata {
 /// Test helper to create runtime state with test data
 struct RuntimeScenarioBuilder {
     state: RuntimeState,
+    virtual_clock: Option<Arc<VirtualClock>>,
 }
 
 impl RuntimeScenarioBuilder {
     fn new() -> Self {
         Self {
             state: RuntimeState::new(),
+            virtual_clock: None,
         }
     }
 
     fn with_virtual_time(mut self, start_time: Time) -> Self {
         let virtual_clock = Arc::new(VirtualClock::starting_at(start_time));
         self.state
-            .set_timer_driver(TimerDriverHandle::with_virtual_clock(virtual_clock));
+            .set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(
+                &virtual_clock,
+            )));
+        self.virtual_clock = Some(virtual_clock);
         self
     }
 
@@ -110,15 +115,14 @@ impl RuntimeScenarioBuilder {
         kind: ObligationKind,
         reserved_at: Time,
     ) -> (Self, ObligationId) {
+        if let Some(clock) = &self.virtual_clock {
+            clock.set(reserved_at);
+        }
+
         let obligation_id = self
             .state
             .create_obligation(kind, task_id, region_id, None)
             .expect("Failed to create obligation");
-
-        // Set reservation time for leak detection
-        if let Some(obligation_record) = self.state.obligation_mut(obligation_id) {
-            obligation_record.reserved_at = reserved_at;
-        }
 
         (self, obligation_id)
     }
@@ -194,7 +198,7 @@ fn generate_forensic_dump(
 #[test]
 fn forensic_dump_empty_runtime() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/diagnostics");
+    settings.set_snapshot_path("snapshots/diagnostics");
 
     let state = RuntimeScenarioBuilder::new().build();
 
@@ -212,7 +216,7 @@ fn forensic_dump_empty_runtime() {
 #[test]
 fn forensic_dump_minimal_runtime() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/diagnostics");
+    settings.set_snapshot_path("snapshots/diagnostics");
 
     let (builder, _root_id) = RuntimeScenarioBuilder::new().add_region(None);
     let state = builder.build();
@@ -231,7 +235,7 @@ fn forensic_dump_minimal_runtime() {
 #[test]
 fn forensic_dump_complex_hierarchy() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/diagnostics");
+    settings.set_snapshot_path("snapshots/diagnostics");
 
     let (builder, root_id) = RuntimeScenarioBuilder::new().add_region(None);
     let (builder, child1_id) = builder.add_region(Some(root_id));
@@ -264,7 +268,7 @@ fn forensic_dump_complex_hierarchy() {
 #[test]
 fn forensic_dump_with_leaked_obligations() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/diagnostics");
+    settings.set_snapshot_path("snapshots/diagnostics");
 
     let base_time = Time::from_millis(1000);
     let current_time = Time::from_millis(5000); // 4 seconds later
@@ -281,6 +285,7 @@ fn forensic_dump_with_leaked_obligations() {
         ObligationKind::SendPermit,
         Time::from_millis(2000),
     );
+    let builder = builder.with_virtual_time(current_time);
 
     let state = builder.build();
 
@@ -298,7 +303,7 @@ fn forensic_dump_with_leaked_obligations() {
 #[test]
 fn forensic_dump_deadlock_scenario() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/diagnostics");
+    settings.set_snapshot_path("snapshots/diagnostics");
 
     // Create a scenario with potential deadlock indicators
     let (builder, root_id) = RuntimeScenarioBuilder::new().add_region(None);

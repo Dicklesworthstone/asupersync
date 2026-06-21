@@ -512,7 +512,7 @@ fn adr_005_join_associative_severity() {
     let outcomes: Vec<Outcome<i32, &str>> = vec![
         Outcome::Ok(1),
         Outcome::Err("fail"),
-        Outcome::Cancelled(CancelReason::timeout()),
+        Outcome::Cancelled(CancelReason::race_loser()),
         Outcome::Panicked(PanicPayload::new("boom")),
     ];
 
@@ -558,7 +558,7 @@ fn adr_005_race_commutative_severity() {
     let outcomes: Vec<Outcome<i32, &str>> = vec![
         Outcome::Ok(1),
         Outcome::Err("fail"),
-        Outcome::Cancelled(CancelReason::timeout()),
+        Outcome::Cancelled(CancelReason::race_loser()),
         Outcome::Panicked(PanicPayload::new("boom")),
     ];
 

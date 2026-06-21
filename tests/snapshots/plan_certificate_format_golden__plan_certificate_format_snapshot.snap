@@ -5,11 +5,11 @@ expression: "json!({\n    \"dedup_race_join\":\n    {\n        \"certificate\": 
 {
   "dedup_race_join": {
     "certificate": {
-      "after_hash": 9330920261498496924,
+      "after_hash": "0cffa48607f55c8b136238a76fec2d8707a9fa8956a76be5c74b163cefb665d1",
       "after_node_count": 8,
-      "before_hash": 12664835006891767254,
+      "before_hash": "9ab853b5bb73b95ab9b307e02357fb8e898496b7d3413557f419c0e7069e8e95",
       "before_node_count": 6,
-      "fingerprint": 16580684486522239160,
+      "fingerprint": "76d3485657bf9a913513dcb613198117dcaa1a3997bb6dc2afb92ecc61bbd34e",
       "identity": false,
       "policy": {
         "associativity": true,
@@ -29,11 +29,11 @@ expression: "json!({\n    \"dedup_race_join\":\n    {\n        \"certificate\": 
       "version": 1
     },
     "compact": {
-      "after_hash": 9330920261498496924,
+      "after_hash": "0cffa48607f55c8b136238a76fec2d8707a9fa8956a76be5c74b163cefb665d1",
       "after_node_count": 8,
-      "before_hash": 12664835006891767254,
+      "before_hash": "9ab853b5bb73b95ab9b307e02357fb8e898496b7d3413557f419c0e7069e8e95",
       "before_node_count": 6,
-      "byte_size_bound": 42,
+      "byte_size_bound": 90,
       "policy_bits": 29,
       "steps": [
         {
@@ -48,11 +48,11 @@ expression: "json!({\n    \"dedup_race_join\":\n    {\n        \"certificate\": 
   },
   "identity_join": {
     "certificate": {
-      "after_hash": 12566553696209370974,
+      "after_hash": "237a6be237aea41abae549511aadb3909fced37fb36770bf3a70b1e98d7c11df",
       "after_node_count": 3,
-      "before_hash": 12566553696209370974,
+      "before_hash": "237a6be237aea41abae549511aadb3909fced37fb36770bf3a70b1e98d7c11df",
       "before_node_count": 3,
-      "fingerprint": 15209754795333290267,
+      "fingerprint": "fb2dd981203f008bf2c9ffa6e6406120048a535982b1c0cfcc049fd370ce34a5",
       "identity": true,
       "policy": {
         "associativity": true,
@@ -65,11 +65,11 @@ expression: "json!({\n    \"dedup_race_join\":\n    {\n        \"certificate\": 
       "version": 1
     },
     "compact": {
-      "after_hash": 12566553696209370974,
+      "after_hash": "237a6be237aea41abae549511aadb3909fced37fb36770bf3a70b1e98d7c11df",
       "after_node_count": 3,
-      "before_hash": 12566553696209370974,
+      "before_hash": "237a6be237aea41abae549511aadb3909fced37fb36770bf3a70b1e98d7c11df",
       "before_node_count": 3,
-      "byte_size_bound": 33,
+      "byte_size_bound": 81,
       "policy_bits": 29,
       "steps": [],
       "version": 1,

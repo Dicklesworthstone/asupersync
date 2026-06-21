@@ -744,15 +744,20 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                 SessionData::new()
             };
 
-            // 2b. Touch the session (refresh last-accessed timestamp). Marks
-            //     the session as modified so the touch is persisted to the
-            //     store on this request. (br-asupersync-7udumi)
-            session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
+            // 2b. Touch existing sessions only. Brand-new, otherwise
+            //     untouched safe requests must not allocate a backing store
+            //     entry or emit a cookie; handlers that actually use the
+            //     session will mark it modified below. (br-asupersync-7udumi)
+            if !is_new {
+                session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
+            }
 
-            // 2c. Ensure a CSRF token exists. New sessions get one on first
-            //     touch; existing sessions that pre-date this commit get one
-            //     lazily on first access. (br-asupersync-7udumi)
-            if self.config.csrf_protection && session_data.get(CSRF_TOKEN_KEY).is_none() {
+            // 2c. Ensure existing sessions have a CSRF token. New sessions
+            //     mint one lazily from Session::csrf_token() or
+            //     rotate_csrf_token(), avoiding empty-request allocation.
+            //     (br-asupersync-7udumi)
+            if !is_new && self.config.csrf_protection && session_data.get(CSRF_TOKEN_KEY).is_none()
+            {
                 let Some(csrf_token) = generate_session_id() else {
                     return Response::new(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -896,13 +901,16 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
 
             // 6. Save if modified. Untouched new sessions are NOT saved to prevent DoS.
             let session_cleared = session_data.is_empty() && session_data.is_modified();
+            let should_save_session =
+                !session_cleared && (session_data.is_modified() || regenerate_requested);
 
             if session_cleared {
                 if !is_new {
                     // Session cleared → delete server-side data and expire the cookie.
                     self.store.delete(&session_id);
                 }
-            } else if session_data.is_modified() || regenerate_requested {
+            } else if should_save_session {
+                session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
                 self.store.save(&session_id, &session_data);
             }
 
@@ -923,7 +931,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                         set_cookie_header(&self.config.cookie_name, "", &expire_config);
                     resp.append_set_cookie(cookie_val);
                 }
-            } else if session_data.is_modified() || regenerate_requested {
+            } else if should_save_session {
                 let cookie_val =
                     set_cookie_header(&self.config.cookie_name, &session_id, &self.config);
                 resp.append_set_cookie(cookie_val);
@@ -1062,7 +1070,13 @@ impl Session {
     /// (br-asupersync-7udumi)
     #[must_use]
     pub fn csrf_token(&self) -> Option<String> {
-        self.0.lock().get(CSRF_TOKEN_KEY).map(ToString::to_string)
+        let mut guard = self.0.lock();
+        if let Some(token) = guard.get(CSRF_TOKEN_KEY) {
+            return Some(token.to_string());
+        }
+        let token = generate_session_id()?;
+        guard.insert(CSRF_TOKEN_KEY, token.clone());
+        Some(token)
     }
 
     /// br-asupersync-hifab2 — Request a session-ID rotation at the end of
@@ -2094,10 +2108,13 @@ mod tests {
             fn call(
                 &self,
                 _cx: &crate::Cx,
-                _req: Request,
+                req: Request,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
             {
-                Box::pin(async {
+                Box::pin(async move {
+                    if let Some(session) = req.extensions.get_typed::<Session>() {
+                        session.insert("flash", "saved");
+                    }
                     let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
                     // Inner handler emits its own cookie via the canonical API.
                     resp.append_set_cookie("csrf_token=abc123; HttpOnly; Path=/");

@@ -1,0 +1,79 @@
+---
+source: tests/golden_diagnostics_forensic_dump.rs
+expression: dump
+---
+ForensicDump {
+    scenario: "leaked_obligations",
+    timestamp_normalized: true,
+    region_explanations: [
+        RegionOpenExplanation {
+            region_id: RegionId(0:0),
+            region_state: Some(
+                Open,
+            ),
+            reasons: [
+                TaskRunning {
+                    task_id: TaskId(0:0),
+                    task_state: "Running",
+                    poll_count: 0,
+                },
+                ObligationHeld {
+                    obligation_id: ObligationId(0:0),
+                    obligation_type: "Ack",
+                    holder_task: TaskId(0:0),
+                },
+                ObligationHeld {
+                    obligation_id: ObligationId(1:0),
+                    obligation_type: "SendPermit",
+                    holder_task: TaskId(0:0),
+                },
+            ],
+            recommendations: [
+                "Wait for live tasks to complete, or cancel the region.",
+                "Ensure obligations are committed/aborted before closing.",
+            ],
+        },
+    ],
+    task_explanations: [
+        TaskBlockedExplanation {
+            task_id: TaskId(0:0),
+            block_reason: AwaitingFuture {
+                description: "unknown await point",
+            },
+            details: [],
+            recommendations: [
+                "Task appears to be awaiting an async operation.",
+            ],
+        },
+    ],
+    obligation_leaks: [
+        ObligationLeak {
+            obligation_id: ObligationId(0:0),
+            obligation_type: "Ack",
+            holder_task: Some(
+                TaskId(0:0),
+            ),
+            region_id: RegionId(0:0),
+            age: 4s,
+        },
+        ObligationLeak {
+            obligation_id: ObligationId(1:0),
+            obligation_type: "SendPermit",
+            holder_task: Some(
+                TaskId(0:0),
+            ),
+            region_id: RegionId(0:0),
+            age: 3s,
+        },
+    ],
+    deadlock_severity: "None",
+    health_classification: "Healthy { margin: 0.0 }",
+    metadata: ForensicDumpMetadata {
+        test_name: "leaked_obligations",
+        description: "Runtime with leaked obligations of different ages",
+        region_count: 1,
+        task_count: 1,
+        obligation_count: 2,
+        virtual_time: true,
+    },
+}

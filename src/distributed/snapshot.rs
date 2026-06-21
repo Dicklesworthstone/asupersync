@@ -581,10 +581,10 @@ impl RegionSnapshot {
         let state = 1_usize;
         let timestamp = 8_usize;
         let sequence = 8_usize;
-        let vector_clock = 4_usize.saturating_add(
-            // Estimate: 4 bytes length + (node_count * (8 bytes NodeId + 8 bytes counter))
-            self.vector_clock.node_count().saturating_mul(16),
-        );
+        let vector_clock_bytes =
+            bincode::serde::encode_to_vec(&self.vector_clock, bincode::config::legacy())
+                .expect("VectorClock should always serialize successfully");
+        let vector_clock = 4_usize.saturating_add(vector_clock_bytes.len());
         let provenance = 16_usize;
         let tasks = 4_usize.saturating_add(self.tasks.len().saturating_mul(10)); // count + per-task (8+1+1)
         let children = 4_usize.saturating_add(self.children.len().saturating_mul(8));

@@ -6,10 +6,8 @@ expression: scrubbed
   "content_type": "application/x-protobuf",
   "export_request": {
     "resource_attributes": {
-      "custom.label": "测试 with 🚀 emoji",
-      "empty.value": "",
-      "service.name": "edge-test",
-      "service.version": "unknown"
+      "service.name": "multi-scope-test",
+      "service.version": "0.1.0"
     },
     "scope_metrics": [
       {
@@ -17,58 +15,58 @@ expression: scrubbed
           {
             "data_points": [
               {
-                "attributes": {},
+                "attributes": {
+                  "worker_id": "0"
+                },
                 "time_unix_nano": "[TIMESTAMP]",
-                "value": 0
+                "value": 1000
               }
             ],
-            "description": "",
-            "name": "zero.counter",
+            "description": "Scheduler tick count",
+            "name": "runtime.scheduler.ticks",
             "type": "counter",
-            "unit": ""
-          },
+            "unit": "1"
+          }
+        ],
+        "scope": {
+          "name": "asupersync::runtime",
+          "version": "0.3.1"
+        }
+      },
+      {
+        "metrics": [
           {
             "data_points": [
               {
                 "attributes": {
-                  "sensor": "outdoor"
+                  "method": "GET",
+                  "route": "/health"
                 },
-                "time_unix_nano": "[TIMESTAMP]",
-                "value": -15.5
-              }
-            ],
-            "description": "Temperature reading",
-            "name": "temperature.celsius",
-            "type": "gauge",
-            "unit": "°C"
-          },
-          {
-            "data_points": [
-              {
-                "attributes": {},
                 "bucket_counts": [
-                  0,
+                  20,
+                  5,
                   0,
                   0
                 ],
-                "count": 0,
+                "count": 25,
                 "explicit_bounds": [
+                  0.1,
                   1.0,
                   10.0
                 ],
-                "sum": 0.0,
+                "sum": 12.5,
                 "time_unix_nano": "[TIMESTAMP]"
               }
             ],
-            "description": "Histogram with no observations",
-            "name": "empty.histogram",
+            "description": "HTTP request duration",
+            "name": "http.server.duration",
             "type": "histogram",
-            "unit": "ms"
+            "unit": "s"
           }
         ],
         "scope": {
-          "name": "edge-test",
-          "version": ""
+          "name": "asupersync::http",
+          "version": "0.3.1"
         }
       }
     ]

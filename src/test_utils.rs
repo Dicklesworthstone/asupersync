@@ -484,7 +484,7 @@ impl EvidenceSink {
     /// Uses a default seed and subsystem. Call `with_context()` for custom configuration.
     pub fn for_test(test_name: &str) -> Self {
         let ctx = TestContext::new(test_name, DEFAULT_TEST_SEED);
-        let logger = NdjsonLogger::enabled(TestLogLevel::Info, Some(ctx));
+        let logger = NdjsonLogger::enabled(TestLogLevel::Debug, Some(ctx));
 
         Self {
             logger,
@@ -495,7 +495,7 @@ impl EvidenceSink {
 
     /// Create evidence sink with custom test context.
     pub fn with_context(test_name: &str, ctx: TestContext) -> Self {
-        let logger = NdjsonLogger::enabled(TestLogLevel::Info, Some(ctx));
+        let logger = NdjsonLogger::enabled(TestLogLevel::Debug, Some(ctx));
 
         Self {
             logger,

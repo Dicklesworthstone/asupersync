@@ -1,0 +1,124 @@
+---
+source: tests/golden_diagnostics_forensic_dump.rs
+expression: dump
+---
+ForensicDump {
+    scenario: "deadlock_scenario",
+    timestamp_normalized: true,
+    region_explanations: [
+        RegionOpenExplanation {
+            region_id: RegionId(0:0),
+            region_state: Some(
+                Open,
+            ),
+            reasons: [
+                ChildRegionOpen {
+                    child_id: RegionId(1:0),
+                    child_state: Open,
+                },
+                ChildRegionOpen {
+                    child_id: RegionId(2:0),
+                    child_state: Open,
+                },
+            ],
+            recommendations: [
+                "Wait for child regions to close, or cancel them.",
+            ],
+        },
+        RegionOpenExplanation {
+            region_id: RegionId(1:0),
+            region_state: Some(
+                Open,
+            ),
+            reasons: [
+                TaskRunning {
+                    task_id: TaskId(0:0),
+                    task_state: "Running",
+                    poll_count: 0,
+                },
+                TaskRunning {
+                    task_id: TaskId(1:0),
+                    task_state: "Running",
+                    poll_count: 0,
+                },
+            ],
+            recommendations: [
+                "Wait for live tasks to complete, or cancel the region.",
+            ],
+        },
+        RegionOpenExplanation {
+            region_id: RegionId(2:0),
+            region_state: Some(
+                Open,
+            ),
+            reasons: [
+                TaskRunning {
+                    task_id: TaskId(2:0),
+                    task_state: "Running",
+                    poll_count: 0,
+                },
+                TaskRunning {
+                    task_id: TaskId(3:0),
+                    task_state: "Running",
+                    poll_count: 0,
+                },
+            ],
+            recommendations: [
+                "Wait for live tasks to complete, or cancel the region.",
+            ],
+        },
+    ],
+    task_explanations: [
+        TaskBlockedExplanation {
+            task_id: TaskId(0:0),
+            block_reason: AwaitingFuture {
+                description: "unknown await point",
+            },
+            details: [],
+            recommendations: [
+                "Task appears to be awaiting an async operation.",
+            ],
+        },
+        TaskBlockedExplanation {
+            task_id: TaskId(1:0),
+            block_reason: AwaitingFuture {
+                description: "unknown await point",
+            },
+            details: [],
+            recommendations: [
+                "Task appears to be awaiting an async operation.",
+            ],
+        },
+        TaskBlockedExplanation {
+            task_id: TaskId(2:0),
+            block_reason: AwaitingFuture {
+                description: "unknown await point",
+            },
+            details: [],
+            recommendations: [
+                "Task appears to be awaiting an async operation.",
+            ],
+        },
+        TaskBlockedExplanation {
+            task_id: TaskId(3:0),
+            block_reason: AwaitingFuture {
+                description: "unknown await point",
+            },
+            details: [],
+            recommendations: [
+                "Task appears to be awaiting an async operation.",
+            ],
+        },
+    ],
+    obligation_leaks: [],
+    deadlock_severity: "None",
+    health_classification: "Healthy { margin: 0.0 }",
+    metadata: ForensicDumpMetadata {
+        test_name: "deadlock_scenario",
+        description: "Runtime with multiple blocked tasks indicating potential deadlock",
+        region_count: 3,
+        task_count: 4,
+        obligation_count: 0,
+        virtual_time: false,
+    },
+}

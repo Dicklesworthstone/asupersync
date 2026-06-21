@@ -3,13 +3,7 @@ source: tests/otlp_metrics_request_golden.rs
 expression: scrubbed
 ---
 {
-  "otlp_version": "1.0.0",
   "content_type": "application/x-protobuf",
-  "scrubbed_fields": [
-    "time_unix_nano",
-    "process.pid",
-    "host.name"
-  ],
   "export_request": {
     "resource_attributes": {
       "deployment.environment": "test",
@@ -20,16 +14,8 @@ expression: scrubbed
     },
     "scope_metrics": [
       {
-        "scope": {
-          "name": "asupersync",
-          "version": "0.3.1"
-        },
         "metrics": [
           {
-            "name": "asupersync.tasks.spawned",
-            "description": "Total number of tasks spawned",
-            "unit": "1",
-            "type": "counter",
             "data_points": [
               {
                 "attributes": {
@@ -45,13 +31,13 @@ expression: scrubbed
                 "time_unix_nano": "[TIMESTAMP]",
                 "value": 18
               }
-            ]
+            ],
+            "description": "Total number of tasks spawned",
+            "name": "asupersync.tasks.spawned",
+            "type": "counter",
+            "unit": "1"
           },
           {
-            "name": "asupersync.connections.active",
-            "description": "Current number of active connections",
-            "unit": "1",
-            "type": "gauge",
             "data_points": [
               {
                 "attributes": {
@@ -61,21 +47,18 @@ expression: scrubbed
                 "time_unix_nano": "[TIMESTAMP]",
                 "value": 8
               }
-            ]
+            ],
+            "description": "Current number of active connections",
+            "name": "asupersync.connections.active",
+            "type": "gauge",
+            "unit": "1"
           },
           {
-            "name": "asupersync.tasks.duration",
-            "description": "Task execution duration in seconds",
-            "unit": "s",
-            "type": "histogram",
             "data_points": [
               {
                 "attributes": {
                   "outcome": "ok"
                 },
-                "time_unix_nano": "[TIMESTAMP]",
-                "count": 100,
-                "sum": 42.5,
                 "bucket_counts": [
                   10,
                   50,
@@ -83,17 +66,34 @@ expression: scrubbed
                   5,
                   0
                 ],
+                "count": 100,
                 "explicit_bounds": [
                   0.1,
                   0.5,
                   1.0,
                   5.0
-                ]
+                ],
+                "sum": 42.5,
+                "time_unix_nano": "[TIMESTAMP]"
               }
-            ]
+            ],
+            "description": "Task execution duration in seconds",
+            "name": "asupersync.tasks.duration",
+            "type": "histogram",
+            "unit": "s"
           }
-        ]
+        ],
+        "scope": {
+          "name": "asupersync",
+          "version": "0.3.1"
+        }
       }
     ]
-  }
+  },
+  "otlp_version": "1.0.0",
+  "scrubbed_fields": [
+    "time_unix_nano",
+    "process.pid",
+    "host.name"
+  ]
 }

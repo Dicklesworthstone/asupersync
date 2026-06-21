@@ -1,16 +1,17 @@
 ---
 source: tests/distributed_consistent_hash_golden.rs
-expression: placeholder
+assertion_line: 160
+expression: "json!({\n    \"baseline\":\n    {\n        \"node_count\": baseline.node_count(), \"vnode_count\":\n        baseline.vnode_count(), \"partition_sizes\":\n        partition_sizes(&baseline_assignments),\n    }, \"after_add\":\n    {\n        \"node_count\": after_add.node_count(), \"vnode_count\":\n        after_add.vnode_count(), \"partition_sizes\":\n        partition_sizes(&after_add_assignments), \"changed_from_baseline\":\n        changed_key_count(&baseline_assignments, &after_add_assignments),\n    }, \"after_remove\":\n    {\n        \"node_count\": after_remove.node_count(), \"vnode_count\":\n        after_remove.vnode_count(), \"partition_sizes\":\n        partition_sizes(&after_remove_assignments), \"changed_from_after_add\":\n        changed_key_count(&after_add_assignments, &after_remove_assignments),\n    }, \"after_replace\":\n    {\n        \"node_count\": after_replace.node_count(), \"vnode_count\":\n        after_replace.vnode_count(), \"partition_sizes\":\n        partition_sizes(&after_replace_assignments), \"changed_from_baseline\":\n        changed_key_count(&baseline_assignments, &after_replace_assignments),\n    },\n})"
 ---
 {
   "after_add": {
-    "changed_from_baseline": 9,
+    "changed_from_baseline": 6,
     "node_count": 4,
     "partition_sizes": {
-      "node-a": 6,
+      "node-a": 10,
       "node-b": 5,
-      "node-c": 4,
-      "node-d": 9
+      "node-c": 3,
+      "node-d": 6
     },
     "vnode_count": 128
   },
@@ -18,28 +19,28 @@ expression: placeholder
     "changed_from_after_add": 5,
     "node_count": 3,
     "partition_sizes": {
-      "node-a": 6,
-      "node-c": 9,
-      "node-d": 9
+      "node-a": 10,
+      "node-c": 7,
+      "node-d": 7
     },
     "vnode_count": 96
   },
   "after_replace": {
-    "changed_from_baseline": 10,
+    "changed_from_baseline": 11,
     "node_count": 3,
     "partition_sizes": {
-      "node-a": 9,
-      "node-b": 7,
-      "node-e": 8
+      "node-a": 10,
+      "node-b": 4,
+      "node-e": 10
     },
     "vnode_count": 96
   },
   "baseline": {
     "node_count": 3,
     "partition_sizes": {
-      "node-a": 12,
-      "node-b": 6,
-      "node-c": 6
+      "node-a": 10,
+      "node-b": 9,
+      "node-c": 5
     },
     "vnode_count": 96
   }

@@ -93,8 +93,7 @@ const GLOSSARY_CORE_TERMS: [&str; 15] = [
 const VALID_MARKERS: [&str; 2] = ["[Explanatory]", "[Implementation]"];
 
 fn load_fos() -> String {
-    std::fs::read_to_string("docs/asupersync_v4_formal_semantics.md")
-        .expect("failed to load FOS doc")
+    std::fs::read_to_string("asupersync_v4_formal_semantics.md").expect("failed to load FOS doc")
 }
 
 fn load_glossary() -> String {
@@ -501,8 +500,9 @@ fn fos_required_top_level_sections() {
         "## 6. Progress Properties",
         "## 7. Algebraic Laws",
         "## 8. Test Oracle Usage",
-        "## 9. TLA+ Sketch",
-        "## 10. Summary",
+        "## 9. Mechanization Plan",
+        "## 10. TLA+ Sketch",
+        "## 11. Summary",
     ];
 
     let mut missing = Vec::new();

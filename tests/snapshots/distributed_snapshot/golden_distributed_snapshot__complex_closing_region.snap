@@ -1,0 +1,132 @@
+---
+source: tests/golden_distributed_snapshot.rs
+expression: capture
+---
+SnapshotFormatCapture {
+    scenario: "complex_closing_region",
+    original: RegionSnapshot {
+        region_id: RegionId(99:7),
+        state: Closing,
+        timestamp: Time(1500000000000ns),
+        sequence: 42,
+        vector_clock: VC{},
+        origin_id: 1,
+        epoch: 1,
+        tasks: [
+            TaskSnapshot {
+                task_id: TaskId(20:2),
+                state: Completed,
+                priority: 5,
+            },
+            TaskSnapshot {
+                task_id: TaskId(21:0),
+                state: Cancelled,
+                priority: 3,
+            },
+            TaskSnapshot {
+                task_id: TaskId(22:1),
+                state: Panicked,
+                priority: 10,
+            },
+        ],
+        children: [
+            RegionId(100:1),
+            RegionId(101:2),
+        ],
+        finalizer_count: 7,
+        budget: BudgetSnapshot {
+            deadline_nanos: Some(
+                10000000000,
+            ),
+            polls_remaining: Some(
+                50,
+            ),
+            cost_remaining: Some(
+                1024,
+            ),
+        },
+        cancel_reason: Some(
+            "timeout_exceeded",
+        ),
+        parent: Some(
+            RegionId(0:1),
+        ),
+        metadata: [
+            170,
+            187,
+            204,
+            221,
+            238,
+            255,
+        ],
+        auth_tag: Tag(<redacted>),
+    },
+    serialized_hex: "534e4150026300000007000000010098f73e5d0100002a00000000000000080000000000000000000000010000000000000001000000000000000300000014000000020000000205150000000000000003031600000001000000040a0200000064000000010000006500000002000000070000000100e40b54020000000132000000010004000000000000011000000074696d656f75745f657863656564656401000000000100000006000000aabbccddeeff0000000000000000000000000000000000000000000000000000000000000000",
+    size_bytes: 211,
+    deserialized: Ok(
+        RegionSnapshot {
+            region_id: RegionId(99:7),
+            state: Closing,
+            timestamp: Time(1500000000000ns),
+            sequence: 42,
+            vector_clock: VC{},
+            origin_id: 1,
+            epoch: 1,
+            tasks: [
+                TaskSnapshot {
+                    task_id: TaskId(20:2),
+                    state: Completed,
+                    priority: 5,
+                },
+                TaskSnapshot {
+                    task_id: TaskId(21:0),
+                    state: Cancelled,
+                    priority: 3,
+                },
+                TaskSnapshot {
+                    task_id: TaskId(22:1),
+                    state: Panicked,
+                    priority: 10,
+                },
+            ],
+            children: [
+                RegionId(100:1),
+                RegionId(101:2),
+            ],
+            finalizer_count: 7,
+            budget: BudgetSnapshot {
+                deadline_nanos: Some(
+                    10000000000,
+                ),
+                polls_remaining: Some(
+                    50,
+                ),
+                cost_remaining: Some(
+                    1024,
+                ),
+            },
+            cancel_reason: Some(
+                "timeout_exceeded",
+            ),
+            parent: Some(
+                RegionId(0:1),
+            ),
+            metadata: [
+                170,
+                187,
+                204,
+                221,
+                238,
+                255,
+            ],
+            auth_tag: Tag(<redacted>),
+        },
+    ),
+    content_hash: "ddc54c106d2b37658d0e06e42e2a40c4274f67044ec885a8f6c473f89a7f028d",
+    metadata: SnapshotCaptureMetadata {
+        test_name: "complex_closing_region",
+        description: "Complex closing region with multiple tasks, cancellation, and full budget",
+        version: 2,
+        magic: "SNAP",
+    },
+}

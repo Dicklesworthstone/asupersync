@@ -1,0 +1,119 @@
+---
+source: tests/trace_canonicalizer_golden.rs
+assertion_line: 389
+expression: golden
+---
+{
+  "scenario": "diamond_dependency",
+  "input_metadata": {
+    "event_count": 6,
+    "event_kinds": [
+      "region_created",
+      "spawn",
+      "spawn",
+      "complete",
+      "complete",
+      "region_close_complete"
+    ],
+    "unique_tasks": 2,
+    "unique_regions": 1,
+    "description": "Diamond pattern: shared setup/teardown with parallel middle"
+  },
+  "canonical_output": {
+    "depth": 4,
+    "len": 6,
+    "layers": [
+      [
+        {
+          "seq": 1,
+          "time_ns": 0,
+          "kind": "region_created",
+          "sort_key": {
+            "kind": 10,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R1/Pnone"
+        }
+      ],
+      [
+        {
+          "seq": 2,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        },
+        {
+          "seq": 3,
+          "time_ns": 2,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 8589934592,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T2/R1"
+        }
+      ],
+      [
+        {
+          "seq": 4,
+          "time_ns": 3,
+          "kind": "complete",
+          "sort_key": {
+            "kind": 5,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        },
+        {
+          "seq": 5,
+          "time_ns": 4,
+          "kind": "complete",
+          "sort_key": {
+            "kind": 5,
+            "primary": 8589934592,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T2/R1"
+        }
+      ],
+      [
+        {
+          "seq": 6,
+          "time_ns": 5,
+          "kind": "region_close_complete",
+          "sort_key": {
+            "kind": 9,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R1/Pnone"
+        }
+      ]
+    ],
+    "independence_stats": {
+      "layer_count": 4,
+      "events_per_layer": [
+        1,
+        2,
+        2,
+        1
+      ],
+      "max_parallelism": 2,
+      "independent_pairs": 2
+    }
+  }
+}

@@ -1,0 +1,130 @@
+---
+source: tests/golden_distributed_snapshot.rs
+expression: capture
+---
+SnapshotFormatCapture {
+    scenario: "draining_region",
+    original: RegionSnapshot {
+        region_id: RegionId(300:8),
+        state: Draining,
+        timestamp: Time(7200000000000ns),
+        sequence: 128,
+        vector_clock: VC{},
+        origin_id: 1,
+        epoch: 1,
+        tasks: [
+            TaskSnapshot {
+                task_id: TaskId(1000:10),
+                state: Pending,
+                priority: 1,
+            },
+        ],
+        children: [
+            RegionId(301:0),
+            RegionId(302:0),
+            RegionId(303:0),
+        ],
+        finalizer_count: 15,
+        budget: BudgetSnapshot {
+            deadline_nanos: Some(
+                1000000000,
+            ),
+            polls_remaining: Some(
+                5,
+            ),
+            cost_remaining: Some(
+                100,
+            ),
+        },
+        cancel_reason: Some(
+            "user_cancel_request",
+        ),
+        parent: Some(
+            RegionId(299:7),
+        ),
+        metadata: [
+            100,
+            114,
+            97,
+            105,
+            110,
+            95,
+            109,
+            101,
+            116,
+            97,
+            100,
+            97,
+            116,
+            97,
+        ],
+        auth_tag: Tag(<redacted>),
+    },
+    serialized_hex: "534e4150022c0100000800000002004071618c06000080000000000000000800000000000000000000000100000000000000010000000000000001000000e80300000a0000000001030000002d010000000000002e010000000000002f010000000000000f0000000100ca9a3b0000000001050000000164000000000000000113000000757365725f63616e63656c5f72657175657374012b010000070000000e000000647261696e5f6d657461646174610000000000000000000000000000000000000000000000000000000000000000",
+    size_bytes: 210,
+    deserialized: Ok(
+        RegionSnapshot {
+            region_id: RegionId(300:8),
+            state: Draining,
+            timestamp: Time(7200000000000ns),
+            sequence: 128,
+            vector_clock: VC{},
+            origin_id: 1,
+            epoch: 1,
+            tasks: [
+                TaskSnapshot {
+                    task_id: TaskId(1000:10),
+                    state: Pending,
+                    priority: 1,
+                },
+            ],
+            children: [
+                RegionId(301:0),
+                RegionId(302:0),
+                RegionId(303:0),
+            ],
+            finalizer_count: 15,
+            budget: BudgetSnapshot {
+                deadline_nanos: Some(
+                    1000000000,
+                ),
+                polls_remaining: Some(
+                    5,
+                ),
+                cost_remaining: Some(
+                    100,
+                ),
+            },
+            cancel_reason: Some(
+                "user_cancel_request",
+            ),
+            parent: Some(
+                RegionId(299:7),
+            ),
+            metadata: [
+                100,
+                114,
+                97,
+                105,
+                110,
+                95,
+                109,
+                101,
+                116,
+                97,
+                100,
+                97,
+                116,
+                97,
+            ],
+            auth_tag: Tag(<redacted>),
+        },
+    ),
+    content_hash: "24974f25479a7c94cdce456371c8ffa2c57d4f7a452bb944dffdfd29dac8f15d",
+    metadata: SnapshotCaptureMetadata {
+        test_name: "draining_region",
+        description: "Draining region with pending tasks and active cancellation",
+        version: 2,
+        magic: "SNAP",
+    },
+}

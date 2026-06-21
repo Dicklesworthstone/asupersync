@@ -1,0 +1,156 @@
+---
+source: tests/golden_distributed_snapshot.rs
+expression: capture
+---
+SnapshotFormatCapture {
+    scenario: "all_task_states",
+    original: RegionSnapshot {
+        region_id: RegionId(400:20),
+        state: Open,
+        timestamp: Time(12345000000ns),
+        sequence: 77,
+        vector_clock: VC{},
+        origin_id: 1,
+        epoch: 1,
+        tasks: [
+            TaskSnapshot {
+                task_id: TaskId(1:0),
+                state: Pending,
+                priority: 1,
+            },
+            TaskSnapshot {
+                task_id: TaskId(2:0),
+                state: Running,
+                priority: 5,
+            },
+            TaskSnapshot {
+                task_id: TaskId(3:0),
+                state: Completed,
+                priority: 3,
+            },
+            TaskSnapshot {
+                task_id: TaskId(4:0),
+                state: Cancelled,
+                priority: 7,
+            },
+            TaskSnapshot {
+                task_id: TaskId(5:0),
+                state: Panicked,
+                priority: 9,
+            },
+        ],
+        children: [],
+        finalizer_count: 3,
+        budget: BudgetSnapshot {
+            deadline_nanos: Some(
+                2500000000,
+            ),
+            polls_remaining: Some(
+                25,
+            ),
+            cost_remaining: Some(
+                500,
+            ),
+        },
+        cancel_reason: None,
+        parent: None,
+        metadata: [
+            97,
+            108,
+            108,
+            95,
+            115,
+            116,
+            97,
+            116,
+            101,
+            115,
+            95,
+            116,
+            101,
+            115,
+            116,
+        ],
+        auth_tag: Tag(<redacted>),
+    },
+    serialized_hex: "534e41500290010000140000000040c0d1df020000004d000000000000000800000000000000000000000100000000000000010000000000000005000000010000000000000000010200000000000000010503000000000000000203040000000000000003070500000000000000040900000000030000000100f9029500000000011900000001f40100000000000000000f000000616c6c5f7374617465735f746573740000000000000000000000000000000000000000000000000000000000000000",
+    size_bytes: 196,
+    deserialized: Ok(
+        RegionSnapshot {
+            region_id: RegionId(400:20),
+            state: Open,
+            timestamp: Time(12345000000ns),
+            sequence: 77,
+            vector_clock: VC{},
+            origin_id: 1,
+            epoch: 1,
+            tasks: [
+                TaskSnapshot {
+                    task_id: TaskId(1:0),
+                    state: Pending,
+                    priority: 1,
+                },
+                TaskSnapshot {
+                    task_id: TaskId(2:0),
+                    state: Running,
+                    priority: 5,
+                },
+                TaskSnapshot {
+                    task_id: TaskId(3:0),
+                    state: Completed,
+                    priority: 3,
+                },
+                TaskSnapshot {
+                    task_id: TaskId(4:0),
+                    state: Cancelled,
+                    priority: 7,
+                },
+                TaskSnapshot {
+                    task_id: TaskId(5:0),
+                    state: Panicked,
+                    priority: 9,
+                },
+            ],
+            children: [],
+            finalizer_count: 3,
+            budget: BudgetSnapshot {
+                deadline_nanos: Some(
+                    2500000000,
+                ),
+                polls_remaining: Some(
+                    25,
+                ),
+                cost_remaining: Some(
+                    500,
+                ),
+            },
+            cancel_reason: None,
+            parent: None,
+            metadata: [
+                97,
+                108,
+                108,
+                95,
+                115,
+                116,
+                97,
+                116,
+                101,
+                115,
+                95,
+                116,
+                101,
+                115,
+                116,
+            ],
+            auth_tag: Tag(<redacted>),
+        },
+    ),
+    content_hash: "e0477de327fcc1031bdd6f1bec6db52decc9ae85bc48988bed11a7d9f7d07f5b",
+    metadata: SnapshotCaptureMetadata {
+        test_name: "all_task_states",
+        description: "Region demonstrating all possible task states in one snapshot",
+        version: 2,
+        magic: "SNAP",
+    },
+}

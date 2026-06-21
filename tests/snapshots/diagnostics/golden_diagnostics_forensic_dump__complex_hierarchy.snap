@@ -1,0 +1,123 @@
+---
+source: tests/golden_diagnostics_forensic_dump.rs
+expression: dump
+---
+ForensicDump {
+    scenario: "complex_hierarchy",
+    timestamp_normalized: true,
+    region_explanations: [
+        RegionOpenExplanation {
+            region_id: RegionId(0:0),
+            region_state: Some(
+                Open,
+            ),
+            reasons: [
+                ChildRegionOpen {
+                    child_id: RegionId(1:0),
+                    child_state: Open,
+                },
+                ChildRegionOpen {
+                    child_id: RegionId(2:0),
+                    child_state: Open,
+                },
+            ],
+            recommendations: [
+                "Wait for child regions to close, or cancel them.",
+            ],
+        },
+        RegionOpenExplanation {
+            region_id: RegionId(1:0),
+            region_state: Some(
+                Open,
+            ),
+            reasons: [
+                ChildRegionOpen {
+                    child_id: RegionId(3:0),
+                    child_state: Open,
+                },
+                TaskRunning {
+                    task_id: TaskId(0:0),
+                    task_state: "Running",
+                    poll_count: 0,
+                },
+            ],
+            recommendations: [
+                "Wait for child regions to close, or cancel them.",
+                "Wait for live tasks to complete, or cancel the region.",
+            ],
+        },
+        RegionOpenExplanation {
+            region_id: RegionId(2:0),
+            region_state: Some(
+                Open,
+            ),
+            reasons: [],
+            recommendations: [],
+        },
+        RegionOpenExplanation {
+            region_id: RegionId(3:0),
+            region_state: Some(
+                Open,
+            ),
+            reasons: [
+                TaskRunning {
+                    task_id: TaskId(2:0),
+                    task_state: "CancelRequested",
+                    poll_count: 0,
+                },
+            ],
+            recommendations: [
+                "Wait for live tasks to complete, or cancel the region.",
+            ],
+        },
+    ],
+    task_explanations: [
+        TaskBlockedExplanation {
+            task_id: TaskId(0:0),
+            block_reason: AwaitingFuture {
+                description: "unknown await point",
+            },
+            details: [],
+            recommendations: [
+                "Task appears to be awaiting an async operation.",
+            ],
+        },
+        TaskBlockedExplanation {
+            task_id: TaskId(1:0),
+            block_reason: Completed,
+            details: [
+                "outcome: Ok(())",
+            ],
+            recommendations: [],
+        },
+        TaskBlockedExplanation {
+            task_id: TaskId(2:0),
+            block_reason: CancelRequested {
+                reason: CancelReasonInfo {
+                    kind: User,
+                    message: Some(
+                        "test cleanup",
+                    ),
+                },
+            },
+            details: [
+                "cancel kind: user",
+                "message: test cleanup",
+            ],
+            recommendations: [
+                "Task is cancelling; wait for drain/finalizers.",
+            ],
+        },
+    ],
+    obligation_leaks: [],
+    deadlock_severity: "None",
+    health_classification: "Healthy { margin: 0.0 }",
+    metadata: ForensicDumpMetadata {
+        test_name: "complex_hierarchy",
+        description: "Complex runtime with nested regions and mixed task states",
+        region_count: 4,
+        task_count: 3,
+        obligation_count: 0,
+        virtual_time: false,
+    },
+}

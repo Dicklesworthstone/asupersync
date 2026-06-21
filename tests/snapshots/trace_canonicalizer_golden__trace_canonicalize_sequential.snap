@@ -1,0 +1,77 @@
+---
+source: tests/trace_canonicalizer_golden.rs
+assertion_line: 362
+expression: golden
+---
+{
+  "scenario": "sequential_chain",
+  "input_metadata": {
+    "event_count": 3,
+    "event_kinds": [
+      "spawn",
+      "poll",
+      "complete"
+    ],
+    "unique_tasks": 1,
+    "unique_regions": 1,
+    "description": "Task lifecycle dependency chain - no parallelism"
+  },
+  "canonical_output": {
+    "depth": 3,
+    "len": 3,
+    "layers": [
+      [
+        {
+          "seq": 1,
+          "time_ns": 0,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        }
+      ],
+      [
+        {
+          "seq": 2,
+          "time_ns": 1,
+          "kind": "poll",
+          "sort_key": {
+            "kind": 4,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        }
+      ],
+      [
+        {
+          "seq": 3,
+          "time_ns": 2,
+          "kind": "complete",
+          "sort_key": {
+            "kind": 5,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        }
+      ]
+    ],
+    "independence_stats": {
+      "layer_count": 3,
+      "events_per_layer": [
+        1,
+        1,
+        1
+      ],
+      "max_parallelism": 1,
+      "independent_pairs": 0
+    }
+  }
+}

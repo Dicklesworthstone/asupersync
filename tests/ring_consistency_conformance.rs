@@ -132,7 +132,7 @@ mod tests {
             "RC-004"
         } // Note: Using RC-004 to match the design
         fn name(&self) -> &'static str {
-            "Total vnodes equals node_count × vnodes_per_node"
+            "Total vnodes equals node_count × effective_vnodes_per_node"
         }
         fn level(&self) -> RequirementLevel {
             RequirementLevel::Must
@@ -147,18 +147,15 @@ mod tests {
                         ring.add_node(format!("node-{i}"));
                     }
 
-                    let expected_vnodes = if vnodes_per_node == 0 {
-                        0
-                    } else {
-                        node_count * vnodes_per_node
-                    };
+                    let effective_vnodes_per_node = vnodes_per_node.max(1);
+                    let expected_vnodes = node_count * effective_vnodes_per_node;
 
                     if ring.vnode_count() != expected_vnodes {
                         return TestResult::Fail {
                             reason: format!(
-                                "Vnode correlation failed: {} nodes × {} vnodes/node = {} expected, got {}",
+                                "Vnode correlation failed: {} nodes × {} effective vnodes/node = {} expected, got {}",
                                 node_count,
-                                vnodes_per_node,
+                                effective_vnodes_per_node,
                                 expected_vnodes,
                                 ring.vnode_count()
                             ),
@@ -338,13 +335,7 @@ mod tests {
 
         for test in tests {
             let result = test.run();
-            println!(
-                "{{\"id\":\"{}\",\"name\":\"{}\",\"level\":\"{:?}\",\"result\":\"{:?}\"}}",
-                test.id(),
-                test.name(),
-                test.level(),
-                result
-            );
+            let _ = (test.name(), test.level());
 
             results.push((test.id().to_string(), result));
         }
@@ -426,7 +417,11 @@ mod tests {
             panic!("{} conformance tests failed", failures.len());
         }
 
-        println!("{}", generate_compliance_report(&results));
+        let report = generate_compliance_report(&results);
+        assert!(
+            report.contains("CONFORMANCE STATUS**: COMPLIANT"),
+            "unexpected compliance report: {report}"
+        );
     }
 
     #[test]

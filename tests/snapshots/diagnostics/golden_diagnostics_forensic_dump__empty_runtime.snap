@@ -1,0 +1,21 @@
+---
+source: tests/golden_diagnostics_forensic_dump.rs
+expression: dump
+---
+ForensicDump {
+    scenario: "empty_runtime",
+    timestamp_normalized: true,
+    region_explanations: [],
+    task_explanations: [],
+    obligation_leaks: [],
+    deadlock_severity: "None",
+    health_classification: "Healthy { margin: 0.0 }",
+    metadata: ForensicDumpMetadata {
+        test_name: "empty_runtime",
+        description: "Completely empty runtime state with no regions, tasks, or obligations",
+        region_count: 0,
+        task_count: 0,
+        obligation_count: 0,
+        virtual_time: false,
+    },
+}

@@ -1,0 +1,94 @@
+---
+source: tests/golden_distributed_snapshot.rs
+expression: capture
+---
+SnapshotFormatCapture {
+    scenario: "simple_open_region",
+    original: RegionSnapshot {
+        region_id: RegionId(42:3),
+        state: Open,
+        timestamp: Time(1000000000000ns),
+        sequence: 5,
+        vector_clock: VC{},
+        origin_id: 1,
+        epoch: 1,
+        tasks: [
+            TaskSnapshot {
+                task_id: TaskId(10:1),
+                state: Running,
+                priority: 8,
+            },
+        ],
+        children: [
+            RegionId(50:0),
+        ],
+        finalizer_count: 2,
+        budget: BudgetSnapshot {
+            deadline_nanos: Some(
+                5000000000,
+            ),
+            polls_remaining: Some(
+                100,
+            ),
+            cost_remaining: None,
+        },
+        cancel_reason: None,
+        parent: None,
+        metadata: [
+            1,
+            2,
+            3,
+            4,
+        ],
+        auth_tag: Tag(<redacted>),
+    },
+    serialized_hex: "534e4150022a00000003000000000010a5d4e8000000050000000000000008000000000000000000000001000000000000000100000000000000010000000a000000010000000108010000003200000000000000020000000100f2052a01000000016400000000000004000000010203040000000000000000000000000000000000000000000000000000000000000000",
+    size_bytes: 145,
+    deserialized: Ok(
+        RegionSnapshot {
+            region_id: RegionId(42:3),
+            state: Open,
+            timestamp: Time(1000000000000ns),
+            sequence: 5,
+            vector_clock: VC{},
+            origin_id: 1,
+            epoch: 1,
+            tasks: [
+                TaskSnapshot {
+                    task_id: TaskId(10:1),
+                    state: Running,
+                    priority: 8,
+                },
+            ],
+            children: [
+                RegionId(50:0),
+            ],
+            finalizer_count: 2,
+            budget: BudgetSnapshot {
+                deadline_nanos: Some(
+                    5000000000,
+                ),
+                polls_remaining: Some(
+                    100,
+                ),
+                cost_remaining: None,
+            },
+            cancel_reason: None,
+            parent: None,
+            metadata: [
+                1,
+                2,
+                3,
+                4,
+            ],
+            auth_tag: Tag(<redacted>),
+        },
+    ),
+    content_hash: "bfa486833233c3d50efc47e083c8ce8b7b4267a547286e91a2ed909ed1ad6a2b",
+    metadata: SnapshotCaptureMetadata {
+        test_name: "simple_open_region",
+        description: "Basic open region with single task, child, and partial budget",
+        version: 2,
+        magic: "SNAP",
+    },
+}

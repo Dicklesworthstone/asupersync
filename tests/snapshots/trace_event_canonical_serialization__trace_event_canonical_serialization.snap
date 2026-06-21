@@ -1,6 +1,6 @@
 ---
 source: tests/trace_event_canonical_serialization.rs
-assertion_line: 160
+assertion_line: 159
 expression: events
 ---
 [
@@ -140,7 +140,7 @@ expression: events
             "generation": 0
           },
           "origin_task": null,
-          "timestamp": 0,
+          "timestamp": 1000000000,
           "message": null,
           "cause": null,
           "truncated": false,
@@ -200,7 +200,7 @@ expression: events
             "generation": 0
           },
           "origin_task": null,
-          "timestamp": 0,
+          "timestamp": 1000000000,
           "message": null,
           "cause": null,
           "truncated": false,

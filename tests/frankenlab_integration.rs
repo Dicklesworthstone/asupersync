@@ -58,6 +58,27 @@ fn scenario_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/scenarios")
 }
 
+fn fault_string_args(entries: &[(&str, &str)]) -> BTreeMap<String, serde_json::Value> {
+    entries
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), serde_json::json!(value)))
+        .collect()
+}
+
+fn fault_link_args(from: &str, to: &str) -> BTreeMap<String, serde_json::Value> {
+    fault_string_args(&[("from", from), ("to", to)])
+}
+
+fn fault_host_args(host: &str) -> BTreeMap<String, serde_json::Value> {
+    fault_string_args(&[("host", host)])
+}
+
+fn fault_clock_skew_args(host: &str, skew_ms: i64) -> BTreeMap<String, serde_json::Value> {
+    let mut args = fault_host_args(host);
+    args.insert("skew_ms".to_string(), serde_json::json!(skew_ms));
+    args
+}
+
 // ============================================================================
 // (1) Deterministic scheduler reproducibility
 // ============================================================================
@@ -141,6 +162,20 @@ fn arb_scenario() -> impl Strategy<Value = Scenario> {
     )
         .prop_map(
             |(seed, workers, chaos, net_preset, fault_count, part_count)| {
+                let participant_count = if fault_count > 0 {
+                    part_count.max(2)
+                } else {
+                    part_count
+                };
+
+                let participants: Vec<Participant> = (0..participant_count)
+                    .map(|i| Participant {
+                        name: format!("node-{i}"),
+                        role: "test".to_string(),
+                        properties: BTreeMap::new(),
+                    })
+                    .collect();
+
                 let mut faults = Vec::new();
                 for i in 0..fault_count {
                     faults.push(FaultEvent {
@@ -150,17 +185,9 @@ fn arb_scenario() -> impl Strategy<Value = Scenario> {
                         } else {
                             FaultAction::Heal
                         },
-                        args: BTreeMap::new(),
+                        args: fault_link_args("node-0", "node-1"),
                     });
                 }
-
-                let participants: Vec<Participant> = (0..part_count)
-                    .map(|i| Participant {
-                        name: format!("node-{i}"),
-                        role: "test".to_string(),
-                        properties: BTreeMap::new(),
-                    })
-                    .collect();
 
                 Scenario {
                     schema_version: SCENARIO_SCHEMA_VERSION,
@@ -342,12 +369,12 @@ fn invalid_scenario_unordered_faults() {
         FaultEvent {
             at_ms: 500,
             action: FaultAction::Partition,
-            args: BTreeMap::new(),
+            args: fault_link_args("alice", "bob"),
         },
         FaultEvent {
             at_ms: 100,
             action: FaultAction::Heal,
-            args: BTreeMap::new(),
+            args: fault_link_args("alice", "bob"),
         },
     ];
     let errors = scenario.validate();
@@ -434,32 +461,32 @@ fn fault_injection_determinism() {
         FaultEvent {
             at_ms: 10,
             action: FaultAction::Partition,
-            args: BTreeMap::new(),
+            args: fault_link_args("node-a", "node-b"),
         },
         FaultEvent {
             at_ms: 50,
             action: FaultAction::Heal,
-            args: BTreeMap::new(),
+            args: fault_link_args("node-a", "node-b"),
         },
         FaultEvent {
             at_ms: 100,
             action: FaultAction::HostCrash,
-            args: BTreeMap::new(),
+            args: fault_host_args("node-a"),
         },
         FaultEvent {
             at_ms: 150,
             action: FaultAction::HostRestart,
-            args: BTreeMap::new(),
+            args: fault_host_args("node-a"),
         },
         FaultEvent {
             at_ms: 200,
             action: FaultAction::ClockSkew,
-            args: BTreeMap::new(),
+            args: fault_clock_skew_args("node-b", 25),
         },
         FaultEvent {
             at_ms: 250,
             action: FaultAction::ClockReset,
-            args: BTreeMap::new(),
+            args: fault_host_args("node-b"),
         },
     ];
 

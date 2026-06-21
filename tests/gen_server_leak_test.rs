@@ -60,9 +60,9 @@ fn test_call_future_dropped_mid_flight_prevents_obligation_leak() {
     let budget = Budget::INFINITE;
     let region = runtime.state.create_root_region(budget);
     let cx = Cx::for_testing();
+    let scope = asupersync::cx::Scope::<asupersync::types::policy::FailFast>::new(region, budget);
 
-    let (server_ref, _stored_task) = cx
-        .scope()
+    let (server_ref, stored_task) = scope
         .spawn_gen_server(
             &mut runtime.state,
             &cx,
@@ -72,6 +72,7 @@ fn test_call_future_dropped_mid_flight_prevents_obligation_leak() {
         .expect("spawn_gen_server");
 
     let task_id = server_ref.task_id();
+    runtime.state.store_spawned_task(task_id, stored_task);
     runtime.scheduler.lock().schedule(task_id, 0);
 
     let (task, _) = runtime

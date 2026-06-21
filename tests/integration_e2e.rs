@@ -683,7 +683,7 @@ fn e2e_severity_lattice_nested_combinators() {
             vec![
                 Outcome::<i32, &str>::Err("fail1"),
                 Outcome::Ok(42),
-                Outcome::Cancelled(CancelReason::user("cancel")),
+                Outcome::Cancelled(CancelReason::race_loser()),
             ],
         );
         let val = result.expect("race should pick Ok(42)");

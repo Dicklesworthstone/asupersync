@@ -1,0 +1,84 @@
+---
+source: tests/trace_canonicalizer_golden.rs
+assertion_line: 346
+expression: golden
+---
+{
+  "scenario": "fully_independent",
+  "input_metadata": {
+    "event_count": 4,
+    "event_kinds": [
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn"
+    ],
+    "unique_tasks": 4,
+    "unique_regions": 4,
+    "description": "Four independent task spawns in different regions - maximum parallelism"
+  },
+  "canonical_output": {
+    "depth": 1,
+    "len": 4,
+    "layers": [
+      [
+        {
+          "seq": 1,
+          "time_ns": 0,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        },
+        {
+          "seq": 2,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 8589934592,
+            "secondary": 8589934592,
+            "tertiary": 0
+          },
+          "data_summary": "T2/R2"
+        },
+        {
+          "seq": 3,
+          "time_ns": 2,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 12884901888,
+            "secondary": 12884901888,
+            "tertiary": 0
+          },
+          "data_summary": "T3/R3"
+        },
+        {
+          "seq": 4,
+          "time_ns": 3,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 17179869184,
+            "secondary": 17179869184,
+            "tertiary": 0
+          },
+          "data_summary": "T4/R4"
+        }
+      ]
+    ],
+    "independence_stats": {
+      "layer_count": 1,
+      "events_per_layer": [
+        4
+      ],
+      "max_parallelism": 4,
+      "independent_pairs": 6
+    }
+  }
+}

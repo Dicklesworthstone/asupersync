@@ -93,7 +93,7 @@ fn generate_snapshot_capture(
 #[test]
 fn snapshot_empty_region() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/distributed_snapshot");
+    settings.set_snapshot_path("snapshots/distributed_snapshot");
 
     let snapshot = RegionSnapshot::empty(RegionId::new_for_test(1, 0));
 
@@ -111,7 +111,7 @@ fn snapshot_empty_region() {
 #[test]
 fn snapshot_simple_open_region() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/distributed_snapshot");
+    settings.set_snapshot_path("snapshots/distributed_snapshot");
 
     let snapshot = RegionSnapshot {
         region_id: RegionId::new_for_test(42, 3),
@@ -153,7 +153,7 @@ fn snapshot_simple_open_region() {
 #[test]
 fn snapshot_complex_closing_region() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/distributed_snapshot");
+    settings.set_snapshot_path("snapshots/distributed_snapshot");
 
     let snapshot = RegionSnapshot {
         region_id: RegionId::new_for_test(99, 7),
@@ -210,7 +210,7 @@ fn snapshot_complex_closing_region() {
 #[test]
 fn snapshot_finalized_region() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/distributed_snapshot");
+    settings.set_snapshot_path("snapshots/distributed_snapshot");
 
     let snapshot = RegionSnapshot {
         region_id: RegionId::new_for_test(200, 15),
@@ -248,7 +248,7 @@ fn snapshot_finalized_region() {
 #[test]
 fn snapshot_draining_region() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/distributed_snapshot");
+    settings.set_snapshot_path("snapshots/distributed_snapshot");
 
     let snapshot = RegionSnapshot {
         region_id: RegionId::new_for_test(300, 8),
@@ -294,7 +294,7 @@ fn snapshot_draining_region() {
 #[test]
 fn snapshot_all_task_states() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/distributed_snapshot");
+    settings.set_snapshot_path("snapshots/distributed_snapshot");
 
     let snapshot = RegionSnapshot {
         region_id: RegionId::new_for_test(400, 20),
@@ -358,7 +358,7 @@ fn snapshot_all_task_states() {
 #[test]
 fn snapshot_maximum_complexity() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/distributed_snapshot");
+    settings.set_snapshot_path("snapshots/distributed_snapshot");
 
     // Create a maximally complex snapshot with many elements
     let mut tasks = vec![];

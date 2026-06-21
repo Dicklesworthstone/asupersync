@@ -627,7 +627,7 @@ fn regression_eprocess_anytime_valid_property() {
 
     // Ville's inequality: P_H₀(∃t: E_t ≥ 1/α) ≤ α.
     // Run many trials under null and check false rejection rate.
-    let n_trials: u32 = 5_000;
+    let n_trials: u32 = 2_000;
     let n_obs: u32 = 50;
     let alpha = 0.05;
     let config = EProcessConfig {

@@ -1,0 +1,27 @@
+---
+source: tests/otlp_metrics_request_golden.rs
+expression: scrubbed
+---
+{
+  "content_type": "application/x-protobuf",
+  "export_request": {
+    "resource_attributes": {
+      "service.name": "empty-test"
+    },
+    "scope_metrics": [
+      {
+        "metrics": [],
+        "scope": {
+          "name": "empty",
+          "version": ""
+        }
+      }
+    ]
+  },
+  "otlp_version": "1.0.0",
+  "scrubbed_fields": [
+    "time_unix_nano",
+    "process.pid",
+    "host.name"
+  ]
+}

@@ -1,0 +1,69 @@
+---
+source: tests/progress_certificate_golden.rs
+expression: "snapshot_verdict(&[40.0, 52.0, 57.0, 61.0, 61.0, 61.0], config)"
+---
+{
+  "config": {
+    "confidence": 0.9,
+    "epsilon": 0.0,
+    "max_step_bound": 5.0,
+    "min_observations": 4,
+    "stall_threshold": 3
+  },
+  "sequence": [
+    40.0,
+    52.0,
+    57.0,
+    61.0,
+    61.0,
+    61.0
+  ],
+  "verdict": {
+    "azuma_bound": 1.0,
+    "confidence_bound": 0.0,
+    "converging": false,
+    "current_potential": 61.0,
+    "drain_phase": "stalled",
+    "empirical_variance": 19.36,
+    "estimated_remaining_steps": null,
+    "evidence": [
+      {
+        "bound": 1.0,
+        "description": "max observed step 12.0000 exceeds configured bound 5.0000; using observed max for Azuma bound",
+        "potential": 61.0,
+        "step": 5
+      },
+      {
+        "bound": 1.0,
+        "description": "stall: 5 consecutive non-decreasing steps (threshold: 3)",
+        "potential": 61.0,
+        "step": 5
+      },
+      {
+        "bound": 0.6,
+        "description": "3 monotonicity violations out of 5 steps (rate: 0.6000)",
+        "potential": 61.0,
+        "step": 5
+      },
+      {
+        "bound": 0.666667,
+        "description": "Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667",
+        "potential": 61.0,
+        "step": 5
+      },
+      {
+        "bound": 1.0,
+        "description": "total progress -21.0000 over 5 steps, mean credit 0.0000/step, Azuma tail P ≤ 1.000000",
+        "potential": 61.0,
+        "step": 5
+      }
+    ],
+    "freedman_bound": 1.0,
+    "initial_potential": 40.0,
+    "max_observed_step": 12.0,
+    "mean_credit": 0.0,
+    "rendered": "Progress Certificate Verdict\n============================\nConverging:         false\nStall detected:     true\nSteps:              6\nV(Σ₀):              40.0000\nV(Σₜ):              61.0000\nMean credit/step:   0.0000\nMax |Δ|:            12.0000\nDrain phase:        stalled\nConfidence bound:   0.000000\nAzuma bound:        1.000000\nFreedman bound:     1.000000\nDelta variance:     19.360000\nEst. remaining:     N/A\nEvidence (5 entries):\n  step=5: V=61.0000, bound=1.000000 — max observed step 12.0000 exceeds configured bound 5.0000; using observed max for Azuma bound\n  step=5: V=61.0000, bound=1.000000 — stall: 5 consecutive non-decreasing steps (threshold: 3)\n  step=5: V=61.0000, bound=0.600000 — 3 monotonicity violations out of 5 steps (rate: 0.6000)\n  step=5: V=61.0000, bound=0.666667 — Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667\n  step=5: V=61.0000, bound=1.000000 — total progress -21.0000 over 5 steps, mean credit 0.0000/step, Azuma tail P ≤ 1.000000\n",
+    "stall_detected": true,
+    "total_steps": 6
+  }
+}

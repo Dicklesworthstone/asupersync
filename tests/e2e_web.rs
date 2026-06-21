@@ -21,6 +21,7 @@ use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 // =========================================================================
@@ -74,6 +75,7 @@ fn redirect_handler() -> Redirect {
 
 const WEB_FRAMEWORK_BEAD_ID: &str = "asupersync-o74l7u.1.4";
 const WEB_FRAMEWORK_ARTIFACT_DIR: &str = "target/web-framework-proof/asupersync-o74l7u.1.4";
+static WEB_FRAMEWORK_PROOF_RUN_ID: AtomicU64 = AtomicU64::new(1);
 const WEB_FRAMEWORK_WAVE2_SCENARIOS: &[&str] = &[
     "router-path-json-extractor",
     "middleware-body-limit-short-circuit",
@@ -659,7 +661,12 @@ fn web_framework_wave2_run() -> io::Result<Vec<Value>> {
     let bead_id = std::env::var("ASUPERSYNC_WEB_FRAMEWORK_BEAD_ID")
         .unwrap_or_else(|_| WEB_FRAMEWORK_BEAD_ID.to_string());
     let output_dir = std::env::var_os("ASUPERSYNC_WEB_FRAMEWORK_PROOF_DIR").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(WEB_FRAMEWORK_ARTIFACT_DIR),
+        || {
+            let run_id = WEB_FRAMEWORK_PROOF_RUN_ID.fetch_add(1, Ordering::Relaxed);
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(WEB_FRAMEWORK_ARTIFACT_DIR)
+                .join(format!("run-{run_id}"))
+        },
         PathBuf::from,
     );
     let rows_path = output_dir.join("test_rows.jsonl");

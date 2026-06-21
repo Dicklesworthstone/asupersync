@@ -1,0 +1,127 @@
+---
+source: tests/otlp_metrics_request_golden.rs
+expression: scrubbed
+---
+{
+  "content_type": "application/x-protobuf",
+  "export_request": {
+    "resource_attributes": {
+      "service.name": "high-cardinality-test",
+      "service.version": "1.0.0"
+    },
+    "scope_metrics": [
+      {
+        "metrics": [
+          {
+            "data_points": [
+              {
+                "attributes": {
+                  "endpoint": "/api/v0",
+                  "method": "GET",
+                  "status_code": "200"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 10
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v1",
+                  "method": "POST",
+                  "status_code": "300"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 20
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v2",
+                  "method": "GET",
+                  "status_code": "400"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 30
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v3",
+                  "method": "POST",
+                  "status_code": "500"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 40
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v4",
+                  "method": "GET",
+                  "status_code": "600"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 50
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v5",
+                  "method": "POST",
+                  "status_code": "200"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 60
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v6",
+                  "method": "GET",
+                  "status_code": "300"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 70
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v7",
+                  "method": "POST",
+                  "status_code": "400"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 80
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v8",
+                  "method": "GET",
+                  "status_code": "500"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 90
+              },
+              {
+                "attributes": {
+                  "endpoint": "/api/v9",
+                  "method": "POST",
+                  "status_code": "600"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 100
+              }
+            ],
+            "description": "HTTP requests by endpoint and status",
+            "name": "http.requests.total",
+            "type": "counter",
+            "unit": "1"
+          }
+        ],
+        "scope": {
+          "name": "high-cardinality",
+          "version": "1.0.0"
+        }
+      }
+    ]
+  },
+  "otlp_version": "1.0.0",
+  "scrubbed_fields": [
+    "time_unix_nano",
+    "process.pid",
+    "host.name"
+  ]
+}

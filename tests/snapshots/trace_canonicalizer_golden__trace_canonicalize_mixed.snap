@@ -1,0 +1,213 @@
+---
+source: tests/trace_canonicalizer_golden.rs
+assertion_line: 484
+expression: golden
+---
+{
+  "scenario": "mixed_parallelism",
+  "input_metadata": {
+    "event_count": 13,
+    "event_kinds": [
+      "region_created",
+      "region_created",
+      "spawn",
+      "spawn",
+      "spawn",
+      "poll",
+      "poll",
+      "complete",
+      "poll",
+      "complete",
+      "complete",
+      "region_close_complete",
+      "region_close_complete"
+    ],
+    "unique_tasks": 3,
+    "unique_regions": 2,
+    "description": "Complex mixed parallel and sequential dependencies across multiple regions"
+  },
+  "canonical_output": {
+    "depth": 5,
+    "len": 13,
+    "layers": [
+      [
+        {
+          "seq": 1,
+          "time_ns": 0,
+          "kind": "region_created",
+          "sort_key": {
+            "kind": 10,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R1/Pnone"
+        },
+        {
+          "seq": 2,
+          "time_ns": 0,
+          "kind": "region_created",
+          "sort_key": {
+            "kind": 10,
+            "primary": 8589934592,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R2/Pnone"
+        }
+      ],
+      [
+        {
+          "seq": 3,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        },
+        {
+          "seq": 4,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 8589934592,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T2/R1"
+        },
+        {
+          "seq": 5,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 12884901888,
+            "secondary": 8589934592,
+            "tertiary": 0
+          },
+          "data_summary": "T3/R2"
+        }
+      ],
+      [
+        {
+          "seq": 6,
+          "time_ns": 2,
+          "kind": "poll",
+          "sort_key": {
+            "kind": 4,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        },
+        {
+          "seq": 9,
+          "time_ns": 4,
+          "kind": "poll",
+          "sort_key": {
+            "kind": 4,
+            "primary": 8589934592,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T2/R1"
+        },
+        {
+          "seq": 7,
+          "time_ns": 2,
+          "kind": "poll",
+          "sort_key": {
+            "kind": 4,
+            "primary": 12884901888,
+            "secondary": 8589934592,
+            "tertiary": 0
+          },
+          "data_summary": "T3/R2"
+        }
+      ],
+      [
+        {
+          "seq": 8,
+          "time_ns": 3,
+          "kind": "complete",
+          "sort_key": {
+            "kind": 5,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        },
+        {
+          "seq": 11,
+          "time_ns": 5,
+          "kind": "complete",
+          "sort_key": {
+            "kind": 5,
+            "primary": 8589934592,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T2/R1"
+        },
+        {
+          "seq": 10,
+          "time_ns": 4,
+          "kind": "complete",
+          "sort_key": {
+            "kind": 5,
+            "primary": 12884901888,
+            "secondary": 8589934592,
+            "tertiary": 0
+          },
+          "data_summary": "T3/R2"
+        }
+      ],
+      [
+        {
+          "seq": 12,
+          "time_ns": 6,
+          "kind": "region_close_complete",
+          "sort_key": {
+            "kind": 9,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R1/Pnone"
+        },
+        {
+          "seq": 13,
+          "time_ns": 6,
+          "kind": "region_close_complete",
+          "sort_key": {
+            "kind": 9,
+            "primary": 8589934592,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R2/Pnone"
+        }
+      ]
+    ],
+    "independence_stats": {
+      "layer_count": 5,
+      "events_per_layer": [
+        2,
+        3,
+        3,
+        3,
+        2
+      ],
+      "max_parallelism": 3,
+      "independent_pairs": 11
+    }
+  }
+}

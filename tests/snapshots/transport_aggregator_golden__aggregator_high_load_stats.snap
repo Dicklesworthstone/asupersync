@@ -1,0 +1,29 @@
+---
+source: tests/transport_aggregator_golden.rs
+assertion_line: 335
+expression: report
+---
+=== Transport Aggregator Report ===
+Total Processed: 500
+
+--- Path Statistics ---
+Path Count: 1
+Usable Paths: 1
+Total Received: 5500
+Total Lost: 0
+Total Duplicates: 0
+Aggregate Bandwidth (bps): 10000000
+
+--- Deduplication Statistics ---
+Objects Tracked: 10
+Symbols Tracked: 500
+Duplicates Detected: 0
+Unique Symbols: 500
+
+--- Reordering Statistics ---
+Objects Tracked: 10
+Symbols Buffered: 0
+In-Order Deliveries: 500
+Reordered Deliveries: 0
+Timeout Deliveries: 0
+=================================

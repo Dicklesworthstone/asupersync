@@ -1,0 +1,59 @@
+---
+source: tests/progress_certificate_golden.rs
+expression: "snapshot_verdict(&[100.0, 68.0, 42.0, 42.0, 41.5, 18.0, 4.0, 0.0], config)"
+---
+{
+  "config": {
+    "confidence": 0.9,
+    "epsilon": 0.0,
+    "max_step_bound": 35.0,
+    "min_observations": 4,
+    "stall_threshold": 3
+  },
+  "sequence": [
+    100.0,
+    68.0,
+    42.0,
+    42.0,
+    41.5,
+    18.0,
+    4.0,
+    0.0
+  ],
+  "verdict": {
+    "azuma_bound": 1.0,
+    "confidence_bound": 1.0,
+    "converging": true,
+    "current_potential": 0.0,
+    "drain_phase": "quiescent",
+    "empirical_variance": 147.989796,
+    "estimated_remaining_steps": 0.0,
+    "evidence": [
+      {
+        "bound": 0.0,
+        "description": "quiescence reached (V ≈ 0)",
+        "potential": 0.0,
+        "step": 7
+      },
+      {
+        "bound": 0.666667,
+        "description": "Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667",
+        "potential": 0.0,
+        "step": 7
+      },
+      {
+        "bound": 1.0,
+        "description": "total progress 100.0000 over 7 steps, mean credit 14.2857/step, Azuma tail P ≤ 1.000000",
+        "potential": 0.0,
+        "step": 7
+      }
+    ],
+    "freedman_bound": 1.0,
+    "initial_potential": 100.0,
+    "max_observed_step": 32.0,
+    "mean_credit": 14.285714,
+    "rendered": "Progress Certificate Verdict\n============================\nConverging:         true\nStall detected:     false\nSteps:              8\nV(Σ₀):              100.0000\nV(Σₜ):              0.0000\nMean credit/step:   14.2857\nMax |Δ|:            32.0000\nDrain phase:        quiescent\nConfidence bound:   1.000000\nAzuma bound:        1.000000\nFreedman bound:     1.000000\nDelta variance:     147.989796\nEst. remaining:     0.0 steps\nEvidence (3 entries):\n  step=7: V=0.0000, bound=0.000000 — quiescence reached (V ≈ 0)\n  step=7: V=0.0000, bound=0.666667 — Ville bound: P(potential ever exceeds 1.5·V₀) ≤ 0.6667\n  step=7: V=0.0000, bound=1.000000 — total progress 100.0000 over 7 steps, mean credit 14.2857/step, Azuma tail P ≤ 1.000000\n",
+    "stall_detected": false,
+    "total_steps": 8
+  }
+}

@@ -410,6 +410,8 @@ impl SupervisionOracle {
                 // Check if restart limit was exceeded
                 let escalated =
                     self.escalated_in_window(failure.parent, failure.time, next_failure_time);
+                let failure_ordinal =
+                    self.failure_ordinal_for_supervisor(failure.parent, failure.time);
 
                 if restart_count > config.max_restarts {
                     // Verify escalation happened (e.from is parent, not failure.from) and it was NOT restarted.
@@ -426,6 +428,17 @@ impl SupervisionOracle {
                         });
                     }
                     continue; // Do not check sibling restarts if we correctly escalated/stopped
+                }
+
+                if escalated
+                    && config.escalation_policy != EscalationPolicy::Stop
+                    && failure_ordinal > config.max_restarts
+                {
+                    // A supervisor may escalate the failure that would exceed
+                    // the restart budget without issuing another restart wave.
+                    // Earlier failures still have their own bounded windows
+                    // and cannot be masked by this later escalation.
+                    continue;
                 }
 
                 // br-asupersync-l7ni1s: do NOT short-circuit the
@@ -592,6 +605,15 @@ impl SupervisionOracle {
             escalation.from == supervisor
                 && Self::event_in_failure_window(escalation.time, failure_time, next_failure_time)
         })
+    }
+
+    fn failure_ordinal_for_supervisor(&self, supervisor: ActorId, failure_time: Time) -> u32 {
+        self.failures
+            .iter()
+            .filter(|failure| failure.parent == supervisor && failure.time <= failure_time)
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
     }
 }
 

@@ -1,5 +1,6 @@
 ---
 source: tests/lab_scenario_runner_report_golden.rs
+assertion_line: 78
 expression: golden
 ---
 {
@@ -11,8 +12,35 @@ expression: golden
       "trace_fingerprint": 16690330141123474010
     },
     "execution_instance_id": "scenario-runner-report-faulted:lab:0x2A:0",
+    "fault_effect_summary": {
+      "active_disk_pressure_bytes": 0,
+      "active_stalled_participants": [],
+      "delayed_cleanup_phases": {},
+      "delayed_cleanup_total_ms": 0,
+      "disk_pressure_by_path": {},
+      "disk_pressure_events": 0,
+      "max_disk_pressure_bytes": 0,
+      "process_stall_total_ms": 0,
+      "resource_cap_breaches": [],
+      "stalled_participants_until_ms": {}
+    },
+    "fault_log": [
+      {
+        "action": "partition",
+        "args_summary": "from=scheduler,to=executor",
+        "at_ms": 5,
+        "trace_message": "fault:partition:from=scheduler,to=executor"
+      },
+      {
+        "action": "heal",
+        "args_summary": "from=scheduler,to=executor",
+        "at_ms": 12,
+        "trace_message": "fault:heal:from=scheduler,to=executor"
+      }
+    ],
     "faults_injected": 2,
     "invariant_violations": [],
+    "minimized_counterexample": null,
     "oracle_report": {
       "all_passed": true,
       "checked": [
@@ -198,8 +226,22 @@ expression: golden
       "trace_fingerprint": 16732658632908851881
     },
     "execution_instance_id": "scenario-runner-report-happy:lab:0x2A:0",
+    "fault_effect_summary": {
+      "active_disk_pressure_bytes": 0,
+      "active_stalled_participants": [],
+      "delayed_cleanup_phases": {},
+      "delayed_cleanup_total_ms": 0,
+      "disk_pressure_by_path": {},
+      "disk_pressure_events": 0,
+      "max_disk_pressure_bytes": 0,
+      "process_stall_total_ms": 0,
+      "resource_cap_breaches": [],
+      "stalled_participants_until_ms": {}
+    },
+    "fault_log": [],
     "faults_injected": 0,
     "invariant_violations": [],
+    "minimized_counterexample": null,
     "oracle_report": {
       "all_passed": true,
       "checked": [

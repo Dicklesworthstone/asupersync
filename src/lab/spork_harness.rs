@@ -259,6 +259,9 @@ impl SporkScenarioConfig {
             .trace_capacity(self.trace_capacity)
             .panic_on_leak(self.panic_on_obligation_leak)
             .panic_on_futurelock(self.panic_on_futurelock);
+        if !self.panic_on_obligation_leak && !self.panic_on_futurelock {
+            config = config.with_cancellation_oracle_warnings();
+        }
         config = if let Some(max_steps) = self.max_steps {
             config.max_steps(max_steps)
         } else {
