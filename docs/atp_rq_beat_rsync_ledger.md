@@ -1473,4 +1473,23 @@ The swarm reverted within ~1 min of the MATRIX-18 report: `8e7536806 "restore RQ
 | bad 2% | 73.41s | 14.94s | 3/3 | 4 | completes; atp loses (CPU-bound single-core decode wall) |
 | broken 10% | 114.44s | 82.59s | 3/3 | 5 | completes; atp loses |
 
-**Verdict.** ✅ `main` is no longer broken — ALL transfers complete, sha 3/3 every cell, NO "frame too large", NO control-channel close. perfect/good are at the healthy baseline (the v3 break is fully repaired). Since transport_rq is byte-identical to 9206290ba, this IS the documented overhead-cap baseline. The bad-regime 73.41s reads higher than the previously-documented 51s (MILESTONE), but the code is identical to that baseline, so the delta is environmental — this bench ran with the rqperf coding swarm actively building on the same host (csd load) + ordinary netem/convergence variance (fr=4 at 80ms RTT). NOT a code regression. atp still loses 50M on lossy links to rsync (the known CPU-bound decode wall: ~0.8MB/s single-core RaptorQ decode), which remains the real lever for 50M/500M domination (decode parallelism / smaller max-block-size / rate-matched pacing), NOT a wire-loss problem. Evidence dir: `artifacts/atp_bench_matrix/20260621T210830Z/`.
+**Verdict.** ✅ `main` is no longer broken — ALL transfers complete, sha 3/3 every cell, NO "frame too large", NO control-channel close. perfect/good are at the healthy baseline (the v3 break is fully repaired). Since transport_rq is byte-identical to 9206290ba, this IS the documented overhead-cap baseline. The bad-regime 73.41s reads higher than the previously-documented 51s (MILESTONE), but the code is identical to that baseline, so the delta is environmental — this bench ran with the rqperf coding swarm actively building on the same host (csd load) + ordinary netem/convergence variance (fr=4 at 80ms RTT). NOT a code regression. Evidence dir: `artifacts/atp_bench_matrix/20260621T210830Z/`.
+
+## MATRIX-20 (2026-06-21) — DECODE/BLOCK-SIZE LEVER REFUTED for the headline cells; the real 50M walls re-diagnosed (syscall on clean, feedback-rounds on lossy)
+
+**Why this matters.** The "50M is CPU-bound on single-core RaptorQ decode" framing (carried from an earlier loopback session) drove a "parallelize/shrink-decode" hypothesis. Two pieces of evidence REFUTE it:
+
+1. **Receiver parallel decode is ALREADY wired and is never the limiter.** transport_rq has `dispatch_decode_job` → `cx.spawn_blocking(run_block_decode_job)` with a per-transfer width budget (`rq_decode_width_budget` = `core_limit.min(memory_limited)`) and per-entry cap. The `ATP_RQ_TRACE` from run 20260621T210830Z shows **600 "queued parallel decode" events and ZERO width-saturation joins** ("joined N pending decode … saturated" / "entry_cap=") across the whole run — decode fans across the blocking pool freely; concurrency is not throttled.
+
+2. **Block size is decode-neutral on clean and *harmful* on lossy.** Central A/B with the existing `--max-block-size` flag (zero code change), 50M nocrypto, 3 reps, run `20260621T214824Z`:
+
+| cell | auto (8 MiB) baseline | **1 MiB** | verdict |
+|---|---|---|---|
+| 50M/perfect | 3.72s (fr=0, sha 3/3) | **3.72s** (fr=0, sha 3/3) | identical → decode is block-size-insensitive |
+| 50M/bad | 73.41s (fr=4) | **91.03s** (fr=4, sha 3/3) | WORSE → more per-block wire overhead on a rate-capped link |
+
+**Re-diagnosis (the real walls).** Throughput math:
+- **perfect (fr=0): 50M / 3.72s = 13.4 MB/s on a 1 gbit / 125 MB/s link = ~11% of line rate, with ZERO loss and ZERO feedback rounds and block-size-insensitive.** → the clean-link wall is raw **pipeline throughput**: the per-symbol `sendto` syscall rate (~43k sendto/50M) and single-thread encode, NOT decode and NOT the pacing cap (RQ_MAX_PACING_BPS≈67 MB/s ≫ 13.4). Lever = **GSO/sendmmsg batched native send** (E-6.2/E-6.3, bead `rq-e6b-gso-sendmmsg-native-send-wfrvuq`; needs unsafe+ledger, also lifts QUIC).
+- **bad: 50M / 73.41s = 0.68 MB/s — far below BOTH the 6.25 MB/s link cap AND the 13.4 MB/s decode rate** → dominated by the **4 feedback rounds** (each ≈ 80 ms RTT + a re-spray of repair) on a 2%-loss link, NOT decode CPU. Lever = **cut the rounds**: fix `317hxr.6.1.1` (FEC fallback self-disables after `source_retransmit_rounds`=2 via the `requested_sources==0` guard at mod.rs ~2153 → rounds 3..N degrade to inefficient source-only retransmits) + calibrate round-0 repair overhead so it converges in 1–2 rounds.
+
+**Verdict / no-claim.** Decode parallelism and block-size are NOT the 50M/500M levers. Do not re-attempt "build parallel decode" (done) or "shrink max_block_size" (refuted: 1 MiB made bad worse, perfect unchanged). The evidence-backed levers are (clean) **GSO/sendmmsg syscall batching** and (lossy) **feedback-round reduction (FEC-fallback fix 317hxr.6.1.1 + overhead calibration)**. Evidence dirs: `artifacts/atp_bench_matrix/20260621T210830Z/` (auto baseline), `.../20260621T214824Z/` (1 MiB A/B).
