@@ -452,8 +452,9 @@ fn um_pool_08_stats_total_equals_idle_plus_active() {
 fn um_pool_09_stats_total_bounded_by_max_size() {
     // UM-POOL-09: Stats: total <= max_size always
     assert!(
-        POOL_SRC.contains("inner.total < self.config.max_size"),
-        "UM-POOL-09: pool must guard total against max_size"
+        POOL_SRC.contains("inner.total < self.effective_max_size()")
+            && POOL_SRC.contains(".min(self.config.max_size)"),
+        "UM-POOL-09: pool must guard total against the live max_size clamped by the configured hard ceiling"
     );
 }
 

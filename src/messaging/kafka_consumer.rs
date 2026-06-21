@@ -22,24 +22,36 @@ use crate::messaging::kafka::apply_security_config;
 use crate::messaging::kafka::{
     KafkaError, KafkaSaslConfig, KafkaSecurityConfig, KafkaTlsConfig, is_loopback_bootstrap_server,
 };
-#[cfg(all(test, not(feature = "kafka")))]
+#[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 use crate::messaging::kafka::{
     deterministic_broker_end_offset, deterministic_broker_fetch, deterministic_broker_notify,
 };
 use crate::sync::Notify;
-#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
+#[cfg(any(
+    feature = "kafka",
+    all(not(feature = "kafka"), any(test, feature = "test-internals"))
+))]
 use crate::time::Sleep;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
+#[cfg(any(
+    feature = "kafka",
+    all(not(feature = "kafka"), any(test, feature = "test-internals"))
+))]
 use std::future::Future;
-#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
+#[cfg(any(
+    feature = "kafka",
+    all(not(feature = "kafka"), any(test, feature = "test-internals"))
+))]
 use std::pin::Pin;
 #[cfg(any(test, feature = "kafka"))]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
+#[cfg(any(
+    feature = "kafka",
+    all(not(feature = "kafka"), any(test, feature = "test-internals"))
+))]
 use std::task::Poll;
 use std::time::Duration;
 
@@ -135,6 +147,10 @@ pub struct ConsumerConfig {
     /// servers. Keep this private so release callers cannot enable the bypass
     /// through a struct literal.
     allow_insecure_transport_for_testing: bool,
+    /// Internal opt-in for the no-feature deterministic broker in downstream
+    /// integration tests.
+    #[cfg(any(test, feature = "test-internals"))]
+    allow_deterministic_broker_for_testing: bool,
 }
 
 impl Default for ConsumerConfig {
@@ -163,6 +179,8 @@ impl Default for ConsumerConfig {
             force_real_kafka: false,
             retries: 3,
             allow_insecure_transport_for_testing: false,
+            #[cfg(any(test, feature = "test-internals"))]
+            allow_deterministic_broker_for_testing: false,
         }
     }
 }
@@ -317,6 +335,18 @@ impl ConsumerConfig {
         self
     }
 
+    /// Opt into the deterministic no-feature broker for downstream tests.
+    ///
+    /// Crate unit tests use the deterministic broker automatically, but
+    /// integration tests compile as downstream consumers and must opt in
+    /// explicitly so default broker operations keep failing closed.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[must_use]
+    pub const fn allow_deterministic_broker_for_testing(mut self, allow: bool) -> Self {
+        self.allow_deterministic_broker_for_testing = allow;
+        self
+    }
+
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), KafkaError> {
         if self.bootstrap_servers.is_empty() {
@@ -405,20 +435,12 @@ pub struct ConsumerRecord {
     pub headers: Vec<(String, Vec<u8>)>,
 }
 
-#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
+#[cfg(any(
+    feature = "kafka",
+    all(not(feature = "kafka"), any(test, feature = "test-internals"))
+))]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
-}
-
-fn broker_operations_feature_disabled_for_build() -> bool {
-    #[cfg(all(not(test), not(feature = "kafka")))]
-    {
-        true
-    }
-    #[cfg(any(test, feature = "kafka"))]
-    {
-        false
-    }
 }
 
 #[cfg(feature = "kafka")]
@@ -462,7 +484,7 @@ struct ConsumerState {
     assigned_partitions: BTreeSet<(String, i32)>,
     committed_offsets: BTreeMap<(String, i32), i64>,
     positions: BTreeMap<(String, i32), i64>,
-    #[cfg(all(test, not(feature = "kafka")))]
+    #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
     poll_cursor: usize,
     rebalance_generation: u64,
     last_revoked_partitions: BTreeSet<(String, i32)>,
@@ -827,7 +849,7 @@ impl KafkaConsumer {
             .await?;
         }
 
-        if broker_operations_feature_disabled_for_build() {
+        if self.broker_operations_feature_disabled() {
             return Err(KafkaError::FeatureDisabled);
         }
 
@@ -837,7 +859,7 @@ impl KafkaConsumer {
             return Err(KafkaError::Config("consumer is closed".to_string()));
         }
         state.subscribed_topics = normalized;
-        #[cfg(all(test, not(feature = "kafka")))]
+        #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         {
             state.assigned_partitions = state
                 .subscribed_topics
@@ -880,7 +902,7 @@ impl KafkaConsumer {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
 
-        if broker_operations_feature_disabled_for_build() {
+        if self.broker_operations_feature_disabled() {
             return Err(KafkaError::FeatureDisabled);
         }
 
@@ -995,7 +1017,7 @@ impl KafkaConsumer {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
 
-        if broker_operations_feature_disabled_for_build() {
+        if self.broker_operations_feature_disabled() {
             return Err(KafkaError::FeatureDisabled);
         }
 
@@ -1182,7 +1204,7 @@ impl KafkaConsumer {
             }
         }
 
-        #[cfg(all(test, not(feature = "kafka")))]
+        #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         {
             if let Some(record) = self.try_poll_local_record()? {
                 return Ok(Some(record));
@@ -1249,7 +1271,7 @@ impl KafkaConsumer {
             }
         }
 
-        #[cfg(all(not(test), not(feature = "kafka")))]
+        #[cfg(all(not(feature = "kafka"), not(any(test, feature = "test-internals"))))]
         {
             Err(KafkaError::FeatureDisabled)
         }
@@ -1265,7 +1287,7 @@ impl KafkaConsumer {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
 
-        if broker_operations_feature_disabled_for_build() {
+        if self.broker_operations_feature_disabled() {
             return Err(KafkaError::FeatureDisabled);
         }
 
@@ -1364,7 +1386,7 @@ impl KafkaConsumer {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
 
-        if broker_operations_feature_disabled_for_build() {
+        if self.broker_operations_feature_disabled() {
             return Err(KafkaError::FeatureDisabled);
         }
 
@@ -1544,7 +1566,26 @@ impl KafkaConsumer {
         Ok(())
     }
 
-    #[cfg(all(test, not(feature = "kafka")))]
+    fn broker_operations_feature_disabled(&self) -> bool {
+        #[cfg(feature = "kafka")]
+        {
+            false
+        }
+        #[cfg(all(not(feature = "kafka"), test))]
+        {
+            false
+        }
+        #[cfg(all(not(feature = "kafka"), not(test), feature = "test-internals"))]
+        {
+            !self.config.allow_deterministic_broker_for_testing
+        }
+        #[cfg(all(not(feature = "kafka"), not(test), not(feature = "test-internals")))]
+        {
+            true
+        }
+    }
+
+    #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
     fn try_poll_local_record(&self) -> Result<Option<ConsumerRecord>, KafkaError> {
         let mut state = self.state.lock();
         if self.closed.load(Ordering::Acquire) {
@@ -1590,7 +1631,7 @@ impl KafkaConsumer {
         Ok(None)
     }
 
-    #[cfg(all(test, not(feature = "kafka")))]
+    #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
     fn current_position_for_partition(
         config: &ConsumerConfig,
         state: &mut ConsumerState,

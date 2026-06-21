@@ -136,12 +136,12 @@ mod protocol_parsing {
             ),
             // HMSG with headers (if headers capability is enabled)
             (
-                "HMSG headers.test 789 25 30\r\nNATS/1.0\r\nFoo: bar\r\n\r\nhello\r\n",
+                "HMSG headers.test 789 23 28\r\nNATS/1.0\r\nFoo: bar\r\n\r\nhello\r\n",
                 ExpectedMessage {
                     subject: "headers.test".to_string(),
                     sid: 789,
                     reply_to: None,
-                    payload_len: 30,
+                    payload_len: 5,
                     headers: Some("NATS/1.0\r\nFoo: bar\r\n\r\n".to_string()),
                     payload: b"hello".to_vec(),
                 },
@@ -227,7 +227,7 @@ mod protocol_parsing {
                     headers: Some("NATS/1.0\r\nMsg-Id: abc123\r\n\r\n".to_string()),
                     payload: b"data".to_vec(),
                 },
-                b"HPUB headers.test 27 4\r\nNATS/1.0\r\nMsg-Id: abc123\r\n\r\ndata\r\n".to_vec(),
+                b"HPUB headers.test 28 4\r\nNATS/1.0\r\nMsg-Id: abc123\r\n\r\ndata\r\n".to_vec(),
             ),
         ];
 
@@ -305,7 +305,7 @@ mod protocol_parsing {
         }
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct ConnectConfig {
         verbose: bool,
         pedantic: bool,
@@ -315,6 +315,21 @@ mod protocol_parsing {
         token: Option<String>,
         headers: bool,
         no_responders: bool,
+    }
+
+    impl Default for ConnectConfig {
+        fn default() -> Self {
+            Self {
+                verbose: false,
+                pedantic: false,
+                name: None,
+                user: None,
+                password: None,
+                token: None,
+                headers: true,
+                no_responders: true,
+            }
+        }
     }
 
     #[derive(Debug)]
@@ -472,8 +487,11 @@ mod protocol_parsing {
             let parts: Vec<&str> = lines[0].split_whitespace().collect();
             let subject = parts[1].to_string();
             let sid = parts[2].parse().expect("valid sid");
-            let _headers_len: usize = parts[3].parse().expect("valid headers_len");
-            let payload_len: usize = parts[4].parse().expect("valid payload_len");
+            let headers_len: usize = parts[3].parse().expect("valid headers_len");
+            let total_len: usize = parts[4].parse().expect("valid total_len");
+            let payload_len = total_len
+                .checked_sub(headers_len)
+                .expect("total length includes headers");
 
             // Find headers section and payload
             let header_end = frame_str.find("\r\n\r\n").expect("header separator");
@@ -589,7 +607,7 @@ mod protocol_parsing {
 
     // Simple JSON extraction helpers for testing
     fn extract_json_string_test<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-        let pattern = format!(r#""{key}":"#);
+        let pattern = format!(r#""{key}":""#);
         if let Some(start) = json.find(&pattern) {
             let value_start = start + pattern.len();
             if let Some(value_end) = json[value_start..].find('"') {
@@ -752,6 +770,9 @@ mod handshake_protocol {
 
         for command in sequence {
             if *command == "PING" {
+                if pending_pings > 0 {
+                    return false;
+                }
                 pending_pings += 1;
             } else if *command == "PONG" {
                 if pending_pings == 0 {

@@ -77,10 +77,11 @@ proptest! {
     fn kafka_consumer_commit_offsets_invariants(seq in sequence_strategy()) {
         run_test_with_cx(|cx| async move {
             let config = ConsumerConfig::new(
-                vec!["kafka:9092".to_string()],
+                vec!["127.0.0.1:9092".to_string()],
                 "asupersync-61m3lc-property-group",
             )
-            .client_id("asupersync-61m3lc-prop");
+            .client_id("asupersync-61m3lc-prop")
+            .allow_deterministic_broker_for_testing(true);
             let consumer = KafkaConsumer::new(config).expect("consumer config");
 
             consumer
@@ -185,10 +186,11 @@ proptest! {
 
         run_test_with_cx(|cx| async move {
             let config = ConsumerConfig::new(
-                vec!["kafka:9092".to_string()],
+                vec!["127.0.0.1:9092".to_string()],
                 "asupersync-61m3lc-unsubscribed-group",
             )
-            .client_id("asupersync-61m3lc-unsubscribed");
+            .client_id("asupersync-61m3lc-unsubscribed")
+            .allow_deterministic_broker_for_testing(true);
             let consumer = KafkaConsumer::new(config).expect("consumer config");
             consumer.subscribe(&cx, &["alpha"]).await.expect("subscribe");
 

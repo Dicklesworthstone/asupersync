@@ -3270,6 +3270,14 @@ impl Drop for PubSubControlGuard<'_> {
     }
 }
 
+impl Drop for RedisPubSub {
+    fn drop(&mut self) {
+        if !self.channels.is_empty() || !self.patterns.is_empty() || self.poisoned {
+            let _ = self.conn.stream.shutdown_transport();
+        }
+    }
+}
+
 impl RedisPubSub {
     async fn connect(cx: &Cx, config: RedisConfig) -> Result<Self, RedisError> {
         let mut conn = RedisConnection::connect(config.clone(), None).await?;

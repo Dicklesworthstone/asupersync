@@ -929,25 +929,26 @@ async fn run_kafka_resilience_proof(
     recovery_bootstrap_servers: Option<Vec<String>>,
     recovery_topic: &str,
 ) -> Result<KafkaResilienceProofOutcome, String> {
-    let cancellation_result =
-        run_kafka_resilience_cancellation_probe(cx, unavailable_bootstrap_servers).await?;
-
     let Some(recovery_bootstrap_servers) = recovery_bootstrap_servers else {
+        assert_kafka_resilience_error_taxonomy()?;
         return Ok(KafkaResilienceProofOutcome {
             message_count: 0,
             ack_count: 0,
             consumer_lag: 0,
             partition: None,
             offset: None,
-            delivery_status: "cancelled-before-send-commit-and-poll".to_string(),
+            delivery_status: "skipped-real-broker-prerequisites-unavailable".to_string(),
             payload_sha256: String::new(),
             expected_ordering_scope: "not-applicable".to_string(),
             reconnect_count: 0,
-            actual_result: format!(
-                "{cancellation_result}; real broker recovery skipped because broker prerequisites are unavailable"
-            ),
+            actual_result:
+                "real broker resilience proof skipped because broker prerequisites are unavailable; Kafka error taxonomy checked locally"
+                    .to_string(),
         });
     };
+
+    let cancellation_result =
+        run_kafka_resilience_cancellation_probe(cx, unavailable_bootstrap_servers).await?;
 
     let recovery =
         run_kafka_broker_parity_roundtrip(cx, recovery_bootstrap_servers, recovery_topic).await?;

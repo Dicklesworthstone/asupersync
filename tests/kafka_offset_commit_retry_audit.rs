@@ -33,7 +33,8 @@ fn offset_commit_uses_configured_consumer_surface() {
         vec!["localhost:9092".to_string()],
         "offset-commit-retry-audit",
     )
-    .retries(2);
+    .retries(2)
+    .allow_deterministic_broker_for_testing(true);
     let consumer = KafkaConsumer::new(config).expect("create consumer");
 
     block_on(async {
