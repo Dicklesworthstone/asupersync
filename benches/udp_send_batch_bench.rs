@@ -1,11 +1,42 @@
-//! Loopback UDP send-batch benchmark for the send_to loop versus native sendmmsg/GSO.
+//! Loopback UDP send-batch benchmark for the send_to loop, sendmmsg, and GSO.
 
-use asupersync::net::{UdpOutboundDatagram, UdpSocket};
+use asupersync::net::{UdpOutboundDatagram, UdpSendBatchStrategy, UdpSocket};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures_lite::future;
 
 const PACKETS_PER_BATCH: usize = 64;
-const PAYLOAD_BYTES: usize = 1200;
+const PAYLOAD_BYTES: usize = 1424;
+
+#[derive(Debug, Clone, Copy)]
+enum SendBatchBenchCase {
+    PortableLoop,
+    NativeSendmmsgOnly,
+    NativeGsoSendmmsg,
+}
+
+impl SendBatchBenchCase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::PortableLoop => "portable_send_to_loop",
+            Self::NativeSendmmsgOnly => "native_sendmmsg_only",
+            Self::NativeGsoSendmmsg => "native_gso_sendmmsg",
+        }
+    }
+
+    fn connected_sender(self) -> bool {
+        !matches!(self, Self::PortableLoop)
+    }
+
+    fn strategy(self) -> UdpSendBatchStrategy {
+        match self {
+            Self::PortableLoop | Self::NativeGsoSendmmsg => UdpSendBatchStrategy::default(),
+            Self::NativeSendmmsgOnly => UdpSendBatchStrategy {
+                prefer_gso: false,
+                ..UdpSendBatchStrategy::default()
+            },
+        }
+    }
+}
 
 fn payloads() -> Vec<Vec<u8>> {
     (0..PACKETS_PER_BATCH)
@@ -13,12 +44,12 @@ fn payloads() -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn send_and_drain(payloads: &[Vec<u8>], connected_sender: bool) {
+fn send_and_drain(payloads: &[Vec<u8>], bench_case: SendBatchBenchCase) {
     future::block_on(async {
         let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let receiver_addr = receiver.local_addr().unwrap();
         let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        if connected_sender {
+        if bench_case.connected_sender() {
             sender.connect(receiver_addr).await.unwrap();
         }
 
@@ -29,14 +60,37 @@ fn send_and_drain(payloads: &[Vec<u8>], connected_sender: bool) {
                 payload,
             })
             .collect::<Vec<_>>();
-        let report = sender.send_batch_to(&packets).await.unwrap();
+        let report = sender
+            .send_batch_to_with_strategy(&packets, bench_case.strategy())
+            .await
+            .unwrap();
         assert_eq!(report.packets_processed, PACKETS_PER_BATCH);
         assert_eq!(report.bytes_processed, PACKETS_PER_BATCH * PAYLOAD_BYTES);
-        if connected_sender && cfg!(target_os = "linux") {
-            assert!(report.native_send_batch_used);
-        }
-        if !connected_sender {
-            assert!(report.fallback_used);
+
+        match bench_case {
+            SendBatchBenchCase::PortableLoop => {
+                assert!(report.fallback_used);
+                assert!(!report.native_send_batch_used);
+                assert!(!report.gso_send_used);
+            }
+            SendBatchBenchCase::NativeSendmmsgOnly => {
+                if cfg!(target_os = "linux") {
+                    assert!(report.native_send_batch_used);
+                    assert!(!report.gso_send_used);
+                }
+            }
+            SendBatchBenchCase::NativeGsoSendmmsg => {
+                if cfg!(target_os = "linux") {
+                    assert!(
+                        report.native_send_batch_used,
+                        "expected native GSO send path, got {report:?}"
+                    );
+                    assert!(
+                        report.gso_send_used,
+                        "GSO-eligible benchmark fell back before using UDP_SEGMENT: {report:?}"
+                    );
+                }
+            }
         }
 
         let mut received = 0usize;
@@ -57,16 +111,17 @@ fn bench_udp_send_batch(c: &mut Criterion) {
         (PACKETS_PER_BATCH * PAYLOAD_BYTES) as u64,
     ));
 
-    group.bench_with_input(
-        BenchmarkId::new("portable_send_to_loop", PACKETS_PER_BATCH),
-        &false,
-        |b, connected_sender| b.iter(|| send_and_drain(&payloads, *connected_sender)),
-    );
-    group.bench_with_input(
-        BenchmarkId::new("native_sendmmsg_gso", PACKETS_PER_BATCH),
-        &true,
-        |b, connected_sender| b.iter(|| send_and_drain(&payloads, *connected_sender)),
-    );
+    for bench_case in [
+        SendBatchBenchCase::PortableLoop,
+        SendBatchBenchCase::NativeSendmmsgOnly,
+        SendBatchBenchCase::NativeGsoSendmmsg,
+    ] {
+        group.bench_with_input(
+            BenchmarkId::new(bench_case.name(), PACKETS_PER_BATCH),
+            &bench_case,
+            |b, bench_case| b.iter(|| send_and_drain(&payloads, *bench_case)),
+        );
+    }
 
     group.finish();
 }

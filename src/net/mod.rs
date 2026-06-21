@@ -100,7 +100,8 @@ pub use udp::{
     UdpEndpointObservation, UdpHairpinSupport, UdpInboundDatagram, UdpNatAssessment,
     UdpNatConfidence, UdpNatKind, UdpOutboundDatagram, UdpPlatform, UdpRecvBatch,
     UdpRendezvousCandidate, UdpRendezvousCandidateKind, UdpRendezvousCandidateSet,
-    UdpRendezvousSignature, UdpRendezvousValidationError, UdpSocket, UdpSocketCapabilities,
+    UdpRendezvousSignature, UdpRendezvousValidationError, UdpSendAccelerationCapabilities,
+    UdpSendBatchPath, UdpSendBatchPlan, UdpSendBatchStrategy, UdpSocket, UdpSocketCapabilities,
     classify_udp_nat, validate_udp_rendezvous_candidates,
 };
 #[cfg(unix)]
