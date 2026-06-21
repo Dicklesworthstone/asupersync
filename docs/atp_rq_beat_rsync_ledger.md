@@ -1440,3 +1440,24 @@ The encrypted CLI data plane (`atp --transport quic`, TLS-1.3 + symbol auth) was
 | tree_small | bad 2% | FAIL (5 err) | 7.36s | " |
 | tree_small | broken 10% | FAIL (5 err) | 34.80s | " |
 (500K/perfect smoke earlier: atp-quic 0.45s TIED rsync-ssh 0.45s, sha-ok.) ★MILESTONE: the encrypted tier is on the scoreboard at all — the QUIC/TLS-1.3 data plane completes byte-perfect transfers on clean links (z0v7ri handshake+sizing DONE). ★NO-CLAIM / OPEN: atp-quic FAILS under ANY loss (good/bad/broken all 0-ok) — the QUIC data plane has no working loss-convergence yet (its own analogue of the rq lever-1 problem; the rq lever-1 fix does NOT carry to the quic path). And clean raw-speed loses ~42× (same cold-start/decode wall as nocrypto + QUIC overhead). So encrypted is USABLE-on-clean, NOT competitive yet. Follow-on: QUIC loss-convergence (relates to QUIC.1 / a new bead) is the next encrypted-tier lever. Evidence dir: `artifacts/atp_bench_matrix/20260621T195619Z/`.
+
+## MATRIX-18 (2026-06-21) — LEVER-1 (round-0 over-pace) REFUTED-AS-IMPLEMENTED TWICE; main currently REGRESSED for large atp-rq
+
+**Context.** Lever-1 = stop round-0 from spraying the whole object at the 16MiB/s cold-start rate (→ ~62% loss on slow links). Two swarm attempts landed on `main` (bead 317hxr.2.5). Both benched on 50M nocrypto × {perfect,good,bad,broken}, ATP_RQ_TRACE, fresh release `atp 0.3.5`, hermetic netns+veth+netem, SHA-256 fail-closed. **Prior best working baseline = overhead-cap `9206290ba` (50M/bad 51s, all sha-ok).**
+
+**v2 `083652184` ("credit source resend probe rounds") — REGRESSED (slow, sha-clean).** Run `20260621T192647Z`, all `sha_ok=true`:
+| regime | v2 | baseline 9206290ba |
+|---|---|---|
+| perfect | 56.19s | 3.7s (**15× slower**) |
+| good | 76.61s | 4.1s (**19× slower**) |
+| bad | 79.72s | 51s (worse) |
+| broken | 92.13s | 124s (better) |
+Trace root cause: source-resend rounds UNDER-CREDIT `received_this_round` (perfect round-2 sent=15992 received=1884, ~12%); the no-collapse guard only catches received==0, so tiny-nonzero is fed to the estimator as ~88% wire loss → `repair_loss_bar` 0.0875→0.88 → path_rate collapse 112M→14M.
+
+**v3 `cfe9816b4` ("exclude source resend loss samples") — HARD BREAK (all transfers fail).** Run `20260621T204912Z`: atp-rq-lab `status=error sha=False` on EVERY regime (incl perfect), fails ~0.3s, `feedback_rounds=0` (rsync succeeds → not netns pollution). Exact errors:
+- recv.time: `atp failed: frame error: frame too large: 1326430 bytes (max: 1048576)`
+- send.time: `round 0 sprayed symbols_sent=437 probe_limit=437` → `got reply KeepAlive` → `sent ObjectComplete` → `atp failed: io error: peer closed control connection mid-transfer`
+
+**Root cause (v3).** The bounded round-0 1-block probe leaves a huge source deficit; the receiver's NeedMore then enumerates ALL remaining source ESIs (~40k), serializing to ~1.3MB > the 1 MiB control-frame max → receiver rejects the frame and closes the control connection → every multi-block (large) transfer fails. So **`main`'s transport_rq is currently broken for 50M/100M/500M atp-rq.**
+
+**Verdict / no-claim.** Lever-1 is NOT yet a win; both implemented forms regressed (v2 slow, v3 broken). The correct fix is ONE coherent change, not incremental patches: (1) bounded round-0 probe; (2) COMPACT source-request encoding in NeedMore (ranges/bitmap or per-sbn bulk request — never per-ESI enumeration, that's what overflowed); (3) gate source-resend rounds OUT of the loss/pacing estimator by ROUND TYPE; (4) credit re-sent source in the SAME round (received≈sent on a clean link); (5) deliver requested source in one bulk round at the measured rate. **Recommended interim:** `git revert 083652184 + cfe9816b4` (or reset round-0/source-resend to `9206290ba`) to restore a working `main` while lever-1 is redesigned. Filed to bead 317hxr.2.5. Evidence dirs: `artifacts/atp_bench_matrix/20260621T192647Z/` (v2), `.../20260621T204912Z/` (v3).
