@@ -51,6 +51,30 @@ RwAwRAIgFLcs0Qdsy190QfKzpvLj28srfpw6wZ2PURF20N+twm8CIFZMWnG65VsE\n\
 WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 -----END CERTIFICATE-----\n";
 
+// P-256 self-signed certificate with IP SAN 127.0.0.1, serverAuth EKU, and
+// CA:TRUE. This mirrors the benchmark CLI path where the same PEM is passed as
+// both --server-cert and --ca; WebPKI rejects it as an end-entity, so the CLI
+// must treat the explicit --ca as a direct leaf pin rather than falling back to
+// an insecure verifier.
+const SELF_SIGNED_CA_TRUE_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBwzCCAWigAwIBAgIUUipbHRMHoXz+egbfzEh5Q4NuOZ4wCgYIKoZIzj0EAwIw\n\
+FDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MDYyMTE4Mjg1MloYDzIxMjYwNTI4\n\
+MTgyODUyWjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwWTATBgcqhkjOPQIBBggqhkjO\n\
+PQMBBwNCAAQSPQ5U0Ubuk7y1Ov22oGgWg1jRDQFdLaXeVDisROTsFq6TRJPQBUbC\n\
+iF/mpdfpOoU7rznm+EKLwi7QvhHJ8hHZo4GVMIGSMB0GA1UdDgQWBBQMm+XYIbOs\n\
+3uarxHpVbY+tEJPDqjAfBgNVHSMEGDAWgBQMm+XYIbOs3uarxHpVbY+tEJPDqjAa\n\
+BgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwDwYDVR0TAQH/BAUwAwEB/zAOBgNV\n\
+HQ8BAf8EBAMCAoQwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCgYIKoZIzj0EAwIDSQAw\n\
+RgIhANPjfmIIhuKQcQ63E0X0f+O/SW3pR3HHsslbOSj7CdVpAiEA1uk8WzcQOkJ1\n\
+/5t6MH+uipuxBmQliyJymsXyLxfFtS8=\n\
+-----END CERTIFICATE-----\n";
+
+const SELF_SIGNED_CA_TRUE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4i+BN3DhwfMiy4pT\n\
+834gbW6xj5Lewo5bjmdOQTuGm8qhRANCAAQSPQ5U0Ubuk7y1Ov22oGgWg1jRDQFd\n\
+LaXeVDisROTsFq6TRJPQBUbCiF/mpdfpOoU7rznm+EKLwi7QvhHJ8hHZ\n\
+-----END PRIVATE KEY-----\n";
+
 fn unique_tmp(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -409,6 +433,87 @@ fn atp_send_recv_quic_loopback_moves_file_bytes() {
             && receiver_stdout.contains("\"committed\":true")
             && receiver_stdout.contains("\"bytes_received\":8192"),
         "receiver stdout: {receiver_stdout}"
+    );
+    assert_eq!(
+        std::fs::read(dest_dir.join("payload.bin")).expect("read received payload"),
+        payload
+    );
+}
+
+#[test]
+fn atp_send_recv_quic_loopback_accepts_explicit_self_signed_leaf_pin() {
+    let root = unique_tmp("self-signed-leaf-pin");
+    let cert = root.join("tls/self-signed.pem");
+    let key = root.join("tls/self-signed.key");
+    write_file(&cert, SELF_SIGNED_CA_TRUE_CERT_PEM.as_bytes());
+    write_file(&key, SELF_SIGNED_CA_TRUE_KEY_PEM.as_bytes());
+
+    let source_dir = root.join("source");
+    let dest_dir = root.join("dest");
+    let payload_path = source_dir.join("payload.bin");
+    let payload = (0..4096u32)
+        .map(|i| (i.wrapping_mul(29) % 251) as u8)
+        .collect::<Vec<_>>();
+    write_file(&payload_path, &payload);
+    std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+
+    let mut receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "recv",
+            dest_dir.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:0",
+            "--transport",
+            "quic",
+            "--once",
+            "--symbol-size",
+            "1144",
+            "--rq-allow-unauthenticated-lab",
+            "--server-cert",
+            cert.to_str().unwrap(),
+            "--server-key",
+            key.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn atp quic receiver");
+    let receiver_stderr = spawn_stderr_reader(&mut receiver);
+    let listen_addr = wait_for_quic_listen_addr(&receiver_stderr);
+
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .args([
+            "send",
+            payload_path.to_str().unwrap(),
+            &listen_addr.to_string(),
+            "--transport",
+            "quic",
+            "--symbol-size",
+            "1144",
+            "--rq-allow-unauthenticated-lab",
+            "--ca",
+            cert.to_str().unwrap(),
+            "--server-name",
+            "127.0.0.1",
+        ])
+        .output()
+        .expect("run atp quic sender");
+    if !sender.status.success() {
+        let _ = receiver.kill();
+        let _ = receiver.wait();
+        panic!(
+            "atp quic sender failed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&sender.stdout),
+            String::from_utf8_lossy(&sender.stderr)
+        );
+    }
+
+    let receiver = wait_with_timeout(receiver, "atp quic receiver");
+    assert!(
+        receiver.status.success(),
+        "atp quic receiver failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&receiver.stdout),
+        String::from_utf8_lossy(&receiver.stderr)
     );
     assert_eq!(
         std::fs::read(dest_dir.join("payload.bin")).expect("read received payload"),

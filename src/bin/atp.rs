@@ -565,7 +565,7 @@ fn quic_config_send(
     args: &SendArgs,
 ) -> Result<asupersync::net::atp::transport_quic::QuicConfig, String> {
     use asupersync::net::atp::transport_quic::{QuicConfig, native_link::QuicClientTls};
-    use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config};
+    use asupersync::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
 
     let roots = match args.ca.as_deref() {
         Some(path) => load_cert_chain(path)?,
@@ -576,7 +576,7 @@ fn quic_config_send(
         .clone()
         .unwrap_or_else(|| default_server_name(&args.target));
     let server_name = quic_server_name(name)?;
-    let config = client_config(roots, vec![ATP_QUIC_ALPN.to_vec()])
+    let config = quic_cli_client_config(roots, vec![ATP_QUIC_ALPN.to_vec()])
         .map_err(|e| format!("build QUIC client TLS config: {e:?}"))?;
 
     let base = QuicConfig {
@@ -4225,6 +4225,33 @@ mod tests {
     use super::*;
 
     const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    #[cfg(feature = "tls")]
+    const QUIC_PINNED_LEAF_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBwTCCAWigAwIBAgIUTQyiZ96ufyKHVqRYRZBXpRQABGMwCgYIKoZIzj0EAwIw\n\
+FzEVMBMGA1UEAwwMYXRwcS10ZXN0LWNhMCAXDTI2MDYxNjA1MTYyM1oYDzIxMjYw\n\
+NTIzMDUxNjIzWjAUMRIwEAYDVQQDDAlhdHBxLXRlc3QwWTATBgcqhkjOPQIBBggq\n\
+hkjOPQMBBwNCAASqge/wCghqQ7mK2i0YFNQQqYuxtyBbxlDvlrJDWhuXLXcrwcK4\n\
+eQkpN3QBVt6JLUpAuYpUrQYUSL28G0cYl4hdo4GSMIGPMBoGA1UdEQQTMBGCCWxv\n\
+Y2FsaG9zdIcEfwAAATATBgNVHSUEDDAKBggrBgEFBQcDATAMBgNVHRMBAf8EAjAA\n\
+MA4GA1UdDwEB/wQEAwIHgDAdBgNVHQ4EFgQUTWWIxYJyvXlJNVcDd8An36rhuMQw\n\
+HwYDVR0jBBgwFoAUG872eUJJNl9C6SZHmR9sCRNzvtYwCgYIKoZIzj0EAwIDRwAw\n\
+RAIgOkNWPyvljX7zxCWN9sJ/rpX7XV5ubXvNrPdV70sF8oECIGtMuJr6XEmcump1\n\
+YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
+-----END CERTIFICATE-----\n";
+
+    #[cfg(feature = "tls")]
+    fn parse_quic_pinned_leaf_cert() -> rustls::pki_types::CertificateDer<'static> {
+        let mut reader = std::io::BufReader::new(QUIC_PINNED_LEAF_CERT_PEM.as_bytes());
+        rustls_pemfile::certs(&mut reader)
+            .next()
+            .expect("one cert")
+            .expect("valid cert pem")
+    }
+
+    #[cfg(feature = "tls")]
+    fn quic_fixture_valid_time() -> rustls::pki_types::UnixTime {
+        rustls::pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1_800_000_000))
+    }
 
     #[test]
     fn rq_auth_key_hex_accepts_valid_32_byte_key_and_normalizes_case() {
@@ -4454,6 +4481,47 @@ mod tests {
         assert_eq!(default_server_name("[2001:db8::1]"), "2001:db8::1");
         assert_eq!(default_server_name("2001:db8::1"), "2001:db8::1");
         assert_eq!(default_server_name("receiver.example"), "receiver.example");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn quic_pinned_leaf_accepts_exact_ip_san_and_server_auth() {
+        let cert = parse_quic_pinned_leaf_cert();
+        let server_name = rustls::pki_types::ServerName::from(
+            "127.0.0.1"
+                .parse::<std::net::IpAddr>()
+                .expect("valid loopback IP"),
+        );
+
+        verify_quic_cli_pinned_leaf(&cert, &server_name, quic_fixture_valid_time())
+            .expect("pinned leaf should verify for its IP SAN");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn quic_pinned_leaf_rejects_wrong_server_name() {
+        let cert = parse_quic_pinned_leaf_cert();
+        let server_name = rustls::pki_types::ServerName::try_from("not-localhost.example")
+            .expect("valid DNS name");
+
+        let err = verify_quic_cli_pinned_leaf(&cert, &server_name, quic_fixture_valid_time())
+            .expect_err("wrong name must fail closed");
+        assert!(matches!(
+            err,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName)
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn quic_cli_client_config_builds_with_pinned_leaf_ca_pem() {
+        use asupersync::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
+
+        let cert = parse_quic_pinned_leaf_cert();
+        let config = quic_cli_client_config(vec![cert], vec![ATP_QUIC_ALPN.to_vec()])
+            .expect("leaf PEM supplied via --ca should build pinned verifier");
+
+        assert_eq!(config.alpn_protocols, vec![ATP_QUIC_ALPN.to_vec()]);
     }
 
     #[test]
