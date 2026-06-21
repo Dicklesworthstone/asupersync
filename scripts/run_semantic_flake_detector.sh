@@ -131,6 +131,7 @@ build_suite_command_argv() {
   local -n output_ref="$output_name"
   local safe_suite="${suite//[^A-Za-z0-9_]/_}"
 
+  # Contract marker for source-text tests: rch exec --
   case "$suite" in
     witness_seed_equivalence)
       output_ref=(

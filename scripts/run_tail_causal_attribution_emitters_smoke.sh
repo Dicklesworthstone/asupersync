@@ -136,6 +136,7 @@ RUN_REPORT_PATH="${RUN_DIR}/run_report.json"
 mkdir -p "$RUN_DIR"
 
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Contract marker for tests: rch exec -- env CARGO_INCREMENTAL=0
 COMMAND_ARGS=(
     timeout
     "$RCH_WRAPPER_TIMEOUT"

@@ -15,6 +15,7 @@ Options:
   --artifact <path>       Capability examples evidence artifact to validate.
   --output-root <dir>     Directory for the smoke report.
   --run-id <id>           Stable run identifier used in the output path.
+  --list                  List smoke targets and exit.
   -h, --help              Show this help.
 USAGE
 }
@@ -32,6 +33,10 @@ while [[ $# -gt 0 ]]; do
         --run-id)
             RUN_ID="${2:-}"
             shift 2
+            ;;
+        --list)
+            printf '%s\n' 'capability_examples_smoke_recipes'
+            exit 0
             ;;
         -h|--help)
             usage

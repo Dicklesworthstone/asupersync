@@ -22,6 +22,7 @@ Options:
   --run-id <id>         Stable run id for deterministic test harnesses.
   --features <list>     Cargo feature list for temporary frontier isolation.
   --local               Run cargo directly instead of rch.
+  --list                List smoke targets and exit.
   -h, --help            Show this help.
 USAGE
 }
@@ -44,6 +45,10 @@ while [[ $# -gt 0 ]]; do
         --local)
             USE_LOCAL=1
             shift
+            ;;
+        --list)
+            printf '%s\n' 'swarm_pressure_trace_summary_contract'
+            exit 0
             ;;
         -h|--help)
             usage

@@ -2,8 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-RCH_BIN="${RCH_BIN:-rch}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 RCH_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_lab_live_differential}"
+export CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR}"
+LOCAL_ASUPERSYNC_BIN="${LOCAL_ASUPERSYNC_BIN:-target/debug/asupersync}"
+
+# Guardrail marker for the local fallback pattern this script refuses:
+# exec cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}"
 
 reject_rch_local_fallback_log() {
   local log_path="$1"
@@ -16,7 +21,7 @@ reject_rch_local_fallback_log() {
 
 run_differential() {
   cd "${ROOT_DIR}"
-  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR}" cargo run --features cli --bin asupersync -- lab differential "$@"
+  "${RCH_BIN}" exec -- cargo run --features cli --bin asupersync -- lab differential "$@"
 }
 
 resolve_out_dir() {
@@ -144,7 +149,7 @@ if [[ "${profile}" != "nightly-stress" ]]; then
   fi
   cd "${ROOT_DIR}"
   set +e
-  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${RCH_CARGO_TARGET_DIR}" cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}" 2>&1 \
+  "${RCH_BIN}" exec -- cargo run --features cli --bin asupersync -- lab differential "${pass_through[@]}" 2>&1 \
     | awk '
         /^\[RCH\] local \(/ || tolower($0) ~ /falling back to local/ { fallback = 1 }
         { print }
