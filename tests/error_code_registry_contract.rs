@@ -297,6 +297,96 @@ fn live_error_codes_are_bidirectionally_linked_to_source() {
 }
 
 #[test]
+fn atp_operability_codes_are_live_and_discoverable() {
+    let registry: Value = serde_json::from_str(&read(REGISTRY)).expect("registry must be JSON");
+    let registry_entries: BTreeMap<_, _> = registry["codes"]
+        .as_array()
+        .expect("registry codes must be an array")
+        .iter()
+        .map(|entry| (as_str(entry, "code").to_string(), entry))
+        .collect();
+    let readme_entries = readme_catalog_entries();
+
+    for (code, expected_name, expected_refs) in [
+        (
+            "ASUP-E801",
+            "atp-rq-no-convergence",
+            &[
+                "src/net/atp/transport_rq/mod.rs",
+                "src/net/atp/transport_quic/mod.rs",
+            ][..],
+        ),
+        (
+            "ASUP-E802",
+            "atp-capability-mismatch",
+            &[
+                "src/net/atp/transport_rq/mod.rs",
+                "src/net/atp/transport_quic/mod.rs",
+            ][..],
+        ),
+        (
+            "ASUP-E803",
+            "atp-block-size-mismatch",
+            &[
+                "src/net/atp/transport_rq/mod.rs",
+                "src/net/atp/transport_quic/mod.rs",
+            ][..],
+        ),
+        (
+            "ASUP-E804",
+            "atp-pacer-stall",
+            &["src/net/atp/transport_quic/mod.rs"][..],
+        ),
+        (
+            "ASUP-E805",
+            "atp-decode-rank-stall",
+            &[
+                "src/net/atp/transport_rq/mod.rs",
+                "src/net/atp/transport_quic/mod.rs",
+            ][..],
+        ),
+    ] {
+        let entry = registry_entries
+            .get(code)
+            .unwrap_or_else(|| panic!("{code} missing from registry"));
+        assert_eq!(as_str(entry, "name"), expected_name);
+        assert_eq!(as_str(entry, "area"), "raptorq");
+        assert_eq!(as_str(entry, "status"), "live");
+        assert_eq!(as_str(entry, "since"), "0.3.5");
+        assert_eq!(
+            as_str(entry, "doc_path"),
+            format!("docs/error_codes/{code}.md")
+        );
+
+        let actual_refs: BTreeSet<_> = as_array(entry, "source_refs")
+            .iter()
+            .map(|source_ref| {
+                source_ref
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{code} source ref must be a string"))
+            })
+            .collect();
+        let expected_refs: BTreeSet<_> = expected_refs.iter().copied().collect();
+        assert_eq!(
+            actual_refs, expected_refs,
+            "{code} source refs must stay pinned to ATP transport diagnostics"
+        );
+
+        let page = read(as_str(entry, "doc_path"));
+        assert!(
+            page.contains(&format!("`[{code}]`")),
+            "{code} runbook must show the emitted token form"
+        );
+        let catalog = readme_entries
+            .get(code)
+            .unwrap_or_else(|| panic!("{code} missing from docs/error_codes/README.md"));
+        assert_eq!(catalog.status, "live");
+        assert_eq!(catalog.area, "raptorq");
+        assert_eq!(catalog.page_target, format!("./{code}.md"));
+    }
+}
+
+#[test]
 fn error_code_registry_is_discoverable_from_agent_docs() {
     let readme = read(README);
     let agents = read(AGENTS);
