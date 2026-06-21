@@ -1,6 +1,6 @@
 [package]
 name = "asupersync-conformance"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 autobins = false
 # Keep target-specific CLI contract tests inside the binary targets that own
@@ -170,7 +170,7 @@ path = "src/bin/otel_metric_exporter_batching_conformance.rs"
 name = "h1_expect_continue_conformance"
 path = "src/bin/h1_expect_continue_conformance.rs"
 [dependencies]
-asupersync = { version = "0.3.4", path = "..", features = ["metrics", "test-internals", "tracing-integration", "fuzz"] }
+asupersync = { version = "0.3.5", path = "..", features = ["metrics", "test-internals", "tracing-integration", "fuzz"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
