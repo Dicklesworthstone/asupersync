@@ -1063,6 +1063,29 @@ mod tests {
     }
 
     #[test]
+    fn sparse_calibration_uses_infinite_threshold_for_high_coverage() {
+        let config = ConformalConfig::new(0.05).min_samples(3);
+        let mut cal = ConformalCalibrator::new(config);
+
+        for _ in 0..3 {
+            cal.calibrate(&make_clean_report(10, 50));
+        }
+
+        let report = cal.predict(&make_violated_report(10_000, 50_000)).unwrap();
+        assert_eq!(report.prediction_sets.len(), 1);
+        let prediction = &report.prediction_sets[0];
+        assert!(
+            prediction.threshold.is_infinite(),
+            "n=3 alpha=0.05 requires +inf threshold, got {}",
+            prediction.threshold
+        );
+        assert!(
+            prediction.conforming,
+            "high-coverage sparse calibration must cover all scores"
+        );
+    }
+
+    #[test]
     fn violation_is_anomalous() {
         let config = ConformalConfig::new(0.10).min_samples(3);
         let mut cal = ConformalCalibrator::new(config);
