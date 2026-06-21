@@ -7882,7 +7882,11 @@ mod tests {
 
         let need_more = QuicNeedMore {
             pending: vec![0, 2, 7],
-            repair_blocks: Vec::new(),
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 2,
+                sbn: 1,
+                symbols: 3,
+            }],
             source_symbols: vec![QuicSourceSymbolRequest {
                 entry: 2,
                 sbn: 1,
@@ -7896,6 +7900,15 @@ mod tests {
             parse_json::<QuicNeedMore>(&feedback_frame).expect("parse feedback"),
             need_more
         );
+        assert_eq!(
+            feedback_frame.payload(),
+            br#"{"pending":[0,2,7],"repair_blocks":[{"entry":2,"sbn":1,"symbols":3}],"source_symbols":[{"entry":2,"sbn":1,"esi":15}]}"#
+        );
+
+        let keepalive = Frame::empty(FrameType::KeepAlive).expect("keepalive frame");
+        assert_eq!(keepalive.version(), ProtocolVersion::CURRENT);
+        assert_eq!(keepalive.frame_type(), FrameType::KeepAlive);
+        assert!(keepalive.payload().is_empty());
     }
 
     #[test]
@@ -10112,6 +10125,9 @@ mod tests {
             .expect("block layout mismatch must reject at handshake");
         assert!(
             reason.contains("max_block_size")
+                && reason.contains("sender max_block_size")
+                && reason.contains("receiver max_block_size")
+                && reason.contains("must match")
                 && reason.contains(&config.max_block_size.to_string()),
             "{reason}"
         );
