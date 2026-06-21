@@ -107,9 +107,13 @@ fn metadata_in_grpc_window_below_http2_advisory_still_rejects() {
     // cap (>8 KiB) STILL gets rejected at the gRPC layer.
     // Client respecting only HTTP/2 advisory is not safe.
     let mut metadata = Metadata::new();
-    let value_16kib = "X".repeat(16 * 1024);
-    assert!(metadata.insert("x-large", &value_16kib));
-    // 16 KiB > 8 KiB gRPC cap → rejected.
+    let chunk = "X".repeat(4 * 1024);
+    assert!(metadata.insert("x-large-a", &chunk));
+    assert!(metadata.insert("x-large-b", &chunk));
+    assert!(metadata.insert("x-large-c", &chunk));
+    assert!(metadata.insert("x-large-d", &chunk));
+    // 16 KiB aggregate > 8 KiB gRPC cap, with each value under the
+    // separate per-header-value validation cap → rejected by aggregate cap.
     let err = enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
         .expect_err("16 KiB metadata exceeds gRPC 8 KiB cap, must reject");
     assert_eq!(
@@ -165,8 +169,10 @@ fn grpc_metadata_size_zero_disables_check_via_no_cap_convention() {
     // but STILL faces the HTTP/2 advisory at the connection
     // layer.
     let mut metadata = Metadata::new();
-    let huge = "Y".repeat(64 * 1024);
-    assert!(metadata.insert("x-huge", &huge));
+    let chunk = "Y".repeat(4 * 1024);
+    for index in 0..16 {
+        assert!(metadata.insert(format!("x-huge-{index}"), &chunk));
+    }
     enforce_metadata_size_limit(&metadata, 0)
         .expect("limit=0 disables gRPC cap; HTTP/2 cap is independent");
 }
@@ -207,8 +213,11 @@ fn grpc_cap_works_even_if_http2_settings_never_acked() {
     // is a pure function of the metadata + cap; no HTTP/2
     // settings dependency.
     let mut metadata = Metadata::new();
-    let big = "Z".repeat(16 * 1024);
-    assert!(metadata.insert("x-big", &big));
+    let chunk = "Z".repeat(4 * 1024);
+    assert!(metadata.insert("x-big-a", &chunk));
+    assert!(metadata.insert("x-big-b", &chunk));
+    assert!(metadata.insert("x-big-c", &chunk));
+    assert!(metadata.insert("x-big-d", &chunk));
     let err = enforce_metadata_size_limit(&metadata, 8 * 1024)
         .expect_err("rejection independent of HTTP/2 SETTINGS state");
     assert_eq!(err.code(), Code::ResourceExhausted);

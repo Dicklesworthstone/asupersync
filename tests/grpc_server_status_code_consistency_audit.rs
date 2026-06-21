@@ -62,10 +62,15 @@ fn metadata_size_cap_rejection_is_always_resource_exhausted() {
     // metadata was constructed (large value, large key, many
     // small entries).
     let scenarios = vec![
-        // One large value
+        // Aggregate overflow via several individually valid values. A single
+        // >8 KiB value is an invalid header field and correctly maps to
+        // InvalidArgument before aggregate cap enforcement.
         {
             let mut m = Metadata::new();
-            assert!(m.insert("x-big", "X".repeat(16 * 1024)));
+            for i in 0..4 {
+                let key = format!("x-big-{i}");
+                assert!(m.insert(&key, "X".repeat(4 * 1024)));
+            }
             m
         },
         // Many small entries that total > cap
@@ -224,7 +229,10 @@ fn similar_size_violations_at_different_layers_use_same_code() {
 
     // (1) Metadata size cap.
     let mut metadata = Metadata::new();
-    assert!(metadata.insert("x-big", "X".repeat(16 * 1024)));
+    for i in 0..4 {
+        let key = format!("x-big-{i}");
+        assert!(metadata.insert(&key, "X".repeat(4 * 1024)));
+    }
     let err1 = enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
         .expect_err("size cap rejects");
     assert_eq!(err1.code(), Code::ResourceExhausted);

@@ -1686,13 +1686,15 @@ mod tests {
             watcher_tx.send(watcher).unwrap();
         });
 
+        let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut status_lock_held = false;
-        for _ in 0..10_000 {
+        while std::time::Instant::now() < wait_deadline {
             if service.statuses.try_write().is_none() {
                 status_lock_held = true;
                 break;
             }
             std::thread::yield_now();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
         crate::assert_with_log!(

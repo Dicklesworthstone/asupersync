@@ -41,6 +41,12 @@
 
 use asupersync::grpc::{NamedService, ReflectionService, ServerBuilder};
 
+fn install_remote_reflection_cx() -> asupersync::cx::cx::CurrentCxGuard {
+    asupersync::cx::Cx::set_current(Some(asupersync::cx::Cx::for_testing_with_remote(
+        asupersync::remote::RemoteCap::new(),
+    )))
+}
+
 #[test]
 fn server_builder_default_does_not_enable_reflection() {
     // Pin (L1): a freshly-built server with NO `.enable_reflection()`
@@ -205,7 +211,9 @@ fn reflection_documents_explicit_opt_in_for_anonymous() {
          auth_installed() in production catches both Locked-but-served \
          AND Anonymous-in-production deployments.",
     );
-    // Anonymous mode permits the call (it's the explicit dev opt-in).
+    // Anonymous mode permits the call (it's the explicit dev auth opt-in);
+    // reflection RPCs still require a REMOTE-capable ambient Cx.
+    let _remote_cx = install_remote_reflection_cx();
     let listed = reflection
         .list_services()
         .expect("Anonymous mode permits list_services for dev tooling");

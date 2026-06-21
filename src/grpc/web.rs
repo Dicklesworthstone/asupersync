@@ -613,7 +613,14 @@ impl Base64StreamDecoder {
         // time), buffer it until a later push completes the group.
         // Once complete, let STANDARD validate padding placement,
         // count, and any trailing bytes.
-        if combined.contains(&b'=') {
+        if let Some(first_padding) = combined.iter().position(|byte| *byte == b'=') {
+            if combined[first_padding..].iter().any(|byte| *byte != b'=') {
+                return Err(GrpcError::protocol(
+                    "invalid base64 in grpc-web-text final chunk: non-padding \
+                     bytes after padding (br-asupersync-37svtb)",
+                ));
+            }
+
             if combined.len() % 4 != 0 {
                 self.pending.clear();
                 self.pending.extend_from_slice(&combined);

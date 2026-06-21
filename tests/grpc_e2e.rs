@@ -898,6 +898,9 @@ fn e2e_grpc_reflection_registry_roundtrip() {
     let reflection = ReflectionService::new().allow_anonymous();
     let health = HealthService::new();
     reflection.register_handler(&health);
+    let _current = asupersync::cx::Cx::set_current(Some(
+        asupersync::cx::Cx::for_testing_with_remote(asupersync::remote::RemoteCap::new()),
+    ));
 
     test_section!("list_services");
     let list = futures_lite::future::block_on(

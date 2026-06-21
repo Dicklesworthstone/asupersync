@@ -34,6 +34,10 @@ mod reflection {
     use asupersync::grpc::streaming::Request;
     use asupersync::types::Budget;
 
+    fn remote_reflection_cx() -> Cx {
+        Cx::for_testing_with_remote(asupersync::remote::RemoteCap::new())
+    }
+
     /// Mock service for testing reflection.
     struct MockEchoService;
 
@@ -73,8 +77,11 @@ mod reflection {
 
                 let list_reflection = reflection.clone();
                 let list_handle = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async move {
-                    list_reflection
-                        .list_services_async(&Request::new(Default::default()))
+                    let list_rpc = {
+                        let _remote_cx = Cx::set_current(Some(remote_reflection_cx()));
+                        list_reflection.list_services_async(&Request::new(Default::default()))
+                    };
+                    list_rpc
                         .await
                         .expect("list services should succeed")
                         .into_inner()
@@ -83,12 +90,15 @@ mod reflection {
 
                 let describe_reflection = reflection.clone();
                 let describe_handle = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async move {
-                    describe_reflection
-                        .describe_service_async(&Request::new(
+                    let describe_rpc = {
+                        let _remote_cx = Cx::set_current(Some(remote_reflection_cx()));
+                        describe_reflection.describe_service_async(&Request::new(
                             asupersync::grpc::reflection::ReflectionDescribeServiceRequest::new(
                                 <HealthService as NamedService>::NAME,
                             ),
                         ))
+                    };
+                    describe_rpc
                         .await
                         .expect("describe service should succeed")
                         .into_inner()
@@ -164,6 +174,7 @@ mod reflection {
         let reflection = ReflectionService::default().allow_anonymous();
         let svc = MockEchoService;
         reflection.register_handler(&svc);
+        let _remote_cx = Cx::set_current(Some(remote_reflection_cx()));
 
         let desc = reflection.describe_service("test.Echo");
         assert!(desc.is_ok(), "describe returns Some");

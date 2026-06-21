@@ -138,7 +138,7 @@ fn capture_service_state(service: &HealthService) -> ServiceStateSnapshot {
 #[test]
 fn health_response_empty_service() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/grpc_health");
+    settings.set_snapshot_path("snapshots/grpc_health");
 
     let service = HealthService::new();
 
@@ -158,7 +158,7 @@ fn health_response_empty_service() {
 #[test]
 fn health_response_unknown_service() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/grpc_health");
+    settings.set_snapshot_path("snapshots/grpc_health");
 
     let service = HealthService::new();
 
@@ -178,7 +178,7 @@ fn health_response_unknown_service() {
 #[test]
 fn health_response_serving_service() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/grpc_health");
+    settings.set_snapshot_path("snapshots/grpc_health");
 
     let service = HealthService::new();
     service.set_status("healthy.service.Example", ServingStatus::Serving);
@@ -199,7 +199,7 @@ fn health_response_serving_service() {
 #[test]
 fn health_response_not_serving_service() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/grpc_health");
+    settings.set_snapshot_path("snapshots/grpc_health");
 
     let service = HealthService::new();
     service.set_status("unhealthy.service.Example", ServingStatus::NotServing);
@@ -220,7 +220,7 @@ fn health_response_not_serving_service() {
 #[test]
 fn health_response_mixed_services() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/grpc_health");
+    settings.set_snapshot_path("snapshots/grpc_health");
 
     let service = HealthService::new();
     service.set_status("alpha.service", ServingStatus::Serving);
@@ -243,7 +243,7 @@ fn health_response_mixed_services() {
 #[test]
 fn health_response_async_method() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/grpc_health");
+    settings.set_snapshot_path("snapshots/grpc_health");
 
     let service = HealthService::new();
     service.set_status("async.test.Service", ServingStatus::Serving);
@@ -264,7 +264,7 @@ fn health_response_async_method() {
 #[test]
 fn health_response_overall_health() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/grpc_health");
+    settings.set_snapshot_path("snapshots/grpc_health");
 
     let service = HealthService::new();
     service.set_status("", ServingStatus::Serving); // Overall server health
@@ -285,7 +285,7 @@ fn health_response_overall_health() {
 #[test]
 fn health_response_status_transitions() {
     let mut settings = Settings::clone_current();
-    settings.set_snapshot_path("tests/snapshots/grpc_health");
+    settings.set_snapshot_path("snapshots/grpc_health");
 
     let service = HealthService::new();
 

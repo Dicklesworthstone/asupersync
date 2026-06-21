@@ -1,0 +1,34 @@
+---
+source: tests/golden_grpc_health.rs
+expression: capture
+---
+HealthResponseCapture {
+    scenario: "status_transitions",
+    request: HealthCheckRequest {
+        service: "transitioning.service",
+    },
+    response: Ok(
+        HealthCheckResponse {
+            status: NotServing,
+        },
+    ),
+    service_state: ServiceStateSnapshot {
+        services: [
+            (
+                "",
+                NotServing,
+            ),
+        ],
+        status_counts: StatusCounts {
+            unknown: 0,
+            serving: 0,
+            not_serving: 1,
+            service_unknown: 0,
+        },
+    },
+    metadata: ResponseCaptureMetadata {
+        test_name: "status_transitions",
+        description: "Health check after multiple status transitions (final state captured)",
+        async_method: false,
+    },
+}

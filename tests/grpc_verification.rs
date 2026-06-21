@@ -90,6 +90,12 @@ fn init_test(name: &str) {
     test_phase!(name);
 }
 
+fn install_remote_reflection_cx() -> asupersync::cx::cx::CurrentCxGuard {
+    asupersync::cx::Cx::set_current(Some(asupersync::cx::Cx::for_testing_with_remote(
+        asupersync::remote::RemoteCap::new(),
+    )))
+}
+
 // =============================================================================
 // Status Codes and Error Handling (001-006)
 // =============================================================================
@@ -1534,11 +1540,12 @@ fn grpc_verify_047_reflection_registry_core_flow() {
     reflection.register_descriptor(&DESC);
 
     // br-asupersync-3tzd9v: list_services now returns Result<...> so the
-    // optional auth callback can reject. With no callback installed
-    // (default), it always Oks.
+    // optional auth callback can reject. Anonymous mode is explicit dev/test
+    // auth, and reflection RPCs still require REMOTE capability.
+    let _remote_cx = install_remote_reflection_cx();
     let services = reflection
         .list_services()
-        .expect("default = no auth, no rejection");
+        .expect("anonymous + REMOTE allows listing");
     assert_eq!(services, vec!["pkg.Echo".to_string()]);
 
     let service = reflection
@@ -1581,6 +1588,7 @@ fn grpc_verify_048_reflection_async_helpers() {
     let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_descriptor(&DESC);
 
+    let _remote_cx = install_remote_reflection_cx();
     let list = futures_lite::future::block_on(
         reflection.list_services_async(&Request::new(ReflectionListServicesRequest)),
     )

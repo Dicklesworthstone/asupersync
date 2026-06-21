@@ -108,9 +108,11 @@ fn te_te_case_insensitive_duplicate_must_reject() {
 }
 
 /// RFC 9110 §5.5: "A field value containing CR, LF, or NUL characters
-/// is invalid." A header-value CRLF injection that smuggles a second
-/// TE header MUST be rejected at validation, before the smuggled
-/// header is parsed as its own line.
+/// is invalid." At this raw HTTP/1 parser boundary the injected CRLF has
+/// already materialized as a separate `Transfer-Encoding` header line; the
+/// required security outcome is still fail-closed before body parsing. With a
+/// smuggled TE plus `Content-Length`, asupersync rejects the message as an
+/// ambiguous body-length request-smuggling vector.
 #[test]
 fn header_value_crlf_injection_smuggling_te_must_reject() {
     let raw = b"POST /api HTTP/1.1\r\n\
@@ -120,7 +122,7 @@ fn header_value_crlf_injection_smuggling_te_must_reject() {
                 hello";
     let result = decode(raw);
     assert!(
-        matches!(result, Err(HttpError::InvalidHeaderValue)),
+        matches!(result, Err(HttpError::AmbiguousBodyLength)),
         "CRLF injection smuggling TE must fail closed; got {result:?}",
     );
 }

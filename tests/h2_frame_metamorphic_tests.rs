@@ -26,6 +26,13 @@ const MAX_TEST_FRAME_SIZE: usize = 16_384;
 /// Maximum test stream ID (31-bit limit).
 const MAX_STREAM_ID: u32 = 0x7FFF_FFFF;
 
+fn h2_frame_proptest_config() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 /// Test data generator for frame payloads.
 prop_compose! {
     fn arb_frame_payload(max_size: usize)
@@ -226,6 +233,8 @@ fn arb_frame() -> impl Strategy<Value = Frame> {
 /// Detects: Serialization bugs, field corruption, truncation errors
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_frame_round_trip_preserves_data(frame in arb_frame()) {
         // Skip frames that would naturally fail validation
@@ -270,6 +279,8 @@ proptest! {
 /// Detects: Header field corruption, bit masking errors
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_frame_header_round_trip(
         length in 0..=MAX_FRAME_SIZE,
@@ -313,6 +324,8 @@ proptest! {
 /// Detects: Padding handling bugs, data corruption during pad removal
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_data_frame_padding_invariance(
         stream_id in arb_stream_id(),
@@ -361,6 +374,8 @@ proptest! {
 /// Detects: Padding handling bugs in HEADERS frame processing
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_headers_frame_padding_invariance(
         stream_id in arb_stream_id(),
@@ -417,6 +432,8 @@ proptest! {
 /// Detects: Header continuation bugs, frame ordering issues
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_headers_continuation_equivalence(
         stream_id in arb_stream_id(),
@@ -477,6 +494,8 @@ proptest! {
 /// Detects: Frame splitting bugs, data ordering issues
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_data_frame_splitting_preserves_content(
         stream_id in arb_stream_id(),
@@ -558,6 +577,8 @@ proptest! {
 /// Detects: Window size calculation errors, overflow handling bugs
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_window_update_additive(
         stream_id in arb_stream_id_or_zero(),
@@ -616,6 +637,8 @@ proptest! {
 /// Detects: Settings accumulation bugs, parameter override issues
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_settings_additive_associative(
         settings1 in prop::collection::vec(arb_setting(), 0..5),
@@ -672,6 +695,8 @@ proptest! {
 /// Detects: Stream ID validation inconsistencies
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_stream_id_subset_preservation(
         frames in prop::collection::vec(arb_frame(), 1..10),
@@ -718,6 +743,8 @@ proptest! {
 /// Detects: Flag validation inconsistencies, illegal flag combinations
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_frame_flag_subset_validity(
         base_flags in any::<u8>(),
@@ -777,10 +804,12 @@ proptest! {
 
 /// MR6.1: Frame size scaling preserves proportional relationships.
 ///
-/// Property: size_ratio(frame1) / size_ratio(frame2) == content_ratio(frame1) / content_ratio(frame2)
+/// Property: encoded_size(frame1) - encoded_size(frame2) == content_size(frame1) - content_size(frame2)
 /// Detects: Frame size calculation errors, overhead inconsistencies
 #[cfg(test)]
 proptest! {
+    #![proptest_config(h2_frame_proptest_config())]
+
     #[test]
     fn mr_frame_size_scaling_proportional(
         content_size1 in 1..1024_usize,
@@ -830,10 +859,6 @@ proptest! {
         frame2.encode(&mut buf2).expect("encode");
         let encoded_size2 = buf2.len();
 
-        // Calculate ratios
-        let content_ratio = content_size1 as f64 / content_size2 as f64;
-        let encoded_ratio = encoded_size1 as f64 / encoded_size2 as f64;
-
         // The overhead should be consistent between frames of the same type
         let overhead1 = encoded_size1 - content_size1;
         let overhead2 = encoded_size2 - content_size2;
@@ -844,11 +869,13 @@ proptest! {
             overhead1, overhead2
         );
 
-        // Encoded size ratio should equal content size ratio (plus constant overhead)
-        let expected_ratio_difference = (content_ratio - encoded_ratio).abs();
-        prop_assert!(
-            expected_ratio_difference < 0.1,
-            "Encoded size ratio should approximately match content size ratio (content: {content_ratio:.3}, encoded: {encoded_ratio:.3}, diff: {expected_ratio_difference:.3})"
+        // Fixed HTTP/2 frame overhead means size deltas, not ratios, are the
+        // invariant. Ratios diverge for small payloads because the 9-byte frame
+        // header dominates the encoded size.
+        prop_assert_eq!(
+            encoded_size1.abs_diff(encoded_size2),
+            content_size1.abs_diff(content_size2),
+            "Encoded size delta should match content size delta for same frame type"
         );
 
     }

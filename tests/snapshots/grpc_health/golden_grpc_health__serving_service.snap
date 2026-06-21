@@ -1,0 +1,34 @@
+---
+source: tests/golden_grpc_health.rs
+expression: capture
+---
+HealthResponseCapture {
+    scenario: "serving_service",
+    request: HealthCheckRequest {
+        service: "healthy.service.Example",
+    },
+    response: Ok(
+        HealthCheckResponse {
+            status: Serving,
+        },
+    ),
+    service_state: ServiceStateSnapshot {
+        services: [
+            (
+                "",
+                Serving,
+            ),
+        ],
+        status_counts: StatusCounts {
+            unknown: 0,
+            serving: 1,
+            not_serving: 0,
+            service_unknown: 0,
+        },
+    },
+    metadata: ResponseCaptureMetadata {
+        test_name: "serving_service",
+        description: "Health check for service explicitly set to Serving status",
+        async_method: false,
+    },
+}

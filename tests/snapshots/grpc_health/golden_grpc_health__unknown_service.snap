@@ -1,0 +1,32 @@
+---
+source: tests/golden_grpc_health.rs
+expression: capture
+---
+HealthResponseCapture {
+    scenario: "unknown_service",
+    request: HealthCheckRequest {
+        service: "non.existent.Service",
+    },
+    response: Err(
+        "Status { code: PermissionDenied, message: \"health check access denied\", details: None }",
+    ),
+    service_state: ServiceStateSnapshot {
+        services: [
+            (
+                "",
+                ServiceUnknown,
+            ),
+        ],
+        status_counts: StatusCounts {
+            unknown: 0,
+            serving: 0,
+            not_serving: 0,
+            service_unknown: 1,
+        },
+    },
+    metadata: ResponseCaptureMetadata {
+        test_name: "unknown_service",
+        description: "Health check for service not registered in health service",
+        async_method: false,
+    },
+}

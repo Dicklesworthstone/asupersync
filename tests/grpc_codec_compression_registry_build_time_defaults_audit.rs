@@ -46,17 +46,18 @@
 //!       at construction time.
 //!
 //!   (f) **`with_identity_frame_codec` wires identity hooks
-//!       symmetrically** (codec.rs:443-445). Identity is the
-//!       no-op pair — operators who want to make the
-//!       passthrough EXPLICIT in the codec configuration use
-//!       this method.
+//!       symmetrically while keeping use_compression false**
+//!       (codec.rs:443-450). Identity is the no-op pair —
+//!       operators who want to make the passthrough EXPLICIT
+//!       in the codec configuration use this method without
+//!       changing outbound compressed-flag bytes.
 //!
 //!   (g) **`poisoned: false` initial state** (codec.rs:390).
 //!       A fresh codec is NOT poisoned — first frame can
 //!       decode normally. Poison fires on the first protocol
 //!       error (audited tick #176).
 //!
-//! Regression tests below pin (a)+(b)+(c)+(d)+(g) at the
+//! Regression tests below pin (a)+(b)+(c)+(d)+(f)+(g) at the
 //! public API surface.
 
 use asupersync::grpc::{FramedCodec, IdentityCodec};
@@ -179,12 +180,13 @@ fn with_frame_hooks_none_none_does_not_set_flag() {
 #[test]
 fn with_identity_frame_codec_wires_identity_pair() {
     // Pin (f): with_identity_frame_codec installs the explicit
-    // identity (no-op) pair — used when operators want
-    // identity to be EXPLICIT in the codec config rather than
-    // implicit absence-of-hooks.
+    // identity (no-op) pair while preserving compressed-flag=0
+    // for outbound frames — used when operators want identity to
+    // be EXPLICIT in the codec config rather than implicit
+    // absence-of-hooks.
     let codec = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
     let dbg = format!("{codec:?}");
-    assert!(dbg.contains("use_compression: true"));
+    assert!(dbg.contains("use_compression: false"));
     assert!(dbg.contains("has_compressor: true"));
     assert!(dbg.contains("has_decompressor: true"));
 }

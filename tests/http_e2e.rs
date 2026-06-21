@@ -862,15 +862,16 @@ fn e2e_http_extractor_missing_content_type() {
     }
 
     test_section!("test_no_content_type");
-    // JSON extractor parses valid JSON regardless of content-type header
+    // JSON extractor is default-deny for ambiguous request bodies: valid JSON
+    // still requires an explicit JSON content-type header.
     let req = Request::new("POST", "/").with_body(Bytes::from_static(b"{\"name\":\"test\"}"));
     let result = asupersync::web::extract::Json::<Input>::from_request(req);
-    tracing::info!(is_ok = result.is_ok(), "no content-type result");
+    tracing::info!(is_err = result.is_err(), "no content-type result");
     assert_with_log!(
-        result.is_ok(),
-        "accepts valid JSON without content-type",
+        result.is_err(),
+        "rejects valid JSON without content-type",
         true,
-        result.is_ok()
+        result.is_err()
     );
 
     test_section!("test_empty_body");

@@ -49,9 +49,8 @@
 //!
 //!   (e) **Total bytes computed via `metadata_byte_size`**
 //!       (server.rs:293-302) sums `key.len() + value.byte_len()`
-//!       over every entry. A peer flooding many small
-//!       headers OR one large header gets caught by the same
-//!       check.
+//!       over every entry. A peer flooding many individually
+//!       valid headers gets caught by the same aggregate check.
 //!
 //!   (f) **Validator runs FIRST**, before size check
 //!       (server.rs:406). `validate_inbound_metadata`
@@ -100,13 +99,17 @@ fn enforce_metadata_size_limit_accepts_under_cap() {
 
 #[test]
 fn enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted() {
-    // Pin (a)+(c): metadata exceeding the cap rejects with
-    // Status::resource_exhausted. The gRPC-equivalent of HTTP
-    // 431.
+    // Pin (a)+(c): aggregate metadata exceeding the cap rejects
+    // with Status::resource_exhausted. The gRPC-equivalent of
+    // HTTP 431.
     let mut metadata = Metadata::new();
-    // 16 KiB of header value — over the 8 KiB cap.
-    let big_value = "X".repeat(16 * 1024);
-    assert!(metadata.insert("x-large", big_value.as_str()));
+    // Keep each individual value under MAX_HEADER_VALUE_LEN so
+    // this fixture isolates the aggregate max_metadata_size gate.
+    for index in 0..3 {
+        let key = format!("x-large-{index}");
+        let value = "X".repeat(4 * 1024);
+        assert!(metadata.insert(&key, value.as_str()));
+    }
 
     let err = enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
         .expect_err("over-cap metadata MUST reject");
@@ -133,12 +136,16 @@ fn enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted() {
 
 #[test]
 fn enforce_metadata_size_limit_zero_disables_cap() {
-    // Pin (d): limit=0 → no enforcement. A 16 KiB metadata
-    // block passes when the cap is disabled. The bypass is
-    // grep-able (operator must explicitly pass 0).
+    // Pin (d): limit=0 → no aggregate-size enforcement. A
+    // metadata block that would exceed the 8 KiB aggregate cap
+    // passes when the cap is disabled. Individual metadata
+    // validity checks still run before the size bypass.
     let mut metadata = Metadata::new();
-    let big_value = "Y".repeat(16 * 1024);
-    assert!(metadata.insert("x-unbounded", big_value.as_str()));
+    for index in 0..4 {
+        let key = format!("x-unbounded-{index}");
+        let value = "Y".repeat(4 * 1024);
+        assert!(metadata.insert(&key, value.as_str()));
+    }
     enforce_metadata_size_limit(&metadata, 0).expect("limit=0 disables enforcement");
 }
 

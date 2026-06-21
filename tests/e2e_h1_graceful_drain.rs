@@ -21,7 +21,7 @@
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
@@ -185,17 +185,22 @@ fn drain_escalates_stragglers() {
     let handle = runtime.handle();
 
     runtime.block_on(async move {
-        // Never notified: these handlers only end when escalation drops them.
-        let never = Arc::new(Notify::new());
-        let handler_never = Arc::clone(&never);
+        let handlers_parked = Arc::new(AtomicUsize::new(0));
+        let handler_parked = Arc::clone(&handlers_parked);
 
         let listener = Http1Listener::bind_with_config(
             "127.0.0.1:0",
             move |_req| {
-                let never = Arc::clone(&handler_never);
+                let handlers_parked = Arc::clone(&handler_parked);
                 async move {
-                    never.notified().await;
-                    Response::new(200, "OK", Vec::new())
+                    handlers_parked.fetch_add(1, Ordering::AcqRel);
+                    loop {
+                        asupersync::time::sleep(
+                            asupersync::time::wall_now(),
+                            Duration::from_millis(10),
+                        )
+                        .await;
+                    }
                 }
             },
             localhost_config(Duration::from_millis(200), Duration::from_secs(5)),
@@ -216,7 +221,9 @@ fn drain_escalates_stragglers() {
 
         let clients: Vec<_> = (0..STRAGGLERS).map(|_| blocking_client(addr)).collect();
 
-        while in_flight.load(Ordering::Acquire) < STRAGGLERS {
+        while in_flight.load(Ordering::Acquire) < STRAGGLERS
+            || handlers_parked.load(Ordering::Acquire) < STRAGGLERS
+        {
             asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
         }
 

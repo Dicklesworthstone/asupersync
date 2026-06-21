@@ -66,7 +66,7 @@
 //! ```
 
 use asupersync::grpc::health::{
-    HealthCheckResponse, HealthService, HealthWatchStream, ServingStatus,
+    HealthAuthMode, HealthCheckResponse, HealthService, HealthWatchStream, ServingStatus,
 };
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::{Request, Response, Streaming};
@@ -105,6 +105,10 @@ fn authed_request(service: &str) -> Request<asupersync::grpc::health::HealthChec
     req
 }
 
+fn authed_health_service() -> HealthService {
+    HealthService::with_auth_mode(HealthAuthMode::bearer_token("test-token"))
+}
+
 /// Drive `watch_async` to completion synchronously to extract the stream.
 /// `watch_async` returns a future that resolves immediately to the stream
 /// (or to an auth error), so a single poll with a no-op waker suffices.
@@ -138,7 +142,7 @@ fn watch_emits_initial_status_immediately_on_first_poll() {
     // current status, never Pending. A regression that made the
     // first poll register a waker would force one extra round-
     // trip per Watch RPC.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::Serving);
     let mut stream = extract_stream(&service, authed_request("test.svc"));
 
@@ -165,7 +169,7 @@ fn watch_serving_to_not_serving_wakes_pending_watcher_promptly() {
     //   3. Calling set_status — a SYNCHRONOUS API, no async.
     //   4. Asserting the wake counter incremented before any
     //      additional poll, timer, or thread sleep is invoked.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::Serving);
     let mut stream = extract_stream(&service, authed_request("test.svc"));
 
@@ -218,7 +222,7 @@ fn watch_not_serving_to_serving_wakes_pending_watcher_promptly() {
     // also a "change" and must wake. A regression that only
     // woke on the SERVING→NOT_SERVING transition (e.g. by
     // checking is_healthy() asymmetrically) would be caught.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::NotServing);
     let mut stream = extract_stream(&service, authed_request("test.svc"));
     let (counter, waker) = counting_waker();
@@ -243,7 +247,7 @@ fn watch_no_change_set_status_does_not_wake() {
     // doesn't bump the version, doesn't wake watchers.
     // Otherwise watchers would see spurious "no-op" emissions
     // and a busy publisher could DoS them with redundant wakes.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::Serving);
     let mut stream = extract_stream(&service, authed_request("test.svc"));
     let (counter, waker) = counting_waker();
@@ -276,7 +280,7 @@ fn watch_status_flip_before_register_is_caught_by_recheck() {
     // return Ready (NOT Pending). This is tested by flipping
     // the status while the stream is in the "post-initial,
     // pre-second-poll" gap.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::Serving);
     let mut stream = extract_stream(&service, authed_request("test.svc"));
     let (_counter, waker) = counting_waker();
@@ -313,7 +317,7 @@ fn watch_empty_string_observes_named_service_changes() {
     // path always includes "" alongside the named-service key.
     // Audit context: this enables the "watch all" use case
     // where load balancers monitor "" for whole-server health.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::Serving);
     let mut stream_empty = extract_stream(&service, authed_request(""));
     let (counter, waker) = counting_waker();
@@ -348,7 +352,7 @@ fn watch_dropped_stream_unregisters_waker() {
     // We test indirectly: drop the stream, then set_status with
     // a different value, and verify the dropped stream's waker
     // is NOT woken (counter stays 0).
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::Serving);
 
     let (counter, waker) = counting_waker();
@@ -376,7 +380,7 @@ fn watch_multiple_status_changes_each_wake_the_watcher() {
     // Pin: each distinct status flip wakes the watcher. A
     // regression that coalesced flips into a single wake (e.g.
     // via debouncing) would slow down legitimate fast publishers.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::Serving);
     let mut stream = extract_stream(&service, authed_request("test.svc"));
     let (counter, waker) = counting_waker();
@@ -408,7 +412,7 @@ fn watch_clear_wakes_all_watchers() {
     // notifies watchers of every cleared service (health.rs:309).
     // A regression that cleared without notifying would leave
     // watchers stuck on stale SERVING status forever.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("svc.a", ServingStatus::Serving);
     let mut stream_a = extract_stream(&service, authed_request("svc.a"));
     let (counter_a, waker_a) = counting_waker();
@@ -466,7 +470,7 @@ fn watch_changes_after_initial_emit_use_post_register_recheck() {
     // flipping AFTER the initial emit and BEFORE the second
     // poll. The post-register re-check sees the version bump
     // and returns Ready.
-    let service = HealthService::new();
+    let service = authed_health_service();
     service.set_status("test.svc", ServingStatus::Serving);
     let mut stream = extract_stream(&service, authed_request("test.svc"));
     let (_counter, waker) = counting_waker();

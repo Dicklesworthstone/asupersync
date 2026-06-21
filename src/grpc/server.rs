@@ -990,7 +990,9 @@ impl ServerBuilder {
     /// registered services and continues to track additional services added to
     /// this builder after reflection is enabled.
     ///
-    /// For development/testing without authentication, use [`Self::enable_reflection_anonymous`].
+    /// Test-only unauthenticated reflection should construct a
+    /// [`ReflectionService`] and opt into [`ReflectionService::allow_anonymous`]
+    /// inside the `#[cfg(test)]` harness that needs it.
     #[must_use]
     pub fn enable_reflection_with_auth<F>(mut self, auth_callback: F) -> Self
     where
@@ -1014,40 +1016,15 @@ impl ServerBuilder {
         self
     }
 
-    /// Enable the built-in reflection service for development/testing WITHOUT authentication.
-    ///
-    /// SECURITY WARNING: This method explicitly disables authentication for reflection
-    /// endpoints, exposing complete service schemas to any client. Only use this for
-    /// development, testing, or when reflection access is protected by other means
-    /// (e.g., network segmentation).
-    ///
-    /// For production deployments, use [`Self::enable_reflection_with_auth`] instead.
-    #[must_use]
-    pub fn enable_reflection_anonymous(mut self) -> Self {
-        let reflection = self.reflection.take().unwrap_or_default().allow_anonymous();
-        for service in self.services.values() {
-            if service.descriptor().full_name() != ReflectionService::NAME {
-                reflection.register_handler(service.as_ref());
-            }
-        }
-        self.services.insert(
-            ReflectionService::NAME.to_string(),
-            Arc::new(reflection.clone()),
-        );
-        self.reflection = Some(reflection);
-        self
-    }
-
     /// Enable the built-in reflection service (DEPRECATED).
     ///
     /// DEPRECATED: This method creates a reflection service in Locked mode that
-    /// rejects all requests. Use `enable_reflection_with_auth()` for production
-    /// or `enable_reflection_anonymous()` for development/testing.
+    /// rejects all requests. Use `enable_reflection_with_auth()` for production.
     ///
     /// This method will be removed in a future version.
     #[deprecated(
         since = "0.3.3",
-        note = "Use enable_reflection_with_auth() or enable_reflection_anonymous() to make auth choice explicit"
+        note = "Use enable_reflection_with_auth() to install production reflection auth explicitly"
     )]
     #[must_use]
     pub fn enable_reflection(mut self) -> Self {
@@ -2132,6 +2109,27 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    impl ServerBuilder {
+        /// Test-only helper for exercising reflection registration without a
+        /// production auth callback. Production code exposes only locked or
+        /// authenticated reflection builder paths.
+        #[must_use]
+        fn enable_reflection_anonymous(mut self) -> Self {
+            let reflection = self.reflection.take().unwrap_or_default().allow_anonymous();
+            for service in self.services.values() {
+                if service.descriptor().full_name() != ReflectionService::NAME {
+                    reflection.register_handler(service.as_ref());
+                }
+            }
+            self.services.insert(
+                ReflectionService::NAME.to_string(),
+                Arc::new(reflection.clone()),
+            );
+            self.reflection = Some(reflection);
+            self
+        }
     }
 
     struct TestService;
@@ -5934,7 +5932,7 @@ mod tests {
 
             // Create request with very short deadline
             let mut metadata = Metadata::new();
-            metadata.insert("grpc-timeout", "1m"); // 1 millisecond
+            metadata.insert("grpc-timeout", "10m"); // 10 milliseconds
             let request = Request::with_metadata(Bytes::from_static(b"test"), metadata);
 
             let handler_completed = Arc::new(AtomicBool::new(false));
@@ -5943,10 +5941,10 @@ mod tests {
             // Handler that performs blocking operation
             let start_time = Instant::now();
             let result = block_on(server.dispatch_unary(request, move |req| async move {
-                // Yield to allow deadline enforcement to check
-                futures_lite::future::yield_now().await;
-                // Blocking operations cannot be cancelled by async timeouts
-                std::thread::sleep(Duration::from_millis(5));
+                // Once a handler enters a blocking operation, async timeout
+                // races cannot preempt the thread. Cooperative handlers are
+                // covered by `audit_deadline_enforcement_works_for_async_operations`.
+                std::thread::sleep(Duration::from_millis(25));
 
                 handler_completed_clone.store(true, Ordering::Relaxed);
                 Ok::<Response<Bytes>, Status>(Response::new(req.into_inner()))
@@ -5965,7 +5963,7 @@ mod tests {
                 "EXPECTED: Blocking handlers cannot be cancelled by async timeouts"
             );
             assert!(
-                start_time.elapsed() > Duration::from_millis(1),
+                start_time.elapsed() > Duration::from_millis(10),
                 "Handler ran past deadline due to blocking operation"
             );
 

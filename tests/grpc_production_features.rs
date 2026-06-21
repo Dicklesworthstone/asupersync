@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use asupersync::bytes::Bytes;
+use asupersync::grpc::health::HealthAuthMode;
 use asupersync::grpc::server::Interceptor;
 use asupersync::grpc::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use asupersync::grpc::{
@@ -162,6 +163,7 @@ struct ReflectionErrorSnapshot {
 }
 
 fn reflection_registry_snapshot(reflection: &ReflectionService) -> ReflectionRegistrySnapshot {
+    let _remote_cx = asupersync::cx::Cx::set_current(Some(remote_reflection_cx()));
     let list_response = futures_lite::future::block_on(
         reflection.list_services_async(&Request::new(ReflectionListServicesRequest)),
     )
@@ -191,6 +193,23 @@ fn reflection_error_snapshot(status: &Status) -> ReflectionErrorSnapshot {
         message: status.message().to_string(),
         details_len: status.details().map_or(0, Bytes::len),
     }
+}
+
+fn remote_reflection_cx() -> asupersync::cx::Cx {
+    asupersync::cx::Cx::for_testing_with_remote(asupersync::remote::RemoteCap::new())
+}
+
+fn bearer_token_health_service() -> HealthService {
+    HealthService::with_auth_mode(HealthAuthMode::bearer_token("test-token"))
+}
+
+fn authed_health_request(service: &str) -> Request<HealthCheckRequest> {
+    let mut request = Request::new(HealthCheckRequest::new(service));
+    let inserted = request
+        .metadata_mut()
+        .insert("authorization", "Bearer test-token");
+    assert!(inserted, "test auth metadata must insert");
+    request
 }
 
 impl From<&ReflectionListServicesResponse> for ReflectionListSnapshot {
@@ -539,6 +558,7 @@ fn reflection_list_services_async() {
     let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&GreeterService);
     reflection.register_handler(&RouteGuideService);
+    let _remote_cx = asupersync::cx::Cx::set_current(Some(remote_reflection_cx()));
 
     let request = Request::new(ReflectionListServicesRequest);
     let response = futures_lite::future::block_on(reflection.list_services_async(&request))
@@ -553,6 +573,7 @@ fn reflection_list_services_async() {
 fn reflection_describe_service_async() {
     let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&GreeterService);
+    let _remote_cx = asupersync::cx::Cx::set_current(Some(remote_reflection_cx()));
 
     let request = Request::new(ReflectionDescribeServiceRequest::new("helloworld.Greeter"));
     let response = futures_lite::future::block_on(reflection.describe_service_async(&request))
@@ -569,6 +590,7 @@ fn reflection_describe_service_async() {
 #[test]
 fn reflection_describe_missing_service_async() {
     let reflection = ReflectionService::new().allow_anonymous();
+    let _remote_cx = asupersync::cx::Cx::set_current(Some(remote_reflection_cx()));
     let request = Request::new(ReflectionDescribeServiceRequest::new("missing.Service"));
     let result = futures_lite::future::block_on(reflection.describe_service_async(&request));
     assert!(result.is_err());
@@ -581,7 +603,8 @@ fn reflection_from_handlers() {
     let greeter = GreeterService;
     let guide = RouteGuideService;
     let handlers: Vec<&dyn ServiceHandler> = vec![&greeter, &guide];
-    let reflection = ReflectionService::from_handlers(handlers);
+    let reflection = ReflectionService::from_handlers(handlers).allow_anonymous();
+    let _remote_cx = asupersync::cx::Cx::set_current(Some(remote_reflection_cx()));
     let services = reflection
         .list_services()
         .expect("list_services must succeed");
@@ -612,6 +635,7 @@ fn reflection_service_handler_traits() {
 fn reflection_method_streaming_flags() {
     let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&RouteGuideService);
+    let _remote_cx = asupersync::cx::Cx::set_current(Some(remote_reflection_cx()));
     let svc = reflection
         .describe_service("routeguide.RouteGuide")
         .expect("service should exist");
@@ -653,6 +677,7 @@ fn reflection_descriptor_output_happy_path_snapshot() {
 #[test]
 fn reflection_descriptor_output_missing_service_snapshot() {
     let reflection = ReflectionService::new().allow_anonymous();
+    let _remote_cx = asupersync::cx::Cx::set_current(Some(remote_reflection_cx()));
     let status = futures_lite::future::block_on(reflection.describe_service_async(&Request::new(
         ReflectionDescribeServiceRequest::new("missing.Service"),
     )))
@@ -781,9 +806,11 @@ fn rate_limit_interceptor_allows_within_limit() {
 #[test]
 fn rate_limit_interceptor_rejects_over_limit() {
     let limiter = RateLimitInterceptor::new(2);
+    let mut held_requests = Vec::new();
     for _ in 0..2 {
         let mut req = Request::new(Bytes::new());
         limiter.intercept_request(&mut req).unwrap();
+        held_requests.push(req);
     }
     let mut req = Request::new(Bytes::new());
     let result = limiter.intercept_request(&mut req);
@@ -1026,9 +1053,9 @@ fn health_check_server_aggregate() {
 
 #[test]
 fn health_check_async_handler() {
-    let health = HealthService::new();
+    let health = bearer_token_health_service();
     health.set_status("test.Service", ServingStatus::Serving);
-    let request = Request::new(HealthCheckRequest::new("test.Service"));
+    let request = authed_health_request("test.Service");
     let response = futures_lite::future::block_on(health.check_async(&request)).unwrap();
     assert_eq!(response.get_ref().status, ServingStatus::Serving);
 }

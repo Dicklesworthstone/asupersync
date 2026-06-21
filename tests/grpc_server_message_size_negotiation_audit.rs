@@ -36,28 +36,21 @@
 //!       each direction independently (server.rs:520-552,
 //!       client.rs ChannelConfig).
 //!
-//!   (d) **⚠️ DOCUMENTED WIRING GAP (P1)**: server's
-//!       max_recv_message_size + max_send_message_size are
-//!       STORED on the config but NOT propagated into the
-//!       dispatch path's codec instance (server.rs:202-216
-//!       doc-comment). The codec uses its own
-//!       DEFAULT_MAX_MESSAGE_SIZE (4 MiB) — operator
-//!       overrides are silently ignored. The CLIENT side
-//!       DOES wire its config into the codec
-//!       (client.rs:106-110). Filed as a P1 security audit
-//!       follow-up.
+//!   (d) **Configured caps are wired into server codecs**:
+//!       `Server::framed_codec` threads
+//!       max_recv_message_size + max_send_message_size into
+//!       the codec instance. This closes the earlier P1
+//!       wiring gap where operator overrides were stored but
+//!       not propagated into the dispatch codec.
 //!
-//!   (e) **The codec's 4 MiB default is the ACTUAL on-wire
-//!       cap on the server side.** Even with the wiring gap,
-//!       a 4 GiB-declared frame is still rejected — but a
-//!       server operator who sets max_recv_message_size to
-//!       512 KiB expecting tighter protection silently gets
-//!       4 MiB instead.
+//!   (e) **The codec and server share the same 4 MiB default**:
+//!       defaulted operators see the same cap whether they
+//!       construct through ServerConfig or directly through
+//!       the codec.
 //!
 //! Regression tests below pin (a)+(b)+(c) at the public API
-//! surface AND structurally document the (d) wiring gap so
-//! a future fix that wires max_recv_message_size into
-//! dispatch will trip the gap-pin and force re-baseline.
+//! surface AND pin the (d) post-fix helper wiring so future
+//! regressions cannot silently drop configured caps.
 
 use asupersync::grpc::{ServerBuilder, ServerConfig};
 
@@ -172,27 +165,23 @@ fn server_framed_codec_helper_wires_configured_caps() {
 #[test]
 fn codec_default_max_message_size_matches_server_config_default() {
     // Pin (e): the codec's DEFAULT_MAX_MESSAGE_SIZE (4 MiB)
-    // matches the server's ServerConfig default. This is what
-    // makes the wiring gap a soft P1 (not a critical
-    // exploit): an operator using the default 4 MiB sees the
-    // configured value's behavior even though the wire path
-    // bypasses the config and uses the codec default.
-    //
-    // We pin by grep — DEFAULT_MAX_MESSAGE_SIZE in codec.rs
-    // should equal 4 MiB.
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let codec_rs =
-        std::fs::read_to_string(std::path::Path::new(manifest_dir).join("src/grpc/codec.rs"))
-            .expect("read src/grpc/codec.rs");
-    // Match either "4 * 1024 * 1024" (= 4 MiB) or "4194304".
-    let has_4mib = codec_rs.contains("DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024")
-        || codec_rs.contains("DEFAULT_MAX_MESSAGE_SIZE: usize = 4194304");
-    assert!(
-        has_4mib,
-        "codec's DEFAULT_MAX_MESSAGE_SIZE must equal 4 MiB to match \
-         ServerConfig default — protects operators using defaults from \
-         the wiring gap. A regression that diverged the codec default \
-         from the server-config default would worsen the gap.",
+    // matches the server's ServerConfig default. The codec
+    // re-exports the parent module constant, so compare the
+    // public API value instead of grepping a source location.
+    assert_eq!(
+        asupersync::grpc::codec::DEFAULT_MAX_MESSAGE_SIZE,
+        DEFAULT_MAX_MESSAGE_SIZE,
+        "codec's DEFAULT_MAX_MESSAGE_SIZE must equal 4 MiB",
+    );
+    assert_eq!(
+        ServerConfig::default().max_recv_message_size,
+        asupersync::grpc::codec::DEFAULT_MAX_MESSAGE_SIZE,
+        "codec default must match ServerConfig recv default",
+    );
+    assert_eq!(
+        ServerConfig::default().max_send_message_size,
+        asupersync::grpc::codec::DEFAULT_MAX_MESSAGE_SIZE,
+        "codec default must match ServerConfig send default",
     );
 }
 

@@ -8,6 +8,7 @@
 mod common;
 
 use asupersync::Cx;
+use asupersync::http::h1::server::{HostPolicy, Http1Config};
 use asupersync::http::h1::{Http1Client, Method, Request, Version};
 use asupersync::http::h1::{Http1Server, HttpClient, Response};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
@@ -132,6 +133,10 @@ fn read_until_headers_end(stream: &mut std::net::TcpStream) -> std::io::Result<V
     }
 
     Ok(buf)
+}
+
+fn localhost_http1_config() -> Http1Config {
+    Http1Config::default().host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
 }
 
 fn accept_with_timeout(
@@ -462,10 +467,13 @@ fn http1_server_expect_100_continue_full_flow() {
             addr_tx.send(addr).expect("send server addr");
 
             let (stream, _) = listener.accept().await?;
-            let server = Http1Server::new(|req| async move {
-                assert_eq!(req.body, b"hello");
-                Response::new(200, "OK", b"done".to_vec())
-            });
+            let server = Http1Server::with_config(
+                |req| async move {
+                    assert_eq!(req.body, b"hello");
+                    Response::new(200, "OK", b"done".to_vec())
+                },
+                localhost_http1_config(),
+            );
             let state = server
                 .serve(stream)
                 .await
@@ -548,13 +556,16 @@ fn http1_server_rejects_unsupported_expectation() {
 
             let (stream, _) = listener.accept().await?;
             let called = Arc::clone(&handler_called_server);
-            let server = Http1Server::new(move |_req| {
-                let called = Arc::clone(&called);
-                async move {
-                    called.store(true, Ordering::SeqCst);
-                    Response::new(200, "OK", b"unexpected".to_vec())
-                }
-            });
+            let server = Http1Server::with_config(
+                move |_req| {
+                    let called = Arc::clone(&called);
+                    async move {
+                        called.store(true, Ordering::SeqCst);
+                        Response::new(200, "OK", b"unexpected".to_vec())
+                    }
+                },
+                localhost_http1_config(),
+            );
 
             let state = server
                 .serve(stream)

@@ -16,7 +16,8 @@
 //!         * Locked → PermissionDenied with operator-facing hint
 //!         * Required(cb) → calls cb(&cx, method); if Cx::current()
 //!           is None, fail-closed with Unauthenticated
-//!         * Anonymous → Ok(())
+//!         * Anonymous → Ok(()) after the ambient REMOTE capability
+//!           gate passes
 //!
 //!   (b) **Default is Locked** (reflection.rs:160-165). Every
 //!       reflection RPC returns PermissionDenied until the
@@ -54,6 +55,12 @@
 
 use asupersync::grpc::ReflectionService;
 use asupersync::grpc::status::Code;
+
+fn install_remote_reflection_cx() -> asupersync::cx::cx::CurrentCxGuard {
+    asupersync::cx::Cx::set_current(Some(asupersync::cx::Cx::for_testing_with_remote(
+        asupersync::remote::RemoteCap::new(),
+    )))
+}
 
 #[test]
 fn locked_default_rejects_list_services_with_permission_denied() {
@@ -152,6 +159,7 @@ fn anonymous_mode_permits_list_services() {
     // through. list_services returns Ok with the (empty)
     // catalog.
     let reflection = ReflectionService::new().allow_anonymous();
+    let _remote_cx = install_remote_reflection_cx();
     let services = reflection
         .list_services()
         .expect("Anonymous mode permits list_services");
@@ -167,6 +175,7 @@ fn anonymous_mode_permits_describe_service_returning_not_found_for_missing() {
     // service returns Ok-path NotFound (the "service not in
     // catalog" error), NOT PermissionDenied.
     let reflection = ReflectionService::new().allow_anonymous();
+    let _remote_cx = install_remote_reflection_cx();
     let err = reflection
         .describe_service("pkg.NonExistent")
         .expect_err("missing service → NotFound");
@@ -224,5 +233,6 @@ fn mode_transition_locked_to_anonymous_is_one_way() {
     assert!(locked.list_services().is_err(), "Locked rejects");
 
     let anon = ReflectionService::new().allow_anonymous();
+    let _remote_cx = install_remote_reflection_cx();
     assert!(anon.list_services().is_ok(), "Anonymous allows");
 }
