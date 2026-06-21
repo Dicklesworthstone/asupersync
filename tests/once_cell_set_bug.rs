@@ -3,9 +3,10 @@
 use asupersync::sync::OnceCell;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 
 #[test]
-fn set_fails_immediately_while_blocking_initializer_is_in_flight() {
+fn set_waits_while_blocking_initializer_is_in_flight_then_loses() {
     let cell = Arc::new(OnceCell::<u32>::new());
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -26,17 +27,33 @@ fn set_fails_immediately_while_blocking_initializer_is_in_flight() {
         .recv()
         .expect("initializer should reach INITIALIZING state");
 
-    let set_result = cell.set(99);
-    assert_eq!(
-        set_result,
-        Err(99),
-        "set should fail immediately while another thread initializes"
+    let (set_done_tx, set_done_rx) = mpsc::channel();
+    let set_cell = Arc::clone(&cell);
+    let set_handle = thread::spawn(move || {
+        set_done_tx
+            .send(set_cell.set(99))
+            .expect("set result should send");
+    });
+
+    assert!(
+        set_done_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+        "set should wait while another thread initializes"
     );
 
     release_tx
         .send(())
         .expect("initializer release should send");
     handle.join().unwrap();
+    set_handle.join().unwrap();
+
+    let set_result = set_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("set should finish after initializer completes");
+    assert_eq!(
+        set_result,
+        Err(99),
+        "set should lose after another initializer completes first"
+    );
 
     assert_eq!(cell.get(), Some(&42));
 }
@@ -68,19 +85,28 @@ fn set_can_succeed_after_in_flight_blocking_initializer_panics() {
         .recv()
         .expect("initializer should reach INITIALIZING state");
 
-    let in_flight_set_result = cell.set(99);
-    assert_eq!(
-        in_flight_set_result,
-        Err(99),
-        "set should fail immediately while initialization is in progress"
+    let (set_done_tx, set_done_rx) = mpsc::channel();
+    let set_cell = Arc::clone(&cell);
+    let set_handle = thread::spawn(move || {
+        set_done_tx
+            .send(set_cell.set(99))
+            .expect("set result should send");
+    });
+
+    assert!(
+        set_done_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+        "set should wait while initialization is in progress"
     );
 
     release_tx
         .send(())
         .expect("initializer release should send");
     handle.join().unwrap();
+    set_handle.join().unwrap();
 
-    let set_result = cell.set(99);
+    let set_result = set_done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("set should finish after cancelled initializer resets the cell");
     assert_eq!(set_result, Ok(()), "set should succeed after cancellation");
     assert_eq!(cell.get(), Some(&99), "cell should contain 99");
 }

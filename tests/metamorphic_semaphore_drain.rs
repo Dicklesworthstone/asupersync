@@ -44,7 +44,11 @@ impl SemaphoreDrainHarness {
             .trace_capacity(1024)
             .max_steps(5000);
         let mut lab_runtime = LabRuntime::new(config);
-        let region = lab_runtime.state.create_root_region(Budget::INFINITE);
+        let root = lab_runtime.state.create_root_region(Budget::INFINITE);
+        let region = lab_runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create semaphore drain child region");
         let semaphore = Arc::new(Semaphore::new(initial_permits));
 
         Self {
@@ -68,7 +72,7 @@ impl SemaphoreDrainHarness {
                 .lab_runtime
                 .state
                 .create_task(self.region, Budget::INFINITE, async move {
-                    let cx = Cx::for_testing();
+                    let cx = Cx::current().expect("lab task cx");
                     if let Ok(_permit) = sem.acquire(&cx, count).await {
                         results.lock().expect("results lock")[index] = Some(index);
                     }
@@ -245,21 +249,13 @@ fn mr_obligation_conservation() {
         let mut harness = SemaphoreDrainHarness::new(seed, initial_permits);
         let results = harness.acquire_permits_concurrent(&waiter_permits);
 
-        // Calculate how many permits should be consumed.
-        let mut permits_consumed = 0;
-        for (i, &count) in waiter_permits.iter().enumerate() {
-            if results[i].is_some() {
-                permits_consumed += count;
-            }
-        }
-
-        // Remaining permits = initial - consumed.
+        // Successful waiters drop their permits before the runtime reaches
+        // quiescence, so all acquired permits must be restored.
         let remaining = harness.semaphore.available_permits();
-        let expected_remaining = initial_permits.saturating_sub(permits_consumed);
 
-        prop_assert_eq!(remaining, expected_remaining,
-            "Obligation conservation violation: {} permits consumed from {}, {} remaining, expected {}",
-            permits_consumed, initial_permits, remaining, expected_remaining);
+        prop_assert_eq!(remaining, initial_permits,
+            "Obligation conservation violation: waiters {:?} produced {:?}, remaining permits {} should restore to initial {}",
+            waiter_permits, results, remaining, initial_permits);
     });
 }
 

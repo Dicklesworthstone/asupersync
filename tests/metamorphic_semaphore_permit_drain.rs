@@ -13,7 +13,7 @@ use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
 use asupersync::sync::Semaphore;
-use asupersync::types::Budget;
+use asupersync::types::{Budget, RegionId, TaskId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -22,19 +22,34 @@ const CONCURRENT_ACQUIRERS: usize = 5;
 const BURST_WAKERS: usize = 8;
 const TEST_TIMEOUT_STEPS: usize = 10_000;
 
+fn install_test_cx() -> impl Drop {
+    Cx::set_current(Some(Cx::new(
+        RegionId::new_for_test(1, 1),
+        TaskId::new_for_test(1, 0),
+        Budget::INFINITE,
+    )))
+}
+
 /// Test that concurrent acquire ordering is preserved under cancellation.
 fn concurrent_acquire_ordering_under_cancel(seed: u64, cancel_phase: usize) -> Vec<usize> {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
-    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let region = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("create semaphore permit drain child region");
     let semaphore = Arc::new(Semaphore::new(MAX_SEMAPHORE_PERMITS));
     let acquisition_order = Arc::new(StdMutex::new(Vec::new()));
     let completed = Arc::new(AtomicUsize::new(0));
     let cancelled = Arc::new(AtomicUsize::new(0));
 
     // Exhaust initial permits to ensure all waiters queue up
-    let _initial_permits: Vec<_> = (0..MAX_SEMAPHORE_PERMITS)
-        .map(|_| semaphore.try_acquire(1).expect("initial permit"))
-        .collect();
+    let _initial_permits: Vec<_> = {
+        let _current = install_test_cx();
+        (0..MAX_SEMAPHORE_PERMITS)
+            .map(|_| semaphore.try_acquire(1).expect("initial permit"))
+            .collect()
+    };
 
     // Spawn concurrent acquirers
     let mut task_ids = Vec::new();
@@ -46,7 +61,7 @@ fn concurrent_acquire_ordering_under_cancel(seed: u64, cancel_phase: usize) -> V
         let (task_id, cancel_handle) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx = Cx::current().expect("lab task cx");
                 match semaphore.acquire(&cx, 1).await {
                     Ok(permit) => {
                         acquisition_order
@@ -109,8 +124,14 @@ fn concurrent_acquire_ordering_under_cancel(seed: u64, cancel_phase: usize) -> V
 /// Test that release+abort operations are idempotent.
 fn release_abort_idempotency(seed: u64, double_operations: usize) -> (usize, usize) {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
-    let region = runtime.state.create_root_region(Budget::INFINITE);
-    let semaphore = Arc::new(Semaphore::new(MAX_SEMAPHORE_PERMITS));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let region = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("create semaphore permit drain child region");
+    let semaphore = Arc::new(Semaphore::new(
+        (double_operations * 2).max(MAX_SEMAPHORE_PERMITS),
+    ));
     let normal_releases = Arc::new(AtomicUsize::new(0));
     let abort_releases = Arc::new(AtomicUsize::new(0));
 
@@ -121,7 +142,7 @@ fn release_abort_idempotency(seed: u64, double_operations: usize) -> (usize, usi
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx = Cx::current().expect("lab task cx");
                 if let Ok(permit) = semaphore.acquire(&cx, 1).await {
                     yield_now().await;
                     // Test double commit idempotency
@@ -140,7 +161,7 @@ fn release_abort_idempotency(seed: u64, double_operations: usize) -> (usize, usi
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx = Cx::current().expect("lab task cx");
                 if let Ok(permit) = semaphore.acquire(&cx, 1).await {
                     yield_now().await;
                     // Test abort idempotency
@@ -169,14 +190,21 @@ fn release_abort_idempotency(seed: u64, double_operations: usize) -> (usize, usi
 /// Test waker deduplication invariants under burst conditions.
 fn waker_dedup_under_burst(seed: u64, burst_size: usize) -> (usize, usize, usize) {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
-    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let region = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("create semaphore permit drain child region");
     let semaphore = Arc::new(Semaphore::new(1)); // Single permit for maximum contention
     let wakeups = Arc::new(AtomicUsize::new(0));
     let permits_acquired = Arc::new(AtomicUsize::new(0));
     let spurious_wakeups = Arc::new(AtomicUsize::new(0));
 
     // Hold the single permit to force all waiters into queue
-    let _held_permit = semaphore.try_acquire(1).expect("initial permit");
+    let _held_permit = {
+        let _current = install_test_cx();
+        semaphore.try_acquire(1).expect("initial permit")
+    };
 
     // Burst spawn waiters to test deduplication
     let burst_count = burst_size.min(BURST_WAKERS);
@@ -188,7 +216,7 @@ fn waker_dedup_under_burst(seed: u64, burst_size: usize) -> (usize, usize, usize
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx = Cx::current().expect("lab task cx");
                 let mut attempt_count = 0;
                 loop {
                     wakeups.fetch_add(1, Ordering::SeqCst);

@@ -35,6 +35,7 @@ use std::task::{Context, Poll, Waker};
 use crate::cx::Cx;
 use crate::obligation::graded::{ObligationToken, SemaphorePermitKind};
 use crate::sync::lock_ordering::{self, LockRank};
+use crate::types::RegionId;
 
 /// Error returned when semaphore acquisition fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +75,15 @@ impl std::fmt::Display for TryAcquireError {
 }
 
 impl std::error::Error for TryAcquireError {}
+
+#[inline]
+fn reserve_permit_obligation(region: RegionId) -> Option<ObligationToken<SemaphorePermitKind>> {
+    if region.as_u64() == 0 {
+        None
+    } else {
+        Some(ObligationToken::reserve("semaphore-permit", region))
+    }
+}
 
 /// A counting semaphore for limiting concurrent access.
 #[derive(Debug)]
@@ -416,20 +426,8 @@ impl Semaphore {
                 // observer that needs the numeric identity; duplicating
                 // it here in heap-allocated form was wasted work on the
                 // synchronization-critical path.
-                obligation: Some({
-                    // Get region from current thread-local context for obligation scoping
-                    let region = crate::cx::Cx::current().map_or_else(
-                        || {
-                            panic!(
-                                "Cannot acquire semaphore permit outside of task context: \
-                                 obligation tokens require region scoping to prevent leaks. \
-                                 Use async acquire() method when in async context."
-                            )
-                        },
-                        |cx| cx.region_id(),
-                    );
-                    ObligationToken::reserve("semaphore-permit", region)
-                }),
+                obligation: crate::cx::Cx::current()
+                    .and_then(|cx| reserve_permit_obligation(cx.region_id())),
                 semaphore: self,
                 count,
                 release_lock_order_on_drop: true,
@@ -600,10 +598,7 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
                 // br-asupersync-13jmt3: static description (see paired
                 // comment in try_acquire); count is exposed via
                 // SemaphorePermit.count.
-                obligation: Some(ObligationToken::reserve(
-                    "semaphore-permit",
-                    self.cx.region_id(),
-                )),
+                obligation: reserve_permit_obligation(self.cx.region_id()),
                 semaphore: self.semaphore,
                 count: self.count,
                 release_lock_order_on_drop: true,
@@ -1004,7 +999,7 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
                 obligation: this
                     .cx
                     .as_ref()
-                    .map(|cx| ObligationToken::reserve("semaphore-permit", cx.region_id())),
+                    .and_then(|cx| reserve_permit_obligation(cx.region_id())),
                 semaphore: this.semaphore.clone(),
                 count: this.count,
             }));

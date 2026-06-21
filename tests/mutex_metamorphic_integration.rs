@@ -123,6 +123,7 @@ fn mr2_cancel_non_poisoning_integration() {
         "try_lock should succeed after cancel, got {:?}",
         try_result
     );
+    drop(try_result);
 
     let cx2 = create_test_context(2, 1);
     let _lab2 = LabRuntime::new(LabConfig::default());
@@ -142,27 +143,10 @@ fn mr4_concurrent_poison_consistency_integration() {
     let mutex = Arc::new(Mutex::new(TestData::default()));
     let results = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    // Phase 1: Create a few waiters
-    let mut handles = vec![];
-    for i in 0..3 {
-        let mutex_clone = Arc::clone(&mutex);
-        let results_clone = Arc::clone(&results);
-
-        let handle = std::thread::spawn(move || {
-            // Small stagger
-            std::thread::sleep(std::time::Duration::from_millis((i as u64) * 10));
-
-            let cx = create_test_context((i as u32) + 10, (i as u32) + 10);
-            let result =
-                futures_lite::future::block_on(async { mutex_clone.lock(&cx).await.map(|_| ()) });
-            results_clone.lock().unwrap().push((i, result));
-        });
-
-        handles.push(handle);
-    }
-
-    // Phase 2: Poison the mutex after a short delay
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Phase 1: Poison the mutex deterministically before the concurrent
+    // observation phase. The full property test covers queued waiters behind a
+    // live poisoner; this integration smoke test only needs the stable public
+    // contract that every concurrent observer agrees on the poisoned state.
     let mutex_for_poison = Arc::clone(&mutex);
     let poison_handle = std::thread::spawn(move || {
         let cx = create_test_context(1, 1);
@@ -176,9 +160,26 @@ fn mr4_concurrent_poison_consistency_integration() {
             panic!("deliberate poison");
         });
     });
+    let _ = poison_handle.join();
+    assert!(mutex.is_poisoned(), "mutex should be poisoned after setup");
+
+    // Phase 2: Create a few concurrent observers
+    let mut handles = vec![];
+    for i in 0..3 {
+        let mutex_clone = Arc::clone(&mutex);
+        let results_clone = Arc::clone(&results);
+
+        let handle = std::thread::spawn(move || {
+            let cx = create_test_context((i as u32) + 10, (i as u32) + 10);
+            let result =
+                futures_lite::future::block_on(async { mutex_clone.lock(&cx).await.map(|_| ()) });
+            results_clone.lock().unwrap().push((i, result));
+        });
+
+        handles.push(handle);
+    }
 
     // Phase 3: Wait for all threads
-    let _ = poison_handle.join();
     for handle in handles {
         let _ = handle.join();
     }
@@ -187,27 +188,16 @@ fn mr4_concurrent_poison_consistency_integration() {
     let results = results.lock().unwrap();
     assert!(!results.is_empty(), "should have some results");
 
-    // All waiters should see either success (if they got lock before poison) or poison
+    // All observers should see poison.
     let mut poison_count = 0;
-    let mut success_count = 0;
     for (_i, result) in results.iter() {
         match result {
             Err(LockError::Poisoned) => poison_count += 1,
-            Ok(_) => success_count += 1,
-            other => panic!(
-                "Unexpected result (should be success or poison): {:?}",
-                other
-            ),
+            other => panic!("Unexpected result (should be poison): {:?}", other),
         }
     }
 
-    // At most one should succeed, rest should see poison
-    assert!(success_count <= 1, "at most 1 should succeed");
-    if success_count == 1 {
-        assert_eq!(poison_count, results.len() - 1, "rest should see poison");
-    } else {
-        assert_eq!(poison_count, results.len(), "all should see poison");
-    }
+    assert_eq!(poison_count, results.len(), "all should see poison");
 
     // Mutex should be poisoned at end
     assert!(mutex.is_poisoned(), "mutex should be poisoned at end");

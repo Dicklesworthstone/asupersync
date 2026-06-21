@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc fb5d1aaaa1e52fd7cb8fa8d9740f0a7188f964d101e3e2a025687a90b842d0c1 # shrinks to a = Budget { poll_quota: 0, priority: 0 }, b = Budget { poll_quota: 0, priority: 1 }
+cc 410226b1d1cb0754dc00b7c1aa60ebd5d3acdf56269e6971127918b441802773 # shrinks to max_permits = 1, ops = [TryAcquire(1)]

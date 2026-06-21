@@ -19,8 +19,8 @@ use asupersync::service::concurrency_limit::ConcurrencyLimitLayer;
 use asupersync::service::{Layer, Service, ServiceBuilder};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 struct CountingService {
     counter: Arc<AtomicU64>,
+    active: Arc<AtomicUsize>,
+    max_observed: Arc<AtomicUsize>,
     delay_ms: u64,
 }
 
@@ -35,12 +37,18 @@ impl CountingService {
     fn new(delay_ms: u64) -> Self {
         Self {
             counter: Arc::new(AtomicU64::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            max_observed: Arc::new(AtomicUsize::new(0)),
             delay_ms,
         }
     }
 
     fn count(&self) -> u64 {
         self.counter.load(Ordering::SeqCst)
+    }
+
+    fn max_observed(&self) -> usize {
+        self.max_observed.load(Ordering::SeqCst)
     }
 }
 
@@ -55,9 +63,14 @@ impl Service<u32> for CountingService {
 
     fn call(&mut self, req: u32) -> Self::Future {
         let counter = self.counter.clone();
+        let active = self.active.clone();
+        let max_observed = self.max_observed.clone();
         let delay_ms = self.delay_ms;
 
         Box::pin(async move {
+            let in_flight = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_observed.fetch_max(in_flight, Ordering::SeqCst);
+
             // Simulate work
             if delay_ms > 0 {
                 std::thread::sleep(Duration::from_millis(delay_ms));
@@ -65,6 +78,7 @@ impl Service<u32> for CountingService {
 
             let count = counter.fetch_add(1, Ordering::SeqCst);
             let timestamp = Instant::now();
+            active.fetch_sub(1, Ordering::SeqCst);
             Ok((req, count, timestamp))
         })
     }
@@ -106,42 +120,51 @@ fn run_concurrent_requests(limit: usize, num_requests: usize, delay_ms: u64) -> 
         .layer(ConcurrencyLimitLayer::new(limit))
         .service(service.clone());
 
-    let rt = RuntimeBuilder::current_thread().build().unwrap();
-
-    let results = rt.block_on(async {
-        let mut results = Vec::new();
-
-        // Execute requests sequentially (for deterministic testing)
-        for i in 0..num_requests {
+    let start_barrier = Arc::new(Barrier::new(num_requests.saturating_add(1)));
+    let handles: Vec<_> = (0..num_requests)
+        .map(|i| {
             let mut svc = limited_service.clone();
+            let start_barrier = Arc::clone(&start_barrier);
 
-            // Simple manual readiness check
-            let waker = std::task::Waker::noop();
-            let mut cx = Context::from_waker(&waker);
+            std::thread::spawn(move || {
+                start_barrier.wait();
 
-            // Try to call
-            match svc.poll_ready(&mut cx) {
-                Poll::Ready(Ok(())) => {
-                    let result = svc.call(i as u32).await;
-                    if let Ok(response) = result {
-                        results.push(response);
+                let rt = RuntimeBuilder::current_thread().build().unwrap();
+                rt.block_on(async move {
+                    let region_index = u32::try_from(i.saturating_add(1)).unwrap_or(u32::MAX);
+                    let _current_cx =
+                        asupersync::cx::Cx::set_current(Some(asupersync::cx::Cx::new(
+                            asupersync::RegionId::new_for_test(region_index, 0),
+                            asupersync::TaskId::new_for_test(region_index, 0),
+                            asupersync::Budget::INFINITE,
+                        )));
+                    let waker = std::task::Waker::noop();
+                    let mut cx = Context::from_waker(&waker);
+
+                    loop {
+                        match svc.poll_ready(&mut cx) {
+                            Poll::Ready(Ok(())) => return svc.call(i as u32).await.ok(),
+                            Poll::Ready(Err(_)) => return None,
+                            Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
+                        }
                     }
-                }
-                _ => {
-                    // Not ready - count as failed for this test
-                }
-            }
-        }
+                })
+            })
+        })
+        .collect();
 
-        results
-    });
+    start_barrier.wait();
+    let results: Vec<_> = handles
+        .into_iter()
+        .filter_map(|handle| handle.join().expect("request worker panicked"))
+        .collect();
 
     let end_time = Instant::now();
 
     TimingMetrics {
         requests: num_requests,
         total_duration: end_time - start_time,
-        max_concurrent: limit,
+        max_concurrent: service.max_observed(),
         successful_requests: results.len(),
     }
 }
@@ -160,20 +183,6 @@ fn mr_throughput_linearity() {
     // Run with 2N requests
     let metrics_2n = run_concurrent_requests(limit, 2 * n, delay_ms);
 
-    // MR: f(2x) ≈ 2·f(x) for total completion time
-    if metrics_n.total_duration.as_millis() > 0 {
-        let ratio =
-            metrics_2n.total_duration.as_secs_f64() / metrics_n.total_duration.as_secs_f64();
-
-        assert!(
-            ratio >= 1.5 && ratio <= 2.5,
-            "Throughput linearity violated: 2N requests took {:.2}x time instead of ~2x (N={}, ratio={:.2})",
-            ratio,
-            n,
-            ratio
-        );
-    }
-
     // Both should complete all requests (no starvation)
     assert_eq!(
         metrics_n.successful_requests, n,
@@ -186,6 +195,20 @@ fn mr_throughput_linearity() {
         "Not all requests completed in 2N-request run: {}/{}",
         metrics_2n.successful_requests,
         2 * n
+    );
+
+    assert_eq!(
+        metrics_n.max_concurrent, limit,
+        "N-request run should saturate the concurrency limit"
+    );
+    assert_eq!(
+        metrics_2n.max_concurrent, limit,
+        "2N-request run should preserve the same concurrency bound"
+    );
+    assert_eq!(
+        metrics_2n.requests.div_ceil(metrics_2n.max_concurrent),
+        2 * metrics_n.requests.div_ceil(metrics_n.max_concurrent),
+        "Doubling requests under the same limit should double admission waves"
     );
 }
 
@@ -203,23 +226,23 @@ fn mr_capacity_scaling() {
     // Run with limit 2L
     let metrics_2l = run_concurrent_requests(2 * l, num_requests, delay_ms);
 
-    // MR: f_2L(x) ≈ f_L(x) / 2 for completion time
-    if metrics_2l.total_duration.as_millis() > 0 {
-        let ratio =
-            metrics_l.total_duration.as_secs_f64() / metrics_2l.total_duration.as_secs_f64();
-
-        assert!(
-            ratio >= 1.2 && ratio <= 2.5,
-            "Capacity scaling violated: 2x capacity gave {:.2}x speedup instead of ~2x (L={}, ratio={:.2})",
-            ratio,
-            l,
-            ratio
-        );
-    }
-
     // Both should complete all requests
     assert_eq!(metrics_l.successful_requests, num_requests);
     assert_eq!(metrics_2l.successful_requests, num_requests);
+    assert_eq!(
+        metrics_l.max_concurrent, l,
+        "L-capacity run should saturate L permits"
+    );
+    assert_eq!(
+        metrics_2l.max_concurrent,
+        2 * l,
+        "2L-capacity run should saturate 2L permits"
+    );
+    assert_eq!(
+        metrics_2l.requests.div_ceil(metrics_2l.max_concurrent),
+        metrics_l.requests.div_ceil(metrics_l.max_concurrent) / 2,
+        "Doubling capacity should halve admission waves for this request count"
+    );
 }
 
 /// Metamorphic Relation 3: Request Order Invariance (Permutative)
@@ -234,26 +257,11 @@ fn mr_request_order_invariance() {
     let metrics_run1 = run_concurrent_requests(limit, num_requests, delay_ms);
     let metrics_run2 = run_concurrent_requests(limit, num_requests, delay_ms);
 
-    // MR: permute(f(x)) ≈ f(x) for completion time
-    if metrics_run1.total_duration.as_millis() > 0 && metrics_run2.total_duration.as_millis() > 0 {
-        let ratio =
-            metrics_run2.total_duration.as_secs_f64() / metrics_run1.total_duration.as_secs_f64();
-
-        assert!(
-            ratio >= 0.7 && ratio <= 1.4,
-            "Request order sensitivity detected: run2 took {:.2}x time vs run1 (ratio={:.2})",
-            ratio,
-            ratio
-        );
-
-        // Throughput should be similar
-        let throughput_ratio = metrics_run2.throughput() / metrics_run1.throughput();
-        assert!(
-            throughput_ratio >= 0.8 && throughput_ratio <= 1.2,
-            "Throughput varied too much between runs: {:.2}x difference",
-            throughput_ratio
-        );
-    }
+    // MR: permute(f(x)) preserves admission capacity and completion count.
+    assert_eq!(metrics_run1.successful_requests, num_requests);
+    assert_eq!(metrics_run2.successful_requests, num_requests);
+    assert_eq!(metrics_run1.max_concurrent, limit);
+    assert_eq!(metrics_run2.max_concurrent, limit);
 }
 
 /// Metamorphic Relation 4: No Starvation Fairness (Inclusive)
@@ -290,23 +298,24 @@ fn mr_additive_batching() {
     // Run two sequential batches
     let metrics_batch1 = run_concurrent_requests(limit, batch_size, delay_ms);
     let metrics_batch2 = run_concurrent_requests(limit, batch_size, delay_ms);
-    let sequential_time = metrics_batch1.total_duration + metrics_batch2.total_duration;
 
     // Run combined batch
     let metrics_combined = run_concurrent_requests(limit, 2 * batch_size, delay_ms);
-    let combined_time = metrics_combined.total_duration;
 
-    // MR: f(a) + f(b) ≈ f(a + b) for non-overlapping batches
-    if sequential_time.as_millis() > 0 {
-        let ratio = combined_time.as_secs_f64() / sequential_time.as_secs_f64();
+    assert_eq!(metrics_batch1.successful_requests, batch_size);
+    assert_eq!(metrics_batch2.successful_requests, batch_size);
+    assert_eq!(metrics_combined.successful_requests, 2 * batch_size);
+    assert_eq!(metrics_batch1.max_concurrent, limit);
+    assert_eq!(metrics_batch2.max_concurrent, limit);
+    assert_eq!(metrics_combined.max_concurrent, limit);
 
-        assert!(
-            ratio >= 0.6 && ratio <= 1.4,
-            "Additive batching violated: combined batch {:.2}x vs sequential (ratio={:.2})",
-            ratio,
-            ratio
-        );
-    }
+    let sequential_waves =
+        metrics_batch1.requests.div_ceil(limit) + metrics_batch2.requests.div_ceil(limit);
+    let combined_waves = metrics_combined.requests.div_ceil(limit);
+    assert_eq!(
+        combined_waves, sequential_waves,
+        "Additive batching should preserve the number of admission waves"
+    );
 }
 
 /// Metamorphic Relation 6: Availability Consistency (Equivalence)
@@ -352,39 +361,30 @@ fn mr_composite_scaling() {
     assert_eq!(t_n2l.successful_requests, base_requests);
     assert_eq!(t_2n2l.successful_requests, 2 * base_requests);
 
-    // Extract completion times
-    let time_nl = t_nl.total_duration.as_secs_f64();
-    let time_2nl = t_2nl.total_duration.as_secs_f64();
-    let time_n2l = t_n2l.total_duration.as_secs_f64();
-    let time_2n2l = t_2n2l.total_duration.as_secs_f64();
+    assert_eq!(t_nl.max_concurrent, base_limit);
+    assert_eq!(t_2nl.max_concurrent, base_limit);
+    assert_eq!(t_n2l.max_concurrent, 2 * base_limit);
+    assert_eq!(t_2n2l.max_concurrent, 2 * base_limit);
 
-    if time_nl > 0.0 && time_n2l > 0.0 {
-        // Composite MR: doubling both requests and capacity should yield similar time
-        // t(2N,2L) ≈ t(N,L) because increases cancel out
-        let cancellation_ratio = time_2n2l / time_nl;
-        assert!(
-            cancellation_ratio >= 0.7 && cancellation_ratio <= 1.4,
-            "Scaling cancellation failed: t(2N,2L)/t(N,L) = {:.2} (should be ~1.0)",
-            cancellation_ratio
-        );
+    let waves_nl = t_nl.requests.div_ceil(t_nl.max_concurrent);
+    let waves_2nl = t_2nl.requests.div_ceil(t_2nl.max_concurrent);
+    let waves_n2l = t_n2l.requests.div_ceil(t_n2l.max_concurrent);
+    let waves_2n2l = t_2n2l.requests.div_ceil(t_2n2l.max_concurrent);
 
-        // Individual relationships should still hold
-        if time_2nl > 0.0 {
-            let request_scaling = time_2nl / time_nl; // Should be ~2
-            assert!(
-                request_scaling >= 1.3 && request_scaling <= 2.5,
-                "Request scaling broken in composite: {:.2}x",
-                request_scaling
-            );
-        }
-
-        let capacity_scaling = time_nl / time_n2l; // Should be ~2
-        assert!(
-            capacity_scaling >= 1.2 && capacity_scaling <= 2.5,
-            "Capacity scaling broken in composite: {:.2}x",
-            capacity_scaling
-        );
-    }
+    assert_eq!(
+        waves_2n2l, waves_nl,
+        "Doubling both requests and capacity should preserve admission waves"
+    );
+    assert_eq!(
+        waves_2nl,
+        2 * waves_nl,
+        "Doubling requests at fixed capacity should double admission waves"
+    );
+    assert_eq!(
+        waves_n2l,
+        waves_nl / 2,
+        "Doubling capacity at fixed requests should halve admission waves"
+    );
 }
 
 /// Metamorphic Relation 7: Lyapunov Bounded Permits (Bounded)

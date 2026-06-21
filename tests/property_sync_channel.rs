@@ -25,7 +25,7 @@ mod common;
 use asupersync::channel::{broadcast, mpsc};
 use asupersync::cx::Cx;
 use asupersync::sync::Semaphore;
-use asupersync::types::{Budget, Time};
+use asupersync::types::{Budget, RegionId, TaskId, Time};
 use common::*;
 use proptest::prelude::*;
 use std::future::Future;
@@ -36,7 +36,15 @@ use std::task::{Context, Poll, Waker};
 // ============================================================================
 
 fn test_cx() -> Cx {
-    Cx::for_testing()
+    Cx::new(
+        RegionId::new_for_test(1, 1),
+        TaskId::new_for_test(1, 0),
+        Budget::INFINITE,
+    )
+}
+
+fn install_test_cx() -> impl Drop {
+    Cx::set_current(Some(test_cx()))
 }
 
 /// Minimal block_on for synchronous proptest usage.
@@ -438,6 +446,7 @@ proptest! {
         acquire_counts in proptest::collection::vec(1_usize..=16, 0..=32)
     ) {
         init_test_logging();
+        let _current = install_test_cx();
         let sem = Semaphore::new(max_permits);
 
         let mut held: Vec<usize> = Vec::new();
@@ -475,6 +484,7 @@ proptest! {
         count in 1_usize..=256
     ) {
         init_test_logging();
+        let _current = install_test_cx();
         let sem = Semaphore::new(max_permits);
         let count = count.min(max_permits);
 
@@ -509,6 +519,7 @@ proptest! {
         count in 1_usize..=64
     ) {
         init_test_logging();
+        let _current = install_test_cx();
         let sem = Semaphore::new(max_permits);
         sem.close();
         let count = count.min(max_permits);
@@ -527,6 +538,7 @@ proptest! {
         ops in arb_sem_ops(32)
     ) {
         init_test_logging();
+        let _current = install_test_cx();
         let sem = Semaphore::new(max_permits);
 
         let mut held_count: usize = 0;

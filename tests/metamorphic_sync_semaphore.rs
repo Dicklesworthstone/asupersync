@@ -8,7 +8,7 @@ use asupersync::{
     cx::Cx,
     lab::{LabConfig, LabRuntime},
     sync::semaphore::{AcquireError, Semaphore},
-    types::Budget,
+    types::{Budget, RegionId, TaskId},
 };
 use proptest::prelude::*;
 use std::future::Future;
@@ -18,7 +18,15 @@ use std::task::{Context, Poll, Waker};
 
 /// Helper to create a test context
 fn test_cx() -> Cx {
-    Cx::for_testing()
+    Cx::new(
+        RegionId::new_for_test(1, 1),
+        TaskId::new_for_test(1, 0),
+        Budget::INFINITE,
+    )
+}
+
+fn install_test_cx() -> impl Drop {
+    Cx::set_current(Some(test_cx()))
 }
 
 /// Helper to poll a future once
@@ -87,6 +95,7 @@ fn mr2_try_acquire_never_blocks() {
         initial_permits in 0usize..=20,
         try_acquire_count in 1usize..=25
     )| {
+        let _current = install_test_cx();
         let sem = Semaphore::new(initial_permits);
 
         let result = sem.try_acquire(try_acquire_count);
@@ -135,6 +144,7 @@ fn mr3_close_wakes_all_waiters() {
         initial_permits in 1usize..=5,
         num_waiters in 1usize..=8
     )| {
+        let _current = install_test_cx();
         let sem = Semaphore::new(initial_permits);
 
         // Exhaust permits so waiters will queue
@@ -181,6 +191,7 @@ fn mr4_cancel_during_acquire_no_deadlock() {
         initial_permits in 1usize..=5,
         num_cancellations in 1usize..=6
     )| {
+        let _current = install_test_cx();
         let sem = Semaphore::new(initial_permits);
 
         // Hold all permits to force queueing
@@ -287,7 +298,7 @@ fn mr6_permit_conservation_stress() {
         for i in 0..num_tasks {
             let sem = Arc::clone(&sem);
             let (task_id, _) = lab.state.create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::for_testing();
+                let cx = test_cx();
 
                 if i % 3 == 0 {
                     let mut fut = sem.acquire(&cx, 1);
@@ -295,6 +306,7 @@ fn mr6_permit_conservation_stress() {
                     cx.set_cancel_requested(true);
                     let _ = poll_once(&mut fut);
                 } else if i % 3 == 1 {
+                    let _current = Cx::set_current(Some(cx.clone()));
                     if let Ok(permit) = sem.try_acquire(1) {
                         drop(permit);
                     }
@@ -344,6 +356,7 @@ fn mr8_try_acquire_consistency() {
     proptest!(|(
         initial_permits in 2usize..=10
     )| {
+        let _current = install_test_cx();
         let sem = Semaphore::new(initial_permits);
         let cx1 = test_cx();
         let cx2 = test_cx();

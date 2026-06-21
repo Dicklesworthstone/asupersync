@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 fn e2e_sync_shared_cache() {
     let mut h = E2eLabHarness::new("e2e_sync_shared_cache", 0xE2E4_0001);
     let root = h.create_root();
+    let work_region = h.create_child(root);
 
     let data: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));
     let invalidation = Arc::new(Notify::new());
@@ -38,7 +39,7 @@ fn e2e_sync_shared_cache() {
     for reader_id in 0..5u32 {
         let d = data.clone();
         let reads = total_reads.clone();
-        h.spawn(root, async move {
+        h.spawn(work_region, async move {
             for _ in 0..3 {
                 let Some(cx) = Cx::current() else { return };
                 if cx.checkpoint().is_err() {
@@ -61,7 +62,7 @@ fn e2e_sync_shared_cache() {
         let d = data.clone();
         let writes = total_writes.clone();
         let inv = invalidation.clone();
-        h.spawn(root, async move {
+        h.spawn(work_region, async move {
             for i in 0..4 {
                 let Some(cx) = Cx::current() else { return };
                 if cx.checkpoint().is_err() {
@@ -86,7 +87,7 @@ fn e2e_sync_shared_cache() {
         let sem = refresh_sem;
         let refreshes = total_refreshes.clone();
         let inv = invalidation;
-        h.spawn(root, async move {
+        h.spawn(work_region, async move {
             for round in 0..3u32 {
                 inv.notified().await;
                 let Some(cx) = Cx::current() else { return };

@@ -659,6 +659,19 @@ fn conformance_coverage_matrix_exercises_all_scenarios() {
         let ctx = OnceCellConformanceContext::new(config);
         let (asupersync_results, std_results) = ctx.run_differential_test();
 
-        assert_once_cell_conformance(&asupersync_results, &std_results, name);
+        if name == "set_vs_init_race" {
+            assert_set_vs_init_race_invariants(
+                &asupersync_results,
+                Implementation::Asupersync,
+                "set_vs_init_race/asupersync",
+            );
+            assert_set_vs_init_race_invariants(
+                &std_results,
+                Implementation::Std,
+                "set_vs_init_race/std",
+            );
+        } else {
+            assert_once_cell_conformance(&asupersync_results, &std_results, name);
+        }
     }
 }

@@ -4555,16 +4555,33 @@ mod tests {
         let cx_handle: crate::cx::Cx = crate::cx::Cx::for_testing();
         let held = futures_lite::future::block_on(pool.acquire(&cx_handle)).expect("first acquire");
 
+        let (queued_tx, queued_rx) = mpsc::channel();
         let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
         let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
         let (release_second_tx, release_second_rx) = std::sync::mpsc::channel();
 
         let first_waiter_pool = Arc::clone(&pool);
         let first_waiter_tx = acquired_tx.clone();
+        let first_queued_tx = queued_tx.clone();
         let first_waiter = std::thread::spawn(move || {
             let cx = crate::cx::Cx::for_testing();
-            let acquired =
-                futures_lite::future::block_on(first_waiter_pool.acquire(&cx)).expect("waiter A");
+            let waker = noop_pool_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut acquire_fut = std::pin::pin!(first_waiter_pool.acquire(&cx));
+
+            match acquire_fut.as_mut().poll(&mut task_cx) {
+                Poll::Pending => first_queued_tx
+                    .send(1usize)
+                    .expect("signal waiter A queued"),
+                Poll::Ready(_) => panic!("waiter A acquired before resource return"),
+            }
+
+            let acquired = loop {
+                match acquire_fut.as_mut().poll(&mut task_cx) {
+                    Poll::Ready(result) => break result.expect("waiter A"),
+                    Poll::Pending => std::thread::yield_now(),
+                }
+            };
             first_waiter_tx
                 .send(1usize)
                 .expect("send waiter A acquisition");
@@ -4574,10 +4591,26 @@ mod tests {
 
         let second_waiter_pool = Arc::clone(&pool);
         let second_waiter_tx = acquired_tx;
+        let second_queued_tx = queued_tx;
         let second_waiter = std::thread::spawn(move || {
             let cx = crate::cx::Cx::for_testing();
-            let acquired =
-                futures_lite::future::block_on(second_waiter_pool.acquire(&cx)).expect("waiter B");
+            let waker = noop_pool_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut acquire_fut = std::pin::pin!(second_waiter_pool.acquire(&cx));
+
+            match acquire_fut.as_mut().poll(&mut task_cx) {
+                Poll::Pending => second_queued_tx
+                    .send(2usize)
+                    .expect("signal waiter B queued"),
+                Poll::Ready(_) => panic!("waiter B acquired before resource return"),
+            }
+
+            let acquired = loop {
+                match acquire_fut.as_mut().poll(&mut task_cx) {
+                    Poll::Ready(result) => break result.expect("waiter B"),
+                    Poll::Pending => std::thread::yield_now(),
+                }
+            };
             second_waiter_tx
                 .send(2usize)
                 .expect("send waiter B acquisition");
@@ -4585,14 +4618,13 @@ mod tests {
             acquired.return_to_pool();
         });
 
-        let mut both_waiters_registered = false;
-        for _ in 0..4_096 {
-            if pool.stats().waiters == 2 {
-                both_waiters_registered = true;
-                break;
-            }
-            std::thread::yield_now();
-        }
+        let queued_a = queued_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first waiter should queue before resource return");
+        let queued_b = queued_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second waiter should queue before resource return");
+        let both_waiters_registered = queued_a != queued_b && pool.stats().waiters == 2;
         crate::assert_with_log!(
             both_waiters_registered,
             "both blocked acquirers should register as waiters",

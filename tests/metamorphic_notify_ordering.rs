@@ -18,108 +18,103 @@
 #![allow(clippy::all)]
 
 use proptest::prelude::*;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::task::{Context, Poll, Waker};
 
-use asupersync::lab::config::LabConfig;
-use asupersync::lab::runtime::LabRuntime;
-use asupersync::runtime::TaskHandle;
 use asupersync::sync::Notify;
-use asupersync::types::{Budget, RegionId};
+
+type WaiterFuture = Pin<Box<dyn Future<Output = usize>>>;
 
 /// Test harness for notify ordering tests
 struct NotifyOrderingHarness {
-    lab_runtime: LabRuntime,
     notify: Arc<Notify>,
-    root: RegionId,
 }
 
 impl NotifyOrderingHarness {
     fn new() -> Self {
-        let config = LabConfig::default()
-            .worker_count(4)
-            .trace_capacity(1024)
-            .max_steps(5000);
-        let mut lab_runtime = LabRuntime::new(config);
-        let root = lab_runtime.state.create_root_region(Budget::INFINITE);
         let notify = Arc::new(Notify::new());
 
-        Self {
-            lab_runtime,
-            notify,
-            root,
-        }
+        Self { notify }
     }
 
     /// Start multiple waiters concurrently and return their task handles.
-    fn spawn_waiters(&mut self, count: usize) -> Vec<TaskHandle<usize>> {
+    fn spawn_waiters(&self, count: usize) -> Vec<WaiterFuture> {
         let mut handles = Vec::with_capacity(count);
         for index in 0..count {
             let notify_clone = Arc::clone(&self.notify);
-            let (task_id, handle) = self
-                .lab_runtime
-                .state
-                .create_task(self.root, Budget::INFINITE, async move {
-                    notify_clone.notified().await;
-                    index
-                })
-                .expect("create waiter task");
-            self.lab_runtime.scheduler.lock().schedule(task_id, 0);
-            handles.push(handle);
+            handles.push(Box::pin(async move {
+                notify_clone.notified().await;
+                index
+            }) as WaiterFuture);
         }
         handles
     }
 
-    /// Advance virtual time by the given `Duration`.
-    fn advance(&mut self, duration: Duration) {
-        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-        self.lab_runtime.advance_time(nanos);
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
     }
 
-    /// Drive the runtime to quiescence, then collect whatever waiter
-    /// results are available in handle order. Handles that have not
-    /// completed are skipped (and dropped).
-    fn drive(&mut self, handles: Vec<TaskHandle<usize>>) -> Vec<usize> {
-        self.lab_runtime.run_until_quiescent();
+    fn register_waiters(&self, waiters: &mut [WaiterFuture]) {
+        let waker = Self::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for waiter in &mut *waiters {
+            assert!(
+                matches!(waiter.as_mut().poll(&mut cx), Poll::Pending),
+                "waiter should register before notification"
+            );
+        }
+        assert_eq!(
+            self.notify.waiter_count(),
+            waiters.len(),
+            "all waiters should be registered"
+        );
+    }
+
+    /// Poll all waiters once and collect those that are currently ready.
+    /// Pending waiters stay registered and are returned to `waiters`.
+    fn drain_ready(&self, waiters: &mut Vec<WaiterFuture>) -> Vec<usize> {
+        let waker = Self::noop_waker();
+        let mut cx = Context::from_waker(&waker);
         let mut completed = Vec::new();
-        for mut handle in handles {
-            if let Ok(Some(value)) = handle.try_join() {
-                completed.push(value);
+        let mut pending = Vec::new();
+
+        for mut waiter in std::mem::take(waiters) {
+            match waiter.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => completed.push(value),
+                Poll::Pending => pending.push(waiter),
             }
         }
+
+        *waiters = pending;
         completed
     }
 
     /// Notify waiters sequentially and collect completion order
     fn sequential_notify_one(&mut self, waiter_count: usize) -> Vec<usize> {
-        let handles = self.spawn_waiters(waiter_count);
-
-        // Give waiters time to register
-        self.advance(Duration::from_millis(10));
-        self.lab_runtime.run_until_quiescent();
+        let mut handles = self.spawn_waiters(waiter_count);
+        self.register_waiters(&mut handles);
 
         // Notify each waiter one by one
+        let mut completed = Vec::with_capacity(waiter_count);
         for _ in 0..waiter_count {
             self.notify.notify_one();
-            self.advance(Duration::from_millis(1));
-            self.lab_runtime.run_until_quiescent();
+            completed.extend(self.drain_ready(&mut handles));
         }
 
-        self.drive(handles)
+        completed
     }
 
     /// Test broadcast notification behavior
     fn broadcast_notify(&mut self, waiter_count: usize) -> Vec<usize> {
-        let handles = self.spawn_waiters(waiter_count);
-
-        // Give waiters time to register
-        self.advance(Duration::from_millis(10));
-        self.lab_runtime.run_until_quiescent();
+        let mut handles = self.spawn_waiters(waiter_count);
+        self.register_waiters(&mut handles);
 
         // Broadcast notify
         self.notify.notify_waiters();
 
-        self.drive(handles)
+        self.drain_ready(&mut handles)
     }
 }
 
@@ -153,11 +148,18 @@ impl NotifyStats {
     }
 }
 
+fn notify_ordering_proptest_config() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 // MR1: FIFO Ordering
 // notify_one should wake waiters in the order they registered (FIFO fairness)
 #[test]
 fn mr_fifo_ordering() {
-    proptest!(|(waiter_count in 2..8_usize)| {
+    proptest!(notify_ordering_proptest_config(), |(waiter_count in 2..8_usize)| {
         let mut harness = NotifyOrderingHarness::new();
         let completion_order = harness.sequential_notify_one(waiter_count);
         let stats = NotifyStats::analyze(completion_order);
@@ -178,7 +180,7 @@ fn mr_fifo_ordering() {
 // notify_waiters should wake all currently registered waiters
 #[test]
 fn mr_broadcast_completeness() {
-    proptest!(|(waiter_count in 1..10_usize)| {
+    proptest!(notify_ordering_proptest_config(), |(waiter_count in 1..10_usize)| {
         let mut harness = NotifyOrderingHarness::new();
         let completion_order = harness.broadcast_notify(waiter_count);
 
@@ -201,7 +203,7 @@ fn mr_broadcast_completeness() {
 // notify_one before waiters should create stored notifications
 #[test]
 fn mr_storage_preservation() {
-    proptest!(|(
+    proptest!(notify_ordering_proptest_config(), |(
         stored_notifications in 1..5_usize,
         waiter_count in 1..8_usize
     )| {
@@ -213,9 +215,9 @@ fn mr_storage_preservation() {
         }
 
         // Now start waiters
-        let handles = harness.spawn_waiters(waiter_count);
+        let mut handles = harness.spawn_waiters(waiter_count);
 
-        let completion_order = harness.drive(handles);
+        let completion_order = harness.drain_ready(&mut handles);
 
         // The number that complete immediately should equal stored notifications
         let expected_immediate = stored_notifications.min(waiter_count);
@@ -229,30 +231,31 @@ fn mr_storage_preservation() {
 // Waiters registered before notify_waiters should be woken, after should not
 #[test]
 fn mr_generation_ordering() {
-    proptest!(|(
+    proptest!(notify_ordering_proptest_config(), |(
         pre_waiters in 1..6_usize,
         post_waiters in 1..6_usize
     )| {
         let mut harness = NotifyOrderingHarness::new();
 
         // Start pre-broadcast waiters
-        let pre_handles = harness.spawn_waiters(pre_waiters);
-
-        // Give them time to register
-        harness.advance(Duration::from_millis(10));
-        harness.lab_runtime.run_until_quiescent();
+        let mut pre_handles = harness.spawn_waiters(pre_waiters);
+        harness.register_waiters(&mut pre_handles);
 
         // Broadcast notify
         harness.notify.notify_waiters();
 
         // Start post-broadcast waiters (should not be woken by the broadcast)
-        let post_handles = harness.spawn_waiters(post_waiters);
-
-        // Give a short time for any spurious wakeups
-        harness.advance(Duration::from_millis(5));
+        let mut post_handles = harness.spawn_waiters(post_waiters);
 
         // Collect pre-broadcast results (should all complete)
-        let pre_completed = harness.drive(pre_handles);
+        let pre_completed = harness.drain_ready(&mut pre_handles);
+
+        let post_completed = harness.drain_ready(&mut post_handles);
+        prop_assert!(
+            post_completed.is_empty(),
+            "post-broadcast waiters should not be completed by the earlier broadcast: {:?}",
+            post_completed
+        );
 
         // Check that all pre-broadcast waiters completed
         prop_assert_eq!(pre_completed.len(), pre_waiters,
@@ -260,8 +263,9 @@ fn mr_generation_ordering() {
             pre_completed.len(), pre_waiters);
 
         // Clean up by notifying post-waiters
+        harness.register_waiters(&mut post_handles);
         harness.notify.notify_waiters();
-        let _ = harness.drive(post_handles);
+        let _ = harness.drain_ready(&mut post_handles);
     });
 }
 
@@ -269,38 +273,30 @@ fn mr_generation_ordering() {
 // A waiter should not receive multiple notifications from the same notify event
 #[test]
 fn mr_no_double_notification() {
-    proptest!(|(waiter_count in 2..8_usize)| {
+    proptest!(notify_ordering_proptest_config(), |(waiter_count in 2..8_usize)| {
         let mut harness = NotifyOrderingHarness::new();
 
         // Create a custom test that can detect double notifications
         let completion_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        let mut handles: Vec<TaskHandle<usize>> = Vec::with_capacity(waiter_count);
+        let mut handles: Vec<WaiterFuture> = Vec::with_capacity(waiter_count);
         for index in 0..waiter_count {
             let notify_clone = Arc::clone(&harness.notify);
             let count_clone = Arc::clone(&completion_count);
-            let (task_id, handle) = harness
-                .lab_runtime
-                .state
-                .create_task(harness.root, Budget::INFINITE, async move {
-                    notify_clone.notified().await;
-                    count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    index
-                })
-                .expect("create waiter task");
-            harness.lab_runtime.scheduler.lock().schedule(task_id, 0);
-            handles.push(handle);
+            handles.push(Box::pin(async move {
+                notify_clone.notified().await;
+                count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                index
+            }) as WaiterFuture);
         }
 
-        // Give waiters time to register
-        harness.advance(Duration::from_millis(10));
-        harness.lab_runtime.run_until_quiescent();
+        harness.register_waiters(&mut handles);
 
         // Single broadcast should wake all waiters exactly once
         harness.notify.notify_waiters();
 
         // Collect results
-        let completed = harness.drive(handles);
+        let completed = harness.drain_ready(&mut handles);
 
         // Exactly waiter_count notifications should have been delivered
         let total_notifications = completion_count.load(std::sync::atomic::Ordering::Relaxed);
