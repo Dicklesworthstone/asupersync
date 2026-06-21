@@ -452,7 +452,9 @@ impl MultiSourceRepairScheduler {
             // Request-level rejections (e.g. a low-trust assigned peer) do
             // retire the request so it can be rescheduled.
             if matches!(reason, RejectionReason::MaliciousPeer { .. }) {
-                self.update_peer_trust(from_peer, false);
+                if self.config.enable_malicious_detection {
+                    self.update_peer_trust(from_peer, false);
+                }
             } else if let Some(request) = self.pending_requests.remove(&symbol_index) {
                 self.record_request_failure(request, reason.clone());
             }
@@ -1370,6 +1372,7 @@ mod tests {
         let attacker = create_test_peer_id(9999);
         let attacker_info = create_test_peer_info(&scheduler, attacker.clone(), vec![1, 2, 3]);
         scheduler.register_peer(attacker_info).unwrap();
+        let attacker_trust_before = scheduler.peers.get(&attacker).unwrap().trust_score;
 
         let symbol_data = vec![7u8; 100];
         let result = scheduler
@@ -1397,6 +1400,11 @@ mod tests {
             scheduler.pending_requests.contains_key(&hijacked_index),
             "forged response must not cancel the honest peer's pending request"
         );
+        let attacker_trust_after = scheduler.peers.get(&attacker).unwrap().trust_score;
+        assert!(
+            attacker_trust_after < attacker_trust_before,
+            "default malicious detection should decay trust on a hijack attempt"
+        );
 
         // The honest peer's later delivery is still accepted.
         let honest = scheduler
@@ -1405,6 +1413,66 @@ mod tests {
         assert!(
             matches!(honest, SymbolProcessResult::Accepted { .. }),
             "the requested peer's delivery must still be accepted"
+        );
+    }
+
+    #[test]
+    fn malicious_detection_flag_only_controls_trust_decay() {
+        let config = RepairSchedulerConfig {
+            enable_malicious_detection: false,
+            ..RepairSchedulerConfig::default()
+        };
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            config,
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            3,
+        );
+
+        let requested_peer = create_test_peer_id(8011);
+        let attacker = create_test_peer_id(8012);
+        scheduler
+            .register_peer(create_test_peer_info(
+                &scheduler,
+                requested_peer.clone(),
+                vec![1, 2, 3],
+            ))
+            .unwrap();
+        scheduler
+            .register_peer(create_test_peer_info(
+                &scheduler,
+                attacker.clone(),
+                vec![1, 2, 3],
+            ))
+            .unwrap();
+
+        let requests = scheduler
+            .schedule_next_batch_at(Time::from_secs(10))
+            .unwrap();
+        let symbol_index = requests[0].symbol_index;
+        let attacker_trust_before = scheduler.peers.get(&attacker).unwrap().trust_score;
+
+        let result = scheduler
+            .process_received_symbol(symbol_index, &[7u8; 100], &attacker)
+            .unwrap();
+
+        assert!(
+            matches!(
+                result,
+                SymbolProcessResult::Rejected {
+                    reason: RejectionReason::MaliciousPeer { .. }
+                }
+            ),
+            "wrong-peer delivery must still fail closed even when trust decay is disabled"
+        );
+        assert!(
+            scheduler.pending_requests.contains_key(&symbol_index),
+            "wrong-peer delivery must not consume the honest peer's pending request"
+        );
+        assert_eq!(
+            scheduler.peers.get(&attacker).unwrap().trust_score,
+            attacker_trust_before,
+            "disabling malicious detection should disable attacker trust decay only"
         );
     }
 
