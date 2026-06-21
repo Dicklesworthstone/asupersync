@@ -292,6 +292,94 @@
       "reason": "Recovery-security tests use mock labels for adversarial fixtures.",
       "revisit_condition": "Revisit when recovery fixtures are renamed away from mock terminology.",
       "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/database/mysql.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "MySQL source-local tests use fake-server wording for a deterministic loopback packet responder, not production behavior.",
+      "revisit_condition": "Revisit when MySQL test helpers move under tests/ or the wording is normalized.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/net/atp/sdk/session.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "ATP SDK source-local tests use loopback daemon placeholder wording for an ephemeral listener fixture.",
+      "revisit_condition": "Revisit when ATP SDK daemon-loopback fixtures move under tests/ or the wording is normalized.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/net/atp/sdk/transfer.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "ATP transfer source-local tests use loopback daemon placeholder wording for an ephemeral listener fixture.",
+      "revisit_condition": "Revisit when ATP transfer daemon-loopback fixtures move under tests/ or the wording is normalized.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/net/atp/transport_common/metadata.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Metadata comments describe the zero-content symlink/file placeholder case explicitly handled by live transfer metadata logic.",
+      "revisit_condition": "Revisit when ATP metadata wording is normalized away from placeholder terminology.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/net/atp/transport_common/multi_object.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Multi-object planning comments describe the live zero-content shard representation for empty entries.",
+      "revisit_condition": "Revisit when ATP multi-object empty-entry wording is normalized.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/net/atp/transport_quic/mod.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "ATP QUIC module documentation records fail-closed unwired entry points and explicitly rejects fake-success behavior.",
+      "revisit_condition": "Revisit as ATP QUIC B2/B3 endpoint pumping slices retire the remaining fail-closed documentation.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/net/atp/transport_quic/symbol_datagram.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "ATP QUIC datagram documentation uses fake-success wording only to state malformed datagrams fail closed.",
+      "revisit_condition": "Revisit when datagram error wording is normalized.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/net/atp/transport_tcp/mod.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "ATP TCP module history mentions the replaced fake sleep-loop facade while documenting the current real transport.",
+      "revisit_condition": "Revisit when historical transport notes are moved out of production module docs.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/net/quic_native/endpoint_api.rs",
+      "category": "production_stub",
+      "owner": "quic-native",
+      "reason": "Native QUIC endpoint docs use mock only to distinguish deterministic loopback helpers from a real UDP/protect layer gap.",
+      "revisit_condition": "Revisit when real UDP loopback and protect/unprotect slices replace the documented loopback helper boundary.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/plan/mod.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "PlanBuilder API uses placeholder in the planning sense for leaf computation labels, not incomplete execution.",
+      "revisit_condition": "Revisit when plan API terminology is normalized.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "pattern": "src/tls/acceptor.rs",
+      "category": "production_stub",
+      "owner": "tls-core",
+      "reason": "TLS acceptor source-local tests document disabled-mode stubs under feature gating rather than production TLS behavior.",
+      "revisit_condition": "Revisit when TLS disabled-mode test wording is normalized.",
+      "replacement_issue": "asupersync-u7y"
     }
   ],
   "allowlist_groups": [

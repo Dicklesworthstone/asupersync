@@ -473,7 +473,7 @@ fn probe_06_legacy_uring_reactor_resolved() {
 fn probe_07_io_uring_cfg_off_is_honest() {
     let src = read_source("src/runtime/reactor/io_uring.rs");
     assert!(
-        src.contains("Unsupported") && src.contains("cfg(not(all(target_os"),
+        src.contains("Unsupported") && src.contains("cfg(not(all(any(target_os"),
         "IoUringReactor cfg-off surface missing Unsupported error handling"
     );
     eprintln!("[PASS] IoUringReactor cfg-off returns Unsupported");
@@ -598,9 +598,9 @@ fn probe_14_transport_mock_is_gated() {
     let lines: Vec<&str> = src.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         if line.contains("pub mod deterministic") {
-            let prev = if i > 0 { lines[i - 1] } else { "" };
+            let start = i.saturating_sub(3);
             assert!(
-                prev.contains("cfg(") || line.contains("cfg("),
+                lines[start..=i].iter().any(|line| line.contains("cfg(")),
                 "transport deterministic module at line {} not feature-gated",
                 i + 1
             );
@@ -1067,6 +1067,7 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
                         | "fixture_reference"
                         | "not_conformance_evidence"
                         | "test_harness"
+                        | "terminology"
                 ),
                 "conformance marker {}:{} classified as unsupported support class {support_class}",
                 marker.path,

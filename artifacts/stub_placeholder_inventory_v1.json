@@ -85,6 +85,103 @@
   },
   "selectors": [
     {
+      "id": "src-atp-cli-fail-closed-preview-surfaces",
+      "paths": [
+        "src/bin/asupersync.rs"
+      ],
+      "terms": [
+        "placeholder",
+        "not implemented",
+        "not yet implemented"
+      ],
+      "disposition": "unsupported-fail-closed",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "",
+      "notes": "ATP CLI preview/follow-up commands validate inputs where possible, then fail closed with ASUP-E701 instead of fabricating sync, mirror, watch, daemon, or peer behavior."
+    },
+    {
+      "id": "src-pbft-view-change-fail-closed",
+      "paths": [
+        "src/distributed/consensus/pbft.rs"
+      ],
+      "terms": [
+        "not implemented"
+      ],
+      "disposition": "unsupported-fail-closed",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "asupersync-v8mszr",
+      "notes": "PBFT view-change and new-view handling return explicit errors until certificate validation and new-view construction are implemented."
+    },
+    {
+      "id": "src-pbft-fail-closed-source-local-test",
+      "paths": [
+        "src/distributed/consensus/tests.rs"
+      ],
+      "terms": [
+        "not implemented"
+      ],
+      "disposition": "legitimate-test-harness",
+      "support_class": "test_harness",
+      "blocker_bead_id": "asupersync-v8mszr",
+      "notes": "Source-local PBFT tests assert that unsupported view-change/new-view paths fail closed instead of silently succeeding."
+    },
+    {
+      "id": "src-atp-protocol-e701-fail-closed",
+      "paths": [
+        "src/net/atp/protocol/outcome.rs"
+      ],
+      "terms": [
+        "not implemented",
+        "not yet implemented"
+      ],
+      "disposition": "unsupported-fail-closed",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "",
+      "notes": "ATP protocol outcome exposes ASUP-E701 for intentionally unwired protocol operations and does not report success."
+    },
+    {
+      "id": "src-atp-sdk-daemon-loopback-source-local-tests",
+      "paths": [
+        "src/net/atp/sdk/session.rs",
+        "src/net/atp/sdk/transfer.rs"
+      ],
+      "terms": [
+        "placeholder",
+        "stub"
+      ],
+      "disposition": "legitimate-test-harness",
+      "support_class": "test_harness",
+      "blocker_bead_id": "",
+      "notes": "ATP SDK source-local tests use loopback listeners and stub wording to assert reachable daemon-delegated operations fail closed with ASUP-E701."
+    },
+    {
+      "id": "src-atp-metadata-empty-entry-placeholder-terminology",
+      "paths": [
+        "src/net/atp/transport_common/metadata.rs",
+        "src/net/atp/transport_common/multi_object.rs"
+      ],
+      "terms": [
+        "placeholder"
+      ],
+      "disposition": "documented-deferred-surface",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "ATP metadata and multi-object planning use placeholder as terminology for explicit empty-entry representations, not unfinished transfer behavior."
+    },
+    {
+      "id": "src-plan-leaf-placeholder-terminology",
+      "paths": [
+        "src/plan/mod.rs"
+      ],
+      "terms": [
+        "placeholder"
+      ],
+      "disposition": "documented-deferred-surface",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "PlanBuilder leaf placeholders are planning labels for computations to be filled by the planner graph, not missing runtime code."
+    },
+    {
       "id": "src-security-zero-tag-sentinel",
       "paths": [
         "src/security/authenticated.rs",
@@ -384,6 +481,19 @@
       "support_class": "explicitly_unsupported",
       "blocker_bead_id": "asupersync-yex",
       "notes": "Skipped gRPC CONNECT streaming cases advertise unsupported status instead of pass evidence."
+    },
+    {
+      "id": "tests-conformance-atp-object-graph-follow-up",
+      "path_prefixes": [
+        "tests/conformance/atp_object_graph_transfer_coverage.md"
+      ],
+      "terms": [
+        "not implemented"
+      ],
+      "disposition": "conformance-bug-follow-up",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-rckstb",
+      "notes": "Object-graph ATP transfer coverage still records explicit not-implemented conformance surfaces; these are live follow-up debt, not pass evidence."
     },
     {
       "id": "tests-conformance-general-placeholders",

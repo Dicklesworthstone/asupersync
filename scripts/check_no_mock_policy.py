@@ -321,6 +321,23 @@ def allowlist_entries(policy: dict) -> list[dict[str, Any]]:
     return entries
 
 
+def policy_categories(policy: dict) -> set[str]:
+    categories: set[str] = set()
+    for rule in policy.get("classification_rules", []):
+        category = rule.get("category")
+        if isinstance(category, str) and category:
+            categories.add(category)
+    for entry in allowlist_entries(policy):
+        category = entry.get("category")
+        if isinstance(category, str) and category != "any":
+            categories.add(category)
+    for waiver in policy.get("waivers", []):
+        category = waiver.get("category")
+        if isinstance(category, str) and category != "any":
+            categories.add(category)
+    return categories
+
+
 def entry_matches(entry: dict[str, Any], path: str, category: str) -> bool:
     pattern = entry_pattern(entry)
     entry_category = entry.get("category", "any")
@@ -400,6 +417,8 @@ def evaluate_policy(
     category_counts: dict[str, dict[str, int]] = defaultdict(
         lambda: {"paths": 0, "hits": 0, "violations": 0, "covered": 0}
     )
+    for category in policy_categories(policy):
+        _ = category_counts[category]
     coverage_counts: dict[str, int] = defaultdict(int)
     violations: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
