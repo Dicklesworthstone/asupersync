@@ -370,16 +370,33 @@ pub fn overhead_for_target(k: u32, loss_p_bar: f64, alpha: f64, max_overhead: f6
     if k == 0 {
         return 0.0;
     }
-    let p = loss_p_bar.clamp(0.0, 0.999);
+    let max_overhead = if max_overhead.is_finite() && max_overhead > 0.0 {
+        max_overhead
+    } else {
+        0.0
+    };
+    if max_overhead == 0.0 {
+        return 0.0;
+    }
+    let p = if loss_p_bar.is_finite() {
+        loss_p_bar.clamp(0.0, 0.999)
+    } else {
+        0.0
+    };
     if p <= CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND {
         return 0.0;
     }
+    let alpha = if alpha.is_finite() && alpha > 0.0 {
+        alpha.clamp(1e-12, 0.5)
+    } else {
+        1e-3
+    };
     let kf = f64::from(k);
     let z = z_for_alpha(alpha);
     // First-order analytic seed.
     let seed = p / (1.0 - p) + z * (p / (kf * (1.0 - p))).sqrt();
-    let mut lo = seed.max(0.0);
-    let mut hi = max_overhead.max(lo + 1e-6);
+    let mut lo = seed.clamp(0.0, max_overhead);
+    let mut hi = max_overhead;
     // If even max_overhead can't hit α, return max_overhead (best effort).
     if decode_fail_probability(k, hi, p) > alpha {
         return hi;
@@ -482,6 +499,59 @@ pub fn rate_matched_pacing_plan(
         max_burst_datagrams,
         false,
     )
+}
+
+/// Build a rate-matched pacing plan constrained by advertised flow-control
+/// credit.
+///
+/// The returned plan is capped so one RTT of raw planned spray does not exceed
+/// `advertised_flow_credit_bytes`. A zero or too-small credit returns `None`
+/// instead of fabricating a token-bucket trickle that would exceed the peer's
+/// stated receive budget.
+#[must_use]
+pub fn rate_matched_pacing_plan_with_flow_credit(
+    est: &PathEstimate,
+    policy: &AdaptivePolicy,
+    symbol_size: u16,
+    cold_start_bytes_per_s: f64,
+    max_burst_datagrams: u32,
+    advertised_flow_credit_bytes: u64,
+) -> Option<RateMatchedPacingPlan> {
+    if advertised_flow_credit_bytes == 0 {
+        return None;
+    }
+
+    let plan = rate_matched_pacing_plan(
+        est,
+        policy,
+        symbol_size,
+        cold_start_bytes_per_s,
+        max_burst_datagrams,
+    );
+    let rtt_s = flow_credit_rtt_window_s(est);
+    let credit_limited_raw_bytes_per_s = advertised_flow_credit_bytes as f64 / rtt_s;
+    if credit_limited_raw_bytes_per_s < 1.0 {
+        return None;
+    }
+
+    let planned_raw_bytes_per_s = plan.raw_pacing_bits_per_s as f64 / 8.0;
+    if planned_raw_bytes_per_s <= credit_limited_raw_bytes_per_s {
+        return Some(plan);
+    }
+
+    let overhead_factor = 1.0 + plan.block.overhead.max(0.0);
+    let capped_useful_bytes_per_s = plan
+        .useful_pacing_bytes_per_s
+        .min(credit_limited_raw_bytes_per_s / overhead_factor)
+        .max(1.0);
+    Some(pacing_plan_from_rates(
+        plan.block,
+        credit_limited_raw_bytes_per_s,
+        capped_useful_bytes_per_s,
+        u32::from(symbol_size.max(1)),
+        plan.max_burst_datagrams,
+        plan.cold_start,
+    ))
 }
 
 /// Choose the per-block plan at the network/coding crossing point (§2.4).
@@ -596,6 +666,14 @@ fn finite_positive_or(value: f64, fallback: f64) -> f64 {
         value
     } else {
         fallback.max(1.0)
+    }
+}
+
+fn flow_credit_rtt_window_s(est: &PathEstimate) -> f64 {
+    if est.rtt_s.is_finite() && est.rtt_s >= MIN_PATH_RTT_S {
+        clamp_path_rtt(est.rtt_s)
+    } else {
+        1.0
     }
 }
 
@@ -1046,6 +1124,70 @@ mod tests {
     }
 
     #[test]
+    fn overhead_deadband_elides_near_clean_repair_symbols() {
+        let alpha = 1e-3;
+        for loss in [0.0, 0.0005, CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND] {
+            assert_eq!(
+                overhead_for_target(512, loss, alpha, 0.5),
+                0.0,
+                "near-clean loss should not pre-spray repair symbols: {loss}"
+            );
+        }
+
+        let lossy = overhead_for_target(512, CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND * 2.0, alpha, 0.5);
+        assert!(
+            lossy > 0.0,
+            "loss above the near-clean deadband should re-enable calibrated repair overhead"
+        );
+    }
+
+    #[test]
+    fn overhead_deadband_eliminates_near_clean_repair_floor() {
+        let alpha = 1e-3;
+        for loss in [0.0, 0.0005, CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND] {
+            assert_eq!(
+                overhead_for_target(2048, loss, alpha, 0.5),
+                0.0,
+                "near-clean measured loss must not inherit a repair floor"
+            );
+        }
+
+        let lossy = overhead_for_target(2048, 0.02, alpha, 0.5);
+        assert!(
+            lossy > 0.0,
+            "non-clean measured loss still needs calibrated repair overhead"
+        );
+        assert!(
+            decode_fail_probability(2048, lossy, 0.02) <= alpha * 1.000_001,
+            "lossy calibrated overhead must still hit the decode-failure target"
+        );
+    }
+
+    #[test]
+    fn overhead_sanitizes_malformed_inputs_to_safe_zero() {
+        assert_eq!(overhead_for_target(2048, f64::NAN, 1e-3, 0.5), 0.0);
+        assert_eq!(overhead_for_target(2048, f64::INFINITY, 1e-3, 0.0), 0.0);
+        assert_eq!(overhead_for_target(2048, 0.02, 1e-3, f64::NAN), 0.0);
+        assert_eq!(
+            overhead_for_target(2048, 0.02, f64::NAN, 0.5),
+            overhead_for_target(2048, 0.02, 1e-3, 0.5)
+        );
+        assert_eq!(
+            overhead_for_target(2048, 0.02, -1.0, 0.5),
+            overhead_for_target(2048, 0.02, 1e-3, 0.5)
+        );
+    }
+
+    #[test]
+    fn overhead_respects_max_overhead_when_loss_model_wants_more() {
+        let capped = overhead_for_target(16, 0.90, 1e-12, 0.01);
+        assert_eq!(
+            capped, 0.01,
+            "adaptive FEC must never exceed the caller's configured overhead cap"
+        );
+    }
+
+    #[test]
     fn optimal_block_is_network_bound_on_clean_fast_path() {
         // Clean path, fast CPU relative to BW ⇒ push K up (network-bound regime).
         let policy = AdaptivePolicy::default();
@@ -1126,6 +1268,33 @@ mod tests {
     }
 
     #[test]
+    fn rate_matched_pacing_plan_keeps_clean_links_source_first() {
+        let mut policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        policy.max_overhead = 0.50;
+
+        let plan = rate_matched_pacing_plan(
+            &est(CLEAN_LINK_REPAIR_OVERHEAD_DEADBAND, 12_000_000.0),
+            &policy,
+            1200,
+            1_000_000.0,
+            32,
+        );
+
+        assert!(!plan.cold_start);
+        assert_eq!(
+            plan.block.overhead, 0.0,
+            "near-clean adaptive FEC should not add round-0 repair overhead"
+        );
+        assert!(plan.raw_pacing_bits_per_s > 0);
+        assert!(plan.datagrams_per_s > 0);
+    }
+
+    #[test]
     fn rate_matched_pacing_plan_drops_to_decode_cpu_capacity() {
         let policy = AdaptivePolicy {
             min_samples_to_activate: 1,
@@ -1152,6 +1321,109 @@ mod tests {
         assert!(
             plan.raw_pacing_bits_per_s < 100_000_000 * 8,
             "decode-bound path must not spray at full measured path rate"
+        );
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_respects_flow_control_credit() {
+        let policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        let est = PathEstimate {
+            rtt_s: 0.100,
+            dec_symbols_per_s: 50_000_000.0,
+            ..est(0.01, 100_000_000.0)
+        };
+        let credit = 12_000;
+
+        let plan =
+            rate_matched_pacing_plan_with_flow_credit(&est, &policy, 1200, 8_000_000.0, 32, credit)
+                .expect("non-zero credit permits a bounded pacing plan");
+
+        let planned_one_rtt_bytes = (plan.raw_pacing_bits_per_s as f64 / 8.0) * est.rtt_s;
+        assert!(
+            planned_one_rtt_bytes <= credit as f64 + 1.0,
+            "planned RTT inflight {planned_one_rtt_bytes} must stay within credit {credit}"
+        );
+        assert!(
+            plan.raw_pacing_bits_per_s < 100_000_000 * 8,
+            "flow credit must cap the raw high-bandwidth path rate"
+        );
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_declines_zero_or_too_small_credit() {
+        let policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        let mut est = est(0.01, 10_000_000.0);
+        est.rtt_s = 2.0;
+
+        assert!(
+            rate_matched_pacing_plan_with_flow_credit(&est, &policy, 1200, 8_000_000.0, 32, 0)
+                .is_none(),
+            "zero credit means no send budget"
+        );
+        assert!(
+            rate_matched_pacing_plan_with_flow_credit(&est, &policy, 1200, 8_000_000.0, 32, 1)
+                .is_none(),
+            "sub-byte-per-second credit cannot be represented safely"
+        );
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_credit_cap_is_replay_stable() {
+        let policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![512, 1024, 2048],
+            arm_grid_fanout: vec![1, 2],
+            ..AdaptivePolicy::default()
+        };
+        let est = PathEstimate {
+            rtt_s: 0.025,
+            dec_symbols_per_s: 10_000_000.0,
+            ..est(0.025, 64_000_000.0)
+        };
+
+        let first =
+            rate_matched_pacing_plan_with_flow_credit(&est, &policy, 1200, 8_000_000.0, 16, 64_000);
+        let replay =
+            rate_matched_pacing_plan_with_flow_credit(&est, &policy, 1200, 8_000_000.0, 16, 64_000);
+
+        assert_eq!(first, replay);
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_malformed_rtt_uses_credit_safe_window() {
+        let policy = AdaptivePolicy::default();
+        let malformed = PathEstimate {
+            samples: 0,
+            rtt_s: f64::NAN,
+            bw_median_bps: f64::INFINITY,
+            ..est(0.02, 50_000_000.0)
+        };
+        let credit = 64 * 1024;
+
+        let plan = rate_matched_pacing_plan_with_flow_credit(
+            &malformed,
+            &policy,
+            1200,
+            8_000_000.0,
+            32,
+            credit,
+        )
+        .expect("valid credit with malformed path evidence uses bounded cold start");
+
+        assert!(plan.cold_start);
+        assert!(
+            plan.raw_pacing_bits_per_s <= credit * 8,
+            "malformed RTT must use a conservative one-second credit window"
         );
     }
 
