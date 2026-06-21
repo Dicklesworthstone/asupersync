@@ -329,7 +329,7 @@ where
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
         if cx.checkpoint().is_err() {
-            self.close_after_cancelled_send(cx).await;
+            self.close_after_cancelled_send(cx, true).await;
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancelled",
@@ -355,7 +355,7 @@ where
             Err(WsError::Io(e))
                 if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
             {
-                self.close_after_cancelled_send(cx).await;
+                self.close_after_cancelled_send(cx, false).await;
                 Err(WsError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
@@ -604,8 +604,8 @@ where
         self.initiate_close_with_cx(None, reason).await
     }
 
-    async fn close_after_cancelled_send(&mut self, cx: &Cx) {
-        if self.write_buf.is_empty() {
+    async fn close_after_cancelled_send(&mut self, cx: &Cx, close_when_uncommitted: bool) {
+        if self.write_buf.is_empty() && !close_when_uncommitted {
             self.close_handshake.force_close(CloseReason::going_away());
             return;
         }
@@ -1420,6 +1420,45 @@ mod tests {
             assert!(
                 ws.write_buf.is_empty(),
                 "cancelled server send must not leave buffered bytes when no write committed"
+            );
+        });
+    }
+
+    #[test]
+    fn pre_cancelled_send_emits_close_frame_before_error() {
+        future::block_on(async {
+            let accept = AcceptResponse {
+                accept_key: String::new(),
+                protocol: None,
+                extensions: Vec::new(),
+            };
+            let mut ws = ServerWebSocket::from_upgraded(
+                TestIo::new(),
+                WebSocketConfig::default(),
+                accept,
+                &[],
+            );
+            let cx = Cx::for_testing();
+            cx.set_cancel_requested(true);
+
+            let err = ws
+                .send(&cx, Message::text("cancelled"))
+                .await
+                .expect_err("pre-cancelled send should fail");
+
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::Interrupted),
+                "expected interrupted send after pre-cancelled Cx, got {err:?}"
+            );
+            assert_eq!(
+                ws.close_handshake.state(),
+                CloseState::CloseSent,
+                "pre-cancelled send should initiate a close handshake"
+            );
+            assert_eq!(
+                ws.io.written,
+                encode_server_frame(Frame::close(Some(1001), None)),
+                "pre-cancelled server send should emit exactly one going-away close frame"
             );
         });
     }

@@ -230,8 +230,11 @@ fn test_backlog_parameter_honored() {
 #[allow(dead_code)]
 fn test_bind_port_zero_returns_os_assigned_port() {
     let mut assigned_ports = HashSet::new();
+    let mut listeners = Vec::new();
 
-    // Create multiple listeners with port 0 to verify OS assigns different ports
+    // Create multiple live listeners with port 0 to verify the OS assigns
+    // different ports while those ports remain bound. Once a listener is
+    // dropped, the kernel may legitimately recycle its ephemeral port.
     for i in 0..5 {
         let addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
 
@@ -268,6 +271,8 @@ fn test_bind_port_zero_returns_os_assigned_port() {
         // Verify the listener is functional
         let _client = StdTcpStream::connect(bound_addr)
             .unwrap_or_else(|_| panic!("connect to auto-assigned port {port}"));
+
+        listeners.push(listener);
 
         println!("✓ OS assigned port {} for socket {}", port, i);
     }

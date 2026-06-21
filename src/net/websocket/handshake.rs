@@ -729,10 +729,7 @@ impl ServerHandshake {
                     .iter()
                     .any(|supported| supported.as_str() == candidate.as_str())
             });
-            match selected {
-                Some(s) => Some(s.clone()),
-                None => None,
-            }
+            selected.cloned()
         } else {
             None
         };

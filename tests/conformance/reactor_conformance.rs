@@ -206,6 +206,10 @@ impl MockReactor {
     }
 
     fn register(&self, fd: MockFd, token: MockToken, interest: MockInterest) -> Result<(), String> {
+        if fd.raw() < 0 {
+            return Err(format!("Invalid file descriptor {}", fd.raw()));
+        }
+
         let mut registrations = self.registrations.lock().unwrap();
 
         if registrations.contains_key(&token) {
@@ -981,10 +985,9 @@ impl ReactorConformanceHarness {
                     self.mock_reactor
                         .register(invalid_fd, token, MockInterest::READABLE);
 
-                // This deterministic reactor accepts any FD, but real implementation would validate.
                 self.harness.verify(
-                    register_result.is_ok(),
-                    "Invalid FD handling should be graceful",
+                    register_result.is_err(),
+                    "Invalid FD handling should reject the descriptor gracefully",
                 )
             },
             "invalid_file_descriptor_handling",

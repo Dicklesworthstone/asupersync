@@ -489,7 +489,7 @@ where
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
         if cx.checkpoint().is_err() {
-            self.close_after_cancelled_send(cx).await;
+            self.close_after_cancelled_send(cx, true).await;
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancelled",
@@ -518,7 +518,7 @@ where
             Err(WsError::Io(e))
                 if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
             {
-                self.close_after_cancelled_send(cx).await;
+                self.close_after_cancelled_send(cx, false).await;
                 Err(WsError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
@@ -761,8 +761,8 @@ where
         self.initiate_close_with_cx(None, reason).await
     }
 
-    async fn close_after_cancelled_send(&mut self, cx: &Cx) {
-        if self.write_buf.is_empty() {
+    async fn close_after_cancelled_send(&mut self, cx: &Cx, close_when_uncommitted: bool) {
+        if self.write_buf.is_empty() && !close_when_uncommitted {
             self.close_handshake.force_close(CloseReason::going_away());
             return;
         }
@@ -1918,6 +1918,40 @@ mod tests {
                 ws.close_state(),
                 CloseState::CloseReceived,
                 "failed close response writes must leave the handshake waiting for a retry"
+            );
+        });
+    }
+
+    #[test]
+    fn pre_cancelled_send_emits_close_frame_before_error() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x32, 0x54, 0x76, 0x98]));
+            let cx = test_cx_with_entropy(Arc::clone(&entropy));
+            cx.set_cancel_requested(true);
+            let mut ws = WebSocket::from_upgraded_with_entropy(
+                TestIo::new(),
+                WebSocketConfig::default(),
+                Arc::clone(&entropy),
+            );
+
+            let err = ws
+                .send(&cx, Message::text("cancelled"))
+                .await
+                .expect_err("pre-cancelled send should fail");
+
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::Interrupted),
+                "expected interrupted send after pre-cancelled Cx, got {err:?}"
+            );
+            assert_eq!(
+                ws.close_state(),
+                CloseState::CloseSent,
+                "pre-cancelled send should initiate a close handshake"
+            );
+            assert_eq!(
+                ws.io.written,
+                encode_client_frame_with_entropy(&Frame::close(Some(1001), None), entropy.as_ref()),
+                "pre-cancelled client send should emit exactly one going-away close frame"
             );
         });
     }
