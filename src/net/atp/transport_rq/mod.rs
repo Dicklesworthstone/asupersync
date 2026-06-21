@@ -187,7 +187,6 @@ const RQ_COLD_START_PACING_BPS: u64 = 16 * 1024 * 1024;
 const RQ_MIN_PACING_BPS: u64 = 512 * 1024;
 const RQ_MAX_PACING_BPS: u64 = 64 * 1024 * 1024;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
-const RQ_COLD_START_RAMP_FACTOR: u64 = 2;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
 const RQ_PACING_MAX_PAUSE: Duration = Duration::from_millis(250);
@@ -418,20 +417,11 @@ struct RqRoundTuning {
 
 #[derive(Debug, Clone, Copy)]
 struct RqSprayPacing {
-    rate_bytes_per_sec: u64,
     path_rate_bps: u64,
     datagram_bytes: u32,
     max_burst_size: u32,
     rtt: Option<Duration>,
     loss_detected: bool,
-    ramp: Option<RqPacingRamp>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RqPacingRamp {
-    step_symbols: u64,
-    factor: u64,
-    max_rate_bytes_per_sec: u64,
 }
 
 impl RqSprayPacing {
@@ -443,19 +433,6 @@ impl RqSprayPacing {
             None,
             false,
         )
-    }
-
-    fn with_round0_slow_start_ramp(mut self) -> Self {
-        if !self.loss_detected && self.rate_bytes_per_sec < RQ_MAX_PACING_BPS {
-            self.ramp = Some(RqPacingRamp {
-                step_symbols: u64::try_from(RQ_COLD_START_BURST_SYMBOLS)
-                    .unwrap_or(u64::MAX)
-                    .max(1),
-                factor: RQ_COLD_START_RAMP_FACTOR.max(1),
-                max_rate_bytes_per_sec: RQ_MAX_PACING_BPS,
-            });
-        }
-        self
     }
 
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
@@ -476,21 +453,17 @@ impl RqSprayPacing {
             .unwrap_or(u32::MAX)
             .max(1);
         Self {
-            rate_bytes_per_sec: pacing_rate_bytes_per_sec,
             path_rate_bps,
             datagram_bytes,
             max_burst_size,
             rtt,
             loss_detected,
-            ramp: None,
         }
     }
 }
 
 struct RqSprayPacer {
     controller: CongestionController,
-    pacing: RqSprayPacing,
-    symbols_since_ramp: u64,
 }
 
 impl RqSprayPacer {
@@ -502,11 +475,7 @@ impl RqSprayPacer {
             pacing.max_burst_size,
         );
         controller.update_congestion_feedback(pacing.rtt, pacing.loss_detected);
-        Self {
-            controller,
-            pacing,
-            symbols_since_ramp: 0,
-        }
+        Self { controller }
     }
 
     fn configure(&mut self, pacing: RqSprayPacing) {
@@ -517,22 +486,12 @@ impl RqSprayPacer {
         );
         self.controller
             .update_congestion_feedback(pacing.rtt, pacing.loss_detected);
-        self.pacing = pacing;
-        self.symbols_since_ramp = 0;
-    }
-
-    fn record_local_loss(&mut self) {
-        self.pacing.ramp = None;
-        self.symbols_since_ramp = 0;
-        self.controller
-            .update_congestion_feedback(self.pacing.rtt, true);
     }
 
     async fn before_send(&mut self, cx: &Cx) -> Result<(), RqError> {
         loop {
             let now = Instant::now();
             if self.controller.try_consume_send_budget(now) {
-                self.record_send_budget_consumed();
                 return Ok(());
             }
             let wait = self
@@ -542,40 +501,6 @@ impl RqSprayPacer {
             crate::time::sleep(cx.now(), wait).await;
             cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         }
-    }
-
-    fn record_send_budget_consumed(&mut self) {
-        let Some(ramp) = self.pacing.ramp else {
-            return;
-        };
-        if self.pacing.loss_detected
-            || self.pacing.rate_bytes_per_sec >= ramp.max_rate_bytes_per_sec
-        {
-            return;
-        }
-
-        self.symbols_since_ramp = self.symbols_since_ramp.saturating_add(1);
-        if self.symbols_since_ramp < ramp.step_symbols {
-            return;
-        }
-        self.symbols_since_ramp = 0;
-
-        let next_rate = self
-            .pacing
-            .rate_bytes_per_sec
-            .saturating_mul(ramp.factor)
-            .min(ramp.max_rate_bytes_per_sec);
-        if next_rate <= self.pacing.rate_bytes_per_sec {
-            return;
-        }
-
-        self.pacing.rate_bytes_per_sec = next_rate;
-        self.pacing.path_rate_bps = next_rate.saturating_mul(8);
-        self.controller.configure_for_path_rate(
-            self.pacing.path_rate_bps,
-            self.pacing.datagram_bytes,
-            self.pacing.max_burst_size,
-        );
     }
 }
 
@@ -770,12 +695,6 @@ impl RqAdaptiveSendState {
 
     fn missed_control_probes(&self) -> u8 {
         self.beacons.missed_probes()
-    }
-
-    fn round0_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
-        let mut tuning = self.round_tuning(config);
-        tuning.pacing = tuning.pacing.with_round0_slow_start_ramp();
-        tuning
     }
 
     fn round_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
@@ -3108,7 +3027,7 @@ pub async fn send_path(
 
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
-    let mut round_tuning = adaptive.round0_tuning(&config);
+    let mut round_tuning = adaptive.round_tuning(&config);
     // One token bucket owns the whole transfer. Recreating it per source/repair
     // spray would grant a fresh burst each time and overflow rate-capped qdiscs.
     let mut pacer = RqSprayPacer::new(round_tuning.pacing);
@@ -3879,7 +3798,6 @@ where
     if config.debug_drop_one_in > 0 {
         *dropper = dropper.wrapping_add(1);
         if *dropper % config.debug_drop_one_in == 0 {
-            pacer.record_local_loss();
             return Ok(());
         }
     }
@@ -6306,86 +6224,6 @@ mod tests {
         assert_eq!(
             pacing.max_burst_size,
             u32::try_from(RQ_COLD_START_BURST_SYMBOLS).unwrap()
-        );
-    }
-
-    #[test]
-    fn rq_round0_pacing_ramps_after_clean_cold_start_bursts() {
-        let config = RqConfig::default();
-        let mut state = RqAdaptiveSendState::new(7, &config, 1);
-        let tuning = state.round0_tuning(&config);
-        assert_eq!(tuning.pacing.rate_bytes_per_sec, RQ_COLD_START_PACING_BPS);
-        assert!(
-            tuning.pacing.ramp.is_some(),
-            "round 0 should enable intra-round slow-start"
-        );
-
-        let mut pacer = RqSprayPacer::new(tuning.pacing);
-        for _ in 0..RQ_COLD_START_BURST_SYMBOLS {
-            pacer.record_send_budget_consumed();
-        }
-        assert_eq!(
-            pacer.pacing.rate_bytes_per_sec,
-            RQ_COLD_START_PACING_BPS * RQ_COLD_START_RAMP_FACTOR
-        );
-
-        for _ in 0..RQ_COLD_START_BURST_SYMBOLS {
-            pacer.record_send_budget_consumed();
-        }
-        assert_eq!(pacer.pacing.rate_bytes_per_sec, RQ_MAX_PACING_BPS);
-
-        for _ in 0..(RQ_COLD_START_BURST_SYMBOLS * 4) {
-            pacer.record_send_budget_consumed();
-        }
-        assert_eq!(
-            pacer.pacing.rate_bytes_per_sec, RQ_MAX_PACING_BPS,
-            "round-0 ramp must clamp at the existing pacing ceiling"
-        );
-    }
-
-    #[test]
-    fn rq_feedback_round_tuning_keeps_cold_start_ramp_disabled() {
-        let config = RqConfig::default();
-        let mut state = RqAdaptiveSendState::new(7, &config, 1);
-
-        let tuning = state.round_tuning(&config);
-
-        assert_eq!(tuning.pacing.rate_bytes_per_sec, RQ_COLD_START_PACING_BPS);
-        assert!(
-            tuning.pacing.ramp.is_none(),
-            "feedback/fallback rounds must not re-enable round-0 slow-start"
-        );
-    }
-
-    #[test]
-    fn rq_round0_ramp_stays_disabled_when_loss_is_already_observed() {
-        let pacing = RqSprayPacing::from_rate(
-            RQ_COLD_START_PACING_BPS,
-            1024,
-            RQ_COLD_START_BURST_SYMBOLS,
-            Some(Duration::from_millis(50)),
-            true,
-        )
-        .with_round0_slow_start_ramp();
-
-        assert!(
-            pacing.ramp.is_none(),
-            "loss-signaled pacing must not continue slow-start ramping"
-        );
-    }
-
-    #[test]
-    fn rq_round0_pacer_sender_observed_loss_disables_ramp() {
-        let pacing = RqSprayPacing::cold_start(1024).with_round0_slow_start_ramp();
-        let mut pacer = RqSprayPacer::new(pacing);
-
-        pacer.record_local_loss();
-        pacer.record_send_budget_consumed();
-
-        assert_eq!(pacer.pacing.rate_bytes_per_sec, RQ_COLD_START_PACING_BPS);
-        assert!(
-            pacer.pacing.ramp.is_none(),
-            "sender-observed loss must stop intra-round slow-start immediately"
         );
     }
 
