@@ -1730,6 +1730,7 @@ with the human report in
 [`docs/browser_ga_final_signoff.md`](./docs/browser_ga_final_signoff.md). It
 aggregates B1 readiness, B2 package integrity, and B3 consumer compatibility
 for the JS/TS package line while keeping the Rust browser API preview-only.
+JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust browser API preview-only.
 
 ---
 
