@@ -33,9 +33,13 @@
 
 use std::sync::Arc;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::quic::{ClientConnection, Connection, KeyChange, ServerConnection, Version};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, Error as RustlsError, RootCertStore,
+    ServerConfig, SignatureScheme,
+};
 
 use super::tls::{
     PacketProtectionRequest, PacketProtectionSpace, ProtectedPacket, ProtectionProof,
@@ -71,6 +75,151 @@ fn handshake_failure(code: &'static str) -> QuicTlsError {
     QuicTlsError::CryptoProviderFailure {
         provider: "rustls-quic-handshake",
         code,
+    }
+}
+
+fn invalid_certificate(error: CertificateError) -> RustlsError {
+    RustlsError::InvalidCertificate(error)
+}
+
+fn is_unknown_issuer(error: &RustlsError) -> bool {
+    matches!(
+        error,
+        RustlsError::InvalidCertificate(CertificateError::UnknownIssuer)
+    )
+}
+
+fn san_matches_server_name(
+    san: &x509_parser::extensions::SubjectAlternativeName<'_>,
+    server_name: &ServerName<'_>,
+) -> bool {
+    san.general_names
+        .iter()
+        .any(|name| match (name, server_name) {
+            (
+                x509_parser::extensions::GeneralName::DNSName(presented),
+                ServerName::DnsName(expected),
+            ) => presented.eq_ignore_ascii_case(expected.as_ref()),
+            (
+                x509_parser::extensions::GeneralName::IPAddress(presented),
+                ServerName::IpAddress(expected),
+            ) => {
+                let expected: std::net::IpAddr = (*expected).into();
+                match expected {
+                    std::net::IpAddr::V4(addr) => *presented == addr.octets().as_slice(),
+                    std::net::IpAddr::V6(addr) => *presented == addr.octets().as_slice(),
+                }
+            }
+            _ => false,
+        })
+}
+
+fn verify_pinned_end_entity_shape(
+    end_entity: &CertificateDer<'_>,
+    server_name: &ServerName<'_>,
+    now: UnixTime,
+) -> Result<(), RustlsError> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(end_entity.as_ref())
+        .map_err(|_| invalid_certificate(CertificateError::BadEncoding))?;
+
+    let now = i64::try_from(now.as_secs())
+        .map_err(|_| invalid_certificate(CertificateError::BadEncoding))?;
+    let validity = parsed.validity();
+    if now < validity.not_before.timestamp() {
+        return Err(invalid_certificate(CertificateError::NotValidYet));
+    }
+    if now > validity.not_after.timestamp() {
+        return Err(invalid_certificate(CertificateError::Expired));
+    }
+
+    match parsed
+        .extended_key_usage()
+        .map_err(|_| invalid_certificate(CertificateError::BadEncoding))?
+    {
+        Some(usage) if usage.value.server_auth || usage.value.any => {}
+        _ => return Err(invalid_certificate(CertificateError::InvalidPurpose)),
+    }
+
+    if parsed
+        .key_usage()
+        .map_err(|_| invalid_certificate(CertificateError::BadEncoding))?
+        .is_some_and(|usage| !usage.value.digital_signature())
+    {
+        return Err(invalid_certificate(CertificateError::InvalidPurpose));
+    }
+
+    let san = parsed
+        .subject_alternative_name()
+        .map_err(|_| invalid_certificate(CertificateError::BadEncoding))?
+        .ok_or_else(|| invalid_certificate(CertificateError::NotValidForName))?;
+    if !san_matches_server_name(san.value, server_name) {
+        return Err(invalid_certificate(CertificateError::NotValidForName));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct WebPkiOrPinnedEndEntityVerifier {
+    webpki: Arc<rustls::client::WebPkiServerVerifier>,
+    pinned_end_entities: Vec<CertificateDer<'static>>,
+}
+
+impl ServerCertVerifier for WebPkiOrPinnedEndEntityVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        match self.webpki.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        ) {
+            Ok(verified) => Ok(verified),
+            Err(error)
+                if is_unknown_issuer(&error)
+                    && self
+                        .pinned_end_entities
+                        .iter()
+                        .any(|pinned| pinned.as_ref() == end_entity.as_ref()) =>
+            {
+                verify_pinned_end_entity_shape(end_entity, server_name, now)?;
+                Ok(ServerCertVerified::assertion())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.webpki.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.webpki.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.webpki.supported_verify_schemes()
+    }
+
+    fn root_hint_subjects(&self) -> Option<&[rustls::DistinguishedName]> {
+        self.webpki.root_hint_subjects()
     }
 }
 
@@ -581,6 +730,7 @@ pub fn client_config(
     roots: Vec<CertificateDer<'static>>,
     alpn: Vec<Vec<u8>>,
 ) -> Result<Arc<ClientConfig>, QuicTlsError> {
+    let pinned_end_entities = roots.clone();
     let mut root_store = RootCertStore::empty();
     for cert in roots {
         root_store
@@ -588,11 +738,29 @@ pub fn client_config(
             .map_err(|_| handshake_failure("client_root_add_failed"))?;
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut config = ClientConfig::builder_with_provider(provider)
+    let builder = ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|_| handshake_failure("client_protocol_versions"))?
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+        .map_err(|_| handshake_failure("client_protocol_versions"))?;
+    let mut config = if pinned_end_entities.is_empty() {
+        builder
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    } else {
+        let webpki = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(root_store),
+            provider,
+        )
+        .build()
+        .map_err(|_| handshake_failure("client_verifier_build"))?;
+        let verifier = WebPkiOrPinnedEndEntityVerifier {
+            webpki,
+            pinned_end_entities,
+        };
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_no_client_auth()
+    };
     config.alpn_protocols = alpn;
     Ok(Arc::new(config))
 }
@@ -691,6 +859,26 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             }
         }
         panic!("handshake did not converge within bound");
+    }
+
+    fn client_rejects_server(
+        client: &mut QuicHandshakeDriver,
+        server: &mut QuicHandshakeDriver,
+    ) -> bool {
+        'drive: for _ in 0..16 {
+            for seg in client.pump_outbound().expect("client pump") {
+                let _ = server.read_handshake(&seg.data);
+            }
+            for seg in server.pump_outbound().expect("server pump") {
+                if client.read_handshake(&seg.data).is_err() {
+                    return true;
+                }
+            }
+            if client.is_complete() {
+                break 'drive;
+            }
+        }
+        false
     }
 
     // Client's original Destination CID; both sides derive Initial keys from it.
@@ -845,6 +1033,55 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
     }
 
     #[test]
+    fn real_tls13_handshake_completes_with_exact_pinned_leaf() {
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let server_cfg =
+            server_config(vec![leaf_cert()], leaf_key(), alpn.clone()).expect("server config");
+        let client_cfg = client_config(vec![leaf_cert()], alpn).expect("client config");
+
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server = QuicHandshakeDriver::server(server_cfg, b"server-params".to_vec())
+            .expect("server driver");
+
+        drive_to_completion(&mut client, &mut server);
+
+        assert!(client.is_complete(), "client handshake incomplete");
+        assert!(server.is_complete(), "server handshake incomplete");
+        assert!(client.one_rtt_keys_installed() && server.one_rtt_keys_installed());
+    }
+
+    #[test]
+    fn exact_pinned_leaf_still_rejects_wrong_server_name() {
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let server_cfg =
+            server_config(vec![leaf_cert()], leaf_key(), alpn.clone()).expect("server config");
+        let client_cfg = client_config(vec![leaf_cert()], alpn).expect("client config");
+
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("not-localhost.example").expect("server name"),
+            b"client-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server = QuicHandshakeDriver::server(server_cfg, b"server-params".to_vec())
+            .expect("server driver");
+
+        assert!(
+            client_rejects_server(&mut client, &mut server),
+            "client must reject a pinned leaf with the wrong SAN"
+        );
+        assert!(
+            !client.is_complete(),
+            "client must not complete against a wrong-name pinned leaf"
+        );
+    }
+
+    #[test]
     fn handshake_fails_closed_when_client_does_not_trust_server() {
         let alpn = vec![ATP_QUIC_ALPN.to_vec()];
         let server_cfg =
@@ -863,24 +1100,8 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         let mut server = QuicHandshakeDriver::server(server_cfg, b"server-params".to_vec())
             .expect("server driver");
 
-        let mut client_rejected = false;
-        'drive: for _ in 0..16 {
-            for seg in client.pump_outbound().expect("client pump") {
-                let _ = server.read_handshake(&seg.data);
-            }
-            for seg in server.pump_outbound().expect("server pump") {
-                if client.read_handshake(&seg.data).is_err() {
-                    client_rejected = true;
-                    break 'drive;
-                }
-            }
-            if client.is_complete() {
-                break;
-            }
-        }
-
         assert!(
-            client_rejected,
+            client_rejects_server(&mut client, &mut server),
             "client must reject the untrusted server certificate"
         );
         assert!(

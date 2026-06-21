@@ -498,6 +498,207 @@ fn load_private_key(
         .ok_or_else(|| format!("no private key found in {}", path.display()))
 }
 
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct QuicCliServerVerifier {
+    webpki: Arc<rustls::client::WebPkiServerVerifier>,
+    pinned_leafs: Vec<Vec<u8>>,
+    signature_algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+#[cfg(feature = "tls")]
+impl QuicCliServerVerifier {
+    fn new(
+        roots: rustls::RootCertStore,
+        pinned_leafs: Vec<Vec<u8>>,
+        provider: Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Self, asupersync::net::quic_native::tls::QuicTlsError> {
+        let signature_algorithms = provider.signature_verification_algorithms;
+        let webpki =
+            rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+                .build()
+                .map_err(|_| {
+                    asupersync::net::quic_native::tls::QuicTlsError::CryptoProviderFailure {
+                        provider: "rustls-quic-handshake",
+                        code: "client_verifier_build_failed",
+                    }
+                })?;
+
+        Ok(Self {
+            webpki,
+            pinned_leafs,
+            signature_algorithms,
+        })
+    }
+
+    fn pinned_leaf_matches(&self, end_entity: &rustls::pki_types::CertificateDer<'_>) -> bool {
+        self.pinned_leafs
+            .iter()
+            .any(|pinned| pinned.as_slice() == end_entity.as_ref())
+    }
+}
+
+#[cfg(feature = "tls")]
+impl rustls::client::danger::ServerCertVerifier for QuicCliServerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use rustls::client::danger::ServerCertVerifier;
+
+        match self.webpki.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        ) {
+            Ok(verified) => Ok(verified),
+            Err(_) if self.pinned_leaf_matches(end_entity) => {
+                verify_quic_cli_pinned_leaf(end_entity, server_name, now)?;
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            Err(webpki_error) => Err(webpki_error),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.signature_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.signature_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.signature_algorithms.supported_schemes()
+    }
+}
+
+#[cfg(feature = "tls")]
+fn rustls_cert_error(error: rustls::CertificateError) -> rustls::Error {
+    rustls::Error::InvalidCertificate(error)
+}
+
+#[cfg(feature = "tls")]
+fn verify_quic_cli_pinned_leaf(
+    end_entity: &rustls::pki_types::CertificateDer<'_>,
+    server_name: &rustls::pki_types::ServerName<'_>,
+    now: rustls::pki_types::UnixTime,
+) -> Result<(), rustls::Error> {
+    use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
+
+    let (remaining, cert) = X509Certificate::from_der(end_entity.as_ref())
+        .map_err(|_| rustls_cert_error(rustls::CertificateError::BadEncoding))?;
+    if !remaining.is_empty() {
+        return Err(rustls_cert_error(rustls::CertificateError::BadEncoding));
+    }
+
+    let now_secs = i64::try_from(now.as_secs())
+        .map_err(|_| rustls_cert_error(rustls::CertificateError::BadEncoding))?;
+    let validity = cert.validity();
+    if now_secs < validity.not_before.timestamp() {
+        return Err(rustls_cert_error(rustls::CertificateError::NotValidYet));
+    }
+    if now_secs > validity.not_after.timestamp() {
+        return Err(rustls_cert_error(rustls::CertificateError::Expired));
+    }
+
+    let eku = cert
+        .extended_key_usage()
+        .map_err(|_| rustls_cert_error(rustls::CertificateError::BadEncoding))?
+        .ok_or_else(|| rustls_cert_error(rustls::CertificateError::InvalidPurpose))?;
+    if !eku.value.server_auth {
+        return Err(rustls_cert_error(rustls::CertificateError::InvalidPurpose));
+    }
+
+    let san = cert
+        .subject_alternative_name()
+        .map_err(|_| rustls_cert_error(rustls::CertificateError::BadEncoding))?
+        .ok_or_else(|| rustls_cert_error(rustls::CertificateError::NotValidForName))?;
+
+    let name_matches = match server_name {
+        rustls::pki_types::ServerName::DnsName(_) => {
+            let expected = server_name.to_str();
+            san.value.general_names.iter().any(|name| match name {
+                GeneralName::DNSName(dns) => dns.eq_ignore_ascii_case(expected.as_ref()),
+                _ => false,
+            })
+        }
+        rustls::pki_types::ServerName::IpAddress(ip) => {
+            let expected = std::net::IpAddr::from(*ip);
+            san.value.general_names.iter().any(|name| match name {
+                GeneralName::IPAddress(raw) => match expected {
+                    std::net::IpAddr::V4(addr) => *raw == addr.octets().as_slice(),
+                    std::net::IpAddr::V6(addr) => *raw == addr.octets().as_slice(),
+                },
+                _ => false,
+            })
+        }
+    };
+
+    if name_matches {
+        Ok(())
+    } else {
+        Err(rustls_cert_error(rustls::CertificateError::NotValidForName))
+    }
+}
+
+#[cfg(feature = "tls")]
+fn quic_cli_client_config(
+    roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    alpn: Vec<Vec<u8>>,
+) -> Result<Arc<rustls::ClientConfig>, asupersync::net::quic_native::tls::QuicTlsError> {
+    use asupersync::net::quic_native::handshake_driver::client_config;
+
+    if roots.is_empty() {
+        return client_config(roots, alpn);
+    }
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut root_store = rustls::RootCertStore::empty();
+    let pinned_leafs = roots
+        .iter()
+        .map(|cert| cert.as_ref().to_vec())
+        .collect::<Vec<_>>();
+    for cert in roots {
+        root_store.add(cert).map_err(|_| {
+            asupersync::net::quic_native::tls::QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "client_root_add_failed",
+            }
+        })?;
+    }
+    let verifier = QuicCliServerVerifier::new(root_store, pinned_leafs, provider.clone())?;
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(
+            |_| asupersync::net::quic_native::tls::QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "client_protocol_versions",
+            },
+        )?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+    config.alpn_protocols = alpn;
+    Ok(Arc::new(config))
+}
+
 /// Best-effort default SNI: the host portion of a `host:port` target.
 fn default_server_name(target: &str) -> String {
     let target = target.trim();
