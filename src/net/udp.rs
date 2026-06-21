@@ -792,6 +792,12 @@ impl UdpSendBatchPlan {
         strategy: UdpSendBatchStrategy,
     ) -> Self {
         let strategy = strategy.clamped();
+        let max_sendmmsg_batch = strategy
+            .max_sendmmsg_batch
+            .min(capabilities.max_sendmmsg_batch.max(1));
+        let max_gso_segments = strategy
+            .max_gso_segments
+            .min(capabilities.max_gso_segments.max(1));
         let datagrams = packets.len();
         let payload_bytes = packets.iter().map(|packet| packet.payload.len()).sum();
 
@@ -817,7 +823,7 @@ impl UdpSendBatchPlan {
         };
 
         if let Some(gso_segment_bytes) = gso_segment_bytes {
-            let segments_per_packet = datagrams.min(strategy.max_gso_segments);
+            let segments_per_packet = datagrams.min(max_gso_segments);
             let super_packets = div_ceil_usize(datagrams, segments_per_packet);
             let can_sendmmsg = strategy.prefer_sendmmsg
                 && matches!(capabilities.sendmmsg, UdpCapability::Supported)
@@ -828,7 +834,7 @@ impl UdpSendBatchPlan {
                 UdpSendBatchPath::Gso
             };
             let estimated_syscalls = if can_sendmmsg {
-                div_ceil_usize(super_packets, strategy.max_sendmmsg_batch)
+                div_ceil_usize(super_packets, max_sendmmsg_batch)
             } else {
                 super_packets
             };
@@ -848,7 +854,7 @@ impl UdpSendBatchPlan {
                 path: UdpSendBatchPath::Sendmmsg,
                 datagrams,
                 payload_bytes,
-                estimated_syscalls: div_ceil_usize(datagrams, strategy.max_sendmmsg_batch),
+                estimated_syscalls: div_ceil_usize(datagrams, max_sendmmsg_batch),
                 gso_segment_bytes: None,
                 gso_segments_per_packet: None,
             };
@@ -2133,6 +2139,73 @@ mod tests {
         assert_eq!(plan.estimated_syscalls, 2);
         assert_eq!(plan.gso_segment_bytes, Some(UDP_DEFAULT_GSO_SEGMENT_BYTES));
         assert_eq!(plan.gso_segments_per_packet, Some(64));
+    }
+
+    #[test]
+    fn udp_send_batch_plan_honors_capability_gso_segment_limit() {
+        let dst = socket_addr("127.0.0.1:9000");
+        let payloads = vec![vec![7; UDP_DEFAULT_GSO_SEGMENT_BYTES]; 9];
+        let packets = payloads
+            .iter()
+            .map(|payload| UdpOutboundDatagram {
+                dst_addr: dst,
+                payload,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = UdpSendBatchPlan::for_packets(
+            &packets,
+            UdpSendAccelerationCapabilities {
+                sendmmsg: UdpCapability::Supported,
+                gso: UdpCapability::Supported,
+                max_sendmmsg_batch: 2,
+                max_gso_segments: 3,
+            },
+            UdpSendBatchStrategy {
+                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+                ..UdpSendBatchStrategy::default()
+            },
+        );
+
+        assert_eq!(plan.path, UdpSendBatchPath::GsoSendmmsg);
+        assert_eq!(plan.datagrams, 9);
+        assert_eq!(plan.estimated_syscalls, 2);
+        assert_eq!(plan.gso_segment_bytes, Some(UDP_DEFAULT_GSO_SEGMENT_BYTES));
+        assert_eq!(plan.gso_segments_per_packet, Some(3));
+    }
+
+    #[test]
+    fn udp_send_batch_plan_honors_capability_sendmmsg_batch_limit() {
+        let dst = socket_addr("127.0.0.1:9000");
+        let payloads = vec![vec![7; 64]; 9];
+        let packets = payloads
+            .iter()
+            .map(|payload| UdpOutboundDatagram {
+                dst_addr: dst,
+                payload,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = UdpSendBatchPlan::for_packets(
+            &packets,
+            UdpSendAccelerationCapabilities {
+                sendmmsg: UdpCapability::Supported,
+                gso: UdpCapability::Unsupported,
+                max_sendmmsg_batch: 4,
+                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+            },
+            UdpSendBatchStrategy {
+                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+                ..UdpSendBatchStrategy::default()
+            },
+        );
+
+        assert_eq!(plan.path, UdpSendBatchPath::Sendmmsg);
+        assert_eq!(plan.datagrams, 9);
+        assert_eq!(plan.estimated_syscalls, 3);
+        assert_eq!(plan.gso_segment_bytes, None);
+        assert_eq!(plan.gso_segments_per_packet, None);
     }
 
     #[test]
