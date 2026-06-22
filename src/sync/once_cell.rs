@@ -61,13 +61,17 @@ struct WaiterState {
 
 #[cfg(test)]
 struct BlockingWaitHook {
+    target_cell: usize,
     entered_tx: std::sync::mpsc::Sender<()>,
     release_rx: StdMutex<std::sync::mpsc::Receiver<()>>,
 }
 
 #[cfg(test)]
 impl BlockingWaitHook {
-    fn run(&self) {
+    fn run(&self, cell_addr: usize) {
+        if self.target_cell != cell_addr {
+            return;
+        }
         self.entered_tx
             .send(())
             .expect("blocking wait hook should report entry");
@@ -84,14 +88,14 @@ static BLOCKING_WAIT_HOOK: OnceLock<StdMutex<Option<std::sync::Arc<BlockingWaitH
     OnceLock::new();
 
 #[cfg(test)]
-fn run_blocking_wait_hook() {
+fn run_blocking_wait_hook(cell_addr: usize) {
     let hook = BLOCKING_WAIT_HOOK
         .get_or_init(|| StdMutex::new(None))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     if let Some(hook) = hook {
-        hook.run();
+        hook.run(cell_addr);
     }
 }
 
@@ -508,7 +512,7 @@ impl<T> OnceCell<T> {
 
         while self.state.load(Ordering::Acquire) == INITIALIZING {
             #[cfg(test)]
-            run_blocking_wait_hook();
+            run_blocking_wait_hook(std::ptr::from_ref(self).cast::<()>() as usize);
             guard = match self.cvar.wait(guard) {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -1985,6 +1989,7 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let _hook_guard = install_blocking_wait_hook(std::sync::Arc::new(BlockingWaitHook {
+            target_cell: std::sync::Arc::as_ptr(&cell).cast::<()>() as usize,
             entered_tx,
             release_rx: StdMutex::new(release_rx),
         }));
