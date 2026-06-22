@@ -980,12 +980,16 @@ fn runner_execute_mode_honors_rch_bin_override() {
     );
 
     let argv = std::fs::read_to_string(&fake_log).expect("fake rch log");
+    let expected_target_dir = format!(
+        "CARGO_TARGET_DIR={}/rch_target_wasm_qa_WASM_QA_SMOKE_LAYERS",
+        std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string())
+    );
     for token in [
         "exec",
         "--",
         "env",
         "CARGO_INCREMENTAL=0",
-        "CARGO_TARGET_DIR=/tmp/rch_target_wasm_qa_WASM_QA_SMOKE_LAYERS",
+        expected_target_dir.as_str(),
         "cargo",
         "test",
         "-p",

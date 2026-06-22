@@ -277,7 +277,8 @@ fn build_browser_core_artifacts_script_exists() {
         "must pin a per-run target dir for remote browser-core builds"
     );
     assert!(
-        content.contains("CARGO_TARGET_DIR=\"${LOCAL_TARGET_DIR}\" wasm-pack build"),
+        content.contains("LOCAL_TARGET_DIR=\"${WORK_DIR}/wasm-pack-target\"")
+            && content.contains("export CARGO_TARGET_DIR=\"${LOCAL_TARGET_DIR}\""),
         "must package through a local wasm-pack target dir so wasm-bindgen can read the wasm artifact"
     );
     assert!(

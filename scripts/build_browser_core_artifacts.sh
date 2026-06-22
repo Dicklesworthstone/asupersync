@@ -57,10 +57,12 @@ esac
 
 mkdir -p "${STAGING_DIR}" "${PACKAGE_DIR}" "${WRAPPER_ROOT}"
 WORK_DIR="$(mktemp -d "${WRAPPER_ROOT}/${PROFILE}.XXXXXX")"
+CARGO_WRAPPER="${WORK_DIR}/cargo-rch"
 TARGET_DIR="${WORK_DIR}/target"
 LOCAL_TARGET_DIR="${WORK_DIR}/wasm-pack-target"
 PREFLIGHT_LOG="${WORK_DIR}/rch-preflight-build.log"
 BUILD_LOG="${WORK_DIR}/wasm-pack-build.log"
+export CARGO_TARGET_DIR="${LOCAL_TARGET_DIR}"
 
 reject_rch_local_fallback_log() {
   local log_path="$1"
@@ -71,6 +73,17 @@ reject_rch_local_fallback_log() {
   fi
 }
 
+cat > "${CARGO_WRAPPER}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${REPO_ROOT}"
+export RCH_FORCE_REMOTE="\${RCH_FORCE_REMOTE:-1}"
+export RCH_QUEUE_WHEN_BUSY="\${RCH_QUEUE_WHEN_BUSY:-1}"
+export RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="\${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}"
+exec "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "\$@"
+EOF
+chmod +x "${CARGO_WRAPPER}"
+
 echo "==> Preflighting asupersync-browser-core (${PROFILE}) through RCH"
 if RCH_REQUIRE_REMOTE=1 "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo "${RCH_CARGO_ARGS[@]}" 2>&1 | tee "${PREFLIGHT_LOG}"; then
   reject_rch_local_fallback_log "${PREFLIGHT_LOG}"
@@ -80,7 +93,7 @@ else
 fi
 
 echo "==> Packaging asupersync-browser-core (${PROFILE})"
-if CARGO_TARGET_DIR="${LOCAL_TARGET_DIR}" wasm-pack build "${CRATE_DIR}" \
+if CARGO="${CARGO_WRAPPER}" wasm-pack build "${CRATE_DIR}" \
   --target web \
   --out-dir "${STAGING_DIR}" \
   --out-name asupersync \

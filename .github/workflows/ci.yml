@@ -357,6 +357,11 @@ jobs:
       - name: WASM browser vNext surface certification
         run: |
           set -euo pipefail
+          RCH_BIN="${HOME}/.local/bin/rch"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for WASM browser vNext surface certification" >&2
+            exit 1
+          fi
           mkdir -p artifacts artifacts/onboarding_vnext
           python3 scripts/run_browser_onboarding_checks.py \
             --scenario worker \
