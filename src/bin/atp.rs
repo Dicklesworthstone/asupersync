@@ -214,6 +214,12 @@ struct SendArgs {
     /// Round-0 repair overhead factor, >= 1.0 (rq only).
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
     repair_overhead: f64,
+    /// Expected RQ round-0 wire loss percentage used to size proactive repair.
+    ///
+    /// This is intentionally separate from sender pacing. `0` keeps the default
+    /// source-first behavior; lossy matrix cells pass their netem loss here.
+    #[arg(long = "rq-round0-loss-pct", default_value_t = 0.0)]
+    rq_round0_loss_pct: f64,
     /// Receiver quiet-drain window after each RQ round marker, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_ROUND_TAIL_DRAIN_MS)]
     rq_tail_drain_ms: u64,
@@ -295,6 +301,9 @@ struct RecvArgs {
     /// Round-0 repair overhead factor (rq only).
     #[arg(long, default_value_t = DEFAULT_REPAIR_OVERHEAD)]
     repair_overhead: f64,
+    /// Expected RQ round-0 wire loss percentage used to size proactive repair.
+    #[arg(long = "rq-round0-loss-pct", default_value_t = 0.0)]
+    rq_round0_loss_pct: f64,
     /// Receiver quiet-drain window after each RQ round marker, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_ROUND_TAIL_DRAIN_MS)]
     rq_tail_drain_ms: u64,
@@ -419,16 +428,19 @@ fn rq_config(
     streams: usize,
     max_block_size: usize,
     repair_overhead: f64,
+    rq_round0_loss_pct: f64,
     tail_drain_ms: u64,
     rq_auth_key_hex: Option<&str>,
     rq_allow_unauthenticated_lab: bool,
 ) -> Result<RqConfig, String> {
     let max_block_size = normalize_max_block_size(symbol_size, max_block_size)?;
+    let round0_loss_target = normalize_loss_pct(rq_round0_loss_pct, "--rq-round0-loss-pct")?;
     let config = RqConfig {
         symbol_size,
         udp_fanout: streams.max(1),
         max_block_size,
         repair_overhead: repair_overhead.max(1.0),
+        round0_loss_target,
         max_transfer_bytes: max_bytes,
         max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
         round_tail_drain: Duration::from_millis(tail_drain_ms),
@@ -443,6 +455,13 @@ fn normalize_max_block_size(symbol_size: u16, max_block_size: usize) -> Result<u
         return Err("--max-block-size must be greater than 0".to_string());
     }
     Ok(max_block_size.max(usize::from(symbol_size.max(1))))
+}
+
+fn normalize_loss_pct(value: f64, flag: &str) -> Result<f64, String> {
+    if !value.is_finite() || value < 0.0 || value >= 100.0 {
+        return Err(format!("{flag} must be finite and in [0, 100)"));
+    }
+    Ok(value / 100.0)
 }
 
 fn normalize_bwlimit_bps(bwlimit_bps: Option<u64>) -> Result<Option<u64>, String> {
@@ -1342,6 +1361,7 @@ fn send_to_addr_with_transport(
                 args.streams,
                 args.max_block_size.effective(args.symbol_size)?,
                 args.repair_overhead,
+                args.rq_round0_loss_pct,
                 args.rq_tail_drain_ms,
                 args.rq_auth_key_hex.as_deref(),
                 args.rq_allow_unauthenticated_lab,
@@ -3323,6 +3343,8 @@ fn spawn_remote_receiver(
         args.max_block_size.remote_arg(),
         "--repair-overhead".to_string(),
         args.repair_overhead.to_string(),
+        "--rq-round0-loss-pct".to_string(),
+        args.rq_round0_loss_pct.to_string(),
         "--rq-tail-drain-ms".to_string(),
         args.rq_tail_drain_ms.to_string(),
     ];
@@ -4072,6 +4094,7 @@ fn run_recv(args: RecvArgs, persistent: bool) -> Result<(), String> {
                 1,
                 args.max_block_size.effective(args.symbol_size)?,
                 args.repair_overhead,
+                args.rq_round0_loss_pct,
                 args.rq_tail_drain_ms,
                 args.rq_auth_key_hex.as_deref(),
                 args.rq_allow_unauthenticated_lab,
@@ -4473,7 +4496,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     #[test]
     fn direct_rq_requires_auth_or_explicit_lab_override() {
-        let missing = match rq_config(1024, 1024, 1, 512 * 1024, 1.0, 2, None, false) {
+        let missing = match rq_config(1024, 1024, 1, 512 * 1024, 1.0, 0.0, 2, None, false) {
             Ok(_) => panic!("direct rq without auth must fail closed"),
             Err(err) => err,
         };
@@ -4486,13 +4509,14 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
                 1,
                 512 * 1024,
                 1.0,
+                0.0,
                 2,
                 Some(VALID_KEY_HEX),
                 false
             )
             .is_ok()
         );
-        assert!(rq_config(1024, 1024, 1, 512 * 1024, 1.0, 2, None, true).is_ok());
+        assert!(rq_config(1024, 1024, 1, 512 * 1024, 1.0, 0.0, 2, None, true).is_ok());
     }
 
     #[test]
@@ -4503,6 +4527,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             4,
             512 * 1024,
             1.0,
+            2.0,
             2,
             Some(VALID_KEY_HEX),
             false,
@@ -4511,6 +4536,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
         assert_eq!(config.max_block_size, 512 * 1024);
         assert_eq!(config.max_block_size / usize::from(config.symbol_size), 512);
+        assert_eq!(config.round0_loss_target, 0.02);
     }
 
     #[test]
@@ -4591,6 +4617,16 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         );
         assert_eq!(normalize_max_block_size(1024, 512), Ok(1024));
         assert_eq!(normalize_max_block_size(1024, 512 * 1024), Ok(512 * 1024));
+    }
+
+    #[test]
+    fn rq_round0_loss_pct_normalizes_fraction_and_rejects_invalid_values() {
+        assert_eq!(normalize_loss_pct(0.0, "--rq-round0-loss-pct"), Ok(0.0));
+        assert_eq!(normalize_loss_pct(0.1, "--rq-round0-loss-pct"), Ok(0.001));
+        assert_eq!(normalize_loss_pct(2.0, "--rq-round0-loss-pct"), Ok(0.02));
+        assert!(normalize_loss_pct(-0.1, "--rq-round0-loss-pct").is_err());
+        assert!(normalize_loss_pct(100.0, "--rq-round0-loss-pct").is_err());
+        assert!(normalize_loss_pct(f64::NAN, "--rq-round0-loss-pct").is_err());
     }
 
     #[test]

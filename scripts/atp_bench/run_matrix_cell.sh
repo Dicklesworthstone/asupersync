@@ -166,6 +166,19 @@ print(hashlib.sha256("\n".join(rows).encode()).hexdigest())
 PY
 }
 
+netem_loss_pct() {
+    python3 - "$NETEM_JSON" <<'PY'
+import json, math, sys
+try:
+    value = float((json.loads(sys.argv[1]) or {}).get("loss_pct", 0) or 0)
+except Exception:
+    value = 0.0
+if not math.isfinite(value) or value < 0:
+    value = 0.0
+print(value)
+PY
+}
+
 # peak avg (kB) over a cmdline pattern, sampled every RSS_SAMPLE_INTERVAL.
 sample_rss() {
     local pattern="$1" stop_file="$2" out_file="$3"
@@ -252,7 +265,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     local rl="$CASE_DIR/recv.log" sl="$CASE_DIR/send.log" rt="$CASE_DIR/recv.time" st="$CASE_DIR/send.time"
     local r_tag="atprecv-${SUFFIX}" s_tag="atpsend-${SUFFIX}"
     local r_stop="$CASE_DIR/r_stop" r_out="$CASE_DIR/r_rss" s_stop="$CASE_DIR/s_stop" s_out="$CASE_DIR/s_rss"
-    local -a auth_recv=() auth_send=() block_args=() delta_args=() tls_recv=() tls_send=()
+    local -a auth_recv=() auth_send=() block_args=() delta_args=() tls_recv=() tls_send=() rq_loss_args=()
     local sym="$SYMBOL_SIZE"
     # "auto" means let atp pick its built-in (auto-bound) block size — the CLI
     # flag parses strictly as a number, so omit it rather than passing "auto"
@@ -301,13 +314,16 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     fi
 
     local extra_send=()
-    [ "$transport" = "rq" ] && extra_send=(--streams "$STREAMS")
+    if [ "$transport" = "rq" ]; then
+        extra_send=(--streams "$STREAMS")
+        rq_loss_args=(--rq-round0-loss-pct "$(netem_loss_pct)")
+    fi
 
     set +e
     timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" recv "$recv_dir" \
         --listen "0.0.0.0:${PORT}" --transport "$transport" --once --peer-id "$r_tag" \
         --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$sym" \
-        "${block_args[@]}" "${delta_args[@]}" "${auth_recv[@]}" "${tls_recv[@]}" >"$rl" 2>"$rt" &
+        "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${auth_recv[@]}" "${tls_recv[@]}" >"$rl" 2>"$rt" &
     local recv_pid=$!
     sample_rss "$r_tag" "$r_stop" "$r_out" & local r_samp=$!
     sleep "$RECEIVER_READY_SLEEP"
@@ -316,7 +332,7 @@ run_atp() {  # $1=auth-mode: lab|key   $2=transport: rq|quic
     start="$(now_s)"
     ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v "$BIN" send "$WL_PATH" "${HOST_IP}:${PORT}" \
         --transport "$transport" --symbol-size "$sym" --peer-id "$s_tag" --max-bytes "$MAX_BYTES" \
-        "${block_args[@]}" "${delta_args[@]}" "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}" >"$sl" 2>"$st"
+        "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}" >"$sl" 2>"$st"
     ss=$?; [ "$ss" = "124" ] && TIMED_OUT=true
     if [ "$ss" != "0" ] && kill -0 "$recv_pid" 2>/dev/null; then kill "$recv_pid" 2>/dev/null || true; fi
     wait "$recv_pid"; rs=$?; [ "$rs" = "124" ] && TIMED_OUT=true

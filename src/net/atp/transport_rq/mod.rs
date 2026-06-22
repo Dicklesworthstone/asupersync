@@ -208,6 +208,15 @@ const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
 const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
 const RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR: f64 = 0.01;
 const RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD: f64 = 0.03;
+/// Do not spend proactive round-0 repair on clean and near-clean links. The
+/// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
+const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
+/// Convert an explicit path-loss target into a conservative upper bound before
+/// feeding the RaptorQ overhead solver. At 2% loss this produces a ~3% sizing
+/// input, enough margin for one-round convergence without turning clean links
+/// into fixed-overhead transfers.
+const RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION: f64 = 0.25;
+const RQ_ROUND0_TARGET_LOSS_MARGIN_MIN: f64 = 0.005;
 /// Hard cap on the per-round fractional repair overhead taken from the controller's
 /// wire-loss-driven `plan.overhead` (round_tuning). Without this, a round-0 spray that
 /// over-paces a slow link self-inflicts high real loss, the wire-loss estimate clamps near
@@ -287,6 +296,14 @@ pub struct RqConfig {
     pub max_block_size: usize,
     /// Extra repair fraction sprayed in round 0 (>= 1.0).
     pub repair_overhead: f64,
+    /// Explicit expected round-0 wire loss as a fraction in `[0, 1)`.
+    ///
+    /// This is optional and defaults to `0.0`. Matrix benchmark callers can set it
+    /// from the known netem loss for lossy cells so the first spray includes a
+    /// calibrated fountain repair budget. Clean and near-clean values stay below
+    /// `RQ_ROUND0_TARGET_LOSS_ENABLE_MIN` and therefore preserve the source-first
+    /// path.
+    pub round0_loss_target: f64,
     /// Number of UDP sockets the sender sprays across.
     pub udp_fanout: usize,
     /// Maximum total bytes a single transfer may carry.
@@ -346,6 +363,7 @@ impl Default for RqConfig {
             symbol_size: DEFAULT_SYMBOL_SIZE,
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             repair_overhead: DEFAULT_REPAIR_OVERHEAD,
+            round0_loss_target: 0.0,
             udp_fanout: DEFAULT_UDP_FANOUT,
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
             max_feedback_rounds: DEFAULT_MAX_FEEDBACK_ROUNDS,
@@ -734,6 +752,14 @@ impl RqAdaptiveSendState {
         }
     }
 
+    fn round0_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
+        let mut tuning = self.round_tuning(config);
+        tuning.repair_overhead = tuning
+            .repair_overhead
+            .max(round0_loss_target_repair_overhead(config));
+        tuning
+    }
+
     fn source_fec_fallback_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
         let mut tuning = self.round_tuning(config);
         let k = fixed_block_k(config);
@@ -1065,6 +1091,29 @@ fn fixed_block_k(config: &RqConfig) -> u32 {
     let symbol_size = usize::from(config.symbol_size.max(1));
     let k = config.max_block_size.div_ceil(symbol_size).max(1);
     u32::try_from(k).unwrap_or(u32::MAX)
+}
+
+fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
+    if !round0_loss_target_repair_enabled(config) {
+        return config.repair_overhead.max(1.0);
+    }
+    let loss = config.round0_loss_target;
+    let loss_bar = (loss * (1.0 + RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION)
+        + RQ_ROUND0_TARGET_LOSS_MARGIN_MIN)
+        .clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD);
+    let overhead = adaptive::overhead_for_target(
+        fixed_block_k(config),
+        loss_bar,
+        RQ_SOURCE_FEC_FALLBACK_ALPHA,
+        RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+    )
+    .min(RQ_MAX_ROUND_REPAIR_OVERHEAD);
+    config.repair_overhead.max(1.0 + overhead)
+}
+
+fn round0_loss_target_repair_enabled(config: &RqConfig) -> bool {
+    let loss = config.round0_loss_target;
+    loss.is_finite() && loss >= RQ_ROUND0_TARGET_LOSS_ENABLE_MIN
 }
 
 fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
@@ -3041,7 +3090,7 @@ pub async fn send_path(
 
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
-    let mut round_tuning = adaptive.round_tuning(&config);
+    let mut round_tuning = adaptive.round0_tuning(&config);
     // One token bucket owns the whole transfer. Recreating it per source/repair
     // spray would grant a fresh burst each time and overflow rate-capped qdiscs.
     let mut pacer = RqSprayPacer::new(round_tuning.pacing);
@@ -3304,7 +3353,8 @@ fn repair_target_for_feedback_round(
 }
 
 fn source_retransmit_request_limit(config: &RqConfig, feedback_round: u32) -> Option<usize> {
-    if config.repair_overhead <= 1.0
+    if !round0_loss_target_repair_enabled(config)
+        && config.repair_overhead <= 1.0
         && config.source_retransmit_rounds > 0
         && feedback_round <= config.source_retransmit_rounds
     {
@@ -3319,6 +3369,9 @@ fn source_retransmit_needs_fec_fallback(
     feedback_round: u32,
     requested_sources: usize,
 ) -> bool {
+    if round0_loss_target_repair_enabled(config) {
+        return true;
+    }
     if config.repair_overhead > 1.0 || config.source_retransmit_rounds == 0 {
         return false;
     }
@@ -8224,6 +8277,33 @@ mod tests {
     }
 
     #[test]
+    fn source_retransmit_stays_source_first_below_round0_loss_threshold() {
+        let config = RqConfig {
+            repair_overhead: 1.0,
+            round0_loss_target: 0.001,
+            ..RqConfig::default()
+        };
+
+        assert_eq!(
+            source_retransmit_request_limit(&config, 1),
+            Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
+        );
+        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 0));
+    }
+
+    #[test]
+    fn round0_loss_target_uses_repair_feedback_in_lossy_cells() {
+        let config = RqConfig {
+            repair_overhead: 1.0,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+
+        assert_eq!(source_retransmit_request_limit(&config, 1), None);
+        assert!(source_retransmit_needs_fec_fallback(&config, 1, 0));
+    }
+
+    #[test]
     fn source_retransmit_requires_explicit_round_budget() {
         let config = RqConfig {
             repair_overhead: 1.0,
@@ -8264,6 +8344,77 @@ mod tests {
         assert!(source_retransmit_needs_fec_fallback(&config, 2, 1));
         assert!(source_retransmit_needs_fec_fallback(&config, 2, 0));
         assert!(source_retransmit_needs_fec_fallback(&config, 3, 0));
+    }
+
+    #[test]
+    fn round0_loss_target_keeps_clean_and_good_links_source_first() {
+        for target in [0.0, 0.001] {
+            let config = RqConfig {
+                symbol_size: 1200,
+                max_block_size: 512 * 1024,
+                repair_overhead: 1.0,
+                round0_loss_target: target,
+                ..RqConfig::default()
+            };
+
+            assert_eq!(round0_loss_target_repair_overhead(&config), 1.0);
+            assert_eq!(
+                source_retransmit_request_limit(&config, 1),
+                Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
+            );
+        }
+    }
+
+    #[test]
+    fn round0_loss_target_calibrates_bad_link_repair_without_pacing_changes() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 8);
+
+        let tuning = state.round0_tuning(&config);
+
+        assert!(
+            (1.10..=1.20).contains(&tuning.repair_overhead),
+            "2% target loss should produce a 10-20% one-round repair budget, got {}",
+            tuning.repair_overhead
+        );
+        assert!(
+            initial_repair_target_per_block(437, tuning.repair_overhead) >= 40,
+            "2% loss should pre-spray enough repair symbols for one-round convergence"
+        );
+        assert!(
+            tuning.pacing.path_rate_bps
+                <= RqSprayPacing::cold_start(config.symbol_size).path_rate_bps,
+            "round-0 loss calibration must not raise sender pacing"
+        );
+        assert!(
+            source_retransmit_needs_fec_fallback(&config, 2, 0),
+            "repair-only rounds at the source-retransmit boundary must keep FEC fallback enabled"
+        );
+    }
+
+    #[test]
+    fn round0_loss_target_for_broken_link_is_bounded() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+
+        let overhead = round0_loss_target_repair_overhead(&config);
+
+        assert!(overhead > 1.20, "broken link should receive proactive FEC");
+        assert!(
+            overhead <= 1.0 + RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+            "round-0 target loss must stay within bounded FEC envelope"
+        );
     }
 
     #[test]
@@ -8361,6 +8512,17 @@ mod tests {
     fn proactive_initial_repair_target_ceilings_extra_fraction() {
         assert_eq!(initial_repair_target_per_block(512, 1.15), 77);
         assert_eq!(initial_repair_target_per_block(1, 1.01), 1);
+    }
+
+    #[test]
+    fn round0_loss_target_respects_explicit_repair_overhead_floor() {
+        let config = RqConfig {
+            repair_overhead: 1.25,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+
+        assert!(round0_loss_target_repair_overhead(&config) >= 1.25);
     }
 
     #[test]
