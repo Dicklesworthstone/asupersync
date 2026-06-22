@@ -1621,3 +1621,20 @@ The sustained-delivery cap does NOT cap good (`path_rate_bps` still hit 335,544,
 **★PACING IS A DEAD END — 5 consecutive failures:** lever-1 v2 (estimator collapse), lever-1 v3 (control-frame overflow), round-0 ramp (receiver overflow), link-cap (bursty estimate 2× over link), sustained-delivery (lossy destruction + sha fail). Every attempt to raise round-0 send rate either overflows the receiver/link → self-inflicted loss → more rounds, or destabilizes lossy convergence. The single perfect improvement (3.72→1.85) NEVER beats rsync (1.23) and is not worth the lossy/correctness cost.
 
 **Decision: REVERT `3e37aac2a` (all pacing) → lock the okcmis + Lever B foundation** as the stable base: okcmis feed-cache (`46355c9a2`, receiver 47.9 MB/s) + Lever B lossy-fix (`67826603e`, round-boundary seed). That foundation is regression-free and IMPROVES bad (73→60) with all cells sha-ok. STOP spending the swarm on sender pacing. **Redirect ALL energy to the real prize: LOSSY CONVERGENCE via FEC** (round-0 repair-overhead calibration ε≈target_loss+margin + the 317hxr.6.1.1 FEC-fallback-self-disable fix), where atp's fountain code SHOULD structurally beat rsync's TCP (bad 5×/broken 1.6× behind today). Dispatched revert + lossy pivot. PASS for the locked foundation: perfect ~3.65 / good ~3.95 / bad ~60 / broken ~112, ALL sha-ok. Evidence dir: `artifacts/atp_bench_matrix/20260622T033426Z/`.
+
+## MATRIX-28 (2026-06-22) — foundation RESTORED + lossy round-0 repair calibration (bad 73→60); ★real lossy wall found: cold-start OVERSHOOTS the slow link
+
+Pacing reverted (`1af2e7a69`, RQ_SUSTAINED=0) + lossy round-0 repair calibration landed (`7842fdcb5`). Rebuilt fresh `atp 0.3.5`, benched 50M nocrypto ×4, run `20260622T043032Z`:
+
+| regime | now | baseline | rsyncd | fr | sha | verdict |
+|---|---|---|---|---|---|---|
+| perfect | 3.65s | 3.72 | 1.23 | 0 | 3/3 | foundation restored, no flood (path_rate back to 64 MiB/s) |
+| good 0.1% | 3.95s | 3.95 | 3.93 | 1 | 3/3 | **ties rsync**, no flood |
+| bad 2% | **59.80s** | 73.41 | 14.94 | 4 | 3/3 | ✅ improved Δ-13.6 (repair calibration) |
+| broken 10% | 128.32s | 114.44 | 76.19 | 6–7 | 3/3 | ⚠ slightly worse (noisy cell + 1.5× overhead costs on a 1.25 MB/s pipe) |
+
+Foundation is the cleanest stable state yet: perfect/good restored (good TIES rsync), no pacing flood, no sha fail; bad improved 18%. All sha-ok.
+
+**★REAL LOSSY WALL (trace, 50M/bad round-0): `sent_this_round=50500 received_this_round=26845` = ~47% loss in ROUND 0 — on a 2%-loss link.** That 47% is NOT link loss; it is the **16 MiB/s cold-start pacing OVERSHOOTING the 6.25 MB/s bad link 2.7×** → the netem rate-limiter drops ~half of round-0 → 4 rounds to recover. The repair-overhead calibration (`repair_overhead=1.5`) only partly masks this (bad 73→60) and is COUNTERPRODUCTIVE on broken (50% extra data on a 1.25 MB/s pipe → 114→128). Repair overhead fights the symptom; the root cause is round-0 overshoot of the slow link.
+
+**Next lossy lever (distinct from the DEAD pace-UP): pace recovery rounds DOWN to the measured link-delivery rate.** After round-0 reveals the link capacity (`received/sent × rate`), pace rounds 1+ at that measured delivery rate (a ONE-DIRECTIONAL DOWNWARD cap, ≤ cold-start — it can NEVER overshoot the receiver, so it can't break clean like the pace-UP attempts). Rounds 1+ then deliver ~100% (no re-overshoot) → converge in 1–2 rounds with MINIMAL repair overhead (drop the flat 1.5× → loss-proportional ε). This attacks the 47% round-0 self-loss directly. Target: bad fr≤2, wall <30s → toward <15 (beat rsync); broken back ≤114 then down. Dispatched. NOTE: this is downward-only link-rate matching on lossy recovery rounds — NOT the refuted pace-up. Evidence dir: `artifacts/atp_bench_matrix/20260622T043032Z/`.
