@@ -1638,3 +1638,20 @@ Foundation is the cleanest stable state yet: perfect/good restored (good TIES rs
 **★REAL LOSSY WALL (trace, 50M/bad round-0): `sent_this_round=50500 received_this_round=26845` = ~47% loss in ROUND 0 — on a 2%-loss link.** That 47% is NOT link loss; it is the **16 MiB/s cold-start pacing OVERSHOOTING the 6.25 MB/s bad link 2.7×** → the netem rate-limiter drops ~half of round-0 → 4 rounds to recover. The repair-overhead calibration (`repair_overhead=1.5`) only partly masks this (bad 73→60) and is COUNTERPRODUCTIVE on broken (50% extra data on a 1.25 MB/s pipe → 114→128). Repair overhead fights the symptom; the root cause is round-0 overshoot of the slow link.
 
 **Next lossy lever (distinct from the DEAD pace-UP): pace recovery rounds DOWN to the measured link-delivery rate.** After round-0 reveals the link capacity (`received/sent × rate`), pace rounds 1+ at that measured delivery rate (a ONE-DIRECTIONAL DOWNWARD cap, ≤ cold-start — it can NEVER overshoot the receiver, so it can't break clean like the pace-UP attempts). Rounds 1+ then deliver ~100% (no re-overshoot) → converge in 1–2 rounds with MINIMAL repair overhead (drop the flat 1.5× → loss-proportional ε). This attacks the 47% round-0 self-loss directly. Target: bad fr≤2, wall <30s → toward <15 (beat rsync); broken back ≤114 then down. Dispatched. NOTE: this is downward-only link-rate matching on lossy recovery rounds — NOT the refuted pace-up. Evidence dir: `artifacts/atp_bench_matrix/20260622T043032Z/`.
+
+## MATRIX-29 (2026-06-22) — lossy recovery downcap REGRESSED (bad FAILS to converge); rate-control is a definitive tar-pit (~7 fails); LOCK foundation, lossy needs real AIMD
+
+The recovery-pacing downcap landed (`ce45e763d` "cap recovery pacing to measured delivery" + `e870d8055` FEC-fallback + refined `0bd348050` "cap lossy recovery to measured delivery"). Benched 50M nocrypto ×4, run `20260622T060546Z`:
+
+| regime | downcap | foundation (MATRIX-28) | rsyncd | verdict |
+|---|---|---|---|---|
+| perfect | 3.65s sha3/3 | 3.65 | 1.23 | unchanged |
+| good | 3.95s sha3/3 | 3.95 | 3.93 | unchanged (ties rsync) |
+| **bad** | **status=error, sha 0/3, ~177s** | 59.8 sha-ok | 14.94 | ❌ **FAILS — `[ASUP-E801] no convergence after 17 rounds`** |
+| broken | 186.7s fr 9–10 | 114→128 | 76.19 | ❌ **+72s WORSE** |
+
+**Why the downcap fails (trace, 50M/bad):** round-1 (the big 45900-symbol recovery round) STILL sprays at `path_rate_bps=63765008` = 64 MiB/s on the 6.25 MB/s link → received 25014/45900 = ~45% loss; the "measured delivery" cap only drops to ~20 MiB/s later (still 3× the link) and never to the true 6.25 MB/s. So rounds keep overshooting → 17 rounds → non-convergence. **Same failure mode as every measurement-derived rate control: the delivery estimate overestimates the link (bursty/early-window) → overshoot → loss.** repair_overhead correctly dropped to loss-proportional 1.05× (good) but pacing is the problem.
+
+**★RATE-CONTROL IS A DEFINITIVE TAR-PIT — ~7 consecutive failures:** lever-1 v2/v3, round-0 ramp, link-cap, sustained-delivery (all pace-UP), + recovery-downcap ×2 (pace-DOWN). Every attempt to set send rate from measured loss/delivery overshoots the link and either breaks clean (receiver overflow) or fails lossy convergence. **STOP piecemeal rate hacks.**
+
+**Decision: REVERT to the MATRIX-28 foundation `7842fdcb5`** (okcmis feed-cache + Lever B + round-0 repair calibration) — the last all-sha-ok state (perfect 3.65 / good 3.95 ties rsync / bad 59.8 / broken ~114-128). Lock it. **Lossy convergence requires PROPER AIMD congestion control** — receiver reports observed loss in NeedMore; sender does multiplicative-decrease on loss + additive-increase on clean, converging the send rate to the true link rate over rounds (the standard solution to exactly this overshoot problem) — as ONE coherent, hard-gated change, NOT another one-shot estimate hack. In parallel, broaden to the untouched mission fronts (QUIC/encrypted port of okcmis, trees, 500M scale) for independent wins while AIMD is built carefully. Dispatched revert + re-orientation. Evidence dir: `artifacts/atp_bench_matrix/20260622T060546Z/`.
