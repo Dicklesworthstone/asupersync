@@ -4279,20 +4279,36 @@ mod tests {
             true,
             has_code
         );
-        for expected in [
-            "count=1",
-            "obligation=",
-            "kind=SendPermit",
-            "holder=",
-            "region=",
-        ] {
-            crate::assert_with_log!(
-                rendered.contains(expected),
-                format!("obligation leak display field {expected}"),
-                true,
-                rendered.contains(expected)
-            );
-        }
+        crate::assert_with_log!(
+            rendered.contains("count=1"),
+            "obligation leak display count",
+            true,
+            rendered.contains("count=1")
+        );
+        crate::assert_with_log!(
+            rendered.contains("obligation="),
+            "obligation leak display obligation id",
+            true,
+            rendered.contains("obligation=")
+        );
+        crate::assert_with_log!(
+            rendered.contains("kind=SendPermit"),
+            "obligation leak display kind",
+            true,
+            rendered.contains("kind=SendPermit")
+        );
+        crate::assert_with_log!(
+            rendered.contains("holder="),
+            "obligation leak display holder",
+            true,
+            rendered.contains("holder=")
+        );
+        crate::assert_with_log!(
+            rendered.contains("region="),
+            "obligation leak display region",
+            true,
+            rendered.contains("region=")
+        );
         crate::test_complete!("obligation_leak_display_includes_error_code_and_owner_facts");
     }
 
