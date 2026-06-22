@@ -213,6 +213,14 @@ const RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN: f64 = 0.03;
 const RQ_AIMD_CLEAN_INCREASE_THRESHOLD: f64 = 0.0015;
 const RQ_AIMD_MULTIPLICATIVE_DECREASE: f64 = 0.50;
 const RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
+/// Explicit lossy matrix cells should not begin at the full cold-start rate:
+/// MATRIX-33/34 showed AIMD fixes rounds after feedback, while the blind first
+/// round still over-paces the shaped bad link. Seed AIMD below cold-start only
+/// when the operator supplied a lossy target, then use the same additive path
+/// to climb on non-excess receiver loss.
+const RQ_AIMD_LOSSY_INITIAL_PACING_BPS: u64 = RQ_COLD_START_PACING_BPS / 4;
+const RQ_AIMD_HIGH_LOSS_INITIAL_PACING_BPS: u64 = RQ_AIMD_LOSSY_INITIAL_PACING_BPS;
+const RQ_AIMD_HIGH_LOSS_INITIAL_THRESHOLD: f64 = 0.05;
 /// Do not spend proactive round-0 repair on clean and near-clean links. The
 /// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
 const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
@@ -305,9 +313,9 @@ pub struct RqConfig {
     ///
     /// This is optional and defaults to `0.0`. Matrix benchmark callers can set it
     /// from the known netem loss for lossy cells so the first spray includes a
-    /// calibrated fountain repair budget. Clean and near-clean values stay below
-    /// `RQ_ROUND0_TARGET_LOSS_ENABLE_MIN` and therefore preserve the source-first
-    /// path.
+    /// calibrated fountain repair budget and a conservative initial AIMD seed.
+    /// Clean and near-clean values stay below `RQ_ROUND0_TARGET_LOSS_ENABLE_MIN`
+    /// and therefore preserve the source-first pacing path.
     pub round0_loss_target: f64,
     /// Number of UDP sockets the sender sprays across.
     pub udp_fanout: usize,
@@ -680,7 +688,7 @@ impl RqAdaptiveSendState {
             beacons: BeaconScheduler::new(seed, Instant::now()),
             est,
             symbol_size: config.symbol_size,
-            aimd_rate_bps: RQ_COLD_START_PACING_BPS,
+            aimd_rate_bps: aimd_initial_rate_bps(config),
             aimd_feedback_seen: false,
             last_round_loss_fraction: 0.0,
             loss_ema: 0.0,
@@ -727,9 +735,20 @@ impl RqAdaptiveSendState {
     }
 
     fn round_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
+        let fixed_pacing = if self.aimd_rate_bps == RQ_COLD_START_PACING_BPS {
+            RqSprayPacing::cold_start(config.symbol_size)
+        } else {
+            RqSprayPacing::from_rate(
+                self.aimd_rate_bps,
+                config.symbol_size,
+                RQ_COLD_START_BURST_SYMBOLS,
+                None,
+                false,
+            )
+        };
         let fixed = RqRoundTuning {
             repair_overhead: config.repair_overhead.max(1.0),
-            pacing: RqSprayPacing::cold_start(config.symbol_size),
+            pacing: fixed_pacing,
         };
         let Some(mut plan) = self.controller.next_block_plan(self.symbol_size) else {
             return fixed;
@@ -949,7 +968,9 @@ impl RqAdaptiveSendState {
             let reduced =
                 (self.aimd_rate_bps as f64 * RQ_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
             self.aimd_rate_bps = reduced.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
-        } else if loss <= RQ_AIMD_CLEAN_INCREASE_THRESHOLD {
+        } else if loss <= RQ_AIMD_CLEAN_INCREASE_THRESHOLD
+            || self.aimd_rate_bps < RQ_COLD_START_PACING_BPS
+        {
             self.aimd_rate_bps = self
                 .aimd_rate_bps
                 .saturating_add(RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
@@ -1170,6 +1191,18 @@ fn aimd_loss_decrease_threshold(config: &RqConfig) -> f64 {
     (expected_loss + RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN)
         .max(RQ_AIMD_LOSS_DECREASE_THRESHOLD_MIN)
         .clamp(0.0, 0.90)
+}
+
+fn aimd_initial_rate_bps(config: &RqConfig) -> u64 {
+    if !round0_loss_target_repair_enabled(config) {
+        return RQ_COLD_START_PACING_BPS;
+    }
+    let initial = if config.round0_loss_target >= RQ_AIMD_HIGH_LOSS_INITIAL_THRESHOLD {
+        RQ_AIMD_HIGH_LOSS_INITIAL_PACING_BPS
+    } else {
+        RQ_AIMD_LOSSY_INITIAL_PACING_BPS
+    };
+    initial.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS)
 }
 
 fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
@@ -6731,6 +6764,63 @@ mod tests {
     }
 
     #[test]
+    fn rq_aimd_initial_rate_preserves_clean_and_good_cold_start() {
+        for target in [0.0, 0.001] {
+            let config = RqConfig {
+                symbol_size: 1200,
+                round0_loss_target: target,
+                ..RqConfig::default()
+            };
+            let mut state = RqAdaptiveSendState::new(7, &config, 1);
+
+            let tuning = state.round0_tuning(&config);
+
+            assert_eq!(state.aimd_rate_bps, RQ_COLD_START_PACING_BPS);
+            assert_eq!(
+                tuning.pacing.path_rate_bps,
+                RQ_COLD_START_PACING_BPS.saturating_mul(8),
+                "clean and 0.1% good cells must keep the proven cold-start path"
+            );
+        }
+    }
+
+    #[test]
+    fn rq_aimd_initial_rate_starts_lossy_cells_conservatively() {
+        let bad = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let mut bad_state = RqAdaptiveSendState::new(7, &bad, 1);
+        let bad_tuning = bad_state.round0_tuning(&bad);
+
+        assert_eq!(bad_state.aimd_rate_bps, RQ_AIMD_LOSSY_INITIAL_PACING_BPS);
+        assert_eq!(
+            bad_tuning.pacing.path_rate_bps,
+            RQ_AIMD_LOSSY_INITIAL_PACING_BPS.saturating_mul(8),
+            "bad cells should not blind-spray at full cold-start before AIMD feedback"
+        );
+
+        let broken = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut broken_state = RqAdaptiveSendState::new(7, &broken, 1);
+        let broken_tuning = broken_state.round0_tuning(&broken);
+
+        assert_eq!(
+            broken_state.aimd_rate_bps,
+            RQ_AIMD_HIGH_LOSS_INITIAL_PACING_BPS
+        );
+        assert_eq!(
+            broken_tuning.pacing.path_rate_bps,
+            RQ_AIMD_HIGH_LOSS_INITIAL_PACING_BPS.saturating_mul(8),
+            "high-loss cells use the conservative AIMD seed and additive recovery"
+        );
+    }
+
+    #[test]
     fn rq_aimd_halves_rate_on_receiver_observed_loss() {
         let config = RqConfig {
             symbol_size: 1200,
@@ -6800,7 +6890,7 @@ mod tests {
     }
 
     #[test]
-    fn rq_aimd_holds_rate_under_configured_loss_target() {
+    fn rq_aimd_increases_under_configured_broken_loss_target() {
         let config = RqConfig {
             symbol_size: 1200,
             round0_loss_target: 0.10,
@@ -6832,13 +6922,15 @@ mod tests {
 
         assert_eq!(state.last_round_loss_fraction, 0.10);
         assert_eq!(
-            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
-            "expected link loss should neither decrease nor increase the AIMD rate"
+            state.aimd_rate_bps,
+            RQ_AIMD_HIGH_LOSS_INITIAL_PACING_BPS
+                .saturating_add(RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S),
+            "expected broken-cell loss should additive-increase until receiver loss exceeds the AIMD threshold"
         );
     }
 
     #[test]
-    fn rq_aimd_holds_rate_for_bad_link_loss_target() {
+    fn rq_aimd_increases_under_bad_link_loss_target() {
         let config = RqConfig {
             symbol_size: 1200,
             round0_loss_target: 0.02,
@@ -6870,8 +6962,9 @@ mod tests {
 
         assert_eq!(state.last_round_loss_fraction, 0.02);
         assert_eq!(
-            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
-            "bad-cell target loss should hold rate, not pace up into self-loss"
+            state.aimd_rate_bps,
+            RQ_AIMD_LOSSY_INITIAL_PACING_BPS.saturating_add(RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S),
+            "bad-cell target loss should additive-increase until receiver loss exceeds the AIMD threshold"
         );
     }
 
@@ -8676,7 +8769,7 @@ mod tests {
     }
 
     #[test]
-    fn round0_loss_target_calibrates_bad_link_repair_without_pacing_changes() {
+    fn round0_loss_target_calibrates_bad_link_repair_and_conservative_aimd_start() {
         let config = RqConfig {
             symbol_size: 1200,
             max_block_size: 512 * 1024,
@@ -8697,10 +8790,10 @@ mod tests {
             initial_repair_target_per_block(437, tuning.repair_overhead) >= 40,
             "2% loss should pre-spray enough repair symbols for one-round convergence"
         );
-        assert!(
-            tuning.pacing.path_rate_bps
-                <= RqSprayPacing::cold_start(config.symbol_size).path_rate_bps,
-            "round-0 loss calibration must not raise sender pacing"
+        assert_eq!(
+            tuning.pacing.path_rate_bps,
+            RQ_AIMD_LOSSY_INITIAL_PACING_BPS.saturating_mul(8),
+            "lossy round-0 must start from the conservative AIMD seed"
         );
         assert!(
             source_retransmit_needs_fec_fallback(&config, 2, 0),
