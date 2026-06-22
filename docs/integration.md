@@ -269,6 +269,9 @@ README, Browser Edition docs, integration docs, formal proof posture, QPACK
 support posture, conformance evidence, capability examples, and the Wave2
 registry together so promoted rows have public markers and non-promoted rows
 keep an explicit fallback, owner, residual risk, or unsupported reason.
+The Wave2 signoff proof pack is represented by
+`artifacts/wave2/wave2_signoff_proof_pack_evidence.json` and closes the
+capability-completion proof-pack marker for promoted registry rows.
 
 ---
 

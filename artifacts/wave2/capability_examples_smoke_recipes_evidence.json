@@ -51,6 +51,8 @@
     "formal/README.md",
     "artifacts/formal_wave2_refinement_coverage_v1.json",
     "scripts/run_formal_wave2_refinement_coverage.sh",
+    "artifacts/wave2/docs_support_matrix_reconciliation_evidence.json",
+    "scripts/run_wave2_docs_support_matrix_reconciliation.sh",
     "tests/conformance/mod.rs"
   ],
   "required_support_cases": [
@@ -288,6 +290,26 @@
       "first_failure": "",
       "case_tags": ["operator-artifact-recipe"],
       "live_owner_bead_id": "asupersync-osh9jv"
+    },
+    {
+      "bead_id": "asupersync-osh9jv",
+      "scenario_id": "AA-WAVE2-EXAMPLES-DOCS-SUPPORT-MATRIX",
+      "capability_id": "docs_support_matrix_reconciliation",
+      "example_path": "docs/integration.md",
+      "feature_flags": ["test-internals"],
+      "host_context": "native",
+      "broker_kind": "none",
+      "platform_requirement": "deterministic docs/support-matrix reconciliation artifact",
+      "command": "bash scripts/run_wave2_docs_support_matrix_reconciliation.sh --output-root ${TMPDIR:-/tmp}/wave2_docs_support_examples",
+      "expected_output_digest": "inventory:docs-support-matrix-reconciliation-v1",
+      "actual_output_digest": "inventory:docs-support-matrix-reconciliation-v1",
+      "unsupported_reason": "",
+      "fallback_target": "",
+      "artifact_path": "artifacts/wave2/capability_examples_smoke_recipes_evidence.json",
+      "verdict": "pass",
+      "first_failure": "",
+      "case_tags": ["operator-artifact-recipe"],
+      "live_owner_bead_id": "asupersync-xl06qj"
     },
     {
       "bead_id": "asupersync-osh9jv",

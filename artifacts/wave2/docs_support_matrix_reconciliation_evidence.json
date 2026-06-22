@@ -260,6 +260,17 @@
       "doc_markers": [
         {"path": "docs/integration.md", "marker": "Wave2 Support-Matrix Reconciliation"}
       ]
+    },
+    {
+      "capability_id": "wave2_signoff_proof_pack",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": [
+        "artifacts/reality_check_gap_closure_signoff_v1.json",
+        "artifacts/wave2/wave2_signoff_proof_pack_evidence.json"
+      ],
+      "doc_markers": [
+        {"path": "docs/integration.md", "marker": "Wave2 signoff proof pack"}
+      ]
     }
   ],
   "deferred_registry_policy": {
