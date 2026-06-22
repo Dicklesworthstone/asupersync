@@ -766,8 +766,16 @@ impl QuicLink {
         ))
     }
 
-    fn spray_pacing_decision(&self, config: &QuicConfig) -> QuicSprayPacingDecision {
-        super::quic_spray_pacing_decision_from_transport(config, self.conn.transport())
+    fn spray_pacing_decision(
+        &self,
+        config: &QuicConfig,
+        aimd_cap_bps: Option<u64>,
+    ) -> QuicSprayPacingDecision {
+        let mut config = config.clone();
+        if let Some(cap) = aimd_cap_bps {
+            config.bwlimit_bps = Some(config.bwlimit_bps.map_or(cap, |existing| existing.min(cap)));
+        }
+        super::quic_spray_pacing_decision_from_transport(&config, self.conn.transport())
     }
 
     /// Spray one symbol, flushing first if the paced outbound queue is full.
@@ -1100,6 +1108,82 @@ async fn accept(
 
 // ─── Sender session ─────────────────────────────────────────────────────────
 
+#[derive(Debug, Default)]
+struct NativeQuicAimdPacer {
+    cap_bps: Option<u64>,
+    last_round_symbols_sent: u64,
+    last_round_pacing_rate_bps: u64,
+    last_round_loss_fraction: f64,
+}
+
+impl NativeQuicAimdPacer {
+    fn cap_bps(&self) -> Option<u64> {
+        self.cap_bps
+    }
+
+    fn record_spray(&mut self, symbols_sent: u64, pacing_rate_bps: u64) {
+        self.last_round_symbols_sent = symbols_sent;
+        self.last_round_pacing_rate_bps = pacing_rate_bps;
+    }
+
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn observe_need_more(&mut self, cx: &Cx, need: &QuicNeedMore) {
+        let sent = self.last_round_symbols_sent;
+        if sent == 0 {
+            return;
+        }
+        let loss = need
+            .round_loss_fraction
+            .filter(|loss| loss.is_finite())
+            .unwrap_or_else(|| {
+                let observed = need
+                    .round_symbols_observed
+                    .or(need.round_symbols_accepted)
+                    .unwrap_or(0)
+                    .min(sent);
+                (1.0 - observed as f64 / sent as f64).clamp(0.0, 0.90)
+            })
+            .clamp(0.0, 0.90);
+        self.last_round_loss_fraction = loss;
+        if loss > super::QUIC_AIMD_LOSS_DECREASE_THRESHOLD {
+            let base = self
+                .cap_bps
+                .unwrap_or(self.last_round_pacing_rate_bps)
+                .max(super::QUIC_AIMD_MIN_RATE_BPS);
+            let reduced = (base as f64 * super::QUIC_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
+            self.cap_bps =
+                Some(reduced.clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS));
+        } else if loss <= super::QUIC_AIMD_CLEAN_INCREASE_THRESHOLD
+            && let Some(cap) = self.cap_bps
+        {
+            self.cap_bps = Some(
+                cap.saturating_add(super::QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
+                    .clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS),
+            );
+        }
+
+        let cap = self
+            .cap_bps
+            .map_or_else(|| "none".to_string(), |cap| cap.to_string());
+        let sent = sent.to_string();
+        let observed = need
+            .round_symbols_observed
+            .or(need.round_symbols_accepted)
+            .unwrap_or(0)
+            .to_string();
+        let loss = format!("{:.4}", self.last_round_loss_fraction);
+        cx.trace_with_fields(
+            "atp_quic.spray.aimd_feedback",
+            &[
+                ("round_symbols_sent", sent.as_str()),
+                ("round_symbols_observed", observed.as_str()),
+                ("round_loss_fraction", loss.as_str()),
+                ("aimd_cap_bps", cap.as_str()),
+            ],
+        );
+    }
+}
+
 /// Spray a round of symbols for the `pending` entries over a live link, pacing on
 /// the bounded outbound DATAGRAM queue. Mirrors `super::spray_native_symbol_round`
 /// but interleaves real UDP flushes so a large object never drops symbols before
@@ -1115,11 +1199,12 @@ async fn spray_round(
     config: &QuicConfig,
     symbol_auth: Option<&SecurityContext>,
     with_source: bool,
+    aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
     let repair_batch = super::repair_batch_per_block(config);
     let drop_one_in = config.debug_drop_one_in;
-    let pacing = link.spray_pacing_decision(config);
+    let pacing = link.spray_pacing_decision(config, aimd.cap_bps());
     pacing.trace_epoch(cx, u64::from(!with_source));
     let mut sent = 0u64;
     let mut sprayed = 0u64;
@@ -1182,6 +1267,7 @@ async fn spray_round(
             entry.set_repair_cursor(sbn, target_repair);
         }
     }
+    aimd.record_spray(sent, pacing.pacing_rate_bps);
     Ok(sent)
 }
 
@@ -1195,9 +1281,10 @@ async fn spray_source_requests(
     requests: &[QuicSourceSymbolRequest],
     config: &QuicConfig,
     symbol_auth: Option<&SecurityContext>,
+    aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
-    let pacing = link.spray_pacing_decision(config);
+    let pacing = link.spray_pacing_decision(config, aimd.cap_bps());
     pacing.trace_epoch(cx, 2);
     let mut sent = 0u64;
     for request in requests {
@@ -1239,6 +1326,7 @@ async fn spray_source_requests(
             .await?;
         sent = sent.saturating_add(1);
     }
+    aimd.record_spray(sent, pacing.pacing_rate_bps);
     Ok(sent)
 }
 
@@ -1252,9 +1340,10 @@ async fn spray_block_repair_requests(
     requests: &[QuicBlockRepairRequest],
     config: &QuicConfig,
     symbol_auth: Option<&SecurityContext>,
+    aimd: &mut NativeQuicAimdPacer,
 ) -> Result<u64, QuicTransportError> {
     let tag = super::transfer_tag(&manifest.transfer_id);
-    let pacing = link.spray_pacing_decision(config);
+    let pacing = link.spray_pacing_decision(config, aimd.cap_bps());
     pacing.trace_epoch(cx, 3);
     let mut sent = 0u64;
     for request in requests {
@@ -1294,6 +1383,7 @@ async fn spray_block_repair_requests(
         }
         enc.set_repair_cursor(request.sbn, target_repair);
     }
+    aimd.record_spray(sent, pacing.pacing_rate_bps);
     Ok(sent)
 }
 
@@ -1355,6 +1445,7 @@ async fn run_sender_session(
 
     let pending_all: std::collections::BTreeSet<u32> =
         encoders.iter().map(|entry| entry.index).collect();
+    let mut aimd = NativeQuicAimdPacer::default();
     let mut symbols_sent = spray_round(
         cx,
         link,
@@ -1365,6 +1456,7 @@ async fn run_sender_session(
         config,
         symbol_auth.as_ref(),
         true,
+        &mut aimd,
     )
     .await?;
     // Push every sprayed symbol onto the wire BEFORE the ObjectComplete marker so
@@ -1374,7 +1466,7 @@ async fn run_sender_session(
     // so without this split a >1-batch spray would assemble prematurely and force
     // a needless feedback round.
     link.flush(cx).await?;
-    super::send_native_object_complete(cx, &mut link.conn, &mut control)?;
+    super::send_native_object_complete(cx, &mut link.conn, &mut control, symbols_sent)?;
     link.flush(cx).await?;
 
     let mut feedback_rounds = 0u32;
@@ -1422,6 +1514,7 @@ async fn run_sender_session(
                 });
             }
             QuicControlReply::NeedMore(need) => {
+                aimd.observe_need_more(cx, &need);
                 feedback_rounds = feedback_rounds.saturating_add(1);
                 if feedback_rounds > config.max_feedback_rounds {
                     return Err(QuicTransportError::NoConvergence {
@@ -1433,7 +1526,7 @@ async fn run_sender_session(
                     && need.repair_blocks.is_empty()
                     && need.source_symbols.is_empty()
                 {
-                    super::send_native_object_complete(cx, &mut link.conn, &mut control)?;
+                    super::send_native_object_complete(cx, &mut link.conn, &mut control, 0)?;
                     link.flush(cx).await?;
                     continue;
                 }
@@ -1448,6 +1541,7 @@ async fn run_sender_session(
                         &need.repair_blocks,
                         config,
                         symbol_auth.as_ref(),
+                        &mut aimd,
                     )
                     .await?
                 } else if need.source_symbols.is_empty() {
@@ -1461,6 +1555,7 @@ async fn run_sender_session(
                         config,
                         symbol_auth.as_ref(),
                         false,
+                        &mut aimd,
                     )
                     .await?
                 } else {
@@ -1473,6 +1568,7 @@ async fn run_sender_session(
                         &need.source_symbols,
                         config,
                         symbol_auth.as_ref(),
+                        &mut aimd,
                     )
                     .await?
                 };
@@ -1480,7 +1576,7 @@ async fn run_sender_session(
                 // Flush this round's repair/source symbols before ObjectComplete
                 // (same ordering guarantee as the initial spray).
                 link.flush(cx).await?;
-                super::send_native_object_complete(cx, &mut link.conn, &mut control)?;
+                super::send_native_object_complete(cx, &mut link.conn, &mut control, sent)?;
                 link.flush(cx).await?;
             }
         }
@@ -1720,6 +1816,9 @@ impl NativeReceiverIntakeStats {
             })
             .to_string();
         let source_symbols = need.source_symbols.len().to_string();
+        let round_symbols_observed = need.round_symbols_observed.unwrap_or(0).to_string();
+        let round_symbols_accepted = need.round_symbols_accepted.unwrap_or(0).to_string();
+        let round_loss_fraction = format!("{:.4}", need.round_loss_fraction.unwrap_or(0.0));
         let drain_calls = self.drain_calls.to_string();
         let symbols_accepted = self.symbols_accepted.to_string();
         let blocks_completed = self.blocks_completed.to_string();
@@ -1738,6 +1837,9 @@ impl NativeReceiverIntakeStats {
                 ("repair_blocks", repair_blocks.as_str()),
                 ("repair_symbols", repair_symbols.as_str()),
                 ("source_symbols", source_symbols.as_str()),
+                ("round_symbols_observed", round_symbols_observed.as_str()),
+                ("round_symbols_accepted", round_symbols_accepted.as_str()),
+                ("round_loss_fraction", round_loss_fraction.as_str()),
                 ("drain_calls", drain_calls.as_str()),
                 ("symbols_accepted", symbols_accepted.as_str()),
                 ("blocks_completed", blocks_completed.as_str()),
@@ -1971,16 +2073,18 @@ async fn run_receiver_session(
     let receive_result: Result<ReceiveReport, QuicTransportError> = async {
         'rounds: loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-            let round_symbols_start = symbols_accepted;
+            let mut round_symbols_observed = 0u64;
+            let mut round_symbols_accepted = 0u64;
             // Drain symbols and wait for this round's ObjectComplete marker, pumping
             // the socket and draining the bounded inbound DATAGRAM queue each step so
             // no symbol is dropped while we wait. `pump_inbound` returns 0 only after a
             // full idle window with no traffic, which means the sender went silent. If
             // the round made progress, silence is enough to request repair for the
             // remaining gaps even when the best-effort ObjectComplete marker was lost.
+            let mut round_complete = super::QuicRoundComplete::default();
             loop {
                 let drain_started = Instant::now(); // ubs:ignore - monotonic intake timing, not crypto randomness
-                let (accepted, completed_blocks) =
+                let (observed, accepted, completed_blocks) =
                     super::drain_native_symbol_datagrams_with_blocks(
                         &mut link.conn,
                         &manifest,
@@ -1988,13 +2092,15 @@ async fn run_receiver_session(
                         config,
                         &mut decode_stats,
                     )?;
+                round_symbols_observed = round_symbols_observed.saturating_add(observed);
+                round_symbols_accepted = round_symbols_accepted.saturating_add(accepted);
                 intake_stats.record_symbol_drain(
                     drain_started.elapsed(),
                     accepted,
                     completed_blocks.len(),
                 );
                 symbols_accepted = symbols_accepted.saturating_add(accepted);
-                if accepted > 0 {
+                if observed > 0 {
                     // Repair (or spray) is flowing again — reset the control-PTO budget.
                     needmore_pto_attempts = 0;
                     send_and_flush_native_keep_alive(cx, link, &mut control).await?;
@@ -2037,7 +2143,10 @@ async fn run_receiver_session(
                 }
                 if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
                     match frame.frame_type() {
-                        FrameType::ObjectComplete => break,
+                        FrameType::ObjectComplete => {
+                            round_complete = super::parse_quic_round_complete(&frame)?;
+                            break;
+                        }
                         FrameType::KeepAlive => {
                             send_and_flush_native_keep_alive(cx, link, &mut control).await?;
                             continue;
@@ -2051,7 +2160,7 @@ async fn run_receiver_session(
                     }
                 }
                 link.flush(cx).await?;
-                let round_made_progress = symbols_accepted > round_symbols_start;
+                let round_made_progress = round_symbols_observed > 0;
                 let pump_timeout = if round_made_progress {
                     ROUND_PROGRESS_IDLE_GRACE
                 } else if last_need.is_some() {
@@ -2113,6 +2222,12 @@ async fn run_receiver_session(
                 pending,
                 repair_blocks,
                 source_symbols: Vec::new(),
+                round_symbols_observed: Some(round_symbols_observed),
+                round_loss_fraction: super::receiver_round_loss_fraction(
+                    round_symbols_observed,
+                    round_complete.round_symbols_sent,
+                ),
+                round_symbols_accepted: Some(round_symbols_accepted),
             };
             intake_stats.trace_need_more(cx, feedback_rounds.saturating_add(1), &need);
             super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;

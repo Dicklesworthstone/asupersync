@@ -251,6 +251,12 @@ const QUIC_SPRAY_BURST_RTT_FRACTION: f64 = 0.125;
 const QUIC_SPRAY_MIN_PAUSE: Duration = Duration::from_millis(1);
 const QUIC_SPRAY_MAX_PAUSE: Duration = Duration::from_secs(1);
 const QUIC_SPRAY_MIN_BACKOFF: f64 = 0.10;
+const QUIC_AIMD_LOSS_DECREASE_THRESHOLD: f64 = 0.03;
+const QUIC_AIMD_CLEAN_INCREASE_THRESHOLD: f64 = 0.0015;
+const QUIC_AIMD_MULTIPLICATIVE_DECREASE: f64 = 0.50;
+const QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
+const QUIC_AIMD_MIN_RATE_BPS: u64 = 512 * 1024;
+const QUIC_AIMD_MAX_RATE_BPS: u64 = 64 * 1024 * 1024;
 
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
@@ -1344,6 +1350,48 @@ fn pacing_pause_for_bytes(bytes: u64, rate_bps: u64) -> Duration {
     duration_from_secs_clamped(bytes.max(1) as f64 / rate_bps.max(1) as f64)
 }
 
+struct QuicSymbolPacer {
+    decision: QuicSprayPacingDecision,
+    sent_since_pause: usize,
+    epoch: u64,
+}
+
+impl QuicSymbolPacer {
+    fn from_connection(config: &QuicConfig, connection: &QuicConnection) -> Self {
+        Self::new(quic_spray_pacing_decision_from_config(
+            config,
+            quic_path_signal_from_connection(connection),
+        ))
+    }
+
+    fn from_native_connection(config: &QuicConfig, connection: &NativeQuicConnection) -> Self {
+        Self::new(quic_spray_pacing_decision_from_config(
+            config,
+            quic_path_signal_from_native_connection(connection),
+        ))
+    }
+
+    fn new(decision: QuicSprayPacingDecision) -> Self {
+        Self {
+            decision,
+            sent_since_pause: 0,
+            epoch: 0,
+        }
+    }
+
+    async fn after_symbol_sent(&mut self, cx: &Cx) -> Result<(), QuicTransportError> {
+        self.sent_since_pause = self.sent_since_pause.saturating_add(1);
+        if self.sent_since_pause < self.decision.max_burst_symbols {
+            return Ok(());
+        }
+        self.decision.trace_epoch(cx, self.epoch);
+        self.epoch = self.epoch.saturating_add(1);
+        self.sent_since_pause = 0;
+        crate::time::sleep(cx.now(), self.decision.pause_after_burst).await;
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)
+    }
+}
+
 /// Convert A6 connection path stats into the shared adaptive reward signal.
 ///
 /// RTT is reported in seconds for the adaptive controller, with smoothed RTT
@@ -1578,9 +1626,19 @@ struct QuicHelloAck {
     reason: Option<String>,
 }
 
+/// Sender → receiver marker for one completed QUIC symbol spray round.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct QuicRoundComplete {
+    /// Number of QUIC DATAGRAM symbols the sender emitted in the completed
+    /// spray round. Empty legacy ObjectComplete frames parse as unknown.
+    #[serde(default)]
+    round_symbols_sent: u64,
+}
+
 /// Receiver → sender fountain feedback: entries still needing more symbols.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 struct QuicNeedMore {
     /// Entry indices that have not yet decoded.
     pending: Vec<u32>,
@@ -1590,6 +1648,22 @@ struct QuicNeedMore {
     /// Sparse systematic source symbols missing from incomplete blocks.
     #[serde(default)]
     source_symbols: Vec<QuicSourceSymbolRequest>,
+    /// Matching QUIC DATAGRAM symbols observed by the receiver in the completed
+    /// spray round. This is the pacing/loss signal; symbols that do not advance
+    /// decode rank still prove that the datagram arrived on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    round_symbols_observed: Option<u64>,
+    /// Receiver-computed symbol loss fraction for the completed spray round.
+    ///
+    /// AIMD uses this explicit wire-loss signal; pending decode pressure remains
+    /// separate and only feeds repair/FEC sizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    round_loss_fraction: Option<f64>,
+    /// Matching QUIC DATAGRAM symbols accepted into a decoder in the completed
+    /// spray round. Diagnostic only; duplicates or dependent repair rows can
+    /// arrive without improving decode rank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    round_symbols_accepted: Option<u64>,
 }
 
 /// Request for fresh repair symbols for one incomplete source block.
@@ -1761,7 +1835,7 @@ fn validate_feedback_block(
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum QuicControlReply {
     Proof(ReceiveReceipt),
     NeedMore(QuicNeedMore),
@@ -1787,6 +1861,23 @@ fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, QuicTrans
 fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, QuicTransportError> {
     serde_json::from_slice(frame.payload())
         .map_err(|err| QuicTransportError::Control(err.to_string()))
+}
+
+#[allow(dead_code)]
+fn parse_quic_round_complete(frame: &Frame) -> Result<QuicRoundComplete, QuicTransportError> {
+    if frame.payload().is_empty() {
+        Ok(QuicRoundComplete::default())
+    } else {
+        parse_json(frame)
+    }
+}
+
+fn receiver_round_loss_fraction(observed: u64, sent: u64) -> Option<f64> {
+    if sent == 0 {
+        return None;
+    }
+    let observed = observed.min(sent);
+    Some((1.0 - observed as f64 / sent as f64).clamp(0.0, 0.90))
 }
 
 #[allow(dead_code)]
@@ -2217,6 +2308,12 @@ impl QuicDecodeStats {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct QuicRoundSymbolStats {
+    observed: u64,
+    accepted: u64,
+}
+
 #[allow(dead_code)]
 struct QuicConnectionTransferOutcome {
     manifest: TransferManifest,
@@ -2234,6 +2331,10 @@ struct QuicSenderFeedbackState<'a> {
     peer: SocketAddr,
     feedback_rounds: u32,
     symbols_sent: u64,
+    round_symbols_start: u64,
+    aimd_rate_bps: u64,
+    aimd_feedback_seen: bool,
+    last_round_loss_fraction: f64,
 }
 
 #[allow(dead_code)]
@@ -2252,8 +2353,86 @@ impl<'a> QuicSenderFeedbackState<'a> {
             peer,
             feedback_rounds: 0,
             symbols_sent,
+            round_symbols_start: 0,
+            aimd_rate_bps: config
+                .bwlimit_bps
+                .unwrap_or(QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64)
+                .clamp(QUIC_AIMD_MIN_RATE_BPS, QUIC_AIMD_MAX_RATE_BPS),
+            aimd_feedback_seen: false,
+            last_round_loss_fraction: 0.0,
         }
     }
+
+    fn sent_this_round(&self) -> u64 {
+        self.symbols_sent.saturating_sub(self.round_symbols_start)
+    }
+
+    fn observe_need_more(&mut self, need: &QuicNeedMore) {
+        let sent_this_round = self.sent_this_round();
+        if sent_this_round == 0 {
+            return;
+        }
+        let loss = need
+            .round_loss_fraction
+            .filter(|loss| loss.is_finite())
+            .or_else(|| {
+                need.round_symbols_observed
+                    .and_then(|observed| receiver_round_loss_fraction(observed, sent_this_round))
+            })
+            .unwrap_or(0.0)
+            .clamp(0.0, 0.90);
+        self.aimd_feedback_seen = true;
+        self.last_round_loss_fraction = loss;
+        if loss > QUIC_AIMD_LOSS_DECREASE_THRESHOLD {
+            let reduced =
+                (self.aimd_rate_bps as f64 * QUIC_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
+            self.aimd_rate_bps = reduced.clamp(QUIC_AIMD_MIN_RATE_BPS, QUIC_AIMD_MAX_RATE_BPS);
+        } else if loss <= QUIC_AIMD_CLEAN_INCREASE_THRESHOLD {
+            self.aimd_rate_bps = self
+                .aimd_rate_bps
+                .saturating_add(QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
+                .clamp(QUIC_AIMD_MIN_RATE_BPS, QUIC_AIMD_MAX_RATE_BPS);
+        }
+    }
+
+    fn next_round_config(&self) -> QuicConfig {
+        if !self.aimd_feedback_seen {
+            return self.config.clone();
+        }
+        let mut config = self.config.clone();
+        config.bwlimit_bps = Some(
+            config
+                .bwlimit_bps
+                .map_or(self.aimd_rate_bps, |cap| cap.min(self.aimd_rate_bps))
+                .clamp(QUIC_AIMD_MIN_RATE_BPS, QUIC_AIMD_MAX_RATE_BPS),
+        );
+        config
+    }
+
+    fn mark_next_round_started(&mut self, previous_symbols_sent: u64, sent: u64) {
+        self.round_symbols_start = previous_symbols_sent;
+        self.symbols_sent = self.symbols_sent.saturating_add(sent);
+    }
+}
+
+fn trace_quic_aimd_feedback(cx: &Cx, state: &QuicSenderFeedbackState<'_>) {
+    if cx.trace_buffer().is_none() {
+        return;
+    }
+    let round = state.feedback_rounds.to_string();
+    let sent_this_round = state.sent_this_round().to_string();
+    let loss = format!("{:.6}", state.last_round_loss_fraction);
+    let aimd_rate_bps = state.aimd_rate_bps.to_string();
+    cx.trace_with_fields(
+        "atp_quic.sender.aimd_feedback",
+        &[
+            ("transport", "quic"),
+            ("round", round.as_str()),
+            ("sent_this_round", sent_this_round.as_str()),
+            ("round_loss_fraction", loss.as_str()),
+            ("aimd_rate_bps", aimd_rate_bps.as_str()),
+        ],
+    );
 }
 
 #[cfg(test)]
@@ -2617,6 +2796,7 @@ async fn spray_streaming_symbol_round(
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
+    let mut pacer = QuicSymbolPacer::from_connection(config, conn);
     let repair_batch = repair_batch_per_block(config);
     for entry in encoders
         .iter_mut()
@@ -2667,6 +2847,7 @@ async fn spray_streaming_symbol_round(
                 let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
                 send_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
+                pacer.after_symbol_sent(cx).await?;
             }
             entry.set_repair_cursor(sbn, target_repair);
         }
@@ -2765,6 +2946,7 @@ async fn send_source_symbol_requests(
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
+    let mut pacer = QuicSymbolPacer::from_connection(config, conn);
     for request in requests {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let enc = encoders
@@ -2780,6 +2962,7 @@ async fn send_source_symbol_requests(
         let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
         send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
         sent = sent.saturating_add(1);
+        pacer.after_symbol_sent(cx).await?;
     }
     Ok(sent)
 }
@@ -2796,6 +2979,7 @@ async fn send_block_repair_requests(
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
+    let mut pacer = QuicSymbolPacer::from_connection(config, conn);
     for request in requests {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let enc = encoders
@@ -2827,6 +3011,7 @@ async fn send_block_repair_requests(
             let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
             send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
             sent = sent.saturating_add(1);
+            pacer.after_symbol_sent(cx).await?;
         }
         enc.set_repair_cursor(request.sbn, target_repair);
     }
@@ -2871,7 +3056,7 @@ async fn send_repair_round_and_object_complete(
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
     if need.pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
-        send_object_complete(cx, conn, control)?;
+        send_object_complete(cx, conn, control, 0)?;
         return Ok(0);
     }
     let pending = validate_need_more_feedback(manifest, config, need)?;
@@ -2910,7 +3095,7 @@ async fn send_repair_round_and_object_complete(
         )
         .await?
     };
-    send_object_complete(cx, conn, control)?;
+    send_object_complete(cx, conn, control, sent)?;
     Ok(sent)
 }
 
@@ -3002,7 +3187,7 @@ fn send_manifest_symbols_complete(
     send_manifest(cx, conn, control, manifest)?;
     let symbols_sent =
         spray_initial_symbols(cx, conn, manifest, encoders, config, symbol_auth.as_ref())?;
-    send_object_complete(cx, conn, control)?;
+    send_object_complete(cx, conn, control, symbols_sent)?;
     Ok(symbols_sent)
 }
 
@@ -3035,7 +3220,7 @@ async fn send_prepared_source_manifest_symbols_complete(
         true,
     )
     .await?;
-    send_object_complete(cx, conn, control)?;
+    send_object_complete(cx, conn, control, symbols_sent)?;
     Ok(symbols_sent)
 }
 
@@ -3099,13 +3284,17 @@ async fn handle_sender_feedback_or_proof(
                     pending: need.pending.len(),
                 });
             }
+            state.observe_need_more(&need);
+            trace_quic_aimd_feedback(cx, state);
             if need.pending.is_empty()
                 && need.repair_blocks.is_empty()
                 && need.source_symbols.is_empty()
             {
                 return Ok(None);
             }
-            let symbol_auth = state.config.symbol_auth_context()?;
+            let round_config = state.next_round_config();
+            let symbol_auth = round_config.symbol_auth_context()?;
+            let previous_symbols_sent = state.symbols_sent;
             let sent = send_repair_round_and_object_complete(
                 cx,
                 conn,
@@ -3113,11 +3302,11 @@ async fn handle_sender_feedback_or_proof(
                 state.manifest,
                 state.encoders,
                 &need,
-                state.config,
+                &round_config,
                 symbol_auth.as_ref(),
             )
             .await?;
-            state.symbols_sent = state.symbols_sent.saturating_add(sent);
+            state.mark_next_round_started(previous_symbols_sent, sent);
             Ok(None)
         }
     }
@@ -4370,8 +4559,14 @@ fn send_object_complete(
     cx: &Cx,
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
+    round_symbols_sent: u64,
 ) -> Result<(), QuicTransportError> {
-    send_empty_control_frame(cx, conn, control, FrameType::ObjectComplete)
+    control.send_json(
+        cx,
+        conn,
+        FrameType::ObjectComplete,
+        &QuicRoundComplete { round_symbols_sent },
+    )
 }
 
 #[allow(dead_code)]
@@ -4379,7 +4574,7 @@ fn receive_object_complete(
     cx: &Cx,
     conn: &mut QuicConnection,
     control: &mut QuicFrameTransport,
-) -> Result<(), QuicTransportError> {
+) -> Result<QuicRoundComplete, QuicTransportError> {
     let frame = next_control_frame(cx, conn, control, "receive object-complete marker")?;
     if frame.frame_type() != FrameType::ObjectComplete {
         return Err(QuicTransportError::Unexpected {
@@ -4387,7 +4582,7 @@ fn receive_object_complete(
             expected: "ObjectComplete",
         });
     }
-    Ok(())
+    parse_quic_round_complete(&frame)
 }
 
 #[allow(dead_code)]
@@ -4395,7 +4590,7 @@ fn receive_native_object_complete(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
     control: &mut NativeQuicFrameTransport,
-) -> Result<(), QuicTransportError> {
+) -> Result<QuicRoundComplete, QuicTransportError> {
     let frame = next_native_control_frame(cx, conn, control, "receive object-complete marker")?;
     if frame.frame_type() != FrameType::ObjectComplete {
         return Err(QuicTransportError::Unexpected {
@@ -4403,7 +4598,7 @@ fn receive_native_object_complete(
             expected: "ObjectComplete",
         });
     }
-    Ok(())
+    parse_quic_round_complete(&frame)
 }
 
 #[allow(dead_code)]
@@ -4411,10 +4606,14 @@ fn send_native_object_complete(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
     control: &mut NativeQuicFrameTransport,
+    round_symbols_sent: u64,
 ) -> Result<(), QuicTransportError> {
-    let frame = Frame::empty(FrameType::ObjectComplete)
-        .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
-    control.send(cx, conn, &frame)
+    control.send_json(
+        cx,
+        conn,
+        FrameType::ObjectComplete,
+        &QuicRoundComplete { round_symbols_sent },
+    )
 }
 
 #[allow(dead_code)]
@@ -4705,6 +4904,7 @@ async fn send_native_source_symbol_requests(
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
+    let mut pacer = QuicSymbolPacer::from_native_connection(config, conn);
     for request in requests {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let enc = encoders
@@ -4720,6 +4920,7 @@ async fn send_native_source_symbol_requests(
         let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
         send_native_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
         sent = sent.saturating_add(1);
+        pacer.after_symbol_sent(cx).await?;
     }
     Ok(sent)
 }
@@ -4736,6 +4937,7 @@ async fn send_native_block_repair_requests(
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
+    let mut pacer = QuicSymbolPacer::from_native_connection(config, conn);
     for request in requests {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let enc = encoders
@@ -4767,6 +4969,7 @@ async fn send_native_block_repair_requests(
             let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
             send_native_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
             sent = sent.saturating_add(1);
+            pacer.after_symbol_sent(cx).await?;
         }
         enc.set_repair_cursor(request.sbn, target_repair);
     }
@@ -4786,7 +4989,7 @@ async fn send_native_repair_round_and_object_complete(
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
     if need.pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
-        send_native_object_complete(cx, conn, control)?;
+        send_native_object_complete(cx, conn, control, 0)?;
         return Ok(0);
     }
     let pending = validate_need_more_feedback(manifest, config, need)?;
@@ -4825,7 +5028,7 @@ async fn send_native_repair_round_and_object_complete(
         )
         .await?
     };
-    send_native_object_complete(cx, conn, control)?;
+    send_native_object_complete(cx, conn, control, sent)?;
     Ok(sent)
 }
 
@@ -4844,7 +5047,7 @@ async fn send_native_manifest_symbols_complete(
     let symbols_sent =
         spray_native_initial_symbols(cx, conn, manifest, encoders, config, symbol_auth.as_ref())
             .await?;
-    send_native_object_complete(cx, conn, control)?;
+    send_native_object_complete(cx, conn, control, symbols_sent)?;
     Ok(symbols_sent)
 }
 
@@ -4932,13 +5135,17 @@ async fn handle_native_sender_feedback_or_proof(
                     pending: need.pending.len(),
                 });
             }
+            state.observe_need_more(&need);
+            trace_quic_aimd_feedback(cx, state);
             if need.pending.is_empty()
                 && need.repair_blocks.is_empty()
                 && need.source_symbols.is_empty()
             {
                 return Ok(None);
             }
-            let symbol_auth = state.config.symbol_auth_context()?;
+            let round_config = state.next_round_config();
+            let symbol_auth = round_config.symbol_auth_context()?;
+            let previous_symbols_sent = state.symbols_sent;
             let sent = send_native_repair_round_and_object_complete(
                 cx,
                 conn,
@@ -4946,11 +5153,11 @@ async fn handle_native_sender_feedback_or_proof(
                 state.manifest,
                 state.encoders,
                 &need,
-                state.config,
+                &round_config,
                 symbol_auth.as_ref(),
             )
             .await?;
-            state.symbols_sent = state.symbols_sent.saturating_add(sent);
+            state.mark_next_round_started(previous_symbols_sent, sent);
             Ok(None)
         }
     }
@@ -5109,11 +5316,11 @@ async fn drain_native_symbol_datagrams_with_aggregator_deferred(
     config: &QuicConfig,
     receive: QuicReceiveAggregation<'_>,
     decode_stats: &mut QuicDecodeStats,
-) -> Result<u64, QuicTransportError> {
+) -> Result<QuicRoundSymbolStats, QuicTransportError> {
     let symbol_auth = config.symbol_auth_context()?;
     let auth_required = symbol_auth.is_some();
     let tag = transfer_tag(&manifest.transfer_id);
-    let mut accepted = 0u64;
+    let mut stats = QuicRoundSymbolStats::default();
     while let Some(envelope) = recv_native_symbol_envelope(conn, auth_required)? {
         if envelope.transfer_tag != tag {
             return Err(QuicTransportError::Integrity(format!(
@@ -5137,23 +5344,26 @@ async fn drain_native_symbol_datagrams_with_aggregator_deferred(
                     envelope.entry
                 ))
             })?;
+        stats.observed = stats.observed.saturating_add(1);
         let auth_symbol = verified_authenticated_symbol_from_envelope(
             &envelope,
             decoder.object_id,
             symbol_auth.as_ref(),
         )?;
-        accepted = accepted.saturating_add(feed_aggregated_symbol_for_entry_deferred(
-            cx,
-            decoders,
-            envelope.entry,
-            auth_symbol,
-            receive,
-            decode_stats,
-        )?);
+        stats.accepted = stats
+            .accepted
+            .saturating_add(feed_aggregated_symbol_for_entry_deferred(
+                cx,
+                decoders,
+                envelope.entry,
+                auth_symbol,
+                receive,
+                decode_stats,
+            )?);
         let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
     }
     let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
-    Ok(accepted)
+    Ok(stats)
 }
 
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
@@ -5163,7 +5373,7 @@ fn drain_native_symbol_datagrams_with_blocks(
     decoders: &mut [QuicEntryDecoder],
     config: &QuicConfig,
     decode_stats: &mut QuicDecodeStats,
-) -> Result<(u64, Vec<QuicDecodedBlock>), QuicTransportError> {
+) -> Result<(u64, u64, Vec<QuicDecodedBlock>), QuicTransportError> {
     let symbol_auth = config.symbol_auth_context()?;
     let auth_required = symbol_auth.is_some();
     let tag = transfer_tag(&manifest.transfer_id);
@@ -5211,7 +5421,11 @@ fn drain_native_symbol_datagrams_with_blocks(
             break;
         }
     }
-    Ok((accepted, completed))
+    Ok((
+        u64::try_from(drained).unwrap_or(u64::MAX),
+        accepted,
+        completed,
+    ))
 }
 
 fn validate_quic_manifest(
@@ -5684,20 +5898,19 @@ async fn receive_native_symbol_round(
     decode_stats: &mut QuicDecodeStats,
 ) -> Result<Option<QuicNeedMore>, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-    *symbols_accepted = (*symbols_accepted).saturating_add(
-        drain_native_symbol_datagrams_with_aggregator_deferred(
-            cx,
-            connection,
-            manifest,
-            decoders,
-            config,
-            QuicReceiveAggregation::new(aggregator, QUIC_PRIMARY_RECEIVE_PATH_ID, cx.now())
-                .with_trace(cx),
-            decode_stats,
-        )
-        .await?,
-    );
-    receive_native_object_complete(cx, connection, control)?;
+    let round_stats = drain_native_symbol_datagrams_with_aggregator_deferred(
+        cx,
+        connection,
+        manifest,
+        decoders,
+        config,
+        QuicReceiveAggregation::new(aggregator, QUIC_PRIMARY_RECEIVE_PATH_ID, cx.now())
+            .with_trace(cx),
+        decode_stats,
+    )
+    .await?;
+    *symbols_accepted = (*symbols_accepted).saturating_add(round_stats.accepted);
+    let round_complete = receive_native_object_complete(cx, connection, control)?;
     let _ = join_all_quic_decodes(cx, decoders, decode_stats).await?;
     decode_stats.add(assemble_completed_entries(decoders));
 
@@ -5721,6 +5934,12 @@ async fn receive_native_symbol_round(
         pending,
         repair_blocks,
         source_symbols,
+        round_symbols_observed: Some(round_stats.observed),
+        round_loss_fraction: receiver_round_loss_fraction(
+            round_stats.observed,
+            round_complete.round_symbols_sent,
+        ),
+        round_symbols_accepted: Some(round_stats.accepted),
     };
     let round = (*feedback_rounds).saturating_add(1);
     let pending_count = need.pending.len().to_string();
@@ -5734,6 +5953,10 @@ async fn receive_native_symbol_round(
         .to_string();
     let source_request_count = need.source_symbols.len().to_string();
     let accepted_count = symbols_accepted.to_string();
+    let round_symbols_sent = round_complete.round_symbols_sent.to_string();
+    let round_symbols_observed = round_stats.observed.to_string();
+    let round_symbols_accepted = round_stats.accepted.to_string();
+    let round_loss_fraction = format!("{:.6}", need.round_loss_fraction.unwrap_or(0.0));
     let round_text = round.to_string();
     cx.trace_with_fields(
         "atp_quic.receive.need_more",
@@ -5743,6 +5966,10 @@ async fn receive_native_symbol_round(
             ("block_requests", block_request_count.as_str()),
             ("repair_symbols", repair_symbol_count.as_str()),
             ("source_requests", source_request_count.as_str()),
+            ("round_symbols_sent", round_symbols_sent.as_str()),
+            ("round_symbols_observed", round_symbols_observed.as_str()),
+            ("round_symbols_accepted", round_symbols_accepted.as_str()),
+            ("round_loss_fraction", round_loss_fraction.as_str()),
             ("symbols_accepted", accepted_count.as_str()),
         ],
     );
@@ -6132,6 +6359,56 @@ mod tests {
         assert_eq!(NATIVE_SYMBOL_DRAIN_BATCH, 512);
     }
 
+    #[test]
+    fn quic_sender_aimd_halves_rate_on_receiver_observed_loss() {
+        let manifest = sample_manifest();
+        let config = trusted_quic_config();
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let mut encoders = Vec::new();
+        let mut state = QuicSenderFeedbackState::new(&manifest, &mut encoders, &config, peer, 100);
+        let initial_rate = state.aimd_rate_bps;
+
+        state.observe_need_more(&QuicNeedMore {
+            pending: vec![0],
+            round_symbols_observed: Some(98),
+            round_symbols_accepted: Some(98),
+            round_loss_fraction: Some(0.25),
+            ..QuicNeedMore::default()
+        });
+
+        assert_eq!(state.last_round_loss_fraction, 0.25);
+        assert_eq!(state.aimd_rate_bps, initial_rate / 2);
+        assert_eq!(
+            state.next_round_config().bwlimit_bps,
+            Some(initial_rate / 2)
+        );
+    }
+
+    #[test]
+    fn quic_sender_aimd_additively_increases_on_clean_feedback() {
+        let manifest = sample_manifest();
+        let config = trusted_quic_config();
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let mut encoders = Vec::new();
+        let mut state = QuicSenderFeedbackState::new(&manifest, &mut encoders, &config, peer, 200);
+        state.aimd_rate_bps = 4 * 1024 * 1024;
+        state.aimd_feedback_seen = true;
+
+        state.observe_need_more(&QuicNeedMore {
+            pending: vec![0],
+            round_symbols_observed: Some(200),
+            round_symbols_accepted: Some(200),
+            round_loss_fraction: Some(0.0),
+            ..QuicNeedMore::default()
+        });
+
+        assert_eq!(state.last_round_loss_fraction, 0.0);
+        assert_eq!(
+            state.aimd_rate_bps,
+            4 * 1024 * 1024 + QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S
+        );
+    }
+
     fn auth_quic_config(seed: u64) -> QuicConfig {
         QuicConfig::default().with_symbol_auth(SecurityContext::for_testing(seed))
     }
@@ -6447,6 +6724,7 @@ mod tests {
                         &decoders,
                         MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
                     ),
+                    ..QuicNeedMore::default()
                 },
             )?;
         }
@@ -7892,6 +8170,7 @@ mod tests {
                 sbn: 1,
                 esi: 15,
             }],
+            ..QuicNeedMore::default()
         };
         let feedback_frame =
             json_frame(FrameType::ObjectRequest, &need_more).expect("feedback frame");
@@ -7956,7 +8235,8 @@ mod tests {
             QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
         let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
 
-        send_object_complete(&cx, &mut client, &mut sender_control).expect("send object-complete");
+        send_object_complete(&cx, &mut client, &mut sender_control, 7)
+            .expect("send object-complete");
         pump_until_idle(
             &cx,
             &mut client,
@@ -7965,8 +8245,9 @@ mod tests {
             2_200,
         )
         .expect("deliver object-complete");
-        receive_object_complete(&cx, &mut server, &mut receiver_control)
+        let complete = receive_object_complete(&cx, &mut server, &mut receiver_control)
             .expect("receive object-complete");
+        assert_eq!(complete.round_symbols_sent, 7);
 
         let need = QuicNeedMore {
             pending: vec![1, 3],
@@ -7976,6 +8257,10 @@ mod tests {
                 sbn: 2,
                 esi: 99,
             }],
+            round_symbols_observed: Some(5),
+            round_loss_fraction: Some(0.25),
+            round_symbols_accepted: Some(4),
+            ..QuicNeedMore::default()
         };
         send_need_more(&cx, &mut server, &mut receiver_control, &need).expect("send need-more");
         pump_until_idle(
@@ -8539,7 +8824,8 @@ mod tests {
         ))
         .expect("send file-backed source-only round");
         assert_eq!(initial_sent, 256);
-        send_object_complete(&cx, &mut client, &mut sender_control).expect("send object complete");
+        send_object_complete(&cx, &mut client, &mut sender_control, initial_sent)
+            .expect("send object complete");
         pump_until_idle(
             &cx,
             &mut client,
@@ -8571,6 +8857,7 @@ mod tests {
                 &decoders,
                 MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND,
             ),
+            ..QuicNeedMore::default()
         };
         assert_eq!(
             need.source_symbols,
@@ -8907,6 +9194,7 @@ mod tests {
             pending,
             repair_blocks: block_repair_requests(&decoders, MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND),
             source_symbols: Vec::new(),
+            ..QuicNeedMore::default()
         };
         assert_eq!(
             need.repair_blocks,
@@ -9040,7 +9328,7 @@ mod tests {
         )
         .expect("spray");
         assert!(sent > 0);
-        send_object_complete(&cx, &mut client, &mut sender_control).expect("send complete");
+        send_object_complete(&cx, &mut client, &mut sender_control, sent).expect("send complete");
         pump_until_idle(
             &cx,
             &mut client,
@@ -9546,7 +9834,7 @@ mod tests {
 
         let dropped = server.recv_datagram().expect("drop one source datagram");
         assert!(!dropped.is_empty());
-        send_object_complete(&cx, &mut client, &mut sender_control)
+        send_object_complete(&cx, &mut client, &mut sender_control, 0)
             .expect("send empty second round marker");
         pump_until_idle(
             &cx,
@@ -9809,6 +10097,7 @@ mod tests {
             pending: vec![0],
             repair_blocks: Vec::new(),
             source_symbols,
+            ..QuicNeedMore::default()
         };
 
         let err = validate_need_more_feedback(&manifest, &config, &need)
@@ -9834,6 +10123,7 @@ mod tests {
             pending: vec![0],
             repair_blocks: vec![repair],
             source_symbols: Vec::new(),
+            ..QuicNeedMore::default()
         };
         let pending =
             validate_need_more_feedback(&manifest, &config, &valid).expect("valid repair request");
@@ -9847,6 +10137,7 @@ mod tests {
                 sbn: 0,
                 esi: 0,
             }],
+            ..QuicNeedMore::default()
         };
         let err = validate_need_more_feedback(&manifest, &config, &mixed)
             .expect_err("mixed source and repair feedback must fail closed");
@@ -9863,6 +10154,7 @@ mod tests {
                 ..repair
             }],
             source_symbols: Vec::new(),
+            ..QuicNeedMore::default()
         };
         let err = validate_need_more_feedback(&manifest, &config, &zero)
             .expect_err("zero-symbol repair request must fail closed");
@@ -9875,6 +10167,7 @@ mod tests {
             pending: vec![0],
             repair_blocks: vec![QuicBlockRepairRequest { sbn: 1, ..repair }],
             source_symbols: Vec::new(),
+            ..QuicNeedMore::default()
         };
         let err = validate_need_more_feedback(&manifest, &config, &invalid_block)
             .expect_err("out-of-range repair block request must fail closed");
@@ -9887,6 +10180,7 @@ mod tests {
             pending: vec![0],
             repair_blocks: vec![repair, repair],
             source_symbols: Vec::new(),
+            ..QuicNeedMore::default()
         };
         let err = validate_need_more_feedback(&manifest, &config, &duplicate)
             .expect_err("duplicate repair block request must fail closed");
@@ -9910,6 +10204,7 @@ mod tests {
             pending: vec![0],
             repair_blocks: Vec::new(),
             source_symbols: vec![duplicate, duplicate],
+            ..QuicNeedMore::default()
         };
 
         let err = validate_need_more_feedback(&manifest, &config, &need)
@@ -9928,6 +10223,7 @@ mod tests {
                 sbn: 0,
                 esi: 1,
             }],
+            ..QuicNeedMore::default()
         };
         let err = validate_need_more_feedback(&manifest, &config, &invalid_esi)
             .expect_err("out-of-range source ESI request must fail closed");
