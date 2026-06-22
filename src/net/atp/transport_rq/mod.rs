@@ -213,18 +213,6 @@ const RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN: f64 = 0.03;
 const RQ_AIMD_CLEAN_INCREASE_THRESHOLD: f64 = 0.0015;
 const RQ_AIMD_MULTIPLICATIVE_DECREASE: f64 = 0.50;
 const RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
-/// Lossy benchmark cells need a conservative first spray, but MATRIX-35 showed
-/// that staying at a static low rate starves the link. Treat it as TCP-style
-/// slow start instead: start below the expected lossy ceiling, multiply upward
-/// during the first spray, then let AIMD take over once excess receiver loss
-/// appears.
-const RQ_SLOW_START_LOSSY_CEILING_BPS: u64 = RQ_COLD_START_PACING_BPS * 3 / 8;
-const RQ_SLOW_START_HIGH_LOSS_CEILING_BPS: u64 = RQ_COLD_START_PACING_BPS / 10;
-const RQ_SLOW_START_HIGH_LOSS_THRESHOLD: f64 = 0.05;
-const RQ_SLOW_START_INITIAL_DIVISOR: u64 = 2;
-const RQ_SLOW_START_RAMP_INTERVAL_SYMBOLS: u64 = 2048;
-const RQ_SLOW_START_INCREASE_NUMERATOR: u64 = 2;
-const RQ_SLOW_START_INCREASE_DENOMINATOR: u64 = 1;
 /// Do not spend proactive round-0 repair on clean and near-clean links. The
 /// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
 const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
@@ -651,9 +639,6 @@ struct RqAdaptiveSendState {
     symbol_size: u16,
     aimd_rate_bps: u64,
     aimd_feedback_seen: bool,
-    slow_start_active: bool,
-    slow_start_ceiling_bps: u64,
-    slow_start_next_ramp_symbols: u64,
     last_round_loss_fraction: f64,
     loss_ema: f64,
     pacing_loss_ema: f64,
@@ -689,19 +674,14 @@ impl RqAdaptiveSendState {
         };
         let mut controller = AdaptiveController::new(policy, seed);
         controller.update_estimate(est);
-        let slow_start_active = slow_start_enabled(config);
-        let slow_start_ceiling_bps = slow_start_ceiling_rate_bps(config);
         Self {
             controller,
             loss_detector: AtpLossDetector::new(),
             beacons: BeaconScheduler::new(seed, Instant::now()),
             est,
             symbol_size: config.symbol_size,
-            aimd_rate_bps: slow_start_initial_rate_bps(config),
+            aimd_rate_bps: RQ_COLD_START_PACING_BPS,
             aimd_feedback_seen: false,
-            slow_start_active,
-            slow_start_ceiling_bps,
-            slow_start_next_ramp_symbols: RQ_SLOW_START_RAMP_INTERVAL_SYMBOLS,
             last_round_loss_fraction: 0.0,
             loss_ema: 0.0,
             pacing_loss_ema: 0.0,
@@ -747,10 +727,9 @@ impl RqAdaptiveSendState {
     }
 
     fn round_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
-        let fixed_pacing = self.pacing_for_current_rate(config);
         let fixed = RqRoundTuning {
             repair_overhead: config.repair_overhead.max(1.0),
-            pacing: fixed_pacing,
+            pacing: RqSprayPacing::cold_start(config.symbol_size),
         };
         let Some(mut plan) = self.controller.next_block_plan(self.symbol_size) else {
             return fixed;
@@ -967,73 +946,14 @@ impl RqAdaptiveSendState {
         self.aimd_feedback_seen = true;
         self.last_round_loss_fraction = loss;
         if loss > decrease_threshold {
-            self.slow_start_active = false;
-            self.slow_start_next_ramp_symbols = RQ_SLOW_START_RAMP_INTERVAL_SYMBOLS;
             let reduced =
                 (self.aimd_rate_bps as f64 * RQ_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
             self.aimd_rate_bps = reduced.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
-        } else if self.slow_start_active {
-            self.aimd_rate_bps =
-                slow_start_increased_rate_bps(self.aimd_rate_bps, self.slow_start_ceiling_bps);
-            if self.aimd_rate_bps >= self.slow_start_ceiling_bps {
-                self.slow_start_active = false;
-                self.slow_start_next_ramp_symbols = RQ_SLOW_START_RAMP_INTERVAL_SYMBOLS;
-            }
         } else if loss <= RQ_AIMD_CLEAN_INCREASE_THRESHOLD {
             self.aimd_rate_bps = self
                 .aimd_rate_bps
                 .saturating_add(RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
                 .clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
-        }
-    }
-
-    fn ramp_slow_start_after_send(
-        &mut self,
-        config: &RqConfig,
-        symbols_sent: u64,
-        pacer: &mut RqSprayPacer,
-    ) {
-        if !self.slow_start_active || self.aimd_feedback_seen {
-            return;
-        }
-        let mut changed = false;
-        while symbols_sent >= self.slow_start_next_ramp_symbols
-            && self.aimd_rate_bps < self.slow_start_ceiling_bps
-        {
-            let next =
-                slow_start_increased_rate_bps(self.aimd_rate_bps, self.slow_start_ceiling_bps);
-            if next <= self.aimd_rate_bps {
-                break;
-            }
-            self.aimd_rate_bps = next;
-            self.slow_start_next_ramp_symbols = self
-                .slow_start_next_ramp_symbols
-                .saturating_add(RQ_SLOW_START_RAMP_INTERVAL_SYMBOLS);
-            changed = true;
-        }
-        if changed {
-            let pacing = self.pacing_for_current_rate(config);
-            rqtrace!(
-                "sender: slow-start ramp symbols_sent={} aimd_rate_bps={} path_rate_bps={}",
-                symbols_sent,
-                self.aimd_rate_bps,
-                pacing.path_rate_bps
-            );
-            pacer.configure(pacing);
-        }
-    }
-
-    fn pacing_for_current_rate(&self, config: &RqConfig) -> RqSprayPacing {
-        if self.aimd_rate_bps == RQ_COLD_START_PACING_BPS {
-            RqSprayPacing::cold_start(config.symbol_size)
-        } else {
-            RqSprayPacing::from_rate(
-                self.aimd_rate_bps,
-                config.symbol_size,
-                RQ_COLD_START_BURST_SYMBOLS,
-                None,
-                false,
-            )
         }
     }
 
@@ -1250,43 +1170,6 @@ fn aimd_loss_decrease_threshold(config: &RqConfig) -> f64 {
     (expected_loss + RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN)
         .max(RQ_AIMD_LOSS_DECREASE_THRESHOLD_MIN)
         .clamp(0.0, 0.90)
-}
-
-fn slow_start_enabled(config: &RqConfig) -> bool {
-    round0_loss_target_repair_enabled(config)
-}
-
-fn slow_start_ceiling_rate_bps(config: &RqConfig) -> u64 {
-    if !slow_start_enabled(config) {
-        return RQ_COLD_START_PACING_BPS;
-    }
-    let ceiling = if config.round0_loss_target >= RQ_SLOW_START_HIGH_LOSS_THRESHOLD {
-        RQ_SLOW_START_HIGH_LOSS_CEILING_BPS
-    } else {
-        RQ_SLOW_START_LOSSY_CEILING_BPS
-    };
-    ceiling.clamp(RQ_MIN_PACING_BPS, RQ_COLD_START_PACING_BPS)
-}
-
-fn slow_start_initial_rate_bps(config: &RqConfig) -> u64 {
-    if !slow_start_enabled(config) {
-        return RQ_COLD_START_PACING_BPS;
-    }
-    let ceiling = slow_start_ceiling_rate_bps(config);
-    ceiling
-        .checked_div(RQ_SLOW_START_INITIAL_DIVISOR)
-        .unwrap_or(ceiling)
-        .clamp(RQ_MIN_PACING_BPS, ceiling)
-}
-
-fn slow_start_increased_rate_bps(rate_bps: u64, ceiling_bps: u64) -> u64 {
-    let increased = (u128::from(rate_bps) * u128::from(RQ_SLOW_START_INCREASE_NUMERATOR)
-        + u128::from(RQ_SLOW_START_INCREASE_DENOMINATOR - 1))
-        / u128::from(RQ_SLOW_START_INCREASE_DENOMINATOR);
-    u64::try_from(increased).unwrap_or(u64::MAX).clamp(
-        RQ_MIN_PACING_BPS,
-        ceiling_bps.clamp(RQ_MIN_PACING_BPS, RQ_COLD_START_PACING_BPS),
-    )
 }
 
 fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
@@ -3428,14 +3311,13 @@ pub async fn send_path(
                 };
                 pacer.configure(round_tuning.pacing);
                 rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} round_loss_fraction={:.4} aimd_rate_bps={} slow_start_active={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
+                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} round_loss_fraction={:.4} aimd_rate_bps={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
                     pending.len(),
                     source_symbols.len(),
                     sent_this_round,
                     received_this_round,
                     adaptive.last_round_loss_fraction,
                     adaptive.aimd_rate_bps,
-                    adaptive.slow_start_active,
                     round_send_wall.as_millis(),
                     control_wait.as_millis(),
                     round_tuning.repair_overhead,
@@ -3862,7 +3744,6 @@ where
                     }
                 }
                 send_batch.flush(sockets, symbols_sent).await?;
-                adaptive.ramp_slow_start_after_send(config, *symbols_sent, pacer);
                 service_rq_spray_control(cx, control, adaptive).await?;
                 enc.repair_cursors[block_index] = target_repair;
             }
@@ -4004,7 +3885,6 @@ where
         .await?;
     }
     send_batch.flush(sockets, symbols_sent).await?;
-    adaptive.ramp_slow_start_after_send(config, *symbols_sent, pacer);
     service_rq_spray_control(cx, control, adaptive).await?;
     rqtrace!(
         "sender: retransmitted {} requested source symbols",
@@ -4053,7 +3933,6 @@ where
         .await?;
     }
     send_batch.flush(sockets, symbols_sent).await?;
-    adaptive.ramp_slow_start_after_send(config, *symbols_sent, pacer);
     service_rq_spray_control(cx, control, adaptive).await
 }
 
@@ -4095,7 +3974,6 @@ where
     send_batch.push(socket_index, dgram);
     if send_batch.should_flush() {
         send_batch.flush(sockets, symbols_sent).await?;
-        adaptive.ramp_slow_start_after_send(config, *symbols_sent, pacer);
         service_rq_spray_control(cx, control, adaptive).await?;
     }
     Ok(())
@@ -6853,195 +6731,6 @@ mod tests {
     }
 
     #[test]
-    fn rq_slow_start_preserves_clean_and_good_cold_start() {
-        for target in [0.0, 0.001] {
-            let config = RqConfig {
-                symbol_size: 1200,
-                round0_loss_target: target,
-                ..RqConfig::default()
-            };
-            let mut state = RqAdaptiveSendState::new(7, &config, 1);
-
-            let tuning = state.round0_tuning(&config);
-
-            assert!(!state.slow_start_active);
-            assert_eq!(state.aimd_rate_bps, RQ_COLD_START_PACING_BPS);
-            assert_eq!(
-                tuning.pacing.path_rate_bps,
-                RqSprayPacing::cold_start(config.symbol_size).path_rate_bps,
-                "clean and 0.1% good cells must keep the proven cold-start path"
-            );
-        }
-    }
-
-    #[test]
-    fn rq_slow_start_starts_lossy_cells_conservatively() {
-        let config = RqConfig {
-            symbol_size: 1200,
-            round0_loss_target: 0.02,
-            ..RqConfig::default()
-        };
-        let mut state = RqAdaptiveSendState::new(7, &config, 1);
-        let expected_initial = slow_start_initial_rate_bps(&config);
-
-        let tuning = state.round0_tuning(&config);
-
-        assert!(state.slow_start_active);
-        assert_eq!(
-            expected_initial,
-            RQ_SLOW_START_LOSSY_CEILING_BPS / RQ_SLOW_START_INITIAL_DIVISOR
-        );
-        assert_eq!(state.aimd_rate_bps, expected_initial);
-        assert_eq!(
-            state.slow_start_ceiling_bps,
-            RQ_SLOW_START_LOSSY_CEILING_BPS
-        );
-        assert_eq!(
-            tuning.pacing.path_rate_bps,
-            expected_initial.saturating_mul(8),
-            "lossy cells should not blind-spray at full cold-start before receiver feedback"
-        );
-    }
-
-    #[test]
-    fn rq_slow_start_uses_lower_ceiling_for_broken_loss_target() {
-        let config = RqConfig {
-            symbol_size: 1200,
-            round0_loss_target: 0.10,
-            ..RqConfig::default()
-        };
-        let mut state = RqAdaptiveSendState::new(7, &config, 1);
-        let expected_initial = slow_start_initial_rate_bps(&config);
-
-        let tuning = state.round0_tuning(&config);
-
-        assert!(state.slow_start_active);
-        assert_eq!(
-            state.slow_start_ceiling_bps,
-            RQ_SLOW_START_HIGH_LOSS_CEILING_BPS
-        );
-        assert_eq!(
-            expected_initial,
-            RQ_SLOW_START_HIGH_LOSS_CEILING_BPS / RQ_SLOW_START_INITIAL_DIVISOR
-        );
-        assert_eq!(state.aimd_rate_bps, expected_initial);
-        assert_eq!(
-            tuning.pacing.path_rate_bps,
-            expected_initial.saturating_mul(8)
-        );
-    }
-
-    #[test]
-    fn rq_slow_start_ramps_within_first_spray_before_feedback() {
-        let config = RqConfig {
-            symbol_size: 1200,
-            round0_loss_target: 0.02,
-            ..RqConfig::default()
-        };
-        let mut state = RqAdaptiveSendState::new(7, &config, 1);
-        let tuning = state.round0_tuning(&config);
-        let mut pacer = RqSprayPacer::new(tuning.pacing);
-        let initial = state.aimd_rate_bps;
-
-        state.ramp_slow_start_after_send(
-            &config,
-            RQ_SLOW_START_RAMP_INTERVAL_SYMBOLS - 1,
-            &mut pacer,
-        );
-
-        assert_eq!(state.aimd_rate_bps, initial);
-        assert!(state.slow_start_active);
-
-        state.ramp_slow_start_after_send(&config, RQ_SLOW_START_RAMP_INTERVAL_SYMBOLS, &mut pacer);
-
-        assert_eq!(state.aimd_rate_bps, slow_start_ceiling_rate_bps(&config));
-        assert!(state.slow_start_active);
-    }
-
-    #[test]
-    fn rq_slow_start_hands_off_at_ceiling_on_expected_bad_link_loss() {
-        let config = RqConfig {
-            symbol_size: 1200,
-            round0_loss_target: 0.02,
-            ..RqConfig::default()
-        };
-        let mut state = RqAdaptiveSendState::new(7, &config, 1);
-        let ceiling = slow_start_ceiling_rate_bps(&config);
-        state.aimd_rate_bps = ceiling;
-        let total_bytes = 50_u64 * 1024 * 1024;
-        let digests = [EntryDigest {
-            rel_path: "bad.bin".to_string(),
-            size: total_bytes,
-            content_id: crate::atp::object::ObjectId::content(
-                crate::atp::object::ContentId::from_bytes(b"bad.bin"),
-            ),
-            content_sha256: [0; 32],
-        }];
-        let pending = BTreeSet::from([0_u32]);
-
-        state.observe_need_more(
-            &config,
-            &digests,
-            &pending,
-            10_000,
-            9_800,
-            None,
-            Duration::from_millis(800),
-            Duration::from_millis(100),
-            total_bytes,
-        );
-
-        assert_eq!(state.last_round_loss_fraction, 0.02);
-        assert!(!state.slow_start_active);
-        assert_eq!(
-            state.aimd_rate_bps, ceiling,
-            "expected bad-cell loss should hand AIMD a discovered near-link rate"
-        );
-    }
-
-    #[test]
-    fn rq_slow_start_exits_to_aimd_decrease_on_excess_loss() {
-        let config = RqConfig {
-            symbol_size: 1200,
-            round0_loss_target: 0.02,
-            ..RqConfig::default()
-        };
-        let mut state = RqAdaptiveSendState::new(7, &config, 1);
-        let total_bytes = 50_u64 * 1024 * 1024;
-        let digests = [EntryDigest {
-            rel_path: "bad.bin".to_string(),
-            size: total_bytes,
-            content_id: crate::atp::object::ObjectId::content(
-                crate::atp::object::ContentId::from_bytes(b"bad.bin"),
-            ),
-            content_sha256: [0; 32],
-        }];
-        let pending = BTreeSet::from([0_u32]);
-        let ceiling = slow_start_ceiling_rate_bps(&config);
-        state.aimd_rate_bps = ceiling;
-
-        state.observe_need_more(
-            &config,
-            &digests,
-            &pending,
-            10_000,
-            8_500,
-            None,
-            Duration::from_millis(800),
-            Duration::from_millis(100),
-            total_bytes,
-        );
-
-        assert!(state.last_round_loss_fraction > aimd_loss_decrease_threshold(&config));
-        assert!(!state.slow_start_active);
-        assert_eq!(
-            state.aimd_rate_bps,
-            ceiling / 2,
-            "first excess loss should leave slow-start and use AIMD multiplicative decrease"
-        );
-    }
-
-    #[test]
     fn rq_aimd_halves_rate_on_receiver_observed_loss() {
         let config = RqConfig {
             symbol_size: 1200,
@@ -7118,8 +6807,6 @@ mod tests {
             ..RqConfig::default()
         };
         let mut state = RqAdaptiveSendState::new(7, &config, 1);
-        state.slow_start_active = false;
-        state.aimd_rate_bps = RQ_COLD_START_PACING_BPS;
         let total_bytes = 50_u64 * 1024 * 1024;
         let digests = [EntryDigest {
             rel_path: "broken.bin".to_string(),
@@ -7158,8 +6845,6 @@ mod tests {
             ..RqConfig::default()
         };
         let mut state = RqAdaptiveSendState::new(7, &config, 1);
-        state.slow_start_active = false;
-        state.aimd_rate_bps = RQ_COLD_START_PACING_BPS;
         let total_bytes = 50_u64 * 1024 * 1024;
         let digests = [EntryDigest {
             rel_path: "bad.bin".to_string(),
@@ -8991,7 +8676,7 @@ mod tests {
     }
 
     #[test]
-    fn round0_loss_target_calibrates_bad_link_repair_and_slow_start_pacing() {
+    fn round0_loss_target_calibrates_bad_link_repair_without_pacing_changes() {
         let config = RqConfig {
             symbol_size: 1200,
             max_block_size: 512 * 1024,
@@ -9012,10 +8697,10 @@ mod tests {
             initial_repair_target_per_block(437, tuning.repair_overhead) >= 40,
             "2% loss should pre-spray enough repair symbols for one-round convergence"
         );
-        assert_eq!(
-            tuning.pacing.path_rate_bps,
-            slow_start_initial_rate_bps(&config).saturating_mul(8),
-            "lossy round-0 should start conservatively and then ramp multiplicatively"
+        assert!(
+            tuning.pacing.path_rate_bps
+                <= RqSprayPacing::cold_start(config.symbol_size).path_rate_bps,
+            "round-0 loss calibration must not raise sender pacing"
         );
         assert!(
             source_retransmit_needs_fec_fallback(&config, 2, 0),
