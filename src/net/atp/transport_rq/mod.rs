@@ -208,15 +208,16 @@ const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
 const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
 const RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR: f64 = 0.01;
 const RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD: f64 = 0.03;
+const RQ_DELIVERY_RATE_CAP_MIN_SYMBOLS: u64 = 128;
 /// Do not spend proactive round-0 repair on clean and near-clean links. The
 /// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
 const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
-/// Convert an explicit path-loss target into a conservative upper bound before
-/// feeding the RaptorQ overhead solver. At 2% loss this produces a ~3% sizing
-/// input, enough margin for one-round convergence without turning clean links
-/// into fixed-overhead transfers.
-const RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION: f64 = 0.25;
-const RQ_ROUND0_TARGET_LOSS_MARGIN_MIN: f64 = 0.005;
+/// Convert an explicit path-loss target into proportional RaptorQ overhead.
+/// At 2% loss this yields 5% extra repair; at 10% it yields 15%. The margin is
+/// intentionally small because MATRIX-28 showed slow links are limited by
+/// round-0 over-pacing, not by a lack of 50% repair budget.
+const RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION: f64 = 0.50;
+const RQ_ROUND0_TARGET_LOSS_MARGIN_MIN: f64 = 0.03;
 /// Hard cap on the per-round fractional repair overhead taken from the controller's
 /// wire-loss-driven `plan.overhead` (round_tuning). Without this, a round-0 spray that
 /// over-paces a slow link self-inflicts high real loss, the wire-loss estimate clamps near
@@ -639,6 +640,7 @@ struct RqAdaptiveSendState {
     bw_ema_bps: f64,
     bw_trough_bps: f64,
     loss_pacing_cap_bps: Option<u64>,
+    delivery_pacing_cap_bps: Option<u64>,
     loss_fec_floor: f64,
     regime_shift: bool,
 }
@@ -679,6 +681,7 @@ impl RqAdaptiveSendState {
             bw_ema_bps: 0.0,
             bw_trough_bps: 0.0,
             loss_pacing_cap_bps: None,
+            delivery_pacing_cap_bps: None,
             loss_fec_floor: 0.0,
             regime_shift: false,
         }
@@ -716,25 +719,30 @@ impl RqAdaptiveSendState {
     }
 
     fn round_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
+        let fixed_rate = self.apply_recovery_pacing_caps(RQ_COLD_START_PACING_BPS);
         let fixed = RqRoundTuning {
             repair_overhead: config.repair_overhead.max(1.0),
-            pacing: RqSprayPacing::cold_start(config.symbol_size),
+            pacing: self.pacing_from_rate(config, fixed_rate),
         };
         let Some(mut plan) = self.controller.next_block_plan(self.symbol_size) else {
             return fixed;
         };
+        let target_repair_overhead = round0_loss_target_repair_enabled(config)
+            .then(|| loss_proportional_repair_overhead(config.round0_loss_target));
         // Bound the wire-loss-driven overhead before it feeds either the repair budget or the
         // pacing rate, so a round-0 over-pace artifact can't blow it up to ~10× (MATRIX-12).
-        plan.overhead = plan.overhead.min(RQ_MAX_ROUND_REPAIR_OVERHEAD);
+        plan.overhead = plan
+            .overhead
+            .min(target_repair_overhead.unwrap_or(RQ_MAX_ROUND_REPAIR_OVERHEAD));
 
+        let fec_floor = target_repair_overhead.map_or(self.loss_fec_floor, |target| {
+            self.loss_fec_floor.min(target)
+        });
         let mut repair_overhead = config
             .repair_overhead
             .max(1.0 + plan.overhead)
-            .max(1.0 + self.loss_fec_floor);
-        let mut rate = self.pacing_rate_for(plan);
-        if let Some(cap) = self.loss_pacing_cap_bps {
-            rate = rate.min(self.loss_pacing_cap_for_current_regime(cap));
-        }
+            .max(1.0 + fec_floor);
+        let mut rate = self.apply_recovery_pacing_caps(self.pacing_rate_for(plan));
         if self.regime_shift || self.pacing_loss_bar >= RQ_REGIME_SHIFT_LOSS_DELTA {
             repair_overhead = repair_overhead.max(1.03);
             rate = rate.min(RQ_COLD_START_PACING_BPS / 2);
@@ -742,13 +750,7 @@ impl RqAdaptiveSendState {
 
         RqRoundTuning {
             repair_overhead,
-            pacing: RqSprayPacing::from_rate(
-                rate,
-                config.symbol_size,
-                RQ_ADAPTIVE_BURST_SYMBOLS,
-                Some(duration_from_secs(self.est.rtt_s)),
-                self.pacing_loss_ema > 0.0,
-            ),
+            pacing: self.pacing_from_rate(config, rate),
         }
     }
 
@@ -762,6 +764,10 @@ impl RqAdaptiveSendState {
 
     fn source_fec_fallback_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
         let mut tuning = self.round_tuning(config);
+        if round0_loss_target_repair_enabled(config) {
+            tuning.repair_overhead = round0_loss_target_repair_overhead(config);
+            return tuning;
+        }
         let k = fixed_block_k(config);
         let loss_bar = self.source_fec_fallback_loss_bar();
         let overhead = adaptive::overhead_for_target(
@@ -801,6 +807,7 @@ impl RqAdaptiveSendState {
         send_wall: Duration,
         control_wait: Duration,
         total_bytes: u64,
+        round0_feedback: bool,
     ) {
         self.record_beacon_exchange(control_wait);
 
@@ -848,9 +855,15 @@ impl RqAdaptiveSendState {
 
         let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
         let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
-        let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
-        let useful_factor = (1.0 - wire_loss_hat * 0.5).clamp(0.25, 1.0);
-        let bw_sample = offered_bps * useful_factor;
+        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
+        let bw_sample = (useful_bytes as f64 / send_wall_s).max(1.0);
+        self.observe_measured_delivery_cap(
+            sent_symbols,
+            received_symbols,
+            bw_sample,
+            wire_loss_hat,
+            round0_feedback,
+        );
         let sent_payload_fraction = if pending_bytes == 0 {
             1.0
         } else {
@@ -882,7 +895,6 @@ impl RqAdaptiveSendState {
         };
         self.controller.update_estimate(self.est);
 
-        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
         let cwnd_bytes = (self.bw_ema_bps * rtt_s)
             .max(f64::from(config.symbol_size.max(1)))
             .ceil() as u64;
@@ -959,6 +971,60 @@ impl RqAdaptiveSendState {
         );
     }
 
+    fn observe_measured_delivery_cap(
+        &mut self,
+        sent_symbols: u64,
+        received_symbols: u64,
+        delivered_bps: f64,
+        wire_loss_hat: f64,
+        round0_feedback: bool,
+    ) {
+        if !round0_feedback
+            || sent_symbols < RQ_DELIVERY_RATE_CAP_MIN_SYMBOLS
+            || received_symbols == 0
+            || !delivered_bps.is_finite()
+            || wire_loss_hat < RQ_ROUND0_TARGET_LOSS_ENABLE_MIN
+        {
+            return;
+        }
+
+        let measured = delivered_bps.ceil() as u64;
+        if measured >= RQ_COLD_START_PACING_BPS {
+            return;
+        }
+
+        let cap = measured.clamp(RQ_MIN_PACING_BPS, RQ_COLD_START_PACING_BPS);
+        self.delivery_pacing_cap_bps = Some(cap);
+    }
+
+    fn apply_recovery_pacing_caps(&self, rate: u64) -> u64 {
+        let mut capped = rate.min(RQ_COLD_START_PACING_BPS);
+        if let Some(cap) = self.loss_pacing_cap_bps {
+            capped = capped.min(self.loss_pacing_cap_for_current_regime(cap));
+        }
+        if let Some(cap) = self.delivery_pacing_cap_bps {
+            capped = capped.min(cap);
+        }
+        capped
+    }
+
+    fn pacing_from_rate(&self, config: &RqConfig, rate: u64) -> RqSprayPacing {
+        if rate >= RQ_COLD_START_PACING_BPS
+            && self.loss_pacing_cap_bps.is_none()
+            && self.delivery_pacing_cap_bps.is_none()
+        {
+            RqSprayPacing::cold_start(config.symbol_size)
+        } else {
+            RqSprayPacing::from_rate(
+                rate,
+                config.symbol_size,
+                RQ_ADAPTIVE_BURST_SYMBOLS,
+                Some(duration_from_secs(self.est.rtt_s)),
+                self.pacing_loss_ema > 0.0 || self.delivery_pacing_cap_bps.is_some(),
+            )
+        }
+    }
+
     fn observe_probe_success(
         &mut self,
         config: &RqConfig,
@@ -994,6 +1060,7 @@ impl RqAdaptiveSendState {
         self.loss_bar = ema(self.loss_bar, 0.0, RQ_LOSS_EMA_ALPHA);
         self.pacing_loss_bar = ema(self.pacing_loss_bar, 0.0, RQ_LOSS_EMA_ALPHA);
         self.loss_pacing_cap_bps = None;
+        self.delivery_pacing_cap_bps = None;
         self.loss_fec_floor = 0.0;
 
         self.est = PathEstimate {
@@ -1097,18 +1164,16 @@ fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
     if !round0_loss_target_repair_enabled(config) {
         return config.repair_overhead.max(1.0);
     }
-    let loss = config.round0_loss_target;
-    let loss_bar = (loss * (1.0 + RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION)
-        + RQ_ROUND0_TARGET_LOSS_MARGIN_MIN)
-        .clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD);
-    let overhead = adaptive::overhead_for_target(
-        fixed_block_k(config),
-        loss_bar,
-        RQ_SOURCE_FEC_FALLBACK_ALPHA,
-        RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
-    )
-    .min(RQ_MAX_ROUND_REPAIR_OVERHEAD);
-    config.repair_overhead.max(1.0 + overhead)
+    config
+        .repair_overhead
+        .max(1.0 + loss_proportional_repair_overhead(config.round0_loss_target))
+}
+
+fn loss_proportional_repair_overhead(loss: f64) -> f64 {
+    let loss = loss.clamp(0.0, 1.0);
+    (loss + (loss * RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION).max(RQ_ROUND0_TARGET_LOSS_MARGIN_MIN))
+        .clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD)
+        .min(RQ_MAX_ROUND_REPAIR_OVERHEAD)
 }
 
 fn round0_loss_target_repair_enabled(config: &RqConfig) -> bool {
@@ -3204,6 +3269,7 @@ pub async fn send_path(
                     round_send_wall,
                     control_wait,
                     total_bytes,
+                    feedback_rounds == 1,
                 );
                 let source_fec_fallback_trigger = source_retransmit_needs_fec_fallback(
                     &config,
@@ -3218,7 +3284,7 @@ pub async fn send_path(
                 };
                 pacer.configure(round_tuning.pacing);
                 rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
+                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} delivery_cap_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
                     pending.len(),
                     source_symbols.len(),
                     sent_this_round,
@@ -3227,6 +3293,7 @@ pub async fn send_path(
                     control_wait.as_millis(),
                     round_tuning.repair_overhead,
                     round_tuning.pacing.path_rate_bps,
+                    adaptive.delivery_pacing_cap_bps.unwrap_or(0),
                     adaptive.loss_ema,
                     adaptive.pacing_loss_ema,
                     adaptive.loss_bar,
@@ -3353,8 +3420,7 @@ fn repair_target_for_feedback_round(
 }
 
 fn source_retransmit_request_limit(config: &RqConfig, feedback_round: u32) -> Option<usize> {
-    if !round0_loss_target_repair_enabled(config)
-        && config.repair_overhead <= 1.0
+    if config.repair_overhead <= 1.0
         && config.source_retransmit_rounds > 0
         && feedback_round <= config.source_retransmit_rounds
     {
@@ -3369,9 +3435,6 @@ fn source_retransmit_needs_fec_fallback(
     feedback_round: u32,
     requested_sources: usize,
 ) -> bool {
-    if round0_loss_target_repair_enabled(config) {
-        return true;
-    }
     if config.repair_overhead > 1.0 || config.source_retransmit_rounds == 0 {
         return false;
     }
@@ -6626,6 +6689,120 @@ mod tests {
     }
 
     #[test]
+    fn rq_round0_measured_delivery_caps_slow_link_recovery() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "large.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"large.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+        let sent_symbols = 50_500_u64;
+        let received_symbols = 26_845_u64;
+        let measured_bytes_per_sec = 6_250_000_u64;
+        let send_wall = Duration::from_millis(
+            received_symbols
+                .saturating_mul(u64::from(config.symbol_size))
+                .saturating_mul(1000)
+                / measured_bytes_per_sec,
+        );
+        let expected_cap = ((received_symbols.saturating_mul(u64::from(config.symbol_size)) as f64
+            / finite_duration_s(send_wall))
+        .ceil()) as u64;
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            sent_symbols,
+            received_symbols,
+            send_wall,
+            Duration::from_millis(80),
+            total_bytes,
+            true,
+        );
+        let tuning = state.round_tuning(&config);
+
+        assert_eq!(state.delivery_pacing_cap_bps, Some(expected_cap));
+        assert!(
+            state.pacing_loss_ema > RQ_MILD_LOSS_PACING_MAX_LOSS,
+            "round-0 overshoot must be treated as real pacing loss"
+        );
+        assert_eq!(
+            tuning.pacing.path_rate_bps,
+            expected_cap.saturating_mul(8),
+            "round-0 measured delivery must cap recovery pacing"
+        );
+        assert!(
+            tuning.pacing.path_rate_bps
+                < RqSprayPacing::cold_start(config.symbol_size).path_rate_bps
+        );
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            7_800,
+            7_644,
+            Duration::from_millis(15_000),
+            Duration::from_millis(80),
+            total_bytes,
+            false,
+        );
+
+        assert_eq!(
+            state.delivery_pacing_cap_bps,
+            Some(expected_cap),
+            "later self-limited repair samples must not lower the round-0 delivery cap"
+        );
+    }
+
+    #[test]
+    fn rq_clean_delivery_sample_does_not_cap_recovery_pacing() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "large.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"large.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+        let sent_symbols = 50_500_u64;
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            sent_symbols,
+            sent_symbols,
+            Duration::from_millis(1200),
+            Duration::from_millis(25),
+            total_bytes,
+            true,
+        );
+
+        assert_eq!(
+            state.delivery_pacing_cap_bps, None,
+            "clean delivery must not install a downward cap"
+        );
+    }
+
+    #[test]
     fn rq_need_more_entry_pressure_does_not_create_congestion_cap() {
         let config = RqConfig {
             symbol_size: 1024,
@@ -6653,6 +6830,7 @@ mod tests {
             Duration::from_secs(120),
             Duration::from_millis(50),
             total_bytes,
+            true,
         );
 
         assert!(
@@ -6718,6 +6896,7 @@ mod tests {
                 send_wall,
                 Duration::from_millis(200),
                 total_bytes,
+                sent_symbols == 43_700_u64,
             );
         }
 
@@ -6776,6 +6955,7 @@ mod tests {
             Duration::from_millis(3_300),
             Duration::from_millis(200),
             total_bytes,
+            true,
         );
 
         assert!(
@@ -6875,6 +7055,7 @@ mod tests {
             Duration::from_millis(300),
             Duration::from_secs(120),
             total_bytes,
+            true,
         );
 
         assert!(
@@ -8292,15 +8473,29 @@ mod tests {
     }
 
     #[test]
-    fn round0_loss_target_uses_repair_feedback_in_lossy_cells() {
+    fn round0_loss_target_keeps_source_retransmit_and_fec_fallback() {
         let config = RqConfig {
             repair_overhead: 1.0,
             round0_loss_target: 0.02,
             ..RqConfig::default()
         };
 
-        assert_eq!(source_retransmit_request_limit(&config, 1), None);
-        assert!(source_retransmit_needs_fec_fallback(&config, 1, 0));
+        assert_eq!(
+            source_retransmit_request_limit(&config, 1),
+            Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
+        );
+        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 0));
+        assert!(!source_retransmit_needs_fec_fallback(
+            &config,
+            1,
+            DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS - 1
+        ));
+        assert!(source_retransmit_needs_fec_fallback(
+            &config,
+            1,
+            DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS
+        ));
+        assert!(source_retransmit_needs_fec_fallback(&config, 2, 0));
     }
 
     #[test]
@@ -8379,13 +8574,13 @@ mod tests {
         let tuning = state.round0_tuning(&config);
 
         assert!(
-            (1.10..=1.20).contains(&tuning.repair_overhead),
-            "2% target loss should produce a 10-20% one-round repair budget, got {}",
+            (1.05..=1.10).contains(&tuning.repair_overhead),
+            "2% target loss should produce a 5-10% proportional repair budget, got {}",
             tuning.repair_overhead
         );
         assert!(
-            initial_repair_target_per_block(437, tuning.repair_overhead) >= 40,
-            "2% loss should pre-spray enough repair symbols for one-round convergence"
+            initial_repair_target_per_block(437, tuning.repair_overhead) >= 20,
+            "2% loss should pre-spray modest repair without a flat 50% budget"
         );
         assert!(
             tuning.pacing.path_rate_bps
@@ -8410,10 +8605,38 @@ mod tests {
 
         let overhead = round0_loss_target_repair_overhead(&config);
 
-        assert!(overhead > 1.20, "broken link should receive proactive FEC");
         assert!(
-            overhead <= 1.0 + RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
-            "round-0 target loss must stay within bounded FEC envelope"
+            (1.10..=1.20).contains(&overhead),
+            "broken link should receive proportional FEC without a 50% budget, got {overhead}"
+        );
+        assert!(
+            initial_repair_target_per_block(437, overhead) <= 66,
+            "broken link should not fall back to the old 50% repair budget"
+        );
+    }
+
+    #[test]
+    fn source_fec_fallback_uses_loss_target_not_round0_overshoot_deficit() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(99, &config, 4);
+        state.loss_ema = 0.47;
+        state.loss_bar = 0.82;
+        state.pacing_loss_ema = 0.47;
+        state.pacing_loss_bar = 0.82;
+        state.est.loss_p_hat = 0.47;
+
+        let tuning = state.source_fec_fallback_tuning(&config);
+
+        assert!(
+            (1.05..=1.10).contains(&tuning.repair_overhead),
+            "fallback must not turn round-0 pacing overshoot into flat 50% repair: got {}",
+            tuning.repair_overhead
         );
     }
 
