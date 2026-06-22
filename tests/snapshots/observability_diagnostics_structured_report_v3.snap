@@ -49,11 +49,12 @@ report:
   generated_at: <scrubbed>
   
   [region]
-  Region RegionId(0:0) is still open.
+  [ASUP-E301] region close drain still blocked for RegionId(0:0).
+    doc: docs/error_codes/ASUP-E301.md
     state: Open
     - child region RegionId(1:0) still open (Open)
-    - task TaskId(0:0) still running (state=Running, polls=9)
-    - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Ack)
+    - task TaskId(0:0) still running (state=Running, polls=9, wait_edges=[], last_checkpoint="<none>")
+    - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Ack, holder_waiters=[], holder_last_checkpoint="<none>")
     -> Wait for child regions to close, or cancel them.
     -> Wait for live tasks to complete, or cancel the region.
     -> Ensure obligations are committed/aborted before closing.
@@ -85,11 +86,12 @@ report:
   generated_at: <scrubbed>
   
   [region]
-  Region RegionId(0:0) is still open.
+  [ASUP-E301] region close drain still blocked for RegionId(0:0).
+    doc: docs/error_codes/ASUP-E301.md
     state: Open
-    - task TaskId(0:0) still running (state=Running, polls=0)
-    - task TaskId(1:0) still running (state=Running, polls=0)
-    - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Ack)
+    - task TaskId(0:0) still running (state=Running, polls=0, wait_edges=[TaskId(1:0)], last_checkpoint="<none>")
+    - task TaskId(1:0) still running (state=Running, polls=0, wait_edges=[], last_checkpoint="<none>")
+    - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Ack, holder_waiters=[TaskId(1:0)], holder_last_checkpoint="<none>")
     -> Wait for live tasks to complete, or cancel the region.
     -> Ensure obligations are committed/aborted before closing.
     -> Directional deadlock risk Critical (score 1.000); inspect cycles and break wait-for loops.

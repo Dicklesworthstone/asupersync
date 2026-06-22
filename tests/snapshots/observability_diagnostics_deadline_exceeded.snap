@@ -6,10 +6,11 @@ scenario: deadline_exceeded
 generated_at: <scrubbed>
 
 [region]
-Region RegionId(0:0) is still open.
+[ASUP-E301] region close drain still blocked for RegionId(0:0).
+  doc: docs/error_codes/ASUP-E301.md
   state: Open
-  - task TaskId(0:0) still running (state=Finalizing, polls=0)
-  - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Lease)
+  - task TaskId(0:0) still running (state=Finalizing, polls=0, wait_edges=[], last_checkpoint="<none>")
+  - obligation ObligationId(0:0) held by task TaskId(0:0) (type=Lease, holder_waiters=[], holder_last_checkpoint="<none>")
   -> Wait for live tasks to complete, or cancel the region.
   -> Ensure obligations are committed/aborted before closing.
 

@@ -424,7 +424,8 @@
       "doc_path": "docs/error_codes/ASUP-E301.md",
       "since": "0.3.4",
       "source_refs": [
-        "src/error.rs"
+        "src/error.rs",
+        "src/observability/diagnostics.rs"
       ]
     },
     {

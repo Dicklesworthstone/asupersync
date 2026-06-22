@@ -6,9 +6,10 @@ scenario: oom
 generated_at: <scrubbed>
 
 [region]
-Region RegionId(0:0) is still open.
+[ASUP-E301] region close drain still blocked for RegionId(0:0).
+  doc: docs/error_codes/ASUP-E301.md
   state: Open
-  - task TaskId(0:0) still running (state=CancelRequested, polls=0)
+  - task TaskId(0:0) still running (state=CancelRequested, polls=0, wait_edges=[], last_checkpoint="<none>")
   -> Wait for live tasks to complete, or cancel the region.
 
 [task]
