@@ -1604,3 +1604,20 @@ All sha 3/3. **Root cause of the good holdout:** on good, `path_rate_bps` = **52
 **This is the 4th pacing iteration; good is the consistent holdout** (ramp → receiver-cap → link-cap all overshoot good). **Key strategic note: the foundation WITHOUT pacing — okcmis feed-cache (`46355c9a2`) + Lever B lossy-fix (`67826603e`) — is already a strict, regression-free improvement** (bad 73→60, perfect ~3.65, good ~3.95, broken ~112, all sha-ok). The pacing (`905b0ef19` + `eff839c8a`) buys a real perfect 2× win (1.75s) but at the cost of an 8× good regression, so it is **net-negative across the matrix until the overshoot is truly fixed.**
 
 **Fix dispatched:** make the delivery-rate estimate **sustained, not bursty** — measure delivered rate over a full settled window (after the link-limiter saturates), or take the MIN of recent per-round delivery samples, or detect the delivery PLATEAU; cap pacing at that true sustained rate. On good that yields ~25 MB/s (no overshoot, good ≤4s); on perfect the link is fast so the receiver rate still binds (keeps 1.75s). **Fallback if not quick:** gate the aggressive ramp to engage only after a round confirms zero/near-zero loss AND a rising-then-plateaued delivery curve — otherwise hold the conservative cold-start. If neither lands soon, revert `905b0ef19`+`eff839c8a` and keep the clean okcmis+Lever B foundation (bad-improved, no regressions) while pacing is redesigned. PASS: perfect ≤1.82 AND good ≤4 AND bad/broken ≤baseline AND sha-ok. Evidence dir: `artifacts/atp_bench_matrix/20260622T025057Z/`.
+
+## MATRIX-27 (2026-06-22) — receiver-safe sustained-delivery pacing is a NET REGRESSION + 1 sha FAIL; PACING DECLARED A DEAD END (5 failures), revert to foundation
+
+After the swarm reverted the broken link-cap pacing (`73f184b57`) it re-implemented pacing receiver-safe with sustained-delivery sampling (`3e37aac2a`). Benched 50M nocrypto ×4, run `20260622T033426Z`:
+
+| regime | recv-safe pacing | baseline | rsyncd | fr | sha | verdict |
+|---|---|---|---|---|---|---|
+| perfect | 1.85s | 3.72s | 1.23s | 0 | 3/3 | held (still loses rsync) |
+| good 0.1% | 27.12s | 3.95s | 3.93s | 2/0/2 | **2/3 ✗** | still floods (path_rate spiked to 335 MB/s) + **1 sha FAILURE** |
+| bad 2% | 110.85s | 73.41s | 14.94s | 4 | 3/3 | **+37s WORSE** |
+| broken 10% | 230.29s | 114.44s | 76.19s | 5–6 | 3/3 | **2× WORSE (+116s)** |
+
+The sustained-delivery cap does NOT cap good (`path_rate_bps` still hit 335,544,320 = 320 MiB/s in-sample), it badly hurt lossy convergence (bad +37, broken doubled), AND it produced a **sha verification failure** on good (a correctness/convergence regression, not just slow).
+
+**★PACING IS A DEAD END — 5 consecutive failures:** lever-1 v2 (estimator collapse), lever-1 v3 (control-frame overflow), round-0 ramp (receiver overflow), link-cap (bursty estimate 2× over link), sustained-delivery (lossy destruction + sha fail). Every attempt to raise round-0 send rate either overflows the receiver/link → self-inflicted loss → more rounds, or destabilizes lossy convergence. The single perfect improvement (3.72→1.85) NEVER beats rsync (1.23) and is not worth the lossy/correctness cost.
+
+**Decision: REVERT `3e37aac2a` (all pacing) → lock the okcmis + Lever B foundation** as the stable base: okcmis feed-cache (`46355c9a2`, receiver 47.9 MB/s) + Lever B lossy-fix (`67826603e`, round-boundary seed). That foundation is regression-free and IMPROVES bad (73→60) with all cells sha-ok. STOP spending the swarm on sender pacing. **Redirect ALL energy to the real prize: LOSSY CONVERGENCE via FEC** (round-0 repair-overhead calibration ε≈target_loss+margin + the 317hxr.6.1.1 FEC-fallback-self-disable fix), where atp's fountain code SHOULD structurally beat rsync's TCP (bad 5×/broken 1.6× behind today). Dispatched revert + lossy pivot. PASS for the locked foundation: perfect ~3.65 / good ~3.95 / bad ~60 / broken ~112, ALL sha-ok. Evidence dir: `artifacts/atp_bench_matrix/20260622T033426Z/`.
