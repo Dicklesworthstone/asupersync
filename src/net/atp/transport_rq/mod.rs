@@ -4187,12 +4187,25 @@ pub async fn receive_connection(
                 if drained > 0 {
                     rqtrace!("receiver: tail-drained {drained} datagrams after ObjectComplete");
                 }
+                let seeded = flush_and_seed_source_streaming_round_boundary(
+                    cx,
+                    &mut decoders,
+                    symbol_size,
+                    symbol_auth.as_ref(),
+                )
+                .await?;
+                if seeded > 0 {
+                    rqtrace!(
+                        "receiver: seeded {seeded} source-streaming block(s) at round boundary"
+                    );
+                }
                 let completed_decodes = join_all_pending_decodes(cx, &mut decoders).await?;
                 if completed_decodes > 0 {
                     rqtrace!(
                         "receiver: finalized {completed_decodes} pending decode job(s) after ObjectComplete"
                     );
                 }
+                flush_cached_entry_staging_files(&mut decoders).await?;
 
                 let pending: Vec<u32> = decoders
                     .iter()
@@ -4963,6 +4976,47 @@ async fn seed_source_streaming_pipeline(
     Ok(())
 }
 
+async fn flush_and_seed_source_streaming_round_boundary(
+    cx: &Cx,
+    decoders: &mut [EntryDecoder],
+    symbol_size: u16,
+    symbol_auth: Option<&SecurityContext>,
+) -> Result<u64, RqError> {
+    for dec in decoders.iter_mut() {
+        flush_cached_entry_staging_file(dec).await?;
+    }
+
+    let mut seeded = 0u64;
+    for decoder_index in 0..decoders.len() {
+        let block_count = decoders[decoder_index].source_blocks.len();
+        for sbn in 0..block_count {
+            if decoders[decoder_index].complete || decoders[decoder_index].pipeline.is_none() {
+                break;
+            }
+            if !source_streaming_block_ready_to_seed(&decoders[decoder_index], sbn) {
+                continue;
+            }
+            let transfer_decode_width = rq_decode_width_budget(decoders, symbol_size);
+            let allow_spawn_decode = rq_pending_decode_jobs(decoders) < transfer_decode_width;
+            let Ok(block_sbn) = u8::try_from(sbn) else {
+                break;
+            };
+            seed_source_streaming_pipeline(
+                cx,
+                &mut decoders[decoder_index],
+                block_sbn,
+                symbol_size,
+                symbol_auth,
+                allow_spawn_decode,
+                transfer_decode_width,
+            )
+            .await?;
+            seeded = seeded.saturating_add(1);
+        }
+    }
+    Ok(seeded)
+}
+
 async fn persist_source_symbol(
     dec: &mut EntryDecoder,
     parsed: &ParsedDatagram,
@@ -5082,6 +5136,13 @@ async fn flush_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), R
         file.flush().await?;
     }
     dec.staging_unflushed_bytes = 0;
+    Ok(())
+}
+
+async fn flush_cached_entry_staging_files(decoders: &mut [EntryDecoder]) -> Result<(), RqError> {
+    for dec in decoders {
+        flush_cached_entry_staging_file(dec).await?;
+    }
     Ok(())
 }
 
@@ -7418,6 +7479,49 @@ mod tests {
     }
 
     #[test]
+    fn source_streaming_round_boundary_flush_keeps_cached_staging_file_hot() {
+        let object_id = entry_object_id("source-stream-cache-flush", 0);
+        let symbol_size = 4u16;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder = source_streaming_test_decoder(object_id, staging_path, 8, symbol_size);
+        decoder.cache_staging_file = true;
+
+        let first = ParsedDatagram {
+            entry: 0,
+            sbn: 0,
+            esi: 0,
+            kind: SymbolKind::Source,
+            auth_tag: None,
+            payload_len: 4,
+            header_len: 0,
+        };
+        assert!(
+            futures_lite::future::block_on(persist_source_symbol(
+                &mut decoder,
+                &first,
+                &[1, 2, 3, 4],
+                symbol_size,
+            ))
+            .expect("persist first cached source symbol")
+        );
+        assert!(decoder.staging_file.is_some());
+        assert_eq!(decoder.staging_unflushed_bytes, 4);
+
+        futures_lite::future::block_on(flush_cached_entry_staging_files(std::slice::from_mut(
+            &mut decoder,
+        )))
+        .expect("round-boundary flush");
+
+        assert!(
+            decoder.staging_file.is_some(),
+            "round-boundary flush should not close the hot descriptor"
+        );
+        assert_eq!(decoder.staging_cursor, Some(4));
+        assert_eq!(decoder.staging_unflushed_bytes, 0);
+    }
+
+    #[test]
     fn source_streaming_staging_cache_policy_is_bounded() {
         const MIN_BYTES: u64 = 1024 * 1024;
         const MAX_ENTRIES: usize = 128;
@@ -7601,6 +7705,115 @@ mod tests {
         assert!(decoder.source_blocks[0].pipeline_seeded[0]);
         assert_eq!(
             std::fs::read(staging_path).expect("read repaired source stream"),
+            data
+        );
+    }
+
+    #[test]
+    fn source_streaming_round_boundary_seeds_when_source_arrives_after_repair() {
+        let object_id = entry_object_id("source-stream-round-boundary-seed", 0);
+        let symbol_size = 4u16;
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 8, symbol_size);
+        decoder.cache_staging_file = true;
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size,
+            max_block_size: 8,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: std::time::Duration::from_secs(0),
+            verify_auth: false,
+        });
+        pipeline
+            .set_object_params(object_params_for(object_id, 8, symbol_size, 8))
+            .expect("set object params");
+        decoder.pipeline = Some(pipeline);
+
+        let pool = SymbolPool::new(PoolConfig::default());
+        let mut encoder = EncodingPipeline::new(
+            crate::config::EncodingConfig {
+                repair_overhead: 1.0,
+                max_block_size: 8,
+                symbol_size,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            pool,
+        );
+        let repair = encoder
+            .encode_single_block_repair_range(object_id, 0, &data, 0, 1)
+            .next()
+            .expect("one repair")
+            .expect("repair encode")
+            .into_symbol();
+        let repair_parsed = ParsedDatagram {
+            entry: 0,
+            sbn: repair.sbn(),
+            esi: repair.esi(),
+            kind: repair.kind(),
+            auth_tag: None,
+            payload_len: repair.data().len(),
+            header_len: 0,
+        };
+        assert!(
+            futures_lite::future::block_on(feed_symbol(
+                &mut decoder,
+                &repair_parsed,
+                repair.data(),
+                symbol_size,
+                None,
+            ))
+            .expect("feed repair first")
+        );
+        assert!(!decoder.complete);
+        assert_eq!(decoder.source_blocks[0].received_count, 0);
+
+        let source = ParsedDatagram {
+            entry: 0,
+            sbn: 0,
+            esi: 0,
+            kind: SymbolKind::Source,
+            auth_tag: None,
+            payload_len: 4,
+            header_len: 0,
+        };
+        assert!(
+            futures_lite::future::block_on(feed_symbol(
+                &mut decoder,
+                &source,
+                &data[..4],
+                symbol_size,
+                None,
+            ))
+            .expect("feed source after repair")
+        );
+        assert!(
+            !decoder.complete,
+            "no later repair arrived to trigger seeding"
+        );
+        assert!(source_streaming_block_ready_to_seed(&decoder, 0));
+        assert!(decoder.staging_file.is_some());
+        assert_eq!(decoder.staging_unflushed_bytes, 4);
+
+        let cx = Cx::for_testing();
+        let mut decoders = vec![decoder];
+        let seeded = futures_lite::future::block_on(
+            flush_and_seed_source_streaming_round_boundary(&cx, &mut decoders, symbol_size, None),
+        )
+        .expect("round-boundary seed");
+        assert_eq!(seeded, 1);
+        futures_lite::future::block_on(join_all_pending_decodes(&cx, &mut decoders))
+            .expect("join boundary decode");
+
+        let decoder = decoders.pop().expect("decoder");
+        assert!(decoder.complete, "round boundary seed should finish block");
+        assert_eq!(decoder.bytes_written, 8);
+        assert_eq!(
+            std::fs::read(staging_path).expect("read round-boundary repaired stream"),
             data
         );
     }
