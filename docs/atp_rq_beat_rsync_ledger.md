@@ -1741,3 +1741,18 @@ Lever-A refine `e93e9065a` "seed lossy AIMD below cold start" (317hxr.2.5.1) —
 **The overshoot fix WORKED** — trace (50M/bad): round-1 now `sent 50500 / received 49452 = ~98% delivery` (was ~53% / ~47% loss). **But it over-corrected:** seeding round-0 below cold-start makes atp UNDER-utilize the link (sends too slow), and AIMD additive-increase ramps up too slowly to recover the lost throughput within the transfer → net slower on lossy (bad +10s, broken +36s). Clean unchanged. **Net-negative → REVERT `e93e9065a` to the AIMD baseline (b90620755 + ramp-cleanup, bad 57.1/broken 96.23).**
 
 **Lesson + correct fix:** eliminating overshoot via a conservative seed is the right *idea* but a flat low seed trades overshoot-waste for under-utilization. The proper mechanism is **slow-start-style ramp**: start conservative, then **multiplicatively increase** the rate each round until the first loss signal (finds the link bandwidth in ~log rounds without big overshoot), then AIMD around it — instead of a fixed low seed + slow additive-increase. Dispatched: revert e93e9065a + the slow-start-ramp refinement (gated: bad/broken must beat the AIMD baseline 57.1/96.23, clean held, sha-ok). Evidence dir: `artifacts/atp_bench_matrix/20260622T212816Z/`.
+
+## MATRIX-36 (2026-06-22) — ROUND-0 TUNING EXHAUSTED: slow-start + high-loss-ceiling both regress; plain AIMD baseline IS the lossy optimum → revert series, pivot fronts
+
+After reverting flat-low-seed, the swarm tried slow-start (`13853a953`) then a high-loss ceiling refine (`8b6192367`, cap ~1.6 MiB/s when loss≥5%). Benched 50M nocrypto ×4 each (runs `222017Z`, `230254Z`), ALL sha 3/3, clean always unchanged:
+
+| regime | plain AIMD (keeper) | slow-start | slow-start+ceiling | rsync |
+|---|---|---|---|---|
+| perfect | 3.65 | 3.65 | 3.65 | 1.23 |
+| good | 3.95 | 3.95 | 3.95 | 3.93 |
+| bad | **57.1** | 59.4 | 59.7 | 14.94 |
+| broken | **96.23** | 125.66 | 204.08 | 76.19 |
+
+**All three round-0 schemes regress vs plain AIMD** (flat-low-seed bad67/broken131; slow-start bad59/broken126; slow-start+ceiling bad60/broken204). Conclusion (definitive): **the plain AIMD baseline — start round-0 at cold-start (16 MiB/s) and let AIMD multiplicative-decrease on observed loss — is the lossy optimum.** Any conservative round-0 start (low seed, ramp, or capped ceiling) loses more to under-utilization/ramp-delay than it saves on overshoot, because the link absorbs a fast first round better than it absorbs a slow start. **ROUND-0 TUNING IS CLOSED** (after AIMD itself, 3 refinements all net-negative).
+
+**Action: revert the slow-start series (`13853a953`+`8b6192367`) to the plain AIMD baseline (restore transport_rq to `325351fbd` state = AIMD + ramp-cleanup, bad 57.1/broken 96.23).** Then PIVOT the swarm off round-0 entirely to the structural-upside fronts: QUIC/encrypted port (encrypted fails all lossy — biggest untapped tier), trees small-entry batching (tree_big/good already BEATS rsync — widen it), and 500M receiver decode/feed profiling (the 500M-lossy wall). Dispatched. **Final lossy verdict: AIMD is the bankable, regression-free lossy win (broken −24%/500M-bad −15% vs pre-AIMD); atp still loses rsync on lossy but the mechanism is at its tuning ceiling — further lossy gains need receiver-decode-at-scale or the QUIC/tree structural edges, not more pacing.** Evidence dir: `artifacts/atp_bench_matrix/20260622T230254Z/`.
