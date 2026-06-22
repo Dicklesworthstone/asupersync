@@ -338,10 +338,14 @@ impl Diagnostics {
         for task_id in task_ids {
             if let Some(task) = self.state.task(task_id) {
                 if !task.state.is_terminal() {
+                    let mut waiters = task.waiters.to_vec();
+                    waiters.sort();
                     reasons.push(Reason::TaskRunning {
                         task_id,
                         task_state: task.state_name().to_string(),
                         poll_count: task.total_polls,
+                        waiters,
+                        last_checkpoint_message: Self::task_checkpoint_message(task),
                     });
                 }
             }
@@ -356,10 +360,20 @@ impl Diagnostics {
         }
         held.sort_by_key(|(id, _, _)| *id);
         for (id, holder, kind) in held {
+            let (holder_waiters, holder_last_checkpoint_message) =
+                self.state
+                    .task(holder)
+                    .map_or((Vec::new(), None), |holder_task| {
+                        let mut waiters = holder_task.waiters.to_vec();
+                        waiters.sort();
+                        (waiters, Self::task_checkpoint_message(holder_task))
+                    });
             reasons.push(Reason::ObligationHeld {
                 obligation_id: id,
                 obligation_type: format!("{kind:?}"),
                 holder_task: holder,
+                holder_waiters,
+                holder_last_checkpoint_message,
             });
         }
 
@@ -406,6 +420,18 @@ impl Diagnostics {
             reasons,
             recommendations,
         }
+    }
+
+    fn task_checkpoint_message(task: &crate::record::task::TaskRecord) -> Option<String> {
+        task.cx
+            .as_ref()
+            .and_then(|cx| cx.checkpoint_state().last_message)
+            .or_else(|| {
+                task.cx_inner
+                    .as_ref()
+                    .and_then(|inner| inner.read().materialised_checkpoint_state().last_message)
+            })
+            .map(|message| sanitize_cancel_message(&message))
     }
 
     /// Explain what is blocking a task.
@@ -717,7 +743,25 @@ pub struct RegionOpenExplanation {
 
 impl fmt::Display for RegionOpenExplanation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Region {:?} is still open.", self.region_id)?;
+        let blocked_region_close = self
+            .region_state
+            .is_some_and(|state| state != RegionState::Closed)
+            && !self.reasons.is_empty()
+            && !self
+                .reasons
+                .iter()
+                .all(|reason| matches!(reason, Reason::RegionNotFound));
+
+        if blocked_region_close {
+            writeln!(
+                f,
+                "[ASUP-E301] region close drain still blocked for {:?}.",
+                self.region_id
+            )?;
+            writeln!(f, "  doc: docs/error_codes/ASUP-E301.md")?;
+        } else {
+            writeln!(f, "Region {:?} is still open.", self.region_id)?;
+        }
         if let Some(st) = self.region_state {
             writeln!(f, "  state: {st:?}")?;
         }
@@ -751,6 +795,10 @@ pub enum Reason {
         task_state: String,
         /// Poll count observed.
         poll_count: u64,
+        /// Tasks currently waiting on this task, ordered by id.
+        waiters: Vec<TaskId>,
+        /// Last checkpoint message recorded by the task, when available.
+        last_checkpoint_message: Option<String>,
     },
     /// An obligation is still reserved/held.
     ObligationHeld {
@@ -760,7 +808,15 @@ pub enum Reason {
         obligation_type: String,
         /// Task holding the obligation.
         holder_task: TaskId,
+        /// Tasks waiting on the holder, ordered by id.
+        holder_waiters: Vec<TaskId>,
+        /// Last checkpoint recorded by the holder task, when available.
+        holder_last_checkpoint_message: Option<String>,
     },
+}
+
+fn format_region_checkpoint(message: Option<&str>) -> String {
+    message.map_or_else(|| "\"<none>\"".to_string(), |msg| format!("{msg:?}"))
 }
 
 impl fmt::Display for Reason {
@@ -775,17 +831,23 @@ impl fmt::Display for Reason {
                 task_id,
                 task_state,
                 poll_count,
+                waiters,
+                last_checkpoint_message,
             } => write!(
                 f,
-                "task {task_id:?} still running (state={task_state}, polls={poll_count})"
+                "task {task_id:?} still running (state={task_state}, polls={poll_count}, wait_edges={waiters:?}, last_checkpoint={})",
+                format_region_checkpoint(last_checkpoint_message.as_deref())
             ),
             Self::ObligationHeld {
                 obligation_id,
                 obligation_type,
                 holder_task,
+                holder_waiters,
+                holder_last_checkpoint_message,
             } => write!(
                 f,
-                "obligation {obligation_id:?} held by task {holder_task:?} (type={obligation_type})"
+                "obligation {obligation_id:?} held by task {holder_task:?} (type={obligation_type}, holder_waiters={holder_waiters:?}, holder_last_checkpoint={})",
+                format_region_checkpoint(holder_last_checkpoint_message.as_deref())
             ),
         }
     }
@@ -3969,7 +4031,7 @@ mod tests {
     use crate::record::region::RegionRecord;
     use crate::record::task::{TaskRecord, TaskState};
     use crate::time::{TimerDriverHandle, VirtualClock};
-    use crate::types::{Budget, CancelReason, Outcome};
+    use crate::types::{Budget, CancelReason, CxInner, Outcome};
     use crate::util::ArenaIndex;
     use serde_json::{Value, json};
     use std::fmt::Write as _;
@@ -4639,8 +4701,15 @@ mod tests {
         let child = insert_child_region(&mut state, root);
 
         let task_id = insert_task(&mut state, root, TaskState::Running);
+        let waiter_id = TaskId::new_for_test(88, 0);
         let task = state.task_mut(task_id).expect("task missing");
         task.total_polls = 7;
+        task.waiters.push(waiter_id);
+        let mut cx_inner = CxInner::new(root, task_id, Budget::INFINITE);
+        cx_inner
+            .checkpoint_state
+            .record_with_message_at("connecting to db".to_string(), Time::from_millis(12));
+        task.set_cx_inner(Arc::new(parking_lot::RwLock::new(cx_inner)));
 
         let obligation_id = insert_obligation(
             &mut state,
@@ -4664,15 +4733,27 @@ mod tests {
                 Reason::TaskRunning {
                     task_id: id,
                     poll_count,
+                    waiters,
+                    last_checkpoint_message,
                     ..
-                } if *id == task_id && *poll_count == 7 => {
+                } if *id == task_id
+                    && *poll_count == 7
+                    && waiters.as_slice() == [waiter_id]
+                    && last_checkpoint_message.as_deref() == Some("connecting to db") =>
+                {
                     saw_task = true;
                 }
                 Reason::ObligationHeld {
                     obligation_id: id,
                     holder_task,
+                    holder_waiters,
+                    holder_last_checkpoint_message,
                     ..
-                } if *id == obligation_id && *holder_task == task_id => {
+                } if *id == obligation_id
+                    && *holder_task == task_id
+                    && holder_waiters.as_slice() == [waiter_id]
+                    && holder_last_checkpoint_message.as_deref() == Some("connecting to db") =>
+                {
                     saw_obligation = true;
                 }
                 _ => {}
@@ -4697,10 +4778,46 @@ mod tests {
 
         let rendered = explanation.to_string();
         crate::assert_with_log!(
+            rendered.contains("[ASUP-E301]"),
+            "display includes ASUP-E301",
+            true,
+            rendered.contains("[ASUP-E301]")
+        );
+        crate::assert_with_log!(
+            rendered.contains("docs/error_codes/ASUP-E301.md"),
+            "display includes ASUP-E301 doc path",
+            true,
+            rendered.contains("docs/error_codes/ASUP-E301.md")
+        );
+        crate::assert_with_log!(
             rendered.contains("child region"),
             "display includes child",
             true,
             rendered.contains("child region")
+        );
+        crate::assert_with_log!(
+            rendered.contains("wait_edges=["),
+            "display includes wait edge",
+            true,
+            rendered.contains("wait_edges=[")
+        );
+        crate::assert_with_log!(
+            rendered.contains("last_checkpoint=\"connecting to db\""),
+            "display includes checkpoint",
+            true,
+            rendered.contains("last_checkpoint=\"connecting to db\"")
+        );
+        crate::assert_with_log!(
+            rendered.contains("holder_waiters=["),
+            "display includes obligation holder wait edge",
+            true,
+            rendered.contains("holder_waiters=[")
+        );
+        crate::assert_with_log!(
+            rendered.contains("holder_last_checkpoint=\"connecting to db\""),
+            "display includes obligation holder checkpoint",
+            true,
+            rendered.contains("holder_last_checkpoint=\"connecting to db\"")
         );
         crate::assert_with_log!(
             rendered.contains("obligation"),
@@ -4933,17 +5050,28 @@ mod tests {
             task_id: TaskId::new_for_test(1, 0),
             task_state: "Running".into(),
             poll_count: 5,
+            waiters: vec![TaskId::new_for_test(2, 0)],
+            last_checkpoint_message: Some("checkpoint".to_string()),
         };
         assert!(r3.to_string().contains("task"));
         assert!(r3.to_string().contains("polls=5"));
+        assert!(r3.to_string().contains("wait_edges=["));
+        assert!(r3.to_string().contains("last_checkpoint=\"checkpoint\""));
 
         let r4 = Reason::ObligationHeld {
             obligation_id: ObligationId::new_for_test(1, 0),
             obligation_type: "Lease".into(),
             holder_task: TaskId::new_for_test(2, 0),
+            holder_waiters: vec![TaskId::new_for_test(3, 0)],
+            holder_last_checkpoint_message: Some("holding permit".to_string()),
         };
         assert!(r4.to_string().contains("obligation"));
         assert!(r4.to_string().contains("Lease"));
+        assert!(r4.to_string().contains("holder_waiters=["));
+        assert!(
+            r4.to_string()
+                .contains("holder_last_checkpoint=\"holding permit\"")
+        );
     }
 
     #[test]
