@@ -1570,3 +1570,20 @@ Swarm landed `46355c9a2` (okcmis, "cache RQ source staging writes": caches the s
 **★THE UNLOCK.** The three prior sender-pacing failures (lever-1 v2/v3, the round-0 ramp → MATRIX-22) ALL happened *because the receiver could only absorb ~15.5 MB/s, so any faster spray overflowed it*. **okcmis lifts the receiver to 47.9 MB/s — that constraint is now gone.** So sender pacing matched to the now-fast receiver is finally viable on clean links: at ~40 MB/s, 50M/perfect → ~1.25s ≈ **beats rsync's 1.23s**. The pacing must still be receiver-rate-aware (cap at the observed drain rate, back off on receiver-side loss) and keep the conservative floor for slow/lossy links — but the headroom now exists (the receiver won't overflow until ~47 MB/s, not ~16).
 
 **Next levers (dispatched):** (A) re-enable a receiver-rate-matched sender pacing increase on clean links now that the receiver keeps up (this is the ramp idea with its precondition finally met); (B) fix the okcmis lossy regression (flush staging at round/completeness boundary or gate the cache). okcmis stays on main — the 47.9 MB/s receiver ceiling is foundational for every clean-link win — but its lossy side effect must be fixed. Evidence dir: `artifacts/atp_bench_matrix/20260622T010229Z/`.
+
+## MATRIX-25 (2026-06-22) — ★FIRST REAL CLEAN WIN (perfect 3.72→1.82s, 2×) but pacing OVERSHOOTS bandwidth-limited links (good 7.6× worse)
+
+Full unlock package committed (HEAD `905b0ef19`): okcmis feed-cache (`46355c9a2`) + Lever B lossy-fix (`67826603e`, round-boundary staging seed) + **Lever A receiver-rate-matched round-0 pacing** (`905b0ef19`, "pace RQ round0 from receiver drain"). Rebuilt fresh `atp 0.3.5`, benched 50M nocrypto ×4, run `20260622T020522Z`:
+
+| regime | unlock pkg | baseline | rsyncd | fr | verdict |
+|---|---|---|---|---|---|
+| **perfect** | **1.82s** | 3.72s | 1.23s | 0 | ✅ **2× faster** (first real clean win); only +0.59 off rsync (was +2.49) |
+| good 0.1% | **29.98s** | 3.95s | 3.93s | 2 | ❌ **7.6× WORSE** — pacing floods the 200 mbit link |
+| bad 2% | 60.50s | 73.41s | 14.94s | 4 | ✅ better (Δ-12.9) |
+| broken 10% | 111.85s | 114.44s | 76.19s | 6–8 | ~same |
+
+All sha 3/3 (no correctness break). **Trace (50M/perfect):** pacing ramped `path_rate_bps` 16 MiB/s → **335,544,320 (320 MiB/s)**; the now-fast receiver kept up — `recv_micros` 2.19s→0.50s, `intake_bytes_per_s` 56.8 MB/s, fr=0 → **3.72→1.82s.** This is the FIRST time a pacing change produced a real win — the receiver-rate match works on a fast link, proving the MATRIX-24 unlock thesis.
+
+**The remaining flaw is precise.** Lever A paces to the *receiver* drain rate (56 MB/s) but ignores *link* capacity. On `perfect` (1 gbit) that's fine. On `good` (200 mbit = 25 MB/s) it ramps to 320 MiB/s and **floods the link** → qdisc loss → controller thrash → 29.98s. The pacing target must be **`min(receiver_drain_rate, observed_link_delivery_rate)`** with hard loss-backoff — the link delivery rate is observable from feedback (`received_this_round / send_wall`). On good that caps at ~25 MB/s (no overshoot); on perfect the link is fast so receiver-rate still binds (keeps the win).
+
+**Verdict / action.** Net mixed: perfect +2× (win), bad better, broken flat, **good 7.6× regression** (not shippable as-is). The lever is close — dispatched the link-rate cap (`min(receiver_rate, observed delivery rate)` + loss-backoff). Until that lands, `main` has a `good`-regime regression from `905b0ef19`; if the cap isn't quick, revert just `905b0ef19` (keep okcmis + Lever B, which gave the foundational receiver speedup and the lossy fix). PASS target: perfect ≤1.82s held AND good back ≤4s AND bad/broken not regressed AND sha-ok. Evidence dir: `artifacts/atp_bench_matrix/20260622T020522Z/`.
