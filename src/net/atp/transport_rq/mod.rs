@@ -211,12 +211,12 @@ const RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD: f64 = 0.03;
 /// Do not spend proactive round-0 repair on clean and near-clean links. The
 /// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
 const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
-/// Convert an explicit path-loss target into proportional RaptorQ overhead.
-/// At 2% loss this yields 5% extra repair; at 10% it yields 15%. The margin is
-/// intentionally small because MATRIX-29 keeps this independent of sender-rate
-/// experiments that regressed lossy convergence.
-const RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION: f64 = 0.50;
-const RQ_ROUND0_TARGET_LOSS_MARGIN_MIN: f64 = 0.03;
+/// Convert an explicit path-loss target into a conservative upper bound before
+/// feeding the RaptorQ overhead solver. At 2% loss this produces a ~3% sizing
+/// input, enough margin for one-round convergence without turning clean links
+/// into fixed-overhead transfers.
+const RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION: f64 = 0.25;
+const RQ_ROUND0_TARGET_LOSS_MARGIN_MIN: f64 = 0.005;
 /// Hard cap on the per-round fractional repair overhead taken from the controller's
 /// wire-loss-driven `plan.overhead` (round_tuning). Without this, a round-0 spray that
 /// over-paces a slow link self-inflicts high real loss, the wire-loss estimate clamps near
@@ -762,10 +762,6 @@ impl RqAdaptiveSendState {
 
     fn source_fec_fallback_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
         let mut tuning = self.round_tuning(config);
-        if round0_loss_target_repair_enabled(config) {
-            tuning.repair_overhead = round0_loss_target_repair_overhead(config);
-            return tuning;
-        }
         let k = fixed_block_k(config);
         let loss_bar = self.source_fec_fallback_loss_bar();
         let overhead = adaptive::overhead_for_target(
@@ -1101,16 +1097,18 @@ fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
     if !round0_loss_target_repair_enabled(config) {
         return config.repair_overhead.max(1.0);
     }
-    config
-        .repair_overhead
-        .max(1.0 + loss_proportional_repair_overhead(config.round0_loss_target))
-}
-
-fn loss_proportional_repair_overhead(loss: f64) -> f64 {
-    let loss = loss.clamp(0.0, 1.0);
-    (loss + (loss * RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION).max(RQ_ROUND0_TARGET_LOSS_MARGIN_MIN))
-        .clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD)
-        .min(RQ_MAX_ROUND_REPAIR_OVERHEAD)
+    let loss = config.round0_loss_target;
+    let loss_bar = (loss * (1.0 + RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION)
+        + RQ_ROUND0_TARGET_LOSS_MARGIN_MIN)
+        .clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD);
+    let overhead = adaptive::overhead_for_target(
+        fixed_block_k(config),
+        loss_bar,
+        RQ_SOURCE_FEC_FALLBACK_ALPHA,
+        RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+    )
+    .min(RQ_MAX_ROUND_REPAIR_OVERHEAD);
+    config.repair_overhead.max(1.0 + overhead)
 }
 
 fn round0_loss_target_repair_enabled(config: &RqConfig) -> bool {
@@ -8381,13 +8379,13 @@ mod tests {
         let tuning = state.round0_tuning(&config);
 
         assert!(
-            (1.05..=1.10).contains(&tuning.repair_overhead),
-            "2% target loss should produce a 5-10% proportional repair budget, got {}",
+            (1.10..=1.20).contains(&tuning.repair_overhead),
+            "2% target loss should produce a 10-20% one-round repair budget, got {}",
             tuning.repair_overhead
         );
         assert!(
-            initial_repair_target_per_block(437, tuning.repair_overhead) >= 20,
-            "2% loss should pre-spray modest repair without a flat 50% budget"
+            initial_repair_target_per_block(437, tuning.repair_overhead) >= 40,
+            "2% loss should pre-spray enough repair symbols for one-round convergence"
         );
         assert!(
             tuning.pacing.path_rate_bps
@@ -8412,38 +8410,10 @@ mod tests {
 
         let overhead = round0_loss_target_repair_overhead(&config);
 
+        assert!(overhead > 1.20, "broken link should receive proactive FEC");
         assert!(
-            (1.10..=1.20).contains(&overhead),
-            "broken link should receive proportional FEC without a 50% budget, got {overhead}"
-        );
-        assert!(
-            initial_repair_target_per_block(437, overhead) <= 66,
-            "broken link should not fall back to the old 50% repair budget"
-        );
-    }
-
-    #[test]
-    fn source_fec_fallback_uses_loss_target_not_round0_overshoot_deficit() {
-        let config = RqConfig {
-            symbol_size: 1200,
-            max_block_size: 512 * 1024,
-            repair_overhead: 1.0,
-            round0_loss_target: 0.02,
-            ..RqConfig::default()
-        };
-        let mut state = RqAdaptiveSendState::new(99, &config, 4);
-        state.loss_ema = 0.47;
-        state.loss_bar = 0.82;
-        state.pacing_loss_ema = 0.47;
-        state.pacing_loss_bar = 0.82;
-        state.est.loss_p_hat = 0.47;
-
-        let tuning = state.source_fec_fallback_tuning(&config);
-
-        assert!(
-            (1.05..=1.10).contains(&tuning.repair_overhead),
-            "fallback must not turn round-0 pacing overshoot into flat 50% repair: got {}",
-            tuning.repair_overhead
+            overhead <= 1.0 + RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+            "round-0 target loss must stay within bounded FEC envelope"
         );
     }
 
