@@ -3420,7 +3420,8 @@ fn repair_target_for_feedback_round(
 }
 
 fn source_retransmit_request_limit(config: &RqConfig, feedback_round: u32) -> Option<usize> {
-    if config.repair_overhead <= 1.0
+    if !round0_loss_target_repair_enabled(config)
+        && config.repair_overhead <= 1.0
         && config.source_retransmit_rounds > 0
         && feedback_round <= config.source_retransmit_rounds
     {
@@ -3435,6 +3436,9 @@ fn source_retransmit_needs_fec_fallback(
     feedback_round: u32,
     requested_sources: usize,
 ) -> bool {
+    if round0_loss_target_repair_enabled(config) {
+        return true;
+    }
     if config.repair_overhead > 1.0 || config.source_retransmit_rounds == 0 {
         return false;
     }
@@ -8473,29 +8477,15 @@ mod tests {
     }
 
     #[test]
-    fn round0_loss_target_keeps_source_retransmit_and_fec_fallback() {
+    fn round0_loss_target_uses_repair_feedback_in_lossy_cells() {
         let config = RqConfig {
             repair_overhead: 1.0,
             round0_loss_target: 0.02,
             ..RqConfig::default()
         };
 
-        assert_eq!(
-            source_retransmit_request_limit(&config, 1),
-            Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
-        );
-        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 0));
-        assert!(!source_retransmit_needs_fec_fallback(
-            &config,
-            1,
-            DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS - 1
-        ));
-        assert!(source_retransmit_needs_fec_fallback(
-            &config,
-            1,
-            DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS
-        ));
-        assert!(source_retransmit_needs_fec_fallback(&config, 2, 0));
+        assert_eq!(source_retransmit_request_limit(&config, 1), None);
+        assert!(source_retransmit_needs_fec_fallback(&config, 1, 0));
     }
 
     #[test]
