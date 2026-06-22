@@ -186,10 +186,6 @@ pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROU
 const RQ_COLD_START_PACING_BPS: u64 = 16 * 1024 * 1024;
 const RQ_MIN_PACING_BPS: u64 = 512 * 1024;
 const RQ_MAX_PACING_BPS: u64 = 64 * 1024 * 1024;
-/// Clean round-0 source sprays may double the pacing rate after each cold-start
-/// second worth of datagrams. This lets large feedback-free transfers escape
-/// the initial 16 MiB/s ceiling without changing lossy-link FEC sizing.
-const RQ_ROUND0_CLEAN_RAMP_STEP_BYTES: u64 = RQ_COLD_START_PACING_BPS;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
@@ -491,112 +487,34 @@ impl RqSprayPacing {
 
 struct RqSprayPacer {
     controller: CongestionController,
-    pacing: RqSprayPacing,
-    round0_ramp: Option<RqRound0CleanPacingRamp>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RqRound0CleanPacingRamp {
-    sent_datagrams: u64,
-    next_step_bytes: u64,
-}
-
-impl RqRound0CleanPacingRamp {
-    fn new() -> Self {
-        Self {
-            sent_datagrams: 0,
-            next_step_bytes: RQ_ROUND0_CLEAN_RAMP_STEP_BYTES,
-        }
-    }
-
-    fn observe_datagram(&mut self, pacing: &mut RqSprayPacing) -> bool {
-        self.sent_datagrams = self.sent_datagrams.saturating_add(1);
-        let sent_bytes = self
-            .sent_datagrams
-            .saturating_mul(u64::from(pacing.datagram_bytes.max(1)));
-        let mut changed = false;
-        while sent_bytes >= self.next_step_bytes
-            && pacing.path_rate_bps < RQ_MAX_PACING_BPS.saturating_mul(8)
-        {
-            let current_bytes_per_s =
-                (pacing.path_rate_bps / 8).clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
-            let next_bytes_per_s = current_bytes_per_s
-                .saturating_mul(2)
-                .clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
-            if next_bytes_per_s == current_bytes_per_s {
-                break;
-            }
-            pacing.path_rate_bps = next_bytes_per_s.saturating_mul(8);
-            self.next_step_bytes = self
-                .next_step_bytes
-                .saturating_add(RQ_ROUND0_CLEAN_RAMP_STEP_BYTES);
-            changed = true;
-        }
-        changed
-    }
-}
-
-fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
-    config.debug_drop_one_in == 0
-        && config.repair_overhead <= 1.0
-        && !round0_loss_target_repair_enabled(config)
-        && !pacing.loss_detected
-        && pacing.path_rate_bps == RqSprayPacing::cold_start(config.symbol_size).path_rate_bps
 }
 
 impl RqSprayPacer {
-    fn new_round0(pacing: RqSprayPacing, config: &RqConfig) -> Self {
-        let round0_ramp =
-            round0_clean_ramp_enabled(config, pacing).then(RqRound0CleanPacingRamp::new);
-        Self::new_with_round0_ramp(pacing, round0_ramp)
-    }
-
-    fn new_with_round0_ramp(
-        pacing: RqSprayPacing,
-        round0_ramp: Option<RqRound0CleanPacingRamp>,
-    ) -> Self {
+    fn new(pacing: RqSprayPacing) -> Self {
         let mut controller = CongestionController::new(CongestionConfig::default());
-        Self::configure_controller(&mut controller, pacing);
-        Self {
-            controller,
-            pacing,
-            round0_ramp,
-        }
-    }
-
-    fn configure(&mut self, pacing: RqSprayPacing) {
-        self.pacing = pacing;
-        self.round0_ramp = None;
-        Self::configure_controller(&mut self.controller, pacing);
-    }
-
-    fn configure_controller(controller: &mut CongestionController, pacing: RqSprayPacing) {
         controller.configure_for_path_rate(
             pacing.path_rate_bps,
             pacing.datagram_bytes,
             pacing.max_burst_size,
         );
         controller.update_congestion_feedback(pacing.rtt, pacing.loss_detected);
+        Self { controller }
     }
 
-    fn observe_datagram_sent(&mut self) {
-        let Some(ramp) = &mut self.round0_ramp else {
-            return;
-        };
-        if ramp.observe_datagram(&mut self.pacing) {
-            Self::configure_controller(&mut self.controller, self.pacing);
-            rqtrace!(
-                "sender: round 0 clean pacing ramp, path_rate_bps={}",
-                self.pacing.path_rate_bps
-            );
-        }
+    fn configure(&mut self, pacing: RqSprayPacing) {
+        self.controller.configure_for_path_rate(
+            pacing.path_rate_bps,
+            pacing.datagram_bytes,
+            pacing.max_burst_size,
+        );
+        self.controller
+            .update_congestion_feedback(pacing.rtt, pacing.loss_detected);
     }
 
     async fn before_send(&mut self, cx: &Cx) -> Result<(), RqError> {
         loop {
             let now = Instant::now();
             if self.controller.try_consume_send_budget(now) {
-                self.observe_datagram_sent();
                 return Ok(());
             }
             let wait = self
@@ -3265,7 +3183,7 @@ pub async fn send_path(
     let mut round_tuning = adaptive.round0_tuning(&config);
     // One token bucket owns the whole transfer. Recreating it per source/repair
     // spray would grant a fresh burst each time and overflow rate-capped qdiscs.
-    let mut pacer = RqSprayPacer::new_round0(round_tuning.pacing, &config);
+    let mut pacer = RqSprayPacer::new(round_tuning.pacing);
     let mut round_started = Instant::now();
     let mut round_symbols_start = symbols_sent;
     spray_round(
