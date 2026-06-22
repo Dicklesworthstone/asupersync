@@ -1694,3 +1694,18 @@ Benched the locked foundation (7842fdcb5) at 500M scale + trees (didn't need the
 **★ FIRST cell where atp beats tuned rsync: tree_big/good** (large many-file tree on a 200 mbit / 0.1%-loss link) — atp's bulk RaptorQ fountain avoids rsync's per-file stat/handshake/round-trip overhead, which dominates rsync on many-file trees once even mild loss/latency is present. Narrow (single cell, 0.76× = atp 1.85 vs rsync 2.43) but real and reproducible (median of 3, sha 3/3). Worth pursuing: trees-on-mildly-imperfect-links is a structural atp advantage (the per-file-overhead asymmetry widens with file count + latency).
 
 **Dominant gap = lossy at scale: 500M/bad 832s (8.4×).** The round-overshoot pathology compounds with size: a 500M object on a 6.25 MB/s 2%-loss link should take ~80s (link floor) but atp takes 832s — ~10× — because every recovery round re-overshoots the link. This is the single biggest domination blocker and the strongest argument for proper AIMD congestion control (converge the send rate to the link, stop the per-round overshoot). Scoreboard summary now: atp **ties** 50M/good, **wins** tree_big/good, loses everything else (worst: lossy at scale). Evidence dir: `artifacts/atp_bench_matrix/20260622T161422Z/`.
+
+## MATRIX-33 (2026-06-22) — ★AIMD WORKS: first SAFE, regression-free rate-control change; lossy improved (broken −24%), clean untouched
+
+Receiver-observed AIMD pacing (`b90620755`, 317hxr.2.5.1) — proper congestion control (receiver reports loss in NeedMore → sender multiplicative-decrease/additive-increase). Built LOCALLY (rch degraded: 4× RCH-E104; user-authorized one-off local build via `RCH_MIN_LOCAL_TIME_MS=999999999` hook bypass; `cargo build --release` 7m42s). Benched 50M nocrypto ×4, run `20260622T195029Z`, ALL sha 3/3:
+
+| regime | AIMD | foundation | rsyncd | fr | verdict |
+|---|---|---|---|---|---|
+| perfect | 3.65s | 3.65 | 1.23 | 0 | **no regression** ✓ |
+| good 0.1% | 3.95s | 3.95 | 3.93 | 1 | **no regression** (ties rsync) ✓ |
+| bad 2% | 57.10s | 58.69 | 14.94 | 4 | −1.6s (still loses 3.8×) |
+| broken 10% | **96.23s** | 127.5 | 76.19 | 6 | **−31s / −24%** (still loses 1.3×) |
+
+**★ AIMD is the FIRST of 8 rate-control attempts that is regression-free AND helps.** Trace (50M/bad) shows it engaging: round-1 still overshoots (cold-start, no loss signal yet — received 26792/50500 sent), but **rounds 2–4 deliver ~97%** (14709/15100, 10651/10900, 10682/10900) — the AIMD rate converged so recovery rounds stop re-overshooting the link. broken (most rounds) gains most (−24%); bad (fewer rounds) gains little. Clean is byte-for-byte unchanged (perfect/good identical to foundation) — AIMD only acts when loss is observed, so it can't break clean (unlike all 7 prior rate hacks). **KEEPS on main.**
+
+**Remaining gap:** AIMD does NOT yet make atp beat rsync on lossy (bad 57 vs 15, broken 96 vs 76) — two residuals: (1) the round-1 cold-start overshoot (~47% loss before AIMD has a feedback sample) is inherent to a 1st round with no signal — could be cut by a more conservative round-0 on a priori loss hints or a faster first-round backoff; (2) the underlying single-core decode + per-round RTT cost. Next: bench AIMD at 500M/bad (does converging recovery rounds dent the 832s catastrophe? — likely a bigger win there since 500M/bad had many rounds, like broken). Scoreboard: atp ties 50M/good, wins tree_big/good, lossy improved but still loses. Evidence dir: `artifacts/atp_bench_matrix/20260622T195029Z/`.
