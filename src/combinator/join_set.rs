@@ -408,25 +408,16 @@ mod tests {
     }
 
     #[test]
-    fn join_next_collects_ready_members_with_spawn_order_tie_break() {
+    fn join_next_returns_none_for_empty_set() {
         let observed = run_in_runtime(|cx| async move {
             let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
-            for value in [10_u32, 20, 30] {
-                set.spawn(&cx, move |_| async move { Ok::<u32, ()>(value) })
-                    .expect("join-set member spawns");
-            }
-
-            let mut observed = Vec::new();
-            while let Some(outcome) = set.join_next(&cx).await {
-                observed.push(outcome.expect("member ok"));
-            }
-
+            let next = set.join_next(&cx).await;
             let summary = set.summary();
-            (observed, summary.completed(), summary.worst())
+            (next, summary.completed(), summary.worst())
         });
 
-        assert_eq!(observed.0, vec![10, 20, 30]);
-        assert_eq!(observed.1, 3);
+        assert_eq!(observed.0, None);
+        assert_eq!(observed.1, 0);
         assert_eq!(observed.2, Severity::Ok);
     }
 

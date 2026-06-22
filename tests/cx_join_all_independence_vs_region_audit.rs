@@ -336,6 +336,32 @@ fn literal_join_set_documents_region_semantics_explicitly() {
 }
 
 #[test]
+fn literal_join_set_spawns_emit_parent_set_trace_fields() {
+    // Pin (audit): JoinSet members must carry enough structured trace
+    // metadata to tie a spawned member back to its parent fan-out set without
+    // confusing the set with an independent region boundary.
+    let join_set_source = read("src/combinator/join_set.rs");
+
+    assert!(
+        join_set_source.contains("cx.trace_with_fields(")
+            && join_set_source.contains("\"join_set.spawn\""),
+        "REGRESSION: JoinSet no longer emits a structured spawn trace event",
+    );
+    for field in [
+        "\"join_set_id\"",
+        "\"member_index\"",
+        "\"region\"",
+        "\"spawn_kind\"",
+        "\"active_members\"",
+    ] {
+        assert!(
+            join_set_source.contains(field),
+            "REGRESSION: JoinSet spawn trace field {field} disappeared",
+        );
+    }
+}
+
+#[test]
 fn join_all_test_documents_in_order_result_invariant() {
     // Pin (audit hygiene): a test in scope.rs documents
     // that join_all preserves the input order in its
