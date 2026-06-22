@@ -1726,3 +1726,18 @@ AIMD is regression-free and helps lossy at every scale (50M/broken −24%, 50M/b
 - 500M-lossy (bad): decode/feed throughput at scale (the receiver pipeline) + round-1 overshoot magnitude. Needs faster receiver decode/feed (parallel block-decode exists per MATRIX-20, but per-symbol feed/intake may still serialize at 500M scale — re-profile receiver intake at 500M like MATRIX-23 did at 50M).
 
 **Standing scoreboard (foundation+AIMD):** atp ties 50M/good, wins tree_big/good; lossy improved 15–24% but still loses rsync everywhere lossy/large. AIMD is the bankable lossy win; domination still requires the round-1-overshoot fix + receiver-decode-at-scale. Evidence dir: `artifacts/atp_bench_matrix/20260622T200612Z/`.
+
+## MATRIX-35 (2026-06-22) — round-1 "seed AIMD below cold start" KILLS the overshoot but OVER-CORRECTS (under-utilizes link); net regression → revert to AIMD baseline
+
+Lever-A refine `e93e9065a` "seed lossy AIMD below cold start" (317hxr.2.5.1) — aimed at the round-1 cold-start overshoot. Built locally, benched 50M nocrypto ×4, run `20260622T212816Z`, ALL sha 3/3:
+
+| regime | refine | AIMD-base | rsyncd | verdict |
+|---|---|---|---|---|
+| perfect | 3.65s | 3.65 | 1.23 | unchanged ✓ |
+| good | 3.95s | 3.95 | 3.93 | unchanged ✓ |
+| bad | 67.30s | 57.1 | 14.94 | **+10.2s WORSE** |
+| broken | 131.85s | 96.23 | 76.19 | **+35.6s WORSE** |
+
+**The overshoot fix WORKED** — trace (50M/bad): round-1 now `sent 50500 / received 49452 = ~98% delivery` (was ~53% / ~47% loss). **But it over-corrected:** seeding round-0 below cold-start makes atp UNDER-utilize the link (sends too slow), and AIMD additive-increase ramps up too slowly to recover the lost throughput within the transfer → net slower on lossy (bad +10s, broken +36s). Clean unchanged. **Net-negative → REVERT `e93e9065a` to the AIMD baseline (b90620755 + ramp-cleanup, bad 57.1/broken 96.23).**
+
+**Lesson + correct fix:** eliminating overshoot via a conservative seed is the right *idea* but a flat low seed trades overshoot-waste for under-utilization. The proper mechanism is **slow-start-style ramp**: start conservative, then **multiplicatively increase** the rate each round until the first loss signal (finds the link bandwidth in ~log rounds without big overshoot), then AIMD around it — instead of a fixed low seed + slow additive-increase. Dispatched: revert e93e9065a + the slow-start-ramp refinement (gated: bad/broken must beat the AIMD baseline 57.1/96.23, clean held, sha-ok). Evidence dir: `artifacts/atp_bench_matrix/20260622T212816Z/`.
