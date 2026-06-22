@@ -6591,6 +6591,7 @@ mod tests {
                 region: crate::types::RegionId::new_for_test(1, 0),
                 idle_steps: 1,
                 held: Vec::new(),
+                last_checkpoint_message: None,
             },
             crate::lab::runtime::InvariantViolation::QuiescenceViolation,
         ];

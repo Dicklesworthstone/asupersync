@@ -38,6 +38,12 @@ The central `Error` display for `ErrorKind::ObligationLeak` starts with:
 [ASUP-E101] ObligationLeak
 ```
 
+Lab invariant reports include the holder facts needed for first-pass triage:
+
+```text
+[ASUP-E101] obligation leak: count=1 leaks=[obligation=ObligationId(...) kind=SendPermit holder=TaskId(...) region=RegionId(...)]
+```
+
 ## Related
 
 - `ASUP-E104`

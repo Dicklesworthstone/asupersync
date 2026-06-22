@@ -2654,11 +2654,25 @@ impl LabRuntime {
                     region: task.owner,
                     idle_steps,
                     held,
+                    last_checkpoint_message: self.futurelock_checkpoint_message(task.id),
                 });
             }
         }
 
         violations
+    }
+
+    fn futurelock_checkpoint_message(&self, task_id: TaskId) -> Option<String> {
+        self.state.task(task_id).and_then(|task| {
+            task.cx
+                .as_ref()
+                .and_then(|cx| cx.checkpoint_state().last_message)
+                .or_else(|| {
+                    task.cx_inner
+                        .as_ref()
+                        .and_then(|inner| inner.read().materialised_checkpoint_state().last_message)
+                })
+        })
     }
 
     fn check_futurelocks(&self) {
@@ -2673,6 +2687,7 @@ impl LabRuntime {
                 region,
                 idle_steps,
                 held,
+                last_checkpoint_message,
             } = v
             else {
                 continue;
@@ -2704,7 +2719,8 @@ impl LabRuntime {
 
             assert!(
                 !self.config.panic_on_futurelock,
-                "[ASUP-E402] futurelock detected: {task} in {region} idle={idle_steps} held={held:?}"
+                "[ASUP-E402] futurelock detected: {task} in {region} idle={idle_steps} held={held:?} last_checkpoint={}",
+                format_futurelock_checkpoint(last_checkpoint_message.as_deref())
             );
         }
     }
@@ -3259,6 +3275,8 @@ pub enum InvariantViolation {
         idle_steps: u64,
         /// Held obligations.
         held: Vec<ObligationId>,
+        /// Last checkpoint message recorded by the task, when available.
+        last_checkpoint_message: Option<String>,
     },
     /// Cancellation protocol violation detected.
     CancellationProtocol {
@@ -3293,9 +3311,16 @@ impl std::fmt::Display for ObligationLeak {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:?} {:?} holder={:?} region={:?}",
+            "obligation={:?} kind={:?} holder={:?} region={:?}",
             self.obligation, self.kind, self.holder, self.region
         )
+    }
+}
+
+fn format_futurelock_checkpoint(message: Option<&str>) -> String {
+    match message {
+        Some(message) => format!("{message:?}"),
+        None => "<none>".to_string(),
     }
 }
 
@@ -3303,7 +3328,18 @@ impl std::fmt::Display for InvariantViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ObligationLeak { leaks } => {
-                write!(f, "{} obligations leaked", leaks.len())
+                write!(f, "[ASUP-E101] obligation leak: count={}", leaks.len())?;
+                if !leaks.is_empty() {
+                    write!(f, " leaks=[")?;
+                    for (index, leak) in leaks.iter().enumerate() {
+                        if index > 0 {
+                            write!(f, "; ")?;
+                        }
+                        write!(f, "{leak}")?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
             }
             Self::TaskLeak { count } => write!(f, "{count} tasks leaked"),
             Self::ActorLeak { count } => write!(f, "{count} actors leaked"),
@@ -3313,9 +3349,11 @@ impl std::fmt::Display for InvariantViolation {
                 region,
                 idle_steps,
                 held,
+                last_checkpoint_message,
             } => write!(
                 f,
-                "[ASUP-E402] futurelock: {task} in {region} idle={idle_steps} held={held:?}"
+                "[ASUP-E402] futurelock: {task} in {region} idle={idle_steps} held={held:?} last_checkpoint={}",
+                format_futurelock_checkpoint(last_checkpoint_message.as_deref())
             ),
             Self::CancellationProtocol { violation } => {
                 write!(f, "cancellation protocol violation: {violation}")
@@ -4197,6 +4235,7 @@ mod tests {
             region,
             idle_steps: 8,
             held: vec![obligation],
+            last_checkpoint_message: Some("waiting on permit".to_string()),
         };
 
         let rendered = violation.to_string();
@@ -4208,7 +4247,110 @@ mod tests {
             true,
             rendered.contains("idle=8")
         );
+        crate::assert_with_log!(
+            rendered.contains("last_checkpoint=\"waiting on permit\""),
+            "futurelock display checkpoint message",
+            true,
+            rendered.contains("last_checkpoint=\"waiting on permit\"")
+        );
         crate::test_complete!("futurelock_display_includes_error_code");
+    }
+
+    #[test]
+    fn obligation_leak_display_includes_error_code_and_owner_facts() {
+        init_test("obligation_leak_display_includes_error_code_and_owner_facts");
+        let task = TaskId::from_arena(ArenaIndex::new(2, 0));
+        let region = RegionId::from_arena(ArenaIndex::new(3, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(4, 0));
+        let violation = InvariantViolation::ObligationLeak {
+            leaks: vec![ObligationLeak {
+                obligation,
+                kind: ObligationKind::SendPermit,
+                holder: task,
+                region,
+            }],
+        };
+
+        let rendered = violation.to_string();
+        let has_code = rendered.starts_with("[ASUP-E101] obligation leak:");
+        crate::assert_with_log!(
+            has_code,
+            "obligation leak display error code",
+            true,
+            has_code
+        );
+        for expected in [
+            "count=1",
+            "obligation=",
+            "kind=SendPermit",
+            "holder=",
+            "region=",
+        ] {
+            crate::assert_with_log!(
+                rendered.contains(expected),
+                format!("obligation leak display field {expected}"),
+                true,
+                rendered.contains(expected)
+            );
+        }
+        crate::test_complete!("obligation_leak_display_includes_error_code_and_owner_facts");
+    }
+
+    #[test]
+    fn futurelock_panic_includes_last_checkpoint_message() {
+        init_test("futurelock_panic_includes_last_checkpoint_message");
+        let config = LabConfig::new(42)
+            .futurelock_max_idle_steps(1)
+            .panic_on_futurelock(true);
+        let mut runtime = LabRuntime::new(config);
+
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+        runtime
+            .state
+            .task(task_id)
+            .expect("task")
+            .cx
+            .as_ref()
+            .expect("task cx")
+            .checkpoint_with("waiting on downstream permit")
+            .expect("checkpoint");
+
+        let _ = runtime
+            .state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for _ in 0..3 {
+                runtime.step();
+            }
+        }));
+        let payload = result.expect_err("futurelock should panic");
+        let message = if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else {
+            String::from("<non-string panic>")
+        };
+
+        crate::assert_with_log!(
+            message.contains("[ASUP-E402] futurelock detected"),
+            "futurelock panic error code",
+            true,
+            message.contains("[ASUP-E402] futurelock detected")
+        );
+        crate::assert_with_log!(
+            message.contains("last_checkpoint=\"waiting on downstream permit\""),
+            "futurelock panic checkpoint message",
+            true,
+            message.contains("last_checkpoint=\"waiting on downstream permit\"")
+        );
+        crate::test_complete!("futurelock_panic_includes_last_checkpoint_message");
     }
 
     #[test]
@@ -6240,7 +6382,10 @@ mod tests {
         let dbg = format!("{leak:?}");
         assert!(dbg.contains("ObligationLeak"));
         let display = format!("{leak}");
-        assert!(!display.is_empty());
+        assert!(display.contains("obligation="));
+        assert!(display.contains("kind=SendPermit"));
+        assert!(display.contains("holder="));
+        assert!(display.contains("region="));
     }
 
     // ================================================================
