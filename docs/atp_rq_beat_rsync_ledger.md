@@ -1550,3 +1550,23 @@ Swarm landed `daf534408` (revert of the pacing ramp) + `4f60acf15` (drhadc: rece
 `feed_symbol_with_cx` is the ENTIRE clean-link wall — socket recv, frame parse, and control drain are all noise. This refines MATRIX-20: the parallel decode that landed only parallelized the **block solve** (`run_block_decode_job`, the final Gaussian elimination per block); the **per-symbol feed/intake into the decoder runs serially on the single receiver pump thread** at ~77 µs/symbol → 15.5 MB/s. rsync clean = 40 MB/s, so this single serial stage is exactly why atp loses clean.
 
 **LEVER R2 (dispatched).** Symbols are block-independent (each carries an sbn), so the feed parallelizes cleanly: shard incoming symbols by block to per-block decoder workers on the existing blocking pool (per-block serialized, but different blocks concurrent). ~7–13 blocks for 50M → potential ~7–13× → ≫40 MB/s = beats rsync clean, and it scales to 500M + ports to QUIC. Must stay byte-identical (sha+merkle) and not regress lossy. This is the first NON-pacing, NON-decode-solve, evidence-pinpointed clean-link lever. Evidence dir: `artifacts/atp_bench_matrix/20260622T000615Z/`.
+
+## MATRIX-24 (2026-06-22) — staging-write cache 3.1×'d the receiver feed (now > rsync throughput!); bottleneck SHIFTED back to sender pacing; lossy regressed
+
+Swarm landed `46355c9a2` (okcmis, "cache RQ source staging writes": caches the staging file handle + buffers unflushed bytes for large entries — kills the per-symbol open/seek/write that MATRIX-23 pinned). Rebuilt fresh `atp 0.3.5`, benched 50M nocrypto ×4, run `20260622T010229Z`:
+
+**The feed fix WORKED (50M/perfect intake trace):**
+| metric | MATRIX-23 (before) | MATRIX-24 (okcmis) | Δ |
+|---|---|---|---|
+| feed_micros | 3,382,218 | **1,094,829** | **3.1× faster** |
+| intake_bytes_per_s | 15.5 MB/s | **47.9 MB/s** | **>rsync's 40 MB/s** |
+| intake_symbols_per_s | 12,920 | 39,913 | 3.1× |
+| recv_micros | 66,223 | **2,186,697** | bottleneck moved here |
+
+**But the clean WALL barely moved** (perfect 3.72→3.65s, good 3.95→3.95s): the bottleneck **shifted from feed to `recv_micros` (66ms → 2.19s)**. The now-fast receiver (47.9 MB/s) is **starved waiting on the 16 MiB/s cold-start-paced sender** — `recv_micros` is now sender-pacing-wait, not socket cost. intake total = 1.09s feed + 2.19s recv-wait ≈ the 3.65s wall.
+
+**Lossy REGRESSED:** bad 73.41→86.73s (fr 4→5), broken 114.44→122.35s (fr 6→8), all sha 3/3. The staging-write cache likely delays block-completion detection on multi-round lossy (buffered/unflushed writes → block not seen complete at the round boundary → extra NeedMore round). Needs a flush at the round/completeness boundary, or gate the cache so it can't delay convergence.
+
+**★THE UNLOCK.** The three prior sender-pacing failures (lever-1 v2/v3, the round-0 ramp → MATRIX-22) ALL happened *because the receiver could only absorb ~15.5 MB/s, so any faster spray overflowed it*. **okcmis lifts the receiver to 47.9 MB/s — that constraint is now gone.** So sender pacing matched to the now-fast receiver is finally viable on clean links: at ~40 MB/s, 50M/perfect → ~1.25s ≈ **beats rsync's 1.23s**. The pacing must still be receiver-rate-aware (cap at the observed drain rate, back off on receiver-side loss) and keep the conservative floor for slow/lossy links — but the headroom now exists (the receiver won't overflow until ~47 MB/s, not ~16).
+
+**Next levers (dispatched):** (A) re-enable a receiver-rate-matched sender pacing increase on clean links now that the receiver keeps up (this is the ramp idea with its precondition finally met); (B) fix the okcmis lossy regression (flush staging at round/completeness boundary or gate the cache). okcmis stays on main — the 47.9 MB/s receiver ceiling is foundational for every clean-link win — but its lossy side effect must be fixed. Evidence dir: `artifacts/atp_bench_matrix/20260622T010229Z/`.
