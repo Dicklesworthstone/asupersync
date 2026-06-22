@@ -36,6 +36,7 @@ use asupersync::combinator::bulkhead::BulkheadPolicy;
 use asupersync::combinator::circuit_breaker::CircuitBreakerPolicy;
 use asupersync::combinator::retry::RetryPolicy;
 use asupersync::grpc::server::Interceptor;
+use asupersync::grpc::status::MAX_STATUS_MESSAGE_LEN;
 use asupersync::grpc::{
     Code, GrpcCodec, GrpcError, GrpcMessage, HealthCheckRequest, HealthService, InterceptorLayer,
     Metadata, MetadataValue, Request as GrpcRequest, Response as GrpcResponse, ServingStatus,
@@ -220,20 +221,20 @@ fn t52_unit_06_case_insensitive_method() {
 fn t53_unit_01_missing_content_type_for_json() {
     init_test("t53_unit_01_missing_content_type_for_json");
 
-    test_section!("json_without_content_type_still_parses");
+    test_section!("json_without_content_type_rejects");
     fn json_handler(JsonExtract(val): JsonExtract<serde_json::Value>) -> String {
         format!("got:{val}")
     }
     let handler = FnHandler1::<_, JsonExtract<serde_json::Value>>::new(json_handler);
 
-    // The Json extractor in this implementation attempts to parse the body
-    // regardless of content-type (lenient behavior). This verifies that contract.
+    // Json is strict about media type. Missing Content-Type is rejected
+    // before the body is parsed.
     let req = Request::new("POST", "/").with_body(Bytes::from_static(br#"{"key":"value"}"#));
     let resp = handler.call(req);
     assert_eq!(
         resp.status,
-        StatusCode::OK,
-        "json extractor is lenient about content-type"
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "json extractor requires content-type"
     );
 
     test_section!("json_with_correct_content_type");
@@ -328,26 +329,27 @@ fn t53_unit_04_missing_path_parameters() {
 fn t53_unit_05_form_extraction_without_content_type() {
     init_test("t53_unit_05_form_extraction_without_content_type");
 
-    test_section!("form_without_content_type_still_parses");
+    test_section!("form_without_content_type_rejects");
     fn form_handler(Form(data): Form<HashMap<String, String>>) -> String {
         format!("user:{}", data.get("user").cloned().unwrap_or_default())
     }
     let handler = FnHandler1::<_, Form<HashMap<String, String>>>::new(form_handler);
 
-    // The Form extractor in this implementation is lenient about content-type.
-    // It will attempt to parse the body as URL-encoded regardless.
+    // Form is strict about media type. Missing Content-Type is rejected
+    // before the body is parsed.
     let req =
         Request::new("POST", "/login").with_body(Bytes::from_static(b"user=alice&pass=secret"));
     let resp = handler.call(req);
     assert_eq!(
         resp.status,
-        StatusCode::OK,
-        "form extractor is lenient about content-type"
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "form extractor requires content-type"
     );
-    assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "user:alice");
 
     test_section!("form_with_empty_body");
-    let req = Request::new("POST", "/login").with_body(Bytes::from_static(b""));
+    let req = Request::new("POST", "/login")
+        .with_header("content-type", "application/x-www-form-urlencoded")
+        .with_body(Bytes::from_static(b""));
     let resp = handler.call(req);
     // Empty body should yield empty map -> user:""
     assert_eq!(resp.status, StatusCode::OK);
@@ -766,7 +768,7 @@ fn t56_unit_02_status_message_encoding() {
     test_section!("very_long_message");
     let long_msg = "x".repeat(10_000);
     let status = Status::unavailable(&long_msg);
-    assert_eq!(status.message().len(), 10_000);
+    assert_eq!(status.message().len(), MAX_STATUS_MESSAGE_LEN);
 
     test_complete!("t56_unit_02_status_message_encoding");
 }
@@ -1077,14 +1079,14 @@ fn t57_unit_04_health_service_multiple_services() {
 fn t57_unit_05_health_service_unknown_service() {
     init_test("t57_unit_05_health_service_unknown_service");
 
-    test_section!("unknown_service_returns_not_found");
+    test_section!("unknown_service_hides_service_topology");
     let health = HealthService::new();
     health.set_status("svc.Known", ServingStatus::Serving);
 
     let result = health.check(&HealthCheckRequest::new("svc.Unknown"));
     assert!(result.is_err(), "unknown service should return error");
     let err = result.unwrap_err();
-    assert_eq!(err.code(), Code::NotFound);
+    assert_eq!(err.code(), Code::PermissionDenied);
 
     test_complete!("t57_unit_05_health_service_unknown_service");
 }
@@ -1210,9 +1212,11 @@ fn t57_unit_10_rate_limiter_reset_and_count() {
     test_section!("exhausts_and_resets");
     let limiter = rate_limiter(3);
 
+    let mut held_requests = Vec::new();
     for _ in 0..3 {
         let mut req = GrpcRequest::new(Bytes::new());
         assert!(limiter.intercept_request(&mut req).is_ok());
+        held_requests.push(req);
     }
     assert_eq!(limiter.current_count(), 3);
 
@@ -1226,6 +1230,9 @@ fn t57_unit_10_rate_limiter_reset_and_count() {
     assert_eq!(limiter.current_count(), 0);
     let mut req = GrpcRequest::new(Bytes::new());
     assert!(limiter.intercept_request(&mut req).is_ok());
+    drop(req);
+    drop(held_requests);
+    assert_eq!(limiter.current_count(), 0);
 
     test_complete!("t57_unit_10_rate_limiter_reset_and_count");
 }

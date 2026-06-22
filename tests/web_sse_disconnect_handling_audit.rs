@@ -65,6 +65,15 @@ fn read_sse_source() -> String {
     std::fs::read_to_string(&path).expect("read sse.rs")
 }
 
+fn read_sse_production_source() -> String {
+    let source = read_sse_source();
+    let test_module = "\n#[cfg(test)]\nmod tests {";
+    let end = source
+        .find(test_module)
+        .expect("sse.rs must keep inline tests behind #[cfg(test)]");
+    source[..end].to_owned()
+}
+
 #[test]
 fn sse_struct_is_a_vec_backed_batch_not_a_stream() {
     // Pin (a): the Sse type holds events in a plain Vec, NOT a
@@ -157,9 +166,9 @@ fn sse_into_response_materializes_body_synchronously() {
 fn sse_module_has_no_async_or_stream_imports() {
     // Pin (d): streaming remains an explicit pull-based state
     // machine, not an implicit async task/channel hidden inside
-    // the response type. A regression that pulled these imports
-    // in for any reason should be reviewed.
-    let source = read_sse_source();
+    // the response type. Inline tests may need polling helpers,
+    // but the production module must not pull these imports in.
+    let source = read_sse_production_source();
 
     let suspect_imports = [
         "use std::future::",

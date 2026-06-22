@@ -58,6 +58,14 @@ fn ok_handler() -> StatusCode {
     StatusCode::OK
 }
 
+fn csrf_cookie_handler(session: &Session) -> StatusCode {
+    assert!(
+        session.csrf_token().is_some(),
+        "test fixture must mint a CSRF token before extracting Set-Cookie",
+    );
+    StatusCode::OK
+}
+
 struct SessionStatusHandler<F>(F);
 
 impl<F> asupersync::web::handler::Handler for SessionStatusHandler<F>
@@ -296,7 +304,7 @@ fn constant_time_compare_helper_returns_false_for_length_mismatch() {
     // session.rs:930-932; length is non-secret.)
     let store = MemoryStore::new();
     let layer = SessionLayer::new(store).secure(false).csrf_protection(true);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -320,7 +328,7 @@ fn csrf_token_with_wrong_value_rejects_with_403() {
     // so timing-based recovery is structurally infeasible.
     let store = MemoryStore::new();
     let layer = SessionLayer::new(store).secure(false).csrf_protection(true);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     // First, GET to seed a session.
     let get_resp = mw.call(Request::new("GET", "/test"));
@@ -351,7 +359,7 @@ fn csrf_token_with_wrong_length_rejects_with_403() {
     // XOR loop.
     let store = MemoryStore::new();
     let layer = SessionLayer::new(store).secure(false).csrf_protection(true);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -372,7 +380,7 @@ fn csrf_token_missing_header_rejects_with_403() {
     // check at session.rs:756 also fires).
     let store = MemoryStore::new();
     let layer = SessionLayer::new(store).secure(false).csrf_protection(true);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -434,7 +442,7 @@ fn state_changing_request_without_origin_or_referer_rejects() {
         .secure(false)
         .csrf_protection(true)
         .allowed_origins(["https://app.example.com"]);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -465,7 +473,7 @@ fn state_changing_request_with_disallowed_origin_rejects() {
         .secure(false)
         .csrf_protection(true)
         .allowed_origins(["https://app.example.com"]);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -487,7 +495,7 @@ fn state_changing_request_with_origin_allowed_passes_origin_check() {
         .secure(false)
         .csrf_protection(true)
         .allowed_origins(["https://app.example.com"]);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -520,7 +528,7 @@ fn referer_fallback_when_origin_absent() {
         .secure(false)
         .csrf_protection(true)
         .allowed_origins(["https://app.example.com"]);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -550,7 +558,7 @@ fn referer_with_disallowed_origin_rejects_at_origin_check() {
         .secure(false)
         .csrf_protection(true)
         .allowed_origins(["https://app.example.com"]);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -593,7 +601,7 @@ fn empty_allowed_origins_disables_origin_check() {
     let store = MemoryStore::new();
     let layer = SessionLayer::new(store).secure(false).csrf_protection(true);
     // No .allowed_origins(...) call.
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);
@@ -623,7 +631,7 @@ fn null_origin_treated_as_absent() {
         .secure(false)
         .csrf_protection(true)
         .allowed_origins(["https://app.example.com"]);
-    let mw = layer.wrap(FnHandler::new(ok_handler));
+    let mw = layer.wrap(SessionStatusHandler(csrf_cookie_handler));
 
     let get_resp = mw.call(Request::new("GET", "/test"));
     let cookie = extract_set_cookie_value(&get_resp);

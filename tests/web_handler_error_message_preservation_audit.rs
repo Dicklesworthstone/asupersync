@@ -30,7 +30,7 @@
 //!
 //!   (d) **Handler call sites** (handler.rs FnHandler /
 //!       FnHandler1 / FnHandler2 / FnHandler3 / FnHandler4) call
-//!       `(self.func)(...).into_response()`. The
+//!       `(func)(...).into_response()`. The
 //!       `Res: IntoResponse` bound flows through to the user's
 //!       `Result<T, E>` return type, which then dispatches to
 //!       the user's `IntoResponse for E` impl on the Err path.
@@ -261,7 +261,7 @@ fn fn_handler_call_dispatches_via_into_response() {
     // Each FnHandler*::call (0..4 extractors) must end its
     // success path with `.into_response()`. We grep for the
     // pattern.
-    let success_dispatch = "(self.func)";
+    let success_dispatch = "(func)";
     let occurrences: Vec<&str> = source
         .match_indices(success_dispatch)
         .map(|(idx, _)| {
@@ -270,7 +270,7 @@ fn fn_handler_call_dispatches_via_into_response() {
             // previous \n or BOF). The dispatch is always on a
             // single line, so this captures the full
             // `.into_response()` chain or the
-            // `run_async_handler_with_runtime_cx(|cx| ...)` wrap.
+            // `run_async_cx_handler(|cx| ...)` wrap.
             let line_start = source[..idx].rfind('\n').map_or(0, |p| p + 1);
             let line_end = source[idx..]
                 .find('\n')
@@ -286,38 +286,38 @@ fn fn_handler_call_dispatches_via_into_response() {
     // somewhere in the next 200 chars.
     assert!(
         !occurrences.is_empty(),
-        "REGRESSION: no `(self.func)` dispatch sites found in \
+        "REGRESSION: no `(func)` dispatch sites found in \
          handler.rs — the structure of FnHandler is gone."
     );
     for (i, snippet) in occurrences.iter().enumerate() {
         // Sync dispatches end directly in `.into_response()`.
         // Async dispatches go through
-        // `run_async_handler_with_runtime_cx`, which itself
+        // `run_async_cx_handler`, which itself
         // calls `.into_response()` (verified by a separate
         // pin in this file). Either pattern is acceptable.
         let direct = snippet.contains(".into_response()");
-        let via_async_helper = snippet.contains("run_async_handler_with_runtime_cx");
+        let via_async_helper = snippet.contains("run_async_cx_handler");
         assert!(
             direct || via_async_helper,
             "REGRESSION: FnHandler dispatch site #{i} no longer \
              flows through .into_response() (sync) or \
-             run_async_handler_with_runtime_cx (async). A \
+             run_async_cx_handler (async). A \
              regression that hardcoded a Response here would \
              bypass the user's IntoResponse impl and lose \
              error message detail.\n\nsnippet:\n{snippet}",
         );
     }
 
-    // Also pin: run_async_handler_with_runtime_cx itself ends
+    // Also pin: run_async_cx_handler itself ends
     // in .into_response() so the async path also delegates.
-    let helper_marker = "fn run_async_handler_with_runtime_cx";
+    let helper_marker = "fn run_async_cx_handler";
     let start = source.find(helper_marker).expect("async helper");
     let body_end = source[start..].find("\n}\n").expect("async helper close");
     let helper_body = &source[start..start + body_end];
     assert!(
         helper_body.contains(".into_response()")
             || helper_body.contains("IntoResponse::into_response"),
-        "REGRESSION: run_async_handler_with_runtime_cx no \
+        "REGRESSION: run_async_cx_handler no \
          longer calls .into_response() on the handler's result. \
          The async dispatch path now bypasses the user's \
          IntoResponse impl. helper body:\n{helper_body}",
