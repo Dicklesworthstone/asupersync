@@ -30,8 +30,9 @@
 //! and [`JoinSet::spawn_local`] for member admission, [`JoinSet::join_next`]
 //! for completion-order collection, [`JoinSet::join_all`] for spawn-order
 //! collection, [`JoinSet::cancel_all`] for explicit drain after cancellation,
-//! [`JoinSet::summary`] for severity aggregation, and abort-on-drop for
-//! best-effort cancellation requests.
+//! [`JoinSet::summary`] for severity aggregation, structured
+//! `join_set.spawn` trace fields that bind each member to its parent set, and
+//! abort-on-drop for best-effort cancellation requests.
 //!
 //! [`join_next`]: JoinSet
 
@@ -58,6 +59,8 @@ where
     scope: Scope<'scope, P>,
     handles: Vec<TaskHandle<Result<T, E>>>,
     summary: JoinSummary,
+    set_id: u64,
+    next_member_index: u64,
 }
 
 impl<'scope, T, E, P> JoinSet<'scope, T, E, P>
@@ -76,6 +79,8 @@ where
             scope: clone_scope(scope),
             handles: Vec::new(),
             summary: JoinSummary::default(),
+            set_id: scope.region_id().as_u64(),
+            next_member_index: 0,
         }
     }
 
@@ -95,8 +100,11 @@ where
         F: FnOnce(Cx) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
+        let member_index = self.next_member_index;
         let handle = cx.spawn_in(&self.scope, f)?;
         self.handles.push(handle);
+        self.next_member_index = self.next_member_index.saturating_add(1);
+        self.trace_member_spawn(cx, member_index, "send");
         Ok(())
     }
 
@@ -114,8 +122,11 @@ where
         F: FnOnce(Cx) -> Fut + 'static,
         Fut: Future<Output = Result<T, E>> + 'static,
     {
+        let member_index = self.next_member_index;
         let handle = cx.spawn_local_in(&self.scope, f)?;
         self.handles.push(handle);
+        self.next_member_index = self.next_member_index.saturating_add(1);
+        self.trace_member_spawn(cx, member_index, "local");
         Ok(())
     }
 
@@ -217,6 +228,23 @@ where
         }
         outcomes
     }
+
+    fn trace_member_spawn(&self, cx: &Cx, member_index: u64, spawn_kind: &str) {
+        let set_id = self.set_id.to_string();
+        let member_index = member_index.to_string();
+        let region = self.scope.region_id().to_string();
+        let active_members = self.handles.len().to_string();
+        cx.trace_with_fields(
+            "join_set.spawn",
+            &[
+                ("join_set_id", set_id.as_str()),
+                ("member_index", member_index.as_str()),
+                ("region", region.as_str()),
+                ("spawn_kind", spawn_kind),
+                ("active_members", active_members.as_str()),
+            ],
+        );
+    }
 }
 
 impl<T, E> JoinSet<'static, T, E, FailFast>
@@ -235,6 +263,8 @@ where
             scope: cx.scope(),
             handles: Vec::new(),
             summary: JoinSummary::default(),
+            set_id: cx.region_id().as_u64(),
+            next_member_index: 0,
         }
     }
 }
@@ -313,6 +343,23 @@ impl JoinSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
+    use crate::runtime::RuntimeBuilder;
+
+    fn run_in_runtime<F, Fut, T>(f: F) -> T
+    where
+        F: FnOnce(Cx) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("spawned root task has Cx");
+            f(cx).await
+        }))
+    }
 
     #[test]
     fn join_to_outcome_maps_value_and_application_error() {
@@ -348,5 +395,61 @@ mod tests {
 
         assert_eq!(summary.completed(), 3);
         assert_eq!(summary.worst(), Severity::Cancelled);
+    }
+
+    #[test]
+    fn join_set_id_is_deterministic_from_owning_region() {
+        let scope =
+            Scope::<FailFast>::new(crate::RegionId::new_for_test(7, 1), crate::Budget::INFINITE);
+        let set = JoinSet::<(), (), FailFast>::new(&scope);
+
+        assert_eq!(set.set_id, scope.region_id().as_u64());
+        assert_eq!(set.next_member_index, 0);
+    }
+
+    #[test]
+    fn join_next_collects_ready_members_with_spawn_order_tie_break() {
+        let observed = run_in_runtime(|cx| async move {
+            let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
+            for value in [10_u32, 20, 30] {
+                set.spawn(&cx, move |_| async move { Ok::<u32, ()>(value) })
+                    .expect("join-set member spawns");
+            }
+
+            let mut observed = Vec::new();
+            while let Some(outcome) = set.join_next(&cx).await {
+                observed.push(outcome.expect("member ok"));
+            }
+
+            let summary = set.summary();
+            (observed, summary.completed(), summary.worst())
+        });
+
+        assert_eq!(observed.0, vec![10, 20, 30]);
+        assert_eq!(observed.1, 3);
+        assert_eq!(observed.2, Severity::Ok);
+    }
+
+    #[test]
+    fn join_all_collects_members_in_spawn_order() {
+        let (outcomes, next_member_index) = run_in_runtime(|cx| async move {
+            let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
+            for value in [30_u32, 10, 20] {
+                set.spawn(&cx, move |_| async move { Ok::<u32, ()>(value) })
+                    .expect("join-set member spawns");
+            }
+
+            let next_member_index = set.next_member_index;
+            (set.join_all(&cx).await, next_member_index)
+        });
+
+        assert_eq!(next_member_index, 3);
+        assert_eq!(
+            outcomes
+                .into_iter()
+                .map(|outcome| outcome.expect("member ok"))
+                .collect::<Vec<_>>(),
+            vec![30, 10, 20]
+        );
     }
 }
