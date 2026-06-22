@@ -34,6 +34,11 @@
 //! `join_set.spawn` trace fields that bind each member to its parent set, and
 //! abort-on-drop for best-effort cancellation requests.
 //!
+//! Child-region isolation is state-threaded through [`Scope::region`]:
+//! construct [`JoinSet::new`] with the child scope inside the region body.
+//! [`JoinSet::new`] and [`JoinSet::in_cx`] intentionally reuse an existing
+//! region instead of allocating a hidden quiescence boundary.
+//!
 //! [`join_next`]: JoinSet
 
 use std::future::Future;
@@ -71,7 +76,7 @@ where
 {
     /// Creates an empty set whose members will be spawned into `scope`'s
     /// region. The set shares the caller's region (no extra quiescence point);
-    /// use a child region (a follow-up `in_child_region` constructor) when
+    /// use [`Scope::region`] and construct the set from that child scope when
     /// isolation is wanted.
     #[must_use]
     pub fn new(scope: &'scope Scope<'scope, P>) -> Self {
@@ -142,6 +147,25 @@ where
         self.handles.is_empty()
     }
 
+    /// Collects one already-complete member without waiting.
+    ///
+    /// Results use the same deterministic tie-break as
+    /// [`join_next`](Self::join_next): if several members are already ready,
+    /// the earliest spawned ready member is returned first. Pending handles are
+    /// left owned by the set and are not cancelled by the readiness scan.
+    pub fn try_join_next(&mut self) -> Option<Outcome<T, E>> {
+        for index in 0..self.handles.len() {
+            let outcome = try_join_to_outcome(self.handles[index].try_join());
+            if let Some(outcome) = outcome {
+                self.summary.record(&outcome);
+                self.handles.remove(index);
+                return Some(outcome);
+            }
+        }
+
+        None
+    }
+
     /// Waits for every member to complete and returns their outcomes in spawn
     /// order.
     ///
@@ -162,7 +186,15 @@ where
     /// their join future's drop-abort path defused, so scanning for readiness
     /// never cancels still-running work.
     pub async fn join_next(&mut self, cx: &Cx) -> Option<Outcome<T, E>> {
+        if let Some(outcome) = self.try_join_next() {
+            return Some(outcome);
+        }
+
         std::future::poll_fn(|task_cx| {
+            if let Some(outcome) = self.try_join_next() {
+                return Poll::Ready(Some(outcome));
+            }
+
             if self.handles.is_empty() {
                 return Poll::Ready(None);
             }
@@ -297,6 +329,16 @@ fn join_to_outcome<T, E>(joined: Result<Result<T, E>, JoinError>) -> Outcome<T, 
     }
 }
 
+fn try_join_to_outcome<T, E>(
+    joined: Result<Option<Result<T, E>>, JoinError>,
+) -> Option<Outcome<T, E>> {
+    match joined {
+        Ok(Some(result)) => Some(join_to_outcome(Ok(result))),
+        Ok(None) => None,
+        Err(error) => Some(join_to_outcome(Err(error))),
+    }
+}
+
 fn clone_scope<'scope, P>(scope: &'scope Scope<'scope, P>) -> Scope<'scope, P>
 where
     P: Policy,
@@ -343,8 +385,10 @@ impl JoinSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channel::oneshot;
     use crate::cx::Cx;
     use crate::runtime::RuntimeBuilder;
+    use crate::types::TaskId;
 
     fn run_in_runtime<F, Fut, T>(f: F) -> T
     where
@@ -359,6 +403,16 @@ mod tests {
             let cx = Cx::current().expect("spawned root task has Cx");
             f(cx).await
         }))
+    }
+
+    fn manual_handle<T>(task_slot: u32) -> (oneshot::Sender<Result<T, JoinError>>, TaskHandle<T>) {
+        let (tx, rx) = oneshot::channel::<Result<T, JoinError>>();
+        let handle = TaskHandle::new(
+            TaskId::new_for_test(task_slot, 0),
+            rx,
+            std::sync::Weak::new(),
+        );
+        (tx, handle)
     }
 
     #[test]
@@ -419,6 +473,68 @@ mod tests {
         assert_eq!(observed.0, None);
         assert_eq!(observed.1, 0);
         assert_eq!(observed.2, Severity::Ok);
+    }
+
+    #[test]
+    fn try_join_next_returns_none_until_member_is_ready() {
+        let scope =
+            Scope::<FailFast>::new(crate::RegionId::new_for_test(8, 1), crate::Budget::INFINITE);
+        let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
+        let (_tx, handle) = manual_handle::<Result<u32, &'static str>>(1);
+
+        set.handles.push(handle);
+
+        assert!(set.try_join_next().is_none());
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.summary().completed(), 0);
+        assert_eq!(set.summary().worst(), Severity::Ok);
+    }
+
+    #[test]
+    fn try_join_next_collects_earliest_spawned_ready_member() {
+        let cx = Cx::for_testing();
+        let scope =
+            Scope::<FailFast>::new(crate::RegionId::new_for_test(9, 1), crate::Budget::INFINITE);
+        let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
+        let (_pending_tx, pending_handle) = manual_handle::<Result<u32, &'static str>>(1);
+        let (ready_tx, ready_handle) = manual_handle::<Result<u32, &'static str>>(2);
+
+        set.handles.push(pending_handle);
+        set.handles.push(ready_handle);
+        ready_tx
+            .send(&cx, Ok(Ok(9)))
+            .expect("ready member result sends");
+
+        let outcome = set.try_join_next().expect("ready member collected");
+
+        assert!(matches!(outcome, Outcome::Ok(9)));
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.summary().completed(), 1);
+        assert_eq!(set.summary().worst(), Severity::Ok);
+        assert!(set.try_join_next().is_none());
+    }
+
+    #[test]
+    fn try_join_next_maps_application_error() {
+        let cx = Cx::for_testing();
+        let scope = Scope::<FailFast>::new(
+            crate::RegionId::new_for_test(10, 1),
+            crate::Budget::INFINITE,
+        );
+        let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
+        let (ready_tx, ready_handle) = manual_handle::<Result<u32, &'static str>>(1);
+
+        set.handles.push(ready_handle);
+        ready_tx
+            .send(&cx, Ok(Err("boom")))
+            .expect("ready member error sends");
+
+        let outcome = set.try_join_next().expect("ready member collected");
+
+        assert!(matches!(outcome, Outcome::Err("boom")));
+        assert!(set.is_empty());
+        assert_eq!(set.summary().completed(), 1);
+        assert_eq!(set.summary().worst(), Severity::Err);
     }
 
     #[test]
