@@ -2645,6 +2645,10 @@ struct EntryDecoder {
     complete: bool,
     staging_path: PathBuf,
     staging_created: bool,
+    staging_file: Option<crate::fs::File>,
+    staging_cursor: Option<u64>,
+    staging_unflushed_bytes: usize,
+    cache_staging_file: bool,
     bytes_written: u64,
     max_block_size: usize,
     source_streaming: bool,
@@ -2661,6 +2665,16 @@ struct PendingDecode {
 enum DecodeDispatch {
     Queued,
     NoProgress,
+}
+
+fn should_cache_entry_staging_file(entry_size: u64, manifest_entries: usize) -> bool {
+    const MIN_BYTES: u64 = 1024 * 1024;
+    const MAX_ENTRIES: usize = 128;
+
+    // Keep a staging file handle hot only for large entries where per-symbol
+    // open/seek/write dominates clean-link receiver intake. Small tree entries
+    // use scoped opens so E-14's FD bound stays intact.
+    entry_size >= MIN_BYTES && manifest_entries <= MAX_ENTRIES
 }
 
 fn entry_decode_width_budget(dec: &EntryDecoder, transfer_decode_width: usize) -> usize {
@@ -4092,6 +4106,13 @@ pub async fn receive_connection(
                 complete: e.size == 0,
                 staging_path: staging_dir.join(e.index.to_string()),
                 staging_created: false,
+                staging_file: None,
+                staging_cursor: None,
+                staging_unflushed_bytes: 0,
+                cache_staging_file: should_cache_entry_staging_file(
+                    e.size,
+                    manifest.entries.len(),
+                ),
                 bytes_written: 0,
                 max_block_size: receiver_max_block_size,
                 source_streaming: entry_source_streaming,
@@ -4280,7 +4301,7 @@ pub async fn receive_connection(
                 }
                 let source_symbols = source_retransmit_request_limit(&config, feedback_rounds)
                     .map_or_else(Vec::new, |limit| collect_source_requests(&decoders, limit));
-                if std::env::var_os("ATP_RQ_TRACE").is_some() {
+                if trace_receiver_intake {
                     let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
                         "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_observed={} round_symbols_accepted={} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
@@ -4833,6 +4854,7 @@ async fn seed_source_streaming_pipeline(
     if !source_streaming_block_ready_to_seed(dec, target_sbn_index) {
         return Ok(());
     }
+    flush_cached_entry_staging_file(dec).await?;
     let Some(mut reader) = crate::fs::File::open(&dec.staging_path).await.ok() else {
         return Ok(());
     };
@@ -5011,6 +5033,7 @@ async fn persist_source_symbol(
     if dec.source_blocks.iter().all(|block| block.complete) {
         dec.complete = true;
         dec.pipeline = None;
+        close_cached_entry_staging_file(dec).await?;
     }
     Ok(true)
 }
@@ -5045,11 +5068,67 @@ async fn open_entry_staging_file(dec: &mut EntryDecoder) -> Result<crate::fs::Fi
     Ok(file)
 }
 
+async fn close_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError> {
+    if let Some(mut file) = dec.staging_file.take() {
+        file.flush().await?;
+    }
+    dec.staging_cursor = None;
+    dec.staging_unflushed_bytes = 0;
+    Ok(())
+}
+
+async fn flush_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError> {
+    if let Some(file) = dec.staging_file.as_mut() {
+        file.flush().await?;
+    }
+    dec.staging_unflushed_bytes = 0;
+    Ok(())
+}
+
 async fn write_entry_staging_range(
     dec: &mut EntryDecoder,
     offset: u64,
     data: &[u8],
 ) -> Result<(), RqError> {
+    if dec.cache_staging_file {
+        if dec.staging_file.is_none() {
+            let file = open_entry_staging_file(dec).await?;
+            dec.staging_file = Some(file);
+            dec.staging_cursor = None;
+            dec.staging_unflushed_bytes = 0;
+        }
+
+        let expected_cursor = dec.staging_cursor;
+        let next_cursor = offset
+            .checked_add(u64::try_from(data.len()).unwrap_or(u64::MAX))
+            .ok_or_else(|| {
+                RqError::Coding(format!("entry {} staging cursor overflow", dec.index))
+            })?;
+        // Clean ATP-RQ transfers arrive mostly as contiguous source symbols.
+        // Flush cached staging writes in chunks so large entries avoid
+        // per-symbol open/seek/write/flush overhead without holding dirty data
+        // unboundedly.
+        const SOURCE_STAGE_BUFFER_BYTES: usize = 256 * 1024;
+        let unflushed_bytes = dec.staging_unflushed_bytes.saturating_add(data.len());
+        let should_flush = unflushed_bytes >= SOURCE_STAGE_BUFFER_BYTES;
+        {
+            let file = dec
+                .staging_file
+                .as_mut()
+                .expect("staging file opened above");
+            if expected_cursor != Some(offset) {
+                file.seek(std::io::SeekFrom::Start(offset)).await?;
+            }
+            file.write_all(data).await?;
+            if should_flush {
+                file.flush().await?;
+            }
+        }
+        dec.staging_cursor = Some(next_cursor);
+        dec.staging_unflushed_bytes = if should_flush { 0 } else { unflushed_bytes };
+        return Ok(());
+    }
+
     let mut file = open_entry_staging_file(dec).await?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     file.write_all(data).await?;
@@ -5166,6 +5245,7 @@ async fn persist_decoded_block(
     if !dec.source_blocks.is_empty() && dec.source_blocks.iter().all(|block| block.complete) {
         dec.complete = true;
         dec.pipeline = None;
+        close_cached_entry_staging_file(dec).await?;
     }
     Ok(())
 }
@@ -5321,6 +5401,7 @@ async fn verify_and_commit(
     feedback_rounds: u32,
 ) -> Result<ReceiveReceipt, RqError> {
     for d in decoders.iter_mut() {
+        close_cached_entry_staging_file(d).await?;
         if d.size == 0 && !d.staging_created {
             let mut file = open_entry_staging_file(d).await?;
             file.flush().await?;
@@ -7112,6 +7193,10 @@ mod tests {
             complete: true,
             staging_path,
             staging_created: true,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
             bytes_written: size,
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
@@ -7194,6 +7279,10 @@ mod tests {
             complete: false,
             staging_path,
             staging_created: false,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
             bytes_written: 0,
             max_block_size: usize::try_from(size).expect("test size fits usize"),
             source_streaming: true,
@@ -7268,6 +7357,74 @@ mod tests {
             std::fs::read(staging_path).expect("read staged source stream"),
             vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
+    }
+
+    #[test]
+    fn source_streaming_large_entry_cache_reuses_and_closes_staging_file() {
+        let object_id = entry_object_id("source-stream-cache", 0);
+        let symbol_size = 4u16;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 8, symbol_size);
+        decoder.cache_staging_file = true;
+
+        let first = ParsedDatagram {
+            entry: 0,
+            sbn: 0,
+            esi: 0,
+            kind: SymbolKind::Source,
+            auth_tag: None,
+            payload_len: 4,
+            header_len: 0,
+        };
+        assert!(
+            futures_lite::future::block_on(persist_source_symbol(
+                &mut decoder,
+                &first,
+                &[1, 2, 3, 4],
+                symbol_size,
+            ))
+            .expect("persist first cached source symbol")
+        );
+        assert!(
+            decoder.staging_file.is_some(),
+            "large-entry source streaming should keep the staging file hot mid-block"
+        );
+        assert_eq!(decoder.staging_cursor, Some(4));
+        assert_eq!(decoder.staging_unflushed_bytes, 4);
+
+        let second = ParsedDatagram { esi: 1, ..first };
+        assert!(
+            futures_lite::future::block_on(persist_source_symbol(
+                &mut decoder,
+                &second,
+                &[5, 6, 7, 8],
+                symbol_size,
+            ))
+            .expect("persist second cached source symbol")
+        );
+        assert!(decoder.complete);
+        assert!(
+            decoder.staging_file.is_none(),
+            "completed entries must release cached staging descriptors"
+        );
+        assert_eq!(decoder.staging_cursor, None);
+        assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert_eq!(
+            std::fs::read(staging_path).expect("read cached source stream"),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[test]
+    fn source_streaming_staging_cache_policy_is_bounded() {
+        const MIN_BYTES: u64 = 1024 * 1024;
+        const MAX_ENTRIES: usize = 128;
+
+        assert!(should_cache_entry_staging_file(MIN_BYTES, MAX_ENTRIES));
+        assert!(!should_cache_entry_staging_file(MIN_BYTES - 1, 1));
+        assert!(!should_cache_entry_staging_file(MIN_BYTES, MAX_ENTRIES + 1));
     }
 
     #[cfg(target_os = "linux")]
@@ -7534,6 +7691,10 @@ mod tests {
             complete: false,
             staging_path: staging_path.clone(),
             staging_created: false,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
             bytes_written: 0,
             max_block_size: 4,
             source_streaming: true,
@@ -8614,6 +8775,10 @@ mod tests {
                 complete: true,
                 staging_path: a_path,
                 staging_created: true,
+                staging_file: None,
+                staging_cursor: None,
+                staging_unflushed_bytes: 0,
+                cache_staging_file: false,
                 bytes_written: a.len() as u64,
                 max_block_size: DEFAULT_MAX_BLOCK_SIZE,
                 source_streaming: false,
@@ -8628,6 +8793,10 @@ mod tests {
                 complete: true,
                 staging_path: b_path,
                 staging_created: true,
+                staging_file: None,
+                staging_cursor: None,
+                staging_unflushed_bytes: 0,
+                cache_staging_file: false,
                 bytes_written: b.len() as u64,
                 max_block_size: DEFAULT_MAX_BLOCK_SIZE,
                 source_streaming: false,
@@ -8891,6 +9060,10 @@ mod tests {
             complete: true,
             staging_path,
             staging_created: true,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
             bytes_written: object.len() as u64,
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
@@ -9066,6 +9239,10 @@ mod tests {
             complete: true,
             staging_path,
             staging_created: true,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
             bytes_written: object.len() as u64,
             max_block_size: DEFAULT_MAX_BLOCK_SIZE,
             source_streaming: false,
