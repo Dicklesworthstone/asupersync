@@ -110,6 +110,15 @@ const ATP_QUIC_CLIENT_SCID: &[u8] = &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 
 const ATP_QUIC_SERVER_SCID: &[u8] = &[0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
 /// Process-unique counter for QUIC receive staging directories.
 static QUIC_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Keep one staged output descriptor hot only for large entries where repeated
+/// block-level open/seek/write/flush dominates receiver intake.
+const QUIC_STAGING_FILE_CACHE_MIN_BYTES: u64 = 1024 * 1024;
+/// Bound cached descriptors so tree transfers with many files do not retain one
+/// file handle per entry.
+const QUIC_STAGING_FILE_CACHE_MAX_ENTRIES: usize = 128;
+/// Flush cached staged writes in bounded chunks. This matches the RQ staging
+/// cache envelope and keeps dirty data bounded while avoiding per-block flushes.
+const QUIC_STAGE_BUFFER_BYTES: usize = 256 * 1024;
 
 fn send_native_keep_alive(
     cx: &Cx,
@@ -1483,14 +1492,53 @@ async fn run_sender_session(
 struct QuicStagedEntryReceive {
     staging_path: PathBuf,
     created: bool,
+    staging_file: Option<crate::fs::File>,
+    staging_cursor: Option<u64>,
+    staging_unflushed_bytes: usize,
+    cache_staging_file: bool,
 }
 
 impl QuicStagedEntryReceive {
-    fn new(staging_path: PathBuf) -> Self {
+    fn new(staging_path: PathBuf, entry_size: u64, manifest_entries: usize) -> Self {
         Self {
             staging_path,
             created: false,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: should_cache_quic_staging_file(entry_size, manifest_entries),
         }
+    }
+
+    async fn open_staging_file(
+        &mut self,
+        entry: &super::ManifestEntry,
+    ) -> Result<crate::fs::File, QuicTransportError> {
+        if let Some(parent) = self.staging_path.parent() {
+            crate::fs::create_dir_all(parent).await?;
+        }
+        if self.created {
+            return Ok(crate::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.staging_path)
+                .await?);
+        }
+        let file = crate::fs::File::create_new(&self.staging_path)
+            .await
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    QuicTransportError::Integrity(format!(
+                        "staging file already exists for entry {}",
+                        entry.index
+                    ))
+                } else {
+                    QuicTransportError::from(err)
+                }
+            })?;
+        file.set_len(entry.size).await?;
+        self.created = true;
+        Ok(file)
     }
 
     async fn write_block(
@@ -1518,39 +1566,219 @@ impl QuicStagedEntryReceive {
                 entry.index, entry.size
             )));
         }
-        if let Some(parent) = self.staging_path.parent() {
-            crate::fs::create_dir_all(parent).await?;
+
+        if self.cache_staging_file {
+            if self.staging_file.is_none() {
+                let file = self.open_staging_file(entry).await?;
+                self.staging_file = Some(file);
+                self.staging_cursor = None;
+                self.staging_unflushed_bytes = 0;
+            }
+
+            let next_cursor = offset
+                .checked_add(u64::try_from(data.len()).unwrap_or(u64::MAX))
+                .ok_or_else(|| {
+                    QuicTransportError::Integrity(format!(
+                        "entry {} staging cursor overflow",
+                        entry.index
+                    ))
+                })?;
+            let unflushed_bytes = self.staging_unflushed_bytes.saturating_add(data.len());
+            let should_flush = unflushed_bytes >= QUIC_STAGE_BUFFER_BYTES;
+            {
+                let file = self.staging_file.as_mut().ok_or_else(|| {
+                    QuicTransportError::Integrity(format!(
+                        "entry {} staging file missing after open",
+                        entry.index
+                    ))
+                })?;
+                if self.staging_cursor != Some(offset) {
+                    file.seek(std::io::SeekFrom::Start(offset)).await?;
+                }
+                file.write_all(data).await?;
+                if should_flush {
+                    file.flush().await?;
+                }
+            }
+            self.staging_cursor = Some(next_cursor);
+            self.staging_unflushed_bytes = if should_flush { 0 } else { unflushed_bytes };
+            return Ok(());
         }
-        let mut file = crate::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(&self.staging_path)
-            .await?;
-        if !self.created {
-            file.set_len(entry.size).await?;
-            self.created = true;
-        }
+
+        let mut file = self.open_staging_file(entry).await?;
         file.seek(std::io::SeekFrom::Start(offset)).await?;
         file.write_all(data).await?;
         file.flush().await?;
         Ok(())
     }
 
-    async fn ensure_created(&mut self, size: u64) -> Result<(), QuicTransportError> {
+    async fn close_cached_staging_file(&mut self) -> Result<(), QuicTransportError> {
+        if let Some(mut file) = self.staging_file.take() {
+            file.flush().await?;
+        }
+        self.staging_cursor = None;
+        self.staging_unflushed_bytes = 0;
+        Ok(())
+    }
+
+    async fn flush_cached_staging_file(&mut self) -> Result<(), QuicTransportError> {
+        if let Some(file) = self.staging_file.as_mut() {
+            file.flush().await?;
+        }
+        self.staging_unflushed_bytes = 0;
+        Ok(())
+    }
+
+    async fn ensure_created(
+        &mut self,
+        entry: &super::ManifestEntry,
+    ) -> Result<(), QuicTransportError> {
         if self.created {
             return Ok(());
         }
-        if let Some(parent) = self.staging_path.parent() {
-            crate::fs::create_dir_all(parent).await?;
-        }
-        let file = crate::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(&self.staging_path)
-            .await?;
-        file.set_len(size).await?;
-        self.created = true;
+        let _ = self.open_staging_file(entry).await?;
         Ok(())
+    }
+}
+
+fn should_cache_quic_staging_file(entry_size: u64, manifest_entries: usize) -> bool {
+    entry_size >= QUIC_STAGING_FILE_CACHE_MIN_BYTES
+        && manifest_entries <= QUIC_STAGING_FILE_CACHE_MAX_ENTRIES
+}
+
+async fn flush_cached_quic_staging_files(
+    staged: &mut [QuicStagedEntryReceive],
+) -> Result<(), QuicTransportError> {
+    for entry in staged {
+        entry.flush_cached_staging_file().await?;
+    }
+    Ok(())
+}
+
+fn quic_staging_nonce_hex() -> Result<String, QuicTransportError> {
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce)
+        .map_err(|err| QuicTransportError::Quic(format!("generate staging nonce: {err}")))?;
+    Ok(hex_encode(&nonce))
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct NativeReceiverIntakeStats {
+    drain_calls: u64,
+    symbols_accepted: u64,
+    blocks_completed: u64,
+    drain_micros: u64,
+    pump_calls: u64,
+    pump_packets: u64,
+    pump_micros: u64,
+    staging_write_count: u64,
+    staging_write_bytes: u64,
+    staging_write_micros: u64,
+}
+
+impl NativeReceiverIntakeStats {
+    fn record_symbol_drain(&mut self, elapsed: Duration, accepted: u64, completed_blocks: usize) {
+        self.drain_calls = self.drain_calls.saturating_add(1);
+        self.symbols_accepted = self.symbols_accepted.saturating_add(accepted);
+        self.blocks_completed = self
+            .blocks_completed
+            .saturating_add(u64::try_from(completed_blocks).unwrap_or(u64::MAX));
+        self.drain_micros = self
+            .drain_micros
+            .saturating_add(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
+    }
+
+    fn record_pump(&mut self, elapsed: Duration, packets: usize) {
+        self.pump_calls = self.pump_calls.saturating_add(1);
+        self.pump_packets = self
+            .pump_packets
+            .saturating_add(u64::try_from(packets).unwrap_or(u64::MAX));
+        self.pump_micros = self
+            .pump_micros
+            .saturating_add(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
+    }
+
+    fn record_staging_write(&mut self, elapsed: Duration, bytes: usize) {
+        self.staging_write_count = self.staging_write_count.saturating_add(1);
+        self.staging_write_bytes = self
+            .staging_write_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.staging_write_micros = self
+            .staging_write_micros
+            .saturating_add(u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX));
+    }
+
+    fn trace_need_more(&self, cx: &Cx, round: u32, need: &QuicNeedMore) {
+        let round = round.to_string();
+        let pending = need.pending.len().to_string();
+        let repair_blocks = need.repair_blocks.len().to_string();
+        let repair_symbols = need
+            .repair_blocks
+            .iter()
+            .fold(0u64, |acc, request| {
+                acc.saturating_add(u64::from(request.symbols))
+            })
+            .to_string();
+        let source_symbols = need.source_symbols.len().to_string();
+        let drain_calls = self.drain_calls.to_string();
+        let symbols_accepted = self.symbols_accepted.to_string();
+        let blocks_completed = self.blocks_completed.to_string();
+        let drain_micros = self.drain_micros.to_string();
+        let pump_calls = self.pump_calls.to_string();
+        let pump_packets = self.pump_packets.to_string();
+        let pump_micros = self.pump_micros.to_string();
+        let staging_write_count = self.staging_write_count.to_string();
+        let staging_write_bytes = self.staging_write_bytes.to_string();
+        let staging_write_micros = self.staging_write_micros.to_string();
+        cx.trace_with_fields(
+            "atp_quic.receive.need_more",
+            &[
+                ("round", round.as_str()),
+                ("pending", pending.as_str()),
+                ("repair_blocks", repair_blocks.as_str()),
+                ("repair_symbols", repair_symbols.as_str()),
+                ("source_symbols", source_symbols.as_str()),
+                ("drain_calls", drain_calls.as_str()),
+                ("symbols_accepted", symbols_accepted.as_str()),
+                ("blocks_completed", blocks_completed.as_str()),
+                ("drain_micros", drain_micros.as_str()),
+                ("pump_calls", pump_calls.as_str()),
+                ("pump_packets", pump_packets.as_str()),
+                ("pump_micros", pump_micros.as_str()),
+                ("staging_write_count", staging_write_count.as_str()),
+                ("staging_write_bytes", staging_write_bytes.as_str()),
+                ("staging_write_micros", staging_write_micros.as_str()),
+            ],
+        );
+    }
+
+    fn trace_summary(&self, cx: &Cx, transfer_id: &str) {
+        let drain_calls = self.drain_calls.to_string();
+        let symbols_accepted = self.symbols_accepted.to_string();
+        let blocks_completed = self.blocks_completed.to_string();
+        let drain_micros = self.drain_micros.to_string();
+        let pump_calls = self.pump_calls.to_string();
+        let pump_packets = self.pump_packets.to_string();
+        let pump_micros = self.pump_micros.to_string();
+        let staging_write_count = self.staging_write_count.to_string();
+        let staging_write_bytes = self.staging_write_bytes.to_string();
+        let staging_write_micros = self.staging_write_micros.to_string();
+        cx.trace_with_fields(
+            "atp_quic.receive.intake",
+            &[
+                ("transfer_id", transfer_id),
+                ("drain_calls", drain_calls.as_str()),
+                ("symbols_accepted", symbols_accepted.as_str()),
+                ("blocks_completed", blocks_completed.as_str()),
+                ("drain_micros", drain_micros.as_str()),
+                ("pump_calls", pump_calls.as_str()),
+                ("pump_packets", pump_packets.as_str()),
+                ("pump_micros", pump_micros.as_str()),
+                ("staging_write_count", staging_write_count.as_str()),
+                ("staging_write_bytes", staging_write_bytes.as_str()),
+                ("staging_write_micros", staging_write_micros.as_str()),
+            ],
+        );
     }
 }
 
@@ -1569,7 +1797,8 @@ async fn commit_staged_entries(
     for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter_mut()) {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         send_and_flush_native_keep_alive(cx, link, control).await?;
-        staged_entry.ensure_created(entry.size).await?;
+        staged_entry.close_cached_staging_file().await?;
+        staged_entry.ensure_created(entry).await?;
         let (size, content_id, content_sha256) =
             hash_file_streaming(&staged_entry.staging_path, &mut read_buf).await?;
         if size != entry.size || hex_encode(&content_sha256) != entry.sha256_hex {
@@ -1596,9 +1825,10 @@ async fn commit_staged_entries(
             committed_paths.push(base.clone());
             send_and_flush_native_keep_alive(cx, link, control).await?;
         }
-        for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter()) {
+        for (entry, staged_entry) in manifest.entries.iter().zip(staged.iter_mut()) {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             send_and_flush_native_keep_alive(cx, link, control).await?;
+            staged_entry.close_cached_staging_file().await?;
             let out_path = if manifest.is_directory {
                 super::quic_join_relative(&base, &entry.rel_path)?
             } else {
@@ -1706,10 +1936,10 @@ async fn run_receiver_session(
 
     let mut decoders = super::decoders_from_manifest(&manifest, config)?;
     let staging_seq = QUIC_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging_nonce = quic_staging_nonce_hex()?;
     let staging_dir = dest_dir.join(format!(
-        ".atp-quic-staging-{}-{}-{staging_seq}",
-        manifest.transfer_id,
-        std::process::id()
+        ".atp-quic-staging-{}-{staging_nonce}-{staging_seq}",
+        manifest.transfer_id
     ));
     // Reclaim any stale scratch directory before use. This mirrors the TCP
     // receiver and prevents stale entries or hostile symlinks under a reused
@@ -1721,11 +1951,18 @@ async fn run_receiver_session(
         .entries
         .iter()
         .enumerate()
-        .map(|(i, _)| QuicStagedEntryReceive::new(staging_dir.join(i.to_string())))
+        .map(|(i, entry)| {
+            QuicStagedEntryReceive::new(
+                staging_dir.join(i.to_string()),
+                entry.size,
+                manifest.entries.len(),
+            )
+        })
         .collect::<Vec<_>>();
     let mut symbols_accepted = 0u64;
     let mut feedback_rounds = 0u32;
     let mut decode_stats = super::QuicDecodeStats::default();
+    let mut intake_stats = NativeReceiverIntakeStats::default();
     // Control-plane PTO state: the last NeedMore we sent and how many times we have re-sent it while
     // awaiting this round's repair. Lets a lost control frame self-heal instead of deadlocking.
     let mut last_need: Option<QuicNeedMore> = None;
@@ -1742,6 +1979,7 @@ async fn run_receiver_session(
             // the round made progress, silence is enough to request repair for the
             // remaining gaps even when the best-effort ObjectComplete marker was lost.
             loop {
+                let drain_started = Instant::now(); // ubs:ignore - monotonic intake timing, not crypto randomness
                 let (accepted, completed_blocks) =
                     super::drain_native_symbol_datagrams_with_blocks(
                         &mut link.conn,
@@ -1750,6 +1988,11 @@ async fn run_receiver_session(
                         config,
                         &mut decode_stats,
                     )?;
+                intake_stats.record_symbol_drain(
+                    drain_started.elapsed(),
+                    accepted,
+                    completed_blocks.len(),
+                );
                 symbols_accepted = symbols_accepted.saturating_add(accepted);
                 if accepted > 0 {
                     // Repair (or spray) is flowing again — reset the control-PTO budget.
@@ -1776,14 +2019,17 @@ async fn run_receiver_session(
                                 block.entry
                             ))
                         })?;
+                    let write_started = Instant::now(); // ubs:ignore - monotonic staging timing, not crypto randomness
                     staged_entry
                         .write_block(entry, block.sbn, &block.data, config)
                         .await?;
+                    intake_stats.record_staging_write(write_started.elapsed(), block.data.len());
                     send_and_flush_native_keep_alive(cx, link, &mut control).await?;
                 }
                 if super::pending_entries(&decoders).is_empty() {
                     // Once all entries decode, Proof can complete the transfer even
                     // if the best-effort ObjectComplete control packet was dropped.
+                    flush_cached_quic_staging_files(&mut staged).await?;
                     break 'rounds;
                 }
                 if link.conn.pending_datagram_count() > 0 {
@@ -1815,7 +2061,10 @@ async fn run_receiver_session(
                 } else {
                     config.idle_timeout
                 };
-                if link.pump_inbound_for(cx, pump_timeout).await? == 0 {
+                let pump_started = Instant::now(); // ubs:ignore - monotonic pump timing, not crypto randomness
+                let pumped_packets = link.pump_inbound_for(cx, pump_timeout).await?;
+                intake_stats.record_pump(pump_started.elapsed(), pumped_packets);
+                if pumped_packets == 0 {
                     if round_made_progress {
                         break;
                     }
@@ -1834,6 +2083,7 @@ async fn run_receiver_session(
                 }
             }
 
+            flush_cached_quic_staging_files(&mut staged).await?;
             let pending = super::pending_entries(&decoders);
             if pending.is_empty() {
                 break;
@@ -1864,6 +2114,7 @@ async fn run_receiver_session(
                 repair_blocks,
                 source_symbols: Vec::new(),
             };
+            intake_stats.trace_need_more(cx, feedback_rounds.saturating_add(1), &need);
             super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
             link.flush(cx).await?;
             // Remember it so the inner loop can re-send it on the control PTO if the repair round
@@ -1880,6 +2131,7 @@ async fn run_receiver_session(
             feedback_rounds,
             &decode_stats,
         );
+        intake_stats.trace_summary(cx, manifest.transfer_id.as_str());
         send_native_keep_alive(cx, &mut link.conn, &mut control)?;
         link.flush(cx).await?;
         let (mut receipt, committed_paths) = commit_staged_entries(
@@ -1925,6 +2177,9 @@ async fn run_receiver_session(
     }
     .await;
 
+    for staged_entry in &mut staged {
+        let _ = staged_entry.close_cached_staging_file().await;
+    }
     // Reclaim the staging directory on every exit path. A successful commit
     // renames each entry out (leaving an empty dir); a failed transfer leaves
     // orphaned partial blocks behind. Either way the receiver must not leak a
@@ -2079,6 +2334,97 @@ mod tests {
         assert_eq!(entry.get_field("inbound_pump_batch_limit"), Some("512"));
     }
 
+    fn quic_staging_test_entry(size: u64) -> crate::net::atp::transport_quic::ManifestEntry {
+        crate::net::atp::transport_quic::ManifestEntry {
+            index: 0,
+            rel_path: "entry.bin".to_string(),
+            size,
+            sha256_hex: "0".repeat(64),
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn native_receiver_intake_trace_records_pump_feed_and_staging_work() {
+        let cx = Cx::for_testing();
+        let collector = crate::observability::LogCollector::new(8)
+            .with_min_level(crate::observability::LogLevel::Trace);
+        cx.set_log_collector(collector.clone());
+        let mut stats = NativeReceiverIntakeStats::default();
+        stats.record_symbol_drain(Duration::from_micros(11), 7, 2);
+        stats.record_pump(Duration::from_micros(13), 5);
+        stats.record_staging_write(Duration::from_micros(17), 1024);
+        stats.trace_summary(&cx, "transfer-intake");
+
+        let entries = collector.peek();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.message() == "atp_quic.receive.intake")
+            .expect("receive intake trace entry");
+        assert_eq!(entry.get_field("transfer_id"), Some("transfer-intake"));
+        assert_eq!(entry.get_field("drain_calls"), Some("1"));
+        assert_eq!(entry.get_field("symbols_accepted"), Some("7"));
+        assert_eq!(entry.get_field("blocks_completed"), Some("2"));
+        assert_eq!(entry.get_field("drain_micros"), Some("11"));
+        assert_eq!(entry.get_field("pump_calls"), Some("1"));
+        assert_eq!(entry.get_field("pump_packets"), Some("5"));
+        assert_eq!(entry.get_field("pump_micros"), Some("13"));
+        assert_eq!(entry.get_field("staging_write_count"), Some("1"));
+        assert_eq!(entry.get_field("staging_write_bytes"), Some("1024"));
+        assert_eq!(entry.get_field("staging_write_micros"), Some("17"));
+    }
+
+    #[test]
+    fn quic_staging_cache_policy_is_bounded() {
+        assert!(should_cache_quic_staging_file(
+            QUIC_STAGING_FILE_CACHE_MIN_BYTES,
+            QUIC_STAGING_FILE_CACHE_MAX_ENTRIES
+        ));
+        assert!(!should_cache_quic_staging_file(
+            QUIC_STAGING_FILE_CACHE_MIN_BYTES - 1,
+            1
+        ));
+        assert!(!should_cache_quic_staging_file(
+            QUIC_STAGING_FILE_CACHE_MIN_BYTES,
+            QUIC_STAGING_FILE_CACHE_MAX_ENTRIES + 1
+        ));
+    }
+
+    #[test]
+    fn quic_staging_large_entry_cache_reuses_and_closes_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let staging_path = temp.path().join("entry0");
+        let entry = quic_staging_test_entry(QUIC_STAGING_FILE_CACHE_MIN_BYTES);
+        let config = QuicConfig {
+            max_block_size: 4,
+            ..QuicConfig::default()
+        };
+        let mut staged = QuicStagedEntryReceive::new(staging_path.clone(), entry.size, 1);
+
+        futures_lite::future::block_on(staged.write_block(&entry, 0, &[1, 2, 3, 4], &config))
+            .expect("write first cached block");
+        assert!(staged.staging_file.is_some());
+        assert_eq!(staged.staging_cursor, Some(4));
+        assert_eq!(staged.staging_unflushed_bytes, 4);
+
+        futures_lite::future::block_on(staged.write_block(&entry, 1, &[5, 6, 7, 8], &config))
+            .expect("write second cached block");
+        assert!(staged.staging_file.is_some());
+        assert_eq!(staged.staging_cursor, Some(8));
+        assert_eq!(staged.staging_unflushed_bytes, 8);
+
+        futures_lite::future::block_on(staged.close_cached_staging_file())
+            .expect("close cached staging file");
+        assert!(staged.staging_file.is_none());
+        assert_eq!(staged.staging_cursor, None);
+        assert_eq!(staged.staging_unflushed_bytes, 0);
+
+        let mut file = std::fs::File::open(staging_path).expect("open staged file");
+        let mut prefix = [0u8; 8];
+        std::io::Read::read_exact(&mut file, &mut prefix).expect("read staged prefix");
+        assert_eq!(prefix, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
     #[test]
     fn quic_staging_dir_guard_reclaims_on_hard_drop_unless_disarmed() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -2101,6 +2447,51 @@ mod tests {
         assert!(
             disarmed.exists(),
             "disarmed QuicStagingDirGuard must leave cooperative cleanup to the caller"
+        );
+    }
+
+    #[test]
+    fn quic_cached_staging_file_flushes_round_boundary_without_closing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let staging_path = temp.path().join("entry0");
+        let entry = quic_staging_test_entry(8);
+        let config = QuicConfig {
+            max_block_size: 4,
+            ..QuicConfig::default()
+        };
+        let mut staged = QuicStagedEntryReceive::new(staging_path.clone(), entry.size, 1);
+        staged.cache_staging_file = true;
+
+        futures_lite::future::block_on(staged.write_block(&entry, 0, &[1, 2, 3, 4], &config))
+            .expect("write first decoded block");
+        assert!(
+            staged.staging_file.is_some(),
+            "large-entry QUIC receive should keep the staging descriptor hot"
+        );
+        assert_eq!(staged.staging_cursor, Some(4));
+        assert_eq!(staged.staging_unflushed_bytes, 4);
+
+        futures_lite::future::block_on(staged.flush_cached_staging_file())
+            .expect("round-boundary flush");
+        assert!(
+            staged.staging_file.is_some(),
+            "round-boundary flush should preserve the hot descriptor"
+        );
+        assert_eq!(staged.staging_cursor, Some(4));
+        assert_eq!(staged.staging_unflushed_bytes, 0);
+
+        futures_lite::future::block_on(staged.write_block(&entry, 1, &[5, 6, 7, 8], &config))
+            .expect("write second decoded block");
+        assert_eq!(staged.staging_cursor, Some(8));
+
+        futures_lite::future::block_on(staged.close_cached_staging_file())
+            .expect("close cached descriptor");
+        assert!(staged.staging_file.is_none());
+        assert_eq!(staged.staging_cursor, None);
+        assert_eq!(staged.staging_unflushed_bytes, 0);
+        assert_eq!(
+            std::fs::read(staging_path).expect("read staged bytes"),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
     }
 }
