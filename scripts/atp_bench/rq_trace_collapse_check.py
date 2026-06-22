@@ -85,6 +85,57 @@ def parse_rounds(lines) -> list[dict]:
     return rounds
 
 
+# Receiver-intake stages (cc_2 R1, 317hxr.29): the `receiver: ... ObjectComplete`
+# trace splits per-datagram intake into these timers (MATRIX-23 pinpointed feed_micros
+# as the clean-link wall; MATRIX-24 shifted it to recv_micros once feed was fixed).
+INTAKE_STAGE_KEYS = ("feed_micros", "recv_micros", "drain_micros", "parse_micros")
+
+
+def parse_receiver_intake(lines) -> list[dict]:
+    records = []
+    for line in lines:
+        if "intake_bytes_per_s" not in line and "feed_micros" not in line:
+            continue
+        kv = {k: v for k, v in KV_RE.findall(line)}
+        stages = {k: v for k in INTAKE_STAGE_KEYS if (v := first_present(kv, (k,))) is not None}
+        if not stages:
+            continue
+        records.append({"stages": stages, "intake_bytes_per_s": first_present(kv, ("intake_bytes_per_s",))})
+    return records
+
+
+def report_receiver_intake(records, target_mbps) -> list[str]:
+    """Print the receiver-intake bottleneck breakdown (which stage caps throughput);
+    return flags. Auto-identifies the dominant stage = SapphireHill's 'attack the top item'."""
+    if not records:
+        return []
+    agg = {k: 0.0 for k in INTAKE_STAGE_KEYS}
+    rates = []
+    for rec in records:
+        for k, v in rec["stages"].items():
+            agg[k] += v
+        if rec["intake_bytes_per_s"]:
+            rates.append(rec["intake_bytes_per_s"])
+    total = sum(agg.values()) or 1.0
+    dominant = max(agg, key=lambda k: agg[k])
+    print("\n## Receiver-intake bottleneck (cc_2 R1 trace)\n")
+    print("| stage | micros | % of intake |")
+    print("|--|--:|--:|")
+    for k in INTAKE_STAGE_KEYS:
+        mark = "  ← WALL" if k == dominant else ""
+        print(f"| {k} | {agg[k]:.0f} | {100.0 * agg[k] / total:.2f}%{mark} |")
+    flags = []
+    suffix = ""
+    if rates:
+        mbps = (sum(rates) / len(rates)) / 1e6
+        suffix = f"mean intake = {mbps:.1f} MB/s; "
+        if target_mbps is not None and mbps < target_mbps:
+            flags.append(f"receiver intake {mbps:.1f} MB/s < target {target_mbps} MB/s (bottleneck: {dominant})")
+    print(f"\n- {suffix}dominant intake stage = **{dominant}** "
+          f"({100.0 * agg[dominant] / total:.1f}%) → attack this")
+    return flags
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="ATP-RQ trace pacing-collapse gate.")
     ap.add_argument("log", nargs="?", help="ATP_RQ_TRACE sender log (default: stdin)")
@@ -101,12 +152,17 @@ def main(argv: list[str]) -> int:
                     help="FAIL if convergence took more feedback rounds than this "
                          "(MATRIX-20 lossy wall = feedback rounds; LEVER-B/F target fr<=2). "
                          "Off by default so non-lossy traces aren't flagged.")
+    ap.add_argument("--receiver-target-mbps", type=float, default=None,
+                    help="FAIL if mean receiver intake_bytes_per_s < this MB/s "
+                         "(MATRIX-24 goal: intake >> rsync's ~40 MB/s). Off by default.")
     args = ap.parse_args(argv)
 
     src = open(args.log, encoding="utf-8") if args.log else sys.stdin
-    rounds = parse_rounds(src)
+    lines = list(src)
     if args.log:
         src.close()
+    rounds = parse_rounds(lines)
+    recv_records = parse_receiver_intake(lines)
 
     flags: list[str] = []
     print("# ATP-RQ trace pacing-collapse gate\n")
@@ -149,9 +205,12 @@ def main(argv: list[str]) -> int:
         flags.append(f"convergence took {max_round} feedback rounds > budget "
                      f"{args.max_rounds} (MATRIX-20 lossy wall; LEVER-B/F must cut rounds)")
 
+    flags += report_receiver_intake(recv_records, args.receiver_target_mbps)
+
     print("\n## Verdict\n")
-    print(f"- parsed {len(rounds)} round record(s); highest feedback round = {max_round}.")
-    if len(rounds) < args.min_rounds:
+    print(f"- parsed {len(rounds)} round record(s); highest feedback round = {max_round}; "
+          f"{len(recv_records)} receiver-intake record(s).")
+    if len(rounds) < args.min_rounds and not flags:
         print(f"- only {len(rounds)} round(s) parsed (need ≥{args.min_rounds}); not a collapse sample.")
         return 0
     if flags:
