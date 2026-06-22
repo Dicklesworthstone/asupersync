@@ -1659,3 +1659,18 @@ The recovery-pacing downcap landed (`ce45e763d` "cap recovery pacing to measured
 ## MATRIX-30 (2026-06-22) — downcap revert was INCOMPLETE; 50M/bad STILL fails; full-file restore to 7842fdcb5 dispatched
 
 The swarm's revert `ac50096e7` ("remove lossy recovery downcap") was benched (run `20260622T071302Z`): perfect 3.65 sha3/3, good 3.95 sha3/3 (ties rsync), **bad status=error sha 0/3 `[ASUP-E801] no convergence after 17 rounds`**, broken 188s sha2/3. **rsync succeeds on bad (13–19s) → purely an atp regression, not netns/env.** The revert only removed the downcap (`ce45e763d`/`0bd348050`) but `transport_rq` still differs from the known-good `7842fdcb5` by **80 lines** — the round-0-loss-target-repair logic from `e870d8055` (`RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION` 0.25→0.50, `MIN` 0.005→0.03, `round0_loss_target_repair_enabled/overhead`) survived and **also** breaks 50M/bad convergence. So a partial revert is insufficient; the clean fix is a full-file restore to `7842fdcb5` (the last empirically-good state: bad 59.8 sha-ok). transport_rq is clean + swarm idle → dispatched the exact `git checkout 7842fdcb5 -- src/net/atp/transport_rq/mod.rs` P0. **Lesson: a "revert the bad commit" instruction is unreliable when multiple commits in the series each contribute to the regression — restore the whole file to the last green SHA.** Evidence dir: `artifacts/atp_bench_matrix/20260622T071302Z/`.
+
+## MATRIX-31 (2026-06-22) — FOUNDATION RESTORED & CONFIRMED (rate-control tar-pit closed out)
+
+Full-file restore of `transport_rq/mod.rs` to `7842fdcb5` committed+pushed (`210799496`, user-authorized one-time mod.rs exception after the swarm missed 3 reverts). Rebuilt fresh `atp 0.3.5`, benched 50M nocrypto ×4, run `20260622T155605Z` — **all sha 3/3, no failures:**
+
+| regime | atp | rsync | vs rsync |
+|---|---|---|---|
+| perfect | 3.65s (fr0) | 1.23 | loses 3.0× |
+| good 0.1% | 3.95s (fr1) | 3.93 | **TIES** |
+| bad 2% | 58.69s (fr4) | 14.94 | loses 3.9× |
+| broken 10% | 127.51s (fr6) | 76.19 | loses 1.7× |
+
+The 17-round non-convergence is gone; `main` is back on the stable, regression-free foundation = okcmis feed-cache (`46355c9a2`, receiver 47.9 MB/s) + Lever B lossy-fix (`67826603e`) + round-0 repair calibration. **Honest scoreboard: atp ties rsync on 50M/good, loses perfect/bad/broken; no 50M cell beats rsync yet.** Net vs the original pre-okcmis baseline (bad 73.41): bad improved 20% (73→59), good held at parity, perfect ~same, all regression-free.
+
+**Rate-control epitaph (MATRIX-18→31):** ~7 send-rate-control attempts (lever-1 v2/v3, round-0 ramp, link-cap, sustained-delivery pace-up; recovery-downcap, round-0-loss-target pace-down) ALL failed — every measurement-derived rate setting overshoots the link → self-inflicted loss → receiver overflow (clean) or non-convergence (lossy). The only sanctioned remaining lossy approach is proper AIMD congestion control (receiver-reported-loss multiplicative-decrease / additive-increase), hard-gated. Parallel non-rate fronts: QUIC/encrypted port of okcmis, trees small-entry batching, 500M scale. Evidence dir: `artifacts/atp_bench_matrix/20260622T155605Z/`.
