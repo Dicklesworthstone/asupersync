@@ -187,11 +187,6 @@ const RQ_COLD_START_PACING_BPS: u64 = 16 * 1024 * 1024;
 const RQ_MIN_PACING_BPS: u64 = 512 * 1024;
 const RQ_MAX_PACING_BPS: u64 = 64 * 1024 * 1024;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
-/// MATRIX-24 measured the okcmis source-staging receiver path at ~47.9 MiB/s.
-/// Round 0 may start higher for that exact path, but stays below the measured
-/// receiver drain ceiling so clean links do not repeat the old 64 MiB/s
-/// receiver-overflow failure.
-const RQ_RECEIVER_SAFE_SOURCE_PACING_BPS: u64 = 40 * 1024 * 1024;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
 const RQ_PACING_MAX_PAUSE: Duration = Duration::from_millis(250);
@@ -261,8 +256,6 @@ const RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK: usize = usize::MAX;
 const RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA: usize = 256;
 /// Tiny quiet window used only after a full batch, matching the native QUIC pump.
 const RQ_INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
-const RQ_STAGING_FILE_CACHE_MIN_BYTES: u64 = 1024 * 1024;
-const RQ_STAGING_FILE_CACHE_MAX_ENTRIES: usize = 128;
 
 /// Process-unique suffix for RQ receive staging directories.
 static RQ_STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -829,8 +822,9 @@ impl RqAdaptiveSendState {
 
         let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
         let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
-        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
-        let bw_sample = (useful_bytes as f64 / send_wall_s).max(1.0);
+        let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
+        let useful_factor = (1.0 - wire_loss_hat * 0.5).clamp(0.25, 1.0);
+        let bw_sample = offered_bps * useful_factor;
         let sent_payload_fraction = if pending_bytes == 0 {
             1.0
         } else {
@@ -862,6 +856,7 @@ impl RqAdaptiveSendState {
         };
         self.controller.update_estimate(self.est);
 
+        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
         let cwnd_bytes = (self.bw_ema_bps * rtt_s)
             .max(f64::from(config.symbol_size.max(1)))
             .ceil() as u64;
@@ -2673,32 +2668,13 @@ enum DecodeDispatch {
 }
 
 fn should_cache_entry_staging_file(entry_size: u64, manifest_entries: usize) -> bool {
+    const MIN_BYTES: u64 = 1024 * 1024;
+    const MAX_ENTRIES: usize = 128;
+
     // Keep a staging file handle hot only for large entries where per-symbol
     // open/seek/write dominates clean-link receiver intake. Small tree entries
     // use scoped opens so E-14's FD bound stays intact.
-    entry_size >= RQ_STAGING_FILE_CACHE_MIN_BYTES
-        && manifest_entries <= RQ_STAGING_FILE_CACHE_MAX_ENTRIES
-}
-
-fn source_streaming_cache_path_enabled(config: &RqConfig, digests: &[EntryDigest]) -> bool {
-    config.repair_overhead <= 1.0
-        && config.source_retransmit_rounds > 0
-        && digests
-            .iter()
-            .any(|digest| should_cache_entry_staging_file(digest.size, digests.len()))
-}
-
-fn round0_pacing_for(config: &RqConfig, digests: &[EntryDigest]) -> RqSprayPacing {
-    if source_streaming_cache_path_enabled(config, digests) {
-        return RqSprayPacing::from_rate(
-            RQ_RECEIVER_SAFE_SOURCE_PACING_BPS,
-            config.symbol_size,
-            RQ_COLD_START_BURST_SYMBOLS,
-            None,
-            false,
-        );
-    }
-    RqSprayPacing::cold_start(config.symbol_size)
+    entry_size >= MIN_BYTES && manifest_entries <= MAX_ENTRIES
 }
 
 fn entry_decode_width_budget(dec: &EntryDecoder, transfer_decode_width: usize) -> usize {
@@ -3066,7 +3042,6 @@ pub async fn send_path(
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
     let mut round_tuning = adaptive.round_tuning(&config);
-    round_tuning.pacing = round0_pacing_for(&config, &digests);
     // One token bucket owns the whole transfer. Recreating it per source/repair
     // spray would grant a fresh burst each time and overflow rate-capped qdiscs.
     let mut pacer = RqSprayPacer::new(round_tuning.pacing);
@@ -3092,10 +3067,7 @@ pub async fn send_path(
     )
     .await?;
     let mut round_send_wall = round_started.elapsed();
-    rqtrace!(
-        "sender: round 0 sprayed, symbols_sent={symbols_sent} path_rate_bps={}",
-        round_tuning.pacing.path_rate_bps
-    );
+    rqtrace!("sender: round 0 sprayed, symbols_sent={symbols_sent}");
 
     // Feedback loop.
     loop {
@@ -6509,63 +6481,6 @@ mod tests {
         );
     }
 
-    fn rq_test_digest(size: u64) -> EntryDigest {
-        EntryDigest {
-            rel_path: "rq-test.bin".to_string(),
-            size,
-            content_id: crate::atp::object::ObjectId::content(
-                crate::atp::object::ContentId::from_bytes(b"rq-test.bin"),
-            ),
-            content_sha256: [0; 32],
-        }
-    }
-
-    #[test]
-    fn rq_round0_large_source_cache_uses_receiver_safe_pacing() {
-        let config = RqConfig::default();
-        let digests = [rq_test_digest(RQ_STAGING_FILE_CACHE_MIN_BYTES)];
-
-        let pacing = round0_pacing_for(&config, &digests);
-
-        assert_eq!(
-            pacing.path_rate_bps,
-            RQ_RECEIVER_SAFE_SOURCE_PACING_BPS.saturating_mul(8)
-        );
-        assert!(
-            RQ_RECEIVER_SAFE_SOURCE_PACING_BPS < RQ_MAX_PACING_BPS,
-            "receiver-safe round-0 cap must stay below the old max-rate overflow"
-        );
-    }
-
-    #[test]
-    fn rq_round0_small_or_non_source_streaming_keeps_cold_start() {
-        let config = RqConfig::default();
-        let small = [rq_test_digest(RQ_STAGING_FILE_CACHE_MIN_BYTES - 1)];
-        assert_eq!(
-            round0_pacing_for(&config, &small).path_rate_bps,
-            RQ_COLD_START_PACING_BPS.saturating_mul(8)
-        );
-
-        let fec_first = RqConfig {
-            repair_overhead: 1.5,
-            ..RqConfig::default()
-        };
-        let large = [rq_test_digest(RQ_STAGING_FILE_CACHE_MIN_BYTES)];
-        assert_eq!(
-            round0_pacing_for(&fec_first, &large).path_rate_bps,
-            RQ_COLD_START_PACING_BPS.saturating_mul(8)
-        );
-
-        let source_retx_disabled = RqConfig {
-            source_retransmit_rounds: 0,
-            ..RqConfig::default()
-        };
-        assert_eq!(
-            round0_pacing_for(&source_retx_disabled, &large).path_rate_bps,
-            RQ_COLD_START_PACING_BPS.saturating_mul(8)
-        );
-    }
-
     fn rq_test_path_estimate(config: &RqConfig, bytes_per_second: f64) -> PathEstimate {
         PathEstimate {
             rtt_s: 0.050,
@@ -6913,44 +6828,6 @@ mod tests {
             state.bw_ema_bps > 8.0 * 1024.0 * 1024.0,
             "feedback timeout must not collapse a fast spray sample to {} B/s",
             state.bw_ema_bps
-        );
-    }
-
-    #[test]
-    fn rq_feedback_bandwidth_caps_to_receiver_observed_delivery() {
-        let config = RqConfig {
-            symbol_size: 1200,
-            ..RqConfig::default()
-        };
-        let mut state = RqAdaptiveSendState::new(23, &config, 1);
-        let total_bytes = 50 * 1024 * 1024_u64;
-        let digests = vec![rq_test_digest(total_bytes)];
-        let pending = BTreeSet::from([0]);
-        let sent_symbols = (40 * 1024 * 1024_u64) / u64::from(config.symbol_size);
-        let received_symbols = (25 * 1024 * 1024_u64) / u64::from(config.symbol_size);
-
-        state.observe_need_more(
-            &config,
-            &digests,
-            &pending,
-            sent_symbols,
-            received_symbols,
-            Duration::from_secs(1),
-            Duration::from_millis(50),
-            total_bytes,
-        );
-
-        let delivered_bps = (received_symbols * u64::from(config.symbol_size)) as f64;
-        assert!(
-            state.bw_ema_bps <= delivered_bps + f64::from(config.symbol_size),
-            "bandwidth sample must follow receiver-observed delivery, got {} B/s for delivered {} B/s",
-            state.bw_ema_bps,
-            delivered_bps
-        );
-        assert!(
-            state.pacing_rate_for(rq_test_block_plan(&config))
-                <= delivered_bps as u64 + u64::from(config.symbol_size),
-            "next pacing rate must not keep the 40MiB/s offered rate after a 25MiB/s delivery sample"
         );
     }
 
@@ -7646,18 +7523,12 @@ mod tests {
 
     #[test]
     fn source_streaming_staging_cache_policy_is_bounded() {
-        assert!(should_cache_entry_staging_file(
-            RQ_STAGING_FILE_CACHE_MIN_BYTES,
-            RQ_STAGING_FILE_CACHE_MAX_ENTRIES
-        ));
-        assert!(!should_cache_entry_staging_file(
-            RQ_STAGING_FILE_CACHE_MIN_BYTES - 1,
-            1
-        ));
-        assert!(!should_cache_entry_staging_file(
-            RQ_STAGING_FILE_CACHE_MIN_BYTES,
-            RQ_STAGING_FILE_CACHE_MAX_ENTRIES + 1
-        ));
+        const MIN_BYTES: u64 = 1024 * 1024;
+        const MAX_ENTRIES: usize = 128;
+
+        assert!(should_cache_entry_staging_file(MIN_BYTES, MAX_ENTRIES));
+        assert!(!should_cache_entry_staging_file(MIN_BYTES - 1, 1));
+        assert!(!should_cache_entry_staging_file(MIN_BYTES, MAX_ENTRIES + 1));
     }
 
     #[cfg(target_os = "linux")]
