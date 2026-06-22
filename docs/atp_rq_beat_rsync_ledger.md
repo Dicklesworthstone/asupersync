@@ -1709,3 +1709,20 @@ Receiver-observed AIMD pacing (`b90620755`, 317hxr.2.5.1) — proper congestion 
 **★ AIMD is the FIRST of 8 rate-control attempts that is regression-free AND helps.** Trace (50M/bad) shows it engaging: round-1 still overshoots (cold-start, no loss signal yet — received 26792/50500 sent), but **rounds 2–4 deliver ~97%** (14709/15100, 10651/10900, 10682/10900) — the AIMD rate converged so recovery rounds stop re-overshooting the link. broken (most rounds) gains most (−24%); bad (fewer rounds) gains little. Clean is byte-for-byte unchanged (perfect/good identical to foundation) — AIMD only acts when loss is observed, so it can't break clean (unlike all 7 prior rate hacks). **KEEPS on main.**
 
 **Remaining gap:** AIMD does NOT yet make atp beat rsync on lossy (bad 57 vs 15, broken 96 vs 76) — two residuals: (1) the round-1 cold-start overshoot (~47% loss before AIMD has a feedback sample) is inherent to a 1st round with no signal — could be cut by a more conservative round-0 on a priori loss hints or a faster first-round backoff; (2) the underlying single-core decode + per-round RTT cost. Next: bench AIMD at 500M/bad (does converging recovery rounds dent the 832s catastrophe? — likely a bigger win there since 500M/bad had many rounds, like broken). Scoreboard: atp ties 50M/good, wins tree_big/good, lossy improved but still loses. Evidence dir: `artifacts/atp_bench_matrix/20260622T195029Z/`.
+
+## MATRIX-34 (2026-06-22) — AIMD @ 500M: bad 832→704s (−15%), clean unchanged; 500M-lossy is DECODE-bound at scale (AIMD helps less here)
+
+Benched AIMD at 500M (locally-built binary), run `20260622T200612Z`, ALL sha 3/3:
+
+| cell | AIMD | foundation | rsyncd | verdict |
+|---|---|---|---|---|
+| 500M/good | 36.58s | 36.68 | 24.25 | unchanged; loses 1.5× |
+| 500M/bad | **704.34s** (fr 5–6) | 832.0 | 97.3 | **−15% (−128s)**; still loses 7.1× |
+
+AIMD is regression-free and helps lossy at every scale (50M/broken −24%, 50M/bad −3%, 500M/bad −15%), magnitude tracking round-count. But 500M/bad still loses rsync 7.1× because at scale the residual is NOT round overshoot — it's **single-core RaptorQ decode of a 500M object + the round-1 cold-start overshoot (which at 500M sprays an enormous first round at ~47% loss before any feedback)**. AIMD converges rounds 2+ but can't fix round-1's blind overshoot or the decode wall.
+
+**Two distinct lossy gaps now pinned by evidence:**
+- 50M-lossy (bad/broken): primarily round-1 cold-start overshoot → refine AIMD to start round-0 conservatively (a-priori/last-known loss) or back off harder on the first feedback. Gated AIMD-style only.
+- 500M-lossy (bad): decode/feed throughput at scale (the receiver pipeline) + round-1 overshoot magnitude. Needs faster receiver decode/feed (parallel block-decode exists per MATRIX-20, but per-symbol feed/intake may still serialize at 500M scale — re-profile receiver intake at 500M like MATRIX-23 did at 50M).
+
+**Standing scoreboard (foundation+AIMD):** atp ties 50M/good, wins tree_big/good; lossy improved 15–24% but still loses rsync everywhere lossy/large. AIMD is the bankable lossy win; domination still requires the round-1-overshoot fix + receiver-decode-at-scale. Evidence dir: `artifacts/atp_bench_matrix/20260622T200612Z/`.
