@@ -1531,3 +1531,22 @@ All sha-ok (correct, just slow). **Trace proof of the failure mechanism** (perfe
 **The real clean-link lever is RECEIVER throughput.** atp clean ≈13.4 MB/s vs rsync ≈40 MB/s; to beat rsync clean we must raise the receiver's symbol-intake/decode/commit pipeline above ~40 MB/s. Decode itself is already parallel and block-insensitive (MATRIX-20), so the suspect is the **serial per-symbol intake/drain loop** (recv → auth-verify → `feed_symbol_with_cx` → dispatch) and/or staging disk write — the part that runs single-threaded between the socket and the parallel decoders. Next diagnostic: profile/instrument the receiver pump to find the ~13 MB/s bottleneck (intake batching, auth cost per symbol, disk write path).
 
 **Action.** `a8a6792f6` is a clean-link regression on `main` (perfect/good 15–17× slower) — recommend REVERT it to restore the overhead-cap baseline (3.72/3.95s clean), then pursue the receiver-throughput lever. Filed to bead 839ykg. Do NOT attempt further round-0 pacing-up levers. Evidence dir: `artifacts/atp_bench_matrix/20260621T231513Z/`.
+
+## MATRIX-23 (2026-06-22) — revert CONFIRMED (clean restored) + ★bottleneck PINPOINTED: the receiver wall is the SERIAL per-symbol FEED
+
+Swarm landed `daf534408` (revert of the pacing ramp) + `4f60acf15` (drhadc: receiver-intake trace decomposing recv/parse/feed/drain). Rebuilt fresh `atp 0.3.5`, benched 50M nocrypto ×4, run `20260622T000615Z`:
+
+**Revert confirmed — clean baseline restored:** perfect 3.85s (base 3.72), good 4.05s (base 3.95), bad 72.51s (base 73.41), all sha 3/3. (broken 129.95s/fr6 vs base 114.44/fr5 — still carries the 7.3 decode-fanout +1-round regression flagged in MATRIX-21/22; separate lossy issue.)
+
+**★THE RECEIVER CEILING IS THE PER-SYMBOL FEED (decisive).** Intake trace for 50M/perfect (rep1, 43700 symbols, 52.4 MB):
+| stage | micros | share |
+|---|---|---|
+| **feed_micros** | **3,382,218** | **99.999%** |
+| drain_micros | 94,803 | 2.8% |
+| recv_micros | 66,223 | 2.0% |
+| parse_micros | 34 | 0.001% |
+| **intake total** | 3,382,252 | → **15.5 MB/s, 12,920 sym/s, ~77 µs/symbol** |
+
+`feed_symbol_with_cx` is the ENTIRE clean-link wall — socket recv, frame parse, and control drain are all noise. This refines MATRIX-20: the parallel decode that landed only parallelized the **block solve** (`run_block_decode_job`, the final Gaussian elimination per block); the **per-symbol feed/intake into the decoder runs serially on the single receiver pump thread** at ~77 µs/symbol → 15.5 MB/s. rsync clean = 40 MB/s, so this single serial stage is exactly why atp loses clean.
+
+**LEVER R2 (dispatched).** Symbols are block-independent (each carries an sbn), so the feed parallelizes cleanly: shard incoming symbols by block to per-block decoder workers on the existing blocking pool (per-block serialized, but different blocks concurrent). ~7–13 blocks for 50M → potential ~7–13× → ≫40 MB/s = beats rsync clean, and it scales to 500M + ports to QUIC. Must stay byte-identical (sha+merkle) and not regress lossy. This is the first NON-pacing, NON-decode-solve, evidence-pinpointed clean-link lever. Evidence dir: `artifacts/atp_bench_matrix/20260622T000615Z/`.
