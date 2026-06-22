@@ -532,7 +532,7 @@
       "file": "examples/spawn_fanout.rs",
       "loc": {
         "start": 1,
-        "end": 20
+        "end": 15
       },
       "kind": "rust",
       "demonstrates": [
