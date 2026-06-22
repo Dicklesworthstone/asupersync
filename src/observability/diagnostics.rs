@@ -2469,6 +2469,10 @@ pub struct WaitCauseRemediationFinding {
     pub finding_id: String,
     /// One-based rank in the report.
     pub rank: usize,
+    /// Stable ASUP error code, when this wait cause maps to the runtime registry.
+    pub asup_code: Option<String>,
+    /// Registry-backed remediation page, when an ASUP code is available.
+    pub remediation_doc_path: Option<String>,
     /// Wait-cause category.
     pub category: WaitCauseCategory,
     /// Finding severity.
@@ -2597,6 +2601,18 @@ fn unknown_wait_safe_actions() -> Vec<String> {
     ]
 }
 
+fn wait_cause_asup_metadata(
+    category: WaitCauseCategory,
+) -> (Option<&'static str>, Option<&'static str>) {
+    match category {
+        WaitCauseCategory::Futurelock => (Some("ASUP-E402"), Some("docs/error_codes/ASUP-E402.md")),
+        WaitCauseCategory::ObligationLeak => {
+            (Some("ASUP-E101"), Some("docs/error_codes/ASUP-E101.md"))
+        }
+        WaitCauseCategory::DeadlockCycle | WaitCauseCategory::UnknownWait => (None, None),
+    }
+}
+
 fn wait_cause_graph_hash(evidence: &WaitCauseRemediationEvidence) -> String {
     let mut projection = String::new();
     projection.push_str(&evidence.report_id);
@@ -2687,6 +2703,8 @@ fn push_deadlock_findings(
         findings.push(WaitCauseRemediationFinding {
             finding_id: String::new(),
             rank: 0,
+            asup_code: None,
+            remediation_doc_path: None,
             category: WaitCauseCategory::DeadlockCycle,
             severity,
             confidence_basis_points,
@@ -2749,9 +2767,12 @@ fn push_task_wait_findings(
             };
 
         let blocked_resource = sanitize_remediation_text(&wait.blocked_resource);
+        let (asup_code, remediation_doc_path) = wait_cause_asup_metadata(category);
         findings.push(WaitCauseRemediationFinding {
             finding_id: String::new(),
             rank: 0,
+            asup_code: asup_code.map(str::to_string),
+            remediation_doc_path: remediation_doc_path.map(str::to_string),
             category,
             severity,
             confidence_basis_points,
@@ -2783,9 +2804,13 @@ fn push_obligation_findings(
 ) {
     for leak in &evidence.obligation_leaks {
         let obligation_type = sanitize_remediation_text(&leak.obligation_type);
+        let (asup_code, remediation_doc_path) =
+            wait_cause_asup_metadata(WaitCauseCategory::ObligationLeak);
         findings.push(WaitCauseRemediationFinding {
             finding_id: String::new(),
             rank: 0,
+            asup_code: asup_code.map(str::to_string),
+            remediation_doc_path: remediation_doc_path.map(str::to_string),
             category: WaitCauseCategory::ObligationLeak,
             severity: WaitCauseSeverity::Critical,
             confidence_basis_points: 9_000,
@@ -2840,6 +2865,14 @@ fn wait_cause_report_hash(report: &WaitCauseRemediationReport) -> String {
         projection.push('|');
         projection.push_str(&finding.finding_id);
         projection.push(':');
+        if let Some(asup_code) = &finding.asup_code {
+            projection.push_str(asup_code);
+            projection.push(':');
+        }
+        if let Some(doc_path) = &finding.remediation_doc_path {
+            projection.push_str(doc_path);
+            projection.push(':');
+        }
         projection.push_str(finding.category.as_str());
         projection.push(':');
         projection.push_str(finding.severity.as_str());
@@ -6227,8 +6260,15 @@ mod tests {
             report.findings[0].category,
             WaitCauseCategory::DeadlockCycle
         );
+        assert_eq!(report.findings[0].asup_code, None);
+        assert_eq!(report.findings[0].remediation_doc_path, None);
         assert_eq!(report.findings[0].severity, WaitCauseSeverity::Critical);
         assert_eq!(report.findings[1].category, WaitCauseCategory::Futurelock);
+        assert_eq!(report.findings[1].asup_code.as_deref(), Some("ASUP-E402"));
+        assert_eq!(
+            report.findings[1].remediation_doc_path.as_deref(),
+            Some("docs/error_codes/ASUP-E402.md")
+        );
         assert_eq!(report.findings[2].category, WaitCauseCategory::UnknownWait);
         assert_eq!(report.findings[0].rank, 1);
         assert_eq!(report.findings[1].rank, 2);
@@ -6253,6 +6293,11 @@ mod tests {
         assert_eq!(report.findings.len(), 1);
         let finding = &report.findings[0];
         assert_eq!(finding.category, WaitCauseCategory::ObligationLeak);
+        assert_eq!(finding.asup_code.as_deref(), Some("ASUP-E101"));
+        assert_eq!(
+            finding.remediation_doc_path.as_deref(),
+            Some("docs/error_codes/ASUP-E101.md")
+        );
         assert_eq!(finding.reason_code, "reserved_obligation_still_held");
         assert_eq!(finding.owner_task_id, Some(format!("{:?}", wait_task(4))));
         assert_eq!(
