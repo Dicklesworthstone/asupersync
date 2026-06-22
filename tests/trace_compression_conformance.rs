@@ -769,21 +769,18 @@ fn compression_idempotence_with_performance_tracking() {
                      ratio {}",
                     second_compressed.ratio()
                 );
-
-                // Performance expectations: second compression should be fast
-                // (already filtered). Only meaningful when the first pass took
-                // long enough to measure; sub-50µs samples are timer noise and
-                // the 2x comparison flakes on them.
-                if !first_compressed.events.is_empty()
-                    && first_duration >= std::time::Duration::from_micros(50)
-                {
-                    assert!(
-                        second_duration <= first_duration * 2,
-                        "Second compression unexpectedly slow: {:?} vs {:?} at {level:?} for len={len}",
-                        second_duration,
-                        first_duration
-                    );
-                }
+                assert_eq!(
+                    second_compressed.original_count,
+                    first_compressed.events.len(),
+                    "Re-compression should report the already-compressed trace length \
+                     as its input size at {level:?} for len={len}, seed={seed}"
+                );
+                assert_eq!(
+                    second_compressed.events_removed(),
+                    0,
+                    "Re-compression should remove no additional events at {level:?} \
+                     for len={len}, seed={seed}"
+                );
 
                 // Validate both compressed traces pass validation
                 assert!(

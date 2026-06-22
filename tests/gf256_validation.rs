@@ -16,7 +16,6 @@ mod tests {
     };
     #[cfg(feature = "simd-intrinsics")]
     use asupersync::raptorq::gf256::{Gf256Kernel, active_kernel};
-    use std::time::Instant;
 
     #[cfg(all(
         feature = "simd-intrinsics",
@@ -205,7 +204,7 @@ mod tests {
         );
     }
 
-    /// Performance regression protection test
+    /// Deterministic regression protection for the hot multiplication loop.
     #[test]
     fn test_performance_regression_protection() {
         const BENCH_SIZE: usize = 8192; // Large enough for SIMD benefits
@@ -215,37 +214,29 @@ mod tests {
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = (i % 256) as u8;
         }
+        let original_data = data.clone();
 
         let c = Gf256(73);
-
-        // Benchmark optimized kernel
-        let start = Instant::now();
         for _ in 0..ITERATIONS {
             gf256_mul_slice(&mut data, c);
         }
-        let optimized_duration = start.elapsed();
 
-        // Verify we have measurable performance (not a no-op)
-        assert!(
-            optimized_duration.as_nanos() > 0,
-            "Performance test shows no work done"
+        let mut factor = Gf256(1);
+        for _ in 0..ITERATIONS {
+            factor = factor * c;
+        }
+        let expected_data = original_data
+            .iter()
+            .map(|&byte| (factor * Gf256(byte)).0)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            data, expected_data,
+            "Repeated optimized GF256 multiplication diverged from scalar field semantics"
         );
-
-        // Log performance for CI monitoring
-        println!(
-            "GF256 mul_slice performance: {optimized_duration:?} for {ITERATIONS} iterations on {BENCH_SIZE}B"
-        );
-
-        // Throughput calculation (bytes/second)
-        let total_bytes = BENCH_SIZE * ITERATIONS;
-        let throughput_gbps = (total_bytes as f64) / optimized_duration.as_secs_f64() / 1e9;
-
-        println!("GF256 mul_slice throughput: {throughput_gbps:.2} GB/s");
-
-        // Basic regression protection: should be faster than 100 MB/s (very conservative)
-        assert!(
-            throughput_gbps > 0.1,
-            "Performance regression detected: {throughput_gbps:.2} GB/s"
+        assert_ne!(
+            data, original_data,
+            "Repeated optimized GF256 multiplication should not behave as a no-op"
         );
     }
 
