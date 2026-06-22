@@ -1587,3 +1587,20 @@ All sha 3/3 (no correctness break). **Trace (50M/perfect):** pacing ramped `path
 **The remaining flaw is precise.** Lever A paces to the *receiver* drain rate (56 MB/s) but ignores *link* capacity. On `perfect` (1 gbit) that's fine. On `good` (200 mbit = 25 MB/s) it ramps to 320 MiB/s and **floods the link** → qdisc loss → controller thrash → 29.98s. The pacing target must be **`min(receiver_drain_rate, observed_link_delivery_rate)`** with hard loss-backoff — the link delivery rate is observable from feedback (`received_this_round / send_wall`). On good that caps at ~25 MB/s (no overshoot); on perfect the link is fast so receiver-rate still binds (keeps the win).
 
 **Verdict / action.** Net mixed: perfect +2× (win), bad better, broken flat, **good 7.6× regression** (not shippable as-is). The lever is close — dispatched the link-rate cap (`min(receiver_rate, observed delivery rate)` + loss-backoff). Until that lands, `main` has a `good`-regime regression from `905b0ef19`; if the cap isn't quick, revert just `905b0ef19` (keep okcmis + Lever B, which gave the foundational receiver speedup and the lossy fix). PASS target: perfect ≤1.82s held AND good back ≤4s AND bad/broken not regressed AND sha-ok. Evidence dir: `artifacts/atp_bench_matrix/20260622T020522Z/`.
+
+## MATRIX-26 (2026-06-22) — perfect win HOLDS (1.75s) but the link-rate cap is INSUFFICIENT for good (bursty delivery estimate ⇒ 2× over link)
+
+Link-cap fix `eff839c8a` (okcmis, "cap RQ pacing to delivered link rate") built + benched 50M nocrypto ×4, run `20260622T025057Z`:
+
+| regime | link-cap | baseline | rsyncd | fr | verdict |
+|---|---|---|---|---|---|
+| perfect | **1.75s** | 3.72s | 1.23s | 0 | ✅ clean win HOLDS (+0.52 off rsync) |
+| good 0.1% | **30.88s** | 3.95s | 3.93s | 2–3 | ❌ STILL 7.8× worse |
+| bad 2% | 72.21s | 73.41s | 14.94s | 4 | ~baseline |
+| broken 10% | 122.21s | 114.44s | 76.19s | 5–6 | ~same (noisy) |
+
+All sha 3/3. **Root cause of the good holdout:** on good, `path_rate_bps` = **52,237,632 (≈50 MB/s)** — the cap engaged (down from 320 MiB/s) but the **good link is only 200 mbit = 25 MB/s**, so 50 MB/s still floods it 2×. The "delivered link rate" estimate (`received_this_round / send_wall`) is taken from a **bursty early window** — the receiver drains an initial buffered burst quickly, so the measured rate (~50 MB/s) overestimates the *sustainable* link rate (25 MB/s) before the netem rate-limiter and loss engage. So the cap clamps to ~2× the true link capacity → still overshoots → loss → 30.88s. (perfect: path_rate 320 MiB/s, link 1 gbit, receiver-bound at ~56 MB/s → no overshoot → 1.75s win.)
+
+**This is the 4th pacing iteration; good is the consistent holdout** (ramp → receiver-cap → link-cap all overshoot good). **Key strategic note: the foundation WITHOUT pacing — okcmis feed-cache (`46355c9a2`) + Lever B lossy-fix (`67826603e`) — is already a strict, regression-free improvement** (bad 73→60, perfect ~3.65, good ~3.95, broken ~112, all sha-ok). The pacing (`905b0ef19` + `eff839c8a`) buys a real perfect 2× win (1.75s) but at the cost of an 8× good regression, so it is **net-negative across the matrix until the overshoot is truly fixed.**
+
+**Fix dispatched:** make the delivery-rate estimate **sustained, not bursty** — measure delivered rate over a full settled window (after the link-limiter saturates), or take the MIN of recent per-round delivery samples, or detect the delivery PLATEAU; cap pacing at that true sustained rate. On good that yields ~25 MB/s (no overshoot, good ≤4s); on perfect the link is fast so the receiver rate still binds (keeps 1.75s). **Fallback if not quick:** gate the aggressive ramp to engage only after a round confirms zero/near-zero loss AND a rising-then-plateaued delivery curve — otherwise hold the conservative cold-start. If neither lands soon, revert `905b0ef19`+`eff839c8a` and keep the clean okcmis+Lever B foundation (bad-improved, no regressions) while pacing is redesigned. PASS: perfect ≤1.82 AND good ≤4 AND bad/broken ≤baseline AND sha-ok. Evidence dir: `artifacts/atp_bench_matrix/20260622T025057Z/`.
