@@ -999,11 +999,11 @@ impl RqAdaptiveSendState {
 
     fn apply_recovery_pacing_caps(&self, rate: u64) -> u64 {
         let mut capped = rate.min(RQ_COLD_START_PACING_BPS);
+        if let Some(cap) = self.delivery_pacing_cap_bps {
+            return capped.min(cap);
+        }
         if let Some(cap) = self.loss_pacing_cap_bps {
             capped = capped.min(self.loss_pacing_cap_for_current_regime(cap));
-        }
-        if let Some(cap) = self.delivery_pacing_cap_bps {
-            capped = capped.min(cap);
         }
         capped
     }
@@ -1100,6 +1100,12 @@ impl RqAdaptiveSendState {
         } else {
             RQ_COLD_START_PACING_BPS as f64
         };
+        let delivery_cap = self
+            .delivery_pacing_cap_bps
+            .map(|cap| cap.min(RQ_COLD_START_PACING_BPS));
+        if let Some(cap) = delivery_cap {
+            network_bps = network_bps.min(cap as f64);
+        }
         if self.mild_loss_pacing_floor_applies() {
             network_bps = network_bps
                 .max(RQ_COLD_START_PACING_BPS as f64 * RQ_MILD_LOSS_PACING_FLOOR_FRACTION);
@@ -1107,7 +1113,11 @@ impl RqAdaptiveSendState {
         let decode_bps =
             self.est.decode_symbols_per_s_at(plan.k) * f64::from(self.symbol_size.max(1));
         let base = network_bps.min(decode_bps.max(1.0));
-        let rate = base / (1.0 + plan.overhead.max(0.0));
+        let rate = if delivery_cap.is_some() {
+            base
+        } else {
+            base / (1.0 + plan.overhead.max(0.0))
+        };
         rqtrace!(
             "pacing_rate_for: network_bps={:.0} decode_bps={:.0} base={:.0} overhead={:.4} rate={:.0} bw_median={:.0} bw_trough={:.0} mild_floor={}",
             network_bps,
