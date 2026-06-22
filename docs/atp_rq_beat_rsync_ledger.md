@@ -1674,3 +1674,23 @@ Full-file restore of `transport_rq/mod.rs` to `7842fdcb5` committed+pushed (`210
 The 17-round non-convergence is gone; `main` is back on the stable, regression-free foundation = okcmis feed-cache (`46355c9a2`, receiver 47.9 MB/s) + Lever B lossy-fix (`67826603e`) + round-0 repair calibration. **Honest scoreboard: atp ties rsync on 50M/good, loses perfect/bad/broken; no 50M cell beats rsync yet.** Net vs the original pre-okcmis baseline (bad 73.41): bad improved 20% (73→59), good held at parity, perfect ~same, all regression-free.
 
 **Rate-control epitaph (MATRIX-18→31):** ~7 send-rate-control attempts (lever-1 v2/v3, round-0 ramp, link-cap, sustained-delivery pace-up; recovery-downcap, round-0-loss-target pace-down) ALL failed — every measurement-derived rate setting overshoots the link → self-inflicted loss → receiver overflow (clean) or non-convergence (lossy). The only sanctioned remaining lossy approach is proper AIMD congestion control (receiver-reported-loss multiplicative-decrease / additive-increase), hard-gated. Parallel non-rate fronts: QUIC/encrypted port of okcmis, trees small-entry batching, 500M scale. Evidence dir: `artifacts/atp_bench_matrix/20260622T155605Z/`.
+
+## MATRIX-32 (2026-06-22) — 500M scale + trees scoreboard on the foundation; ★FIRST rsync-beating cell found (tree_big/good)
+
+Benched the locked foundation (7842fdcb5) at 500M scale + trees (didn't need the credit-blocked swarm), run `20260622T161422Z`, nocrypto, ALL sha-ok:
+
+| workload/regime | atp-rq-lab | rsyncd | verdict |
+|---|---|---|---|
+| 500M/perfect | 36.28s | 5.13s | loses 7.1× |
+| 500M/good | 36.68s | 24.24s | loses 1.5× |
+| 500M/bad | **832.0s** | 98.71s | loses 8.4× (≈10× the 6.25 MB/s link floor — lossy-at-scale catastrophe) |
+| tree_small/perfect | 1.92s | 1.03s | loses 1.9× |
+| tree_small/good | 2.35s | 2.03s | loses 1.2× |
+| tree_small/bad | 12.06s | 7.33s | loses 1.6× |
+| tree_big/perfect | 1.55s | 0.93s | loses 1.7× |
+| **tree_big/good** | **1.85s** | **2.43s** | **★ atp WINS (0.76×)** |
+| tree_big/bad | 19.57s | 8.73s | loses 2.2× |
+
+**★ FIRST cell where atp beats tuned rsync: tree_big/good** (large many-file tree on a 200 mbit / 0.1%-loss link) — atp's bulk RaptorQ fountain avoids rsync's per-file stat/handshake/round-trip overhead, which dominates rsync on many-file trees once even mild loss/latency is present. Narrow (single cell, 0.76× = atp 1.85 vs rsync 2.43) but real and reproducible (median of 3, sha 3/3). Worth pursuing: trees-on-mildly-imperfect-links is a structural atp advantage (the per-file-overhead asymmetry widens with file count + latency).
+
+**Dominant gap = lossy at scale: 500M/bad 832s (8.4×).** The round-overshoot pathology compounds with size: a 500M object on a 6.25 MB/s 2%-loss link should take ~80s (link floor) but atp takes 832s — ~10× — because every recovery round re-overshoots the link. This is the single biggest domination blocker and the strongest argument for proper AIMD congestion control (converge the send rate to the link, stop the per-round overshoot). Scoreboard summary now: atp **ties** 50M/good, **wins** tree_big/good, loses everything else (worst: lossy at scale). Evidence dir: `artifacts/atp_bench_matrix/20260622T161422Z/`.
