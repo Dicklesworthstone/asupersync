@@ -829,9 +829,8 @@ impl RqAdaptiveSendState {
 
         let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
         let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
-        let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
-        let useful_factor = (1.0 - wire_loss_hat * 0.5).clamp(0.25, 1.0);
-        let bw_sample = offered_bps * useful_factor;
+        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
+        let bw_sample = (useful_bytes as f64 / send_wall_s).max(1.0);
         let sent_payload_fraction = if pending_bytes == 0 {
             1.0
         } else {
@@ -863,7 +862,6 @@ impl RqAdaptiveSendState {
         };
         self.controller.update_estimate(self.est);
 
-        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
         let cwnd_bytes = (self.bw_ema_bps * rtt_s)
             .max(f64::from(config.symbol_size.max(1)))
             .ceil() as u64;
@@ -6915,6 +6913,44 @@ mod tests {
             state.bw_ema_bps > 8.0 * 1024.0 * 1024.0,
             "feedback timeout must not collapse a fast spray sample to {} B/s",
             state.bw_ema_bps
+        );
+    }
+
+    #[test]
+    fn rq_feedback_bandwidth_caps_to_receiver_observed_delivery() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(23, &config, 1);
+        let total_bytes = 50 * 1024 * 1024_u64;
+        let digests = vec![rq_test_digest(total_bytes)];
+        let pending = BTreeSet::from([0]);
+        let sent_symbols = (40 * 1024 * 1024_u64) / u64::from(config.symbol_size);
+        let received_symbols = (25 * 1024 * 1024_u64) / u64::from(config.symbol_size);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            sent_symbols,
+            received_symbols,
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+            total_bytes,
+        );
+
+        let delivered_bps = (received_symbols * u64::from(config.symbol_size)) as f64;
+        assert!(
+            state.bw_ema_bps <= delivered_bps + f64::from(config.symbol_size),
+            "bandwidth sample must follow receiver-observed delivery, got {} B/s for delivered {} B/s",
+            state.bw_ema_bps,
+            delivered_bps
+        );
+        assert!(
+            state.pacing_rate_for(rq_test_block_plan(&config))
+                <= delivered_bps as u64 + u64::from(config.symbol_size),
+            "next pacing rate must not keep the 40MiB/s offered rate after a 25MiB/s delivery sample"
         );
     }
 
