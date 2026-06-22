@@ -219,6 +219,8 @@ const RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
 /// during the first spray, then let AIMD take over once excess receiver loss
 /// appears.
 const RQ_SLOW_START_LOSSY_CEILING_BPS: u64 = RQ_COLD_START_PACING_BPS * 3 / 8;
+const RQ_SLOW_START_HIGH_LOSS_CEILING_BPS: u64 = RQ_COLD_START_PACING_BPS / 10;
+const RQ_SLOW_START_HIGH_LOSS_THRESHOLD: f64 = 0.05;
 const RQ_SLOW_START_INITIAL_DIVISOR: u64 = 2;
 const RQ_SLOW_START_RAMP_INTERVAL_SYMBOLS: u64 = 2048;
 const RQ_SLOW_START_INCREASE_NUMERATOR: u64 = 2;
@@ -1258,7 +1260,12 @@ fn slow_start_ceiling_rate_bps(config: &RqConfig) -> u64 {
     if !slow_start_enabled(config) {
         return RQ_COLD_START_PACING_BPS;
     }
-    RQ_SLOW_START_LOSSY_CEILING_BPS.clamp(RQ_MIN_PACING_BPS, RQ_COLD_START_PACING_BPS)
+    let ceiling = if config.round0_loss_target >= RQ_SLOW_START_HIGH_LOSS_THRESHOLD {
+        RQ_SLOW_START_HIGH_LOSS_CEILING_BPS
+    } else {
+        RQ_SLOW_START_LOSSY_CEILING_BPS
+    };
+    ceiling.clamp(RQ_MIN_PACING_BPS, RQ_COLD_START_PACING_BPS)
 }
 
 fn slow_start_initial_rate_bps(config: &RqConfig) -> u64 {
@@ -6897,20 +6904,31 @@ mod tests {
     }
 
     #[test]
-    fn rq_slow_start_uses_same_ceiling_for_bad_and_broken_cells() {
-        for target in [0.02, 0.10] {
-            let config = RqConfig {
-                symbol_size: 1200,
-                round0_loss_target: target,
-                ..RqConfig::default()
-            };
-            let state = RqAdaptiveSendState::new(7, &config, 1);
+    fn rq_slow_start_uses_lower_ceiling_for_broken_loss_target() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let expected_initial = slow_start_initial_rate_bps(&config);
 
-            assert_eq!(
-                state.slow_start_ceiling_bps, RQ_SLOW_START_LOSSY_CEILING_BPS,
-                "broken cells must not get a lower fixed ceiling that repeats MATRIX-35 under-utilization"
-            );
-        }
+        let tuning = state.round0_tuning(&config);
+
+        assert!(state.slow_start_active);
+        assert_eq!(
+            state.slow_start_ceiling_bps,
+            RQ_SLOW_START_HIGH_LOSS_CEILING_BPS
+        );
+        assert_eq!(
+            expected_initial,
+            RQ_SLOW_START_HIGH_LOSS_CEILING_BPS / RQ_SLOW_START_INITIAL_DIVISOR
+        );
+        assert_eq!(state.aimd_rate_bps, expected_initial);
+        assert_eq!(
+            tuning.pacing.path_rate_bps,
+            expected_initial.saturating_mul(8)
+        );
     }
 
     #[test]
