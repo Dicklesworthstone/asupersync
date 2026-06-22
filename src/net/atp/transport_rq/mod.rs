@@ -208,6 +208,11 @@ const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
 const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
 const RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR: f64 = 0.01;
 const RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD: f64 = 0.03;
+const RQ_AIMD_LOSS_DECREASE_THRESHOLD_MIN: f64 = RQ_MILD_LOSS_PACING_MAX_LOSS;
+const RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN: f64 = 0.03;
+const RQ_AIMD_CLEAN_INCREASE_THRESHOLD: f64 = 0.0015;
+const RQ_AIMD_MULTIPLICATIVE_DECREASE: f64 = 0.50;
+const RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
 /// Do not spend proactive round-0 repair on clean and near-clean links. The
 /// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
 const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
@@ -632,6 +637,9 @@ struct RqAdaptiveSendState {
     beacons: BeaconScheduler,
     est: PathEstimate,
     symbol_size: u16,
+    aimd_rate_bps: u64,
+    aimd_feedback_seen: bool,
+    last_round_loss_fraction: f64,
     loss_ema: f64,
     pacing_loss_ema: f64,
     pacing_loss_bar: f64,
@@ -672,6 +680,9 @@ impl RqAdaptiveSendState {
             beacons: BeaconScheduler::new(seed, Instant::now()),
             est,
             symbol_size: config.symbol_size,
+            aimd_rate_bps: RQ_COLD_START_PACING_BPS,
+            aimd_feedback_seen: false,
+            last_round_loss_fraction: 0.0,
             loss_ema: 0.0,
             pacing_loss_ema: 0.0,
             pacing_loss_bar: 0.0,
@@ -731,13 +742,22 @@ impl RqAdaptiveSendState {
             .repair_overhead
             .max(1.0 + plan.overhead)
             .max(1.0 + self.loss_fec_floor);
-        let mut rate = self.pacing_rate_for(plan);
-        if let Some(cap) = self.loss_pacing_cap_bps {
+        let model_rate = self.pacing_rate_for(plan);
+        let mut rate = if self.aimd_feedback_seen {
+            self.aimd_rate_bps
+        } else {
+            model_rate.min(self.aimd_rate_bps)
+        };
+        if !self.aimd_feedback_seen
+            && let Some(cap) = self.loss_pacing_cap_bps
+        {
             rate = rate.min(self.loss_pacing_cap_for_current_regime(cap));
         }
         if self.regime_shift || self.pacing_loss_bar >= RQ_REGIME_SHIFT_LOSS_DELTA {
             repair_overhead = repair_overhead.max(1.03);
-            rate = rate.min(RQ_COLD_START_PACING_BPS / 2);
+            if !self.aimd_feedback_seen {
+                rate = rate.min(RQ_COLD_START_PACING_BPS / 2);
+            }
         }
 
         RqRoundTuning {
@@ -798,6 +818,7 @@ impl RqAdaptiveSendState {
         pending: &BTreeSet<u32>,
         sent_this_round: u64,
         received_this_round: u64,
+        round_loss_fraction: Option<f64>,
         send_wall: Duration,
         control_wait: Duration,
         total_bytes: u64,
@@ -811,11 +832,17 @@ impl RqAdaptiveSendState {
         let pending_units = u64::try_from(pending.len()).unwrap_or(u64::MAX).max(1);
         let received_symbols = received_this_round.min(sent_symbols);
         let decode_pending_loss = (pending_units as f64 / sent_symbols as f64).clamp(0.0, 0.90);
-        let wire_loss_hat = if sent_this_round == 0 {
+        let derived_wire_loss = if sent_this_round == 0 {
             0.0
         } else {
             (1.0 - received_symbols as f64 / sent_symbols as f64).clamp(0.0, 0.90)
         };
+        let wire_loss_hat = round_loss_fraction
+            .filter(|loss| loss.is_finite())
+            .map_or(derived_wire_loss, |loss| loss.clamp(0.0, 0.90));
+        if sent_this_round != 0 {
+            self.apply_aimd_feedback(config, wire_loss_hat);
+        }
         let byte_pressure = if total_bytes == 0 {
             0.0
         } else {
@@ -913,6 +940,23 @@ impl RqAdaptiveSendState {
         );
     }
 
+    fn apply_aimd_feedback(&mut self, config: &RqConfig, loss_fraction: f64) {
+        let loss = loss_fraction.clamp(0.0, 0.90);
+        let decrease_threshold = aimd_loss_decrease_threshold(config);
+        self.aimd_feedback_seen = true;
+        self.last_round_loss_fraction = loss;
+        if loss > decrease_threshold {
+            let reduced =
+                (self.aimd_rate_bps as f64 * RQ_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
+            self.aimd_rate_bps = reduced.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
+        } else if loss <= RQ_AIMD_CLEAN_INCREASE_THRESHOLD {
+            self.aimd_rate_bps = self
+                .aimd_rate_bps
+                .saturating_add(RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
+                .clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
+        }
+    }
+
     fn apply_loss_recommendations(
         &mut self,
         recommendations: &[LossRecommendation],
@@ -983,6 +1027,7 @@ impl RqAdaptiveSendState {
         let sent_payload_bytes =
             sent_this_round.saturating_mul(u64::from(config.symbol_size.max(1)));
         let bw_sample = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
+        self.apply_aimd_feedback(config, 0.0);
         self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
             bw_sample
         } else {
@@ -1114,6 +1159,17 @@ fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
 fn round0_loss_target_repair_enabled(config: &RqConfig) -> bool {
     let loss = config.round0_loss_target;
     loss.is_finite() && loss >= RQ_ROUND0_TARGET_LOSS_ENABLE_MIN
+}
+
+fn aimd_loss_decrease_threshold(config: &RqConfig) -> f64 {
+    let expected_loss = if round0_loss_target_repair_enabled(config) {
+        config.round0_loss_target
+    } else {
+        0.0
+    };
+    (expected_loss + RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN)
+        .max(RQ_AIMD_LOSS_DECREASE_THRESHOLD_MIN)
+        .clamp(0.0, 0.90)
 }
 
 fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
@@ -1318,6 +1374,18 @@ pub struct TransferManifest {
     pub entries: Vec<ManifestEntry>,
 }
 
+/// Sender → receiver marker for one finished spray round.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+struct RqRoundComplete {
+    /// Number of datagrams the sender emitted in the completed spray round.
+    ///
+    /// The receiver uses this with its observed datagram count to report an
+    /// explicit loss fraction in `NeedMore`. Empty legacy `ObjectComplete`
+    /// frames are treated as unknown and fall back to sender-side inference.
+    #[serde(default)]
+    round_symbols_sent: u64,
+}
+
 /// Receiver → sender fountain feedback: entries still needing more symbols.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NeedMore {
@@ -1332,6 +1400,12 @@ struct NeedMore {
     /// advance decode rank still prove the datagram arrived on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     round_symbols_observed: Option<u64>,
+    /// Receiver-computed symbol loss fraction for the completed spray round.
+    ///
+    /// AIMD uses this explicit wire-loss signal; pending decode pressure remains
+    /// separate and only feeds repair/FEC sizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    round_loss_fraction: Option<f64>,
     /// Matching RQ symbols accepted into a decoder in the completed spray round.
     ///
     /// This remains diagnostic only; accepted symbols can stall on duplicate or
@@ -1524,6 +1598,22 @@ fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, RqError> 
 
 fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError> {
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
+}
+
+fn parse_round_complete(frame: &Frame) -> Result<RqRoundComplete, RqError> {
+    if frame.payload().is_empty() {
+        Ok(RqRoundComplete::default())
+    } else {
+        parse_json(frame)
+    }
+}
+
+fn receiver_round_loss_fraction(observed: u64, sent: u64) -> Option<f64> {
+    if sent == 0 {
+        return None;
+    }
+    let observed = observed.min(sent);
+    Some((1.0 - observed as f64 / sent as f64).clamp(0.0, 0.90))
 }
 
 fn parse_and_validate_manifest_frame(
@@ -3121,16 +3211,18 @@ pub async fn send_path(
     // Feedback loop.
     loop {
         let control_wait_started = Instant::now();
+        let sent_this_round = symbols_sent.saturating_sub(round_symbols_start);
         control
-            .send(
-                &Frame::empty(FrameType::ObjectComplete)
-                    .map_err(|e| RqError::Frame(e.to_string()))?,
-            )
+            .send(&json_frame(
+                FrameType::ObjectComplete,
+                &RqRoundComplete {
+                    round_symbols_sent: sent_this_round,
+                },
+            )?)
             .await?;
         rqtrace!("sender: sent ObjectComplete, awaiting reply");
         let reply = control.recv().await?;
         let control_wait = control_wait_started.elapsed();
-        let sent_this_round = symbols_sent.saturating_sub(round_symbols_start);
         rqtrace!("sender: got reply {:?}", reply.frame_type());
         match reply.frame_type() {
             FrameType::Proof => {
@@ -3201,6 +3293,7 @@ pub async fn send_path(
                     &pending,
                     sent_this_round,
                     received_this_round,
+                    need.round_loss_fraction,
                     round_send_wall,
                     control_wait,
                     total_bytes,
@@ -3218,11 +3311,13 @@ pub async fn send_path(
                 };
                 pacer.configure(round_tuning.pacing);
                 rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
+                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} round_loss_fraction={:.4} aimd_rate_bps={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
                     pending.len(),
                     source_symbols.len(),
                     sent_this_round,
                     received_this_round,
+                    adaptive.last_round_loss_fraction,
+                    adaptive.aimd_rate_bps,
                     round_send_wall.as_millis(),
                     control_wait.as_millis(),
                     round_tuning.repair_overhead,
@@ -4222,6 +4317,7 @@ pub async fn receive_connection(
 
         match frame.frame_type() {
             FrameType::ObjectComplete => {
+                let round_complete = parse_round_complete(&frame)?;
                 let drained = drain_round_tail(
                     cx,
                     &mut udp,
@@ -4265,12 +4361,18 @@ pub async fn receive_connection(
                     .filter(|d| !d.complete)
                     .map(|d| d.index)
                     .collect();
+                let round_loss_fraction = receiver_round_loss_fraction(
+                    round_stats.observed,
+                    round_complete.round_symbols_sent,
+                );
                 rqtrace!(
-                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_observed={} round_symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={}",
+                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={}",
                     pending.len(),
                     decoders.len(),
+                    round_complete.round_symbols_sent,
                     round_stats.observed,
                     round_stats.accepted,
+                    round_loss_fraction.unwrap_or(0.0),
                     round_stats.payload_bytes,
                     round_stats.intake_micros(),
                     round_stats.intake_symbols_per_s(),
@@ -4370,11 +4472,13 @@ pub async fn receive_connection(
                 if trace_receiver_intake {
                     let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
-                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_observed={} round_symbols_accepted={} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
+                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
                         pending.len(),
                         source_symbols.len(),
+                        round_complete.round_symbols_sent,
                         round_stats.observed,
                         round_stats.accepted,
+                        round_loss_fraction.unwrap_or(0.0),
                         symbols_accepted,
                         round_stats.payload_bytes,
                         round_stats.intake_micros(),
@@ -4402,6 +4506,7 @@ pub async fn receive_connection(
                             source_symbols,
                             round_symbols_observed: Some(round_stats.observed),
                             round_symbols_accepted: Some(round_stats.accepted),
+                            round_loss_fraction,
                         },
                     )?)
                     .await?;
@@ -6626,6 +6731,207 @@ mod tests {
     }
 
     #[test]
+    fn rq_aimd_halves_rate_on_receiver_observed_loss() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "large.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"large.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+        let sent_symbols = 10_000_u64;
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            sent_symbols,
+            9_400,
+            None,
+            Duration::from_millis(800),
+            Duration::from_millis(100),
+            total_bytes,
+        );
+
+        assert!(state.last_round_loss_fraction > aimd_loss_decrease_threshold(&config));
+        assert_eq!(state.aimd_rate_bps, RQ_COLD_START_PACING_BPS / 2);
+    }
+
+    #[test]
+    fn rq_aimd_prefers_explicit_receiver_loss_fraction() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "large.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"large.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            10_000,
+            10_000,
+            Some(0.06),
+            Duration::from_millis(800),
+            Duration::from_millis(100),
+            total_bytes,
+        );
+
+        assert_eq!(state.last_round_loss_fraction, 0.06);
+        assert_eq!(state.aimd_rate_bps, RQ_COLD_START_PACING_BPS / 2);
+    }
+
+    #[test]
+    fn rq_aimd_holds_rate_under_configured_loss_target() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.10,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "broken.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"broken.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            10_000,
+            9_000,
+            None,
+            Duration::from_millis(800),
+            Duration::from_millis(100),
+            total_bytes,
+        );
+
+        assert_eq!(state.last_round_loss_fraction, 0.10);
+        assert_eq!(
+            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
+            "expected link loss should neither decrease nor increase the AIMD rate"
+        );
+    }
+
+    #[test]
+    fn rq_aimd_holds_rate_for_bad_link_loss_target() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 50_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "bad.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"bad.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            10_000,
+            9_800,
+            None,
+            Duration::from_millis(800),
+            Duration::from_millis(100),
+            total_bytes,
+        );
+
+        assert_eq!(state.last_round_loss_fraction, 0.02);
+        assert_eq!(
+            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
+            "bad-cell target loss should hold rate, not pace up into self-loss"
+        );
+    }
+
+    #[test]
+    fn rq_aimd_additively_increases_on_clean_receiver_round() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 5_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "clean.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"clean.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+        state.aimd_rate_bps = 4 * 1024 * 1024;
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            4_000,
+            4_000,
+            None,
+            Duration::from_millis(400),
+            Duration::from_millis(100),
+            total_bytes,
+        );
+
+        assert_eq!(state.last_round_loss_fraction, 0.0);
+        assert_eq!(
+            state.aimd_rate_bps,
+            4 * 1024 * 1024 + RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S
+        );
+    }
+
+    #[test]
+    fn rq_round_tuning_honors_persistent_aimd_cap() {
+        let config = RqConfig::default();
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.est = rq_test_path_estimate(&config, RQ_MAX_PACING_BPS as f64);
+        state.controller.update_estimate(state.est);
+        state.aimd_rate_bps = 4 * 1024 * 1024;
+        state.aimd_feedback_seen = true;
+
+        let tuning = state.round_tuning(&config);
+
+        assert_eq!(
+            tuning.pacing.path_rate_bps,
+            state.aimd_rate_bps.saturating_mul(8),
+            "AIMD decrease must cap the next sender spray instead of acting as a one-shot sample"
+        );
+    }
+
+    #[test]
     fn rq_need_more_entry_pressure_does_not_create_congestion_cap() {
         let config = RqConfig {
             symbol_size: 1024,
@@ -6650,6 +6956,7 @@ mod tests {
             &pending,
             sent_symbols,
             sent_symbols.saturating_sub(1),
+            None,
             Duration::from_secs(120),
             Duration::from_millis(50),
             total_bytes,
@@ -6715,6 +7022,7 @@ mod tests {
                 &pending,
                 sent_symbols,
                 sent_symbols.saturating_sub(lost_symbols),
+                None,
                 send_wall,
                 Duration::from_millis(200),
                 total_bytes,
@@ -6773,6 +7081,7 @@ mod tests {
             &pending,
             sent_symbols,
             sent_symbols.saturating_sub(sent_symbols.div_ceil(10)),
+            None,
             Duration::from_millis(3_300),
             Duration::from_millis(200),
             total_bytes,
@@ -6872,6 +7181,7 @@ mod tests {
             &pending,
             sent_symbols,
             sent_symbols,
+            None,
             Duration::from_millis(300),
             Duration::from_secs(120),
             total_bytes,
