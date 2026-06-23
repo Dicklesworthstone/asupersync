@@ -2898,6 +2898,15 @@ fn rq_decode_job_memory_estimate_bytes(max_block_size: usize, symbol_size: u16) 
         .max(RQ_DECODE_JOB_MEMORY_FLOOR_BYTES)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RqDecodeWidthBudget {
+    effective: usize,
+    core_limit: usize,
+    memory_limit: usize,
+    job_memory_bytes: usize,
+    max_block_size: usize,
+}
+
 fn rq_decode_reserved_io_cores(available: usize) -> usize {
     if available <= 1 {
         return 0;
@@ -2917,25 +2926,40 @@ fn rq_decode_core_limit_for_available(available: usize) -> usize {
         .min(RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD)
 }
 
-fn rq_decode_width_budget(decoders: &[EntryDecoder], symbol_size: u16) -> usize {
+fn rq_decode_core_limit() -> usize {
     static CORE_LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    let core_limit = *CORE_LIMIT.get_or_init(|| {
+    *CORE_LIMIT.get_or_init(|| {
         let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         rq_decode_core_limit_for_available(available)
-    });
+    })
+}
+
+fn rq_decode_width_budget_snapshot(
+    decoders: &[EntryDecoder],
+    symbol_size: u16,
+) -> RqDecodeWidthBudget {
+    let core_limit = rq_decode_core_limit();
     let max_block_size = decoders
         .iter()
         .map(|decoder| decoder.max_block_size)
         .max()
         .unwrap_or(DEFAULT_MAX_BLOCK_SIZE);
-    let memory_limited = RQ_DECODE_JOB_MEMORY_BUDGET_BYTES
-        .checked_div(rq_decode_job_memory_estimate_bytes(
-            max_block_size,
-            symbol_size,
-        ))
+    let job_memory_bytes = rq_decode_job_memory_estimate_bytes(max_block_size, symbol_size);
+    let memory_limit = RQ_DECODE_JOB_MEMORY_BUDGET_BYTES
+        .checked_div(job_memory_bytes)
         .unwrap_or(1)
         .max(1);
-    core_limit.min(memory_limited).max(1)
+    RqDecodeWidthBudget {
+        effective: core_limit.min(memory_limit).max(1),
+        core_limit,
+        memory_limit,
+        job_memory_bytes,
+        max_block_size,
+    }
+}
+
+fn rq_decode_width_budget(decoders: &[EntryDecoder], symbol_size: u16) -> usize {
+    rq_decode_width_budget_snapshot(decoders, symbol_size).effective
 }
 
 fn block_decode_pending(dec: &EntryDecoder, block_sbn: u8) -> bool {
@@ -4433,8 +4457,9 @@ pub async fn receive_connection(
                     round_stats.observed,
                     round_complete.round_symbols_sent,
                 );
+                let decode_budget = rq_decode_width_budget_snapshot(&decoders, symbol_size);
                 rqtrace!(
-                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={}",
+                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={}",
                     pending.len(),
                     decoders.len(),
                     round_complete.round_symbols_sent,
@@ -4452,7 +4477,12 @@ pub async fn receive_connection(
                     round_stats.decode_stats.attempts,
                     round_stats.decode_stats.completed_blocks,
                     round_stats.decode_stats.stale_requeues,
-                    round_stats.decode_stats.decode_micros
+                    round_stats.decode_stats.decode_micros,
+                    decode_budget.effective,
+                    decode_budget.core_limit,
+                    decode_budget.memory_limit,
+                    decode_budget.job_memory_bytes,
+                    decode_budget.max_block_size
                 );
 
                 if pending.is_empty() {
@@ -4544,7 +4574,7 @@ pub async fn receive_connection(
                 if trace_receiver_intake {
                     let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
-                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
+                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
                         pending.len(),
                         source_symbols.len(),
                         round_complete.round_symbols_sent,
@@ -4564,6 +4594,11 @@ pub async fn receive_connection(
                         round_stats.decode_stats.completed_blocks,
                         round_stats.decode_stats.stale_requeues,
                         round_stats.decode_stats.decode_micros,
+                        decode_budget.effective,
+                        decode_budget.core_limit,
+                        decode_budget.memory_limit,
+                        decode_budget.job_memory_bytes,
+                        decode_budget.max_block_size,
                         progress.source_received,
                         progress.source_needed,
                         progress.pending_decode_jobs,
@@ -6887,6 +6922,20 @@ mod tests {
             rq_decode_core_limit_for_available(64),
             RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD
         );
+    }
+
+    #[test]
+    fn decode_width_budget_reports_effective_core_and_memory_caps() {
+        let budget = rq_decode_width_budget_snapshot(&[], DEFAULT_SYMBOL_SIZE);
+        assert!(budget.effective >= 1);
+        assert!(budget.core_limit >= budget.effective);
+        assert!(budget.memory_limit >= budget.effective);
+        assert_eq!(budget.max_block_size, DEFAULT_MAX_BLOCK_SIZE);
+        assert_eq!(
+            budget.job_memory_bytes,
+            rq_decode_job_memory_estimate_bytes(DEFAULT_MAX_BLOCK_SIZE, DEFAULT_SYMBOL_SIZE)
+        );
+        assert_eq!(budget.effective, budget.core_limit.min(budget.memory_limit));
     }
 
     #[test]
