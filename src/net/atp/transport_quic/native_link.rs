@@ -1694,7 +1694,7 @@ async fn run_sender_session(
                     link.flush(cx).await?;
                     continue;
                 }
-                let pending = super::validate_need_more_feedback(manifest, config, &need)?;
+                super::validate_need_more_feedback(manifest, config, &need)?;
                 let symbols_before = symbols_sent;
                 let response_mode = super::quic_need_more_response_mode(&need);
                 let sent = if !need.repair_blocks.is_empty() {
@@ -1711,19 +1711,10 @@ async fn run_sender_session(
                     )
                     .await?
                 } else if need.source_symbols.is_empty() {
-                    spray_round(
-                        cx,
-                        link,
-                        &mut control,
-                        manifest,
-                        &mut encoders,
-                        &pending,
-                        config,
-                        symbol_auth.as_ref(),
-                        false,
-                        &mut aimd,
-                    )
-                    .await?
+                    return Err(QuicTransportError::Integrity(
+                        "receiver NeedMore listed pending entries without targeted repair/source deficits"
+                            .to_string(),
+                    ));
                 } else {
                     spray_source_requests(
                         cx,

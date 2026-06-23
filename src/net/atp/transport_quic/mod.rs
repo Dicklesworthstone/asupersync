@@ -1757,6 +1757,12 @@ fn validate_need_more_feedback(
             )));
         }
     }
+    if !pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
+        return Err(QuicTransportError::Integrity(
+            "receiver NeedMore listed pending entries without targeted repair/source deficits"
+                .to_string(),
+        ));
+    }
 
     let mut block_requests = std::collections::BTreeSet::new();
     let mut repair_symbols = 0usize;
@@ -2580,7 +2586,7 @@ fn quic_need_more_response_mode(need: &QuicNeedMore) -> &'static str {
     } else if need.pending.is_empty() && need.source_symbols.is_empty() {
         "empty"
     } else if need.source_symbols.is_empty() {
-        "repair_spray"
+        "missing_deficit"
     } else {
         "source_retransmit"
     }
@@ -3366,7 +3372,7 @@ async fn send_repair_round_and_object_complete(
         send_object_complete(cx, conn, control, 0)?;
         return Ok(0);
     }
-    let pending = validate_need_more_feedback(manifest, config, need)?;
+    validate_need_more_feedback(manifest, config, need)?;
     let sent = if !need.repair_blocks.is_empty() {
         send_block_repair_requests(
             cx,
@@ -3379,17 +3385,10 @@ async fn send_repair_round_and_object_complete(
         )
         .await?
     } else if need.source_symbols.is_empty() {
-        spray_streaming_symbol_round(
-            cx,
-            conn,
-            manifest,
-            encoders,
-            &pending,
-            config,
-            symbol_auth,
-            false,
-        )
-        .await?
+        return Err(QuicTransportError::Integrity(
+            "receiver NeedMore listed pending entries without targeted repair/source deficits"
+                .to_string(),
+        ));
     } else {
         send_source_symbol_requests(
             cx,
@@ -5633,7 +5632,7 @@ async fn send_native_repair_round_and_object_complete(
         send_native_object_complete(cx, conn, control, 0)?;
         return Ok(0);
     }
-    let pending = validate_need_more_feedback(manifest, config, need)?;
+    validate_need_more_feedback(manifest, config, need)?;
     let sent = if !need.repair_blocks.is_empty() {
         send_native_block_repair_requests(
             cx,
@@ -5646,17 +5645,10 @@ async fn send_native_repair_round_and_object_complete(
         )
         .await?
     } else if need.source_symbols.is_empty() {
-        spray_native_symbol_round(
-            cx,
-            conn,
-            manifest,
-            encoders,
-            &pending,
-            config,
-            symbol_auth,
-            false,
-        )
-        .await?
+        return Err(QuicTransportError::Integrity(
+            "receiver NeedMore listed pending entries without targeted repair/source deficits"
+                .to_string(),
+        ));
     } else {
         send_native_source_symbol_requests(
             cx,
