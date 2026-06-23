@@ -2851,6 +2851,12 @@ impl DecodeDispatchOutcome {
 #[derive(Debug, Default, Clone, Copy)]
 struct RqSymbolFeed {
     accepted: bool,
+    source_auth_micros: u64,
+    source_persist_micros: u64,
+    pipeline_feed_micros: u64,
+    block_persist_micros: u64,
+    decode_dispatch_micros: u64,
+    source_seed_micros: u64,
     decode_stats: RqDecodeRoundStats,
 }
 
@@ -4479,7 +4485,7 @@ pub async fn receive_connection(
                 );
                 let decode_budget = rq_decode_width_budget_snapshot(&decoders, symbol_size);
                 rqtrace!(
-                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={}",
+                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} source_auth_micros={} source_persist_micros={} pipeline_feed_micros={} block_persist_micros={} decode_dispatch_micros={} source_seed_micros={} feed_other_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={}",
                     pending.len(),
                     decoders.len(),
                     round_complete.round_symbols_sent,
@@ -4492,6 +4498,13 @@ pub async fn receive_connection(
                     round_stats.intake_bytes_per_s(),
                     round_stats.parse_micros,
                     round_stats.feed_micros,
+                    round_stats.source_auth_micros,
+                    round_stats.source_persist_micros,
+                    round_stats.pipeline_feed_micros,
+                    round_stats.block_persist_micros,
+                    round_stats.decode_dispatch_micros,
+                    round_stats.source_seed_micros,
+                    round_stats.feed_other_micros,
                     round_stats.recv_micros,
                     round_stats.drain_micros,
                     round_stats.decode_stats.attempts,
@@ -4594,7 +4607,7 @@ pub async fn receive_connection(
                 if trace_receiver_intake {
                     let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
-                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
+                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} source_auth_micros={} source_persist_micros={} pipeline_feed_micros={} block_persist_micros={} decode_dispatch_micros={} source_seed_micros={} feed_other_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
                         pending.len(),
                         source_symbols.len(),
                         round_complete.round_symbols_sent,
@@ -4608,6 +4621,13 @@ pub async fn receive_connection(
                         round_stats.intake_bytes_per_s(),
                         round_stats.parse_micros,
                         round_stats.feed_micros,
+                        round_stats.source_auth_micros,
+                        round_stats.source_persist_micros,
+                        round_stats.pipeline_feed_micros,
+                        round_stats.block_persist_micros,
+                        round_stats.decode_dispatch_micros,
+                        round_stats.source_seed_micros,
+                        round_stats.feed_other_micros,
                         round_stats.recv_micros,
                         round_stats.drain_micros,
                         round_stats.decode_stats.attempts,
@@ -4823,6 +4843,7 @@ async fn feed_symbol_with_cx(
     symbol_auth: Option<&SecurityContext>,
     allow_spawn_decode: bool,
     transfer_decode_width: usize,
+    trace_intake: bool,
 ) -> Result<RqSymbolFeed, RqError> {
     if dec.complete {
         return Ok(RqSymbolFeed::default());
@@ -4846,7 +4867,11 @@ async fn feed_symbol_with_cx(
                 parsed.kind,
             );
             let mut auth = AuthenticatedSymbol::from_parts(sym, tag);
+            let auth_start = trace_intake.then(Instant::now);
             if context.verify_authenticated_symbol(&mut auth).is_err() {
+                feed.source_auth_micros = feed
+                    .source_auth_micros
+                    .saturating_add(elapsed_micros_since(auth_start));
                 rqtrace!(
                     "receiver: entry {} rejected source-streamed sbn={} esi={} auth tag",
                     dec.index,
@@ -4855,15 +4880,26 @@ async fn feed_symbol_with_cx(
                 );
                 return Ok(feed);
             }
+            feed.source_auth_micros = feed
+                .source_auth_micros
+                .saturating_add(elapsed_micros_since(auth_start));
             if auth.is_verified() {
+                let persist_start = trace_intake.then(Instant::now);
                 feed.accepted = persist_source_symbol(dec, parsed, payload, symbol_size).await?;
+                feed.source_persist_micros = feed
+                    .source_persist_micros
+                    .saturating_add(elapsed_micros_since(persist_start));
                 return Ok(feed);
             }
             pipeline_auth = Some(auth);
         } else if symbol_auth.is_some() {
             return Ok(feed);
         } else {
+            let persist_start = trace_intake.then(Instant::now);
             feed.accepted = persist_source_symbol(dec, parsed, payload, symbol_size).await?;
+            feed.source_persist_micros = feed
+                .source_persist_micros
+                .saturating_add(elapsed_micros_since(persist_start));
             return Ok(feed);
         }
     }
@@ -4884,13 +4920,18 @@ async fn feed_symbol_with_cx(
             AuthenticatedSymbol::new_unauthenticated(sym)
         }
     };
+    let pipeline_start = trace_intake.then(Instant::now);
     let result = dec
         .pipeline
         .as_mut()
         .expect("checked above")
         .feed_streaming_block_deferred(auth);
+    feed.pipeline_feed_micros = feed
+        .pipeline_feed_micros
+        .saturating_add(elapsed_micros_since(pipeline_start));
     let accepted = match result {
         Ok(DeferredSymbolAcceptResult::Decode(job)) => {
+            let dispatch_start = trace_intake.then(Instant::now);
             let dispatch = dispatch_decode_job(
                 cx,
                 dec,
@@ -4900,6 +4941,9 @@ async fn feed_symbol_with_cx(
                 transfer_decode_width,
             )
             .await?;
+            feed.decode_dispatch_micros = feed
+                .decode_dispatch_micros
+                .saturating_add(elapsed_micros_since(dispatch_start));
             feed.decode_stats.merge(dispatch.decode_stats);
             true
         }
@@ -4936,7 +4980,11 @@ async fn feed_symbol_with_cx(
             block_sbn,
             data,
         })) => {
+            let persist_start = trace_intake.then(Instant::now);
             persist_decoded_block(dec, block_sbn, &data).await?;
+            feed.block_persist_micros = feed
+                .block_persist_micros
+                .saturating_add(elapsed_micros_since(persist_start));
             // `persist_decoded_block` may have already completed the entry via the source-block
             // tracker (mixed source+FEC, E-9). Otherwise fall back to the pipeline's own view
             // (the all-FEC / non-source-streaming path).
@@ -4991,6 +5039,7 @@ async fn feed_symbol_with_cx(
         }
     };
     if accepted && dec.source_streaming && parsed.kind.is_repair() {
+        let seed_start = trace_intake.then(Instant::now);
         feed.decode_stats.merge(
             seed_source_streaming_pipeline(
                 cx,
@@ -5003,6 +5052,9 @@ async fn feed_symbol_with_cx(
             )
             .await?,
         );
+        feed.source_seed_micros = feed
+            .source_seed_micros
+            .saturating_add(elapsed_micros_since(seed_start));
     }
     feed.accepted = accepted;
     Ok(feed)
@@ -5026,6 +5078,7 @@ async fn feed_symbol(
         symbol_auth,
         true,
         RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
+        false,
     )
     .await?;
     while !dec.pending_decodes.is_empty() {
@@ -6194,11 +6247,18 @@ struct RqDatagramIngest {
     observed: bool,
     accepted: bool,
     payload_bytes: u64,
-    // Per-symbol receiver-intake stage timing (LEVER-R1): the clean-link wall
-    // is the receiver's ~13 MB/s intake rate, not the sender. Auth verification,
-    // decode feed/dispatch, and staging writes currently land in feed_micros.
+    // Per-symbol receiver-intake stage timing. `feed_micros` is the legacy
+    // aggregate; the sub-stages below make large-lossy traces identify the
+    // exact feed bottleneck instead of blaming RaptorQ solve width.
     parse_micros: u64,
     feed_micros: u64,
+    source_auth_micros: u64,
+    source_persist_micros: u64,
+    pipeline_feed_micros: u64,
+    block_persist_micros: u64,
+    decode_dispatch_micros: u64,
+    source_seed_micros: u64,
+    feed_other_micros: u64,
     decode_stats: RqDecodeRoundStats,
 }
 
@@ -6234,6 +6294,13 @@ struct RqDatagramRoundStats {
     // LEVER-R1 receiver-intake throughput instrumentation (sums over the round).
     parse_micros: u64,
     feed_micros: u64,
+    source_auth_micros: u64,
+    source_persist_micros: u64,
+    pipeline_feed_micros: u64,
+    block_persist_micros: u64,
+    decode_dispatch_micros: u64,
+    source_seed_micros: u64,
+    feed_other_micros: u64,
     recv_micros: u64,
     drain_micros: u64,
     decode_stats: RqDecodeRoundStats,
@@ -6250,6 +6317,27 @@ impl RqDatagramRoundStats {
         }
         self.parse_micros = self.parse_micros.saturating_add(ingest.parse_micros);
         self.feed_micros = self.feed_micros.saturating_add(ingest.feed_micros);
+        self.source_auth_micros = self
+            .source_auth_micros
+            .saturating_add(ingest.source_auth_micros);
+        self.source_persist_micros = self
+            .source_persist_micros
+            .saturating_add(ingest.source_persist_micros);
+        self.pipeline_feed_micros = self
+            .pipeline_feed_micros
+            .saturating_add(ingest.pipeline_feed_micros);
+        self.block_persist_micros = self
+            .block_persist_micros
+            .saturating_add(ingest.block_persist_micros);
+        self.decode_dispatch_micros = self
+            .decode_dispatch_micros
+            .saturating_add(ingest.decode_dispatch_micros);
+        self.source_seed_micros = self
+            .source_seed_micros
+            .saturating_add(ingest.source_seed_micros);
+        self.feed_other_micros = self
+            .feed_other_micros
+            .saturating_add(ingest.feed_other_micros);
         self.decode_stats.merge(ingest.decode_stats);
     }
 
@@ -6259,6 +6347,27 @@ impl RqDatagramRoundStats {
         self.payload_bytes = self.payload_bytes.saturating_add(other.payload_bytes);
         self.parse_micros = self.parse_micros.saturating_add(other.parse_micros);
         self.feed_micros = self.feed_micros.saturating_add(other.feed_micros);
+        self.source_auth_micros = self
+            .source_auth_micros
+            .saturating_add(other.source_auth_micros);
+        self.source_persist_micros = self
+            .source_persist_micros
+            .saturating_add(other.source_persist_micros);
+        self.pipeline_feed_micros = self
+            .pipeline_feed_micros
+            .saturating_add(other.pipeline_feed_micros);
+        self.block_persist_micros = self
+            .block_persist_micros
+            .saturating_add(other.block_persist_micros);
+        self.decode_dispatch_micros = self
+            .decode_dispatch_micros
+            .saturating_add(other.decode_dispatch_micros);
+        self.source_seed_micros = self
+            .source_seed_micros
+            .saturating_add(other.source_seed_micros);
+        self.feed_other_micros = self
+            .feed_other_micros
+            .saturating_add(other.feed_other_micros);
         self.recv_micros = self.recv_micros.saturating_add(other.recv_micros);
         self.drain_micros = self.drain_micros.saturating_add(other.drain_micros);
         self.decode_stats.merge(other.decode_stats);
@@ -6347,16 +6456,31 @@ async fn feed_datagram_to_decoders(
         symbol_auth,
         allow_spawn_decode,
         decode_width_budget,
+        trace_intake,
     )
     .await?;
     decode_stats.merge(feed.decode_stats);
     let feed_micros = elapsed_micros_since(feed_start);
+    let feed_accounted_micros = feed
+        .source_auth_micros
+        .saturating_add(feed.source_persist_micros)
+        .saturating_add(feed.pipeline_feed_micros)
+        .saturating_add(feed.block_persist_micros)
+        .saturating_add(feed.decode_dispatch_micros)
+        .saturating_add(feed.source_seed_micros);
     Ok(RqDatagramIngest {
         observed: true,
         accepted: feed.accepted,
         payload_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
         parse_micros,
         feed_micros,
+        source_auth_micros: feed.source_auth_micros,
+        source_persist_micros: feed.source_persist_micros,
+        pipeline_feed_micros: feed.pipeline_feed_micros,
+        block_persist_micros: feed.block_persist_micros,
+        decode_dispatch_micros: feed.decode_dispatch_micros,
+        source_seed_micros: feed.source_seed_micros,
+        feed_other_micros: feed_micros.saturating_sub(feed_accounted_micros),
         decode_stats,
     })
 }
