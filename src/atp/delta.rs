@@ -823,6 +823,48 @@ pub struct DeltaResyncSendPlan {
     pub whole_chunk_bytes: u64,
 }
 
+/// Sender-produced delta wire payload plus byte-accounting metadata.
+///
+/// This is the transport-facing packet shape for the re-sync benchmark path:
+/// callers send only `wire_payload`, while the remaining fields make the
+/// bytes-on-wire decision auditable without reparsing the envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeltaResyncWirePayload {
+    /// Negotiated base plan the receiver must use to decode `wire_payload`.
+    pub base_plan: DeltaResyncPlan,
+    /// Deterministic envelope bytes emitted on the delta transfer stream.
+    pub wire_payload: Vec<u8>,
+    /// Number of bytes in `wire_payload`.
+    pub wire_payload_bytes: u64,
+    /// Actual item payload bytes before envelope metadata.
+    pub payload_bytes: u64,
+    /// Logical whole-chunk bytes represented by the missing set.
+    pub whole_chunk_bytes: u64,
+    /// Count of items carried as sub-chunk op streams.
+    pub subchunk_count: usize,
+    /// Count of items carried as whole chunks.
+    pub whole_chunk_count: usize,
+}
+
+/// Receiver result after applying a delta wire payload and rebuilding bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeltaResyncApplyReport {
+    /// Receiver CAS after applying whole chunks and reconstructed sub-deltas.
+    pub store: ContentAddressedChunkStore,
+    /// Byte-identical logical object reconstructed from `target_manifest`.
+    pub reconstructed_bytes: Vec<u8>,
+    /// Number of received envelope bytes.
+    pub wire_payload_bytes: u64,
+    /// Actual item payload bytes before envelope metadata.
+    pub payload_bytes: u64,
+    /// Logical whole-chunk bytes represented by the missing set.
+    pub whole_chunk_bytes: u64,
+    /// Count of applied sub-chunk op streams.
+    pub subchunk_count: usize,
+    /// Count of applied whole chunks.
+    pub whole_chunk_count: usize,
+}
+
 impl DeltaResyncSendPlan {
     /// Count of payload items encoded as sub-chunk op streams.
     #[must_use]
@@ -990,6 +1032,36 @@ impl DeltaResyncSendPlan {
             payload_bytes: encoded_payload_bytes,
             whole_chunk_bytes,
         })
+    }
+}
+
+impl DeltaResyncWirePayload {
+    /// Encode a concrete send plan into its transport payload with accounting.
+    pub fn from_send_plan(send_plan: DeltaResyncSendPlan) -> Result<Self, DeltaError> {
+        let subchunk_count = send_plan.subchunk_count();
+        let whole_chunk_count = send_plan.whole_chunk_count();
+        let payload_bytes = send_plan.payload_bytes;
+        let whole_chunk_bytes = send_plan.whole_chunk_bytes;
+        let base_plan = send_plan.base_plan.clone();
+        let wire_payload = send_plan.to_wire_bytes()?;
+        let wire_payload_bytes =
+            u64::try_from(wire_payload.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+
+        Ok(Self {
+            base_plan,
+            wire_payload,
+            wire_payload_bytes,
+            payload_bytes,
+            whole_chunk_bytes,
+            subchunk_count,
+            whole_chunk_count,
+        })
+    }
+
+    /// Whether the encoded transfer payload is smaller than a full-object send.
+    #[must_use]
+    pub const fn beats_full_object(&self, full_object_bytes: u64) -> bool {
+        self.wire_payload_bytes < full_object_bytes
     }
 }
 
@@ -1282,6 +1354,27 @@ pub fn build_delta_resync_send_plan(
     })
 }
 
+/// Build the concrete sender-side wire payload for a delta re-sync.
+///
+/// This composes planning, whole/sub-chunk selection, deterministic envelope
+/// encoding, and byte accounting into the single object a transport needs to
+/// send. It intentionally does not decide whether delta should be used; callers
+/// pass the already-negotiated base plan so fallback policy stays explicit.
+pub fn build_delta_resync_wire_payload(
+    base_plan: &DeltaResyncPlan,
+    sender_store: &ContentAddressedChunkStore,
+    receiver_manifest: &PersistentChunkManifest,
+    receiver_signatures: &[ReceiverSubchunkSignature],
+) -> Result<DeltaResyncWirePayload, DeltaError> {
+    let send_plan = build_delta_resync_send_plan(
+        base_plan,
+        sender_store,
+        receiver_manifest,
+        receiver_signatures,
+    )?;
+    DeltaResyncWirePayload::from_send_plan(send_plan)
+}
+
 /// Apply a concrete delta send payload to receiver state and verify target coverage.
 pub fn apply_delta_resync_send_plan(
     target_manifest: &PersistentChunkManifest,
@@ -1324,6 +1417,38 @@ pub fn apply_delta_resync_wire_payload(
 ) -> Result<ContentAddressedChunkStore, DeltaError> {
     let send_plan = DeltaResyncSendPlan::from_wire_bytes(base_plan, wire_payload)?;
     apply_delta_resync_send_plan(target_manifest, receiver_store, &send_plan)
+}
+
+/// Decode, apply, and reconstruct a delta wire payload in one receiver step.
+///
+/// The returned bytes are assembled only after target manifest coverage verifies,
+/// so callers can commit them directly to the destination path/tree and refresh
+/// receiver delta state from the returned store.
+pub fn apply_delta_resync_wire_payload_and_reconstruct(
+    target_manifest: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    base_plan: DeltaResyncPlan,
+    wire_payload: &[u8],
+) -> Result<DeltaResyncApplyReport, DeltaError> {
+    let send_plan = DeltaResyncSendPlan::from_wire_bytes(base_plan, wire_payload)?;
+    let wire_payload_bytes =
+        u64::try_from(wire_payload.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+    let payload_bytes = send_plan.payload_bytes;
+    let whole_chunk_bytes = send_plan.whole_chunk_bytes;
+    let subchunk_count = send_plan.subchunk_count();
+    let whole_chunk_count = send_plan.whole_chunk_count();
+    let store = apply_delta_resync_send_plan(target_manifest, receiver_store, &send_plan)?;
+    let reconstructed_bytes = reconstruct_manifest_bytes(target_manifest, &store)?;
+
+    Ok(DeltaResyncApplyReport {
+        store,
+        reconstructed_bytes,
+        wire_payload_bytes,
+        payload_bytes,
+        whole_chunk_bytes,
+        subchunk_count,
+        whole_chunk_count,
+    })
 }
 
 /// Reconstruct a manifest's logical byte stream from a verified chunk store.
@@ -2629,5 +2754,83 @@ mod tests {
             rebuilt_from_wire,
             [new_a.as_slice(), new_b.as_slice()].concat()
         );
+    }
+
+    #[test]
+    fn wire_payload_report_transmits_delta_and_reconstructs_bench_object() {
+        let shared = (0..(32 * 1024))
+            .map(|idx| ((idx * 13 + 11) % 251) as u8)
+            .collect::<Vec<_>>();
+        let old_changed = (0..(64 * 1024))
+            .map(|idx| ((idx * 17 + idx / 7 + 3) % 253) as u8)
+            .collect::<Vec<_>>();
+        let mut new_changed = old_changed.clone();
+        for byte in &mut new_changed[28 * 1024..29 * 1024] {
+            *byte ^= 0x71;
+        }
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "bench-file",
+            vec![shared.as_slice(), new_changed.as_slice()],
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "bench-file",
+            vec![shared.as_slice(), old_changed.as_slice()],
+        );
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let base_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &receiver_coverage,
+        );
+
+        assert_eq!(base_plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(base_plan.shared_chunks, 1);
+        assert_eq!(base_plan.missing_chunks.len(), 1);
+        assert_eq!(
+            base_plan.missing_bytes,
+            u64::try_from(new_changed.len()).expect("test chunk len")
+        );
+
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let payload =
+            build_delta_resync_wire_payload(&base_plan, &sender_store, &receiver, &signatures)
+                .expect("wire payload");
+
+        assert_eq!(payload.base_plan, base_plan);
+        assert_eq!(payload.subchunk_count, 1);
+        assert_eq!(payload.whole_chunk_count, 0);
+        assert!(payload.payload_bytes < payload.whole_chunk_bytes);
+        assert!(payload.beats_full_object(sender.total_size_bytes));
+
+        let applied = apply_delta_resync_wire_payload_and_reconstruct(
+            &sender,
+            &receiver_store,
+            payload.base_plan.clone(),
+            &payload.wire_payload,
+        )
+        .expect("apply and reconstruct");
+
+        assert_eq!(applied.wire_payload_bytes, payload.wire_payload_bytes);
+        assert_eq!(applied.payload_bytes, payload.payload_bytes);
+        assert_eq!(applied.whole_chunk_bytes, payload.whole_chunk_bytes);
+        assert_eq!(applied.subchunk_count, 1);
+        assert_eq!(applied.whole_chunk_count, 0);
+        assert_eq!(
+            applied.reconstructed_bytes,
+            [shared.as_slice(), new_changed.as_slice()].concat()
+        );
+        sender
+            .verify_store_coverage(&applied.store)
+            .expect("target coverage");
     }
 }
