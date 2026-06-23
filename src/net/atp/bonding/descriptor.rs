@@ -596,6 +596,22 @@ mod tests {
     }
 
     #[test]
+    fn donation_proof_token_refuses_descriptor_merkle_drift() {
+        let mut desc = descriptor_for(FILES);
+        let digests: Vec<EntryDigest> = FILES.iter().map(|(_, p, b)| digest_for(p, b)).collect();
+        let forged_root = "00".repeat(32);
+        desc.merkle_root_hex = forged_root.clone();
+
+        assert!(matches!(
+            desc.prove_local_digests_for_donation(&digests),
+            Err(BondProofError::MerkleMismatch {
+                expected,
+                recomputed,
+            }) if expected == forged_root && recomputed != expected
+        ));
+    }
+
+    #[test]
     fn donation_proof_token_refuses_tampered_local_digests() {
         let desc = descriptor_for(FILES);
         let digests = vec![
