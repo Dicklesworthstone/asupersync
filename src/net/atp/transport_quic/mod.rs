@@ -86,7 +86,7 @@ use crate::codec::Decoder;
 use crate::config::EncodingConfig;
 use crate::cx::Cx;
 use crate::decoding::{
-    BlockDecodeOutcome, BlockStateKind, DecodingConfig, DecodingPipeline,
+    BlockDecodeJob, BlockDecodeOutcome, BlockStateKind, DecodingConfig, DecodingPipeline,
     DeferredSymbolAcceptResult, MissingSourceSymbol, RejectReason, SymbolAcceptResult,
     run_block_decode_job,
 };
@@ -240,17 +240,22 @@ const NATIVE_SYMBOL_DRAIN_BATCH: usize = 512;
 
 /// Maximum native QUIC receiver decode jobs one entry may have in flight.
 ///
-/// Mirrors the RQ receiver bound: enough fan-out to keep independent bounded-K
-/// blocks off the hot receive pump, while avoiding unbounded blocking-pool and
-/// decoded-block memory pressure under bursty loss.
-const QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 16;
+/// Mirrors the post-MATRIX-49/50 RQ receiver bound: enough fan-out to keep
+/// independent bounded-K blocks off the hot receive pump, while avoiding
+/// unbounded blocking-pool and decoded-block memory pressure under bursty loss.
+const QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 64;
 /// Maximum native QUIC receiver decode jobs one transfer may have in flight.
 ///
 /// The per-entry bound alone is insufficient for tree transfers: thousands of
 /// small files could otherwise multiply the blocking-pool queue and retained
 /// decoded-block memory by entry count. Once this transfer-wide window is full,
 /// decode falls back to the existing inline path until ready jobs drain.
-const QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER: usize = QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY * 4;
+const QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER: usize = 64;
+/// Keep tiny encrypted tree entries on the inline decode path. A 50M encrypted
+/// bulk object still has enough independent K512 blocks to amortize blocking-pool
+/// dispatch; sub-8MiB entries usually do not.
+const QUIC_PARALLEL_DECODE_MIN_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
+const QUIC_PARALLEL_DECODE_MIN_SOURCE_BLOCKS: usize = 32;
 
 const QUIC_PRIMARY_RECEIVE_PATH_ID: PathId = PathId(1);
 
@@ -2306,6 +2311,81 @@ fn quic_pending_decode_jobs(decoders: &[QuicEntryDecoder]) -> usize {
         .sum()
 }
 
+fn quic_block_decode_pending(decoder: &QuicEntryDecoder, block_sbn: u8) -> bool {
+    decoder
+        .pending_decodes
+        .iter()
+        .any(|pending| pending.block_sbn == block_sbn)
+}
+
+fn quic_entry_source_block_count_for_geometry(entry_size: u64, max_block_size: usize) -> usize {
+    if entry_size == 0 {
+        return 0;
+    }
+    let max_block_size = u64::try_from(max_block_size.max(1)).unwrap_or(u64::MAX);
+    entry_size
+        .div_ceil(max_block_size)
+        .min(u64::from(u8::MAX) + 1)
+        .try_into()
+        .unwrap_or(usize::from(u8::MAX) + 1)
+}
+
+#[cfg(test)]
+fn quic_should_parallel_decode_entry_geometry(entry_size: u64, max_block_size: usize) -> bool {
+    entry_size >= QUIC_PARALLEL_DECODE_MIN_ENTRY_BYTES
+        && quic_entry_source_block_count_for_geometry(entry_size, max_block_size)
+            >= QUIC_PARALLEL_DECODE_MIN_SOURCE_BLOCKS
+}
+
+fn quic_entry_source_block_count(decoder: &QuicEntryDecoder, config: &QuicConfig) -> usize {
+    quic_entry_source_block_count_for_geometry(decoder.size, config.max_block_size)
+}
+
+fn quic_should_parallel_decode_entry(decoder: &QuicEntryDecoder, config: &QuicConfig) -> bool {
+    decoder.size >= QUIC_PARALLEL_DECODE_MIN_ENTRY_BYTES
+        && quic_entry_source_block_count(decoder, config) >= QUIC_PARALLEL_DECODE_MIN_SOURCE_BLOCKS
+}
+
+fn quic_transfer_decode_width(decoders: &[QuicEntryDecoder], config: &QuicConfig) -> usize {
+    if decoders
+        .iter()
+        .any(|decoder| quic_should_parallel_decode_entry(decoder, config))
+    {
+        QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
+    } else {
+        0
+    }
+}
+
+fn quic_entry_decode_width_budget(
+    decoder: &QuicEntryDecoder,
+    config: &QuicConfig,
+    transfer_decode_width: usize,
+) -> usize {
+    if !quic_should_parallel_decode_entry(decoder, config) {
+        return 0;
+    }
+    quic_entry_source_block_count(decoder, config)
+        .min(QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY)
+        .min(transfer_decode_width.max(1))
+        .max(1)
+}
+
+#[cfg(test)]
+fn quic_entry_decode_width_budget_for_geometry(
+    entry_size: u64,
+    max_block_size: usize,
+    transfer_decode_width: usize,
+) -> usize {
+    if !quic_should_parallel_decode_entry_geometry(entry_size, max_block_size) {
+        return 0;
+    }
+    quic_entry_source_block_count_for_geometry(entry_size, max_block_size)
+        .min(QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY)
+        .min(transfer_decode_width.max(1))
+        .max(1)
+}
+
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
 pub(crate) struct QuicDecodedBlock {
     pub(crate) entry: u32,
@@ -3671,8 +3751,10 @@ fn feed_authenticated_symbol_deferred(
     cx: &Cx,
     decoder: &mut QuicEntryDecoder,
     auth_symbol: AuthenticatedSymbol,
+    config: &QuicConfig,
     decode_stats: &mut QuicDecodeStats,
     allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<bool, QuicTransportError> {
     if decoder.complete {
         return Ok(false);
@@ -3703,8 +3785,11 @@ fn feed_authenticated_symbol_deferred(
         )) => Ok(false),
         Ok(DeferredSymbolAcceptResult::Decode(job)) => {
             let block_sbn = job.sbn();
+            let entry_decode_width =
+                quic_entry_decode_width_budget(decoder, config, transfer_decode_width);
             if !allow_spawn_decode
-                || decoder.pending_decodes.len() >= QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY
+                || entry_decode_width <= 1
+                || decoder.pending_decodes.len() >= entry_decode_width
             {
                 let outcome = run_block_decode_job(job);
                 return finish_quic_decode_outcome(decoder, outcome, decode_stats, started_at);
@@ -3784,22 +3869,154 @@ async fn join_all_quic_decodes(
 }
 
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
-fn feed_authenticated_symbol_take_block(
+fn finish_quic_streaming_decode_result(
+    decoder: &mut QuicEntryDecoder,
+    result: SymbolAcceptResult,
+    elapsed: Duration,
+    decode_stats: &mut QuicDecodeStats,
+) -> Result<Option<QuicDecodedBlock>, QuicTransportError> {
+    match result {
+        SymbolAcceptResult::BlockComplete { block_sbn, data } => {
+            decode_stats.record_completed_block(elapsed);
+            decoder.complete = decoder
+                .pipeline
+                .as_ref()
+                .is_some_and(DecodingPipeline::is_complete);
+            Ok(Some(QuicDecodedBlock {
+                entry: decoder.index,
+                sbn: block_sbn,
+                data,
+            }))
+        }
+        SymbolAcceptResult::Accepted { .. } | SymbolAcceptResult::DecodingStarted { .. } => {
+            Ok(None)
+        }
+        SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed) => Err(
+            QuicTransportError::Integrity("symbol authentication failed".to_string()),
+        ),
+        SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_) => Ok(None),
+    }
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+fn finish_quic_streaming_decode_outcome(
+    cx: &Cx,
+    decoder: &mut QuicEntryDecoder,
+    outcome: BlockDecodeOutcome,
+    config: &QuicConfig,
+    decode_stats: &mut QuicDecodeStats,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
+) -> Result<Option<QuicDecodedBlock>, QuicTransportError> {
+    let elapsed = outcome.elapsed();
+    let result = {
+        let Some(pipeline) = decoder.pipeline.as_mut() else {
+            return Ok(None);
+        };
+        pipeline.finish_decode_job_deferred(outcome)
+    };
+    match result {
+        DeferredSymbolAcceptResult::Immediate(result) => {
+            finish_quic_streaming_decode_result(decoder, result, elapsed, decode_stats)
+        }
+        DeferredSymbolAcceptResult::Decode(job) => dispatch_quic_streaming_decode_job(
+            cx,
+            decoder,
+            job,
+            config,
+            decode_stats,
+            allow_spawn_decode,
+            transfer_decode_width,
+        ),
+    }
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+fn dispatch_quic_streaming_decode_job(
+    cx: &Cx,
+    decoder: &mut QuicEntryDecoder,
+    job: BlockDecodeJob,
+    config: &QuicConfig,
+    decode_stats: &mut QuicDecodeStats,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
+) -> Result<Option<QuicDecodedBlock>, QuicTransportError> {
+    let block_sbn = job.sbn();
+    if decoder.complete
+        || decoder.pipeline.is_none()
+        || quic_block_decode_pending(decoder, block_sbn)
+    {
+        return Ok(None);
+    }
+
+    let entry_decode_width = quic_entry_decode_width_budget(decoder, config, transfer_decode_width);
+    if !allow_spawn_decode
+        || entry_decode_width <= 1
+        || decoder.pending_decodes.len() >= entry_decode_width
+    {
+        return finish_quic_streaming_decode_outcome(
+            cx,
+            decoder,
+            run_block_decode_job(job),
+            config,
+            decode_stats,
+            allow_spawn_decode,
+            transfer_decode_width,
+        );
+    }
+
+    let fallback_job = job.clone();
+    match cx.spawn_blocking(move |_child| run_block_decode_job(job)) {
+        Ok(handle) => {
+            decoder.pending_decodes.push(QuicPendingDecode {
+                block_sbn,
+                started_at: Instant::now(),
+                handle,
+            });
+            Ok(None)
+        }
+        Err(_) => finish_quic_streaming_decode_outcome(
+            cx,
+            decoder,
+            run_block_decode_job(fallback_job),
+            config,
+            decode_stats,
+            allow_spawn_decode,
+            transfer_decode_width,
+        ),
+    }
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+fn feed_authenticated_symbol_take_block_deferred(
+    cx: &Cx,
     decoder: &mut QuicEntryDecoder,
     auth_symbol: AuthenticatedSymbol,
+    config: &QuicConfig,
     decode_stats: &mut QuicDecodeStats,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<(bool, Option<QuicDecodedBlock>), QuicTransportError> {
     if decoder.complete {
         return Ok((false, None));
     }
-    let Some(pipeline) = decoder.pipeline.as_mut() else {
-        return Ok((false, None));
+    let result = {
+        let Some(pipeline) = decoder.pipeline.as_mut() else {
+            return Ok((false, None));
+        };
+        pipeline.feed_streaming_block_deferred(auth_symbol)
     };
     let started_at = Instant::now();
-    match pipeline.feed_streaming_block(auth_symbol) {
-        Ok(SymbolAcceptResult::BlockComplete { block_sbn, data }) => {
+    match result {
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
+            block_sbn,
+            data,
+        })) => {
             decode_stats.record_completed_block(started_at.elapsed());
-            decoder.complete = pipeline.is_complete();
+            decoder.complete = decoder
+                .pipeline
+                .as_ref()
+                .is_some_and(DecodingPipeline::is_complete);
             Ok((
                 true,
                 Some(QuicDecodedBlock {
@@ -3809,17 +4026,108 @@ fn feed_authenticated_symbol_take_block(
                 }),
             ))
         }
-        Ok(SymbolAcceptResult::Accepted { .. } | SymbolAcceptResult::DecodingStarted { .. }) => {
-            Ok((true, None))
-        }
-        Ok(SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed)) => Err(
-            QuicTransportError::Integrity("symbol authentication failed".to_string()),
-        ),
-        Ok(SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_)) => Ok((false, None)),
+        Ok(DeferredSymbolAcceptResult::Immediate(
+            SymbolAcceptResult::Accepted { .. } | SymbolAcceptResult::DecodingStarted { .. },
+        )) => Ok((true, None)),
+        Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Rejected(
+            RejectReason::AuthenticationFailed,
+        ))) => Err(QuicTransportError::Integrity(
+            "symbol authentication failed".to_string(),
+        )),
+        Ok(DeferredSymbolAcceptResult::Immediate(
+            SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_),
+        )) => Ok((false, None)),
+        Ok(DeferredSymbolAcceptResult::Decode(job)) => Ok((
+            true,
+            dispatch_quic_streaming_decode_job(
+                cx,
+                decoder,
+                job,
+                config,
+                decode_stats,
+                allow_spawn_decode,
+                transfer_decode_width,
+            )?,
+        )),
         Err(err) => Err(QuicTransportError::Control(format!(
             "RaptorQ decoder rejected symbol: {err}"
         ))),
     }
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+async fn drain_ready_quic_decodes_with_blocks(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    decode_stats: &mut QuicDecodeStats,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
+) -> Result<Vec<QuicDecodedBlock>, QuicTransportError> {
+    let mut completed = Vec::new();
+    for decoder in decoders {
+        let mut i = 0usize;
+        while i < decoder.pending_decodes.len() {
+            if !decoder.pending_decodes[i].handle.is_finished() {
+                i += 1;
+                continue;
+            }
+            let mut pending = decoder.pending_decodes.swap_remove(i);
+            let block_sbn = pending.block_sbn;
+            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+                QuicTransportError::Control(format!(
+                    "decode task failed for entry {} block {}: {join_err:?}",
+                    decoder.index, block_sbn
+                ))
+            })?;
+            if let Some(block) = finish_quic_streaming_decode_outcome(
+                cx,
+                decoder,
+                outcome,
+                config,
+                decode_stats,
+                allow_spawn_decode,
+                transfer_decode_width,
+            )? {
+                completed.push(block);
+            }
+        }
+    }
+    Ok(completed)
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+async fn join_all_quic_decodes_with_blocks(
+    cx: &Cx,
+    decoders: &mut [QuicEntryDecoder],
+    config: &QuicConfig,
+    decode_stats: &mut QuicDecodeStats,
+    transfer_decode_width: usize,
+) -> Result<Vec<QuicDecodedBlock>, QuicTransportError> {
+    let mut completed = Vec::new();
+    for decoder in decoders {
+        while let Some(mut pending) = decoder.pending_decodes.pop() {
+            let block_sbn = pending.block_sbn;
+            let outcome = pending.handle.join(cx).await.map_err(|join_err| {
+                QuicTransportError::Control(format!(
+                    "decode task failed for entry {} block {}: {join_err:?}",
+                    decoder.index, block_sbn
+                ))
+            })?;
+            if let Some(block) = finish_quic_streaming_decode_outcome(
+                cx,
+                decoder,
+                outcome,
+                config,
+                decode_stats,
+                true,
+                transfer_decode_width,
+            )? {
+                completed.push(block);
+            }
+        }
+    }
+    Ok(completed)
 }
 
 fn authenticated_symbol_from_envelope(
@@ -3992,6 +4300,7 @@ fn feed_aggregated_symbol_for_entry_deferred(
     entry: u32,
     auth_symbol: AuthenticatedSymbol,
     receive: QuicReceiveAggregation<'_>,
+    config: &QuicConfig,
     decode_stats: &mut QuicDecodeStats,
 ) -> Result<u64, QuicTransportError> {
     let decoder_index = decoders
@@ -4018,14 +4327,16 @@ fn feed_aggregated_symbol_for_entry_deferred(
             ));
         }
         let ready = authenticated_symbol_with_existing_tag(symbol, &auth_symbol);
-        let allow_spawn_decode =
-            quic_pending_decode_jobs(decoders) < QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER;
+        let transfer_decode_width = quic_transfer_decode_width(decoders, config);
+        let allow_spawn_decode = quic_pending_decode_jobs(decoders) < transfer_decode_width;
         if feed_authenticated_symbol_deferred(
             cx,
             &mut decoders[decoder_index],
             ready,
+            config,
             decode_stats,
             allow_spawn_decode,
+            transfer_decode_width,
         )? {
             accepted = accepted.saturating_add(1);
         }
@@ -5715,6 +6026,7 @@ async fn drain_native_symbol_datagrams_with_aggregator_deferred(
                 envelope.entry,
                 auth_symbol,
                 receive,
+                config,
                 decode_stats,
             )?);
         let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
@@ -5724,7 +6036,8 @@ async fn drain_native_symbol_datagrams_with_aggregator_deferred(
 }
 
 #[cfg_attr(not(feature = "tls"), allow(dead_code))]
-fn drain_native_symbol_datagrams_with_blocks(
+async fn drain_native_symbol_datagrams_with_blocks(
+    cx: &Cx,
     conn: &mut NativeQuicConnection,
     manifest: &TransferManifest,
     decoders: &mut [QuicEntryDecoder],
@@ -5751,9 +6064,9 @@ fn drain_native_symbol_datagrams_with_blocks(
                 config.symbol_size
             )));
         }
-        let decoder = decoders
+        let decoder_index = decoders
             .iter_mut()
-            .find(|decoder| decoder.index == envelope.entry)
+            .position(|decoder| decoder.index == envelope.entry)
             .ok_or_else(|| {
                 QuicTransportError::Integrity(format!(
                     "symbol for unknown manifest entry {}",
@@ -5762,22 +6075,53 @@ fn drain_native_symbol_datagrams_with_blocks(
             })?;
         let auth_symbol = verified_authenticated_symbol_from_envelope(
             &envelope,
-            decoder.object_id,
+            decoders[decoder_index].object_id,
             symbol_auth.as_ref(),
         )?;
-        let (was_accepted, block) =
-            feed_authenticated_symbol_take_block(decoder, auth_symbol, decode_stats)?;
+        let transfer_decode_width = quic_transfer_decode_width(decoders, config);
+        let allow_spawn_decode = quic_pending_decode_jobs(decoders) < transfer_decode_width;
+        let (was_accepted, block) = feed_authenticated_symbol_take_block_deferred(
+            cx,
+            &mut decoders[decoder_index],
+            auth_symbol,
+            config,
+            decode_stats,
+            allow_spawn_decode,
+            transfer_decode_width,
+        )?;
         if was_accepted {
             accepted = accepted.saturating_add(1);
         }
         if let Some(block) = block {
             completed.push(block);
         }
+        completed.extend(
+            drain_ready_quic_decodes_with_blocks(
+                cx,
+                decoders,
+                config,
+                decode_stats,
+                allow_spawn_decode,
+                transfer_decode_width,
+            )
+            .await?,
+        );
         drained = drained.saturating_add(1);
         if drained >= NATIVE_SYMBOL_DRAIN_BATCH {
             break;
         }
     }
+    let transfer_decode_width = quic_transfer_decode_width(decoders, config);
+    completed.extend(
+        join_all_quic_decodes_with_blocks(
+            cx,
+            decoders,
+            config,
+            decode_stats,
+            transfer_decode_width,
+        )
+        .await?,
+    );
     Ok((
         u64::try_from(drained).unwrap_or(u64::MAX),
         accepted,
@@ -7037,6 +7381,18 @@ mod tests {
             .collect()
     }
 
+    fn quic_decode_width_fixture_entry(size: u64) -> QuicEntryDecoder {
+        QuicEntryDecoder {
+            index: 0,
+            object_id: ObjectId::new(0x5155_4943, size),
+            size,
+            pipeline: None,
+            complete: false,
+            data: Vec::new(),
+            pending_decodes: Vec::new(),
+        }
+    }
+
     fn drive_in_memory_loopback_transfer(
         cx: &Cx,
         sender: &mut QuicConnection,
@@ -7193,6 +7549,68 @@ mod tests {
         assert_eq!(
             c.symbol_auth_mode(),
             QuicSymbolAuthMode::MissingAuthenticationContext
+        );
+    }
+
+    #[test]
+    fn quic_decode_width_gate_keeps_tiny_entries_inline_and_50m_wide() {
+        let config = trusted_quic_config();
+        let tiny_size = 1024 * 1024;
+        let tiny = quic_decode_width_fixture_entry(tiny_size);
+        assert!(!quic_should_parallel_decode_entry(&tiny, &config));
+        assert_eq!(
+            quic_entry_decode_width_budget(
+                &tiny,
+                &config,
+                QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
+            ),
+            0,
+            "tiny encrypted entries should stay on the inline decode path"
+        );
+        assert_eq!(
+            quic_entry_decode_width_budget_for_geometry(
+                tiny_size,
+                config.max_block_size,
+                QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
+            ),
+            0,
+            "tiny encrypted geometry should not open a decode fanout window"
+        );
+
+        let size_50m = 50 * 1024 * 1024;
+        let config_50m = effective_quic_config_for_largest_entry(&config, size_50m)
+            .expect("50M fixture must fit default QUIC geometry");
+        assert!(quic_should_parallel_decode_entry_geometry(
+            size_50m as u64,
+            config_50m.max_block_size
+        ));
+        let dec_50m = quic_decode_width_fixture_entry(size_50m as u64);
+        assert!(
+            quic_should_parallel_decode_entry(&dec_50m, &config_50m),
+            "50M encrypted bulk geometry should be eligible for receiver decode fanout"
+        );
+        assert_eq!(
+            quic_entry_decode_width_budget(
+                &dec_50m,
+                &config_50m,
+                QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
+            ),
+            QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
+            "50M encrypted bulk geometry should use the full per-entry fanout window"
+        );
+        assert_eq!(
+            quic_entry_decode_width_budget_for_geometry(
+                size_50m as u64,
+                config_50m.max_block_size,
+                QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER
+            ),
+            QUIC_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
+            "50M encrypted bulk geometry should open the same fanout as the decoder helper"
+        );
+        assert_eq!(
+            quic_transfer_decode_width(std::slice::from_ref(&dec_50m), &config_50m),
+            QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
+            "eligible encrypted bulk transfers should open the transfer-wide decode window"
         );
     }
 

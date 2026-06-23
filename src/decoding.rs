@@ -499,16 +499,6 @@ impl DecodingPipeline {
         self.feed_with_retention_and_mode(auth_symbol, true, FeedDecodeMode::Deferred)
     }
 
-    /// Feeds a symbol for streaming receivers that immediately persist decoded
-    /// blocks and do not need `into_data()` to retain a second in-memory copy.
-    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
-    pub(crate) fn feed_streaming_block(
-        &mut self,
-        auth_symbol: AuthenticatedSymbol,
-    ) -> Result<SymbolAcceptResult, DecodingError> {
-        self.feed_with_retention(auth_symbol, false)
-    }
-
     /// Feeds a streaming symbol and returns an owned decode job when the block
     /// reaches threshold. The caller must run the job and pass its outcome to
     /// [`Self::finish_decode_job`].
@@ -2766,11 +2756,23 @@ mod tests {
                 symbol,
                 crate::security::tag::AuthenticationTag::zero(),
             );
-            if let SymbolAcceptResult::BlockComplete { data, .. } = decoder
-                .feed_streaming_block(auth)
+            match decoder
+                .feed_streaming_block_deferred(auth)
                 .expect("feed streaming source")
             {
-                completed = Some(data);
+                DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
+                    data,
+                    ..
+                }) => {
+                    completed = Some(data);
+                }
+                DeferredSymbolAcceptResult::Immediate(_) => {}
+                DeferredSymbolAcceptResult::Decode(job) => {
+                    let result = decoder.finish_decode_job(run_block_decode_job(job));
+                    if let SymbolAcceptResult::BlockComplete { data, .. } = result {
+                        completed = Some(data);
+                    }
+                }
             }
         }
 

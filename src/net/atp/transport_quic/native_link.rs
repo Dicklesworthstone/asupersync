@@ -2280,12 +2280,14 @@ async fn run_receiver_session(
                 let drain_started = Instant::now(); // ubs:ignore - monotonic intake timing, not crypto randomness
                 let (observed, accepted, completed_blocks) =
                     super::drain_native_symbol_datagrams_with_blocks(
+                        cx,
                         &mut link.conn,
                         &manifest,
                         &mut decoders,
                         config,
                         &mut decode_stats,
-                    )?;
+                    )
+                    .await?;
                 round_symbols_observed = round_symbols_observed.saturating_add(observed);
                 round_symbols_accepted = round_symbols_accepted.saturating_add(accepted);
                 intake_stats.record_symbol_drain(
