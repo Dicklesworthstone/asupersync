@@ -40,7 +40,7 @@ pub use esi::{
 };
 pub use handshake::{
     BONDING_HANDSHAKE_VERSION, BondTransport, BondingAgreement, BondingAssignmentMode,
-    BondingHandshake, BondingHandshakeError,
+    BondingControlRegistry, BondingHandshake, BondingHandshakeError,
 };
 pub use receiver::{
     BondedBlockCoverage, BondedDonorIngressStats, BondedReceiverIngressStats,

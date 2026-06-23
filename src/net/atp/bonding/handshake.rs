@@ -6,7 +6,7 @@
 //! required before any donor starts spraying symbols.
 
 use core::fmt;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -204,6 +204,81 @@ impl BondingAgreement {
     }
 }
 
+/// Receiver-side registry of negotiated donor control connections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondingControlRegistry {
+    expected_donor_count: u32,
+    donors: BTreeMap<u32, BondingAgreement>,
+}
+
+impl BondingControlRegistry {
+    /// Create an empty registry for one bonded transfer.
+    pub fn new(expected_donor_count: u32) -> Result<Self, BondingHandshakeError> {
+        if expected_donor_count == 0 {
+            return Err(BondingHandshakeError::InvalidDonorCount { donor_count: 0 });
+        }
+        if expected_donor_count > MAX_BONDING_DONORS {
+            return Err(BondingHandshakeError::TooManyDonors {
+                donor_count: expected_donor_count,
+                max: MAX_BONDING_DONORS,
+            });
+        }
+        Ok(Self {
+            expected_donor_count,
+            donors: BTreeMap::new(),
+        })
+    }
+
+    /// Enroll one donor's negotiated control agreement.
+    pub fn enroll_donor(
+        &mut self,
+        donor_index: u32,
+        agreement: BondingAgreement,
+    ) -> Result<(), BondingHandshakeError> {
+        if donor_index >= self.expected_donor_count {
+            return Err(BondingHandshakeError::DonorIndexOutOfRange {
+                donor_index,
+                donor_count: self.expected_donor_count,
+            });
+        }
+        if agreement.max_donor_count < self.expected_donor_count {
+            return Err(BondingHandshakeError::AgreementDonorCountTooSmall {
+                donor_index,
+                expected_donor_count: self.expected_donor_count,
+                agreement_max_donor_count: agreement.max_donor_count,
+            });
+        }
+        if self.donors.insert(donor_index, agreement).is_some() {
+            return Err(BondingHandshakeError::DuplicateDonorControl { donor_index });
+        }
+        Ok(())
+    }
+
+    /// Number of unique donor control connections enrolled.
+    #[must_use]
+    pub fn enrolled_count(&self) -> usize {
+        self.donors.len()
+    }
+
+    /// Expected donor count for this bonded transfer.
+    #[must_use]
+    pub const fn expected_donor_count(&self) -> u32 {
+        self.expected_donor_count
+    }
+
+    /// True when every donor index in `0..expected_donor_count` is enrolled.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.enrolled_count() == self.expected_donor_count as usize
+    }
+
+    /// Return one donor's negotiated agreement.
+    #[must_use]
+    pub fn agreement_for(&self, donor_index: u32) -> Option<&BondingAgreement> {
+        self.donors.get(&donor_index)
+    }
+}
+
 /// Bonded-handshake validation or negotiation failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BondingHandshakeError {
@@ -222,6 +297,16 @@ pub enum BondingHandshakeError {
     },
     /// No transport family is common to both peers.
     NoCommonTransport,
+    /// Donor index is outside the expected donor set.
+    DonorIndexOutOfRange { donor_index: u32, donor_count: u32 },
+    /// The same donor control connection was enrolled twice.
+    DuplicateDonorControl { donor_index: u32 },
+    /// A negotiated donor agreement cannot support this transfer's donor count.
+    AgreementDonorCountTooSmall {
+        donor_index: u32,
+        expected_donor_count: u32,
+        agreement_max_donor_count: u32,
+    },
 }
 
 impl fmt::Display for BondingHandshakeError {
@@ -248,6 +333,25 @@ impl fmt::Display for BondingHandshakeError {
                 "incompatible channel-bonding protocol versions: local {local_min}..={local_max}, peer {peer_min}..={peer_max}"
             ),
             Self::NoCommonTransport => f.write_str("no common channel-bonding transport"),
+            Self::DonorIndexOutOfRange {
+                donor_index,
+                donor_count,
+            } => write!(
+                f,
+                "channel-bonding donor index {donor_index} is outside 0..{donor_count}"
+            ),
+            Self::DuplicateDonorControl { donor_index } => write!(
+                f,
+                "channel-bonding donor {donor_index} control connection enrolled twice"
+            ),
+            Self::AgreementDonorCountTooSmall {
+                donor_index,
+                expected_donor_count,
+                agreement_max_donor_count,
+            } => write!(
+                f,
+                "channel-bonding donor {donor_index} agreement supports {agreement_max_donor_count} donors, below expected {expected_donor_count}"
+            ),
         }
     }
 }
@@ -257,6 +361,17 @@ impl std::error::Error for BondingHandshakeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn agreement(max_donor_count: u32) -> BondingAgreement {
+        BondingAgreement {
+            protocol_version: BONDING_HANDSHAKE_VERSION,
+            supported_transports: BTreeSet::from([BondTransport::DirectIp]),
+            assignment_mode: BondingAssignmentMode::DynamicWindows,
+            resume_supported: true,
+            auth_required: true,
+            max_donor_count,
+        }
+    }
 
     #[test]
     fn handshake_degrades_to_static_residue_when_dynamic_windows_are_not_common() {
@@ -367,6 +482,63 @@ mod tests {
             Err(BondingHandshakeError::TooManyDonors {
                 donor_count: MAX_BONDING_DONORS + 1,
                 max: MAX_BONDING_DONORS,
+            })
+        );
+    }
+
+    #[test]
+    fn control_registry_accepts_every_unique_donor_connection() {
+        let mut registry = BondingControlRegistry::new(3).expect("registry");
+
+        registry
+            .enroll_donor(2, agreement(3))
+            .expect("donor 2 enrolled");
+        registry
+            .enroll_donor(0, agreement(3))
+            .expect("donor 0 enrolled");
+
+        assert_eq!(registry.expected_donor_count(), 3);
+        assert_eq!(registry.enrolled_count(), 2);
+        assert!(!registry.is_complete());
+        assert!(registry.agreement_for(1).is_none());
+
+        registry
+            .enroll_donor(1, agreement(3))
+            .expect("donor 1 enrolled");
+
+        assert!(registry.is_complete());
+        assert!(registry.agreement_for(1).is_some());
+    }
+
+    #[test]
+    fn control_registry_fails_closed_for_invalid_donor_connections() {
+        assert_eq!(
+            BondingControlRegistry::new(0),
+            Err(BondingHandshakeError::InvalidDonorCount { donor_count: 0 })
+        );
+
+        let mut registry = BondingControlRegistry::new(2).expect("registry");
+        registry
+            .enroll_donor(0, agreement(2))
+            .expect("donor 0 enrolled");
+
+        assert_eq!(
+            registry.enroll_donor(0, agreement(2)),
+            Err(BondingHandshakeError::DuplicateDonorControl { donor_index: 0 })
+        );
+        assert_eq!(
+            registry.enroll_donor(2, agreement(2)),
+            Err(BondingHandshakeError::DonorIndexOutOfRange {
+                donor_index: 2,
+                donor_count: 2,
+            })
+        );
+        assert_eq!(
+            registry.enroll_donor(1, agreement(1)),
+            Err(BondingHandshakeError::AgreementDonorCountTooSmall {
+                donor_index: 1,
+                expected_donor_count: 2,
+                agreement_max_donor_count: 1,
             })
         );
     }
