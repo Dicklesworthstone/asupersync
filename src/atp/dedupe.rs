@@ -349,6 +349,124 @@ impl DeltaDedupPayloadSet {
     pub const fn saves_bytes(&self) -> bool {
         self.payload_bytes < self.send_set.logical_missing_bytes
     }
+
+    /// Payload + metadata bytes for the compact dedupe envelope.
+    pub fn compact_wire_bytes(&self) -> Result<u64, DeltaError> {
+        self.validate_against_send_set()?;
+        let metadata = u64::try_from(self.send_set.canonical_metadata_bytes())
+            .map_err(|_| DeltaError::ChunkSizeOverflow)?;
+        self.payload_bytes
+            .checked_add(metadata)
+            .ok_or(DeltaError::ChunkSizeOverflow)
+    }
+
+    /// Encode unique payload bytes in send-set order.
+    ///
+    /// The surrounding delta envelope owns framing. The matching metadata is
+    /// [`DeltaDedupSendSet::to_canonical_bytes`].
+    pub fn to_canonical_payload_bytes(&self) -> Result<Vec<u8>, DeltaError> {
+        self.validate_against_send_set()?;
+        let capacity =
+            usize::try_from(self.payload_bytes).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+        let mut out = Vec::with_capacity(capacity);
+        for payload in &self.payloads {
+            out.extend_from_slice(&payload.payload);
+        }
+        Ok(out)
+    }
+
+    /// Decode canonical dedupe metadata plus its unique payload byte stream.
+    pub fn from_canonical_parts(
+        plan: &DeltaResyncPlan,
+        metadata_bytes: &[u8],
+        payload_bytes: &[u8],
+    ) -> Result<Self, DeltaError> {
+        let send_set = DeltaDedupSendSet::from_canonical_bytes(plan, metadata_bytes)?;
+        let encoded_payload_bytes =
+            u64::try_from(payload_bytes.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+        if encoded_payload_bytes != send_set.unique_payload_bytes {
+            return Err(DeltaError::DeltaSendPlanPayloadBytesMismatch {
+                encoded: encoded_payload_bytes,
+                computed: send_set.unique_payload_bytes,
+            });
+        }
+
+        let mut cursor = 0usize;
+        let mut payloads = Vec::with_capacity(send_set.unique_chunks.len());
+        for unique in &send_set.unique_chunks {
+            let size = usize::try_from(unique.key.size_bytes)
+                .map_err(|_| DeltaError::ChunkSizeOverflow)?;
+            let end = cursor
+                .checked_add(size)
+                .ok_or(DeltaError::TruncatedManifest)?;
+            let Some(payload) = payload_bytes.get(cursor..end) else {
+                return Err(DeltaError::TruncatedManifest);
+            };
+            payload_matches_key(payload, &unique.key, unique.representative.index)?;
+            payloads.push(DeltaUniquePayload {
+                key: unique.key.clone(),
+                representative: unique.representative.clone(),
+                payload: payload.to_vec(),
+            });
+            cursor = end;
+        }
+        if cursor != payload_bytes.len() {
+            return Err(DeltaError::TrailingBytes {
+                trailing: payload_bytes.len() - cursor,
+            });
+        }
+
+        let decoded = Self {
+            send_set,
+            payloads,
+            payload_bytes: encoded_payload_bytes,
+        };
+        decoded.validate_against_send_set()?;
+        Ok(decoded)
+    }
+
+    /// Verify unique payloads are byte-identical to the dedupe send-set keys.
+    pub fn validate_against_send_set(&self) -> Result<(), DeltaError> {
+        if self.payloads.len() != self.send_set.unique_chunks.len() {
+            return Err(DeltaError::DeltaSendPlanItemCountMismatch {
+                actual: self.payloads.len(),
+                expected: self.send_set.unique_chunks.len(),
+            });
+        }
+
+        let mut computed_payload_bytes = 0u64;
+        for (ordinal, (payload, unique)) in self
+            .payloads
+            .iter()
+            .zip(&self.send_set.unique_chunks)
+            .enumerate()
+        {
+            if payload.key != unique.key || payload.representative != unique.representative {
+                return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
+            }
+            payload_matches_key(&payload.payload, &payload.key, payload.representative.index)?;
+            computed_payload_bytes = computed_payload_bytes
+                .checked_add(
+                    u64::try_from(payload.payload.len())
+                        .map_err(|_| DeltaError::ChunkSizeOverflow)?,
+                )
+                .ok_or(DeltaError::ChunkSizeOverflow)?;
+        }
+
+        if computed_payload_bytes != self.payload_bytes {
+            return Err(DeltaError::DeltaSendPlanPayloadBytesMismatch {
+                encoded: self.payload_bytes,
+                computed: computed_payload_bytes,
+            });
+        }
+        if self.payload_bytes != self.send_set.unique_payload_bytes {
+            return Err(DeltaError::DeltaSendPlanPayloadBytesMismatch {
+                encoded: self.payload_bytes,
+                computed: self.send_set.unique_payload_bytes,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Collapse a delta plan's missing chunks into unique content payloads plus
@@ -663,6 +781,63 @@ mod tests {
         assert!(payloads.saves_bytes());
         assert_eq!(payloads.payloads[0].payload, b"same");
         assert_eq!(payloads.payloads[1].payload, b"unique");
+    }
+
+    #[test]
+    fn dedupe_payload_set_canonical_parts_round_trip() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[&b"alpha"[..], &b"beta"[..], &b"alpha"[..]],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let payload_set = build_dedup_payload_set(&plan, &sender_store).expect("payload set");
+
+        let metadata = payload_set.send_set.to_canonical_bytes().expect("metadata");
+        let payload_bytes = payload_set
+            .to_canonical_payload_bytes()
+            .expect("payload bytes");
+        let decoded = DeltaDedupPayloadSet::from_canonical_parts(&plan, &metadata, &payload_bytes)
+            .expect("decode canonical parts");
+
+        assert_eq!(decoded, payload_set);
+        assert_eq!(
+            payload_set.compact_wire_bytes().unwrap(),
+            payload_set.payload_bytes + u64::try_from(metadata.len()).unwrap()
+        );
+        assert!(payload_set.compact_wire_bytes().unwrap() < sender.total_size_bytes);
+    }
+
+    #[test]
+    fn dedupe_payload_set_canonical_parts_fail_closed_on_payload_drift() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(&mut sender_store, "tree-a", &[&b"alpha"[..], &b"beta"[..]]);
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let payload_set = build_dedup_payload_set(&plan, &sender_store).expect("payload set");
+        let metadata = payload_set.send_set.to_canonical_bytes().expect("metadata");
+        let mut payload_bytes = payload_set
+            .to_canonical_payload_bytes()
+            .expect("payload bytes");
+
+        payload_bytes[0] ^= 0x40;
+        assert!(matches!(
+            DeltaDedupPayloadSet::from_canonical_parts(&plan, &metadata, &payload_bytes),
+            Err(DeltaError::ChunkPayloadHashMismatch { .. })
+        ));
+        payload_bytes.pop();
+        assert!(matches!(
+            DeltaDedupPayloadSet::from_canonical_parts(&plan, &metadata, &payload_bytes),
+            Err(DeltaError::DeltaSendPlanPayloadBytesMismatch { .. })
+        ));
     }
 
     #[test]

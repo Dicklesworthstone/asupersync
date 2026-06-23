@@ -6,7 +6,9 @@
 //! final coverage check before any caller commits reconstructed bytes.
 
 use crate::atp::dedupe::{DeltaDedupPayloadSet, payload_matches_key};
-use crate::atp::delta::{ContentAddressedChunkStore, DeltaError, PersistentChunkManifest};
+use crate::atp::delta::{
+    ContentAddressedChunkStore, DeltaError, DeltaResyncPlan, PersistentChunkManifest,
+};
 
 /// Summary of applying a deduped delta payload set.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +64,19 @@ pub fn reconcile_dedup_payload_set(
             reconstructed_bytes: target_manifest.total_size_bytes,
         },
     ))
+}
+
+/// Decode canonical dedupe parts and apply them to the receiver CAS.
+pub fn reconcile_canonical_dedup_payload_parts(
+    target_manifest: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    plan: &DeltaResyncPlan,
+    metadata_bytes: &[u8],
+    unique_payload_bytes: &[u8],
+) -> Result<(ContentAddressedChunkStore, DeltaReconcileReport), DeltaError> {
+    let payload_set =
+        DeltaDedupPayloadSet::from_canonical_parts(plan, metadata_bytes, unique_payload_bytes)?;
+    reconcile_dedup_payload_set(target_manifest, receiver_store, &payload_set)
 }
 
 fn verify_placements(
@@ -194,6 +209,41 @@ mod tests {
         assert_eq!(report.reconstructed_bytes, sender.total_size_bytes);
         let rebuilt = reconstruct_manifest_bytes(&sender, &store).expect("reconstruct");
         assert_eq!(rebuilt, b"alphabetaalpha".as_slice());
+    }
+
+    #[test]
+    fn reconcile_applies_canonical_dedup_payload_parts() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[&b"repeat"[..], &b"middle"[..], &b"repeat"[..]],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let payload_set = build_dedup_payload_set(&plan, &sender_store).expect("payload set");
+        let metadata = payload_set.send_set.to_canonical_bytes().expect("metadata");
+        let payload_bytes = payload_set
+            .to_canonical_payload_bytes()
+            .expect("payload bytes");
+
+        let (store, report) = reconcile_canonical_dedup_payload_parts(
+            &sender,
+            &receiver_store,
+            &plan,
+            &metadata,
+            &payload_bytes,
+        )
+        .expect("canonical reconcile");
+
+        assert_eq!(report.unique_payloads, 2);
+        assert_eq!(report.duplicate_logical_chunks, 1);
+        assert_eq!(report.reconstructed_bytes, sender.total_size_bytes);
+        let rebuilt = reconstruct_manifest_bytes(&sender, &store).expect("reconstruct");
+        assert_eq!(rebuilt, b"repeatmiddlerepeat".as_slice());
     }
 
     #[test]
