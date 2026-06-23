@@ -4539,6 +4539,7 @@ struct NativeQuicFrameTransport {
     codec: AtpFrameCodec,
     rbuf: BytesMut,
     last_sent_range: Option<std::ops::Range<u64>>,
+    last_object_request_range: Option<std::ops::Range<u64>>,
 }
 
 #[allow(dead_code)]
@@ -4554,6 +4555,7 @@ impl NativeQuicFrameTransport {
             codec: AtpFrameCodec::new(),
             rbuf: BytesMut::new(),
             last_sent_range: None,
+            last_object_request_range: None,
         }
     }
 
@@ -4570,6 +4572,9 @@ impl NativeQuicFrameTransport {
         let end = start.saturating_add(u64::try_from(wire.len()).unwrap_or(u64::MAX));
         conn.write_stream_bytes(cx, self.stream, Bytes::from(wire), false)?;
         self.last_sent_range = Some(start..end);
+        if frame.frame_type() == FrameType::ObjectRequest {
+            self.last_object_request_range = Some(start..end);
+        }
         Ok(())
     }
 
@@ -4590,6 +4595,17 @@ impl NativeQuicFrameTransport {
         conn: &mut NativeQuicConnection,
     ) -> Result<usize, QuicTransportError> {
         let Some(range) = self.last_sent_range.clone() else {
+            return Ok(0);
+        };
+        Ok(conn.requeue_sent_stream_frames_in_range(cx, self.stream, range.start, range.end)?)
+    }
+
+    fn requeue_last_object_request(
+        &mut self,
+        cx: &Cx,
+        conn: &mut NativeQuicConnection,
+    ) -> Result<usize, QuicTransportError> {
+        let Some(range) = self.last_object_request_range.clone() else {
             return Ok(0);
         };
         Ok(conn.requeue_sent_stream_frames_in_range(cx, self.stream, range.start, range.end)?)
@@ -8390,6 +8406,78 @@ mod tests {
             .try_recv(&cx, &mut native_server)
             .expect("missing local stream behaves like EOF");
         assert!(frame.is_none());
+    }
+
+    #[test]
+    fn native_frame_transport_requeues_need_more_after_keepalive() {
+        let (cx, client, server) = established_pair();
+        let mut native_client = client.inner().clone();
+        let mut native_server = server.inner().clone();
+        let mut tx =
+            NativeQuicFrameTransport::open(&cx, &mut native_client).expect("open native control");
+        let mut rx = NativeQuicFrameTransport::for_stream(first_client_bidi_stream());
+        let need = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 0,
+                symbols: 3,
+            }],
+            ..QuicNeedMore::default()
+        };
+        let need_frame = json_frame(FrameType::ObjectRequest, &need).expect("need-more frame");
+        let keepalive = Frame::empty(FrameType::KeepAlive).expect("keepalive frame");
+        let mut packet_number = 0u64;
+
+        tx.send(&cx, &mut native_client, &need_frame)
+            .expect("send need-more");
+        tx.send(&cx, &mut native_client, &keepalive)
+            .expect("send keepalive");
+        let dropped_frames = native_client
+            .generate_frames(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                DEFAULT_MAX_PACKET_BYTES,
+            )
+            .expect("emit original control frames");
+        assert!(
+            dropped_frames
+                .iter()
+                .any(|frame| matches!(frame, QuicFrame::Stream { .. })),
+            "original NeedMore must be emitted on the control stream before loss"
+        );
+        packet_number = packet_number.saturating_add(1);
+        assert!(
+            rx.try_recv(&cx, &mut native_server)
+                .expect("dropped packet leaves receiver empty")
+                .is_none()
+        );
+
+        let requeued = tx
+            .requeue_last_object_request(&cx, &mut native_client)
+            .expect("requeue need-more");
+        assert!(
+            requeued > 0,
+            "NeedMore replay must not be clobbered by later keepalive sends"
+        );
+        pump_native_until_idle(
+            &cx,
+            &mut native_client,
+            &mut native_server,
+            &mut packet_number,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_701,
+        )
+        .expect("deliver replayed need-more");
+        let replay = rx
+            .try_recv(&cx, &mut native_server)
+            .expect("decode replayed need-more")
+            .expect("replayed need-more present");
+        assert_eq!(replay.frame_type(), FrameType::ObjectRequest);
+        assert_eq!(
+            parse_json::<QuicNeedMore>(&replay).expect("parse replayed need-more"),
+            need
+        );
     }
 
     #[test]

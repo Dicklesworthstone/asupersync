@@ -1003,6 +1003,32 @@ impl QuicLink {
             idle_pto_attempts = 0;
         }
     }
+
+    /// Poll the feedback control stream for one short PTO.
+    ///
+    /// Unlike [`Self::next_control_frame`], this returns `Ok(None)` when the
+    /// sender-side feedback PTO goes quiet. The ATP sender can then actively
+    /// re-serve the last outstanding NeedMore with fresh repair symbols instead
+    /// of only sending keepalives while the receiver is still short.
+    async fn next_feedback_control_frame(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+    ) -> Result<Option<Frame>, QuicTransportError> {
+        loop {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            if let Some(frame) = self.pending_control_frames.pop_front() {
+                return Ok(Some(frame));
+            }
+            if let Some(frame) = control.try_recv(cx, &mut self.conn)? {
+                return Ok(Some(frame));
+            }
+            self.flush(cx).await?;
+            if self.pump_inbound_for(cx, NEEDMORE_PTO).await? == 0 {
+                return Ok(None);
+            }
+        }
+    }
 }
 
 /// Bind a `QuicUdpEndpoint` on `local`, tuned for the ATP-over-QUIC handshake.
@@ -1583,6 +1609,111 @@ async fn spray_block_repair_requests(
     Ok(sent)
 }
 
+async fn send_native_need_more_response_round(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    manifest: &TransferManifest,
+    encoders: &mut [QuicEntryEncoder],
+    need: &QuicNeedMore,
+    config: &QuicConfig,
+    symbol_auth: Option<&SecurityContext>,
+    aimd: &mut NativeQuicAimdPacer,
+    symbols_sent: &mut u64,
+    feedback_rounds: u32,
+    late_resend_attempt: Option<u32>,
+) -> Result<u64, QuicTransportError> {
+    let requested_repair_symbols = need_more_repair_symbol_count(need);
+    if let Some(attempt) = late_resend_attempt {
+        quic_rqtrace!(
+            "sender: late NeedMore re-serve round={feedback_rounds} attempt={} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={}",
+            attempt,
+            need.pending.len(),
+            need.repair_blocks.len(),
+            requested_repair_symbols,
+            need.source_symbols.len(),
+            *symbols_sent,
+            aimd.last_round_symbols_sent,
+            aimd.last_round_pacing_rate_bps,
+        );
+    }
+    if need.pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
+        super::trace_quic_sender_repair_round(
+            cx,
+            feedback_rounds,
+            super::quic_need_more_response_mode(need),
+            *symbols_sent,
+            0,
+            need,
+        );
+        super::send_native_object_complete(cx, &mut link.conn, control, 0)?;
+        link.flush(cx).await?;
+        return Ok(0);
+    }
+    let _pending = super::validate_need_more_feedback(manifest, config, need)?;
+    let symbols_before = *symbols_sent;
+    let response_mode = super::quic_need_more_response_mode(need);
+    let sent = if !need.repair_blocks.is_empty() {
+        spray_block_repair_requests(
+            cx,
+            link,
+            control,
+            manifest,
+            encoders,
+            &need.repair_blocks,
+            config,
+            symbol_auth,
+            aimd,
+        )
+        .await?
+    } else if !need.source_symbols.is_empty() {
+        spray_source_requests(
+            cx,
+            link,
+            control,
+            manifest,
+            encoders,
+            &need.source_symbols,
+            config,
+            symbol_auth,
+            aimd,
+        )
+        .await?
+    } else {
+        return Err(QuicTransportError::Integrity(
+            "receiver NeedMore had pending entries but no targeted repair/source requests"
+                .to_string(),
+        ));
+    };
+    if !need.repair_blocks.is_empty() && sent != requested_repair_symbols {
+        return Err(QuicTransportError::Integrity(format!(
+            "native QUIC repair round emitted {sent} symbols for {requested_repair_symbols} requested repair symbols"
+        )));
+    }
+    *symbols_sent = (*symbols_sent).saturating_add(sent);
+    super::trace_quic_sender_repair_round(
+        cx,
+        feedback_rounds,
+        response_mode,
+        symbols_before,
+        sent,
+        need,
+    );
+    quic_rqtrace!(
+        "sender: repair_round round={feedback_rounds} late_resend_attempt={} emitted_symbols={sent} requested_repair_symbols={requested_repair_symbols} total_symbols_sent={} pacing_rate_bps={} max_feedback_rounds={} round_cap_enforced=false",
+        late_resend_attempt.unwrap_or(0),
+        *symbols_sent,
+        aimd.last_round_pacing_rate_bps,
+        config.max_feedback_rounds,
+    );
+    // Flush this round's repair/source symbols before ObjectComplete
+    // (same ordering guarantee as the initial spray).
+    link.flush(cx).await?;
+    super::send_native_object_complete(cx, &mut link.conn, control, sent)?;
+    link.flush(cx).await?;
+    Ok(sent)
+}
+
 /// Receiver `HandshakeAck` parse (mirrors `super::receive_native_sender_hello_ack`).
 fn parse_hello_ack(frame: &Frame) -> Result<QuicHelloAck, QuicTransportError> {
     if frame.frame_type() != FrameType::HandshakeAck {
@@ -1666,11 +1797,55 @@ async fn run_sender_session(
     link.flush(cx).await?;
 
     let mut feedback_rounds = 0u32;
+    let mut feedback_idle_pto_attempts = 0u32;
+    let mut last_targeted_need: Option<QuicNeedMore> = None;
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let reply_frame = link
-            .next_control_frame(cx, &mut control, "receive proof or fountain feedback")
-            .await?;
+        let reply_frame = loop {
+            match link.next_feedback_control_frame(cx, &mut control).await? {
+                Some(frame) => {
+                    break frame;
+                }
+                None => {
+                    if feedback_idle_pto_attempts >= MAX_FEEDBACK_IDLE_PTO {
+                        return Err(QuicTransportError::Timeout {
+                            operation: "receive proof or fountain feedback",
+                            timeout: NEEDMORE_PTO,
+                        });
+                    }
+                    feedback_idle_pto_attempts = feedback_idle_pto_attempts.saturating_add(1);
+                    if let Some(need) = last_targeted_need.clone() {
+                        let sent = send_native_need_more_response_round(
+                            cx,
+                            link,
+                            &mut control,
+                            manifest,
+                            &mut encoders,
+                            &need,
+                            config,
+                            symbol_auth.as_ref(),
+                            &mut aimd,
+                            &mut symbols_sent,
+                            feedback_rounds,
+                            Some(feedback_idle_pto_attempts),
+                        )
+                        .await?;
+                        if sent == 0 {
+                            last_targeted_need = None;
+                        }
+                    } else {
+                        quic_rqtrace!(
+                            "sender: feedback wait PTO attempt={} max_attempts={} operation={}",
+                            feedback_idle_pto_attempts,
+                            MAX_FEEDBACK_IDLE_PTO,
+                            "receive proof or fountain feedback",
+                        );
+                        send_native_keep_alive(cx, &mut link.conn, &mut control)?;
+                        link.flush(cx).await?;
+                    }
+                }
+            }
+        };
         let reply = match reply_frame.frame_type() {
             FrameType::Proof => {
                 QuicControlReply::Proof(super::parse_json::<ReceiveReceipt>(&reply_frame)?)
@@ -1678,7 +1853,10 @@ async fn run_sender_session(
             FrameType::ObjectRequest => {
                 QuicControlReply::NeedMore(super::parse_json::<QuicNeedMore>(&reply_frame)?)
             }
-            FrameType::KeepAlive => continue,
+            FrameType::KeepAlive => {
+                feedback_idle_pto_attempts = 0;
+                continue;
+            }
             got => {
                 return Err(QuicTransportError::Unexpected {
                     got,
@@ -1710,12 +1888,22 @@ async fn run_sender_session(
                 });
             }
             QuicControlReply::NeedMore(need) => {
-                aimd.observe_need_more(cx, &need);
-                feedback_rounds = feedback_rounds.saturating_add(1);
+                let repeated_need = last_targeted_need.as_ref() == Some(&need);
+                let late_reserve_attempt = if repeated_need {
+                    feedback_idle_pto_attempts = feedback_idle_pto_attempts.saturating_add(1);
+                    Some(feedback_idle_pto_attempts)
+                } else {
+                    feedback_idle_pto_attempts = 0;
+                    aimd.observe_need_more(cx, &need);
+                    feedback_rounds = feedback_rounds.saturating_add(1);
+                    None
+                };
                 let requested_repair_symbols = need_more_repair_symbol_count(&need);
                 let repair_detail = repair_block_trace_summary(&need.repair_blocks);
                 quic_rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
+                    "sender: NeedMore round={feedback_rounds} repeated={} late_reserve_attempt={} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
+                    repeated_need,
+                    late_reserve_attempt.unwrap_or(0),
                     need.pending.len(),
                     need.repair_blocks.len(),
                     requested_repair_symbols,
@@ -1742,81 +1930,29 @@ async fn run_sender_session(
                     None,
                     aimd.cap_bps(),
                 );
-                if need.pending.is_empty()
-                    && need.repair_blocks.is_empty()
-                    && need.source_symbols.is_empty()
-                {
-                    super::trace_quic_sender_repair_round(
-                        cx,
-                        feedback_rounds,
-                        super::quic_need_more_response_mode(&need),
-                        symbols_sent,
-                        0,
-                        &need,
-                    );
-                    super::send_native_object_complete(cx, &mut link.conn, &mut control, 0)?;
-                    link.flush(cx).await?;
-                    continue;
-                }
-                let _pending = super::validate_need_more_feedback(manifest, config, &need)?;
-                let symbols_before = symbols_sent;
-                let response_mode = super::quic_need_more_response_mode(&need);
-                let sent = if !need.repair_blocks.is_empty() {
-                    spray_block_repair_requests(
-                        cx,
-                        link,
-                        &mut control,
-                        manifest,
-                        &mut encoders,
-                        &need.repair_blocks,
-                        config,
-                        symbol_auth.as_ref(),
-                        &mut aimd,
-                    )
-                    .await?
-                } else if !need.source_symbols.is_empty() {
-                    spray_source_requests(
-                        cx,
-                        link,
-                        &mut control,
-                        manifest,
-                        &encoders,
-                        &need.source_symbols,
-                        config,
-                        symbol_auth.as_ref(),
-                        &mut aimd,
-                    )
-                    .await?
-                } else {
-                    return Err(QuicTransportError::Integrity(
-                        "receiver NeedMore had pending entries but no targeted repair/source requests"
-                            .to_string(),
-                    ));
-                };
-                if !need.repair_blocks.is_empty() && sent != requested_repair_symbols {
-                    return Err(QuicTransportError::Integrity(format!(
-                        "native QUIC repair round emitted {sent} symbols for {requested_repair_symbols} requested repair symbols"
-                    )));
-                }
-                symbols_sent = symbols_sent.saturating_add(sent);
-                super::trace_quic_sender_repair_round(
+                let has_targeted_work = !need.pending.is_empty()
+                    || !need.repair_blocks.is_empty()
+                    || !need.source_symbols.is_empty();
+                let sent = send_native_need_more_response_round(
                     cx,
-                    feedback_rounds,
-                    response_mode,
-                    symbols_before,
-                    sent,
+                    link,
+                    &mut control,
+                    manifest,
+                    &mut encoders,
                     &need,
-                );
-                quic_rqtrace!(
-                    "sender: repair_round round={feedback_rounds} emitted_symbols={sent} requested_repair_symbols={requested_repair_symbols} total_symbols_sent={symbols_sent} pacing_rate_bps={} max_feedback_rounds={} round_cap_enforced=false",
-                    aimd.last_round_pacing_rate_bps,
-                    config.max_feedback_rounds,
-                );
-                // Flush this round's repair/source symbols before ObjectComplete
-                // (same ordering guarantee as the initial spray).
-                link.flush(cx).await?;
-                super::send_native_object_complete(cx, &mut link.conn, &mut control, sent)?;
-                link.flush(cx).await?;
+                    config,
+                    symbol_auth.as_ref(),
+                    &mut aimd,
+                    &mut symbols_sent,
+                    feedback_rounds,
+                    late_reserve_attempt,
+                )
+                .await?;
+                last_targeted_need = if has_targeted_work && sent > 0 {
+                    Some(need)
+                } else {
+                    None
+                };
             }
         }
     }
@@ -2474,7 +2610,7 @@ async fn run_receiver_session(
                                 MAX_NEEDMORE_PTO,
                             );
                             let requeued_stream_frames =
-                                control.requeue_last_sent(cx, &mut link.conn)?;
+                                control.requeue_last_object_request(cx, &mut link.conn)?;
                             if requeued_stream_frames == 0 {
                                 super::send_native_need_more(
                                     cx,
