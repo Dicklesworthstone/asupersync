@@ -43,6 +43,6 @@ pub use handshake::{
     BondingHandshake, BondingHandshakeError,
 };
 pub use receiver::{
-    BondedDonorIngressStats, BondedReceiverIngressStats, BondedReceiverSymbolSet,
-    BondedSymbolDisposition, BondedSymbolKey,
+    BondedBlockCoverage, BondedDonorIngressStats, BondedReceiverIngressStats,
+    BondedReceiverSymbolSet, BondedSymbolDisposition, BondedSymbolKey,
 };

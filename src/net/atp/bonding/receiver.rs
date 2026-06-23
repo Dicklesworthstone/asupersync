@@ -136,6 +136,29 @@ pub enum BondedSymbolDisposition {
     Duplicate(BondedSymbolKey),
 }
 
+/// Receiver coverage for one bonded RaptorQ source block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondedBlockCoverage {
+    /// RaptorQ object id shared by all bonded donors.
+    pub object_id: ObjectId,
+    /// Source block number within the object.
+    pub sbn: u8,
+    /// Accepted symbols needed before the block can stop asking for repair.
+    pub target_symbols: u32,
+    /// Globally novel symbols accepted for this block.
+    pub accepted_symbols: u32,
+    /// Additional symbols needed to reach `target_symbols`.
+    pub deficit_symbols: u32,
+}
+
+impl BondedBlockCoverage {
+    /// True when the block has reached or exceeded its target.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        self.deficit_symbols == 0
+    }
+}
+
 /// Receiver-side C2 registry for authenticated donor symbols.
 #[derive(Debug, Clone, Default)]
 pub struct BondedReceiverSymbolSet {
@@ -247,6 +270,47 @@ impl BondedReceiverSymbolSet {
     #[must_use]
     pub fn donor_stats(&self, donor_index: u32) -> Option<BondedDonorIngressStats> {
         self.donor_stats.get(&donor_index).copied()
+    }
+
+    /// Compute aggregate coverage for one source block.
+    ///
+    /// The count is global across donors and deduplicated by `(object_id, sbn,
+    /// esi)`, so duplicate donor retransmits cannot hide a remaining deficit.
+    #[must_use]
+    pub fn block_coverage(
+        &self,
+        object_id: ObjectId,
+        sbn: u8,
+        target_symbols: u32,
+    ) -> BondedBlockCoverage {
+        let accepted_symbols = self
+            .seen
+            .iter()
+            .filter(|key| key.object_id == object_id && key.sbn == sbn)
+            .count()
+            .min(u32::MAX as usize) as u32;
+        BondedBlockCoverage {
+            object_id,
+            sbn,
+            target_symbols,
+            accepted_symbols,
+            deficit_symbols: target_symbols.saturating_sub(accepted_symbols),
+        }
+    }
+
+    /// Return coverage rows only for blocks that still need repair symbols.
+    #[must_use]
+    pub fn blocks_needing_more(
+        &self,
+        blocks: impl IntoIterator<Item = (ObjectId, u8, u32)>,
+    ) -> Vec<BondedBlockCoverage> {
+        blocks
+            .into_iter()
+            .map(|(object_id, sbn, target_symbols)| {
+                self.block_coverage(object_id, sbn, target_symbols)
+            })
+            .filter(|coverage| !coverage.is_complete())
+            .collect()
     }
 }
 
@@ -369,6 +433,59 @@ mod tests {
         assert_eq!(donor1.duplicate_symbols, 2);
         assert_eq!(donor1.source_symbols_accepted, 0);
         assert_eq!(donor1.repair_symbols_accepted, 0);
+    }
+
+    #[test]
+    fn block_coverage_counts_deduplicated_symbols_across_donors() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(13);
+
+        for (donor, esi) in [(0, 0), (1, 1), (2, 2), (3, 2)] {
+            set.record_key(
+                donor,
+                BondedSymbolKey::new(object_id, 0, esi),
+                SymbolKind::Repair,
+            );
+        }
+
+        let coverage = set.block_coverage(object_id, 0, 4);
+
+        assert_eq!(
+            coverage,
+            BondedBlockCoverage {
+                object_id,
+                sbn: 0,
+                target_symbols: 4,
+                accepted_symbols: 3,
+                deficit_symbols: 1,
+            }
+        );
+        assert!(!coverage.is_complete());
+
+        set.record_key(4, BondedSymbolKey::new(object_id, 0, 3), SymbolKind::Repair);
+        assert!(set.block_coverage(object_id, 0, 4).is_complete());
+    }
+
+    #[test]
+    fn blocks_needing_more_reports_only_incomplete_blocks() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(17);
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 1, 1), SymbolKind::Repair);
+
+        let needs_more = set.blocks_needing_more([(object_id, 0, 2), (object_id, 1, 2)]);
+
+        assert_eq!(
+            needs_more,
+            vec![BondedBlockCoverage {
+                object_id,
+                sbn: 0,
+                target_symbols: 2,
+                accepted_symbols: 1,
+                deficit_symbols: 1,
+            }]
+        );
     }
 
     #[test]
