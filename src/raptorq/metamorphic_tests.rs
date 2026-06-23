@@ -9,7 +9,7 @@ use crate::config::RaptorQConfig;
 use crate::cx::Cx;
 use crate::raptorq::builder::RaptorQSenderBuilder;
 use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-use crate::raptorq::linalg::GaussianResult;
+use crate::raptorq::linalg::GaussianOutcomeKind;
 use crate::raptorq::systematic::SystematicEncoder;
 use crate::security::AuthenticatedSymbol;
 use crate::transport::sink::SymbolSink;
@@ -2477,6 +2477,11 @@ fn mr_gaussian_solve_determinism() {
                 let result2 = solver2.solve_markowitz();
 
                 // Both methods should agree on solvability classification
+                prop_assert_eq!(
+                    result1.outcome_kind(), result2.outcome_kind(),
+                    "Gaussian solver determinism violation: solve() = {:?}, solve_markowitz() = {:?}",
+                    result1.outcome_kind(), result2.outcome_kind()
+                );
                 match (&result1, &result2) {
                     (GaussianResult::Solved(sol1), GaussianResult::Solved(sol2)) => {
                         // Solutions may differ in specific values due to pivot choice,
@@ -2495,7 +2500,7 @@ fn mr_gaussian_solve_determinism() {
                     _ => {
                         prop_assert!(false,
                             "Gaussian solver determinism violation: solve() = {:?}, solve_markowitz() = {:?}",
-                            classify_result(&result1), classify_result(&result2)
+                            result1.outcome_kind(), result2.outcome_kind()
                         );
                     }
                 }
@@ -2504,12 +2509,14 @@ fn mr_gaussian_solve_determinism() {
     });
 }
 
-fn classify_result(result: &GaussianResult) -> &'static str {
-    match result {
-        GaussianResult::Solved(_) => "Solved",
-        GaussianResult::Singular { .. } => "Singular",
-        GaussianResult::Inconsistent { .. } => "Inconsistent",
-    }
+#[test]
+fn gaussian_outcome_kind_debug_labels_are_stable_for_metamorphic_logs() {
+    assert_eq!(format!("{:?}", GaussianOutcomeKind::Solved), "Solved");
+    assert_eq!(format!("{:?}", GaussianOutcomeKind::Singular), "Singular");
+    assert_eq!(
+        format!("{:?}", GaussianOutcomeKind::Inconsistent),
+        "Inconsistent"
+    );
 }
 
 /// MR-MatrixOperationRankMonotonicity: Matrix operations should respect rank properties.
