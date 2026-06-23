@@ -1897,3 +1897,17 @@ Benched encrypted 50M after j80p42 loop-fix `f2ba4038c` "keep repair feedback lo
 2. **Unpaced:** sending 46000 symbols into a 50mbit link overruns it → **observed loss 14.73%** (vs netem's 2%) — self-inflicted. Most re-sent symbols are dropped, so per-block deficits shrink slowly → good crawls (414s), bad never converges in budget. (Not a round cap — `round_cap_exceeded=false`, 1024-round budget unused.)
 
 **NEXT LEVER (perf bead filed):** the repair loop must (a) emit ONLY the requested per-block repair symbols (~7430, not 46000) per NeedMore, and (b) PACE them to the link rate (AIMD/token-bucket, like the nocrypto rq path) so self-loss stays ~2% not 15%. That bounded+paced repair should cut good from 414s toward rsync's 4s AND let bad converge. j80p42 = correctness foothold (kept as evidence); the win needs this efficiency fix. Evidence: `artifacts/atp_bench_matrix/20260623T050640Z/` (trace in cells/50M/bad/encrypted/atp-quic-tls13/rep*/).
+
+## MATRIX-45 (2026-06-23) — ⚠️REGRESSION: lqmfsi "target+pace repairs" made encrypted-good WORSE (j80p42's 2/3 → 0/3). Targeting correct, but sender abandons LATE NeedMore → receiver PTO-exhausts. RECOMMEND revert 569d9b291 or fix-forward.
+
+Benched encrypted 50M after lqmfsi `569d9b291` "fix(atp-quic): target and pace encrypted repairs". Run `artifacts/atp_bench_matrix/20260623T061649Z/`, 3 reps:
+
+| regime | atp-quic-tls13 | rsync-ssh | vs j80p42 (MATRIX-44) |
+|---|---|---|---|
+| perfect | 31.5s sha-ok (3/3) | 0.9s | ~same (fine) |
+| good | **0/3 ASUP-E804** | 4.0s | ⚠️REGRESSED from 2/3 sha-ok |
+| bad | 0/3 ASUP-E804 | 19.1s | still fails |
+
+**lqmfsi is a NET REGRESSION on encrypted-good.** j80p42 (MATRIX-44) got good to 2/3 sha-ok (414s, wasteful-but-converges); lqmfsi dropped it to 0/3. The targeting half WORKS — trace shows the receiver correctly requests ONLY the deficit (`requested_repair_symbols=1640` for 29 incomplete blocks, reaching 45926/46000 = 99.8%, only ~74 short) — but the new failure mode is the sender **abandoning late NeedMore**: `[ATP_RQ_TRACE] receiver: NeedMore PTO resend round=1 attempt=40 pending=1 repair_blocks=29 max_attempts=40` — the receiver re-sends its final repair request up to max_attempts=40, gets NO repair back, then times out (ASUP-E804). So lqmfsi traded j80p42's "over-send but converge" for "targeted+paced but the sender quits before serving the last-mile NeedMore." Contained to the encrypted transport_quic path (nocrypto/auth/tree wins unaffected); perfect/clean fine (31.5s).
+
+**RECOMMENDATION (swarm owns transport_quic):** either (a) **REVERT 569d9b291** to restore j80p42's converges-slow baseline (good 2/3 @414s — at least correct), OR (b) **FIX-FORWARD**: keep lqmfsi's targeting+pacing BUT the sender must NOT exit its serve loop while the receiver has pending blocks — it must keep answering late NeedMore (re-serve the requested deficit, paced) until the receiver acks ALL blocks complete. Also: receiver `NeedMore PTO max_attempts=40` may be too few, and/or the NeedMore control message isn't reaching the sender on the lossy link (consider sending it on the reliable QUIC control stream, not a droppable datagram). GATE for the real win: encrypted good+bad sha_ok=true AND wall « 414s (toward rsync's 4s). Commented lqmfsi+j80p42, dispatched. Evidence: `artifacts/atp_bench_matrix/20260623T061649Z/` (trace in cells/50M/good/encrypted/atp-quic-tls13/rep1/).
