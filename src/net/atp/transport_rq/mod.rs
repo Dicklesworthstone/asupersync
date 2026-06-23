@@ -9542,6 +9542,25 @@ mod tests {
     }
 
     #[test]
+    fn source_retransmit_repair_only_rounds_keep_fec_fallback_enabled() {
+        let config = RqConfig {
+            repair_overhead: 1.0,
+            source_retransmit_rounds: 2,
+            max_source_retransmit_requests: 17,
+            max_feedback_rounds: 16,
+            ..RqConfig::default()
+        };
+
+        assert_eq!(source_retransmit_request_limit(&config, 3), None);
+        for feedback_round in (config.source_retransmit_rounds + 1)..=config.max_feedback_rounds {
+            assert!(
+                source_retransmit_needs_fec_fallback(&config, feedback_round, 0),
+                "repair-only feedback round {feedback_round} must keep FEC fallback enabled"
+            );
+        }
+    }
+
+    #[test]
     fn round0_loss_target_keeps_clean_and_good_links_source_first() {
         for target in [0.0, 0.001] {
             let config = RqConfig {
