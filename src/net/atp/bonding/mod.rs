@@ -22,9 +22,11 @@ pub mod receiver;
 
 pub use assignment::{
     BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondScheduleError, BondedBlockRepairSchedule,
-    BondedBlockSpraySchedule, BondedDonorSpraySchedule, BondedSymbolAuthVerdict,
+    BondedBlockSourceFirstCoverage, BondedBlockSpraySchedule, BondedDonorSourceFirstCoverage,
+    BondedDonorSpraySchedule, BondedSourceFirstCoverage, BondedSymbolAuthVerdict,
     BondedSymbolRejectReason, DonorAssignment, DonorAssignmentError, EsiWindow, MAX_BONDING_DONORS,
-    schedule_bonded_donor_spray, schedule_bonded_repair_continuation, verify_bonded_symbol_tag,
+    schedule_bonded_donor_spray, schedule_bonded_repair_continuation,
+    schedule_bonded_source_first_coverage, verify_bonded_symbol_tag,
 };
 pub use descriptor::{
     BondEntry, BondEntryBlockGeometry, BondProofError, BondTransferDescriptor,

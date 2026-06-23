@@ -16,7 +16,7 @@
 //!   before data-path consumers persist or decode the symbol.
 
 use core::fmt;
-use std::net::SocketAddr;
+use std::{collections::BTreeSet, net::SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
@@ -253,6 +253,68 @@ impl BondedDonorSpraySchedule {
     }
 }
 
+/// Collective source-range coverage for a bonded transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedSourceFirstCoverage {
+    /// Number of donor assignments included in the report.
+    pub assignment_count: usize,
+    /// Per-entry/source-block source ESI coverage.
+    pub blocks: Vec<BondedBlockSourceFirstCoverage>,
+}
+
+impl BondedSourceFirstCoverage {
+    /// True when every block has every source ESI covered exactly once.
+    #[must_use]
+    pub fn is_source_complete_exactly_once(&self) -> bool {
+        self.blocks
+            .iter()
+            .all(BondedBlockSourceFirstCoverage::is_source_complete_exactly_once)
+    }
+}
+
+/// Per-block aggregate source ESI coverage across all donors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedBlockSourceFirstCoverage {
+    /// Descriptor-agreed RaptorQ identity and source-block geometry.
+    pub geometry: BondEntryBlockGeometry,
+    /// Per-donor source range ownership for this block.
+    pub donors: Vec<BondedDonorSourceFirstCoverage>,
+    /// Source ESIs not covered by any donor assignment.
+    pub missing_source_esis: Vec<u32>,
+    /// Source ESIs covered by more than one donor assignment.
+    pub duplicate_source_esis: Vec<u32>,
+}
+
+impl BondedBlockSourceFirstCoverage {
+    /// True when this block can complete from source symbols without decode.
+    #[must_use]
+    pub fn is_source_complete_exactly_once(&self) -> bool {
+        self.missing_source_esis.is_empty() && self.duplicate_source_esis.is_empty()
+    }
+
+    /// Count all donor-owned source ESIs for this block.
+    #[must_use]
+    pub fn scheduled_source_symbol_count(&self) -> usize {
+        self.donors
+            .iter()
+            .map(|donor| donor.source_esis.len())
+            .sum()
+    }
+}
+
+/// One donor's source-first work for a single source block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedDonorSourceFirstCoverage {
+    /// Zero-based donor index.
+    pub donor_index: u32,
+    /// Systematic/source ESIs owned by this donor (`esi < K`).
+    pub source_esis: Vec<u32>,
+    /// First repair ESI this donor owns after the source range, if known.
+    pub first_repair_esi: Option<u32>,
+    /// Same donor-local timing stagger as the spray schedule.
+    pub stagger_delay_slots: u32,
+}
+
 /// Per-source-block ESI assignment for one donor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BondedBlockSpraySchedule {
@@ -324,6 +386,20 @@ pub enum BondScheduleError {
     InvalidAssignment(DonorAssignmentError),
     /// The shared transfer descriptor is invalid.
     InvalidDescriptor(BondProofError),
+    /// A collective schedule needs at least one donor assignment.
+    NoDonorAssignments,
+    /// All donors must agree on the same donor-count geometry.
+    InconsistentDonorCount {
+        /// Donor count from the first assignment.
+        expected: u32,
+        /// Donor count from a later assignment.
+        actual: u32,
+    },
+    /// The same donor index appeared more than once in one collective schedule.
+    DuplicateDonorAssignment {
+        /// Reused donor index.
+        donor_index: u32,
+    },
     /// Repair ESI budget overflowed the `u32` ESI space.
     RepairBudgetOverflow {
         /// Descriptor entry index.
@@ -375,6 +451,17 @@ impl fmt::Display for BondScheduleError {
         match self {
             Self::InvalidAssignment(err) => write!(f, "{err}"),
             Self::InvalidDescriptor(err) => write!(f, "{err}"),
+            Self::NoDonorAssignments => {
+                f.write_str("channel-bonding source coverage needs at least one donor assignment")
+            }
+            Self::InconsistentDonorCount { expected, actual } => write!(
+                f,
+                "channel-bonding donor count mismatch in collective schedule: expected {expected}, got {actual}"
+            ),
+            Self::DuplicateDonorAssignment { donor_index } => write!(
+                f,
+                "channel-bonding collective schedule has duplicate donor assignment {donor_index}"
+            ),
             Self::RepairBudgetOverflow {
                 entry_index,
                 source_block_number,
@@ -420,7 +507,10 @@ impl std::error::Error for BondScheduleError {
         match self {
             Self::InvalidAssignment(err) => Some(err),
             Self::InvalidDescriptor(err) => Some(err),
-            Self::RepairBudgetOverflow { .. }
+            Self::NoDonorAssignments
+            | Self::InconsistentDonorCount { .. }
+            | Self::DuplicateDonorAssignment { .. }
+            | Self::RepairBudgetOverflow { .. }
             | Self::RepairStartBeforeSource { .. }
             | Self::RepairContinuationOverflow { .. }
             | Self::InsufficientRepairWindow { .. } => None,
@@ -470,6 +560,45 @@ pub fn schedule_bonded_donor_spray(
     Ok(BondedDonorSpraySchedule {
         donor_index: assignment.donor_index,
         donor_count: assignment.donor_count,
+        blocks,
+    })
+}
+
+/// Report collective source-range coverage across a bonded donor set.
+///
+/// B4 uses this pure scheduler check to keep bonded transfers on the systematic
+/// fast path: donors should collectively cover every source ESI (`0..K`) exactly
+/// once before spending bandwidth on repair ESIs. The report is intentionally
+/// non-transport; later RQ/QUIC paths can consume it to decide whether source
+/// retransmit or repair feedback should be preferred.
+pub fn schedule_bonded_source_first_coverage(
+    descriptor: &BondTransferDescriptor,
+    assignments: &[DonorAssignment],
+) -> Result<BondedSourceFirstCoverage, BondScheduleError> {
+    descriptor
+        .validate()
+        .map_err(BondScheduleError::InvalidDescriptor)?;
+    validate_collective_assignments(assignments)?;
+
+    let mut blocks = Vec::new();
+    for entry in &descriptor.entries {
+        let Some(source_block_count) = descriptor.entry_source_block_count(entry.index) else {
+            continue;
+        };
+        for source_block_number in 0..source_block_count {
+            let Ok(source_block_number) = u8::try_from(source_block_number) else {
+                continue;
+            };
+            let Some(geometry) = descriptor.entry_block_geometry(entry.index, source_block_number)
+            else {
+                continue;
+            };
+            blocks.push(schedule_block_source_first_coverage(assignments, geometry));
+        }
+    }
+
+    Ok(BondedSourceFirstCoverage {
+        assignment_count: assignments.len(),
         blocks,
     })
 }
@@ -561,6 +690,96 @@ fn schedule_block(
         next_repair_esi: repair_end,
         stagger_delay_slots: assignment.donor_index,
     })
+}
+
+fn validate_collective_assignments(
+    assignments: &[DonorAssignment],
+) -> Result<(), BondScheduleError> {
+    let Some(first) = assignments.first() else {
+        return Err(BondScheduleError::NoDonorAssignments);
+    };
+    let expected_donor_count = first.donor_count;
+    let mut donor_indices = BTreeSet::new();
+
+    for assignment in assignments {
+        assignment
+            .validate()
+            .map_err(BondScheduleError::InvalidAssignment)?;
+        if assignment.donor_count != expected_donor_count {
+            return Err(BondScheduleError::InconsistentDonorCount {
+                expected: expected_donor_count,
+                actual: assignment.donor_count,
+            });
+        }
+        if !donor_indices.insert(assignment.donor_index) {
+            return Err(BondScheduleError::DuplicateDonorAssignment {
+                donor_index: assignment.donor_index,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn schedule_block_source_first_coverage(
+    assignments: &[DonorAssignment],
+    geometry: BondEntryBlockGeometry,
+) -> BondedBlockSourceFirstCoverage {
+    let source_symbol_count = usize::from(geometry.source_symbols);
+    let mut coverage_counts = vec![0u16; source_symbol_count];
+    let mut donors = Vec::with_capacity(assignments.len());
+
+    for assignment in assignments {
+        let source_esis: Vec<u32> = (0..u32::from(geometry.source_symbols))
+            .filter(|esi| assignment.owns_esi(*esi))
+            .collect();
+        for esi in &source_esis {
+            let slot = &mut coverage_counts[*esi as usize];
+            *slot = slot.saturating_add(1);
+        }
+        donors.push(BondedDonorSourceFirstCoverage {
+            donor_index: assignment.donor_index,
+            source_esis,
+            first_repair_esi: first_assigned_repair_esi_at_or_after(
+                assignment,
+                u32::from(geometry.source_symbols),
+            ),
+            stagger_delay_slots: assignment.donor_index,
+        });
+    }
+
+    let mut missing_source_esis = Vec::new();
+    let mut duplicate_source_esis = Vec::new();
+    for (esi, count) in coverage_counts.into_iter().enumerate() {
+        if count == 0 {
+            missing_source_esis.push(esi as u32);
+        } else if count > 1 {
+            duplicate_source_esis.push(esi as u32);
+        }
+    }
+
+    BondedBlockSourceFirstCoverage {
+        geometry,
+        donors,
+        missing_source_esis,
+        duplicate_source_esis,
+    }
+}
+
+fn first_assigned_repair_esi_at_or_after(
+    assignment: &DonorAssignment,
+    first_repair_esi: u32,
+) -> Option<u32> {
+    if assignment.esi_windows.is_empty() {
+        return first_static_owned_esi_at_or_after(assignment, first_repair_esi);
+    }
+
+    assignment
+        .esi_windows
+        .iter()
+        .filter(|window| window.end_exclusive > first_repair_esi)
+        .map(|window| window.start_inclusive.max(first_repair_esi))
+        .min()
 }
 
 fn schedule_static_repair_continuation(
@@ -899,6 +1118,94 @@ mod tests {
                 assert_eq!(esi % 2, 1);
             }
         }
+    }
+
+    #[test]
+    fn source_first_coverage_proves_static_donors_cover_k_exactly_once() {
+        let descriptor = descriptor();
+        let assignments = vec![
+            DonorAssignment::new_static(0, 2, vec![endpoint()], None),
+            DonorAssignment::new_static(1, 2, vec![endpoint()], None),
+        ];
+
+        let coverage =
+            schedule_bonded_source_first_coverage(&descriptor, &assignments).expect("coverage");
+
+        assert_eq!(coverage.assignment_count, 2);
+        assert_eq!(coverage.blocks.len(), 2);
+        assert!(coverage.is_source_complete_exactly_once());
+
+        for block in &coverage.blocks {
+            assert!(block.is_source_complete_exactly_once());
+            assert_eq!(
+                block.scheduled_source_symbol_count(),
+                usize::from(block.geometry.source_symbols)
+            );
+            assert_eq!(block.missing_source_esis, Vec::<u32>::new());
+            assert_eq!(block.duplicate_source_esis, Vec::<u32>::new());
+            assert_eq!(block.donors[0].donor_index, 0);
+            assert_eq!(block.donors[0].source_esis, vec![0]);
+            assert_eq!(block.donors[0].first_repair_esi, Some(2));
+            assert_eq!(block.donors[0].stagger_delay_slots, 0);
+            assert_eq!(block.donors[1].donor_index, 1);
+            assert_eq!(block.donors[1].source_esis, vec![1]);
+            assert_eq!(block.donors[1].first_repair_esi, Some(3));
+            assert_eq!(block.donors[1].stagger_delay_slots, 1);
+        }
+    }
+
+    #[test]
+    fn source_first_coverage_reports_windowed_missing_and_duplicate_source_esis() {
+        let descriptor = descriptor();
+        let assignments = vec![
+            DonorAssignment::new_windowed(0, 2, vec![EsiWindow::new(0, 1)], vec![endpoint()], None),
+            DonorAssignment::new_windowed(1, 2, vec![EsiWindow::new(0, 1)], vec![endpoint()], None),
+        ];
+
+        let coverage =
+            schedule_bonded_source_first_coverage(&descriptor, &assignments).expect("coverage");
+
+        assert!(!coverage.is_source_complete_exactly_once());
+        for block in &coverage.blocks {
+            assert_eq!(block.missing_source_esis, vec![1]);
+            assert_eq!(block.duplicate_source_esis, vec![0]);
+            assert_eq!(block.scheduled_source_symbol_count(), 2);
+            assert_eq!(block.donors[0].source_esis, vec![0]);
+            assert_eq!(block.donors[0].first_repair_esi, None);
+            assert_eq!(block.donors[1].source_esis, vec![0]);
+            assert_eq!(block.donors[1].first_repair_esi, None);
+        }
+    }
+
+    #[test]
+    fn source_first_coverage_fails_closed_for_invalid_collective_assignments() {
+        let descriptor = descriptor();
+
+        assert_eq!(
+            schedule_bonded_source_first_coverage(&descriptor, &[]),
+            Err(BondScheduleError::NoDonorAssignments)
+        );
+
+        let duplicate = vec![
+            DonorAssignment::new_static(0, 2, vec![endpoint()], None),
+            DonorAssignment::new_static(0, 2, vec![endpoint()], None),
+        ];
+        assert_eq!(
+            schedule_bonded_source_first_coverage(&descriptor, &duplicate),
+            Err(BondScheduleError::DuplicateDonorAssignment { donor_index: 0 })
+        );
+
+        let mismatched_count = vec![
+            DonorAssignment::new_static(0, 2, vec![endpoint()], None),
+            DonorAssignment::new_static(1, 3, vec![endpoint()], None),
+        ];
+        assert_eq!(
+            schedule_bonded_source_first_coverage(&descriptor, &mismatched_count),
+            Err(BondScheduleError::InconsistentDonorCount {
+                expected: 2,
+                actual: 3,
+            })
+        );
     }
 
     #[test]
