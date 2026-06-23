@@ -3089,6 +3089,69 @@ mod tests {
     }
 
     #[test]
+    fn send_plan_rejects_repeated_chunk_source_ordinal_forgery() {
+        let repeated = (0..(8 * 1024))
+            .map(|idx| ((idx * 31 + idx / 7 + 43) % 251) as u8)
+            .collect::<Vec<_>>();
+        let unique = (0..(2 * 1024))
+            .map(|idx| ((idx * 11 + idx / 3 + 97) % 253) as u8)
+            .collect::<Vec<_>>();
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "repeated-file",
+            vec![repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = ingest_manifest(&mut receiver_store, "repeated-file", Vec::new());
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let base_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &receiver_coverage,
+        );
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let send_plan =
+            build_delta_resync_send_plan(&base_plan, &sender_store, &receiver, &signatures)
+                .expect("send plan");
+
+        let DeltaResyncSendItem::RepeatedChunk {
+            chunk,
+            source_ordinal,
+        } = &send_plan.items[2]
+        else {
+            panic!("expected compacted repeated chunk");
+        };
+        assert_eq!(*source_ordinal, 0);
+
+        let mut self_referential = send_plan.clone();
+        self_referential.items[2] = DeltaResyncSendItem::RepeatedChunk {
+            chunk: chunk.clone(),
+            source_ordinal: 2,
+        };
+        assert!(matches!(
+            self_referential.to_wire_bytes(),
+            Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal: 2 })
+        ));
+
+        let mut wrong_source = send_plan.clone();
+        wrong_source.items[2] = DeltaResyncSendItem::RepeatedChunk {
+            chunk: chunk.clone(),
+            source_ordinal: 1,
+        };
+        assert!(matches!(
+            wrong_source.to_wire_bytes(),
+            Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal: 2 })
+        ));
+    }
+
+    #[test]
     fn wire_payload_report_transmits_delta_and_reconstructs_bench_object() {
         let shared = (0..(32 * 1024))
             .map(|idx| ((idx * 13 + 11) % 251) as u8)
