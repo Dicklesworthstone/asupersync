@@ -1832,3 +1832,15 @@ Benched the auth tier (atp-rq-auth `--rq-auth-key-hex` vs rsync-ssh aes128-gcm) 
 **The auth tier is correct and healthy** — converges sha-ok in every regime, no ASUP-E804 / no convergence bug (contrast the encrypted/QUIC tier, MATRIX-39, which fails lossy on the one-symbol-per-packet throughput cap). The auth path rides the same rq transport + frozen AIMD as nocrypto, so it inherits the same scoreboard shape: **TIE on good (matches 50M/good nocrypto TIE), lose on perfect (clean per-tree/decode setup overhead) and bad (the single-core lossy decode wall, 53s ≈ nocrypto bad 57s).** The per-symbol auth (AUTH-1 source-first) adds no measurable convergence penalty.
 
 **Watch:** auth/bad peak RSS = **877 MB** (vs rsync 52MB) — the receiver buffers a large symbol backlog during the long single-core lossy decode at 50M. This is the same decode-wall pathology; the LANE-A receiver-parallel-decode lever should cut both the 53s wall AND the 877MB backlog (faster drain → fewer retained symbols). No auth-specific work needed — auth rides nocrypto's fixes. Evidence: `artifacts/atp_bench_matrix/20260623T015724Z/`.
+
+## MATRIX-41 (2026-06-23) — Regression-guard PASS: 50M nocrypto unchanged after the +546-line tree-batch change (bad −6.1%, core file path isolated)
+
+The tree-batch commit `1d3290821` added +546 lines to `transport_rq/mod.rs` (the hot file). MATRIX-38 benched the tree path; this confirms the **core single-file 50M nocrypto cells did not regress**. Run `artifacts/atp_bench_matrix/20260623T020322Z/`, 3 reps, all sha-ok:
+
+| regime | atp-rq-lab now | frozen baseline | Δ | rsync |
+|---|---|---|---|---|
+| perfect | 3.65s | 3.65 | +0.1% (identical) | 1.23s |
+| good | 3.954s | 3.95 | +0.1% (TIE holds) | 3.93s |
+| bad | 53.6s | 57.1 | **−6.1%** (slightly better) | 14.74s |
+
+Clean PASS — the small-entry tree batching is correctly scoped to the tree-staging path and does not touch single-file transfer behavior (bad's −6.1% is within lossy-cell variance / minor batched-staging benefit). Current main is healthy on the core scoreboard. This was benched while the cod swarm was credit-blocked (codex usage limit, reset pending) — the critical-path encrypted-throughput fix (bead `mh1eg4`, coalesce many symbol-DATAGRAMs per UDP datagram) is filed + dispatched and awaits swarm credits. Evidence: `artifacts/atp_bench_matrix/20260623T020322Z/`.
