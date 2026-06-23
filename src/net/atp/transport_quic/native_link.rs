@@ -2402,20 +2402,22 @@ async fn run_receiver_session(
             // receiver idled to a timeout. `repair_blocks` routes the sender to fresh repair for
             // the incomplete source blocks only, so a single final block is not starved by complete
             // blocks in the same pending entry.
+            let round_loss_fraction = super::receiver_round_loss_fraction(
+                round_symbols_observed,
+                round_complete.round_symbols_sent,
+            );
             let repair_blocks = super::block_repair_requests(
                 &decoders,
                 config,
                 super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                round_loss_fraction,
             );
             let need = QuicNeedMore {
                 pending,
                 repair_blocks,
                 source_symbols: Vec::new(),
                 round_symbols_observed: Some(round_symbols_observed),
-                round_loss_fraction: super::receiver_round_loss_fraction(
-                    round_symbols_observed,
-                    round_complete.round_symbols_sent,
-                ),
+                round_loss_fraction,
                 round_symbols_accepted: Some(round_symbols_accepted),
             };
             intake_stats.trace_need_more(cx, feedback_rounds.saturating_add(1), &need);
