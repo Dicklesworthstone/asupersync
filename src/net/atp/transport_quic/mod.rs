@@ -244,8 +244,10 @@ pub const DEFAULT_DATAGRAM_FANOUT: usize = 1;
 ///
 /// C3 still lets the congestion window choose a smaller burst. This cap prevents
 /// a very large cwnd estimate from turning one scheduler slice into an unbounded
-/// outbound queue.
-pub const DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH: usize = 32;
+/// outbound queue while still letting the native encrypted link coalesce a
+/// near-full jumbo 1-RTT packet of symbol DATAGRAM frames after MATRIX-39
+/// removed the old one-symbol packet budget.
+pub const DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH: usize = 54;
 
 const QUIC_SPRAY_BURST_RTT_FRACTION: f64 = 0.125;
 const QUIC_SPRAY_MIN_PAUSE: Duration = Duration::from_millis(1);
@@ -6797,6 +6799,10 @@ mod tests {
         assert_eq!(c.max_active_connections, DEFAULT_MAX_ACTIVE_CONNECTIONS);
         assert_eq!(c.max_feedback_rounds, DEFAULT_MAX_FEEDBACK_ROUNDS);
         assert_eq!(c.datagram_fanout, DEFAULT_DATAGRAM_FANOUT);
+        assert_eq!(
+            c.max_spray_symbols_per_flush,
+            DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH
+        );
         assert_eq!(
             c.symbol_auth_mode(),
             QuicSymbolAuthMode::MissingAuthenticationContext

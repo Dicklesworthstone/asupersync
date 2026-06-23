@@ -256,11 +256,11 @@ const DEFAULT_MAX_REMOTE_STREAMS: u64 = 128;
 /// Maximum number of decoded inbound DATAGRAM payloads buffered before packet
 /// processing applies backpressure. The receiver never evicts buffered symbols.
 ///
-/// Keep this at least four full native ATP receive-drain batches: one batch may
-/// arrive before the higher-level decoder drains the queue, a WAN burst may
-/// already be queued behind it, and the receiver still needs a clean
-/// backpressure boundary without displacing accepted survivors.
-const MAX_INBOUND_DATAGRAMS: usize = 2048;
+/// Keep this large enough for paced native ATP bursts after MATRIX-39
+/// DATAGRAM coalescing. The native link also caps socket receive width by
+/// remaining DATAGRAM slots divided by the expected symbol frames per UDP packet,
+/// so this is a bounded burst envelope rather than an eviction threshold.
+const MAX_INBOUND_DATAGRAMS: usize = 4096;
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.
@@ -3105,6 +3105,31 @@ mod tests {
             .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
             .expect("lowering limits should not emit MAX_STREAMS");
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn application_datagram_generation_coalesces_many_payloads_when_budget_allows() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let datagram_count = 64usize;
+
+        for idx in 0..datagram_count {
+            let payload = Bytes::from(vec![(idx % 251) as u8; 64]);
+            conn.send_datagram(&cx, payload)
+                .expect("queue outbound datagram");
+        }
+
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65_000)
+            .expect("coalesced datagram frames should generate");
+        let emitted = frames
+            .iter()
+            .filter(|frame| matches!(frame, QuicFrame::Datagram { .. }))
+            .count();
+
+        assert_eq!(emitted, datagram_count);
+        assert_eq!(conn.pending_outbound_datagram_count(), 0);
+        assert_eq!(conn.datagrams_sent(), datagram_count as u64);
     }
 
     #[test]

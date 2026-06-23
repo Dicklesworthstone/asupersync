@@ -350,6 +350,38 @@ fn one_rtt_max_payload_for_udp_packet(max_udp_packet: usize) -> usize {
         .saturating_sub(ONE_RTT_COALESCED_CONTROL_HEADROOM)
 }
 
+fn coalesced_datagram_frames_per_packet(
+    max_app_payload: usize,
+    datagram_frame_len: usize,
+) -> usize {
+    (max_app_payload / datagram_frame_len.max(1)).max(1)
+}
+
+fn quic_varint_len(value: usize) -> usize {
+    match value {
+        0..=63 => 1,
+        64..=16_383 => 2,
+        16_384..=1_073_741_823 => 4,
+        _ => 8,
+    }
+}
+
+fn symbol_datagram_frame_len(symbol_size: u16, envelope_header_len: usize) -> usize {
+    let payload_len = usize::from(symbol_size.max(1)).saturating_add(envelope_header_len);
+    // ATP DATAGRAM frames are encoded as 0x31 (type + explicit length + payload)
+    // so many frames can be carried in one protected 1-RTT packet.
+    1usize
+        .saturating_add(quic_varint_len(payload_len))
+        .saturating_add(payload_len)
+}
+
+fn inbound_udp_packet_receive_limit(
+    remaining_datagram_capacity: usize,
+    max_datagram_frames_per_packet: usize,
+) -> usize {
+    INBOUND_PUMP_BATCH.min(remaining_datagram_capacity / max_datagram_frames_per_packet.max(1))
+}
+
 /// An established native QUIC connection plus everything needed to drive its
 /// 1-RTT application data plane over a real UDP socket.
 pub struct QuicLink {
@@ -363,6 +395,9 @@ pub struct QuicLink {
     clock: u64,
     /// Max application payload that fits one 1-RTT packet under the endpoint MTU.
     max_app_payload: usize,
+    /// Expected upper bound on ATP symbol DATAGRAM frames one received UDP
+    /// packet may enqueue before the symbol decoder gets a turn to drain them.
+    max_datagram_frames_per_packet: usize,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
     pending_control_frames: VecDeque<Frame>,
@@ -495,6 +530,13 @@ impl QuicLink {
             .map_or_else(BeaconMeasurement::empty, |rtt| {
                 BeaconMeasurement::with_rtt(u32::try_from(rtt.as_micros()).unwrap_or(u32::MAX), 0)
             })
+    }
+
+    fn inbound_receive_packet_limit(&self) -> usize {
+        inbound_udp_packet_receive_limit(
+            self.conn.inbound_datagram_remaining_capacity(),
+            self.max_datagram_frames_per_packet,
+        )
     }
 
     async fn service_spray_liveness(
@@ -704,13 +746,15 @@ impl QuicLink {
             let pending_datagrams = self.conn.pending_datagram_count();
             let datagram_capacity = self.conn.inbound_datagram_capacity();
             let remaining_capacity = self.conn.inbound_datagram_remaining_capacity();
-            if remaining_capacity == 0 {
+            let receive_limit = self.inbound_receive_packet_limit();
+            if receive_limit == 0 {
                 let pending_datagrams_text = pending_datagrams.to_string();
                 let datagram_capacity_text = datagram_capacity.to_string();
                 let remaining_capacity_text = remaining_capacity.to_string();
                 let total_processed_text = total_processed.to_string();
+                let max_datagrams_per_packet_text = self.max_datagram_frames_per_packet.to_string();
                 cx.trace_with_fields(
-                    "atp_quic.receive.datagram_queue_full",
+                    "atp_quic.receive.datagram_queue_needs_drain",
                     &[
                         ("pending_datagrams", pending_datagrams_text.as_str()),
                         ("reorder_occupancy", pending_datagrams_text.as_str()),
@@ -720,11 +764,14 @@ impl QuicLink {
                             remaining_capacity_text.as_str(),
                         ),
                         ("packets_processed", total_processed_text.as_str()),
+                        (
+                            "max_datagrams_per_packet",
+                            max_datagrams_per_packet_text.as_str(),
+                        ),
                     ],
                 );
                 return Ok(total_processed);
             }
-            let receive_limit = INBOUND_PUMP_BATCH.min(remaining_capacity);
             let received = match crate::time::timeout(
                 cx.now(),
                 next_timeout,
@@ -892,22 +939,23 @@ fn link_from_handshake(
             "handshake completed without installed 1-RTT keys".to_string(),
         ));
     }
-    // Cap each 1-RTT data packet to carry at most one symbol DATAGRAM (plus a
-    // little control headroom). This keeps loss granularity per-symbol (the
-    // point of RFC 9221 DATAGRAMs) and, crucially, bounds how many symbols a
-    // single inbound pump can queue, so the connection's 256-deep inbound
-    // DATAGRAM queue cannot overflow between drains. `symbol_size` is bounded by
-    // `max_datagram_size` via `QuicConfig::validate`, so this stays well under
-    // the endpoint envelope. Large control frames are split across packets and
-    // reassembled by the frame codec.
-    let one_datagram = usize::from(config.symbol_size)
-        .saturating_add(super::AUTH_ENVELOPE_HEADER_LEN)
-        .saturating_add(16);
-    let max_app_payload =
-        one_datagram.min(one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET));
+    // Let one protected UDP packet carry many RFC 9221 DATAGRAM frames while
+    // keeping each RaptorQ symbol in its own DATAGRAM frame. This preserves
+    // per-symbol loss granularity, but avoids the MATRIX-39 one-symbol-per-UDP
+    // packet ceiling that throttled encrypted transfers to packet-rate speed.
+    // The no-evict receive queue and inbound pump remain the burst bounds.
+    let max_app_payload = one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET);
+    let max_datagram_frame_size = config.max_datagram_size.min(max_app_payload);
+    // Use the smallest ATP symbol envelope this link may legitimately carry
+    // (trusted unauthenticated mode) so the receive batch bound remains safe for
+    // both auth postures.
+    let symbol_frame_len =
+        symbol_datagram_frame_len(config.symbol_size, super::ENVELOPE_HEADER_LEN);
+    let max_datagram_frames_per_packet =
+        coalesced_datagram_frames_per_packet(max_app_payload, symbol_frame_len);
     let conn_config = NativeQuicConnectionConfig {
         role,
-        max_datagram_frame_size: config.max_datagram_size.min(max_app_payload),
+        max_datagram_frame_size,
         ..NativeQuicConnectionConfig::default()
     };
     let mut conn = NativeQuicConnection::new(conn_config);
@@ -938,6 +986,7 @@ fn link_from_handshake(
         send_pn: 0,
         clock: 0,
         max_app_payload,
+        max_datagram_frames_per_packet,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
         pending_control_frames: VecDeque::new(),
@@ -2194,6 +2243,9 @@ async fn run_receiver_session(
                 let pumped_packets = link.pump_inbound_for(cx, pump_timeout).await?;
                 intake_stats.record_pump(pump_started.elapsed(), pumped_packets);
                 if pumped_packets == 0 {
+                    if link.conn.pending_datagram_count() > 0 {
+                        continue;
+                    }
                     if round_made_progress {
                         break;
                     }
@@ -2391,6 +2443,8 @@ pub async fn bind_server_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytes::Bytes;
+    use crate::net::atp::protocol::quic_frames::QuicFrame;
 
     #[test]
     fn one_rtt_header_round_trips() {
@@ -2449,6 +2503,63 @@ mod tests {
     }
 
     #[test]
+    fn one_rtt_payload_budget_coalesces_many_default_symbol_datagrams() {
+        let symbol_envelope_len =
+            usize::from(super::super::DEFAULT_SYMBOL_SIZE) + super::super::AUTH_ENVELOPE_HEADER_LEN;
+        let mut encoded = BytesMut::new();
+        QuicFrame::Datagram {
+            data: Bytes::from(vec![0u8; symbol_envelope_len]),
+        }
+        .encode(&mut encoded)
+        .expect("encode datagram frame");
+        assert_eq!(
+            encoded.len(),
+            symbol_datagram_frame_len(
+                super::super::DEFAULT_SYMBOL_SIZE,
+                super::super::AUTH_ENVELOPE_HEADER_LEN,
+            )
+        );
+
+        let max_app_payload = one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET);
+        let coalesced_symbols =
+            coalesced_datagram_frames_per_packet(max_app_payload, encoded.len());
+
+        assert!(
+            coalesced_symbols >= 50,
+            "one 1-RTT UDP packet should carry roughly MATRIX-39's ~53 symbol DATAGRAM frames"
+        );
+        assert!(encoded.len().saturating_mul(coalesced_symbols) <= max_app_payload);
+        assert!(
+            encoded
+                .len()
+                .saturating_mul(coalesced_symbols.saturating_add(1))
+                > max_app_payload
+        );
+    }
+
+    #[test]
+    fn inbound_receive_limit_reserves_slots_for_coalesced_datagrams() {
+        assert_eq!(inbound_udp_packet_receive_limit(0, 64), 0);
+        assert_eq!(inbound_udp_packet_receive_limit(63, 64), 0);
+        assert_eq!(inbound_udp_packet_receive_limit(64, 64), 1);
+        assert_eq!(inbound_udp_packet_receive_limit(4096, 64), 64);
+        assert_eq!(
+            inbound_udp_packet_receive_limit(usize::MAX, 64),
+            INBOUND_PUMP_BATCH
+        );
+        let max_app_payload = one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET);
+        let default_frame_len = symbol_datagram_frame_len(
+            super::super::DEFAULT_SYMBOL_SIZE,
+            super::super::ENVELOPE_HEADER_LEN,
+        );
+        let default_frames =
+            coalesced_datagram_frames_per_packet(max_app_payload, default_frame_len);
+        let default_limit = inbound_udp_packet_receive_limit(4096, default_frames);
+        assert!(default_limit > 0);
+        assert!(default_limit.saturating_mul(default_frames) <= 4096);
+    }
+
+    #[test]
     fn quic_endpoint_packet_budget_accepts_matrix37_lossy_overshoot() {
         // MATRIX-37 encrypted lossy cells failed deterministically at 16 KiB + 1..6
         // bytes when ACK/control frames were coalesced with near-full 1-RTT data.
@@ -2473,8 +2584,8 @@ mod tests {
             datagrams_received: 12,
             datagrams_dropped_on_receive: 0,
             pending_datagrams: 3,
-            inbound_datagram_capacity: 2048,
-            inbound_datagram_available: 2045,
+            inbound_datagram_capacity: 4096,
+            inbound_datagram_available: 4093,
             inbound_pump_batch_limit: INBOUND_PUMP_BATCH,
         };
         let decode_stats = crate::net::atp::transport_quic::QuicDecodeStats {
@@ -2503,8 +2614,8 @@ mod tests {
         assert_eq!(entry.get_field("datagrams_dropped_on_receive"), Some("0"));
         assert_eq!(entry.get_field("pending_datagrams"), Some("3"));
         assert_eq!(entry.get_field("reorder_occupancy"), Some("3"));
-        assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("2048"));
-        assert_eq!(entry.get_field("inbound_datagram_available"), Some("2045"));
+        assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("4096"));
+        assert_eq!(entry.get_field("inbound_datagram_available"), Some("4093"));
         assert_eq!(entry.get_field("inbound_pump_batch_limit"), Some("512"));
     }
 
