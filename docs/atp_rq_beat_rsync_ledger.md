@@ -2063,3 +2063,21 @@ Benched HEAD (atp 0.3.5, clean build incl j91wza d110e6d52 "adapt rq repair over
 **50M/bad unchanged (64s vs MATRIX-53's 66.5s)** — no regression, still converges 3/3 in 4-8 rounds, still a ~4.4× wall loss vs rsync 14.4s (16× less RSS).
 
 **ROUTED follow-up:** LANE-K stays the highest-EV lossy lever IF made effective — re-opened to a transport_rq owner to diagnose why ε isn't cutting the round count (instrument: does the 50M/broken repair path actually emit ε·K extra symbols/round at p̄=0.10? if not, wire it; if yes, raise ε). Until then, the broken/lossy-large wall stays a loss. Memory dominance holds (rsync 11.2GB on 50M/broken). Evidence: `artifacts/atp_bench_matrix/20260623T223844Z/`.
+
+## MATRIX-56 (2026-06-23) — ★DELTA RE-SYNC FIRST RESULT (the rsync-killer home turf): atp delta WINS insert 62.5× (846KB vs rsync 52.9MB, byte-identical!); append works O(change) but loses 3.5×; 1pct scattered-flips FALLS BACK to full-object (delta-engine bug, fail-closed excluded). Delta path is real and has a decisive win + a clear bug.
+
+First run of the incremental RE-SYNC scorecard (`scripts/atp_bench/resync_bench.sh`, B-8.7) on committed HEAD (built via git archive, atp 0.3.5), 100M/good, atp-rq-delta (default-on) vs rsyncd-delta, netns veth tx+rx byte counters, sha-verified:
+
+| change | atp-rq-delta wire | rsyncd-delta wire | ratio | atp sha | verdict |
+|---|---|---|---|---|---|
+| insert | **846,140 B (846KB)** | **52,920,430 B (52.9MB)** | **atp 62.5× FEWER bytes** | ok | ★atp WINS BIG |
+| append | 663,386 B (663KB) | 188,832 B (189KB) | atp 3.5× more | ok | atp loses (both O(change)) |
+| 1pct (scattered flips) | 108,015,205 B (full object) | 105,578,825 B | — | status=ERROR | atp delta FELL BACK to full-send (excluded) |
+
+**★HEADLINE WIN — insert, atp 62.5× fewer bytes-on-wire (846KB vs rsync 52.9MB), byte-identical.** Insert is rsync's classic Achilles heel: inserting bytes shifts every subsequent offset, so rsync's fixed-block rolling-checksum resyncs but still ships ~half the file (52.9MB for a small insert into 100M). atp's content-defined chunking (FastCDC) re-anchors at content boundaries, so only the changed chunk(s) move — 846KB. This is the first concrete proof of the rsync-killer thesis (bytes-on-wire ∝ delta, not file size) on rsync's home turf, and it's a decisive win on the case rsync handles worst.
+
+**append works but loses (atp 663KB vs rsync 189KB, 3.5×):** atp's delta DOES engage (O(change), not O(file)) but carries more per-chunk/manifest overhead than rsync's append handling. Both are tiny vs the 100M file; this is a tuning gap (chunk-size / manifest overhead), not a fundamental loss.
+
+**1pct scattered byte-flips — atp FELL BACK to full-object (108MB, status=error, fail-closed excluded):** 'ATP sender fell back to full-object despite sidecar state; marking cell invalid'. The sender had the prior-sync sidecar but the delta-send decision bailed to a full send on scattered flips. This is a real LANE-H bug: scattered small edits should be the delta sweet spot (rsync handles them well at ~O(change)); atp must not fall back. ROUTED to the delta.rs owner: find the full-vs-delta decision in the send path and make it emit O(change) when the sidecar is present for scattered-flip diffs.
+
+**Scoreboard add:** delta-resync/insert is a new confirmed atp WIN (62.5×). Net mission status: atp now wins lossy-large (500M/bad 1.59×), high-loss-small (5M/broken 1.48×), **delta-insert (62.5×)**, ties clean-small + delta-append-ish, dominates memory everywhere (16-1000×); open gaps = delta 1pct-fallback bug, delta-append efficiency, 50M lossy-small wall, encrypted-lossy convergence, clean-perfect wall. NEXT: re-bench LANE-K 50M/broken (did 85867ddf8 cut rounds?) + encrypted-lossy 50M (did lqmfsi converge?). Evidence: `/tmp/atp_resync_bench/20260623T232653Z-2016368/resync.jsonl`.

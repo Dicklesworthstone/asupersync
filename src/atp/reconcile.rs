@@ -118,6 +118,33 @@ pub fn reconcile_canonical_dedup_payload_parts(
     reconcile_dedup_payload_set(target_manifest, receiver_store, &payload_set)
 }
 
+/// Decode canonical dedupe wire parts, apply them, and reconstruct target bytes.
+pub fn reconcile_canonical_dedup_payload_parts_and_reconstruct(
+    target_manifest: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    plan: &DeltaResyncPlan,
+    metadata_bytes: &[u8],
+    unique_payload_bytes: &[u8],
+) -> Result<DeltaDedupReconstructReport, DeltaError> {
+    let payload_set =
+        DeltaDedupPayloadSet::from_canonical_parts(plan, metadata_bytes, unique_payload_bytes)?;
+    let metadata_wire_bytes =
+        u64::try_from(metadata_bytes.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+    let unique_payload_wire_bytes =
+        u64::try_from(unique_payload_bytes.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+    let compact_wire_bytes = metadata_wire_bytes
+        .checked_add(unique_payload_wire_bytes)
+        .ok_or(DeltaError::ChunkSizeOverflow)?;
+    reconcile_decoded_dedup_payload_set_and_reconstruct(
+        target_manifest,
+        receiver_store,
+        &payload_set,
+        metadata_wire_bytes,
+        unique_payload_wire_bytes,
+        compact_wire_bytes,
+    )
+}
+
 /// Apply canonical dedupe parts and reconstruct target bytes in one receiver step.
 pub fn reconcile_canonical_dedup_parts_and_reconstruct(
     target_manifest: &PersistentChunkManifest,
@@ -126,19 +153,37 @@ pub fn reconcile_canonical_dedup_parts_and_reconstruct(
     parts: &DeltaDedupCanonicalParts,
 ) -> Result<DeltaDedupReconstructReport, DeltaError> {
     let payload_set = parts.decode_payload_set(plan)?;
+    reconcile_decoded_dedup_payload_set_and_reconstruct(
+        target_manifest,
+        receiver_store,
+        &payload_set,
+        parts.metadata_wire_bytes,
+        parts.unique_payload_wire_bytes,
+        parts.compact_wire_bytes,
+    )
+}
+
+fn reconcile_decoded_dedup_payload_set_and_reconstruct(
+    target_manifest: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    payload_set: &DeltaDedupPayloadSet,
+    metadata_wire_bytes: u64,
+    unique_payload_wire_bytes: u64,
+    compact_wire_bytes: u64,
+) -> Result<DeltaDedupReconstructReport, DeltaError> {
     let (store, reconcile) =
-        reconcile_dedup_payload_set(target_manifest, receiver_store, &payload_set)?;
+        reconcile_dedup_payload_set(target_manifest, receiver_store, payload_set)?;
     let reconstructed_bytes = reconstruct_manifest_bytes(target_manifest, &store)?;
     Ok(DeltaDedupReconstructReport {
         store,
         reconcile,
         reconstructed_bytes,
-        metadata_wire_bytes: parts.metadata_wire_bytes,
-        unique_payload_wire_bytes: parts.unique_payload_wire_bytes,
-        compact_wire_bytes: parts.compact_wire_bytes,
-        logical_missing_bytes: parts.logical_missing_bytes,
-        duplicate_missing_chunks: parts.duplicate_missing_chunks,
-        duplicate_missing_bytes: parts.duplicate_missing_bytes,
+        metadata_wire_bytes,
+        unique_payload_wire_bytes,
+        compact_wire_bytes,
+        logical_missing_bytes: payload_set.send_set.logical_missing_bytes,
+        duplicate_missing_chunks: payload_set.send_set.duplicate_missing_chunks,
+        duplicate_missing_bytes: payload_set.send_set.duplicate_missing_bytes,
     })
 }
 
@@ -364,6 +409,55 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_canonical_dedup_payload_parts_reconstruct_from_wire_bytes() {
+        let repeated = vec![b'w'; 4096];
+        let unique = vec![b'z'; 1024];
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let parts =
+            build_canonical_dedup_payload_parts(&plan, &sender_store).expect("canonical parts");
+
+        let report = reconcile_canonical_dedup_payload_parts_and_reconstruct(
+            &sender,
+            &receiver_store,
+            &plan,
+            &parts.metadata_bytes,
+            &parts.unique_payload_bytes,
+        )
+        .expect("reconstruct raw canonical parts");
+
+        assert!(report.saves_bytes());
+        assert_eq!(report.metadata_wire_bytes, parts.metadata_wire_bytes);
+        assert_eq!(
+            report.unique_payload_wire_bytes,
+            parts.unique_payload_wire_bytes
+        );
+        assert_eq!(report.compact_wire_bytes, parts.compact_wire_bytes);
+        assert_eq!(report.logical_missing_bytes, parts.logical_missing_bytes);
+        assert_eq!(
+            report.duplicate_missing_chunks,
+            parts.duplicate_missing_chunks
+        );
+        assert_eq!(
+            report.duplicate_missing_bytes,
+            parts.duplicate_missing_bytes
+        );
+        assert_eq!(
+            report.reconstructed_bytes,
+            [repeated.as_slice(), unique.as_slice(), repeated.as_slice()].concat()
+        );
+    }
+
+    #[test]
     fn reconcile_canonical_dedup_parts_fail_closed_before_reconstruct() {
         let repeated = vec![b'r'; 4096];
         let unique = vec![b'u'; 1024];
@@ -389,6 +483,38 @@ mod tests {
             &parts,
         )
         .expect_err("tampered canonical parts");
+
+        assert!(matches!(err, DeltaError::ChunkPayloadHashMismatch { .. }));
+    }
+
+    #[test]
+    fn reconcile_canonical_dedup_payload_parts_fail_closed_before_reconstruct() {
+        let repeated = vec![b'w'; 4096];
+        let unique = vec![b'z'; 1024];
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let parts =
+            build_canonical_dedup_payload_parts(&plan, &sender_store).expect("canonical parts");
+        let mut unique_payload_bytes = parts.unique_payload_bytes.clone();
+        unique_payload_bytes[0] ^= 0x40;
+
+        let err = reconcile_canonical_dedup_payload_parts_and_reconstruct(
+            &sender,
+            &receiver_store,
+            &plan,
+            &parts.metadata_bytes,
+            &unique_payload_bytes,
+        )
+        .expect_err("tampered canonical wire parts");
 
         assert!(matches!(err, DeltaError::ChunkPayloadHashMismatch { .. }));
     }
