@@ -5,9 +5,10 @@
 //! payload into the CAS once, and then asks the target manifest to perform the
 //! final coverage check before any caller commits reconstructed bytes.
 
-use crate::atp::dedupe::{DeltaDedupPayloadSet, payload_matches_key};
+use crate::atp::dedupe::{DeltaDedupCanonicalParts, DeltaDedupPayloadSet, payload_matches_key};
 use crate::atp::delta::{
     ContentAddressedChunkStore, DeltaError, DeltaResyncPlan, PersistentChunkManifest,
+    reconstruct_manifest_bytes,
 };
 
 /// Summary of applying a deduped delta payload set.
@@ -23,6 +24,29 @@ pub struct DeltaReconcileReport {
     pub duplicate_logical_chunks: u64,
     /// Logical target bytes covered after reconcile.
     pub reconstructed_bytes: u64,
+}
+
+/// Receiver result after applying canonical dedupe parts and rebuilding bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeltaDedupReconstructReport {
+    /// Receiver CAS after applying the canonical dedupe parts.
+    pub store: ContentAddressedChunkStore,
+    /// Receiver-side reconcile accounting.
+    pub reconcile: DeltaReconcileReport,
+    /// Byte-identical target bytes rebuilt from the verified receiver CAS.
+    pub reconstructed_bytes: Vec<u8>,
+    /// Metadata plus unique payload bytes, excluding outer envelope framing.
+    pub compact_wire_bytes: u64,
+    /// Logical missing bytes represented by the canonical parts.
+    pub logical_missing_bytes: u64,
+}
+
+impl DeltaDedupReconstructReport {
+    /// True when the canonical dedupe parts were smaller than all missing chunks.
+    #[must_use]
+    pub const fn saves_bytes(&self) -> bool {
+        self.compact_wire_bytes < self.logical_missing_bytes
+    }
 }
 
 /// Apply a deduped payload set to a receiver CAS and verify target coverage.
@@ -77,6 +101,26 @@ pub fn reconcile_canonical_dedup_payload_parts(
     let payload_set =
         DeltaDedupPayloadSet::from_canonical_parts(plan, metadata_bytes, unique_payload_bytes)?;
     reconcile_dedup_payload_set(target_manifest, receiver_store, &payload_set)
+}
+
+/// Apply canonical dedupe parts and reconstruct target bytes in one receiver step.
+pub fn reconcile_canonical_dedup_parts_and_reconstruct(
+    target_manifest: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    plan: &DeltaResyncPlan,
+    parts: &DeltaDedupCanonicalParts,
+) -> Result<DeltaDedupReconstructReport, DeltaError> {
+    let payload_set = parts.decode_payload_set(plan)?;
+    let (store, reconcile) =
+        reconcile_dedup_payload_set(target_manifest, receiver_store, &payload_set)?;
+    let reconstructed_bytes = reconstruct_manifest_bytes(target_manifest, &store)?;
+    Ok(DeltaDedupReconstructReport {
+        store,
+        reconcile,
+        reconstructed_bytes,
+        compact_wire_bytes: parts.compact_wire_bytes,
+        logical_missing_bytes: parts.logical_missing_bytes,
+    })
 }
 
 fn verify_placements(
@@ -137,7 +181,7 @@ fn verify_placements(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::dedupe::build_dedup_payload_set;
+    use crate::atp::dedupe::{build_canonical_dedup_payload_parts, build_dedup_payload_set};
     use crate::atp::delta::{
         PersistentChunkManifest, ReceiverCasCoverage,
         plan_incremental_resync_with_receiver_coverage, reconstruct_manifest_bytes,
@@ -244,6 +288,46 @@ mod tests {
         assert_eq!(report.reconstructed_bytes, sender.total_size_bytes);
         let rebuilt = reconstruct_manifest_bytes(&sender, &store).expect("reconstruct");
         assert_eq!(rebuilt, b"repeatmiddlerepeat".as_slice());
+    }
+
+    #[test]
+    fn reconcile_canonical_dedup_parts_reconstructs_target_bytes() {
+        let repeated = vec![b'r'; 4096];
+        let unique = vec![b'u'; 1024];
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let parts =
+            build_canonical_dedup_payload_parts(&plan, &sender_store).expect("canonical parts");
+
+        let report = reconcile_canonical_dedup_parts_and_reconstruct(
+            &sender,
+            &receiver_store,
+            &plan,
+            &parts,
+        )
+        .expect("reconstruct canonical parts");
+
+        assert!(report.saves_bytes());
+        assert_eq!(report.compact_wire_bytes, parts.compact_wire_bytes);
+        assert_eq!(report.logical_missing_bytes, sender.total_size_bytes);
+        assert_eq!(report.reconcile.unique_payloads, 2);
+        assert_eq!(report.reconcile.duplicate_logical_chunks, 1);
+        assert_eq!(
+            report.reconstructed_bytes,
+            [repeated.as_slice(), unique.as_slice(), repeated.as_slice()].concat()
+        );
+        sender
+            .verify_store_coverage(&report.store)
+            .expect("verified reconstructed store");
     }
 
     #[test]
