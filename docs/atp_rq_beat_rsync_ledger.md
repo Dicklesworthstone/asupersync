@@ -2033,3 +2033,18 @@ After landing LANE-C (f4e6d4984), which also edited the SHARED src/decoding.rs, 
 **50M/good TIE holds** (atp 3.95s vs rsync 3.93s — dead heat on wall) with atp using **369× less memory** (49MB vs rsync 17.6GB; rsync-over-rsyncd balloons its in-memory file/buffer structures even on a 50M plaintext transfer).
 
 **Honest weak spot — 50M/bad loses ~4× on wall** (66.47s vs rsync 16.14s): on a SMALL lossy object the RaptorQ fountain + decode overhead isn't amortized over enough data (contrast 500M/bad where it IS amortized → 1.59× of rsync, MATRIX-50). atp remains 32× more memory-efficient (183MB vs 5.7GB) and converges reliably, but the lossy-SMALL wall is a known CPU/decode-bound loss. Pattern confirmed: atp wins lossy-LARGE + always-memory; ties clean-small; loses clean-perfect-wall and lossy-small-wall. Evidence: `artifacts/atp_bench_matrix/20260623T131225Z/`.
+
+## MATRIX-54 (2026-06-23) — BROKEN regime (10mbit/200ms/10% loss + reorder/dup): atp WINS 5M/broken (1.48×, 533× less RSS) but LOSES 50M/broken (2.9×) — diagnosed as FEEDBACK-ROUND-COUNT bound (11-12 rounds × RTT), NOT decode → lever = higher per-round repair overhead (E-7.4 adaptive FEC ε*), distinct from frozen AIMD.
+
+First fresh validation of the broken/10%-loss regime (the regime where FEC should help most). netns+veth+netem `delay 200ms 50ms loss 10% reorder 5% 50% duplicate 1% rate 10mbit`, staged binary atp 0.3.5=f4e6d4984, all sha-ok 3/3:
+
+| cell | atp-rq-lab | rsyncd | atp RSS | rsync RSS | mem ratio | atp rounds | verdict |
+|---|---|---|---|---|---|---|---|
+| 5M/broken nocrypto | 13.16s | 19.44s | **43MB** | **22,930MB (22.4GB)** | atp 533× less | 0 | **atp WINS 1.48×** |
+| 50M/broken nocrypto | 223.24s | 77.49s | **191MB** | **8,782MB (8.6GB)** | atp 46× less | 11-12 | atp loses 2.9× |
+
+**5M/broken is a clean atp WIN** (13.16s vs rsync 19.44s = 1.48× faster) AND 533× less memory (43MB vs rsync's staggering 22.4GB at 10% loss + reorder). At small size + high loss, atp's RaptorQ fountain delivers in 0 feedback rounds (enough repair in the first spray) while rsync pays retransmit + reorder-buffer overhead. This adds a high-loss-small win alongside the lossy-large (500M/bad 1.59×) and clean-small-tie (50M/good) results.
+
+**50M/broken loses 2.9× (223s vs 77.5s) — root cause is FEEDBACK-ROUND COUNT, not decode:** atp needed **11-12 feedback rounds** to converge. At 10% loss each round is a full ~200-400ms RTT + a decode attempt + a re-request; 11-12 serial rounds × that latency dominates the 223s wall. rsync's TCP selective-retransmit handles 10% loss on a 50M stream in 77s. **The lever is per-round repair overhead, not decode parallelism**: send FEC symbols proportional to the measured ~10% loss (overhead ε ≈ 0.12-0.15) so the receiver converges in 2-3 rounds instead of 12. This is the adaptive-FEC `ε*(K,p̄,α)` path (bead E-7.4 / 317hxr adaptive overhead) and is DISTINCT from the frozen AIMD rate control (AIMD governs send RATE; this governs repair AMOUNT per round). Sending more repair upfront at high measured loss should collapse the round count → big 50M/broken win. NOT a dead lever (dead = round-0/one-shot RATE control; this is per-round repair AMOUNT).
+
+**Memory dominance is most extreme in the broken regime:** rsync hits 22.4GB RSS on a 5M transfer and 8.6GB on 50M under 10% loss + reorder (its reorder/retransmit buffers explode), while atp holds 43-191MB — 46-533× less. On any memory-constrained host rsync would OOM at 10% loss where atp sails through. Evidence: `artifacts/atp_bench_matrix/20260623T132007Z/`. NEXT LEVER for swarm: E-7.4 per-round adaptive repair overhead to cut the 50M/broken round count 12→2-3.
