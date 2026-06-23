@@ -3499,14 +3499,19 @@ fn max_feedback_repair_batch_per_block(block_source_n: usize) -> usize {
     (block_source_n / 4).max(16)
 }
 
+/// Minimum fresh repair symbols emitted for a source-first repair-only feedback
+/// round. A one-symbol tail is too fragile on lossy links: if that one repair
+/// symbol drops, the receiver idles until the next control PTO or fails closed.
+const SOURCE_FIRST_FEEDBACK_REPAIR_FLOOR_PER_BLOCK: usize = 4;
+
 fn adaptive_feedback_repair_batch_per_block(block_source_n: usize, repair_overhead: f64) -> usize {
     if repair_overhead <= 1.0 {
-        return 1;
+        return SOURCE_FIRST_FEEDBACK_REPAIR_FLOOR_PER_BLOCK;
     }
 
     let matched = ((block_source_n as f64) * (repair_overhead - 1.0)).ceil() as usize;
     matched
-        .max(1)
+        .max(SOURCE_FIRST_FEEDBACK_REPAIR_FLOOR_PER_BLOCK)
         .min(max_feedback_repair_batch_per_block(block_source_n))
 }
 
@@ -3554,9 +3559,12 @@ fn source_retransmit_needs_fec_fallback(
     if config.repair_overhead > 1.0 || config.source_retransmit_rounds == 0 {
         return false;
     }
+    let rank_only_or_repair_feedback = requested_sources == 0;
     let saturated_request = config.max_source_retransmit_requests != 0
         && requested_sources >= config.max_source_retransmit_requests;
-    saturated_request || feedback_round >= config.source_retransmit_rounds
+    rank_only_or_repair_feedback
+        || saturated_request
+        || feedback_round >= config.source_retransmit_rounds
 }
 
 /// Above this total transfer size the parallel per-block encode is disabled and the sequential
@@ -8998,9 +9006,15 @@ mod tests {
     }
 
     #[test]
-    fn source_first_feedback_repair_batch_is_minimal() {
-        assert_eq!(repair_target_for_feedback_round(512, 0, 1.0), 1);
-        assert_eq!(repair_target_for_feedback_round(512, 7, 1.0), 8);
+    fn source_first_feedback_repair_batch_has_lossy_straggler_cushion() {
+        assert_eq!(
+            repair_target_for_feedback_round(512, 0, 1.0),
+            SOURCE_FIRST_FEEDBACK_REPAIR_FLOOR_PER_BLOCK
+        );
+        assert_eq!(
+            repair_target_for_feedback_round(512, 7, 1.0),
+            7 + SOURCE_FIRST_FEEDBACK_REPAIR_FLOOR_PER_BLOCK
+        );
     }
 
     #[test]
@@ -9042,7 +9056,11 @@ mod tests {
             source_retransmit_request_limit(&config, 1),
             Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
         );
-        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 0));
+        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 1));
+        assert!(
+            source_retransmit_needs_fec_fallback(&config, 1, 0),
+            "pending rank-only repair feedback must not wait for the source retransmit window"
+        );
     }
 
     #[test]
@@ -9084,7 +9102,7 @@ mod tests {
     }
 
     #[test]
-    fn source_retransmit_falls_back_to_fec_when_saturated_or_final_round() {
+    fn source_retransmit_falls_back_to_fec_when_repair_only_saturated_or_final_round() {
         let config = RqConfig {
             repair_overhead: 1.0,
             source_retransmit_rounds: 2,
@@ -9092,7 +9110,7 @@ mod tests {
             ..RqConfig::default()
         };
 
-        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 0));
+        assert!(source_retransmit_needs_fec_fallback(&config, 1, 0));
         assert!(!source_retransmit_needs_fec_fallback(&config, 1, 16));
         assert!(source_retransmit_needs_fec_fallback(&config, 1, 17));
         assert!(source_retransmit_needs_fec_fallback(&config, 2, 1));

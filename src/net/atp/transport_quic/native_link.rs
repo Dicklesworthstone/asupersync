@@ -2288,6 +2288,7 @@ async fn run_receiver_session(
             // blocks in the same pending entry.
             let repair_blocks = super::block_repair_requests(
                 &decoders,
+                config,
                 super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
             );
             let need = QuicNeedMore {
