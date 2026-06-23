@@ -9714,6 +9714,9 @@ mod tests {
     fn measured_feedback_repair_overhead_tracks_receiver_loss() {
         assert_eq!(measured_feedback_repair_overhead(0.0), 0.0);
         assert_eq!(measured_feedback_repair_overhead(0.001), 0.0);
+        assert_eq!(measured_feedback_repair_overhead(-0.10), 0.0);
+        assert_eq!(measured_feedback_repair_overhead(f64::NAN), 0.0);
+        assert_eq!(measured_feedback_repair_overhead(f64::INFINITY), 0.0);
 
         let bad = measured_feedback_repair_overhead(0.02);
         assert!(
@@ -9725,6 +9728,12 @@ mod tests {
         assert!(
             (0.12..=0.15).contains(&broken),
             "10% measured loss should request a bounded 12-15% repair overhead, got {broken}"
+        );
+
+        assert_eq!(
+            measured_feedback_repair_overhead(0.90),
+            RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+            "pathological measured loss must clamp at the repair-overhead budget"
         );
     }
 
