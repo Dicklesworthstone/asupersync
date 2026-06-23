@@ -33,8 +33,8 @@
 
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::linalg::{
-    collect_batch_candidates, row_scale_add, row_scale_add_batch_multi, row_scale_add_batch2,
-    select_pivot_basic, select_pivot_markowitz,
+    coefficient_rank_profile, collect_batch_candidates, row_scale_add, row_scale_add_batch_multi,
+    row_scale_add_batch2, select_pivot_basic, select_pivot_markowitz,
 };
 
 /// Deterministic LCG (Knuth MMIX constants) for reproducible row generation.
@@ -379,4 +379,40 @@ fn pivot_selectors_break_ties_by_smallest_index() {
     // All-zero column → None from both.
     assert_eq!(select_pivot_basic(&rows, 0, 4, 1), None);
     assert_eq!(select_pivot_markowitz(&rows, 0, 4, 1), None);
+}
+
+#[test]
+fn rank_profile_reports_stable_pivot_and_free_column_witnesses() {
+    let first_order = [
+        vec![0u8, 1, 1, 0],
+        vec![1, 0, 1, 0],
+        vec![1, 1, 0, 0], // dependent: row0 + row1 over GF(256)
+        vec![0, 0, 0, 0],
+    ];
+    let second_order = [
+        first_order[1].clone(),
+        first_order[0].clone(),
+        first_order[3].clone(),
+        first_order[2].clone(),
+    ];
+
+    for rows in [&first_order, &second_order] {
+        let row_refs = rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let profile = coefficient_rank_profile(&row_refs, 4);
+
+        assert_eq!(profile.rows, 4);
+        assert_eq!(profile.columns, 4);
+        assert_eq!(profile.rank, 2);
+        assert_eq!(profile.deficit, 2);
+        assert_eq!(
+            profile.pivot_columns,
+            vec![0, 1],
+            "rank profile should keep deterministic left-to-right pivot witnesses"
+        );
+        assert_eq!(
+            profile.free_columns,
+            vec![2, 3],
+            "rank profile should expose every unsupported free column"
+        );
+    }
 }
