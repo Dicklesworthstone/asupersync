@@ -248,6 +248,26 @@ fn need_more_repair_symbol_count(need: &QuicNeedMore) -> u64 {
     })
 }
 
+fn drop_duplicate_need_more_frames(
+    pending: &mut VecDeque<Frame>,
+    served_need: &QuicNeedMore,
+) -> Result<usize, QuicTransportError> {
+    let mut retained = VecDeque::with_capacity(pending.len());
+    let mut dropped = 0usize;
+    while let Some(frame) = pending.pop_front() {
+        if frame.frame_type() == FrameType::ObjectRequest {
+            let queued = super::parse_json::<QuicNeedMore>(&frame)?;
+            if queued == *served_need {
+                dropped = dropped.saturating_add(1);
+                continue;
+            }
+        }
+        retained.push_back(frame);
+    }
+    *pending = retained;
+    Ok(dropped)
+}
+
 fn repair_block_trace_summary(requests: &[QuicBlockRepairRequest]) -> String {
     const MAX_DETAIL_BLOCKS: usize = 16;
     let mut max_symbols = 0u32;
@@ -632,6 +652,37 @@ impl QuicLink {
         }
 
         Ok(())
+    }
+
+    async fn drop_duplicate_need_more_resends(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+        served_need: &QuicNeedMore,
+    ) -> Result<usize, QuicTransportError> {
+        self.service_spray_liveness(cx, control).await?;
+        let dropped =
+            drop_duplicate_need_more_frames(&mut self.pending_control_frames, served_need)?;
+        if dropped > 0 {
+            let dropped_text = dropped.to_string();
+            let queued_text = self.pending_control_frames.len().to_string();
+            let requested_text = need_more_repair_symbol_count(served_need).to_string();
+            cx.trace_with_fields(
+                "atp_quic.sender.drop_duplicate_need_more",
+                &[
+                    ("dropped", dropped_text.as_str()),
+                    ("queued_after_drop", queued_text.as_str()),
+                    ("requested_repair_symbols", requested_text.as_str()),
+                ],
+            );
+            quic_rqtrace!(
+                "sender: dropped_duplicate_need_more dropped={} queued_after_drop={} requested_repair_symbols={}",
+                dropped,
+                self.pending_control_frames.len(),
+                need_more_repair_symbol_count(served_need),
+            );
+        }
+        Ok(dropped)
     }
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
@@ -1761,6 +1812,11 @@ async fn run_sender_session(
                 link.flush(cx).await?;
                 super::send_native_object_complete(cx, &mut link.conn, &mut control, sent)?;
                 link.flush(cx).await?;
+                if !need.repair_blocks.is_empty() {
+                    let _ = link
+                        .drop_duplicate_need_more_resends(cx, &mut control, &need)
+                        .await?;
+                }
             }
         }
     }
@@ -2773,6 +2829,48 @@ mod tests {
         assert_eq!(entry.get_field("inbound_datagram_capacity"), Some("4096"));
         assert_eq!(entry.get_field("inbound_datagram_available"), Some("4093"));
         assert_eq!(entry.get_field("inbound_pump_batch_limit"), Some("512"));
+    }
+
+    #[test]
+    fn sender_drops_exact_duplicate_need_more_resends_only() {
+        let served = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 1,
+                symbols: 7,
+            }],
+            source_symbols: Vec::new(),
+            round_symbols_observed: Some(90),
+            round_loss_fraction: Some(0.10),
+            round_symbols_accepted: Some(88),
+        };
+        let changed = QuicNeedMore {
+            repair_blocks: vec![QuicBlockRepairRequest {
+                symbols: 3,
+                ..served.repair_blocks[0]
+            }],
+            round_symbols_observed: Some(7),
+            round_loss_fraction: Some(0.0),
+            round_symbols_accepted: Some(7),
+            ..served.clone()
+        };
+        let mut pending = VecDeque::from([
+            super::json_frame(FrameType::ObjectRequest, &served).expect("duplicate need-more"),
+            Frame::empty(FrameType::Proof).expect("proof frame"),
+            super::json_frame(FrameType::ObjectRequest, &changed).expect("changed need-more"),
+            super::json_frame(FrameType::ObjectRequest, &served).expect("duplicate need-more"),
+        ]);
+
+        let dropped = drop_duplicate_need_more_frames(&mut pending, &served)
+            .expect("duplicate filter parses queued feedback");
+
+        assert_eq!(dropped, 2);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].frame_type(), FrameType::Proof);
+        assert_eq!(pending[1].frame_type(), FrameType::ObjectRequest);
+        let retained = super::parse_json::<QuicNeedMore>(&pending[1]).expect("retained need-more");
+        assert_eq!(retained, changed);
     }
 
     fn quic_staging_test_entry(size: u64) -> crate::net::atp::transport_quic::ManifestEntry {
