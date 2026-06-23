@@ -33,8 +33,9 @@
 
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::linalg::{
-    coefficient_rank_profile, collect_batch_candidates, row_scale_add, row_scale_add_batch_multi,
-    row_scale_add_batch2, select_pivot_basic, select_pivot_markowitz,
+    DenseRow, GaussianResult, GaussianSolver, coefficient_rank_profile, collect_batch_candidates,
+    row_scale_add, row_scale_add_batch_multi, row_scale_add_batch2, select_pivot_basic,
+    select_pivot_markowitz,
 };
 
 /// Deterministic LCG (Knuth MMIX constants) for reproducible row generation.
@@ -451,4 +452,51 @@ fn rank_profile_is_stable_under_equivalent_row_space_presentations() {
             "equivalent row spaces should expose the same free-column witness"
         );
     }
+}
+
+fn rank_deficient_solver() -> GaussianSolver {
+    let mut solver = GaussianSolver::new(3, 4);
+    solver.set_row(0, &[1, 0, 0, 0], DenseRow::new(vec![0x10]));
+    solver.set_row(1, &[0, 0, 1, 0], DenseRow::new(vec![0x20]));
+    solver.set_row(2, &[1, 0, 1, 0], DenseRow::new(vec![0x30]));
+    solver
+}
+
+#[test]
+fn solver_rank_status_reports_deficit_before_fail_closed_solve() {
+    let mut solver = rank_deficient_solver();
+    let status = solver.rank_status();
+    let profile = solver.rank_profile();
+
+    assert_eq!(status.rows, 3);
+    assert_eq!(status.columns, 4);
+    assert_eq!(status.rank, 2);
+    assert_eq!(status.deficit, 2);
+    assert_eq!(profile.pivot_columns, vec![0, 2]);
+    assert_eq!(profile.free_columns, vec![1, 3]);
+
+    let result = solver.solve();
+    assert_eq!(
+        result,
+        GaussianResult::Singular { row: 1 },
+        "rank-deficient solver state must fail closed instead of emitting a payload"
+    );
+    assert!(!result.is_solved());
+}
+
+#[test]
+fn markowitz_rank_status_matches_basic_and_fails_closed() {
+    let basic = rank_deficient_solver();
+    let mut markowitz = rank_deficient_solver();
+
+    assert_eq!(basic.rank_status(), markowitz.rank_status());
+    assert_eq!(basic.rank_profile(), markowitz.rank_profile());
+
+    let result = markowitz.solve_markowitz();
+    assert_eq!(
+        result,
+        GaussianResult::Singular { row: 1 },
+        "Markowitz pivoting must preserve the same fail-closed rank-deficient outcome"
+    );
+    assert!(!result.is_solved());
 }
