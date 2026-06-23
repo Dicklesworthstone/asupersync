@@ -117,6 +117,15 @@ use crate::types::Time;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 
+/// Opt-in stderr tracing for ATP/QUIC fountain-feedback diagnosis. This uses the
+/// same environment switch as the RQ transport so a single MATRIX run can
+/// capture both paths.
+fn quic_rqtrace(args: std::fmt::Arguments<'_>) {
+    if std::env::var_os("ATP_RQ_TRACE").is_some() {
+        eprintln!("[ATP_RQ_TRACE] [atp-quic] {args}");
+    }
+}
+
 // Reuse the manifest / receipt / report wire+value types so QUIC and TCP share
 // one schema (see module docs). These are the "reuse manifest/report/receipt"
 // half of the B1 acceptance.
@@ -195,16 +204,21 @@ pub const DEFAULT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DEFAULT_MAX_ACTIVE_CONNECTIONS: usize = 64;
 
 /// Default bound on fountain feedback rounds before failing closed.
-pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
+///
+/// Lossy ATP/QUIC must let RaptorQ repair loop until block convergence or the
+/// transfer deadline. A small round count can strand the final per-block
+/// deficits even while the receiver is still making progress, so the default is
+/// deliberately high; tests and callers can still set a lower explicit cap.
+pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 1024;
 
 /// Maximum sparse source-symbol retransmit requests accepted in one feedback round.
 const MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
 
 /// Maximum targeted repair block entries accepted in one feedback round.
-const MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND: usize = 2048;
+const MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND: usize = 16_384;
 
 /// Maximum targeted fresh repair symbols accepted in one feedback round.
-const MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND: usize = 2048;
+const MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND: usize = 1 << 20;
 
 /// Extra fresh repair symbols requested per incomplete block in a feedback round.
 ///
@@ -2445,6 +2459,205 @@ fn trace_quic_aimd_feedback(cx: &Cx, state: &QuicSenderFeedbackState<'_>) {
     );
 }
 
+fn quic_repair_symbol_total(requests: &[QuicBlockRepairRequest]) -> u64 {
+    requests.iter().fold(0u64, |acc, request| {
+        acc.saturating_add(u64::from(request.symbols))
+    })
+}
+
+fn quic_repair_block_request_summary(requests: &[QuicBlockRepairRequest]) -> String {
+    use std::fmt::Write as _;
+
+    const MAX_TRACE_BLOCKS: usize = 128;
+
+    let mut summary = String::new();
+    for (idx, request) in requests.iter().take(MAX_TRACE_BLOCKS).enumerate() {
+        if idx != 0 {
+            summary.push(';');
+        }
+        let _ = write!(
+            &mut summary,
+            "{}:{}:{}",
+            request.entry, request.sbn, request.symbols
+        );
+    }
+    if requests.len() > MAX_TRACE_BLOCKS {
+        if !summary.is_empty() {
+            summary.push(';');
+        }
+        let _ = write!(
+            &mut summary,
+            "+{}more",
+            requests.len().saturating_sub(MAX_TRACE_BLOCKS)
+        );
+    }
+    summary
+}
+
+fn quic_need_more_response_mode(need: &QuicNeedMore) -> &'static str {
+    if !need.repair_blocks.is_empty() {
+        "block_repair"
+    } else if need.pending.is_empty() && need.source_symbols.is_empty() {
+        "empty"
+    } else if need.source_symbols.is_empty() {
+        "repair_spray"
+    } else {
+        "source_retransmit"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_quic_sender_need_more(
+    cx: &Cx,
+    round: u32,
+    symbols_sent_total: u64,
+    sent_this_round: u64,
+    need: &QuicNeedMore,
+    config: &QuicConfig,
+    aimd_rate_bps: Option<u64>,
+    native_aimd_cap_bps: Option<u64>,
+) {
+    if std::env::var_os("ATP_RQ_TRACE").is_some() {
+        quic_rqtrace(format_args!(
+            "sender: NeedMore round={} pending={} repair_blocks={} repair_symbols_requested={} source_requests={} sent_total={} sent_this_round={} observed={} accepted={} loss={:.6} max_feedback_rounds={} repair_symbol_round_cap={} repair_block_request_cap={} repair_block_requests={} aimd_rate_bps={} native_aimd_cap_bps={}",
+            round,
+            need.pending.len(),
+            need.repair_blocks.len(),
+            quic_repair_symbol_total(&need.repair_blocks),
+            need.source_symbols.len(),
+            symbols_sent_total,
+            sent_this_round,
+            need.round_symbols_observed.unwrap_or(0),
+            need.round_symbols_accepted.unwrap_or(0),
+            need.round_loss_fraction.unwrap_or(0.0),
+            config.max_feedback_rounds,
+            MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+            MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND,
+            quic_repair_block_request_summary(&need.repair_blocks),
+            aimd_rate_bps
+                .map(|rate| rate.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            native_aimd_cap_bps
+                .map(|rate| rate.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        ));
+    }
+    if cx.trace_buffer().is_none() {
+        return;
+    }
+
+    let round = round.to_string();
+    let symbols_sent_total = symbols_sent_total.to_string();
+    let sent_this_round = sent_this_round.to_string();
+    let max_feedback_rounds = config.max_feedback_rounds.to_string();
+    let pending = need.pending.len().to_string();
+    let repair_blocks = need.repair_blocks.len().to_string();
+    let repair_symbols_requested = quic_repair_symbol_total(&need.repair_blocks).to_string();
+    let source_symbols = need.source_symbols.len().to_string();
+    let round_symbols_observed = need.round_symbols_observed.unwrap_or(0).to_string();
+    let round_symbols_accepted = need.round_symbols_accepted.unwrap_or(0).to_string();
+    let round_loss_fraction = format!("{:.6}", need.round_loss_fraction.unwrap_or(0.0));
+    let repair_symbol_round_cap = MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
+    let repair_block_request_cap = MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
+    let repair_cushion_per_block = FEEDBACK_REPAIR_CUSHION_PER_BLOCK.to_string();
+    let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
+    let aimd_rate_bps = aimd_rate_bps.map_or_else(|| "none".to_string(), |rate| rate.to_string());
+    let native_aimd_cap_bps =
+        native_aimd_cap_bps.map_or_else(|| "none".to_string(), |rate| rate.to_string());
+
+    cx.trace_with_fields(
+        "atp_quic.sender.need_more",
+        &[
+            ("transport", "quic"),
+            ("round", round.as_str()),
+            ("symbols_sent_total", symbols_sent_total.as_str()),
+            ("sent_this_round", sent_this_round.as_str()),
+            ("max_feedback_rounds", max_feedback_rounds.as_str()),
+            ("pending", pending.as_str()),
+            ("repair_blocks", repair_blocks.as_str()),
+            (
+                "repair_symbols_requested",
+                repair_symbols_requested.as_str(),
+            ),
+            ("source_symbols", source_symbols.as_str()),
+            ("round_symbols_observed", round_symbols_observed.as_str()),
+            ("round_symbols_accepted", round_symbols_accepted.as_str()),
+            ("round_loss_fraction", round_loss_fraction.as_str()),
+            ("repair_symbol_round_cap", repair_symbol_round_cap.as_str()),
+            (
+                "repair_block_request_cap",
+                repair_block_request_cap.as_str(),
+            ),
+            (
+                "repair_cushion_per_block",
+                repair_cushion_per_block.as_str(),
+            ),
+            ("repair_block_requests", repair_block_requests.as_str()),
+            ("aimd_rate_bps", aimd_rate_bps.as_str()),
+            ("native_aimd_cap_bps", native_aimd_cap_bps.as_str()),
+        ],
+    );
+}
+
+fn trace_quic_sender_repair_round(
+    cx: &Cx,
+    round: u32,
+    mode: &str,
+    symbols_before: u64,
+    emitted_symbols: u64,
+    need: &QuicNeedMore,
+) {
+    if std::env::var_os("ATP_RQ_TRACE").is_some() {
+        quic_rqtrace(format_args!(
+            "sender: repair_round round={} mode={} symbols_before={} emitted_symbols={} symbols_after={} pending={} repair_blocks={} repair_symbols_requested={} source_requests={} repair_block_requests={}",
+            round,
+            mode,
+            symbols_before,
+            emitted_symbols,
+            symbols_before.saturating_add(emitted_symbols),
+            need.pending.len(),
+            need.repair_blocks.len(),
+            quic_repair_symbol_total(&need.repair_blocks),
+            need.source_symbols.len(),
+            quic_repair_block_request_summary(&need.repair_blocks)
+        ));
+    }
+    if cx.trace_buffer().is_none() {
+        return;
+    }
+
+    let symbols_after_value = symbols_before.saturating_add(emitted_symbols);
+    let round = round.to_string();
+    let symbols_before = symbols_before.to_string();
+    let emitted_symbols = emitted_symbols.to_string();
+    let symbols_after = symbols_after_value.to_string();
+    let pending = need.pending.len().to_string();
+    let repair_blocks = need.repair_blocks.len().to_string();
+    let repair_symbols_requested = quic_repair_symbol_total(&need.repair_blocks).to_string();
+    let source_symbols = need.source_symbols.len().to_string();
+    let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
+
+    cx.trace_with_fields(
+        "atp_quic.sender.repair_round",
+        &[
+            ("transport", "quic"),
+            ("round", round.as_str()),
+            ("mode", mode),
+            ("symbols_before", symbols_before.as_str()),
+            ("emitted_symbols", emitted_symbols.as_str()),
+            ("symbols_after", symbols_after.as_str()),
+            ("pending", pending.as_str()),
+            ("repair_blocks", repair_blocks.as_str()),
+            (
+                "repair_symbols_requested",
+                repair_symbols_requested.as_str(),
+            ),
+            ("source_symbols", source_symbols.as_str()),
+            ("repair_block_requests", repair_block_requests.as_str()),
+        ],
+    );
+}
+
 #[cfg(test)]
 fn encoders_from_entries(
     manifest: &TransferManifest,
@@ -3007,6 +3220,10 @@ async fn send_block_repair_requests(
         let block = enc.read_block(cx, request.sbn, config).await?;
         let already = enc.repair_cursor(request.sbn);
         let target_repair = already.saturating_add(repair_count);
+        quic_rqtrace(format_args!(
+            "sender: repair_block entry={} sbn={} requested_symbols={} repair_cursor_start={} repair_cursor_target={}",
+            request.entry, request.sbn, repair_count, already, target_repair
+        ));
         let mut pipeline = encoding_pipeline(config);
         for encoded in pipeline.encode_single_block_repair_range(
             enc.object_id,
@@ -3296,15 +3513,34 @@ async fn handle_sender_feedback_or_proof(
             }
             state.observe_need_more(&need);
             trace_quic_aimd_feedback(cx, state);
+            trace_quic_sender_need_more(
+                cx,
+                state.feedback_rounds,
+                state.symbols_sent,
+                state.sent_this_round(),
+                &need,
+                state.config,
+                Some(state.aimd_rate_bps),
+                None,
+            );
             if need.pending.is_empty()
                 && need.repair_blocks.is_empty()
                 && need.source_symbols.is_empty()
             {
+                trace_quic_sender_repair_round(
+                    cx,
+                    state.feedback_rounds,
+                    quic_need_more_response_mode(&need),
+                    state.symbols_sent,
+                    0,
+                    &need,
+                );
                 return Ok(None);
             }
             let round_config = state.next_round_config();
             let symbol_auth = round_config.symbol_auth_context()?;
             let previous_symbols_sent = state.symbols_sent;
+            let response_mode = quic_need_more_response_mode(&need);
             let sent = send_repair_round_and_object_complete(
                 cx,
                 conn,
@@ -3317,6 +3553,14 @@ async fn handle_sender_feedback_or_proof(
             )
             .await?;
             state.mark_next_round_started(previous_symbols_sent, sent);
+            trace_quic_sender_repair_round(
+                cx,
+                state.feedback_rounds,
+                response_mode,
+                previous_symbols_sent,
+                sent,
+                &need,
+            );
             Ok(None)
         }
     }
@@ -5037,6 +5281,10 @@ async fn send_native_block_repair_requests(
         let block = enc.read_block(cx, request.sbn, config).await?;
         let already = enc.repair_cursor(request.sbn);
         let target_repair = already.saturating_add(repair_count);
+        quic_rqtrace(format_args!(
+            "sender-native: repair_block entry={} sbn={} requested_symbols={} repair_cursor_start={} repair_cursor_target={}",
+            request.entry, request.sbn, repair_count, already, target_repair
+        ));
         let mut pipeline = encoding_pipeline(config);
         for encoded in pipeline.encode_single_block_repair_range(
             enc.object_id,
@@ -5219,15 +5467,34 @@ async fn handle_native_sender_feedback_or_proof(
             }
             state.observe_need_more(&need);
             trace_quic_aimd_feedback(cx, state);
+            trace_quic_sender_need_more(
+                cx,
+                state.feedback_rounds,
+                state.symbols_sent,
+                state.sent_this_round(),
+                &need,
+                state.config,
+                Some(state.aimd_rate_bps),
+                None,
+            );
             if need.pending.is_empty()
                 && need.repair_blocks.is_empty()
                 && need.source_symbols.is_empty()
             {
+                trace_quic_sender_repair_round(
+                    cx,
+                    state.feedback_rounds,
+                    quic_need_more_response_mode(&need),
+                    state.symbols_sent,
+                    0,
+                    &need,
+                );
                 return Ok(None);
             }
             let round_config = state.next_round_config();
             let symbol_auth = round_config.symbol_auth_context()?;
             let previous_symbols_sent = state.symbols_sent;
+            let response_mode = quic_need_more_response_mode(&need);
             let sent = send_native_repair_round_and_object_complete(
                 cx,
                 conn,
@@ -5240,6 +5507,14 @@ async fn handle_native_sender_feedback_or_proof(
             )
             .await?;
             state.mark_next_round_started(previous_symbols_sent, sent);
+            trace_quic_sender_repair_round(
+                cx,
+                state.feedback_rounds,
+                response_mode,
+                previous_symbols_sent,
+                sent,
+                &need,
+            );
             Ok(None)
         }
     }
@@ -6040,6 +6315,10 @@ async fn receive_native_symbol_round(
     let round_symbols_observed = round_stats.observed.to_string();
     let round_symbols_accepted = round_stats.accepted.to_string();
     let round_loss_fraction = format!("{:.6}", need.round_loss_fraction.unwrap_or(0.0));
+    let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
+    let repair_symbol_round_cap = MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
+    let repair_block_request_cap = MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
+    let repair_cushion_per_block = FEEDBACK_REPAIR_CUSHION_PER_BLOCK.to_string();
     let round_text = round.to_string();
     cx.trace_with_fields(
         "atp_quic.receive.need_more",
@@ -6054,8 +6333,35 @@ async fn receive_native_symbol_round(
             ("round_symbols_accepted", round_symbols_accepted.as_str()),
             ("round_loss_fraction", round_loss_fraction.as_str()),
             ("symbols_accepted", accepted_count.as_str()),
+            ("repair_block_requests", repair_block_requests.as_str()),
+            ("repair_symbol_round_cap", repair_symbol_round_cap.as_str()),
+            (
+                "repair_block_request_cap",
+                repair_block_request_cap.as_str(),
+            ),
+            (
+                "repair_cushion_per_block",
+                repair_cushion_per_block.as_str(),
+            ),
         ],
     );
+    quic_rqtrace(format_args!(
+        "receiver: NeedMore round={} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={} symbols_accepted={} max_feedback_rounds={} repair_symbol_round_cap={} repair_block_request_cap={} repair_block_requests={}",
+        round,
+        pending_count,
+        block_request_count,
+        repair_symbol_count,
+        source_request_count,
+        round_symbols_sent,
+        round_symbols_observed,
+        round_symbols_accepted,
+        round_loss_fraction,
+        accepted_count,
+        config.max_feedback_rounds,
+        repair_symbol_round_cap,
+        repair_block_request_cap,
+        repair_block_requests,
+    ));
     send_native_need_more(cx, connection, control, &need)?;
     *feedback_rounds = round;
     Ok(Some(need))

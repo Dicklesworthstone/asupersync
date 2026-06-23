@@ -231,6 +231,59 @@ const NEEDMORE_PTO: Duration = Duration::from_millis(1500);
 /// (`NEEDMORE_PTO * MAX_NEEDMORE_PTO` is the effective per-round idle budget).
 const MAX_NEEDMORE_PTO: u32 = 40;
 
+/// Opt-in stderr tracing for ATP/RQ benchmark diagnosis. Reuses the existing
+/// ATP_RQ_TRACE switch so matrix runs can grep one trace stream across RQ and
+/// QUIC transports.
+macro_rules! quic_rqtrace {
+    ($($arg:tt)*) => {
+        if std::env::var_os("ATP_RQ_TRACE").is_some() {
+            eprintln!("[ATP_RQ_TRACE] [atp-quic] {}", format!($($arg)*));
+        }
+    };
+}
+
+fn need_more_repair_symbol_count(need: &QuicNeedMore) -> u64 {
+    need.repair_blocks.iter().fold(0u64, |acc, request| {
+        acc.saturating_add(u64::from(request.symbols))
+    })
+}
+
+fn repair_block_trace_summary(requests: &[QuicBlockRepairRequest]) -> String {
+    const MAX_DETAIL_BLOCKS: usize = 16;
+    let mut max_symbols = 0u32;
+    let mut parts = Vec::new();
+    for request in requests.iter().take(MAX_DETAIL_BLOCKS) {
+        max_symbols = max_symbols.max(request.symbols);
+        parts.push(format!(
+            "{}:{}:{}",
+            request.entry, request.sbn, request.symbols
+        ));
+    }
+    for request in requests.iter().skip(MAX_DETAIL_BLOCKS) {
+        max_symbols = max_symbols.max(request.symbols);
+    }
+    if requests.len() > MAX_DETAIL_BLOCKS {
+        parts.push(format!("+{}more", requests.len() - MAX_DETAIL_BLOCKS));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        format!("max={} [{}]", max_symbols, parts.join(","))
+    }
+}
+
+fn trace_repair_block_deficits(direction: &str, round: u32, requests: &[QuicBlockRepairRequest]) {
+    if std::env::var_os("ATP_RQ_TRACE").is_none() {
+        return;
+    }
+    for request in requests {
+        eprintln!(
+            "[ATP_RQ_TRACE] [atp-quic] {direction}: NeedMoreBlock round={round} entry={} sbn={} requested_symbols={}",
+            request.entry, request.sbn, request.symbols
+        );
+    }
+}
+
 /// Monotonic data-plane clock step (microseconds) fed to the connection per pump
 /// operation. The transfer's correctness does not depend on real time; this only
 /// keeps the connection's loss/ACK bookkeeping monotonic.
@@ -1451,6 +1504,16 @@ async fn spray_block_repair_requests(
             sent = sent.saturating_add(1);
         }
         enc.set_repair_cursor(request.sbn, target_repair);
+        quic_rqtrace!(
+            "sender: repair_block entry={} sbn={} requested_symbols={} emitted_symbols={} repair_cursor_before={} repair_cursor_after={} pacing_rate_bps={}",
+            entry_index,
+            request.sbn,
+            request.symbols,
+            repair_count,
+            already,
+            target_repair,
+            pacing.pacing_rate_bps,
+        );
     }
     aimd.record_spray(sent, pacing.pacing_rate_bps);
     Ok(sent)
@@ -1585,21 +1648,55 @@ async fn run_sender_session(
             QuicControlReply::NeedMore(need) => {
                 aimd.observe_need_more(cx, &need);
                 feedback_rounds = feedback_rounds.saturating_add(1);
-                if feedback_rounds > config.max_feedback_rounds {
-                    return Err(QuicTransportError::NoConvergence {
-                        rounds: feedback_rounds,
-                        pending: need.pending.len(),
-                    });
-                }
+                let requested_repair_symbols = need_more_repair_symbol_count(&need);
+                let repair_detail = repair_block_trace_summary(&need.repair_blocks);
+                quic_rqtrace!(
+                    "sender: NeedMore round={feedback_rounds} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
+                    need.pending.len(),
+                    need.repair_blocks.len(),
+                    requested_repair_symbols,
+                    need.source_symbols.len(),
+                    need.round_symbols_observed.unwrap_or(0),
+                    need.round_symbols_accepted.unwrap_or(0),
+                    need.round_loss_fraction.unwrap_or(0.0),
+                    config.max_feedback_rounds,
+                    feedback_rounds > config.max_feedback_rounds,
+                    super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                    symbols_sent,
+                    aimd.last_round_symbols_sent,
+                    aimd.last_round_pacing_rate_bps,
+                    repair_detail,
+                );
+                trace_repair_block_deficits("sender", feedback_rounds, &need.repair_blocks);
+                super::trace_quic_sender_need_more(
+                    cx,
+                    feedback_rounds,
+                    symbols_sent,
+                    aimd.last_round_symbols_sent,
+                    &need,
+                    config,
+                    None,
+                    aimd.cap_bps(),
+                );
                 if need.pending.is_empty()
                     && need.repair_blocks.is_empty()
                     && need.source_symbols.is_empty()
                 {
+                    super::trace_quic_sender_repair_round(
+                        cx,
+                        feedback_rounds,
+                        super::quic_need_more_response_mode(&need),
+                        symbols_sent,
+                        0,
+                        &need,
+                    );
                     super::send_native_object_complete(cx, &mut link.conn, &mut control, 0)?;
                     link.flush(cx).await?;
                     continue;
                 }
                 let pending = super::validate_need_more_feedback(manifest, config, &need)?;
+                let symbols_before = symbols_sent;
+                let response_mode = super::quic_need_more_response_mode(&need);
                 let sent = if !need.repair_blocks.is_empty() {
                     spray_block_repair_requests(
                         cx,
@@ -1642,6 +1739,19 @@ async fn run_sender_session(
                     .await?
                 };
                 symbols_sent = symbols_sent.saturating_add(sent);
+                super::trace_quic_sender_repair_round(
+                    cx,
+                    feedback_rounds,
+                    response_mode,
+                    symbols_before,
+                    sent,
+                    &need,
+                );
+                quic_rqtrace!(
+                    "sender: repair_round round={feedback_rounds} emitted_symbols={sent} requested_repair_symbols={requested_repair_symbols} total_symbols_sent={symbols_sent} pacing_rate_bps={} max_feedback_rounds={} round_cap_enforced=false",
+                    aimd.last_round_pacing_rate_bps,
+                    config.max_feedback_rounds,
+                );
                 // Flush this round's repair/source symbols before ObjectComplete
                 // (same ordering guarantee as the initial spray).
                 link.flush(cx).await?;
@@ -1888,6 +1998,11 @@ impl NativeReceiverIntakeStats {
         let round_symbols_observed = need.round_symbols_observed.unwrap_or(0).to_string();
         let round_symbols_accepted = need.round_symbols_accepted.unwrap_or(0).to_string();
         let round_loss_fraction = format!("{:.4}", need.round_loss_fraction.unwrap_or(0.0));
+        let repair_block_requests = super::quic_repair_block_request_summary(&need.repair_blocks);
+        let repair_symbol_round_cap = super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
+        let repair_block_request_cap =
+            super::MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
+        let repair_cushion_per_block = super::FEEDBACK_REPAIR_CUSHION_PER_BLOCK.to_string();
         let drain_calls = self.drain_calls.to_string();
         let symbols_accepted = self.symbols_accepted.to_string();
         let blocks_completed = self.blocks_completed.to_string();
@@ -1909,6 +2024,16 @@ impl NativeReceiverIntakeStats {
                 ("round_symbols_observed", round_symbols_observed.as_str()),
                 ("round_symbols_accepted", round_symbols_accepted.as_str()),
                 ("round_loss_fraction", round_loss_fraction.as_str()),
+                ("repair_block_requests", repair_block_requests.as_str()),
+                ("repair_symbol_round_cap", repair_symbol_round_cap.as_str()),
+                (
+                    "repair_block_request_cap",
+                    repair_block_request_cap.as_str(),
+                ),
+                (
+                    "repair_cushion_per_block",
+                    repair_cushion_per_block.as_str(),
+                ),
                 ("drain_calls", drain_calls.as_str()),
                 ("symbols_accepted", symbols_accepted.as_str()),
                 ("blocks_completed", blocks_completed.as_str()),
@@ -2255,6 +2380,15 @@ async fn run_receiver_session(
                     if let Some(need) = last_need.as_ref() {
                         if needmore_pto_attempts < MAX_NEEDMORE_PTO {
                             needmore_pto_attempts = needmore_pto_attempts.saturating_add(1);
+                            quic_rqtrace!(
+                                "receiver: NeedMore PTO resend round={} attempt={} pending={} repair_blocks={} requested_repair_symbols={} max_attempts={}",
+                                feedback_rounds,
+                                needmore_pto_attempts,
+                                need.pending.len(),
+                                need.repair_blocks.len(),
+                                need_more_repair_symbol_count(need),
+                                MAX_NEEDMORE_PTO,
+                            );
                             super::send_native_need_more(cx, &mut link.conn, &mut control, need)?;
                             link.flush(cx).await?;
                             continue;
@@ -2268,12 +2402,6 @@ async fn run_receiver_session(
             let pending = super::pending_entries(&decoders);
             if pending.is_empty() {
                 break;
-            }
-            if feedback_rounds >= config.max_feedback_rounds {
-                return Err(QuicTransportError::NoConvergence {
-                    rounds: feedback_rounds,
-                    pending: pending.len(),
-                });
             }
             // Request fountain-robust FRESH repair (not fragile specific-source re-send). RaptorQ is
             // a fountain code: any K independent symbols decode a block, so fresh repair symbols
@@ -2303,6 +2431,30 @@ async fn run_receiver_session(
                 round_symbols_accepted: Some(round_symbols_accepted),
             };
             intake_stats.trace_need_more(cx, feedback_rounds.saturating_add(1), &need);
+            let requested_repair_symbols = need_more_repair_symbol_count(&need);
+            let repair_detail = repair_block_trace_summary(&need.repair_blocks);
+            quic_rqtrace!(
+                "receiver: NeedMore round={} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_symbols_sent={} round_loss_fraction={:.4} symbols_accepted={} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} repair_blocks_detail={}",
+                feedback_rounds.saturating_add(1),
+                need.pending.len(),
+                need.repair_blocks.len(),
+                requested_repair_symbols,
+                need.source_symbols.len(),
+                round_symbols_observed,
+                round_symbols_accepted,
+                round_complete.round_symbols_sent,
+                need.round_loss_fraction.unwrap_or(0.0),
+                symbols_accepted,
+                config.max_feedback_rounds,
+                feedback_rounds.saturating_add(1) > config.max_feedback_rounds,
+                super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                repair_detail,
+            );
+            trace_repair_block_deficits(
+                "receiver",
+                feedback_rounds.saturating_add(1),
+                &need.repair_blocks,
+            );
             super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
             link.flush(cx).await?;
             // Remember it so the inner loop can re-send it on the control PTO if the repair round

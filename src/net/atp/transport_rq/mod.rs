@@ -3480,6 +3480,16 @@ pub async fn send_path(
                     }
                     round_send_wall = round_started.elapsed();
                 }
+                let emitted_this_response = symbols_sent.saturating_sub(round_symbols_start);
+                rqtrace!(
+                    "sender: NeedMore response round={feedback_rounds} pending={} source_requests={} emitted_symbols={} total_symbols_sent={} max_feedback_rounds={} fec_fallback={}",
+                    pending.len(),
+                    source_symbols.len(),
+                    emitted_this_response,
+                    symbols_sent,
+                    config.max_feedback_rounds,
+                    source_fec_fallback_active,
+                );
             }
             other => {
                 return Err(RqError::Unexpected {
