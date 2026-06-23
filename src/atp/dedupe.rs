@@ -397,6 +397,37 @@ impl DeltaDedupCanonicalParts {
             .saturating_sub(self.compact_wire_bytes)
     }
 
+    /// Compact bytes plus the caller-owned outer delta envelope overhead.
+    pub fn compact_wire_bytes_with_outer_overhead(
+        &self,
+        outer_envelope_overhead_bytes: u64,
+    ) -> Result<u64, DeltaError> {
+        self.compact_wire_bytes
+            .checked_add(outer_envelope_overhead_bytes)
+            .ok_or(DeltaError::ChunkSizeOverflow)
+    }
+
+    /// True when compact parts plus outer envelope overhead beat logical bytes.
+    pub fn saves_bytes_with_outer_overhead(
+        &self,
+        outer_envelope_overhead_bytes: u64,
+    ) -> Result<bool, DeltaError> {
+        Ok(
+            self.compact_wire_bytes_with_outer_overhead(outer_envelope_overhead_bytes)?
+                < self.logical_missing_bytes,
+        )
+    }
+
+    /// Logical bytes avoided after accounting for the caller-owned envelope.
+    pub fn saved_bytes_with_outer_overhead(
+        &self,
+        outer_envelope_overhead_bytes: u64,
+    ) -> Result<u64, DeltaError> {
+        let wire_bytes =
+            self.compact_wire_bytes_with_outer_overhead(outer_envelope_overhead_bytes)?;
+        Ok(self.logical_missing_bytes.saturating_sub(wire_bytes))
+    }
+
     /// Decode canonical parts into a verified payload set for the receiver.
     pub fn decode_payload_set(
         &self,
@@ -682,6 +713,21 @@ pub fn build_canonical_dedup_payload_parts(
 ) -> Result<DeltaDedupCanonicalParts, DeltaError> {
     let payload_set = build_dedup_payload_set(plan, sender_store)?;
     DeltaDedupCanonicalParts::from_payload_set(&payload_set)
+}
+
+/// Build canonical dedupe parts only when they beat logical missing bytes after
+/// caller-owned outer envelope overhead is included.
+pub fn build_canonical_dedup_payload_parts_if_smaller(
+    plan: &DeltaResyncPlan,
+    sender_store: &ContentAddressedChunkStore,
+    outer_envelope_overhead_bytes: u64,
+) -> Result<Option<DeltaDedupCanonicalParts>, DeltaError> {
+    let parts = build_canonical_dedup_payload_parts(plan, sender_store)?;
+    if parts.saves_bytes_with_outer_overhead(outer_envelope_overhead_bytes)? {
+        Ok(Some(parts))
+    } else {
+        Ok(None)
+    }
 }
 
 pub(crate) fn payload_matches_key(
@@ -976,6 +1022,62 @@ mod tests {
             parts.saved_bytes(),
             sender.total_size_bytes - parts.compact_wire_bytes
         );
+        assert_eq!(
+            parts
+                .compact_wire_bytes_with_outer_overhead(128)
+                .expect("wire plus outer overhead"),
+            parts.compact_wire_bytes + 128
+        );
+        assert!(
+            parts
+                .saves_bytes_with_outer_overhead(128)
+                .expect("saves with outer overhead")
+        );
+        assert_eq!(
+            parts
+                .saved_bytes_with_outer_overhead(128)
+                .expect("saved with overhead"),
+            sender.total_size_bytes - parts.compact_wire_bytes - 128
+        );
+    }
+
+    #[test]
+    fn canonical_dedup_parts_if_smaller_accounts_outer_envelope() {
+        let repeated = vec![b'r'; 4096];
+        let unique = vec![b'u'; 1024];
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let parts =
+            build_canonical_dedup_payload_parts(&plan, &sender_store).expect("canonical parts");
+        let saved_without_outer = parts.saved_bytes();
+        assert!(saved_without_outer > 0);
+
+        let selected = build_canonical_dedup_payload_parts_if_smaller(
+            &plan,
+            &sender_store,
+            saved_without_outer - 1,
+        )
+        .expect("selected compact parts")
+        .expect("compact still saves one byte");
+        assert_eq!(selected.metadata_bytes, parts.metadata_bytes);
+        assert_eq!(selected.unique_payload_bytes, parts.unique_payload_bytes);
+
+        let rejected = build_canonical_dedup_payload_parts_if_smaller(
+            &plan,
+            &sender_store,
+            saved_without_outer,
+        )
+        .expect("compact selection");
+        assert!(rejected.is_none());
     }
 
     #[test]
