@@ -825,6 +825,50 @@ pub fn select_pivot_markowitz(
     best
 }
 
+/// Computes the GF(256) coefficient rank of a dense matrix.
+///
+/// Rows may be shorter than `columns`; missing entries are treated as zero.
+/// The reduction is deterministic: columns are considered left-to-right, and
+/// the first row that creates a new basis vector for a pivot column is retained.
+/// Unlike the decode solver, rank determination skips free columns and
+/// therefore reports the true row rank of the coefficient matrix even when a
+/// unique solution is impossible.
+#[must_use]
+pub fn coefficient_rank(matrix: &[&[u8]], columns: usize) -> usize {
+    let mut basis = vec![None::<Vec<Gf256>>; columns];
+    let mut rank = 0usize;
+
+    for row_data in matrix {
+        let mut row = vec![Gf256::ZERO; columns];
+        for (column, slot) in row.iter_mut().enumerate() {
+            *slot = Gf256::new(row_data.get(column).copied().unwrap_or(0));
+        }
+
+        for pivot in 0..columns {
+            if row[pivot].is_zero() {
+                continue;
+            }
+
+            if let Some(basis_row) = basis[pivot].as_ref() {
+                let factor = row[pivot];
+                for (column, value) in row.iter_mut().enumerate().skip(pivot) {
+                    *value += basis_row[column] * factor;
+                }
+            } else {
+                let inv = row[pivot].inv();
+                for value in row.iter_mut().skip(pivot) {
+                    *value *= inv;
+                }
+                basis[pivot] = Some(row);
+                rank += 1;
+                break;
+            }
+        }
+    }
+
+    rank
+}
+
 /// Counts nonzeros in a row (useful for Markowitz pivot selection).
 #[inline]
 #[must_use]
@@ -867,6 +911,19 @@ pub enum GaussianResult {
         /// The transformed row index witnessing inconsistency.
         row: usize,
     },
+}
+
+/// Deterministic rank summary for a [`GaussianSolver`] coefficient matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GaussianRankStatus {
+    /// Number of coefficient rows.
+    pub rows: usize,
+    /// Number of coefficient columns / unknowns.
+    pub columns: usize,
+    /// GF(256) row rank of the coefficient matrix.
+    pub rank: usize,
+    /// Number of columns still missing independent support.
+    pub deficit: usize,
 }
 
 /// Statistics from Gaussian elimination.
@@ -945,12 +1002,33 @@ impl GaussianSolver {
         &self.stats
     }
 
+    /// Computes the current coefficient rank without considering RHS data.
+    ///
+    /// This is an opt-in rank probe rather than part of the hot solve path. It
+    /// treats missing coefficients as zero and skips free columns, so it reports
+    /// true matrix rank even when `solve` must fail closed at the first missing
+    /// pivot because a unique solution cannot be reconstructed.
+    #[must_use]
+    pub fn rank_status(&self) -> GaussianRankStatus {
+        let rows: Vec<&[u8]> = self.matrix.iter().map(Vec::as_slice).collect();
+        let rank = coefficient_rank(&rows, self.cols);
+        GaussianRankStatus {
+            rows: self.rows,
+            columns: self.cols,
+            rank,
+            deficit: self.cols.saturating_sub(rank),
+        }
+    }
+
     /// Solve the system using Gaussian elimination with partial pivoting.
     ///
     /// Returns `GaussianResult::Solved` with the solution if successful,
     /// `GaussianResult::Singular` if no pivot exists, or
     /// `GaussianResult::Inconsistent` for contradictory overdetermined systems.
     pub fn solve(&mut self) -> GaussianResult {
+        if let Some(row) = self.rhs_width_mismatch_row() {
+            return GaussianResult::Inconsistent { row };
+        }
         let n = self.rows.min(self.cols);
 
         // Forward elimination
@@ -1015,6 +1093,9 @@ impl GaussianSolver {
 
     /// Solve with Markowitz pivot selection (better for sparse matrices).
     pub fn solve_markowitz(&mut self) -> GaussianResult {
+        if let Some(row) = self.rhs_width_mismatch_row() {
+            return GaussianResult::Inconsistent { row };
+        }
         let n = self.rows.min(self.cols);
 
         // Forward elimination with Markowitz pivoting
@@ -1122,6 +1203,15 @@ impl GaussianSolver {
     /// has a non-zero RHS, indicating an inconsistent system.
     fn first_inconsistent_row(&self) -> Option<usize> {
         self.first_inconsistent_row_from(0)
+    }
+
+    fn rhs_width_mismatch_row(&self) -> Option<usize> {
+        let expected = self.rhs.first().map_or(0, DenseRow::len);
+        self.rhs
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find_map(|(row, rhs)| (rhs.len() != expected).then_some(row))
     }
 
     fn first_inconsistent_row_from(&self, start_row: usize) -> Option<usize> {
@@ -1878,6 +1968,46 @@ mod tests {
     }
 
     #[test]
+    fn coefficient_rank_skips_free_columns_and_counts_true_rank() {
+        // Column 1 is entirely zero, so the solve path must fail closed there
+        // for unique reconstruction. Rank determination still has to count the
+        // independent support in columns 0 and 2.
+        let rows: Vec<Vec<u8>> = vec![vec![1, 0, 1], vec![0, 0, 1], vec![1, 0, 0]];
+        let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+
+        assert_eq!(coefficient_rank(&matrix, 3), 2);
+        assert_eq!(coefficient_rank(&matrix, 2), 1);
+        assert_eq!(coefficient_rank(&matrix, 0), 0);
+    }
+
+    #[test]
+    fn coefficient_rank_is_invariant_under_row_scaling_and_permutation() {
+        let base: Vec<Vec<u8>> = vec![vec![2, 0, 1, 0], vec![0, 3, 1, 0], vec![2, 3, 0, 0]];
+
+        let scaled_permuted: Vec<Vec<u8>> = [2usize, 0, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row_index)| {
+                let factor = Gf256::new([7, 11, 13][idx]);
+                base[row_index]
+                    .iter()
+                    .map(|&value| (Gf256::new(value) * factor).raw())
+                    .collect()
+            })
+            .collect();
+
+        let base_rows: Vec<&[u8]> = base.iter().map(Vec::as_slice).collect();
+        let scaled_rows: Vec<&[u8]> = scaled_permuted.iter().map(Vec::as_slice).collect();
+
+        assert_eq!(coefficient_rank(&base_rows, 4), 2);
+        assert_eq!(
+            coefficient_rank(&base_rows, 4),
+            coefficient_rank(&scaled_rows, 4),
+            "row scaling by nonzero GF(256) factors and row permutation must preserve rank"
+        );
+    }
+
+    #[test]
     fn row_nonzero_count_works() {
         assert_eq!(row_nonzero_count(&[0, 0, 0]), 0);
         assert_eq!(row_nonzero_count(&[1, 0, 2]), 2);
@@ -2233,6 +2363,40 @@ mod tests {
     }
 
     #[test]
+    fn gaussian_mixed_rhs_widths_fail_closed_before_elimination() {
+        fn build_solver() -> GaussianSolver {
+            let mut solver = GaussianSolver::new(2, 2);
+            solver.set_row(0, &[1, 1], DenseRow::new(vec![0xAA, 0xBB]));
+            solver.set_row(1, &[0, 1], DenseRow::new(vec![0xCC]));
+            solver
+        }
+
+        let mut basic = build_solver();
+        let mut markowitz = build_solver();
+
+        assert_eq!(
+            basic.solve(),
+            GaussianResult::Inconsistent { row: 1 },
+            "mixed-width RHS rows must not solve by padding or truncating symbols"
+        );
+        assert_eq!(
+            markowitz.solve_markowitz(),
+            GaussianResult::Inconsistent { row: 1 },
+            "Markowitz path must enforce the same RHS-width fail-closed guard"
+        );
+        assert_eq!(
+            basic.stats().pivot_selections,
+            0,
+            "basic solver should reject malformed RHS widths before pivoting"
+        );
+        assert_eq!(
+            markowitz.stats().pivot_selections,
+            0,
+            "Markowitz solver should reject malformed RHS widths before pivoting"
+        );
+    }
+
+    #[test]
     fn gaussian_zero_variable_empty_system_solves_empty_solution() {
         let mut basic = GaussianSolver::new(0, 0);
         let mut markowitz = GaussianSolver::new(0, 0);
@@ -2326,6 +2490,17 @@ mod tests {
         solver.set_row(1, &[0, 0, 1], DenseRow::new(vec![1]));
         solver.set_row(2, &[1, 0, 0], DenseRow::new(vec![1]));
 
+        assert_eq!(
+            solver.rank_status(),
+            GaussianRankStatus {
+                rows: 3,
+                columns: 3,
+                rank: 2,
+                deficit: 1,
+            },
+            "rank probe must report the true coefficient rank before the unique-solve path fails closed"
+        );
+
         match solver.solve() {
             GaussianResult::Singular { .. } => {}
             GaussianResult::Inconsistent { .. } => {
@@ -2336,6 +2511,12 @@ mod tests {
                  column is rank-deficient and MUST NOT solve"
             ),
         }
+
+        assert_eq!(
+            solver.rank_status().rank,
+            2,
+            "rank probe should remain stable after the in-place elimination attempt"
+        );
     }
 
     #[test]
