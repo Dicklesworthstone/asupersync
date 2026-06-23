@@ -1795,3 +1795,26 @@ Benched the TREES front commit `1d3290821` "fix(atp-rq): batch small tree receiv
 **Side-finding (memory asymmetry):** rsyncd peak RSS on tree_small/perfect = **~6.5 GB** vs atp **18 MB** (~360×). rsync materializes a full in-memory file list for many-small-files trees; atp's streaming fountain stays bounded. This is a real robustness edge even where atp loses on wall — flagged for the memory scoreboard (E-8.1).
 
 **Watch:** tree_big/bad atp 23.97s vs prior-run ~19.57s (+4.4s) — the batching targets the *small*-entry path so this is most likely lossy-cell variance (bad = 80ms/2%/50mbit, high cv), not a batch regression; will re-confirm if it recurs. **Next tree lever is NOT more small-entry batching** (diminishing returns on wall) — the residual small-tree gap is fixed per-tree fountain setup latency, which only matters on clean/small; atp already wins where it counts (lossy big trees). Pivot tree effort toward the encrypted-lossy unblocker (71qhl6) and 500M-decode, which have far larger untapped EV. Evidence: `artifacts/atp_bench_matrix/20260623T004938Z/`.
+
+## MATRIX-39 (2026-06-23) — 71qhl6 fix VERIFIED (packet-too-large gone) but encrypted-lossy STILL fails: root cause is ONE-SYMBOL-PER-UDP-PACKET throttling QUIC to ~1 MB/s regardless of link (also explains encrypted-clean 42× loss)
+
+Re-benched encrypted 50M after the QUIC 71qhl6 fix `5a690b975` (ATP_QUIC_UDP_MAX_PACKET 16384→65535 + headroom + fail-closed clamp). Run `artifacts/atp_bench_matrix/20260623T011637Z/`:
+
+| regime | atp-quic-tls13 | rsync-ssh | atp status | vs MATRIX-37 |
+|---|---|---|---|---|
+| perfect | 37.38s sha-ok (3/3, 46000 symbols) | 0.86s sha-ok | ok | works (loses 43×) |
+| good (25ms/0.1%/200mbit) | 0/3 — **ASUP-E804 60s timeout** | 4.06s sha-ok | error | packet-too-large GONE; now timeout |
+| bad (80ms/2%/50mbit) | 0/3 — **ASUP-E804 60s timeout** | 17.47s sha-ok | error | packet-too-large GONE; now timeout |
+
+**71qhl6 is CONFIRMED working:** `grep 'packet too large'` across all lossy reps = **0** (was 6 in MATRIX-37). The cap fix did exactly its job. But it exposed the NEXT blocker: **`[ASUP-E804] transport timeout during receive proof or fountain feedback after 60s`** — non-convergence, not a fast error.
+
+**ROOT CAUSE (pinned, decisive from the receiver diagnostic counters):** the QUIC sender is delivering **<1 MB/s regardless of link bandwidth**:
+- perfect: 46000 symbols in 37.4s = **1230 sym/s ≈ 1.5 MB/s** (and this is the converging case)
+- good (25 MB/s link): 45964/46000 symbols in 60s = **766 sym/s ≈ 0.92 MB/s** = **3.7% link utilization** — agonizingly close (99.9% of K) then times out
+- bad (6.25 MB/s link): 34974/46000 in 60s = **583 sym/s ≈ 0.70 MB/s** = **11% link utilization** — badly starved
+
+Bandwidth is NOT the limit (receiver `datagrams_dropped=0, pending=0` — it accepts every symbol that arrives; nothing is lost at intake). The sender simply emits too few symbols/sec. **The cause is `native_link.rs:895` "Cap each 1-RTT data packet to carry at most one symbol DATAGRAM"**: `max_app_payload = one_datagram (= symbol_size+header+16 ≈ 1216B)`. Even with the envelope now at 65535, every UDP packet carries exactly ONE ~1216B symbol → throughput is **packets/sec-bound, not bytes/sec-bound**. Higher RTT (good 25ms, bad 80ms) → fewer round-trips in 60s → fewer symbols → good lands 45964/46000 and bad 34974/46000.
+
+**This same cap also explains encrypted-clean's 42× loss** (MATRIX-37/39): perfect = 1.5 MB/s vs rsync 58 MB/s. The one-symbol-per-packet rule is the SINGLE encrypted-tier throughput bottleneck across ALL regimes (lossy non-convergence AND clean slowness).
+
+**FIX (filed as a bead):** now that the UDP envelope is 65535, COALESCE MANY symbol-DATAGRAM frames per UDP datagram (~53 symbols × 1216B fit in 65535) — each symbol stays its own RFC 9221 DATAGRAM frame (per-symbol loss granularity preserved), just packed into one UDP send. This is ~50× send-throughput headroom and should fix BOTH encrypted-lossy convergence AND encrypted-clean speed at once. Caveat: the receiver's 256-deep inbound DATAGRAM queue (the original reason for the 1-symbol cap) must drain faster or be enlarged to absorb coalesced bursts — pair the change with a receiver drain/queue-depth bump. Evidence: `artifacts/atp_bench_matrix/20260623T011637Z/` (counters in cells/50M/{good,bad}/encrypted/atp-quic-tls13/rep*/).
