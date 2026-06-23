@@ -274,6 +274,8 @@ const RQ_DECODE_JOB_SYMBOL_MEMORY_MULTIPLIER: usize = 1;
 /// MATRIX-49: 500M/bad needs parallel block decode, but 50M/bad regressed when
 /// a handful of cheap block solves were over-dispatched. Keep those small
 /// entries sequential while preserving wide fanout for 500M-class geometry.
+/// MATRIX-50 tightened the gate to require both a large entry and many blocks:
+/// block count alone can reopen fanout for 50M-class shapes.
 const RQ_PARALLEL_DECODE_MIN_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
 const RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS: usize = 128;
 /// RQ repair feedback is round/RTT-bound: do not reject symbols for an
@@ -2913,13 +2915,13 @@ fn should_parallel_decode_entry_geometry(
     observed_source_blocks: usize,
 ) -> bool {
     entry_size >= RQ_PARALLEL_DECODE_MIN_ENTRY_BYTES
-        || entry_source_block_count_for_geometry(entry_size, max_block_size, observed_source_blocks)
+        && entry_source_block_count_for_geometry(entry_size, max_block_size, observed_source_blocks)
             >= RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS
 }
 
 fn should_parallel_decode_entry(dec: &EntryDecoder) -> bool {
     dec.size >= RQ_PARALLEL_DECODE_MIN_ENTRY_BYTES
-        || entry_source_block_count(dec) >= RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS
+        && entry_source_block_count(dec) >= RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS
 }
 
 fn transfer_decode_size_gate(decoders: &[EntryDecoder]) -> usize {
@@ -2932,7 +2934,7 @@ fn transfer_decode_size_gate(decoders: &[EntryDecoder]) -> usize {
 
 fn entry_decode_width_budget(dec: &EntryDecoder, transfer_decode_width: usize) -> usize {
     if !should_parallel_decode_entry(dec) {
-        return 1;
+        return 0;
     }
     let block_count = entry_source_block_count(dec);
     block_count
@@ -7272,6 +7274,29 @@ mod tests {
     }
 
     #[test]
+    fn decode_entry_width_gate_rejects_small_high_block_count_geometry() {
+        let config = RqConfig::default();
+        let workload_50m = 50 * 1024 * 1024;
+        let observed_blocks = RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS;
+
+        assert!(!should_parallel_decode_entry_geometry(
+            workload_50m as u64,
+            usize::from(config.symbol_size).saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK),
+            observed_blocks
+        ));
+        assert_eq!(
+            entry_decode_width_budget_for_geometry(
+                workload_50m as u64,
+                usize::from(config.symbol_size).saturating_mul(TARGET_SOURCE_SYMBOLS_PER_BLOCK),
+                observed_blocks,
+                RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
+            ),
+            0,
+            "50M-class entries must stay sequential even when block count reaches the old fanout threshold"
+        );
+    }
+
+    #[test]
     fn decode_memory_budget_keeps_500m_geometry_wide() {
         let config = RqConfig::default();
         let workload_500m = 500 * 1024 * 1024;
@@ -7350,8 +7375,8 @@ mod tests {
         );
         assert_eq!(
             entry_decode_width_budget(&dec_50m, RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD),
-            1,
-            "50M repair decode fanout should not pay blocking-pool dispatch overhead"
+            0,
+            "50M repair decode fanout should be fully disabled"
         );
         assert_eq!(
             rq_decode_width_budget_snapshot(std::slice::from_ref(&dec_50m), config.symbol_size)
