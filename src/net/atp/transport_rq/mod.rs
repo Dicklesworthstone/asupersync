@@ -2833,6 +2833,33 @@ enum DecodeDispatch {
     NoProgress,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DecodeDispatchOutcome {
+    dispatch: DecodeDispatch,
+    decode_stats: RqDecodeRoundStats,
+}
+
+impl DecodeDispatchOutcome {
+    fn new(dispatch: DecodeDispatch, decode_stats: RqDecodeRoundStats) -> Self {
+        Self {
+            dispatch,
+            decode_stats,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RqSymbolFeed {
+    accepted: bool,
+    decode_stats: RqDecodeRoundStats,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SourceStreamingSeedStats {
+    seeded: u64,
+    decode_stats: RqDecodeRoundStats,
+}
+
 fn should_cache_entry_staging_file(
     entry_size: u64,
     manifest_entries: usize,
@@ -4370,16 +4397,18 @@ pub async fn receive_connection(
                 if drained > 0 {
                     rqtrace!("receiver: tail-drained {drained} datagrams after ObjectComplete");
                 }
-                let seeded = flush_and_seed_source_streaming_round_boundary(
+                let seed_stats = flush_and_seed_source_streaming_round_boundary(
                     cx,
                     &mut decoders,
                     symbol_size,
                     symbol_auth.as_ref(),
                 )
                 .await?;
-                if seeded > 0 {
+                round_stats.record_decode_stats(seed_stats.decode_stats);
+                if seed_stats.seeded > 0 {
                     rqtrace!(
-                        "receiver: seeded {seeded} source-streaming block(s) at round boundary"
+                        "receiver: seeded {} source-streaming block(s) at round boundary",
+                        seed_stats.seeded
                     );
                 }
                 let completed_decode_stats = join_all_pending_decodes(cx, &mut decoders).await?;
@@ -4739,21 +4768,22 @@ async fn feed_symbol_with_cx(
     symbol_auth: Option<&SecurityContext>,
     allow_spawn_decode: bool,
     transfer_decode_width: usize,
-) -> Result<bool, RqError> {
+) -> Result<RqSymbolFeed, RqError> {
     if dec.complete {
-        return Ok(false);
+        return Ok(RqSymbolFeed::default());
     }
     if payload.len() != usize::from(symbol_size) {
         // RaptorQ symbols are fixed-size; ignore malformed/truncated payloads.
         // (The final block's short tail is zero-padded by the encoder, so all
         // emitted symbols are symbol_size bytes.)
-        return Ok(false);
+        return Ok(RqSymbolFeed::default());
     }
+    let mut feed = RqSymbolFeed::default();
     let mut pipeline_auth = None;
     if dec.source_streaming && parsed.kind.is_source() {
         if let Some(tag) = parsed.auth_tag {
             let Some(context) = symbol_auth else {
-                return Ok(false);
+                return Ok(feed);
             };
             let sym = Symbol::new(
                 SymbolId::new(dec.object_id, parsed.sbn, parsed.esi),
@@ -4768,20 +4798,22 @@ async fn feed_symbol_with_cx(
                     parsed.sbn,
                     parsed.esi
                 );
-                return Ok(false);
+                return Ok(feed);
             }
             if auth.is_verified() {
-                return persist_source_symbol(dec, parsed, payload, symbol_size).await;
+                feed.accepted = persist_source_symbol(dec, parsed, payload, symbol_size).await?;
+                return Ok(feed);
             }
             pipeline_auth = Some(auth);
         } else if symbol_auth.is_some() {
-            return Ok(false);
+            return Ok(feed);
         } else {
-            return persist_source_symbol(dec, parsed, payload, symbol_size).await;
+            feed.accepted = persist_source_symbol(dec, parsed, payload, symbol_size).await?;
+            return Ok(feed);
         }
     }
     if dec.pipeline.is_none() {
-        return Ok(false);
+        return Ok(feed);
     }
     let auth = if let Some(auth) = pipeline_auth {
         auth
@@ -4804,7 +4836,7 @@ async fn feed_symbol_with_cx(
         .feed_streaming_block_deferred(auth);
     let accepted = match result {
         Ok(DeferredSymbolAcceptResult::Decode(job)) => {
-            let _ = dispatch_decode_job(
+            let dispatch = dispatch_decode_job(
                 cx,
                 dec,
                 job,
@@ -4813,6 +4845,7 @@ async fn feed_symbol_with_cx(
                 transfer_decode_width,
             )
             .await?;
+            feed.decode_stats.merge(dispatch.decode_stats);
             true
         }
         Ok(DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::Accepted {
@@ -4903,18 +4936,21 @@ async fn feed_symbol_with_cx(
         }
     };
     if accepted && dec.source_streaming && parsed.kind.is_repair() {
-        seed_source_streaming_pipeline(
-            cx,
-            dec,
-            parsed.sbn,
-            symbol_size,
-            symbol_auth,
-            allow_spawn_decode,
-            transfer_decode_width,
-        )
-        .await?;
+        feed.decode_stats.merge(
+            seed_source_streaming_pipeline(
+                cx,
+                dec,
+                parsed.sbn,
+                symbol_size,
+                symbol_auth,
+                allow_spawn_decode,
+                transfer_decode_width,
+            )
+            .await?,
+        );
     }
-    Ok(accepted)
+    feed.accepted = accepted;
+    Ok(feed)
 }
 
 #[cfg(test)]
@@ -4926,7 +4962,7 @@ async fn feed_symbol(
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<bool, RqError> {
     let cx = Cx::for_testing();
-    let accepted = feed_symbol_with_cx(
+    let feed = feed_symbol_with_cx(
         &cx,
         dec,
         parsed,
@@ -4940,7 +4976,7 @@ async fn feed_symbol(
     while !dec.pending_decodes.is_empty() {
         let _ = join_one_pending_decode(&cx, dec).await?;
     }
-    Ok(accepted)
+    Ok(feed.accepted)
 }
 
 async fn dispatch_decode_job(
@@ -4950,20 +4986,24 @@ async fn dispatch_decode_job(
     trigger: &'static str,
     allow_spawn_decode: bool,
     transfer_decode_width: usize,
-) -> Result<DecodeDispatch, RqError> {
+) -> Result<DecodeDispatchOutcome, RqError> {
     let block_sbn = job.sbn();
-    let _ = drain_ready_entry_decodes(cx, dec).await?;
+    let mut decode_stats = drain_ready_entry_decodes(cx, dec).await?;
     if block_decode_pending(dec, block_sbn) {
         rqtrace!(
             "receiver: entry {} dropped duplicate decode job for block {} from {trigger}",
             dec.index,
             block_sbn
         );
-        return Ok(DecodeDispatch::Queued);
+        return Ok(DecodeDispatchOutcome::new(
+            DecodeDispatch::Queued,
+            decode_stats,
+        ));
     }
 
     if !allow_spawn_decode {
         let joined = join_one_pending_decode(cx, dec).await?;
+        decode_stats.merge(joined);
         rqtrace!(
             "receiver: entry {} joined {} pending decode job(s) before queueing block {} from {trigger} because transfer decode width is saturated",
             dec.index,
@@ -4971,13 +5011,17 @@ async fn dispatch_decode_job(
             block_sbn
         );
         if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
-            return Ok(DecodeDispatch::NoProgress);
+            return Ok(DecodeDispatchOutcome::new(
+                DecodeDispatch::NoProgress,
+                decode_stats,
+            ));
         }
     }
 
     let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
     if !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width) {
         let joined = join_one_pending_decode(cx, dec).await?;
+        decode_stats.merge(joined);
         rqtrace!(
             "receiver: entry {} joined {} pending decode job(s) before queueing block {} from {trigger} (entry_cap={entry_decode_width})",
             dec.index,
@@ -4985,7 +5029,10 @@ async fn dispatch_decode_job(
             block_sbn
         );
         if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
-            return Ok(DecodeDispatch::NoProgress);
+            return Ok(DecodeDispatchOutcome::new(
+                DecodeDispatch::NoProgress,
+                decode_stats,
+            ));
         }
     }
 
@@ -4999,26 +5046,35 @@ async fn dispatch_decode_job(
                 dec.index,
                 block_sbn
             );
-            Ok(DecodeDispatch::Queued)
+            Ok(DecodeDispatchOutcome::new(
+                DecodeDispatch::Queued,
+                decode_stats,
+            ))
         }
         Err(crate::runtime::state::SpawnError::RuntimeUnavailable) => {
-            let _ = finalize_decode_outcome(
-                cx,
-                dec,
-                run_block_decode_job(retry_job),
-                false,
-                transfer_decode_width,
-            )
-            .await?;
+            decode_stats.merge(
+                finalize_decode_outcome(
+                    cx,
+                    dec,
+                    run_block_decode_job(retry_job),
+                    false,
+                    transfer_decode_width,
+                )
+                .await?,
+            );
             rqtrace!(
                 "receiver: entry {} ran decode block {} inline from {trigger} because no runtime spawn gateway is available",
                 dec.index,
                 block_sbn
             );
-            Ok(DecodeDispatch::NoProgress)
+            Ok(DecodeDispatchOutcome::new(
+                DecodeDispatch::NoProgress,
+                decode_stats,
+            ))
         }
         Err(err) => {
             let joined = join_one_pending_decode(cx, dec).await?;
+            decode_stats.merge(joined);
             rqtrace!(
                 "receiver: entry {} joined {} pending decode job(s) after spawn denial for block {} from {trigger}: {err:?}",
                 dec.index,
@@ -5026,7 +5082,10 @@ async fn dispatch_decode_job(
                 block_sbn
             );
             if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
-                return Ok(DecodeDispatch::NoProgress);
+                return Ok(DecodeDispatchOutcome::new(
+                    DecodeDispatch::NoProgress,
+                    decode_stats,
+                ));
             }
             match cx.spawn_blocking(move |_child| run_block_decode_job(retry_job)) {
                 Ok(handle) => {
@@ -5037,7 +5096,10 @@ async fn dispatch_decode_job(
                         dec.index,
                         block_sbn
                     );
-                    Ok(DecodeDispatch::Queued)
+                    Ok(DecodeDispatchOutcome::new(
+                        DecodeDispatch::Queued,
+                        decode_stats,
+                    ))
                 }
                 Err(retry_err) => {
                     rqtrace!(
@@ -5048,7 +5110,10 @@ async fn dispatch_decode_job(
                     if let Some(pipeline) = dec.pipeline.as_mut() {
                         pipeline.cancel_decode_job(block_sbn);
                     }
-                    Ok(DecodeDispatch::NoProgress)
+                    Ok(DecodeDispatchOutcome::new(
+                        DecodeDispatch::NoProgress,
+                        decode_stats,
+                    ))
                 }
             }
         }
@@ -5063,28 +5128,29 @@ async fn seed_source_streaming_pipeline(
     symbol_auth: Option<&SecurityContext>,
     allow_spawn_decode: bool,
     transfer_decode_width: usize,
-) -> Result<(), RqError> {
+) -> Result<RqDecodeRoundStats, RqError> {
+    let mut decode_stats = RqDecodeRoundStats::default();
     if dec.pipeline.is_none() {
-        return Ok(());
+        return Ok(decode_stats);
     }
     if block_decode_pending(dec, target_sbn) {
-        return Ok(());
+        return Ok(decode_stats);
     }
     let symbol_size = usize::from(symbol_size);
     let target_sbn_index = usize::from(target_sbn);
     if !source_streaming_block_ready_to_seed(dec, target_sbn_index) {
-        return Ok(());
+        return Ok(decode_stats);
     }
     flush_cached_entry_staging_file(dec).await?;
     let Some(mut reader) = crate::fs::File::open(&dec.staging_path).await.ok() else {
-        return Ok(());
+        return Ok(decode_stats);
     };
 
     // Seed only the repair block and only once retained repair equations plus staged source
     // symbols can reach K. This keeps lossy transfers from retaining source payloads for many
     // partially-repaired blocks while still feeding the same symbols before decode.
     if dec.source_blocks[target_sbn_index].complete {
-        return Ok(());
+        return Ok(decode_stats);
     }
 
     let sbn = target_sbn_index;
@@ -5151,12 +5217,12 @@ async fn seed_source_streaming_pipeline(
                 {
                     dec.complete = true;
                     dec.pipeline = None;
-                    return Ok(());
+                    return Ok(decode_stats);
                 }
             }
             Ok(DeferredSymbolAcceptResult::Immediate(_)) => {}
             Ok(DeferredSymbolAcceptResult::Decode(job)) => {
-                match dispatch_decode_job(
+                let dispatch = dispatch_decode_job(
                     cx,
                     dec,
                     job,
@@ -5164,9 +5230,10 @@ async fn seed_source_streaming_pipeline(
                     allow_spawn_decode,
                     transfer_decode_width,
                 )
-                .await?
-                {
-                    DecodeDispatch::Queued => return Ok(()),
+                .await?;
+                decode_stats.merge(dispatch.decode_stats);
+                match dispatch.dispatch {
+                    DecodeDispatch::Queued => return Ok(decode_stats),
                     DecodeDispatch::NoProgress => {}
                 }
             }
@@ -5181,7 +5248,7 @@ async fn seed_source_streaming_pipeline(
         }
     }
 
-    Ok(())
+    Ok(decode_stats)
 }
 
 async fn flush_and_seed_source_streaming_round_boundary(
@@ -5189,12 +5256,12 @@ async fn flush_and_seed_source_streaming_round_boundary(
     decoders: &mut [EntryDecoder],
     symbol_size: u16,
     symbol_auth: Option<&SecurityContext>,
-) -> Result<u64, RqError> {
+) -> Result<SourceStreamingSeedStats, RqError> {
     for dec in decoders.iter_mut() {
         flush_cached_entry_staging_file(dec).await?;
     }
 
-    let mut seeded = 0u64;
+    let mut seed_stats = SourceStreamingSeedStats::default();
     for decoder_index in 0..decoders.len() {
         let block_count = decoders[decoder_index].source_blocks.len();
         for sbn in 0..block_count {
@@ -5209,7 +5276,7 @@ async fn flush_and_seed_source_streaming_round_boundary(
             let Ok(block_sbn) = u8::try_from(sbn) else {
                 break;
             };
-            seed_source_streaming_pipeline(
+            let decode_stats = seed_source_streaming_pipeline(
                 cx,
                 &mut decoders[decoder_index],
                 block_sbn,
@@ -5219,10 +5286,11 @@ async fn flush_and_seed_source_streaming_round_boundary(
                 transfer_decode_width,
             )
             .await?;
-            seeded = seeded.saturating_add(1);
+            seed_stats.decode_stats.merge(decode_stats);
+            seed_stats.seeded = seed_stats.seeded.saturating_add(1);
         }
     }
-    Ok(seeded)
+    Ok(seed_stats)
 }
 
 async fn persist_source_symbol(
@@ -6212,7 +6280,7 @@ async fn feed_datagram_to_decoders(
     }
     let allow_spawn_decode = pending_decode_jobs < decode_width_budget;
     let feed_start = trace_intake.then(Instant::now);
-    let accepted = feed_symbol_with_cx(
+    let feed = feed_symbol_with_cx(
         cx,
         &mut decoders[pos],
         &parsed,
@@ -6223,10 +6291,11 @@ async fn feed_datagram_to_decoders(
         decode_width_budget,
     )
     .await?;
+    decode_stats.merge(feed.decode_stats);
     let feed_micros = elapsed_micros_since(feed_start);
     Ok(RqDatagramIngest {
         observed: true,
-        accepted,
+        accepted: feed.accepted,
         payload_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
         parse_micros,
         feed_micros,
@@ -8446,11 +8515,11 @@ mod tests {
 
         let cx = Cx::for_testing();
         let mut decoders = vec![decoder];
-        let seeded = futures_lite::future::block_on(
+        let seed_stats = futures_lite::future::block_on(
             flush_and_seed_source_streaming_round_boundary(&cx, &mut decoders, symbol_size, None),
         )
         .expect("round-boundary seed");
-        assert_eq!(seeded, 1);
+        assert_eq!(seed_stats.seeded, 1);
         futures_lite::future::block_on(join_all_pending_decodes(&cx, &mut decoders))
             .expect("join boundary decode");
 
