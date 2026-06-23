@@ -2932,18 +2932,14 @@ impl InactivationDecoder {
     fn reconstruct_source_symbols(&self, intermediate: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let mut source = Vec::with_capacity(self.params.k);
         for esi in 0..self.params.k {
-            // Skip ESIs that don't fit in u32 to avoid panic (extremely large k)
-            if let Ok(esi_u32) = u32::try_from(esi) {
-                let (columns, coefficients) = self.source_equation(esi_u32);
-                let mut symbol = vec![0u8; self.params.symbol_size];
-                for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
-                    gf256_addmul_slice(&mut symbol, &intermediate[column], coefficient);
-                }
-                source.push(symbol);
-            } else {
-                // For extremely large ESI, push zero symbol to maintain indexing
-                source.push(vec![0u8; self.params.symbol_size]);
+            let esi_u32 =
+                u32::try_from(esi).expect("decoder params guarantee source ESI fits in u32");
+            let (columns, coefficients) = self.source_equation(esi_u32);
+            let mut symbol = vec![0u8; self.params.symbol_size];
+            for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+                gf256_addmul_slice(&mut symbol, &intermediate[column], coefficient);
             }
+            source.push(symbol);
         }
         source
     }
