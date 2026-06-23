@@ -35,10 +35,18 @@ pub struct DeltaDedupReconstructReport {
     pub reconcile: DeltaReconcileReport,
     /// Byte-identical target bytes rebuilt from the verified receiver CAS.
     pub reconstructed_bytes: Vec<u8>,
+    /// Canonical dedupe metadata bytes received before unique payloads.
+    pub metadata_wire_bytes: u64,
+    /// Unique payload bytes received after metadata.
+    pub unique_payload_wire_bytes: u64,
     /// Metadata plus unique payload bytes, excluding outer envelope framing.
     pub compact_wire_bytes: u64,
     /// Logical missing bytes represented by the canonical parts.
     pub logical_missing_bytes: u64,
+    /// Count of logical missing chunks eliminated by dedupe.
+    pub duplicate_missing_chunks: u64,
+    /// Logical missing bytes eliminated by dedupe.
+    pub duplicate_missing_bytes: u64,
 }
 
 impl DeltaDedupReconstructReport {
@@ -46,6 +54,13 @@ impl DeltaDedupReconstructReport {
     #[must_use]
     pub const fn saves_bytes(&self) -> bool {
         self.compact_wire_bytes < self.logical_missing_bytes
+    }
+
+    /// Logical missing bytes avoided by applying canonical dedupe parts.
+    #[must_use]
+    pub const fn saved_wire_bytes(&self) -> u64 {
+        self.logical_missing_bytes
+            .saturating_sub(self.compact_wire_bytes)
     }
 }
 
@@ -118,8 +133,12 @@ pub fn reconcile_canonical_dedup_parts_and_reconstruct(
         store,
         reconcile,
         reconstructed_bytes,
+        metadata_wire_bytes: parts.metadata_wire_bytes,
+        unique_payload_wire_bytes: parts.unique_payload_wire_bytes,
         compact_wire_bytes: parts.compact_wire_bytes,
         logical_missing_bytes: parts.logical_missing_bytes,
+        duplicate_missing_chunks: parts.duplicate_missing_chunks,
+        duplicate_missing_bytes: parts.duplicate_missing_bytes,
     })
 }
 
@@ -317,8 +336,22 @@ mod tests {
         .expect("reconstruct canonical parts");
 
         assert!(report.saves_bytes());
+        assert_eq!(report.saved_wire_bytes(), parts.saved_bytes());
+        assert_eq!(report.metadata_wire_bytes, parts.metadata_wire_bytes);
+        assert_eq!(
+            report.unique_payload_wire_bytes,
+            parts.unique_payload_wire_bytes
+        );
         assert_eq!(report.compact_wire_bytes, parts.compact_wire_bytes);
         assert_eq!(report.logical_missing_bytes, sender.total_size_bytes);
+        assert_eq!(
+            report.duplicate_missing_chunks,
+            parts.duplicate_missing_chunks
+        );
+        assert_eq!(
+            report.duplicate_missing_bytes,
+            parts.duplicate_missing_bytes
+        );
         assert_eq!(report.reconcile.unique_payloads, 2);
         assert_eq!(report.reconcile.duplicate_logical_chunks, 1);
         assert_eq!(
