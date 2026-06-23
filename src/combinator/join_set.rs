@@ -588,6 +588,43 @@ mod tests {
     }
 
     #[test]
+    fn join_next_ready_order_is_deterministic_across_replays() {
+        fn collect_ready_values(seed_values: &[u32]) -> Vec<u32> {
+            let seed_values = seed_values.to_vec();
+            run_in_runtime(move |cx| async move {
+                let scope = Scope::<FailFast>::new(
+                    crate::RegionId::new_for_test(11, 1),
+                    crate::Budget::INFINITE,
+                );
+                let mut set = JoinSet::<u32, &'static str, FailFast>::new(&scope);
+
+                for (index, value) in seed_values.into_iter().enumerate() {
+                    let (ready_tx, ready_handle) =
+                        manual_handle::<Result<u32, &'static str>>((index + 1) as u32);
+                    set.handles.push(ready_handle);
+                    ready_tx
+                        .send(&cx, Ok(Ok(value)))
+                        .expect("ready member result sends");
+                }
+
+                let mut observed = Vec::new();
+                while let Some(outcome) = set.join_next(&cx).await {
+                    observed.push(outcome.expect("member ok"));
+                }
+                observed
+            })
+        }
+
+        let seed_values = [5, 3, 8, 1, 13, 2, 21, 1];
+
+        assert_eq!(collect_ready_values(&seed_values), seed_values);
+        assert_eq!(
+            collect_ready_values(&seed_values),
+            collect_ready_values(&seed_values)
+        );
+    }
+
+    #[test]
     fn join_all_collects_members_in_spawn_order() {
         let (outcomes, next_member_index) = run_in_runtime(|cx| async move {
             let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
@@ -608,6 +645,41 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![30, 10, 20]
         );
+    }
+
+    #[test]
+    fn join_all_drains_ten_thousand_ready_members_in_spawn_order() {
+        const MEMBERS: usize = 10_000;
+
+        let outcomes = run_in_runtime(|cx| async move {
+            let scope = Scope::<FailFast>::new(
+                crate::RegionId::new_for_test(12, 1),
+                crate::Budget::INFINITE,
+            );
+            let mut set = JoinSet::<u64, &'static str, FailFast>::new(&scope);
+
+            for index in 0..MEMBERS {
+                let (ready_tx, ready_handle) =
+                    manual_handle::<Result<u64, &'static str>>((index + 1) as u32);
+                set.handles.push(ready_handle);
+                ready_tx
+                    .send(&cx, Ok(Ok(index as u64)))
+                    .expect("ready member result sends");
+            }
+
+            assert_eq!(set.len(), MEMBERS);
+            set.join_all(&cx).await
+        });
+
+        assert_eq!(outcomes.len(), MEMBERS);
+
+        let mut observed_sum = 0_u64;
+        for (expected, outcome) in outcomes.into_iter().enumerate() {
+            let value = outcome.expect("member ok");
+            assert_eq!(value, expected as u64);
+            observed_sum += value;
+        }
+        assert_eq!(observed_sum, (MEMBERS as u64 - 1) * MEMBERS as u64 / 2);
     }
 
     #[test]
