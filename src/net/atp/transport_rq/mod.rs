@@ -269,6 +269,13 @@ const RQ_DECODE_MAX_CORES_RESERVED_FOR_IO: usize = 4;
 const RQ_DECODE_JOB_MEMORY_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const RQ_DECODE_JOB_MEMORY_FLOOR_BYTES: usize = 1024 * 1024;
 const RQ_DECODE_JOB_SYMBOL_MEMORY_MULTIPLIER: usize = 1;
+/// Small transfers decode cheaper than they schedule onto the blocking pool.
+///
+/// MATRIX-49: 500M/bad needs parallel block decode, but 50M/bad regressed when
+/// a handful of cheap block solves were over-dispatched. Keep those small
+/// entries sequential while preserving wide fanout for 500M-class geometry.
+const RQ_PARALLEL_DECODE_MIN_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+const RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS: usize = 128;
 /// RQ repair feedback is round/RTT-bound: do not reject symbols for an
 /// undecoded block. Decoded blocks are cleared immediately after commit.
 const RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK: usize = usize::MAX;
@@ -2885,10 +2892,67 @@ fn is_round_scoped_entry_staging_cache(dec: &EntryDecoder) -> bool {
     dec.cache_staging_file && dec.size < ENTRY_STAGING_FILE_CACHE_MIN_BYTES
 }
 
+fn entry_source_block_count_for_geometry(
+    entry_size: u64,
+    max_block_size: usize,
+    observed_source_blocks: usize,
+) -> usize {
+    let max_block_size = u64::try_from(max_block_size.max(1)).unwrap_or(u64::MAX);
+    let planned_blocks = usize::try_from(entry_size.div_ceil(max_block_size)).unwrap_or(usize::MAX);
+    observed_source_blocks.max(planned_blocks).max(1)
+}
+
+fn entry_source_block_count(dec: &EntryDecoder) -> usize {
+    entry_source_block_count_for_geometry(dec.size, dec.max_block_size, dec.source_blocks.len())
+}
+
+#[cfg(test)]
+fn should_parallel_decode_entry_geometry(
+    entry_size: u64,
+    max_block_size: usize,
+    observed_source_blocks: usize,
+) -> bool {
+    entry_size >= RQ_PARALLEL_DECODE_MIN_ENTRY_BYTES
+        || entry_source_block_count_for_geometry(entry_size, max_block_size, observed_source_blocks)
+            >= RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS
+}
+
+fn should_parallel_decode_entry(dec: &EntryDecoder) -> bool {
+    dec.size >= RQ_PARALLEL_DECODE_MIN_ENTRY_BYTES
+        || entry_source_block_count(dec) >= RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS
+}
+
+fn transfer_decode_size_gate(decoders: &[EntryDecoder]) -> usize {
+    if decoders.is_empty() || decoders.iter().any(should_parallel_decode_entry) {
+        RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD
+    } else {
+        0
+    }
+}
+
 fn entry_decode_width_budget(dec: &EntryDecoder, transfer_decode_width: usize) -> usize {
-    let max_block_size = u64::try_from(dec.max_block_size.max(1)).unwrap_or(u64::MAX);
-    let planned_blocks = usize::try_from(dec.size.div_ceil(max_block_size)).unwrap_or(usize::MAX);
-    let block_count = dec.source_blocks.len().max(planned_blocks).max(1);
+    if !should_parallel_decode_entry(dec) {
+        return 1;
+    }
+    let block_count = entry_source_block_count(dec);
+    block_count
+        .min(RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY)
+        .min(transfer_decode_width.max(1))
+        .max(1)
+}
+
+#[cfg(test)]
+fn entry_decode_width_budget_for_geometry(
+    entry_size: u64,
+    max_block_size: usize,
+    observed_source_blocks: usize,
+    transfer_decode_width: usize,
+) -> usize {
+    if !should_parallel_decode_entry_geometry(entry_size, max_block_size, observed_source_blocks) {
+        return 0;
+    }
+    let block_count =
+        entry_source_block_count_for_geometry(entry_size, max_block_size, observed_source_blocks);
     block_count
         .min(RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY)
         .min(transfer_decode_width.max(1))
@@ -2896,7 +2960,7 @@ fn entry_decode_width_budget(dec: &EntryDecoder, transfer_decode_width: usize) -
 }
 
 fn can_spawn_parallel_decode(pending_decodes: usize, entry_decode_width: usize) -> bool {
-    pending_decodes < entry_decode_width.max(1)
+    entry_decode_width > 1 && pending_decodes < entry_decode_width
 }
 
 fn rq_decode_job_memory_estimate_bytes(max_block_size: usize, symbol_size: u16) -> usize {
@@ -2958,8 +3022,9 @@ fn rq_decode_width_budget_snapshot(
         .checked_div(job_memory_bytes)
         .unwrap_or(1)
         .max(1);
+    let size_gate = transfer_decode_size_gate(decoders);
     RqDecodeWidthBudget {
-        effective: core_limit.min(memory_limit).max(1),
+        effective: core_limit.min(memory_limit).min(size_gate),
         core_limit,
         memory_limit,
         job_memory_bytes,
@@ -5115,6 +5180,39 @@ async fn dispatch_decode_job(
         ));
     }
 
+    let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
+    if entry_decode_width <= 1 {
+        while !dec.pending_decodes.is_empty() {
+            let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
+            decode_stats.merge(joined);
+            if dec.complete || dec.pipeline.is_none() || block_decode_pending(dec, block_sbn) {
+                return Ok(DecodeDispatchOutcome::new(
+                    DecodeDispatch::NoProgress,
+                    decode_stats,
+                ));
+            }
+        }
+        decode_stats.merge(
+            finalize_decode_outcome(
+                cx,
+                dec,
+                run_block_decode_job(job),
+                false,
+                transfer_decode_width,
+            )
+            .await?,
+        );
+        rqtrace!(
+            "receiver: entry {} ran decode block {} inline from {trigger} because entry size/block-count is below the parallel decode gate",
+            dec.index,
+            block_sbn
+        );
+        return Ok(DecodeDispatchOutcome::new(
+            DecodeDispatch::NoProgress,
+            decode_stats,
+        ));
+    }
+
     if !allow_spawn_decode {
         let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
         decode_stats.merge(joined);
@@ -5131,8 +5229,6 @@ async fn dispatch_decode_job(
             ));
         }
     }
-
-    let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
     if !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width) {
         let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
         decode_stats.merge(joined);
@@ -6615,6 +6711,24 @@ async fn queue_stale_decode_retry(
     }
 
     let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
+    if entry_decode_width <= 1 {
+        let outcome = run_block_decode_job(job);
+        let decode_elapsed = outcome.elapsed();
+        stats.record_attempt(decode_elapsed);
+        let Some(pipeline) = dec.pipeline.as_mut() else {
+            return Ok(stats);
+        };
+        let result = pipeline.finish_decode_job(outcome);
+        if apply_decode_result(dec, result, decode_elapsed).await? {
+            stats.completed_blocks = stats.completed_blocks.saturating_add(1);
+        }
+        rqtrace!(
+            "receiver: entry {} ran stale decode retry block {} inline because entry size/block-count is below the parallel decode gate",
+            dec.index,
+            block_sbn
+        );
+        return Ok(stats);
+    }
     if !allow_spawn_decode
         || !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width)
     {
@@ -7094,6 +7208,14 @@ mod tests {
             RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY,
             RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY
         ));
+        assert!(
+            !can_spawn_parallel_decode(0, 0),
+            "zero decode width must not spawn"
+        );
+        assert!(
+            !can_spawn_parallel_decode(0, 1),
+            "one-wide inline decode gate must not spawn"
+        );
     }
 
     #[test]
@@ -7125,11 +7247,38 @@ mod tests {
     }
 
     #[test]
+    fn decode_entry_width_gate_keeps_50m_geometry_sequential() {
+        let config = RqConfig::default();
+        let workload_50m = 50 * 1024 * 1024;
+        let max_block_size = effective_max_block_size_for_largest_entry(&config, workload_50m)
+            .expect("50M must fit default RQ transfer geometry");
+        let block_count =
+            entry_source_block_count_for_geometry(workload_50m as u64, max_block_size, 0);
+
+        assert!(
+            block_count < RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS,
+            "fixture should represent the 50M small-object cell: block_count={block_count} threshold={RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS}"
+        );
+        assert!(!should_parallel_decode_entry_geometry(
+            workload_50m as u64,
+            max_block_size,
+            0
+        ));
+        assert_eq!(
+            entry_decode_width_budget_for_geometry(workload_50m as u64, max_block_size, 0, 64),
+            0,
+            "50M geometry should close the parallel decode budget"
+        );
+    }
+
+    #[test]
     fn decode_memory_budget_keeps_500m_geometry_wide() {
         let config = RqConfig::default();
         let workload_500m = 500 * 1024 * 1024;
         let max_block_size = effective_max_block_size_for_largest_entry(&config, workload_500m)
             .expect("500M must fit default RQ transfer geometry");
+        let block_count =
+            entry_source_block_count_for_geometry(workload_500m as u64, max_block_size, 0);
         let job_memory_bytes =
             rq_decode_job_memory_estimate_bytes(max_block_size, config.symbol_size);
         let memory_limit = RQ_DECODE_JOB_MEMORY_BUDGET_BYTES / job_memory_bytes;
@@ -7142,6 +7291,96 @@ mod tests {
         assert!(
             effective_memory_width <= RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
             "effective memory gate should stay within the hard transfer cap"
+        );
+        assert!(
+            should_parallel_decode_entry_geometry(workload_500m as u64, max_block_size, 0),
+            "500M geometry should remain eligible for parallel decode: block_count={block_count} threshold={RQ_PARALLEL_DECODE_MIN_SOURCE_BLOCKS}"
+        );
+        assert_eq!(
+            entry_decode_width_budget_for_geometry(
+                workload_500m as u64,
+                max_block_size,
+                0,
+                effective_memory_width
+            ),
+            block_count
+                .min(RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY)
+                .min(effective_memory_width)
+        );
+    }
+
+    fn decode_width_fixture_entry(
+        size: u64,
+        max_block_size: usize,
+        symbol_size: u16,
+    ) -> EntryDecoder {
+        EntryDecoder {
+            index: 0,
+            object_id: ObjectId::new(0xD3C0_D3C0, 0),
+            size,
+            pipeline: None,
+            complete: false,
+            staging_path: PathBuf::new(),
+            staging_created: false,
+            staging_file: None,
+            staging_cursor: None,
+            staging_unflushed_bytes: 0,
+            cache_staging_file: false,
+            bytes_written: 0,
+            max_block_size,
+            source_streaming: true,
+            source_blocks: source_block_progress_for(size, max_block_size, symbol_size)
+                .expect("fixture must fit source-block table"),
+            pending_decodes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn decode_width_size_gate_keeps_50m_sequential_and_500m_parallel() {
+        let config = RqConfig::default();
+        let size_50m = 50 * 1024 * 1024;
+        let block_50m = effective_max_block_size_for_largest_entry(&config, size_50m)
+            .expect("50M fixture must fit default RQ geometry");
+        let dec_50m = decode_width_fixture_entry(size_50m as u64, block_50m, config.symbol_size);
+
+        assert!(
+            !should_parallel_decode_entry(&dec_50m),
+            "50M decode should stay sequential: block_count={} max_block_size={block_50m}",
+            entry_source_block_count(&dec_50m)
+        );
+        assert_eq!(
+            entry_decode_width_budget(&dec_50m, RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD),
+            1,
+            "50M repair decode fanout should not pay blocking-pool dispatch overhead"
+        );
+        assert_eq!(
+            rq_decode_width_budget_snapshot(std::slice::from_ref(&dec_50m), config.symbol_size)
+                .effective,
+            0,
+            "all-small transfers should close the transfer-wide parallel decode budget"
+        );
+
+        let size_500m = 500 * 1024 * 1024;
+        let block_500m = effective_max_block_size_for_largest_entry(&config, size_500m)
+            .expect("500M fixture must fit default RQ geometry");
+        let dec_500m = decode_width_fixture_entry(size_500m as u64, block_500m, config.symbol_size);
+
+        assert!(
+            should_parallel_decode_entry(&dec_500m),
+            "500M decode should retain parallel fanout: block_count={} max_block_size={block_500m}",
+            entry_source_block_count(&dec_500m)
+        );
+        assert!(
+            entry_decode_width_budget(&dec_500m, RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD)
+                >= 48,
+            "500M repair decode should keep wide fanout after size gating"
+        );
+        let budget_500m =
+            rq_decode_width_budget_snapshot(std::slice::from_ref(&dec_500m), config.symbol_size);
+        assert_eq!(
+            budget_500m.effective,
+            budget_500m.core_limit.min(budget_500m.memory_limit).max(1),
+            "500M transfer decode budget should not be narrowed by the size gate"
         );
     }
 
