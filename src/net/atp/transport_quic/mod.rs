@@ -278,6 +278,10 @@ const QUIC_AIMD_MULTIPLICATIVE_DECREASE: f64 = 0.50;
 const QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
 const QUIC_AIMD_MIN_RATE_BPS: u64 = 512 * 1024;
 const QUIC_AIMD_MAX_RATE_BPS: u64 = 64 * 1024 * 1024;
+const QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = 0.005;
+const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
+const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
+const QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD: f64 = 0.50;
 
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
@@ -1905,6 +1909,19 @@ fn receiver_round_loss_fraction(observed: u64, sent: u64) -> Option<f64> {
     }
     let observed = observed.min(sent);
     Some((1.0 - observed as f64 / sent as f64).clamp(0.0, 0.90))
+}
+
+fn quic_feedback_repair_overhead(round_loss_fraction: Option<f64>) -> f64 {
+    let Some(loss) = round_loss_fraction.filter(|loss| loss.is_finite()) else {
+        return 0.0;
+    };
+    let loss = loss.clamp(0.0, QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD);
+    if loss < QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN {
+        return 0.0;
+    }
+    (loss * (1.0 + QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION)
+        + QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN)
+        .clamp(0.0, QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD)
 }
 
 #[allow(dead_code)]
@@ -4467,11 +4484,21 @@ fn quic_decoder_block_source_symbols(
 }
 
 #[allow(dead_code)]
-fn quic_targeted_repair_symbols(base_deficit: usize, remaining_round_budget: usize) -> usize {
+fn quic_targeted_repair_symbols(
+    base_deficit: usize,
+    block_source_symbols: usize,
+    round_loss_fraction: Option<f64>,
+    remaining_round_budget: usize,
+) -> usize {
     if base_deficit == 0 {
         return 0;
     }
-    let target = base_deficit.min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
+    let measured_loss_target = ((block_source_symbols as f64)
+        * quic_feedback_repair_overhead(round_loss_fraction))
+    .ceil() as usize;
+    let target = base_deficit
+        .max(measured_loss_target)
+        .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
     if remaining_round_budget == 0 {
         target
     } else {
@@ -4484,6 +4511,7 @@ fn block_repair_requests(
     decoders: &[QuicEntryDecoder],
     config: &QuicConfig,
     limit: usize,
+    round_loss_fraction: Option<f64>,
 ) -> Vec<QuicBlockRepairRequest> {
     let mut requests = Vec::new();
     let mut requested_symbols = 0usize;
@@ -4516,6 +4544,7 @@ fn block_repair_requests(
                 break 'decoders;
             }
             let sbn = u8::try_from(block_index).unwrap_or(u8::MAX);
+            let block_source_symbols = quic_decoder_block_source_symbols(decoder, sbn, config);
             let status_deficit = pipeline.block_status(sbn).and_then(|status| {
                 if matches!(
                     status.state,
@@ -4549,8 +4578,13 @@ fn block_repair_requests(
             } else {
                 limit.saturating_sub(requested_symbols)
             };
-            let mut deficit = quic_targeted_repair_symbols(base_deficit, remaining)
-                .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
+            let mut deficit = quic_targeted_repair_symbols(
+                base_deficit,
+                block_source_symbols,
+                round_loss_fraction,
+                remaining,
+            )
+            .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
             if deficit == 0 {
                 continue;
             }
@@ -6591,8 +6625,14 @@ async fn receive_native_symbol_round(
             pending: pending.len(),
         });
     }
-    let repair_blocks =
-        block_repair_requests(decoders, config, MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
+    let round_loss_fraction =
+        receiver_round_loss_fraction(round_stats.observed, round_complete.round_symbols_sent);
+    let repair_blocks = block_repair_requests(
+        decoders,
+        config,
+        MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+        round_loss_fraction,
+    );
     let source_symbols = if repair_blocks.is_empty() {
         source_symbol_requests(decoders, MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND)
     } else {
@@ -6603,10 +6643,7 @@ async fn receive_native_symbol_round(
         repair_blocks,
         source_symbols,
         round_symbols_observed: Some(round_stats.observed),
-        round_loss_fraction: receiver_round_loss_fraction(
-            round_stats.observed,
-            round_complete.round_symbols_sent,
-        ),
+        round_loss_fraction,
         round_symbols_accepted: Some(round_stats.accepted),
     };
     let round = (*feedback_rounds).saturating_add(1);
@@ -9991,14 +10028,42 @@ mod tests {
 
     #[test]
     fn quic_targeted_repair_symbols_requests_exact_deficit() {
-        assert_eq!(quic_targeted_repair_symbols(0, 0), 0);
-        assert_eq!(quic_targeted_repair_symbols(1, 0), 1);
-        assert_eq!(quic_targeted_repair_symbols(512, 0), 512);
-        assert_eq!(quic_targeted_repair_symbols(10, 12), 10);
-        assert_eq!(quic_targeted_repair_symbols(10, 4), 4);
+        assert_eq!(quic_targeted_repair_symbols(0, 512, None, 0), 0);
+        assert_eq!(quic_targeted_repair_symbols(1, 512, None, 0), 1);
+        assert_eq!(quic_targeted_repair_symbols(512, 512, None, 0), 512);
+        assert_eq!(quic_targeted_repair_symbols(10, 512, None, 12), 10);
+        assert_eq!(quic_targeted_repair_symbols(10, 512, None, 4), 4);
         assert_eq!(
-            quic_targeted_repair_symbols(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND, 0),
+            quic_targeted_repair_symbols(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND, 512, None, 0),
             MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND
+        );
+    }
+
+    #[test]
+    fn quic_targeted_repair_symbols_tracks_measured_round_loss() {
+        assert_eq!(quic_feedback_repair_overhead(None), 0.0);
+        assert_eq!(quic_feedback_repair_overhead(Some(0.001)), 0.0);
+
+        let bad = quic_feedback_repair_overhead(Some(0.02));
+        assert!(
+            (0.029..=0.031).contains(&bad),
+            "2% measured loss should request about 3% repair overhead, got {bad}"
+        );
+
+        let broken = quic_feedback_repair_overhead(Some(0.10));
+        assert!(
+            (0.12..=0.15).contains(&broken),
+            "10% measured loss should request a bounded 12-15% repair overhead, got {broken}"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols(1, 512, Some(0.10), 0),
+            67,
+            "broken-link repair must send enough symbols to survive another lossy repair round"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols(1, 512, Some(0.10), 16),
+            16,
+            "feedback round budget still caps adaptive repair"
         );
     }
 
@@ -10095,12 +10160,15 @@ mod tests {
                 &decoders,
                 &config,
                 MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+                None,
             ),
             source_symbols: Vec::new(),
             ..QuicNeedMore::default()
         };
         let expected_repair_symbols = u32::try_from(quic_targeted_repair_symbols(
             1,
+            256,
+            None,
             MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
         ))
         .unwrap_or(u32::MAX);
@@ -10776,6 +10844,8 @@ mod tests {
         assert_eq!(need.pending, vec![0]);
         let expected_repair_symbols = u32::try_from(quic_targeted_repair_symbols(
             1,
+            3,
+            None,
             MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
         ))
         .unwrap_or(u32::MAX);
