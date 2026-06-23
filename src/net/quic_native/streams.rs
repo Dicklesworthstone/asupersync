@@ -573,31 +573,6 @@ impl QuicStream {
         Ok(())
     }
 
-    /// Requeue all emitted STREAM frame chunks whose starting offsets are in
-    /// `start..end`. This is used by application-level PTO paths that know a
-    /// whole control message byte range was not observed, but do not have QUIC
-    /// packet-to-frame loss receipts yet.
-    pub fn requeue_sent_stream_frames_in_range(&mut self, start: u64, end: u64) -> usize {
-        if start >= end {
-            return 0;
-        }
-        let offsets = self
-            .sent_stream_frames
-            .range(start..end)
-            .map(|(offset, _)| *offset)
-            .collect::<Vec<_>>();
-        let count = offsets.len();
-        for offset in offsets.into_iter().rev() {
-            if let Some(frame) = self.sent_stream_frames.get(&offset).cloned() {
-                self.pending_send_frames.push_front(QueuedStreamFrame {
-                    retransmit: true,
-                    ..frame
-                });
-            }
-        }
-        count
-    }
-
     /// Set final size from FIN/RESET.
     pub fn set_final_size(&mut self, final_size: u64) -> Result<(), QuicStreamError> {
         let highest_observed = self.recv_credit.used();
@@ -1156,19 +1131,6 @@ impl StreamTable {
     ) -> Result<(), StreamTableError> {
         self.stream_mut(id)?.requeue_sent_stream_frame(offset)?;
         Ok(())
-    }
-
-    /// Requeue emitted STREAM frame chunks whose starting offsets are in
-    /// `start..end`.
-    pub fn requeue_sent_stream_frames_in_range(
-        &mut self,
-        id: StreamId,
-        start: u64,
-        end: u64,
-    ) -> Result<usize, StreamTableError> {
-        Ok(self
-            .stream_mut(id)?
-            .requeue_sent_stream_frames_in_range(start, end))
     }
 
     /// Put a popped STREAM frame back when packet assembly did not emit it.
@@ -2329,35 +2291,6 @@ mod tests {
         assert_eq!(next.offset, offset);
         assert_eq!(next.data, data);
         assert!(!next.retransmit);
-    }
-
-    #[test]
-    fn requeue_sent_stream_frame_range_replays_original_offsets() {
-        let mut table =
-            StreamTable::new_with_connection_limits(StreamRole::Client, 1, 0, 64, 64, 64, 64);
-        let stream = table.open_local_bidi().expect("open");
-        table
-            .write_stream_bytes(stream, Bytes::from_static(b"need-more-control"), false)
-            .expect("queue stream bytes");
-
-        let first = table.pop_next_stream_frame(4).expect("first chunk");
-        let second = table.pop_next_stream_frame(4).expect("second chunk");
-        let _third = table.pop_next_stream_frame(64).expect("third chunk");
-
-        let requeued = table
-            .requeue_sent_stream_frames_in_range(stream, first.offset, second.offset + 4)
-            .expect("requeue emitted range");
-        assert_eq!(requeued, 2);
-
-        let replay_first = table.pop_next_stream_frame(4).expect("replay first");
-        assert_eq!(replay_first.offset, first.offset);
-        assert_eq!(replay_first.data, first.data);
-        assert!(replay_first.retransmit);
-
-        let replay_second = table.pop_next_stream_frame(4).expect("replay second");
-        assert_eq!(replay_second.offset, second.offset);
-        assert_eq!(replay_second.data, second.data);
-        assert!(replay_second.retransmit);
     }
 
     #[test]
