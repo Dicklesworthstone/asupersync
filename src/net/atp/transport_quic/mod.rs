@@ -3315,6 +3315,7 @@ async fn send_block_repair_requests(
             request.entry, request.sbn, repair_count, already, target_repair
         ));
         let mut pipeline = encoding_pipeline(config);
+        let sent_before_request = sent;
         for encoded in pipeline.encode_single_block_repair_range(
             enc.object_id,
             request.sbn,
@@ -3329,6 +3330,13 @@ async fn send_block_repair_requests(
             send_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
             sent = sent.saturating_add(1);
             pacer.after_symbol_sent(cx).await?;
+        }
+        let emitted_for_request = sent.saturating_sub(sent_before_request);
+        if emitted_for_request != u64::from(request.symbols) {
+            return Err(QuicTransportError::Integrity(format!(
+                "sender emitted {emitted_for_request} repair symbols for receiver-requested deficit {} on entry {} block {}",
+                request.symbols, request.entry, request.sbn
+            )));
         }
         enc.set_repair_cursor(request.sbn, target_repair);
     }
@@ -3377,6 +3385,7 @@ async fn send_repair_round_and_object_complete(
         return Ok(0);
     }
     validate_need_more_feedback(manifest, config, need)?;
+    let requested_repair_symbols = quic_repair_symbol_total(&need.repair_blocks);
     let sent = if !need.repair_blocks.is_empty() {
         send_block_repair_requests(
             cx,
@@ -3405,6 +3414,11 @@ async fn send_repair_round_and_object_complete(
         )
         .await?
     };
+    if !need.repair_blocks.is_empty() && sent != requested_repair_symbols {
+        return Err(QuicTransportError::Integrity(format!(
+            "sender emitted {sent} repair symbols for receiver-requested deficit {requested_repair_symbols}"
+        )));
+    }
     send_object_complete(cx, conn, control, sent)?;
     Ok(sent)
 }
@@ -5598,6 +5612,7 @@ async fn send_native_block_repair_requests(
             request.entry, request.sbn, repair_count, already, target_repair
         ));
         let mut pipeline = encoding_pipeline(config);
+        let sent_before_request = sent;
         for encoded in pipeline.encode_single_block_repair_range(
             enc.object_id,
             request.sbn,
@@ -5612,6 +5627,13 @@ async fn send_native_block_repair_requests(
             send_native_symbol(cx, conn, &symbol, tag, request.entry, auth_tag)?;
             sent = sent.saturating_add(1);
             pacer.after_symbol_sent(cx).await?;
+        }
+        let emitted_for_request = sent.saturating_sub(sent_before_request);
+        if emitted_for_request != u64::from(request.symbols) {
+            return Err(QuicTransportError::Integrity(format!(
+                "sender emitted {emitted_for_request} repair symbols for receiver-requested deficit {} on entry {} block {}",
+                request.symbols, request.entry, request.sbn
+            )));
         }
         enc.set_repair_cursor(request.sbn, target_repair);
     }
@@ -5635,6 +5657,7 @@ async fn send_native_repair_round_and_object_complete(
         return Ok(0);
     }
     validate_need_more_feedback(manifest, config, need)?;
+    let requested_repair_symbols = quic_repair_symbol_total(&need.repair_blocks);
     let sent = if !need.repair_blocks.is_empty() {
         send_native_block_repair_requests(
             cx,
@@ -5663,6 +5686,11 @@ async fn send_native_repair_round_and_object_complete(
         )
         .await?
     };
+    if !need.repair_blocks.is_empty() && sent != requested_repair_symbols {
+        return Err(QuicTransportError::Integrity(format!(
+            "sender emitted {sent} repair symbols for receiver-requested deficit {requested_repair_symbols}"
+        )));
+    }
     send_native_object_complete(cx, conn, control, sent)?;
     Ok(sent)
 }

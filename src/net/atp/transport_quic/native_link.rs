@@ -1488,6 +1488,7 @@ async fn spray_block_repair_requests(
         let mut pipeline = super::encoding_pipeline(config);
         let object_id = enc.object_id;
         let entry_index = enc.index;
+        let sent_before_request = sent;
         for encoded in pipeline.encode_single_block_repair_range(
             object_id,
             request.sbn,
@@ -1503,13 +1504,20 @@ async fn spray_block_repair_requests(
                 .await?;
             sent = sent.saturating_add(1);
         }
+        let emitted_for_request = sent.saturating_sub(sent_before_request);
+        if emitted_for_request != u64::from(request.symbols) {
+            return Err(QuicTransportError::Integrity(format!(
+                "sender emitted {emitted_for_request} repair symbols for receiver-requested deficit {} on entry {} block {}",
+                request.symbols, entry_index, request.sbn
+            )));
+        }
         enc.set_repair_cursor(request.sbn, target_repair);
         quic_rqtrace!(
             "sender: repair_block entry={} sbn={} requested_symbols={} emitted_symbols={} repair_cursor_before={} repair_cursor_after={} pacing_rate_bps={}",
             entry_index,
             request.sbn,
             request.symbols,
-            repair_count,
+            emitted_for_request,
             already,
             target_repair,
             pacing.pacing_rate_bps,
@@ -1729,6 +1737,11 @@ async fn run_sender_session(
                     )
                     .await?
                 };
+                if !need.repair_blocks.is_empty() && sent != requested_repair_symbols {
+                    return Err(QuicTransportError::Integrity(format!(
+                        "sender emitted {sent} repair symbols for receiver-requested deficit {requested_repair_symbols}"
+                    )));
+                }
                 symbols_sent = symbols_sent.saturating_add(sent);
                 super::trace_quic_sender_repair_round(
                     cx,
