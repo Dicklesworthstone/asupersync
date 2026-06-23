@@ -333,6 +333,8 @@ pub struct BondedDonorRepairWindow {
     pub esi_window: EsiWindow,
     /// Number of repair symbols in `esi_window`.
     pub symbol_count: u32,
+    /// Compact timing stagger slot for this allocation round.
+    pub stagger_delay_slots: u32,
 }
 
 /// Disjoint dynamic repair windows for one source block and feedback round.
@@ -727,6 +729,7 @@ pub fn allocate_bonded_repair_windows(
 
     let mut cursor = first_repair_esi;
     let mut windows = Vec::new();
+    let mut stagger_slot = 0u32;
     for (weight, symbol_count) in donor_weights.iter().zip(symbol_counts) {
         if symbol_count == 0 {
             continue;
@@ -743,7 +746,9 @@ pub fn allocate_bonded_repair_windows(
             donor_index: weight.donor_index,
             esi_window: EsiWindow::new(cursor, end_exclusive),
             symbol_count,
+            stagger_delay_slots: stagger_slot,
         });
+        stagger_slot = stagger_slot.saturating_add(1);
         cursor = end_exclusive;
     }
 
@@ -1490,11 +1495,13 @@ mod tests {
                     donor_index: 0,
                     esi_window: EsiWindow::new(2, 4),
                     symbol_count: 2,
+                    stagger_delay_slots: 0,
                 },
                 BondedDonorRepairWindow {
                     donor_index: 1,
                     esi_window: EsiWindow::new(4, 10),
                     symbol_count: 6,
+                    stagger_delay_slots: 1,
                 },
             ]
         );
@@ -1533,18 +1540,55 @@ mod tests {
                     donor_index: 0,
                     esi_window: EsiWindow::new(2, 4),
                     symbol_count: 2,
+                    stagger_delay_slots: 0,
                 },
                 BondedDonorRepairWindow {
                     donor_index: 1,
                     esi_window: EsiWindow::new(4, 6),
                     symbol_count: 2,
+                    stagger_delay_slots: 1,
                 },
                 BondedDonorRepairWindow {
                     donor_index: 2,
                     esi_window: EsiWindow::new(6, 7),
                     symbol_count: 1,
+                    stagger_delay_slots: 2,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn dynamic_repair_window_stagger_slots_are_compact() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let weights = vec![
+            BondedDonorWindowWeight {
+                donor_index: 2,
+                weight: 0,
+            },
+            BondedDonorWindowWeight {
+                donor_index: 7,
+                weight: 1,
+            },
+            BondedDonorWindowWeight {
+                donor_index: 42,
+                weight: 1,
+            },
+        ];
+
+        let plan =
+            allocate_bonded_repair_windows(geometry, 2, 2, &weights).expect("window allocation");
+
+        assert_eq!(plan.allocated_symbol_count(), 2);
+        assert_eq!(
+            plan.windows
+                .iter()
+                .map(|window| (window.donor_index, window.stagger_delay_slots))
+                .collect::<Vec<_>>(),
+            vec![(7, 0), (42, 1)]
         );
     }
 
@@ -1676,6 +1720,7 @@ mod tests {
                 donor_index: 0,
                 esi_window: EsiWindow::new(10, 16),
                 symbol_count: 6,
+                stagger_delay_slots: 0,
             }]
         );
     }
