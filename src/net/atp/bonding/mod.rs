@@ -24,7 +24,10 @@ pub use assignment::{
     BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondedSymbolAuthVerdict, BondedSymbolRejectReason,
     DonorAssignment, DonorAssignmentError, EsiWindow, MAX_BONDING_DONORS, verify_bonded_symbol_tag,
 };
-pub use descriptor::{BondEntry, BondProofError, BondTransferDescriptor};
+pub use descriptor::{
+    BondEntry, BondEntryBlockGeometry, BondProofError, BondTransferDescriptor,
+    bonded_entry_object_id,
+};
 pub use esi::{
     DonorEsiStream, EsiPartition, EsiPartitionError, donor_esi_stream, esi_for_donor, owns_esi,
 };

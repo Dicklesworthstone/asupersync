@@ -18,6 +18,10 @@
 //!   agree on (`symbol_size`, `max_block_size`) and a reference to the shared
 //!   symbol-auth key. Phase A's job is to confirm this is *sufficient*: every field
 //!   here comes from the manifest or an agreed param.
+//! * The identity helpers ([`BondTransferDescriptor::entry_object_id`] and
+//!   [`BondTransferDescriptor::entry_block_geometry`]) make the agreed RaptorQ
+//!   view explicit: for every entry and source block, all donors derive the same
+//!   object id, block byte span, and per-block `K` before any symbol is emitted.
 //! * Agreement is **free**. Because all donor copies are byte-identical, the merkle
 //!   root — and thus `transfer_id` — is identical, so two donors that independently
 //!   hold the same bytes produce *equal* descriptors ([`BondTransferDescriptor::agrees_with`]).
@@ -37,11 +41,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::net::atp::transport_common::{
     EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
 };
 use crate::net::atp::transport_rq::{ManifestEntry, TransferManifest};
+use crate::types::symbol::ObjectId as RaptorqObjectId;
 
 /// Reused streaming-hash buffer for the donor proof (per file, 64 KiB).
 const BOND_HASH_BUFFER_SIZE: usize = 1 << 16;
@@ -101,6 +107,29 @@ pub struct BondTransferDescriptor {
     /// out of band (A3); only its id travels in the descriptor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_key_id: Option<String>,
+}
+
+/// The agreed RaptorQ identity and geometry for one descriptor source block.
+///
+/// This is the descriptor-side contract donors use before spraying symbols:
+/// `object_id` names the entry's fountain, `source_block_number` names the
+/// block within it, and `source_symbols` is that block's actual `K`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondEntryBlockGeometry {
+    /// Stable descriptor entry index.
+    pub entry_index: u32,
+    /// RaptorQ object id derived from `transfer_id` + `entry_index`.
+    pub object_id: RaptorqObjectId,
+    /// Source block number within the entry.
+    pub source_block_number: u8,
+    /// Total source blocks in this entry.
+    pub source_block_count: u16,
+    /// Byte offset of this block within the entry.
+    pub block_start: u64,
+    /// Bytes covered by this block.
+    pub block_bytes: u64,
+    /// Actual source symbols (`K`) required for this block.
+    pub source_symbols: u16,
 }
 
 /// Why a donor (or the receiver) refused a bonded descriptor / failed its proof.
@@ -243,6 +272,68 @@ impl BondTransferDescriptor {
         self == other
     }
 
+    /// Derive the RaptorQ object id for a descriptor entry.
+    ///
+    /// This mirrors the rq and quic transports exactly so bonded donors and the
+    /// receiver address the same fountain without extra signaling.
+    #[must_use]
+    pub fn entry_object_id(&self, entry_index: u32) -> RaptorqObjectId {
+        bonded_entry_object_id(&self.transfer_id, entry_index)
+    }
+
+    /// Return the descriptor entry with `entry_index`.
+    #[must_use]
+    pub fn entry_by_index(&self, entry_index: u32) -> Option<&BondEntry> {
+        self.entries.iter().find(|entry| entry.index == entry_index)
+    }
+
+    /// Planned source-block count for `entry_index` under the descriptor's
+    /// agreed RaptorQ block size.
+    #[must_use]
+    pub fn entry_source_block_count(&self, entry_index: u32) -> Option<u16> {
+        let entry = self.entry_by_index(entry_index)?;
+        Some(entry_source_block_count(entry.size, self.max_block_size))
+    }
+
+    /// Return the agreed RaptorQ geometry for one entry/source-block pair.
+    ///
+    /// Empty entries have zero source blocks and therefore no block geometry.
+    /// Non-empty entries are split greedily into `max_block_size` chunks, matching
+    /// the rq/quic transport object-parameter derivation. `source_symbols` is the
+    /// actual per-block `K`, including a shorter final block.
+    #[must_use]
+    pub fn entry_block_geometry(
+        &self,
+        entry_index: u32,
+        source_block_number: u8,
+    ) -> Option<BondEntryBlockGeometry> {
+        let entry = self.entry_by_index(entry_index)?;
+        let block_count = entry_source_block_count(entry.size, self.max_block_size);
+        let sbn = u16::from(source_block_number);
+        if block_count == 0 || sbn >= block_count {
+            return None;
+        }
+
+        let block_limit = self.max_block_size.max(1);
+        let block_start = block_limit.checked_mul(u64::from(source_block_number))?;
+        if block_start >= entry.size {
+            return None;
+        }
+        let block_bytes = (entry.size - block_start).min(block_limit);
+        let symbol_size = u64::from(self.symbol_size.max(1));
+        let source_symbols = block_bytes.div_ceil(symbol_size).max(1);
+
+        Some(BondEntryBlockGeometry {
+            entry_index,
+            object_id: self.entry_object_id(entry_index),
+            source_block_number,
+            source_block_count: block_count,
+            block_start,
+            block_bytes,
+            source_symbols: u16::try_from(source_symbols).unwrap_or(u16::MAX),
+        })
+    }
+
     /// Validate descriptor-only invariants before comparing any donor proof.
     pub fn validate(&self) -> Result<(), BondProofError> {
         let mut indices = BTreeSet::new();
@@ -338,6 +429,33 @@ impl BondTransferDescriptor {
         }
         self.verify_local_digests(&digests)
     }
+}
+
+/// Derive the per-entry RaptorQ object id from a transfer id and entry index.
+#[must_use]
+pub fn bonded_entry_object_id(transfer_id: &str, entry_index: u32) -> RaptorqObjectId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"asupersync.atp.rq.entry-object-id.v1\0");
+    hasher.update(transfer_id.as_bytes());
+    hasher.update(entry_index.to_be_bytes());
+    let digest = hasher.finalize();
+    let high = u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
+    ]);
+    let low = u64::from_be_bytes([
+        digest[8], digest[9], digest[10], digest[11], digest[12], digest[13], digest[14],
+        digest[15],
+    ]);
+    RaptorqObjectId::new(high, low)
+}
+
+fn entry_source_block_count(entry_size: u64, max_block_size: u64) -> u16 {
+    if entry_size == 0 {
+        return 0;
+    }
+    let block_limit = max_block_size.max(1);
+    let blocks = entry_size.div_ceil(block_limit).min(u64::from(u8::MAX) + 1);
+    u16::try_from(blocks).unwrap_or(u16::from(u8::MAX) + 1)
 }
 
 /// Join a forward-slash transfer-relative path onto `root_dir`, rejecting any
@@ -510,6 +628,59 @@ mod tests {
         let json = serde_json::to_string(&desc).expect("serialize");
         let back: BondTransferDescriptor = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(desc, back);
+    }
+
+    #[test]
+    fn entry_object_id_matches_the_rq_transport_derivation() {
+        let desc = descriptor_for(FILES);
+        let first = desc.entry_object_id(0);
+
+        assert_eq!(first, desc.entry_object_id(0));
+        assert_eq!(
+            first,
+            crate::net::atp::channel_bonding::entry_object_id(&desc.transfer_id, 0)
+        );
+        assert_eq!(first, bonded_entry_object_id(&desc.transfer_id, 0));
+        assert_ne!(first, desc.entry_object_id(1));
+        assert_ne!(first, bonded_entry_object_id("different-transfer", 0));
+    }
+
+    #[test]
+    fn entry_block_geometry_locks_actual_per_block_k() {
+        let mut desc = descriptor_for(&[(7, "payload.bin", b"0123456789abc")]);
+        desc.symbol_size = 4;
+        desc.max_block_size = 6;
+
+        assert_eq!(desc.entry_source_block_count(7), Some(3));
+
+        let first = desc.entry_block_geometry(7, 0).expect("first block");
+        assert_eq!(first.entry_index, 7);
+        assert_eq!(first.object_id, desc.entry_object_id(7));
+        assert_eq!(first.source_block_number, 0);
+        assert_eq!(first.source_block_count, 3);
+        assert_eq!(first.block_start, 0);
+        assert_eq!(first.block_bytes, 6);
+        assert_eq!(first.source_symbols, 2);
+
+        let second = desc.entry_block_geometry(7, 1).expect("second block");
+        assert_eq!(second.block_start, 6);
+        assert_eq!(second.block_bytes, 6);
+        assert_eq!(second.source_symbols, 2);
+
+        let final_partial = desc.entry_block_geometry(7, 2).expect("partial block");
+        assert_eq!(final_partial.block_start, 12);
+        assert_eq!(final_partial.block_bytes, 1);
+        assert_eq!(final_partial.source_symbols, 1);
+
+        assert!(desc.entry_block_geometry(7, 3).is_none());
+        assert!(desc.entry_block_geometry(99, 0).is_none());
+    }
+
+    #[test]
+    fn empty_entries_have_no_source_block_geometry() {
+        let desc = descriptor_for(&[(0, "empty.bin", b"")]);
+        assert_eq!(desc.entry_source_block_count(0), Some(0));
+        assert!(desc.entry_block_geometry(0, 0).is_none());
     }
 
     #[test]
