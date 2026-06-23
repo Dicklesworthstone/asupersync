@@ -9561,6 +9561,33 @@ mod tests {
     }
 
     #[test]
+    fn source_retransmit_fec_fallback_latches_after_repair_only_feedback() {
+        let config = RqConfig {
+            repair_overhead: 1.0,
+            source_retransmit_rounds: 2,
+            max_source_retransmit_requests: 17,
+            max_feedback_rounds: 16,
+            ..RqConfig::default()
+        };
+
+        let mut active = false;
+        for (feedback_round, requested_sources, expected_active) in [
+            (1, 1, false),
+            (1, 0, true),
+            (2, 8, true),
+            (3, 1, true),
+            (config.max_feedback_rounds, 0, true),
+        ] {
+            active |=
+                source_retransmit_needs_fec_fallback(&config, feedback_round, requested_sources);
+            assert_eq!(
+                active, expected_active,
+                "feedback_round={feedback_round} requested_sources={requested_sources}"
+            );
+        }
+    }
+
+    #[test]
     fn round0_loss_target_keeps_clean_and_good_links_source_first() {
         for target in [0.0, 0.001] {
             let config = RqConfig {

@@ -7385,6 +7385,40 @@ mod tests {
         }
     }
 
+    fn quic_decode_width_fixture_decoder(
+        index: u32,
+        size: u64,
+        config: &QuicConfig,
+    ) -> QuicEntryDecoder {
+        let object_id = ObjectId::new(0x5155_4943 + u64::from(index), size);
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: config.repair_overhead,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(0),
+            verify_auth: false,
+        });
+        pipeline
+            .set_object_params(object_params_for(
+                object_id,
+                size,
+                config.symbol_size,
+                config.max_block_size,
+            ))
+            .expect("fixture object params fit QUIC decode geometry");
+        QuicEntryDecoder {
+            index,
+            object_id,
+            size,
+            pipeline: Some(pipeline),
+            complete: false,
+            data: Vec::new(),
+            pending_decodes: Vec::new(),
+        }
+    }
+
     fn drive_in_memory_loopback_transfer(
         cx: &Cx,
         sender: &mut QuicConnection,
@@ -7541,6 +7575,86 @@ mod tests {
         assert_eq!(
             c.symbol_auth_mode(),
             QuicSymbolAuthMode::MissingAuthenticationContext
+        );
+    }
+
+    #[test]
+    fn quic_streaming_parallel_decode_returns_byte_identical_block() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig {
+            symbol_size: 1024,
+            max_block_size: 32 * 1024,
+            repair_overhead: 1.0,
+            ..trusted_quic_config()
+        };
+        let object_size = QUIC_PARALLEL_DECODE_MIN_ENTRY_BYTES;
+        let mut decoder = quic_decode_width_fixture_decoder(7, object_size, &config);
+        let entry_width = quic_entry_decode_width_budget(
+            &decoder,
+            &config,
+            QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
+        );
+        assert!(
+            entry_width > 1,
+            "fixture must exercise the gated parallel decode path"
+        );
+
+        let block = varied_bytes(config.max_block_size, 91);
+        let mut encoder = encoding_pipeline(&config);
+        let repair_symbols = encoder
+            .encode_single_block_repair_range(decoder.object_id, 0, &block, 0, 48)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("single-block repair symbols encode");
+
+        let mut decode_stats = QuicDecodeStats::default();
+        let mut completed = Vec::new();
+        let mut accepted_symbols = 0usize;
+        for encoded in repair_symbols {
+            let (accepted, decoded) = feed_authenticated_symbol_take_block_deferred(
+                &cx,
+                &mut decoder,
+                AuthenticatedSymbol::new_unauthenticated(encoded.into_symbol()),
+                &config,
+                &mut decode_stats,
+                true,
+                QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
+            )
+            .expect("QUIC streaming decoder accepts repair symbol");
+            if accepted {
+                accepted_symbols += 1;
+            }
+            if let Some(decoded) = decoded {
+                completed.push(decoded);
+                break;
+            }
+        }
+        assert!(
+            accepted_symbols >= config.max_block_size / usize::from(config.symbol_size),
+            "fixture must feed at least K symbols before decode"
+        );
+        completed.extend(
+            block_on(join_all_quic_decodes_with_blocks(
+                &cx,
+                std::slice::from_mut(&mut decoder),
+                &config,
+                &mut decode_stats,
+                QUIC_MAX_PENDING_DECODE_JOBS_PER_TRANSFER,
+            ))
+            .expect("pending QUIC decode jobs join"),
+        );
+
+        assert_eq!(completed.len(), 1, "only block 0 should complete");
+        assert_eq!(completed[0].entry, 7);
+        assert_eq!(completed[0].sbn, 0);
+        assert_eq!(completed[0].data, block);
+        assert_eq!(decode_stats.decode_count, 1);
+        assert!(
+            decoder.pending_decodes.is_empty(),
+            "decode join must leave no queued blocking jobs"
+        );
+        assert!(
+            !decoder.complete,
+            "one decoded block must not mark the multi-block logical entry complete"
         );
     }
 
