@@ -1425,29 +1425,13 @@ impl GaussianSolver {
     }
 
     fn first_inconsistent_row_from(&self, start_row: usize) -> Option<usize> {
-        (start_row..self.rows).find(|&row| {
-            self.matrix[row].iter().all(|&coef| coef == 0) // ubs:ignore - math coefficient, not a secret
-                && self.rhs[row].as_slice().iter().any(|&byte| byte != 0)
-        })
+        (start_row..self.rows).find(|&row| self.is_inconsistent_row(row))
     }
 
-    /// Check whether the single row aligned to the current pivot position is
-    /// an explicit zero-coefficient, nonzero-RHS contradiction. Used during
-    /// forward elimination to classify an unpivotable column as `Inconsistent`
-    /// only when the pivot row itself is a contradiction; rank-deficient rows
-    /// farther down are reported after elimination completes.
-    #[allow(dead_code)] // Wired up by br-asupersync-mwx6zi (solve/solve_markowitz alignment)
-    fn first_inconsistent_row_at(&self, row: usize) -> Option<usize> {
-        if row >= self.rows {
-            return None;
-        }
-        if self.matrix[row].iter().all(|&coef| coef == 0)
+    /// True when a transformed row is `0 = b` with non-zero RHS.
+    fn is_inconsistent_row(&self, row: usize) -> bool {
+        self.matrix[row].iter().all(|&coef| coef == 0) // ubs:ignore - math coefficient, not a secret
             && self.rhs[row].as_slice().iter().any(|&byte| byte != 0)
-        {
-            Some(row)
-        } else {
-            None
-        }
     }
 
     fn solved_result(&self, pivot_count: usize) -> GaussianResult {
