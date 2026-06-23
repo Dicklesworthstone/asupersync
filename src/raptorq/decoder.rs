@@ -1336,6 +1336,20 @@ fn row_cross_block_nnz(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PivotCandidate {
+    row: usize,
+    cross_block_nnz: usize,
+    row_nnz: usize,
+}
+
+impl PivotCandidate {
+    fn is_better_than(self, other: Self) -> bool {
+        (self.cross_block_nnz, self.row_nnz, self.row)
+            < (other.cross_block_nnz, other.row_nnz, other.row)
+    }
+}
+
 fn select_pivot_row(
     a: &[Gf256],
     n_rows: usize,
@@ -1349,7 +1363,7 @@ fn select_pivot_row(
         return (0..n_rows).find(|&row| !row_used[row] && !a[row * n_cols + col].is_zero());
     }
 
-    let mut best: Option<(usize, usize, usize)> = None;
+    let mut best: Option<PivotCandidate> = None;
     for row in 0..n_rows {
         if row_used[row] || a[row * n_cols + col].is_zero() {
             continue;
@@ -1361,26 +1375,21 @@ fn select_pivot_row(
             }
         };
         let nnz = row_nonzero_count(a, n_cols, row);
+        let candidate = PivotCandidate {
+            row,
+            cross_block_nnz,
+            row_nnz: nnz,
+        };
         match best {
-            None => best = Some((row, cross_block_nnz, nnz)),
-            Some((_best_row, best_cross, _best_nnz)) if cross_block_nnz < best_cross => {
-                best = Some((row, cross_block_nnz, nnz));
-            }
-            Some((_best_row, best_cross, best_nnz))
-                if cross_block_nnz == best_cross && nnz < best_nnz =>
-            {
-                best = Some((row, cross_block_nnz, nnz));
-            }
-            Some((best_row, best_cross, best_nnz))
-                if cross_block_nnz == best_cross && nnz == best_nnz && row < best_row =>
-            {
-                best = Some((row, cross_block_nnz, nnz));
+            None => best = Some(candidate),
+            Some(best_candidate) if candidate.is_better_than(best_candidate) => {
+                best = Some(candidate);
             }
             _ => {}
         }
     }
 
-    best.map(|(row, _, _)| row)
+    best.map(|candidate| candidate.row)
 }
 
 // ============================================================================
@@ -3707,6 +3716,83 @@ mod tests {
         ];
         let cols = pivot_nonzero_columns(&row, row.len());
         assert_eq!(cols, vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn pivot_candidate_order_prefers_cross_block_then_density_then_row() {
+        let incumbent = PivotCandidate {
+            row: 6,
+            cross_block_nnz: 2,
+            row_nnz: 3,
+        };
+        assert!(
+            PivotCandidate {
+                row: 9,
+                cross_block_nnz: 1,
+                row_nnz: 8,
+            }
+            .is_better_than(incumbent),
+            "lower cross-block support wins before row density"
+        );
+        assert!(
+            PivotCandidate {
+                row: 9,
+                cross_block_nnz: 2,
+                row_nnz: 2,
+            }
+            .is_better_than(incumbent),
+            "lower row density wins when cross-block support ties"
+        );
+        assert!(
+            PivotCandidate {
+                row: 5,
+                cross_block_nnz: 2,
+                row_nnz: 3,
+            }
+            .is_better_than(incumbent),
+            "lowest row wins the final deterministic tie"
+        );
+    }
+
+    #[test]
+    fn block_schur_pivot_selection_prefers_low_cross_block_support() {
+        let rows = [
+            [1, 0, 1, 1], // baseline first pivot; cross-block nnz = 2
+            [1, 1, 0, 0], // block-schur best; cross-block nnz = 0
+            [1, 0, 0, 1], // cross-block nnz = 1
+        ];
+        let flat: Vec<Gf256> = rows
+            .iter()
+            .flat_map(|row| row.iter().copied().map(Gf256::new))
+            .collect();
+        let row_used = vec![false; rows.len()];
+
+        assert_eq!(
+            select_pivot_row(
+                &flat,
+                rows.len(),
+                4,
+                0,
+                &row_used,
+                false,
+                HardRegimePlan::Markowitz
+            ),
+            Some(0),
+            "baseline pivoting keeps first available row"
+        );
+        assert_eq!(
+            select_pivot_row(
+                &flat,
+                rows.len(),
+                4,
+                0,
+                &row_used,
+                true,
+                HardRegimePlan::BlockSchurLowRank { split_col: 2 },
+            ),
+            Some(1),
+            "block-schur pivoting should prefer the row with lowest cross-block support"
+        );
     }
 
     #[test]
