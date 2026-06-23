@@ -143,9 +143,11 @@ pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_ENTRIES: usize = 4 * 1024 * 1024;
 
 /// E-15 tree coalescing: files strictly smaller than this become candidates for
-/// packing into a combined RaptorQ object. Files at or above it stay single-file
-/// objects (they already amortize per-object overhead over enough bytes).
-const PACK_THRESHOLD: u64 = 256 * 1024;
+/// packing into a combined RaptorQ object. The threshold intentionally includes
+/// the benchmark `tree_small` generator's 1 MiB max-size bucket so those entries
+/// share the packed-object receiver staging path instead of becoming thousands
+/// of cache-skipping single-file RQ objects.
+const PACK_THRESHOLD: u64 = 1024 * 1024 + 1;
 
 /// E-15 tree coalescing: target size for a combined RaptorQ object. The packer
 /// greedily fills a pack with small files until adding the next would exceed this
@@ -154,6 +156,11 @@ const PACK_THRESHOLD: u64 = 256 * 1024;
 /// RaptorQ object's worth of bytes — large enough to collapse the per-object
 /// runtime overhead, small enough that a lost symbol does not span the whole tree.
 const PACK_TARGET: u64 = 8 * 1024 * 1024;
+
+/// Keep a staging descriptor hot for large entries only when the manifest is
+/// small enough that the receiver cannot retain too many open files.
+const ENTRY_STAGING_FILE_CACHE_MIN_BYTES: u64 = 1024 * 1024;
+const ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES: usize = 128;
 
 /// Default bound on fountain feedback rounds before failing closed.
 pub const DEFAULT_MAX_FEEDBACK_ROUNDS: u32 = 16;
@@ -1897,31 +1904,13 @@ async fn pack_small_files(
         let mut offset: u64 = 0;
         for &member_idx in group {
             let entry = &entries[member_idx];
-            // Hash the member with the SAME streaming helper the rest of the
-            // transport uses, so its size / content_id / sha are byte-identical
-            // to a non-packed transfer of the same file.
-            let (len, content_id, content_sha256) =
-                hash_file_streaming(&entry.abs_path, &mut hash_buf)
-                    .await
-                    .map_err(|e| RqError::Source(e.into_message()))?;
-            // Copy the member bytes into the pack temp file at the running offset.
-            let mut src = crate::fs::File::open(&entry.abs_path)
-                .await
-                .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))?;
-            loop {
-                let (returned, n) = src
-                    .read_into_vec(std::mem::take(&mut hash_buf))
-                    .await
-                    .map_err(|e| RqError::Source(format!("{}: {e}", entry.abs_path.display())))?;
-                hash_buf = returned;
-                if n == 0 {
-                    break;
-                }
-                pack_file
-                    .write_all(&hash_buf[..n])
-                    .await
-                    .map_err(|e| RqError::Source(format!("{}: {e}", pack_path.display())))?;
-            }
+            let (len, content_id, content_sha256) = append_file_to_pack_with_digest(
+                &entry.abs_path,
+                &pack_path,
+                &mut pack_file,
+                &mut hash_buf,
+            )
+            .await?;
             members.push(PackedMember {
                 rel_path: entry.rel_path.clone(),
                 offset,
@@ -1953,6 +1942,44 @@ async fn pack_small_files(
     }
 
     Ok((new_entries, logical_digests, Some(tempdir)))
+}
+
+async fn append_file_to_pack_with_digest(
+    path: &Path,
+    pack_path: &Path,
+    pack_file: &mut crate::fs::File,
+    buf: &mut [u8],
+) -> Result<(u64, crate::atp::object::ObjectId, [u8; 32]), RqError> {
+    let mut src = crate::fs::File::open(path)
+        .await
+        .map_err(|e| RqError::Source(format!("{}: {e}", path.display())))?;
+    let mut sha = Sha256::new();
+    let mut cid = crate::atp::object::ContentId::streaming();
+    let mut size = 0u64;
+    loop {
+        let n = src
+            .read(buf)
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buf[..n];
+        sha.update(chunk);
+        cid.update(chunk);
+        pack_file
+            .write_all(chunk)
+            .await
+            .map_err(|e| RqError::Source(format!("{}: {e}", pack_path.display())))?;
+        size = size.checked_add(n as u64).ok_or_else(|| {
+            RqError::Coding(format!("{}: packed member size overflow", path.display()))
+        })?;
+    }
+    Ok((
+        size,
+        crate::atp::object::ObjectId::content(cid.finalize()),
+        sha.finalize().into(),
+    ))
 }
 
 /// Split large unpacked entries into ordered RaptorQ objects while preserving the
@@ -2806,14 +2833,20 @@ enum DecodeDispatch {
     NoProgress,
 }
 
-fn should_cache_entry_staging_file(entry_size: u64, manifest_entries: usize) -> bool {
-    const MIN_BYTES: u64 = 1024 * 1024;
-    const MAX_ENTRIES: usize = 128;
+fn should_cache_entry_staging_file(
+    entry_size: u64,
+    manifest_entries: usize,
+    packed_members: usize,
+) -> bool {
+    let bounded_manifest = manifest_entries <= ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES;
+    let large_entry_cache = entry_size >= ENTRY_STAGING_FILE_CACHE_MIN_BYTES && bounded_manifest;
+    let packed_tree_batch = packed_members > 0 && entry_size > 0 && bounded_manifest;
 
-    // Keep a staging file handle hot only for large entries where per-symbol
-    // open/seek/write dominates clean-link receiver intake. Small tree entries
-    // use scoped opens so E-14's FD bound stays intact.
-    entry_size >= MIN_BYTES && manifest_entries <= MAX_ENTRIES
+    large_entry_cache || packed_tree_batch
+}
+
+fn is_round_scoped_entry_staging_cache(dec: &EntryDecoder) -> bool {
+    dec.cache_staging_file && dec.size < ENTRY_STAGING_FILE_CACHE_MIN_BYTES
 }
 
 fn entry_decode_width_budget(dec: &EntryDecoder, transfer_decode_width: usize) -> usize {
@@ -4260,6 +4293,7 @@ pub async fn receive_connection(
                 cache_staging_file: should_cache_entry_staging_file(
                     e.size,
                     manifest.entries.len(),
+                    e.members.len(),
                 ),
                 bytes_written: 0,
                 max_block_size: receiver_max_block_size,
@@ -5290,6 +5324,9 @@ async fn close_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), R
 }
 
 async fn flush_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError> {
+    if is_round_scoped_entry_staging_cache(dec) {
+        return close_cached_entry_staging_file(dec).await;
+    }
     if let Some(file) = dec.staging_file.as_mut() {
         file.flush().await?;
     }
@@ -5351,7 +5388,6 @@ async fn write_entry_staging_range(
     let mut file = open_entry_staging_file(dec).await?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     file.write_all(data).await?;
-    file.flush().await?;
     Ok(())
 }
 
@@ -5500,36 +5536,140 @@ fn object_params_for(
     )
 }
 
-/// Read the byte range a packed member occupies from its staging file.
-///
-/// Thin `u64` wrapper over [`read_source_range`] for [`PackedMember`] offsets;
-/// fails closed if the offset/length overflow `usize` or the staging file is
-/// shorter than `offset + len` (a short read).
-///
-/// # Errors
-///
-/// Returns [`RqError::Coding`] on an out-of-range offset/length, or
-/// [`RqError::Source`] on a seek/read failure.
-async fn read_member_range(path: &Path, offset: u64, len: u64) -> Result<Vec<u8>, RqError> {
-    let offset = usize::try_from(offset).map_err(|_| {
-        RqError::Coding(format!(
-            "{}: packed member offset does not fit usize: {offset}",
-            path.display()
-        ))
-    })?;
-    let len = usize::try_from(len).map_err(|_| {
-        RqError::Coding(format!(
-            "{}: packed member length does not fit usize: {len}",
-            path.display()
-        ))
-    })?;
-    read_source_range(path, offset, len).await
-}
-
 #[derive(Debug, Clone)]
 struct LargeObjectCommitShard {
     staging_path: PathBuf,
     fragment: LargeObjectFragment,
+}
+
+#[derive(Debug, Clone)]
+struct PackedMemberWrite {
+    offset: u64,
+    len: u64,
+    out_path: PathBuf,
+}
+
+async fn hash_packed_members_streaming(
+    staging_path: &Path,
+    members: &[PackedMember],
+    logical_digests: &mut Vec<EntryDigest>,
+    logical_files: &mut u64,
+    buf: &mut [u8],
+) -> Result<bool, RqError> {
+    let mut file = crate::fs::File::open(staging_path)
+        .await
+        .map_err(|e| RqError::Source(format!("{}: {e}", staging_path.display())))?;
+    let mut cursor = 0u64;
+    let mut sha_ok = true;
+
+    for member in members {
+        let next_cursor = member.offset.checked_add(member.len).ok_or_else(|| {
+            RqError::Coding(format!(
+                "{}: packed member {} byte range overflows",
+                staging_path.display(),
+                member.rel_path
+            ))
+        })?;
+        if cursor != member.offset {
+            file.seek(std::io::SeekFrom::Start(member.offset)).await?;
+            cursor = member.offset;
+        }
+
+        let mut sha = Sha256::new();
+        let mut content_id = crate::atp::object::ContentId::streaming();
+        let mut remaining = member.len;
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+            let n = file
+                .read(&mut buf[..want])
+                .await
+                .map_err(|e| RqError::Source(format!("{}: {e}", staging_path.display())))?;
+            if n == 0 {
+                return Err(RqError::Source(format!(
+                    "{}: short read while verifying packed member {}",
+                    staging_path.display(),
+                    member.rel_path
+                )));
+            }
+            sha.update(&buf[..n]);
+            content_id.update(&buf[..n]);
+            remaining -= n as u64;
+            cursor = cursor.saturating_add(n as u64);
+        }
+
+        let member_sha: [u8; 32] = sha.finalize().into();
+        if hex_encode(&member_sha) != member.sha256_hex {
+            sha_ok = false;
+        }
+        logical_digests.push(EntryDigest {
+            rel_path: member.rel_path.clone(),
+            size: member.len,
+            content_id: crate::atp::object::ObjectId::content(content_id.finalize()),
+            content_sha256: member_sha,
+        });
+        *logical_files = (*logical_files).saturating_add(1);
+        cursor = next_cursor;
+    }
+
+    Ok(sha_ok)
+}
+
+async fn write_packed_member_batch(
+    staging_path: &Path,
+    members: &[PackedMemberWrite],
+    buf: &mut [u8],
+) -> Result<(), RqError> {
+    let mut created_parents: BTreeSet<PathBuf> = BTreeSet::new();
+    for member in members {
+        if let Some(parent) = member.out_path.parent()
+            && created_parents.insert(parent.to_path_buf())
+        {
+            crate::fs::create_dir_all(parent).await?;
+        }
+    }
+
+    let mut source = crate::fs::File::open(staging_path)
+        .await
+        .map_err(|e| RqError::Source(format!("{}: {e}", staging_path.display())))?;
+    let mut cursor = 0u64;
+
+    for member in members {
+        let next_cursor = member.offset.checked_add(member.len).ok_or_else(|| {
+            RqError::Coding(format!(
+                "{}: packed member destination {} byte range overflows",
+                staging_path.display(),
+                member.out_path.display()
+            ))
+        })?;
+        if cursor != member.offset {
+            source.seek(std::io::SeekFrom::Start(member.offset)).await?;
+            cursor = member.offset;
+        }
+
+        let mut out = crate::fs::File::create(&member.out_path).await?;
+        let mut remaining = member.len;
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+            let n = source
+                .read(&mut buf[..want])
+                .await
+                .map_err(|e| RqError::Source(format!("{}: {e}", staging_path.display())))?;
+            if n == 0 {
+                return Err(RqError::Source(format!(
+                    "{}: short read while committing packed member {}",
+                    staging_path.display(),
+                    member.out_path.display()
+                )));
+            }
+            out.write_all(&buf[..n]).await?;
+            remaining -= n as u64;
+            cursor = cursor.saturating_add(n as u64);
+        }
+        out.flush().await?;
+        cursor = next_cursor;
+    }
+
+    Ok(())
 }
 
 async fn hash_large_object_fragments(
@@ -5707,24 +5847,14 @@ async fn verify_and_commit(
             // E-15 packed object: split the staging file into member byte ranges,
             // verify each member's own SHA-256, and build a per-member logical
             // digest. The packed object itself is not committed.
-            for member in &e.members {
-                let bytes =
-                    read_member_range(&decoder.staging_path, member.offset, member.len).await?;
-                let member_sha: [u8; 32] = Sha256::digest(&bytes).into();
-                if hex_encode(&member_sha) != member.sha256_hex {
-                    sha_ok = false;
-                }
-                let member_content_id = crate::atp::object::ObjectId::content(
-                    crate::atp::object::ContentId::from_bytes(&bytes),
-                );
-                logical_digests.push(EntryDigest {
-                    rel_path: member.rel_path.clone(),
-                    size: member.len,
-                    content_id: member_content_id,
-                    content_sha256: member_sha,
-                });
-                logical_files = logical_files.saturating_add(1);
-            }
+            sha_ok &= hash_packed_members_streaming(
+                &decoder.staging_path,
+                &e.members,
+                &mut logical_digests,
+                &mut logical_files,
+                &mut hash_buf,
+            )
+            .await?;
             commits.push(EntryCommit::Split {
                 staging_path: decoder.staging_path.clone(),
                 members: e.members.clone(),
@@ -5772,11 +5902,9 @@ async fn verify_and_commit(
                 staging_path: PathBuf,
                 out_path: PathBuf,
             },
-            Member {
+            Members {
                 staging_path: PathBuf,
-                offset: u64,
-                len: u64,
-                out_path: PathBuf,
+                members: Vec<PackedMemberWrite>,
             },
             Fragments {
                 shards: Vec<LargeObjectCommitShard>,
@@ -5806,15 +5934,19 @@ async fn verify_and_commit(
                 } => {
                     // A packed object only ever occurs inside a directory transfer
                     // (the single-file path never packs), so members join under base.
+                    let mut member_writes = Vec::with_capacity(members.len());
                     for member in members {
                         let out_path = join_relative(&base, &member.rel_path)?;
-                        writes.push(CommitWrite::Member {
-                            staging_path: staging_path.clone(),
+                        member_writes.push(PackedMemberWrite {
                             offset: member.offset,
                             len: member.len,
                             out_path,
                         });
                     }
+                    writes.push(CommitWrite::Members {
+                        staging_path: staging_path.clone(),
+                        members: member_writes,
+                    });
                 }
                 EntryCommit::Fragments { rel_path, shards } => {
                     let out_path = if manifest.is_directory {
@@ -5831,12 +5963,16 @@ async fn verify_and_commit(
         }
 
         for write in &writes {
-            let out_path = match write {
-                CommitWrite::Rename { out_path, .. }
-                | CommitWrite::Member { out_path, .. }
-                | CommitWrite::Fragments { out_path, .. } => out_path,
-            };
-            reject_destination_symlink_prefix(&base, out_path).await?;
+            match write {
+                CommitWrite::Rename { out_path, .. } | CommitWrite::Fragments { out_path, .. } => {
+                    reject_destination_symlink_prefix(&base, out_path).await?;
+                }
+                CommitWrite::Members { members, .. } => {
+                    for member in members {
+                        reject_destination_symlink_prefix(&base, &member.out_path).await?;
+                    }
+                }
+            }
         }
 
         for write in writes {
@@ -5851,22 +5987,20 @@ async fn verify_and_commit(
                     crate::fs::rename(&staging_path, &out_path).await?;
                     committed_paths.push(out_path.display().to_string());
                 }
-                CommitWrite::Member {
+                CommitWrite::Members {
                     staging_path,
-                    offset,
-                    len,
-                    out_path,
+                    members,
                 } => {
-                    if let Some(parent) = out_path.parent() {
-                        crate::fs::create_dir_all(parent).await?;
-                    }
-                    // Re-read the verified member byte range from the packed staging
-                    // file and write it into place (the packed object is consumed,
-                    // not renamed). Members are bounded by PACK_TARGET, so this is
-                    // O(member) memory.
-                    let bytes = read_member_range(&staging_path, offset, len).await?;
-                    crate::fs::write(&out_path, &bytes).await?;
-                    committed_paths.push(out_path.display().to_string());
+                    // Re-read the verified member byte ranges from the packed
+                    // staging file once, in offset order. This preserves the
+                    // per-file outputs while avoiding one staging open/seek and
+                    // one allocation per small tree file.
+                    write_packed_member_batch(&staging_path, &members, &mut hash_buf).await?;
+                    committed_paths.extend(
+                        members
+                            .into_iter()
+                            .map(|member| member.out_path.display().to_string()),
+                    );
                 }
                 CommitWrite::Fragments { shards, out_path } => {
                     if let Some(parent) = out_path.parent() {
@@ -7847,7 +7981,12 @@ mod tests {
         let symbol_size = 4u16;
         let dir = tempfile::tempdir().expect("tempdir");
         let staging_path = dir.path().join("entry0");
-        let mut decoder = source_streaming_test_decoder(object_id, staging_path, 8, symbol_size);
+        let mut decoder = source_streaming_test_decoder(
+            object_id,
+            staging_path,
+            ENTRY_STAGING_FILE_CACHE_MIN_BYTES,
+            symbol_size,
+        );
         decoder.cache_staging_file = true;
 
         let first = ParsedDatagram {
@@ -7885,13 +8024,86 @@ mod tests {
     }
 
     #[test]
-    fn source_streaming_staging_cache_policy_is_bounded() {
-        const MIN_BYTES: u64 = 1024 * 1024;
-        const MAX_ENTRIES: usize = 128;
+    fn source_streaming_small_entry_cache_closes_on_round_boundary() {
+        let object_id = entry_object_id("source-stream-small-cache-flush", 0);
+        let symbol_size = 4u16;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 8, symbol_size);
+        decoder.cache_staging_file = true;
 
-        assert!(should_cache_entry_staging_file(MIN_BYTES, MAX_ENTRIES));
-        assert!(!should_cache_entry_staging_file(MIN_BYTES - 1, 1));
-        assert!(!should_cache_entry_staging_file(MIN_BYTES, MAX_ENTRIES + 1));
+        let first = ParsedDatagram {
+            entry: 0,
+            sbn: 0,
+            esi: 0,
+            kind: SymbolKind::Source,
+            auth_tag: None,
+            payload_len: 4,
+            header_len: 0,
+        };
+        assert!(
+            futures_lite::future::block_on(persist_source_symbol(
+                &mut decoder,
+                &first,
+                &[1, 2, 3, 4],
+                symbol_size,
+            ))
+            .expect("persist first cached source symbol")
+        );
+        assert!(decoder.staging_file.is_some());
+        assert_eq!(decoder.staging_cursor, Some(4));
+        assert_eq!(decoder.staging_unflushed_bytes, 4);
+
+        futures_lite::future::block_on(flush_cached_entry_staging_files(std::slice::from_mut(
+            &mut decoder,
+        )))
+        .expect("round-boundary flush");
+
+        assert!(
+            decoder.staging_file.is_none(),
+            "small-entry staging cache should not retain tree leaves across rounds"
+        );
+        assert_eq!(decoder.staging_cursor, None);
+        assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert_eq!(
+            std::fs::read(staging_path).expect("read staged first source symbol"),
+            vec![1, 2, 3, 4, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn source_streaming_staging_cache_policy_batches_small_tree_entries() {
+        assert!(should_cache_entry_staging_file(
+            ENTRY_STAGING_FILE_CACHE_MIN_BYTES,
+            ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES,
+            0,
+        ));
+        assert!(!should_cache_entry_staging_file(
+            ENTRY_STAGING_FILE_CACHE_MIN_BYTES,
+            ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES + 1,
+            0,
+        ));
+        assert!(!should_cache_entry_staging_file(
+            ENTRY_STAGING_FILE_CACHE_MIN_BYTES - 1,
+            ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES,
+            0,
+        ));
+        assert!(should_cache_entry_staging_file(
+            ENTRY_STAGING_FILE_CACHE_MIN_BYTES - 1,
+            ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES,
+            2,
+        ));
+        assert!(!should_cache_entry_staging_file(
+            ENTRY_STAGING_FILE_CACHE_MIN_BYTES - 1,
+            ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES + 1,
+            2,
+        ));
+        assert!(!should_cache_entry_staging_file(
+            0,
+            ENTRY_STAGING_FILE_CACHE_MAX_ENTRIES,
+            2,
+        ));
     }
 
     #[cfg(target_os = "linux")]
@@ -9598,6 +9810,39 @@ mod tests {
     }
 
     #[test]
+    fn pack_small_files_coalesces_tree_small_max_size_bucket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let max_tree_small = vec![0x11u8; 1024 * 1024];
+        let sibling = vec![0x22u8; 1024 * 1024];
+        let entries = vec![
+            source_entry(dir.path(), "leaf/a.bin", &max_tree_small),
+            source_entry(dir.path(), "leaf/b.bin", &sibling),
+        ];
+
+        let config = RqConfig::default();
+        let (packed, logical_digests, tempdir) =
+            futures_lite::future::block_on(pack_small_files(entries, &config)).expect("pack");
+        let _tempdir = tempdir.expect("tree_small max-size entries should pack");
+
+        assert_eq!(packed.len(), 1);
+        let pack = &packed[0];
+        assert_eq!(pack.members.len(), 2);
+        assert_eq!(pack.members[0].rel_path, "leaf/a.bin");
+        assert_eq!(pack.members[0].offset, 0);
+        assert_eq!(pack.members[0].len, max_tree_small.len() as u64);
+        assert_eq!(pack.members[1].rel_path, "leaf/b.bin");
+        assert_eq!(pack.members[1].offset, max_tree_small.len() as u64);
+        assert_eq!(pack.members[1].len, sibling.len() as u64);
+        assert_eq!(logical_digests.len(), 2);
+        assert_eq!(
+            std::fs::metadata(&pack.abs_path)
+                .expect("packed object metadata")
+                .len(),
+            (max_tree_small.len() + sibling.len()) as u64
+        );
+    }
+
+    #[test]
     fn pack_small_files_leaves_large_files_unpacked_and_root_unchanged() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Two files >= PACK_THRESHOLD: neither is packed, nothing materialized.
@@ -9779,6 +10024,81 @@ mod tests {
         assert_eq!(std::fs::read(&out_b).expect("member b"), b);
         // The synthetic packed object name must not appear on disk.
         assert!(!dest.path().join("payload/.atp-pack-0").exists());
+    }
+
+    #[test]
+    fn packed_member_streaming_helpers_reuse_small_buffers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let staging_path = temp.path().join("pack-object");
+        let a = b"alpha-member".to_vec();
+        let b = b"beta-member-is-longer".to_vec();
+        let mut packed = Vec::new();
+        packed.extend_from_slice(&a);
+        packed.extend_from_slice(&b);
+        std::fs::write(&staging_path, &packed).expect("write packed staging object");
+
+        let members = vec![
+            PackedMember {
+                rel_path: "a.txt".to_string(),
+                offset: 0,
+                len: a.len() as u64,
+                sha256_hex: hex_encode(&Sha256::digest(&a)),
+            },
+            PackedMember {
+                rel_path: "nested/b.txt".to_string(),
+                offset: a.len() as u64,
+                len: b.len() as u64,
+                sha256_hex: hex_encode(&Sha256::digest(&b)),
+            },
+        ];
+
+        let mut digests = Vec::new();
+        let mut logical_files = 0;
+        let mut verify_buf = [0u8; 3];
+        let ok = futures_lite::future::block_on(hash_packed_members_streaming(
+            &staging_path,
+            &members,
+            &mut digests,
+            &mut logical_files,
+            &mut verify_buf,
+        ))
+        .expect("streaming member verification");
+        assert!(ok);
+        assert_eq!(logical_files, 2);
+        assert_eq!(digests.len(), 2);
+        assert_eq!(digests[0].rel_path, "a.txt");
+        let expected_a_sha: [u8; 32] = Sha256::digest(&a).into();
+        assert_eq!(digests[0].content_sha256, expected_a_sha);
+        assert_eq!(digests[1].rel_path, "nested/b.txt");
+        let expected_b_sha: [u8; 32] = Sha256::digest(&b).into();
+        assert_eq!(digests[1].content_sha256, expected_b_sha);
+
+        let out_root = temp.path().join("out");
+        let writes = vec![
+            PackedMemberWrite {
+                offset: members[0].offset,
+                len: members[0].len,
+                out_path: out_root.join(&members[0].rel_path),
+            },
+            PackedMemberWrite {
+                offset: members[1].offset,
+                len: members[1].len,
+                out_path: out_root.join(&members[1].rel_path),
+            },
+        ];
+        let mut write_buf = [0u8; 4];
+        futures_lite::future::block_on(write_packed_member_batch(
+            &staging_path,
+            &writes,
+            &mut write_buf,
+        ))
+        .expect("batched member commit");
+
+        assert_eq!(std::fs::read(out_root.join("a.txt")).expect("read a"), a);
+        assert_eq!(
+            std::fs::read(out_root.join("nested/b.txt")).expect("read b"),
+            b
+        );
     }
 
     #[test]
