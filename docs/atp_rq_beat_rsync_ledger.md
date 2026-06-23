@@ -2081,3 +2081,17 @@ First run of the incremental RE-SYNC scorecard (`scripts/atp_bench/resync_bench.
 **1pct scattered byte-flips — atp FELL BACK to full-object (108MB, status=error, fail-closed excluded):** 'ATP sender fell back to full-object despite sidecar state; marking cell invalid'. The sender had the prior-sync sidecar but the delta-send decision bailed to a full send on scattered flips. This is a real LANE-H bug: scattered small edits should be the delta sweet spot (rsync handles them well at ~O(change)); atp must not fall back. ROUTED to the delta.rs owner: find the full-vs-delta decision in the send path and make it emit O(change) when the sidecar is present for scattered-flip diffs.
 
 **Scoreboard add:** delta-resync/insert is a new confirmed atp WIN (62.5×). Net mission status: atp now wins lossy-large (500M/bad 1.59×), high-loss-small (5M/broken 1.48×), **delta-insert (62.5×)**, ties clean-small + delta-append-ish, dominates memory everywhere (16-1000×); open gaps = delta 1pct-fallback bug, delta-append efficiency, 50M lossy-small wall, encrypted-lossy convergence, clean-perfect wall. NEXT: re-bench LANE-K 50M/broken (did 85867ddf8 cut rounds?) + encrypted-lossy 50M (did lqmfsi converge?). Evidence: `/tmp/atp_resync_bench/20260623T232653Z-2016368/resync.jsonl`.
+
+## MATRIX-57 (2026-06-23) — LANE-K v2 (85867ddf8 apply measured-loss repair during source retransmit) STILL ineffective: 50M/broken median 11 rounds (was 11), ~233s vs rsync ~70s. Two ε-attempts failed → real limiter is the PER-ROUND repair cap (MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND), not ε. Deprioritized (niche cell; atp wins memory 100× here regardless).
+
+Re-benched 50M/broken nocrypto on committed HEAD (incl 85867ddf8), 3/3 sha-ok:
+
+| metric | atp-rq-lab | rsyncd |
+|---|---|---|
+| median wall | 232.9s (reps 233/209/240) | 70.7s (69/71/97) |
+| feedback rounds | **11 (11/9/11)** — vs MATRIX-55's 11 | 0 |
+| peak RSS | **194,804 KB (195MB)** | **20,801,988 KB (20.3GB)** |
+
+**LANE-K v2 did NOT cut the round count.** 85867ddf8 ("apply measured-loss repair during source retransmit") is the second adaptive-overhead attempt (after j91wza) and 50M/broken still needs a median 11 feedback rounds (one rep hit 9). So sizing ε to measured loss is NOT the bottleneck. REFINED DIAGNOSIS: the limiter is the **per-round repair-symbol cap** (`MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND`, the `limit` arg to block_repair_requests): even with ε≈0.12 computed, the sender can only emit `limit` repair symbols per feedback round, so at 10% loss on K-many blocks the deficit is necessarily spread across ~11 serial RTT rounds. To collapse rounds you must raise the per-round cap (loss-adaptively, to avoid clean-link overshoot) so the full ε·K deficit ships in 1-2 rounds — NOT compute a bigger ε that then gets clamped by the cap.
+
+**DEPRIORITIZED:** 50M/broken is a niche cell (10% loss + 50M small-lossy). Two LANE-K attempts failed; atp still converges sha-ok and uses **100× less memory** there (195MB vs rsync's 20.3GB — rsync would OOM on a constrained host). The per-round-cap fix is the right lever IF revisited, but higher-EV work now is the DELTA 1pct-fallback fix (turns delta-resync into a clean sweep, MATRIX-56) and encrypted-lossy convergence (LANE-E). Routed the refined cap-diagnosis to the LANE-K owner as lower priority. Evidence: results.jsonl mtime>lanek2_ts. NEXT: encrypted-lossy 50M re-bench (LANE-E lqmfsi — 3/3 converge now?).
