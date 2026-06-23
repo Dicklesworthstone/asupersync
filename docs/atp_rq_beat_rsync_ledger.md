@@ -2048,3 +2048,18 @@ First fresh validation of the broken/10%-loss regime (the regime where FEC shoul
 **50M/broken loses 2.9× (223s vs 77.5s) — root cause is FEEDBACK-ROUND COUNT, not decode:** atp needed **11-12 feedback rounds** to converge. At 10% loss each round is a full ~200-400ms RTT + a decode attempt + a re-request; 11-12 serial rounds × that latency dominates the 223s wall. rsync's TCP selective-retransmit handles 10% loss on a 50M stream in 77s. **The lever is per-round repair overhead, not decode parallelism**: send FEC symbols proportional to the measured ~10% loss (overhead ε ≈ 0.12-0.15) so the receiver converges in 2-3 rounds instead of 12. This is the adaptive-FEC `ε*(K,p̄,α)` path (bead E-7.4 / 317hxr adaptive overhead) and is DISTINCT from the frozen AIMD rate control (AIMD governs send RATE; this governs repair AMOUNT per round). Sending more repair upfront at high measured loss should collapse the round count → big 50M/broken win. NOT a dead lever (dead = round-0/one-shot RATE control; this is per-round repair AMOUNT).
 
 **Memory dominance is most extreme in the broken regime:** rsync hits 22.4GB RSS on a 5M transfer and 8.6GB on 50M under 10% loss + reorder (its reorder/retransmit buffers explode), while atp holds 43-191MB — 46-533× less. On any memory-constrained host rsync would OOM at 10% loss where atp sails through. Evidence: `artifacts/atp_bench_matrix/20260623T132007Z/`. NEXT LEVER for swarm: E-7.4 per-round adaptive repair overhead to cut the 50M/broken round count 12→2-3.
+
+## MATRIX-55 (2026-06-23) — LANE-K (j91wza adaptive repair overhead) is INEFFECTIVE as wired: 50M/broken STILL 11 feedback rounds / 219s (unchanged from MATRIX-54's 11-12 / 223s); the measured-loss→ε overhead is not moving the round count. 50M/bad no regression (64s). Lever needs follow-up before it earns a win.
+
+Benched HEAD (atp 0.3.5, clean build incl j91wza d110e6d52 "adapt rq repair overhead to measured loss"), 50M broken+bad nocrypto, 3/3 sha-ok:
+
+| cell | atp-rq-lab | rsyncd | atp RSS | rsync RSS | atp rounds | vs MATRIX-54 |
+|---|---|---|---|---|---|---|
+| 50M/broken | 219.44s | 74.59s | **196MB** | **11,446MB (11.2GB)** | **11** | UNCHANGED (was 11-12 / 223s) |
+| 50M/bad | 64.07s | 14.44s | 189MB | 3,035MB | 4-8 | no regression (was 66.5s) |
+
+**LANE-K did NOT achieve its goal.** The hypothesis (MATRIX-54) was that sizing per-round FEC repair overhead to the receiver-measured loss would collapse 50M/broken's 11-12 feedback rounds to ≤3. The j91wza commit landed (+70 lines transport_rq/mod.rs) but the benched result is **11 rounds, 219s — statistically identical to the pre-fix 223s**. So either (a) the measured-loss→ε overhead is computed but NOT actually applied to the repair spray on the 50M source-retransmit path, (b) ε is sized too conservatively (at p̄≈0.10 we need ε≈0.12-0.15 of the block emitted per repair round, not a small increment), or (c) the per-block deficit re-request still serializes a round per block regardless of overhead. atp still loses 50M/broken 2.94× on wall (but 58× less memory: 196MB vs rsync 11.2GB).
+
+**50M/bad unchanged (64s vs MATRIX-53's 66.5s)** — no regression, still converges 3/3 in 4-8 rounds, still a ~4.4× wall loss vs rsync 14.4s (16× less RSS).
+
+**ROUTED follow-up:** LANE-K stays the highest-EV lossy lever IF made effective — re-opened to a transport_rq owner to diagnose why ε isn't cutting the round count (instrument: does the 50M/broken repair path actually emit ε·K extra symbols/round at p̄=0.10? if not, wire it; if yes, raise ε). Until then, the broken/lossy-large wall stays a loss. Memory dominance holds (rsync 11.2GB on 50M/broken). Evidence: `artifacts/atp_bench_matrix/20260623T223844Z/`.
