@@ -979,6 +979,60 @@ mod tests {
     }
 
     #[test]
+    fn canonical_dedup_parts_reject_accounting_drift() {
+        let repeated = vec![b'r'; 4096];
+        let unique = vec![b'u'; 1024];
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let parts =
+            build_canonical_dedup_payload_parts(&plan, &sender_store).expect("canonical parts");
+
+        let mut bad_metadata_len = parts.clone();
+        bad_metadata_len.metadata_wire_bytes += 1;
+        assert!(matches!(
+            bad_metadata_len.decode_payload_set(&plan),
+            Err(DeltaError::DeltaSendPlanPayloadBytesMismatch { .. })
+        ));
+
+        let mut bad_compact_len = parts.clone();
+        bad_compact_len.compact_wire_bytes += 1;
+        assert!(matches!(
+            bad_compact_len.decode_payload_set(&plan),
+            Err(DeltaError::DeltaSendPlanPayloadBytesMismatch { .. })
+        ));
+
+        let mut bad_logical_bytes = parts.clone();
+        bad_logical_bytes.logical_missing_bytes -= 1;
+        assert!(matches!(
+            bad_logical_bytes.decode_payload_set(&plan),
+            Err(DeltaError::DeltaSendPlanWholeBytesMismatch { .. })
+        ));
+
+        let mut bad_duplicate_chunks = parts.clone();
+        bad_duplicate_chunks.duplicate_missing_chunks += 1;
+        assert!(matches!(
+            bad_duplicate_chunks.decode_payload_set(&plan),
+            Err(DeltaError::DeltaSendPlanItemCountMismatch { .. })
+        ));
+
+        let mut bad_duplicate_bytes = parts;
+        bad_duplicate_bytes.duplicate_missing_bytes += 1;
+        assert!(matches!(
+            bad_duplicate_bytes.decode_payload_set(&plan),
+            Err(DeltaError::DeltaSendPlanPayloadBytesMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn dedupe_payload_set_canonical_parts_fail_closed_on_payload_drift() {
         let mut sender_store = ContentAddressedChunkStore::new();
         let mut receiver_store = ContentAddressedChunkStore::new();

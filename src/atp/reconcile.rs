@@ -331,6 +331,36 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_canonical_dedup_parts_fail_closed_before_reconstruct() {
+        let repeated = vec![b'r'; 4096];
+        let unique = vec![b'u'; 1024];
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let mut parts =
+            build_canonical_dedup_payload_parts(&plan, &sender_store).expect("canonical parts");
+
+        parts.unique_payload_bytes[0] ^= 0x40;
+        let err = reconcile_canonical_dedup_parts_and_reconstruct(
+            &sender,
+            &receiver_store,
+            &plan,
+            &parts,
+        )
+        .expect_err("tampered canonical parts");
+
+        assert!(matches!(err, DeltaError::ChunkPayloadHashMismatch { .. }));
+    }
+
+    #[test]
     fn reconcile_fails_closed_on_tampered_unique_payload() {
         let mut sender_store = ContentAddressedChunkStore::new();
         let mut receiver_store = ContentAddressedChunkStore::new();
