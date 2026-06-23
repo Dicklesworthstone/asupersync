@@ -1033,6 +1033,45 @@ mod tests {
     }
 
     #[test]
+    fn canonical_dedup_parts_are_stable_across_ingest_runs() {
+        let repeated = vec![b'r'; 4096];
+        let unique = vec![b'u'; 1024];
+        let chunks = [repeated.as_slice(), unique.as_slice(), repeated.as_slice()];
+
+        let mut sender_store_a = ContentAddressedChunkStore::new();
+        let mut receiver_store_a = ContentAddressedChunkStore::new();
+        let sender_a = manifest(&mut sender_store_a, "tree-a", &chunks);
+        let receiver_a = manifest(&mut receiver_store_a, "tree-a", &[]);
+        let coverage_a = ReceiverCasCoverage::from_manifest(&receiver_a);
+        let plan_a = plan_incremental_resync_with_receiver_coverage(
+            &sender_a,
+            Some(&receiver_a),
+            &coverage_a,
+        );
+        let parts_a = build_canonical_dedup_payload_parts(&plan_a, &sender_store_a)
+            .expect("canonical parts a");
+
+        let mut sender_store_b = ContentAddressedChunkStore::new();
+        let mut receiver_store_b = ContentAddressedChunkStore::new();
+        let sender_b = manifest(&mut sender_store_b, "tree-a", &chunks);
+        let receiver_b = manifest(&mut receiver_store_b, "tree-a", &[]);
+        let coverage_b = ReceiverCasCoverage::from_manifest(&receiver_b);
+        let plan_b = plan_incremental_resync_with_receiver_coverage(
+            &sender_b,
+            Some(&receiver_b),
+            &coverage_b,
+        );
+        let parts_b = build_canonical_dedup_payload_parts(&plan_b, &sender_store_b)
+            .expect("canonical parts b");
+
+        assert_eq!(sender_a.to_canonical_bytes(), sender_b.to_canonical_bytes());
+        assert_eq!(plan_a.missing_chunks, plan_b.missing_chunks);
+        assert_eq!(parts_a.metadata_bytes, parts_b.metadata_bytes);
+        assert_eq!(parts_a.unique_payload_bytes, parts_b.unique_payload_bytes);
+        assert_eq!(parts_a.compact_wire_bytes, parts_b.compact_wire_bytes);
+    }
+
+    #[test]
     fn dedupe_payload_set_canonical_parts_fail_closed_on_payload_drift() {
         let mut sender_store = ContentAddressedChunkStore::new();
         let mut receiver_store = ContentAddressedChunkStore::new();
