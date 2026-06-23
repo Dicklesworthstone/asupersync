@@ -132,6 +132,23 @@ pub struct BondEntryBlockGeometry {
     pub source_symbols: u16,
 }
 
+/// Proof token that a donor may participate in a bonded transfer.
+///
+/// This is intentionally small and non-secret: it can be logged or attached to a
+/// control-plane receipt after [`BondTransferDescriptor::verify_local_digests`]
+/// proves the donor's local bytes match the descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedDonorHoldingProof {
+    /// Stable transfer identifier that was proven locally.
+    pub transfer_id: String,
+    /// Flat-graph merkle root proven over the local copy.
+    pub merkle_root_hex: String,
+    /// Total byte count proven over the local copy.
+    pub total_bytes: u64,
+    /// Number of descriptor entries covered by the proof.
+    pub entry_count: usize,
+}
+
 /// Why a donor (or the receiver) refused a bonded descriptor / failed its proof.
 ///
 /// Every variant means **refuse to donate / fail closed**: a participant that
@@ -398,6 +415,26 @@ impl BondTransferDescriptor {
         Ok(())
     }
 
+    /// Verify local digests and return the non-secret proof token needed before
+    /// donor scheduling may begin.
+    ///
+    /// This is the B2 donor refusal gate in typed form: callers get a
+    /// [`BondedDonorHoldingProof`] only when the local bytes are byte-identical to
+    /// the descriptor. Any mismatch returns the same fail-closed error as
+    /// [`Self::verify_local_digests`].
+    pub fn prove_local_digests_for_donation(
+        &self,
+        digests: &[EntryDigest],
+    ) -> Result<BondedDonorHoldingProof, BondProofError> {
+        self.verify_local_digests(digests)?;
+        Ok(BondedDonorHoldingProof {
+            transfer_id: self.transfer_id.clone(),
+            merkle_root_hex: self.merkle_root_hex.clone(),
+            total_bytes: self.total_bytes,
+            entry_count: self.entries.len(),
+        })
+    }
+
     /// Donor enrolment proof over an on-disk copy rooted at `root_dir`: stream-hash
     /// each entry's local file and run [`Self::verify_local_digests`]. Returns
     /// `Ok(())` only if every byte matches; otherwise refuse to donate.
@@ -541,6 +578,37 @@ mod tests {
         let desc = descriptor_for(FILES);
         let digests: Vec<EntryDigest> = FILES.iter().map(|(_, p, b)| digest_for(p, b)).collect();
         assert!(desc.verify_local_digests(&digests).is_ok());
+    }
+
+    #[test]
+    fn donation_proof_token_requires_byte_identical_local_digests() {
+        let desc = descriptor_for(FILES);
+        let digests: Vec<EntryDigest> = FILES.iter().map(|(_, p, b)| digest_for(p, b)).collect();
+
+        let proof = desc
+            .prove_local_digests_for_donation(&digests)
+            .expect("byte-identical donor proof");
+
+        assert_eq!(proof.transfer_id, desc.transfer_id);
+        assert_eq!(proof.merkle_root_hex, desc.merkle_root_hex);
+        assert_eq!(proof.total_bytes, desc.total_bytes);
+        assert_eq!(proof.entry_count, desc.entries.len());
+    }
+
+    #[test]
+    fn donation_proof_token_refuses_tampered_local_digests() {
+        let desc = descriptor_for(FILES);
+        let digests = vec![
+            digest_for("a.bin", b"HELLO bonded world"),
+            digest_for("sub/b.bin", b"second donor file"),
+        ];
+
+        assert_eq!(
+            desc.prove_local_digests_for_donation(&digests),
+            Err(BondProofError::EntryMismatch {
+                rel_path: "a.bin".to_string(),
+            })
+        );
     }
 
     #[test]
