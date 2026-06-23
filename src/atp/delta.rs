@@ -22,6 +22,11 @@ const SUBDELTA_OPS_MAGIC: &[u8] = b"ASUP_ATP_DELTA_SUBCHUNK_OPS_V1\0";
 const ENCODED_CHUNK_BYTES: usize = 4 + 8 + 8 + 32;
 const SUBDELTA_OP_COPY: u8 = 0;
 const SUBDELTA_OP_LITERAL: u8 = 1;
+const RECEIVER_HAVE_SET_BASE_WIRE_BYTES: u64 = 32 + 8 + 8;
+const RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES: u64 = 32 + 8;
+
+/// Schema marker for receiver-advertised delta have-set negotiation.
+pub const ATP_DELTA_RECEIVER_HAVE_SET_SCHEMA: &str = "asupersync.atp.delta.receiver-have-set.v1";
 
 /// A logical object chunk addressed by its content hash.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -525,6 +530,10 @@ impl ReceiverCasCoverage {
         });
     }
 
+    fn insert_key(&mut self, key: ReceiverChunkKey) {
+        self.chunks.insert(key);
+    }
+
     /// Record one available manifest chunk.
     pub fn insert_chunk_ref(&mut self, chunk: &CasChunkRef) {
         self.chunks.insert(chunk.key());
@@ -556,6 +565,118 @@ impl ReceiverCasCoverage {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
+    }
+}
+
+/// Receiver have-set bounds enforced before advertising CAS coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverHaveSetLimits {
+    /// Maximum unique content-addressed chunks advertised in one negotiation.
+    pub max_chunks: usize,
+    /// Maximum estimated wire bytes for the advertised have-set.
+    pub max_wire_bytes: u64,
+}
+
+impl ReceiverHaveSetLimits {
+    /// Default cap keeps negotiation bounded while covering very large trees.
+    pub const DEFAULT: Self = Self {
+        max_chunks: 1_048_576,
+        max_wire_bytes: 64 * 1024 * 1024,
+    };
+}
+
+impl Default for ReceiverHaveSetLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Bounded receiver-advertised CAS have-set for delta manifest negotiation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiverHaveSetAdvertisement {
+    /// Negotiation schema marker.
+    pub schema: &'static str,
+    /// Receiver manifest root this advertisement describes.
+    pub receiver_merkle_root: MerkleRoot,
+    /// Receiver manifest logical byte size this advertisement describes.
+    pub receiver_total_size_bytes: u64,
+    /// Unique receiver CAS keys proven locally before advertisement.
+    chunks: Vec<ReceiverChunkKey>,
+    /// Conservative encoded byte count for the control-plane have-set.
+    estimated_wire_bytes: u64,
+}
+
+impl ReceiverHaveSetAdvertisement {
+    /// Build a bounded advertisement from receiver-verified coverage.
+    pub fn from_verified_manifest(
+        manifest: &PersistentChunkManifest,
+        coverage: &ReceiverCasCoverage,
+        limits: ReceiverHaveSetLimits,
+    ) -> Result<Self, DeltaError> {
+        for chunk in &manifest.chunks {
+            if !coverage.contains_chunk(chunk) {
+                return Err(DeltaError::ReceiverHaveSetMissingChunk { index: chunk.index });
+            }
+        }
+
+        let chunks = coverage.chunks.iter().cloned().collect::<Vec<_>>();
+        let estimated_wire_bytes = receiver_have_set_wire_bytes(chunks.len())?;
+        if chunks.len() > limits.max_chunks {
+            return Err(DeltaError::ReceiverHaveSetTooManyChunks {
+                chunks: chunks.len(),
+                max_chunks: limits.max_chunks,
+            });
+        }
+        if estimated_wire_bytes > limits.max_wire_bytes {
+            return Err(DeltaError::ReceiverHaveSetTooManyBytes {
+                bytes: estimated_wire_bytes,
+                max_bytes: limits.max_wire_bytes,
+            });
+        }
+
+        Ok(Self {
+            schema: ATP_DELTA_RECEIVER_HAVE_SET_SCHEMA,
+            receiver_merkle_root: manifest.merkle_root.clone(),
+            receiver_total_size_bytes: manifest.total_size_bytes,
+            chunks,
+            estimated_wire_bytes,
+        })
+    }
+
+    /// Number of unique receiver CAS chunks advertised.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Whether no receiver CAS chunks are advertised.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    /// Conservative encoded byte count for this control-plane advertisement.
+    #[must_use]
+    pub const fn estimated_wire_bytes(&self) -> u64 {
+        self.estimated_wire_bytes
+    }
+
+    /// Whether this advertisement is bound to the supplied receiver manifest.
+    #[must_use]
+    pub fn describes_manifest(&self, manifest: &PersistentChunkManifest) -> bool {
+        self.schema == ATP_DELTA_RECEIVER_HAVE_SET_SCHEMA
+            && self.receiver_merkle_root == manifest.merkle_root
+            && self.receiver_total_size_bytes == manifest.total_size_bytes
+    }
+
+    /// Convert into sender-side coverage for delta planning.
+    #[must_use]
+    pub fn to_coverage(&self) -> ReceiverCasCoverage {
+        let mut coverage = ReceiverCasCoverage::new();
+        for chunk in &self.chunks {
+            coverage.insert_key(chunk.clone());
+        }
+        coverage
     }
 }
 
@@ -835,6 +956,35 @@ pub fn plan_incremental_resync_with_receiver_coverage(
         stale_chunks,
         stale_bytes,
     }
+}
+
+/// Plan an ATP incremental re-sync from a bounded receiver have-set advertisement.
+#[must_use]
+pub fn plan_incremental_resync_with_receiver_have_set(
+    sender: &PersistentChunkManifest,
+    receiver: Option<&PersistentChunkManifest>,
+    advertisement: Option<&ReceiverHaveSetAdvertisement>,
+) -> DeltaResyncPlan {
+    let Some(receiver) = receiver else {
+        return full_object_plan(sender, None, DeltaResyncFallbackReason::NoReceiverManifest);
+    };
+    let Some(advertisement) = advertisement else {
+        return full_object_plan(
+            sender,
+            Some(receiver),
+            DeltaResyncFallbackReason::ReceiverCasCoverageIncomplete,
+        );
+    };
+    if !advertisement.describes_manifest(receiver) {
+        return full_object_plan(
+            sender,
+            Some(receiver),
+            DeltaResyncFallbackReason::ReceiverCasCoverageIncomplete,
+        );
+    }
+
+    let coverage = advertisement.to_coverage();
+    plan_incremental_resync_with_receiver_coverage(sender, Some(receiver), &coverage)
 }
 
 /// Plan an ATP incremental re-sync from a receiver manifest whose CAS coverage
@@ -1129,6 +1279,12 @@ pub enum DeltaError {
     },
     /// A compact sub-delta op stream used an unknown operation tag.
     InvalidSubDeltaOpTag { tag: u8 },
+    /// Receiver tried to advertise a manifest chunk it had not verified locally.
+    ReceiverHaveSetMissingChunk { index: u32 },
+    /// Receiver have-set exceeds the configured chunk-count budget.
+    ReceiverHaveSetTooManyChunks { chunks: usize, max_chunks: usize },
+    /// Receiver have-set exceeds the configured control-plane byte budget.
+    ReceiverHaveSetTooManyBytes { bytes: u64, max_bytes: u64 },
 }
 
 impl fmt::Display for DeltaError {
@@ -1197,6 +1353,20 @@ impl fmt::Display for DeltaError {
             Self::InvalidSubDeltaOpTag { tag } => {
                 write!(f, "delta sub-chunk op stream used invalid tag {tag}")
             }
+            Self::ReceiverHaveSetMissingChunk { index } => {
+                write!(
+                    f,
+                    "delta receiver have-set missing verified coverage for chunk {index}"
+                )
+            }
+            Self::ReceiverHaveSetTooManyChunks { chunks, max_chunks } => write!(
+                f,
+                "delta receiver have-set advertised {chunks} chunks above the limit {max_chunks}"
+            ),
+            Self::ReceiverHaveSetTooManyBytes { bytes, max_bytes } => write!(
+                f,
+                "delta receiver have-set estimated {bytes} wire bytes above the limit {max_bytes}"
+            ),
         }
     }
 }
@@ -1230,6 +1400,14 @@ impl CasChunkRef {
 
 fn manifest_chunk_keys(chunks: &[CasChunkRef]) -> BTreeSet<ReceiverChunkKey> {
     chunks.iter().map(CasChunkRef::key).collect()
+}
+
+fn receiver_have_set_wire_bytes(chunks: usize) -> Result<u64, DeltaError> {
+    let chunks = u64::try_from(chunks).map_err(|_| DeltaError::ChunkCountOverflow)?;
+    chunks
+        .checked_mul(RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES)
+        .and_then(|chunk_bytes| chunk_bytes.checked_add(RECEIVER_HAVE_SET_BASE_WIRE_BYTES))
+        .ok_or(DeltaError::ChunkSizeOverflow)
 }
 
 fn full_object_plan(
@@ -1720,6 +1898,201 @@ mod tests {
         assert!(plan.missing_chunks.is_empty());
         assert_eq!(plan.missing_bytes, 0);
         assert_eq!(plan.stale_chunks.len(), 1);
+    }
+
+    #[test]
+    fn receiver_have_set_advertisement_drives_delta_plan() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice(), b"gamma".as_slice()],
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let advertisement = ReceiverHaveSetAdvertisement::from_verified_manifest(
+            &receiver,
+            &coverage,
+            Default::default(),
+        )
+        .expect("receiver have-set");
+
+        assert_eq!(advertisement.schema, ATP_DELTA_RECEIVER_HAVE_SET_SCHEMA);
+        assert_eq!(advertisement.len(), 2);
+        assert_eq!(
+            advertisement.estimated_wire_bytes(),
+            RECEIVER_HAVE_SET_BASE_WIRE_BYTES + 2 * RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES
+        );
+        assert!(advertisement.describes_manifest(&receiver));
+
+        let plan = plan_incremental_resync_with_receiver_have_set(
+            &sender,
+            Some(&receiver),
+            Some(&advertisement),
+        );
+
+        assert_eq!(plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(plan.shared_chunks, 2);
+        assert_eq!(plan.missing_chunks.len(), 1);
+        assert_eq!(
+            plan.missing_chunks[0].content_id,
+            ContentId::from_bytes(b"gamma")
+        );
+        assert_eq!(plan.missing_bytes, 5);
+    }
+
+    #[test]
+    fn receiver_have_set_advertises_extra_verified_cas_for_shifted_layouts() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"old".as_slice()],
+        );
+        let mut coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        coverage.insert(ContentId::from_bytes(b"beta"), 4);
+
+        let advertisement = ReceiverHaveSetAdvertisement::from_verified_manifest(
+            &receiver,
+            &coverage,
+            ReceiverHaveSetLimits::DEFAULT,
+        )
+        .expect("receiver have-set");
+        let plan = plan_incremental_resync_with_receiver_have_set(
+            &sender,
+            Some(&receiver),
+            Some(&advertisement),
+        );
+
+        assert_eq!(advertisement.len(), 3);
+        assert_eq!(
+            advertisement.estimated_wire_bytes(),
+            RECEIVER_HAVE_SET_BASE_WIRE_BYTES + 3 * RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES
+        );
+        assert_eq!(plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(plan.shared_chunks, 2);
+        assert!(plan.missing_chunks.is_empty());
+        assert_eq!(plan.missing_bytes, 0);
+        assert_eq!(plan.stale_chunks.len(), 1);
+    }
+
+    #[test]
+    fn receiver_have_set_fails_closed_without_verified_coverage() {
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+        let mut coverage = ReceiverCasCoverage::new();
+        coverage.insert_chunk_ref(&receiver.chunks[0]);
+
+        let err = ReceiverHaveSetAdvertisement::from_verified_manifest(
+            &receiver,
+            &coverage,
+            ReceiverHaveSetLimits::DEFAULT,
+        )
+        .expect_err("unverified chunk must not be advertised");
+
+        assert_eq!(err, DeltaError::ReceiverHaveSetMissingChunk { index: 1 });
+    }
+
+    #[test]
+    fn receiver_have_set_enforces_chunk_and_wire_budgets() {
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+
+        let err = ReceiverHaveSetAdvertisement::from_verified_manifest(
+            &receiver,
+            &coverage,
+            ReceiverHaveSetLimits {
+                max_chunks: 1,
+                max_wire_bytes: u64::MAX,
+            },
+        )
+        .expect_err("chunk budget must cap advertisement");
+        assert_eq!(
+            err,
+            DeltaError::ReceiverHaveSetTooManyChunks {
+                chunks: 2,
+                max_chunks: 1,
+            }
+        );
+
+        let err = ReceiverHaveSetAdvertisement::from_verified_manifest(
+            &receiver,
+            &coverage,
+            ReceiverHaveSetLimits {
+                max_chunks: usize::MAX,
+                max_wire_bytes: RECEIVER_HAVE_SET_BASE_WIRE_BYTES,
+            },
+        )
+        .expect_err("wire budget must cap advertisement");
+        assert_eq!(
+            err,
+            DeltaError::ReceiverHaveSetTooManyBytes {
+                bytes: RECEIVER_HAVE_SET_BASE_WIRE_BYTES + 2 * RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES,
+                max_bytes: RECEIVER_HAVE_SET_BASE_WIRE_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_receiver_have_set_falls_back_to_full_object() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut old_receiver_store = ContentAddressedChunkStore::new();
+        let mut current_receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice(), b"gamma".as_slice()],
+        );
+        let old_receiver = ingest_manifest(
+            &mut old_receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+        let current_receiver = ingest_manifest(
+            &mut current_receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"delta".as_slice()],
+        );
+        let old_coverage = ReceiverCasCoverage::from_manifest(&old_receiver);
+        let stale_advertisement = ReceiverHaveSetAdvertisement::from_verified_manifest(
+            &old_receiver,
+            &old_coverage,
+            Default::default(),
+        )
+        .expect("old receiver have-set");
+
+        let plan = plan_incremental_resync_with_receiver_have_set(
+            &sender,
+            Some(&current_receiver),
+            Some(&stale_advertisement),
+        );
+
+        assert!(plan.requires_full_object_fallback());
+        assert_eq!(
+            plan.fallback_reason,
+            Some(DeltaResyncFallbackReason::ReceiverCasCoverageIncomplete)
+        );
+        assert_eq!(plan.missing_bytes, sender.total_size_bytes);
     }
 
     #[test]
