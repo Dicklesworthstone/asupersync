@@ -16,6 +16,7 @@ pub mod cache;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod cache_seeding_integration_tests;
 pub mod daemon_control;
+pub mod dedupe;
 pub mod delta;
 pub mod delta_subchunk;
 pub mod diagnostics;
@@ -41,6 +42,7 @@ pub mod policy;
 pub mod profiles;
 pub mod proof;
 pub mod quota;
+pub mod reconcile;
 pub mod repair_coordinator;
 #[cfg(test)]
 mod repair_coordinator_integration_test;
