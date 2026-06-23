@@ -262,6 +262,12 @@ pub struct BondedBlockSpraySchedule {
     pub source_esis: Vec<u32>,
     /// Repair/FEC ESIs owned by this donor for the configured repair budget.
     pub repair_esis: Vec<u32>,
+    /// First repair ESI candidate after this initial spray window.
+    ///
+    /// B3 donor-control loops use this cursor when a receiver sends `NeedMore`:
+    /// continue from here, filter through the same donor assignment, and never
+    /// re-emit a repair ESI already present in `repair_esis`.
+    pub next_repair_esi: u32,
     /// Donor-local timing stagger slots. This does not change ESI ownership; it
     /// lets B3 smooth the first burst by delaying donor `i` by `i` slots.
     pub stagger_delay_slots: u32,
@@ -282,6 +288,33 @@ impl BondedBlockSpraySchedule {
         esis.extend_from_slice(&self.repair_esis);
         esis
     }
+
+    /// Build a B3 continuation batch for this block after the initial spray.
+    pub fn repair_continuation(
+        &self,
+        assignment: &DonorAssignment,
+        requested_symbols: usize,
+    ) -> Result<BondedBlockRepairSchedule, BondScheduleError> {
+        schedule_bonded_repair_continuation(
+            assignment,
+            self.geometry,
+            self.next_repair_esi,
+            requested_symbols,
+        )
+    }
+}
+
+/// Donor-local continuation plan for one block after receiver `NeedMore`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedBlockRepairSchedule {
+    /// Descriptor-agreed RaptorQ identity and source-block geometry.
+    pub geometry: BondEntryBlockGeometry,
+    /// Repair ESIs owned by this donor for the requested continuation batch.
+    pub repair_esis: Vec<u32>,
+    /// First repair ESI candidate after this continuation batch.
+    pub next_repair_esi: u32,
+    /// Same donor-local timing stagger as the initial block schedule.
+    pub stagger_delay_slots: u32,
 }
 
 /// Scheduler construction errors.
@@ -302,6 +335,39 @@ pub enum BondScheduleError {
         /// Requested repair symbols for this block.
         repair_symbols: u32,
     },
+    /// A repair continuation must start at or beyond `K`.
+    RepairStartBeforeSource {
+        /// Descriptor entry index.
+        entry_index: u32,
+        /// Source block number within the entry.
+        source_block_number: u8,
+        /// First repair ESI (`K`).
+        source_symbols: u16,
+        /// Requested first continuation candidate.
+        first_repair_esi: u32,
+    },
+    /// The continuation cursor exceeded the `u32` ESI space.
+    RepairContinuationOverflow {
+        /// Descriptor entry index.
+        entry_index: u32,
+        /// Source block number within the entry.
+        source_block_number: u8,
+        /// First repair ESI candidate for this continuation.
+        first_repair_esi: u32,
+        /// Donor-owned repair symbols requested.
+        requested_symbols: usize,
+    },
+    /// A finite explicit window assignment cannot satisfy the requested deficit.
+    InsufficientRepairWindow {
+        /// Descriptor entry index.
+        entry_index: u32,
+        /// Source block number within the entry.
+        source_block_number: u8,
+        /// Donor-owned repair symbols requested.
+        requested_symbols: usize,
+        /// Symbols covered by the explicit windows.
+        scheduled_symbols: usize,
+    },
 }
 
 impl fmt::Display for BondScheduleError {
@@ -318,6 +384,33 @@ impl fmt::Display for BondScheduleError {
                 f,
                 "channel-bonding repair schedule overflow for entry {entry_index} block {source_block_number}: K={source_symbols}, repair={repair_symbols}"
             ),
+            Self::RepairStartBeforeSource {
+                entry_index,
+                source_block_number,
+                source_symbols,
+                first_repair_esi,
+            } => write!(
+                f,
+                "channel-bonding repair continuation for entry {entry_index} block {source_block_number} starts at ESI {first_repair_esi}, before K={source_symbols}"
+            ),
+            Self::RepairContinuationOverflow {
+                entry_index,
+                source_block_number,
+                first_repair_esi,
+                requested_symbols,
+            } => write!(
+                f,
+                "channel-bonding repair continuation overflow for entry {entry_index} block {source_block_number}: first_repair_esi={first_repair_esi}, requested={requested_symbols}"
+            ),
+            Self::InsufficientRepairWindow {
+                entry_index,
+                source_block_number,
+                requested_symbols,
+                scheduled_symbols,
+            } => write!(
+                f,
+                "channel-bonding explicit repair windows for entry {entry_index} block {source_block_number} scheduled {scheduled_symbols}/{requested_symbols} requested symbols"
+            ),
         }
     }
 }
@@ -327,7 +420,10 @@ impl std::error::Error for BondScheduleError {
         match self {
             Self::InvalidAssignment(err) => Some(err),
             Self::InvalidDescriptor(err) => Some(err),
-            Self::RepairBudgetOverflow { .. } => None,
+            Self::RepairBudgetOverflow { .. }
+            | Self::RepairStartBeforeSource { .. }
+            | Self::RepairContinuationOverflow { .. }
+            | Self::InsufficientRepairWindow { .. } => None,
         }
     }
 }
@@ -378,6 +474,63 @@ pub fn schedule_bonded_donor_spray(
     })
 }
 
+/// Continue one block's repair stream for a receiver `NeedMore` deficit.
+///
+/// `first_repair_esi` is the first global repair ESI candidate to consider.
+/// Static-residue assignments jump to this donor's next owned ESI at or after
+/// that cursor and then keep advancing by donor count. Explicit windows are
+/// finite receiver allocations and must cover the full requested deficit.
+pub fn schedule_bonded_repair_continuation(
+    assignment: &DonorAssignment,
+    geometry: BondEntryBlockGeometry,
+    first_repair_esi: u32,
+    requested_symbols: usize,
+) -> Result<BondedBlockRepairSchedule, BondScheduleError> {
+    assignment
+        .validate()
+        .map_err(BondScheduleError::InvalidAssignment)?;
+    let source_symbols = u32::from(geometry.source_symbols);
+    if first_repair_esi < source_symbols {
+        return Err(BondScheduleError::RepairStartBeforeSource {
+            entry_index: geometry.entry_index,
+            source_block_number: geometry.source_block_number,
+            source_symbols: geometry.source_symbols,
+            first_repair_esi,
+        });
+    }
+    if requested_symbols == 0 {
+        return Ok(BondedBlockRepairSchedule {
+            geometry,
+            repair_esis: Vec::new(),
+            next_repair_esi: first_repair_esi,
+            stagger_delay_slots: assignment.donor_index,
+        });
+    }
+
+    let (repair_esis, next_repair_esi) = if assignment.esi_windows.is_empty() {
+        schedule_static_repair_continuation(
+            assignment,
+            geometry,
+            first_repair_esi,
+            requested_symbols,
+        )?
+    } else {
+        schedule_windowed_repair_continuation(
+            assignment,
+            geometry,
+            first_repair_esi,
+            requested_symbols,
+        )?
+    };
+
+    Ok(BondedBlockRepairSchedule {
+        geometry,
+        repair_esis,
+        next_repair_esi,
+        stagger_delay_slots: assignment.donor_index,
+    })
+}
+
 fn schedule_block(
     assignment: &DonorAssignment,
     geometry: BondEntryBlockGeometry,
@@ -405,8 +558,106 @@ fn schedule_block(
         geometry,
         source_esis,
         repair_esis,
+        next_repair_esi: repair_end,
         stagger_delay_slots: assignment.donor_index,
     })
+}
+
+fn schedule_static_repair_continuation(
+    assignment: &DonorAssignment,
+    geometry: BondEntryBlockGeometry,
+    first_repair_esi: u32,
+    requested_symbols: usize,
+) -> Result<(Vec<u32>, u32), BondScheduleError> {
+    let mut repair_esis = Vec::with_capacity(requested_symbols);
+    let Some(mut next_repair_esi) =
+        first_static_owned_esi_at_or_after(assignment, first_repair_esi)
+    else {
+        return Err(BondScheduleError::RepairContinuationOverflow {
+            entry_index: geometry.entry_index,
+            source_block_number: geometry.source_block_number,
+            first_repair_esi,
+            requested_symbols,
+        });
+    };
+
+    for _ in 0..requested_symbols {
+        repair_esis.push(next_repair_esi);
+        next_repair_esi = next_repair_esi.checked_add(assignment.donor_count).ok_or(
+            BondScheduleError::RepairContinuationOverflow {
+                entry_index: geometry.entry_index,
+                source_block_number: geometry.source_block_number,
+                first_repair_esi,
+                requested_symbols,
+            },
+        )?;
+    }
+
+    Ok((repair_esis, next_repair_esi))
+}
+
+fn first_static_owned_esi_at_or_after(assignment: &DonorAssignment, start: u32) -> Option<u32> {
+    let residue = start % assignment.donor_count;
+    let delta = if residue <= assignment.donor_index {
+        assignment.donor_index - residue
+    } else {
+        assignment
+            .donor_count
+            .checked_sub(residue - assignment.donor_index)?
+    };
+    start.checked_add(delta)
+}
+
+fn schedule_windowed_repair_continuation(
+    assignment: &DonorAssignment,
+    geometry: BondEntryBlockGeometry,
+    first_repair_esi: u32,
+    requested_symbols: usize,
+) -> Result<(Vec<u32>, u32), BondScheduleError> {
+    let mut repair_esis = Vec::with_capacity(requested_symbols);
+    let mut windows = assignment.esi_windows.clone();
+    windows.sort_unstable();
+
+    for window in windows {
+        if repair_esis.len() == requested_symbols {
+            break;
+        }
+        if window.end_exclusive <= first_repair_esi {
+            continue;
+        }
+        let mut esi = window.start_inclusive.max(first_repair_esi);
+        while esi < window.end_exclusive && repair_esis.len() < requested_symbols {
+            repair_esis.push(esi);
+            esi = esi
+                .checked_add(1)
+                .ok_or(BondScheduleError::RepairContinuationOverflow {
+                    entry_index: geometry.entry_index,
+                    source_block_number: geometry.source_block_number,
+                    first_repair_esi,
+                    requested_symbols,
+                })?;
+        }
+    }
+
+    if repair_esis.len() != requested_symbols {
+        return Err(BondScheduleError::InsufficientRepairWindow {
+            entry_index: geometry.entry_index,
+            source_block_number: geometry.source_block_number,
+            requested_symbols,
+            scheduled_symbols: repair_esis.len(),
+        });
+    }
+
+    let next_repair_esi = repair_esis
+        .last()
+        .and_then(|esi| esi.checked_add(1))
+        .ok_or(BondScheduleError::RepairContinuationOverflow {
+            entry_index: geometry.entry_index,
+            source_block_number: geometry.source_block_number,
+            first_repair_esi,
+            requested_symbols,
+        })?;
+    Ok((repair_esis, next_repair_esi))
 }
 
 /// Why a bonded symbol was rejected before the data path consumed it.
@@ -682,6 +933,87 @@ mod tests {
         assert_eq!(schedule.blocks[0].repair_esis, vec![4]);
         assert_eq!(schedule.blocks[0].ordered_esis(), vec![0, 1, 4]);
         assert_eq!(schedule.blocks[0].stagger_delay_slots, 1);
+    }
+
+    #[test]
+    fn repair_continuation_resumes_after_initial_window_without_duplicates() {
+        let descriptor = descriptor();
+        let donor0 = DonorAssignment::new_static(0, 2, vec![endpoint()], None);
+        let donor1 = DonorAssignment::new_static(1, 2, vec![endpoint()], None);
+        let schedule0 =
+            schedule_bonded_donor_spray(&descriptor, &donor0, 4).expect("donor 0 schedule");
+        let schedule1 =
+            schedule_bonded_donor_spray(&descriptor, &donor1, 4).expect("donor 1 schedule");
+
+        assert_eq!(schedule0.blocks[0].repair_esis, vec![2, 4]);
+        assert_eq!(schedule0.blocks[0].next_repair_esi, 6);
+        assert_eq!(schedule1.blocks[0].repair_esis, vec![3, 5]);
+        assert_eq!(schedule1.blocks[0].next_repair_esi, 6);
+
+        let repair0 = schedule0.blocks[0]
+            .repair_continuation(&donor0, 3)
+            .expect("donor 0 continuation");
+        let repair1 = schedule1.blocks[0]
+            .repair_continuation(&donor1, 3)
+            .expect("donor 1 continuation");
+
+        assert_eq!(repair0.repair_esis, vec![6, 8, 10]);
+        assert_eq!(repair0.next_repair_esi, 12);
+        assert_eq!(repair1.repair_esis, vec![7, 9, 11]);
+        assert_eq!(repair1.next_repair_esi, 13);
+
+        for esi in &repair0.repair_esis {
+            assert!(!schedule0.blocks[0].repair_esis.contains(esi));
+            assert_eq!(esi % 2, 0);
+        }
+        for esi in &repair1.repair_esis {
+            assert!(!schedule1.blocks[0].repair_esis.contains(esi));
+            assert_eq!(esi % 2, 1);
+        }
+    }
+
+    #[test]
+    fn windowed_repair_continuation_requires_enough_receiver_window() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let assignment =
+            DonorAssignment::new_windowed(0, 3, vec![EsiWindow::new(6, 8)], vec![endpoint()], None);
+
+        let repair =
+            schedule_bonded_repair_continuation(&assignment, geometry, 6, 2).expect("windowed");
+        assert_eq!(repair.repair_esis, vec![6, 7]);
+        assert_eq!(repair.next_repair_esi, 8);
+
+        assert_eq!(
+            schedule_bonded_repair_continuation(&assignment, geometry, 6, 3),
+            Err(BondScheduleError::InsufficientRepairWindow {
+                entry_index: 0,
+                source_block_number: 0,
+                requested_symbols: 3,
+                scheduled_symbols: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn repair_continuation_rejects_source_esi_start() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let assignment = DonorAssignment::new_static(0, 1, vec![endpoint()], None);
+
+        assert_eq!(
+            schedule_bonded_repair_continuation(&assignment, geometry, 1, 1),
+            Err(BondScheduleError::RepairStartBeforeSource {
+                entry_index: 0,
+                source_block_number: 0,
+                source_symbols: 2,
+                first_repair_esi: 1,
+            })
+        );
     }
 
     #[test]
