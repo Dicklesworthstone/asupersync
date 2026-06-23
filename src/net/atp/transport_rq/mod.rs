@@ -248,11 +248,12 @@ const RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
 /// Hard ceiling on one entry's queued RQ repair-decode jobs.
 ///
 /// A single large file is split into many independent bounded-K source blocks.
-/// Let that one entry fan those block decoders across the machine; the receiver
-/// pump remains async and the transfer-wide budget below reserves CPU/memory.
-const RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 48;
+/// Let that one entry fan those block decoders across 64-core matrix workers;
+/// the receiver pump remains async and the transfer-wide budget below reserves
+/// CPU/memory.
+const RQ_MAX_PENDING_DECODE_JOBS_PER_ENTRY: usize = 64;
 /// Hard ceiling on one transfer's queued RQ repair-decode jobs.
-const RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD: usize = 48;
+const RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD: usize = 64;
 /// Minimum CPU cores left for the UDP/control receive pump and filesystem work.
 const RQ_DECODE_MIN_CORES_RESERVED_FOR_IO: usize = 1;
 /// Upper bound on CPU cores held back from RQ decode on large machines.
@@ -7076,8 +7077,8 @@ mod tests {
             "entry decode width must not exceed the transfer hard cap"
         );
         assert!(
-            RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD >= 32,
-            "MATRIX-5 repair decode must fan out on high-core receivers"
+            RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD >= 64,
+            "large-object repair decode must fan out on 64-core receivers"
         );
         assert!(can_spawn_parallel_decode(
             0,
@@ -7100,8 +7101,9 @@ mod tests {
         assert_eq!(rq_decode_core_limit_for_available(4), 3);
         assert_eq!(rq_decode_core_limit_for_available(8), 6);
         assert_eq!(rq_decode_core_limit_for_available(16), 12);
+        assert_eq!(rq_decode_core_limit_for_available(64), 60);
         assert_eq!(
-            rq_decode_core_limit_for_available(64),
+            rq_decode_core_limit_for_available(96),
             RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD
         );
     }
