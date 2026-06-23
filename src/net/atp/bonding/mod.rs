@@ -21,8 +21,10 @@ pub mod handshake;
 pub mod receiver;
 
 pub use assignment::{
-    BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondedSymbolAuthVerdict, BondedSymbolRejectReason,
-    DonorAssignment, DonorAssignmentError, EsiWindow, MAX_BONDING_DONORS, verify_bonded_symbol_tag,
+    BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, BondScheduleError, BondedBlockSpraySchedule,
+    BondedDonorSpraySchedule, BondedSymbolAuthVerdict, BondedSymbolRejectReason, DonorAssignment,
+    DonorAssignmentError, EsiWindow, MAX_BONDING_DONORS, schedule_bonded_donor_spray,
+    verify_bonded_symbol_tag,
 };
 pub use descriptor::{
     BondEntry, BondEntryBlockGeometry, BondProofError, BondTransferDescriptor,

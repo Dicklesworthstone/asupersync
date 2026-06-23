@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::types::Symbol;
 
+use super::descriptor::{BondEntryBlockGeometry, BondProofError, BondTransferDescriptor};
 use super::esi::{EsiPartition, EsiPartitionError};
 
 /// Version of the Phase-A donor-assignment record.
@@ -208,6 +209,206 @@ pub enum BondedSymbolAuthVerdict {
     Rejected(BondedSymbolRejectReason),
 }
 
+/// Donor-local spray plan for one bonded transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedDonorSpraySchedule {
+    /// Zero-based donor index.
+    pub donor_index: u32,
+    /// Total donors in the schedule.
+    pub donor_count: u32,
+    /// Per-entry/source-block ESI assignments for this donor.
+    pub blocks: Vec<BondedBlockSpraySchedule>,
+}
+
+impl BondedDonorSpraySchedule {
+    /// Count all source symbols this donor should spray.
+    #[must_use]
+    pub fn source_symbol_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(|block| block.source_esis.len())
+            .sum()
+    }
+
+    /// Count all repair symbols this donor should spray for the configured budget.
+    #[must_use]
+    pub fn repair_symbol_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(|block| block.repair_esis.len())
+            .sum()
+    }
+
+    /// Count source + repair symbols this donor should spray.
+    #[must_use]
+    pub fn total_symbol_count(&self) -> usize {
+        self.source_symbol_count() + self.repair_symbol_count()
+    }
+
+    /// Return true when every non-empty descriptor block gave this donor at least
+    /// one source or repair symbol under the configured assignment.
+    #[must_use]
+    pub fn covers_every_block(&self) -> bool {
+        self.blocks.iter().all(|block| !block.is_empty())
+    }
+}
+
+/// Per-source-block ESI assignment for one donor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedBlockSpraySchedule {
+    /// Descriptor-agreed RaptorQ identity and source-block geometry.
+    pub geometry: BondEntryBlockGeometry,
+    /// Systematic/source ESIs owned by this donor (`esi < K`).
+    pub source_esis: Vec<u32>,
+    /// Repair/FEC ESIs owned by this donor for the configured repair budget.
+    pub repair_esis: Vec<u32>,
+    /// Donor-local timing stagger slots. This does not change ESI ownership; it
+    /// lets B3 smooth the first burst by delaying donor `i` by `i` slots.
+    pub stagger_delay_slots: u32,
+}
+
+impl BondedBlockSpraySchedule {
+    /// Return true when this donor has no work for this source block.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.source_esis.is_empty() && self.repair_esis.is_empty()
+    }
+
+    /// Return all ESIs in emission order: source first, then repair.
+    #[must_use]
+    pub fn ordered_esis(&self) -> Vec<u32> {
+        let mut esis = Vec::with_capacity(self.source_esis.len() + self.repair_esis.len());
+        esis.extend_from_slice(&self.source_esis);
+        esis.extend_from_slice(&self.repair_esis);
+        esis
+    }
+}
+
+/// Scheduler construction errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BondScheduleError {
+    /// The donor assignment is invalid.
+    InvalidAssignment(DonorAssignmentError),
+    /// The shared transfer descriptor is invalid.
+    InvalidDescriptor(BondProofError),
+    /// Repair ESI budget overflowed the `u32` ESI space.
+    RepairBudgetOverflow {
+        /// Descriptor entry index.
+        entry_index: u32,
+        /// Source block number within the entry.
+        source_block_number: u8,
+        /// First repair ESI (`K`).
+        source_symbols: u16,
+        /// Requested repair symbols for this block.
+        repair_symbols: u32,
+    },
+}
+
+impl fmt::Display for BondScheduleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidAssignment(err) => write!(f, "{err}"),
+            Self::InvalidDescriptor(err) => write!(f, "{err}"),
+            Self::RepairBudgetOverflow {
+                entry_index,
+                source_block_number,
+                source_symbols,
+                repair_symbols,
+            } => write!(
+                f,
+                "channel-bonding repair schedule overflow for entry {entry_index} block {source_block_number}: K={source_symbols}, repair={repair_symbols}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BondScheduleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidAssignment(err) => Some(err),
+            Self::InvalidDescriptor(err) => Some(err),
+            Self::RepairBudgetOverflow { .. } => None,
+        }
+    }
+}
+
+/// Build the deterministic donor-side symbol schedule for a descriptor.
+///
+/// This is the pure scheduler B1 needs before it calls into the existing RQ
+/// encoder: every returned ESI is owned by `assignment`, source ESIs remain
+/// source-first for the receiver's memcpy path, and repair ESIs start at `K`.
+/// The function is control-plane only; it does not encode or transmit symbols.
+pub fn schedule_bonded_donor_spray(
+    descriptor: &BondTransferDescriptor,
+    assignment: &DonorAssignment,
+    repair_symbols_per_block: u32,
+) -> Result<BondedDonorSpraySchedule, BondScheduleError> {
+    assignment
+        .validate()
+        .map_err(BondScheduleError::InvalidAssignment)?;
+    descriptor
+        .validate()
+        .map_err(BondScheduleError::InvalidDescriptor)?;
+
+    let mut blocks = Vec::new();
+    for entry in &descriptor.entries {
+        let Some(source_block_count) = descriptor.entry_source_block_count(entry.index) else {
+            continue;
+        };
+        for source_block_number in 0..source_block_count {
+            let Ok(source_block_number) = u8::try_from(source_block_number) else {
+                continue;
+            };
+            let Some(geometry) = descriptor.entry_block_geometry(entry.index, source_block_number)
+            else {
+                continue;
+            };
+            blocks.push(schedule_block(
+                assignment,
+                geometry,
+                repair_symbols_per_block,
+            )?);
+        }
+    }
+
+    Ok(BondedDonorSpraySchedule {
+        donor_index: assignment.donor_index,
+        donor_count: assignment.donor_count,
+        blocks,
+    })
+}
+
+fn schedule_block(
+    assignment: &DonorAssignment,
+    geometry: BondEntryBlockGeometry,
+    repair_symbols_per_block: u32,
+) -> Result<BondedBlockSpraySchedule, BondScheduleError> {
+    let source_symbols = u32::from(geometry.source_symbols);
+    let repair_start = source_symbols;
+    let repair_end = repair_start
+        .checked_add(repair_symbols_per_block)
+        .ok_or_else(|| BondScheduleError::RepairBudgetOverflow {
+            entry_index: geometry.entry_index,
+            source_block_number: geometry.source_block_number,
+            source_symbols: geometry.source_symbols,
+            repair_symbols: repair_symbols_per_block,
+        })?;
+
+    let source_esis = (0..source_symbols)
+        .filter(|esi| assignment.owns_esi(*esi))
+        .collect();
+    let repair_esis = (repair_start..repair_end)
+        .filter(|esi| assignment.owns_esi(*esi))
+        .collect();
+
+    Ok(BondedBlockSpraySchedule {
+        geometry,
+        source_esis,
+        repair_esis,
+        stagger_delay_slots: assignment.donor_index,
+    })
+}
+
 /// Why a bonded symbol was rejected before the data path consumed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BondedSymbolRejectReason {
@@ -333,6 +534,7 @@ fn validate_esi_windows(windows: &[EsiWindow]) -> Result<(), DonorAssignmentErro
 
 #[cfg(test)]
 mod tests {
+    use super::super::descriptor::{BondEntry, BondTransferDescriptor};
     use super::*;
     use crate::security::SecurityContext;
     use crate::types::{SymbolId, SymbolKind};
@@ -347,6 +549,25 @@ mod tests {
             b"bonded-symbol".to_vec(),
             SymbolKind::Repair,
         )
+    }
+
+    fn descriptor() -> BondTransferDescriptor {
+        BondTransferDescriptor {
+            transfer_id: "bond-schedule-transfer".to_string(),
+            root_name: "root".to_string(),
+            is_directory: false,
+            total_bytes: 13,
+            merkle_root_hex: "schedule-root".to_string(),
+            entries: vec![BondEntry {
+                index: 0,
+                rel_path: "payload.bin".to_string(),
+                size: 13,
+                sha256_hex: "00".repeat(32),
+            }],
+            symbol_size: 4,
+            max_block_size: 8,
+            auth_key_id: Some("key-1".to_string()),
+        }
     }
 
     #[test]
@@ -383,6 +604,108 @@ mod tests {
         assert!(assignment.owns_esi(10));
         assert!(assignment.owns_esi(11));
         assert!(!assignment.owns_esi(12));
+    }
+
+    #[test]
+    fn donor_spray_schedule_partitions_source_and_repair_esis() {
+        let descriptor = descriptor();
+        let donor0 = DonorAssignment::new_static(0, 2, vec![endpoint()], None);
+        let donor1 = DonorAssignment::new_static(1, 2, vec![endpoint()], None);
+
+        let schedule0 =
+            schedule_bonded_donor_spray(&descriptor, &donor0, 4).expect("donor 0 schedule");
+        let schedule1 =
+            schedule_bonded_donor_spray(&descriptor, &donor1, 4).expect("donor 1 schedule");
+
+        assert_eq!(schedule0.blocks.len(), 2);
+        assert_eq!(schedule1.blocks.len(), 2);
+        assert!(schedule0.covers_every_block());
+        assert!(schedule1.covers_every_block());
+        assert_eq!(
+            schedule0.total_symbol_count() + schedule1.total_symbol_count(),
+            12
+        );
+
+        for (left, right) in schedule0.blocks.iter().zip(&schedule1.blocks) {
+            assert_eq!(left.geometry, right.geometry);
+            let left_esis = left.ordered_esis();
+            let right_esis = right.ordered_esis();
+            let mut combined = left_esis.clone();
+            combined.extend_from_slice(&right_esis);
+            combined.sort_unstable();
+            combined.dedup();
+            assert_eq!(
+                combined,
+                vec![0, 1, 2, 3, 4, 5],
+                "two donors cover source ESIs 0..K and four repair ESIs"
+            );
+
+            for esi in left_esis {
+                assert!(!right_esis.contains(&esi));
+                assert_eq!(esi % 2, 0);
+            }
+            for esi in right_esis {
+                assert_eq!(esi % 2, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn donor_count_one_schedule_is_single_source_isomorphic() {
+        let descriptor = descriptor();
+        let assignment = DonorAssignment::new_static(0, 1, vec![endpoint()], None);
+
+        let schedule = schedule_bonded_donor_spray(&descriptor, &assignment, 3).expect("schedule");
+
+        assert_eq!(schedule.blocks.len(), 2);
+        assert_eq!(schedule.blocks[0].source_esis, vec![0, 1]);
+        assert_eq!(schedule.blocks[0].repair_esis, vec![2, 3, 4]);
+        assert_eq!(schedule.blocks[1].source_esis, vec![0, 1]);
+        assert_eq!(schedule.blocks[1].repair_esis, vec![2, 3, 4]);
+        assert_eq!(schedule.total_symbol_count(), 10);
+    }
+
+    #[test]
+    fn windowed_schedule_overrides_residue_and_keeps_source_first() {
+        let descriptor = descriptor();
+        let assignment = DonorAssignment::new_windowed(
+            1,
+            3,
+            vec![EsiWindow::new(0, 2), EsiWindow::new(4, 5)],
+            vec![endpoint()],
+            None,
+        );
+
+        let schedule = schedule_bonded_donor_spray(&descriptor, &assignment, 4).expect("schedule");
+
+        assert_eq!(schedule.blocks[0].source_esis, vec![0, 1]);
+        assert_eq!(schedule.blocks[0].repair_esis, vec![4]);
+        assert_eq!(schedule.blocks[0].ordered_esis(), vec![0, 1, 4]);
+        assert_eq!(schedule.blocks[0].stagger_delay_slots, 1);
+    }
+
+    #[test]
+    fn spray_schedule_fails_closed_for_invalid_inputs() {
+        let descriptor = descriptor();
+        let invalid_assignment = DonorAssignment::new_static(2, 2, vec![endpoint()], None);
+        assert!(matches!(
+            schedule_bonded_donor_spray(&descriptor, &invalid_assignment, 1),
+            Err(BondScheduleError::InvalidAssignment(
+                DonorAssignmentError::InvalidPartition(
+                    EsiPartitionError::DonorIndexOutOfRange { .. }
+                )
+            ))
+        ));
+
+        let mut bad_descriptor = descriptor();
+        bad_descriptor.total_bytes += 1;
+        let assignment = DonorAssignment::new_static(0, 1, vec![endpoint()], None);
+        assert!(matches!(
+            schedule_bonded_donor_spray(&bad_descriptor, &assignment, 1),
+            Err(BondScheduleError::InvalidDescriptor(
+                BondProofError::TotalBytesMismatch { .. }
+            ))
+        ));
     }
 
     #[test]
