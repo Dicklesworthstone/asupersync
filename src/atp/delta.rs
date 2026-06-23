@@ -2833,4 +2833,68 @@ mod tests {
             .verify_store_coverage(&applied.store)
             .expect("target coverage");
     }
+
+    #[test]
+    fn wire_apply_report_rejects_payload_accounting_mismatch() {
+        let shared = (0..(32 * 1024))
+            .map(|idx| ((idx * 7 + 19) % 251) as u8)
+            .collect::<Vec<_>>();
+        let old_changed = (0..(64 * 1024))
+            .map(|idx| ((idx * 29 + idx / 13 + 17) % 253) as u8)
+            .collect::<Vec<_>>();
+        let mut new_changed = old_changed.clone();
+        for byte in &mut new_changed[20 * 1024..21 * 1024] {
+            *byte ^= 0x4d;
+        }
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "bench-file",
+            vec![shared.as_slice(), new_changed.as_slice()],
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "bench-file",
+            vec![shared.as_slice(), old_changed.as_slice()],
+        );
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let base_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &receiver_coverage,
+        );
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let payload =
+            build_delta_resync_wire_payload(&base_plan, &sender_store, &receiver, &signatures)
+                .expect("wire payload");
+
+        let mut tampered = payload.wire_payload.clone();
+        let receiver_root_bytes = if payload.base_plan.receiver_merkle_root.is_some() {
+            32
+        } else {
+            0
+        };
+        let payload_bytes_offset =
+            DELTA_RESYNC_SEND_PLAN_MAGIC.len() + 32 + 1 + receiver_root_bytes + 8;
+        tampered[payload_bytes_offset + 7] ^= 0x01;
+
+        let err = apply_delta_resync_wire_payload_and_reconstruct(
+            &sender,
+            &receiver_store,
+            payload.base_plan,
+            &tampered,
+        )
+        .expect_err("payload accounting mismatch must fail closed");
+        assert!(matches!(
+            err,
+            DeltaError::DeltaSendPlanPayloadBytesMismatch { .. }
+        ));
+    }
 }
