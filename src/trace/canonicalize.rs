@@ -60,7 +60,6 @@ use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use crate::trace::independence::independent;
 use crate::util::DetHasher;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
 /// A trace in Foata normal form: layers of mutually independent events.
@@ -382,7 +381,7 @@ pub fn canonicalize(events: &[TraceEvent]) -> FoataTrace {
 
     // Step 3: Sort within each layer deterministically.
     for layer in &mut layers {
-        layer.sort_by(event_cmp);
+        layer.sort_by_cached_key(event_total_order_key);
     }
 
     FoataTrace { layers }
@@ -421,7 +420,7 @@ pub fn trace_fingerprint(events: &[TraceEvent]) -> u64 {
 
     let mut hasher = DetHasher::default();
     for (layer_idx, indices) in layer_indices.iter_mut().enumerate() {
-        indices.sort_by(|&a, &b| event_cmp(&events[a], &events[b]));
+        indices.sort_by_cached_key(|&idx| event_total_order_key(&events[idx]));
         layer_idx.hash(&mut hasher);
         indices.len().hash(&mut hasher);
         for &idx in indices.iter() {
@@ -629,9 +628,19 @@ pub fn trace_event_key(event: &TraceEvent) -> TraceEventKey {
     TraceEventKey::new(kind, primary, secondary, tertiary)
 }
 
-/// Deterministic comparison of two trace events.
-fn event_cmp(a: &TraceEvent, b: &TraceEvent) -> Ordering {
-    event_sort_key(a).cmp(&event_sort_key(b))
+/// Deterministic total ordering key for trace events.
+fn event_total_order_key(event: &TraceEvent) -> ((u8, u64, u64, u64), Vec<u8>) {
+    (event_sort_key(event), event_total_order_tiebreak(event))
+}
+
+/// Full-value tie-breaker used only when the stable canonical key collides.
+///
+/// The primary key intentionally omits selected payload fields so historical
+/// trace fingerprints remain stable across non-semantic envelope differences.
+/// Rust's slice sorting still requires a comparator that is a total order, so
+/// equal canonical keys are ordered by the complete serialized event.
+fn event_total_order_tiebreak(event: &TraceEvent) -> Vec<u8> {
+    serde_json::to_vec(event).unwrap_or_else(|_| format!("{event:?}").into_bytes())
 }
 
 /// Equality on the semantic content of a trace event.
@@ -639,8 +648,10 @@ fn semantically_equal_event(a: &TraceEvent, b: &TraceEvent) -> bool {
     a.version == b.version && a.kind == b.kind && a.data == b.data
 }
 
-/// Hash key for fingerprinting. Must agree with `event_sort_key` ordering:
-/// events with the same sort key produce the same hash key.
+/// Hash key for fingerprinting.
+///
+/// This deliberately excludes [`event_total_order_tiebreak`] so existing trace
+/// fingerprints keep treating equal canonical keys as the same event class.
 fn event_hash_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
     event_sort_key(event)
 }
@@ -1175,6 +1186,27 @@ mod tests {
         let layer = &foata.layers()[0];
         let keys: Vec<_> = layer.iter().map(event_sort_key).collect();
         assert!(keys.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn equal_canonical_keys_still_have_total_sort_order() {
+        let events = (0..16)
+            .map(|idx| {
+                TraceEvent::new(
+                    idx,
+                    Time::from_nanos(idx),
+                    TraceEventKind::UserTrace,
+                    TraceData::Message("same canonical message".to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let foata = canonicalize(&events);
+        assert_eq!(foata.depth(), 1);
+        assert_eq!(foata.len(), events.len());
+
+        let fingerprint = trace_fingerprint(&events);
+        assert_ne!(fingerprint, 0);
     }
 
     // === Fingerprint consistency ===

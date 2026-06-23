@@ -205,10 +205,14 @@ impl Hasher for DetHasher {
 }
 
 /// Builder for deterministic hashers.
+///
+/// The seed is captured once when the builder is created and reused for every
+/// `build_hasher` call. `HashMap`/`HashSet` require this: inserting, looking
+/// up, and removing one key must hash that key identically within one
+/// collection. Production mode remains randomized per builder, not per probe.
 #[derive(Clone)]
 pub struct DetBuildHasher {
-    /// Whether to use production-safe random seeding.
-    production_mode: bool,
+    seed: u64,
 }
 
 impl Default for DetBuildHasher {
@@ -236,18 +240,20 @@ impl DetBuildHasher {
     #[must_use]
     pub fn for_lab() -> Self {
         Self {
-            production_mode: false,
+            seed: DetHasher::for_lab().state,
         }
     }
 
-    /// Creates a builder that produces production hashers (random seed).
+    /// Creates a builder that produces production hashers.
     ///
     /// **Security**: Use for any HashMap/HashSet with attacker-controlled keys.
+    /// The seed is random per builder and stable across all hashers built from
+    /// that builder.
     #[inline]
     #[must_use]
     pub fn for_production() -> Self {
         Self {
-            production_mode: true,
+            seed: DetHasher::for_production().state,
         }
     }
 }
@@ -257,11 +263,7 @@ impl BuildHasher for DetBuildHasher {
 
     #[inline]
     fn build_hasher(&self) -> Self::Hasher {
-        if self.production_mode {
-            DetHasher::for_production()
-        } else {
-            DetHasher::for_lab()
-        }
+        DetHasher { state: self.seed }
     }
 }
 
@@ -528,9 +530,8 @@ mod tests {
     fn det_build_hasher_clone_default() {
         let b1 = DetBuildHasher::default();
         let b2 = b1.clone();
-        let b3 = DetBuildHasher::for_lab();
-        let mut x = b2.build_hasher();
-        let mut y = b3.build_hasher();
+        let mut x = b1.build_hasher();
+        let mut y = b2.build_hasher();
         x.write(b"same");
         y.write(b"same");
         assert_eq!(x.finish(), y.finish());
@@ -601,8 +602,34 @@ mod tests {
         let mut y = h2;
         x.write(b"");
         y.write(b"");
-        // Production mode should produce different seeds each time
-        assert_ne!(x.finish(), y.finish());
+        assert_eq!(
+            x.finish(),
+            y.finish(),
+            "one builder must seed all its hashers identically (HashMap correctness)"
+        );
+
+        let other = DetBuildHasher::for_production();
+        let mut a = builder.build_hasher();
+        let mut b = other.build_hasher();
+        a.write(b"");
+        b.write(b"");
+        assert_ne!(
+            a.finish(),
+            b.finish(),
+            "independent production builders should use independent random seeds"
+        );
+    }
+
+    #[test]
+    fn det_hash_set_production_builder_preserves_set_semantics() {
+        let mut set = DetHashSet::with_hasher(DetBuildHasher::for_production());
+
+        assert!(set.insert(42_u64));
+        assert!(!set.insert(42_u64));
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&42));
+        assert!(set.remove(&42));
+        assert!(set.is_empty());
     }
 
     #[test]
@@ -655,29 +682,54 @@ mod tests {
     }
 
     #[test]
-    fn backward_compatibility_default_uses_lab_mode() {
-        let default_hasher = DetHasher::default();
-        let lab_hasher = DetHasher::for_lab();
-        let mut d = default_hasher;
-        let mut l = lab_hasher;
-        d.write(b"compatibility test");
-        l.write(b"compatibility test");
+    fn default_builder_matches_configured_mode_and_remains_stable() {
+        let default_builder = DetBuildHasher::default();
+        let mut d1 = default_builder.build_hasher();
+        let mut d2 = default_builder.build_hasher();
+        d1.write(b"compatibility");
+        d2.write(b"compatibility");
         assert_eq!(
-            d.finish(),
-            l.finish(),
-            "Default should be identical to lab mode"
+            d1.finish(),
+            d2.finish(),
+            "Default builder must be stable within one collection"
         );
 
-        let default_builder = DetBuildHasher::default();
-        let lab_builder = DetBuildHasher::for_lab();
-        let mut d_h = default_builder.build_hasher();
-        let mut l_h = lab_builder.build_hasher();
-        d_h.write(b"compatibility");
-        l_h.write(b"compatibility");
-        assert_eq!(
-            d_h.finish(),
-            l_h.finish(),
-            "Default builder should match lab builder"
-        );
+        #[cfg(feature = "test-internals")]
+        {
+            let mut d = DetHasher::default();
+            let mut l = DetHasher::for_lab();
+            d.write(b"compatibility test");
+            l.write(b"compatibility test");
+            assert_eq!(
+                d.finish(),
+                l.finish(),
+                "Default hasher should be identical to lab mode"
+            );
+
+            let lab_builder = DetBuildHasher::for_lab();
+            let mut d_h = default_builder.build_hasher();
+            let mut l_h = lab_builder.build_hasher();
+            d_h.write(b"compatibility");
+            l_h.write(b"compatibility");
+            assert_eq!(
+                d_h.finish(),
+                l_h.finish(),
+                "Default builder should match lab builder"
+            );
+        }
+
+        #[cfg(not(feature = "test-internals"))]
+        {
+            let other_builder = DetBuildHasher::default();
+            let mut x = default_builder.build_hasher();
+            let mut y = other_builder.build_hasher();
+            x.write(b"compatibility");
+            y.write(b"compatibility");
+            assert_ne!(
+                x.finish(),
+                y.finish(),
+                "Default production builders should use independent random seeds"
+            );
+        }
     }
 }

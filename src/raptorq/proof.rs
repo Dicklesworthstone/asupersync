@@ -911,7 +911,7 @@ impl ReceivedEsiMultisetHashState {
     fn observe(&mut self, esi: u32, is_source: bool) {
         use std::hash::{Hash, Hasher};
 
-        let mut hasher = DetHasher::default();
+        let mut hasher = DetHasher::for_lab();
         (esi, is_source).hash(&mut hasher);
         let digest = hasher.finish();
 
@@ -929,7 +929,7 @@ impl ReceivedEsiMultisetHashState {
     fn finish(self) -> u64 {
         use std::hash::{Hash, Hasher};
 
-        let mut hasher = DetHasher::default();
+        let mut hasher = DetHasher::for_lab();
         self.count.hash(&mut hasher);
         self.sum.hash(&mut hasher);
         self.sum_products.hash(&mut hasher);
