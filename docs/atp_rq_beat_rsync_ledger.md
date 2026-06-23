@@ -1844,3 +1844,19 @@ The tree-batch commit `1d3290821` added +546 lines to `transport_rq/mod.rs` (the
 | bad | 53.6s | 57.1 | **−6.1%** (slightly better) | 14.74s |
 
 Clean PASS — the small-entry tree batching is correctly scoped to the tree-staging path and does not touch single-file transfer behavior (bad's −6.1% is within lossy-cell variance / minor batched-staging benefit). Current main is healthy on the core scoreboard. This was benched while the cod swarm was credit-blocked (codex usage limit, reset pending) — the critical-path encrypted-throughput fix (bead `mh1eg4`, coalesce many symbol-DATAGRAMs per UDP datagram) is filed + dispatched and awaits swarm credits. Evidence: `artifacts/atp_bench_matrix/20260623T020322Z/`.
+
+## MATRIX-42 (2026-06-23) — mh1eg4 coalescing VERIFIED working (1.9 datagrams/UDP packet, packets 67729→25092) + encrypted-clean 37→32.7s; but encrypted-LOSSY still ASUP-E804 — now root-caused to per-block fountain-feedback STRAGGLER (45926/46000), NOT throughput → = Finding-1 FEC-fallback bug
+
+Re-benched encrypted 50M after mh1eg4 `1aa4d74b0` "coalesce symbol datagrams per UDP packet". Run `artifacts/atp_bench_matrix/20260623T031907Z/`:
+
+| regime | atp-quic-tls13 | rsync-ssh | atp status | vs MATRIX-39 |
+|---|---|---|---|---|
+| perfect | 32.74s sha-ok (3/3) | 0.85s | ok | 37→32.7s (−12%) |
+| good (25ms/0.1%/200mbit) | 0/3 ASUP-E804 | 4.06s | error | still fails |
+| bad (80ms/2%/50mbit) | 0/3 ASUP-E804 | 18.77s | error | still fails |
+
+**mh1eg4 coalescing is CONFIRMED working** — receiver counters show **1.9 DATAGRAM frames per UDP packet** now (good: `udp_packets_received=25092` but `datagrams_received=47962`), vs MATRIX-39's 0.77 (52099 datagrams in 67729 packets, ACK-diluted). Packet count fell ~2.7× for the same symbol volume — the one-symbol-per-packet throttle is GONE. Clean improved modestly (37→32.7s); perfect is now **decode-bound** (single-core RaptorQ ~1.5 MB/s ≈ 33s for 50M), so coalescing send-throughput gives limited clean gain — the clean wall is the SAME single-core-decode lever as nocrypto (LANE-A parallel decode).
+
+**Encrypted-lossy STILL fails — but the blocker moved from throughput to CONVERGENCE.** Counters: good reaches `symbols_accepted=45926` of ~46000 needed (**99.8%**), `datagrams_dropped_on_receive=0` (receiver drops nothing) → it's starved of the **last ~50–74 straggler symbols** (lost to the 0.1–2% link), requests them via NeedMore, but the error is `[ASUP-E804] transport timeout during receive proof or fountain feedback after 60s` → **the repair round never completes**. This is the per-block fountain-feedback straggler = **the SAME FEC-fallback-self-disables bug as Finding-1 / 317hxr.6.1.1** (FEC repair disables in later rounds via the `requested_sources==0` guard → straggler symbols never resent). 
+
+**Lever (re-routed):** the encrypted-lossy unblocker is NOT more QUIC-specific work — it is **Finding-1 (LANE-B): drop the FEC-fallback self-disable guard** so the sender keeps emitting per-block repair until the receiver converges. That single fix should land BOTH nocrypto-lossy (50M/bad 53.6s→faster/convergent) AND encrypted-lossy (good/bad 0/3 → sha-ok). mh1eg4 stays a real win (throughput foundation + clean −12%); commented on bead. Evidence: `artifacts/atp_bench_matrix/20260623T031907Z/` (counters in cells/50M/{good,bad}/encrypted/atp-quic-tls13/rep*/).
