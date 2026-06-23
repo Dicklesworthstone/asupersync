@@ -684,6 +684,27 @@ mod tests {
     }
 
     #[test]
+    fn entry_block_geometry_clamps_zero_symbol_and_block_inputs() {
+        let mut desc = descriptor_for(&[(2, "payload.bin", b"abc")]);
+        desc.symbol_size = 0;
+        desc.max_block_size = 0;
+
+        assert_eq!(desc.entry_source_block_count(2), Some(3));
+
+        let first = desc.entry_block_geometry(2, 0).expect("first byte block");
+        assert_eq!(first.block_start, 0);
+        assert_eq!(first.block_bytes, 1);
+        assert_eq!(first.source_symbols, 1);
+
+        let final_block = desc.entry_block_geometry(2, 2).expect("final byte block");
+        assert_eq!(final_block.block_start, 2);
+        assert_eq!(final_block.block_bytes, 1);
+        assert_eq!(final_block.source_symbols, 1);
+        assert_eq!(final_block.source_block_count, 3);
+        assert!(desc.entry_block_geometry(2, 3).is_none());
+    }
+
+    #[test]
     fn from_manifest_carries_every_agreed_field() {
         let manifest = TransferManifest {
             transfer_id: "tid-deadbeef".to_string(),

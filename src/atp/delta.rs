@@ -1988,6 +1988,56 @@ mod tests {
     }
 
     #[test]
+    fn receiver_have_set_round_trips_to_sender_coverage() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"beta".as_slice()],
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "tree-a",
+            vec![b"alpha".as_slice(), b"old".as_slice()],
+        );
+        let mut direct_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        direct_coverage.insert(ContentId::from_bytes(b"beta"), 4);
+
+        let advertisement = ReceiverHaveSetAdvertisement::from_verified_manifest(
+            &receiver,
+            &direct_coverage,
+            ReceiverHaveSetLimits::DEFAULT,
+        )
+        .expect("receiver have-set");
+        let advertised_coverage = advertisement.to_coverage();
+
+        assert_eq!(advertised_coverage.len(), direct_coverage.len());
+        assert!(!advertised_coverage.is_empty());
+        for chunk in &receiver.chunks {
+            assert!(advertised_coverage.contains_chunk(chunk));
+        }
+        assert!(advertised_coverage.contains_chunk(&sender.chunks[1]));
+
+        let direct_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &direct_coverage,
+        );
+        let advertised_plan = plan_incremental_resync_with_receiver_have_set(
+            &sender,
+            Some(&receiver),
+            Some(&advertisement),
+        );
+
+        assert_eq!(advertised_plan, direct_plan);
+        assert_eq!(advertised_plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(advertised_plan.shared_chunks, 2);
+        assert!(advertised_plan.missing_chunks.is_empty());
+        assert_eq!(advertised_plan.stale_chunks.len(), 1);
+    }
+
+    #[test]
     fn receiver_have_set_fails_closed_without_verified_coverage() {
         let mut receiver_store = ContentAddressedChunkStore::new();
         let receiver = ingest_manifest(

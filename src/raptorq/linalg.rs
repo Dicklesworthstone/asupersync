@@ -1981,6 +1981,16 @@ mod tests {
     }
 
     #[test]
+    fn coefficient_rank_treats_short_rows_as_structural_zeros() {
+        let rows: Vec<Vec<u8>> = vec![vec![1], vec![0, 1], vec![0, 0, 1], vec![1, 1, 1, 0]];
+        let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+
+        assert_eq!(coefficient_rank(&matrix, 4), 3);
+        assert_eq!(coefficient_rank(&matrix, 3), 3);
+        assert_eq!(coefficient_rank(&matrix, 2), 2);
+    }
+
+    #[test]
     fn coefficient_rank_is_invariant_under_row_scaling_and_permutation() {
         let base: Vec<Vec<u8>> = vec![vec![2, 0, 1, 0], vec![0, 3, 1, 0], vec![2, 3, 0, 0]];
 
