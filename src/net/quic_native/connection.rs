@@ -571,6 +571,16 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Current send offset for a stream.
+    pub fn stream_send_offset(
+        &self,
+        cx: &Cx,
+        id: StreamId,
+    ) -> Result<u64, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        Ok(self.streams.stream(id)?.send_offset)
+    }
+
     /// Queue application bytes for reliable STREAM frame emission.
     pub fn write_stream_bytes(
         &mut self,
@@ -650,6 +660,21 @@ impl NativeQuicConnection {
         self.ensure_data_state()?;
         self.streams
             .requeue_sent_stream_frame(id, offset)
+            .map_err(map_stream_table_error)
+    }
+
+    /// Requeue emitted STREAM chunks whose starting offsets are in `start..end`.
+    pub fn requeue_sent_stream_frames_in_range(
+        &mut self,
+        cx: &Cx,
+        id: StreamId,
+        start: u64,
+        end: u64,
+    ) -> Result<usize, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_data_state()?;
+        self.streams
+            .requeue_sent_stream_frames_in_range(id, start, end)
             .map_err(map_stream_table_error)
     }
 

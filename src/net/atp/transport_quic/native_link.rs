@@ -43,12 +43,13 @@
 //! # Loss posture (no-claim boundary)
 //!
 //! RaptorQ + the fountain feedback loop tolerate symbol-DATAGRAM loss
-//! end-to-end. The reliable control STREAM, however, is **not** retransmitted by
-//! this pump (QUIC loss recovery for stream frames is not wired here), so the
-//! control plane currently assumes a low-loss path (loopback / LAN). The pump
-//! never injects loss into packets carrying control STREAM bytes; deterministic
-//! symbol loss for tests is injected before a symbol is sprayed
-//! ([`QuicConfig::debug_drop_one_in`]), so the control channel stays intact.
+//! end-to-end. ATP control rides a STREAM, but this pump still does not claim a
+//! full RFC QUIC loss-recovery implementation for stream frames. Instead, the
+//! ATP loop treats NeedMore as idempotent: the receiver retransmits its latest
+//! NeedMore on a short PTO while blocks remain pending, and the sender keeps
+//! pumping the control stream after repair rounds so late NeedMore frames are
+//! served instead of timing out. Deterministic symbol loss for tests is injected
+//! before a symbol is sprayed ([`QuicConfig::debug_drop_one_in`]).
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -215,21 +216,28 @@ const INBOUND_PUMP_MAX_DRAIN_BATCHES: usize = 64;
 /// packets queued without charging a full idle timeout to every drain attempt.
 const INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
 
-/// Quiet window that ends a receiver symbol round after at least one symbol was
-/// accepted. This must be much shorter than the sender's Proof/NeedMore timeout
-/// so feedback reaches the sender before it gives up, while still giving the UDP
-/// pump room to drain a burst between paced sender flushes.
-const ROUND_PROGRESS_IDLE_GRACE: Duration = Duration::from_millis(250);
+/// Idle window for a round that has made DATAGRAM progress but has not yet seen
+/// the sender's `ObjectComplete` marker. MATRIX-44 showed that the short drain
+/// grace can snapshot an encrypted round while the sender is still encoding or
+/// pacing it, causing near-whole-object repair requests. Wait for the control
+/// marker unless the peer is quiet long enough that the marker was likely lost.
+const ROUND_COMPLETE_IDLE_GRACE: Duration = Duration::from_millis(1500);
 
 /// Control-plane PTO. When the receiver is awaiting repair after a NeedMore and the link goes idle,
-/// the NeedMore (receiver->sender) or the repair round (sender->receiver) was likely lost on the wire
-/// — ATP control rides best-effort 1-RTT here, so under real-internet loss a single dropped NeedMore
-/// otherwise deadlocks both sides until the full idle timeout. Re-send the NeedMore on this interval
-/// instead; this is what lets cross-machine transfers converge through control-frame loss.
+/// the reliable control stream or the repair DATAGRAMs are still catching up after loss/retransmit.
+/// Re-send the NeedMore on this interval instead of letting one quiet window strand the transfer.
 const NEEDMORE_PTO: Duration = Duration::from_millis(1500);
-/// Max NeedMore re-sends while awaiting one round's repair before giving up
-/// (`NEEDMORE_PTO * MAX_NEEDMORE_PTO` is the effective per-round idle budget).
-const MAX_NEEDMORE_PTO: u32 = 40;
+/// Max NeedMore re-sends while awaiting one round's repair before giving up.
+/// This must exceed the operator-level transfer deadline by a wide margin so
+/// the ATP receiver never self-aborts a still-live, nearly complete lossy
+/// transfer before the external deadline decides it.
+const MAX_NEEDMORE_PTO: u32 = 512;
+
+/// Sender-side idle control PTOs while waiting for Proof/NeedMore after a
+/// repair round. The peer can still have pending blocks even when the sender is
+/// temporarily quiet, so keep servicing the reliable control stream instead of
+/// exiting at the first idle window.
+const MAX_FEEDBACK_IDLE_PTO: u32 = 512;
 
 /// Opt-in stderr tracing for ATP/RQ benchmark diagnosis. Reuses the existing
 /// ATP_RQ_TRACE switch so matrix runs can grep one trace stream across RQ and
@@ -282,6 +290,28 @@ fn trace_repair_block_deficits(direction: &str, round: u32, requests: &[QuicBloc
             request.entry, request.sbn, request.symbols
         );
     }
+}
+
+fn need_more_expected_response_symbols(need: &QuicNeedMore) -> Option<u64> {
+    if !need.repair_blocks.is_empty() {
+        return Some(need_more_repair_symbol_count(need));
+    }
+    if !need.source_symbols.is_empty() {
+        return Some(u64::try_from(need.source_symbols.len()).unwrap_or(u64::MAX));
+    }
+    if need.pending.is_empty() {
+        return Some(0);
+    }
+    None
+}
+
+fn object_complete_exceeds_need_more_response(
+    need: &QuicNeedMore,
+    complete: &super::QuicRoundComplete,
+) -> bool {
+    need_more_expected_response_symbols(need)
+        .map(|expected| complete.round_symbols_sent > expected)
+        .unwrap_or(false)
 }
 
 /// Monotonic data-plane clock step (microseconds) fed to the connection per pump
@@ -927,6 +957,8 @@ impl QuicLink {
         control: &mut NativeQuicFrameTransport,
         operation: &'static str,
     ) -> Result<Frame, QuicTransportError> {
+        let feedback_wait = operation == "receive proof or fountain feedback";
+        let mut idle_pto_attempts = 0u32;
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             if let Some(frame) = self.pending_control_frames.pop_front() {
@@ -936,16 +968,34 @@ impl QuicLink {
                 return Ok(frame);
             }
             self.flush(cx).await?;
-            // `pump_inbound` waits up to a full idle window for the first packet;
-            // it only returns 0 when that window elapsed with no traffic at all,
-            // which means the peer has gone silent — fail closed. Any packets
-            // (>0) loop back to re-check for a now-complete control frame.
-            if self.pump_inbound(cx).await? == 0 {
+            // Use a short PTO while waiting for feedback after a repair round:
+            // this keeps ACK/retransmit and keepalive traffic moving so a late
+            // NeedMore on the reliable control stream is still served. Handshake
+            // and manifest waits keep the normal full idle timeout.
+            let pump_timeout = if feedback_wait {
+                NEEDMORE_PTO
+            } else {
+                self.idle_timeout
+            };
+            if self.pump_inbound_for(cx, pump_timeout).await? == 0 {
+                if feedback_wait && idle_pto_attempts < MAX_FEEDBACK_IDLE_PTO {
+                    idle_pto_attempts = idle_pto_attempts.saturating_add(1);
+                    quic_rqtrace!(
+                        "sender: feedback wait PTO attempt={} max_attempts={} operation={}",
+                        idle_pto_attempts,
+                        MAX_FEEDBACK_IDLE_PTO,
+                        operation,
+                    );
+                    send_native_keep_alive(cx, &mut self.conn, control)?;
+                    self.flush(cx).await?;
+                    continue;
+                }
                 return Err(QuicTransportError::Timeout {
                     operation,
-                    timeout: self.idle_timeout,
+                    timeout: pump_timeout,
                 });
             }
+            idle_pto_attempts = 0;
         }
     }
 }
@@ -1230,7 +1280,7 @@ async fn accept(
 
 // ─── Sender session ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct NativeQuicAimdPacer {
     cap_bps: Option<u64>,
     last_round_symbols_sent: u64,
@@ -1239,6 +1289,15 @@ struct NativeQuicAimdPacer {
 }
 
 impl NativeQuicAimdPacer {
+    fn new(_config: &QuicConfig) -> Self {
+        Self {
+            cap_bps: None,
+            last_round_symbols_sent: 0,
+            last_round_pacing_rate_bps: 0,
+            last_round_loss_fraction: 0.0,
+        }
+    }
+
     fn cap_bps(&self) -> Option<u64> {
         self.cap_bps
     }
@@ -1267,21 +1326,21 @@ impl NativeQuicAimdPacer {
             })
             .clamp(0.0, 0.90);
         self.last_round_loss_fraction = loss;
+        let base = self
+            .cap_bps
+            .unwrap_or_else(super::quic_feedback_initial_aimd_rate_bps);
         if loss > super::QUIC_AIMD_LOSS_DECREASE_THRESHOLD {
-            let base = self
-                .cap_bps
-                .unwrap_or(self.last_round_pacing_rate_bps)
-                .max(super::QUIC_AIMD_MIN_RATE_BPS);
             let reduced = (base as f64 * super::QUIC_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
             self.cap_bps =
                 Some(reduced.clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS));
-        } else if loss <= super::QUIC_AIMD_CLEAN_INCREASE_THRESHOLD
-            && let Some(cap) = self.cap_bps
-        {
+        } else if loss <= super::QUIC_AIMD_CLEAN_INCREASE_THRESHOLD {
             self.cap_bps = Some(
-                cap.saturating_add(super::QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
+                base.saturating_add(super::QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S)
                     .clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS),
             );
+        } else {
+            self.cap_bps =
+                Some(base.clamp(super::QUIC_AIMD_MIN_RATE_BPS, super::QUIC_AIMD_MAX_RATE_BPS));
         }
 
         let cap = self
@@ -1577,7 +1636,7 @@ async fn run_sender_session(
 
     let pending_all: std::collections::BTreeSet<u32> =
         encoders.iter().map(|entry| entry.index).collect();
-    let mut aimd = NativeQuicAimdPacer::default();
+    let mut aimd = NativeQuicAimdPacer::new(config);
     let mut symbols_sent = spray_round(
         cx,
         link,
@@ -1694,7 +1753,7 @@ async fn run_sender_session(
                     link.flush(cx).await?;
                     continue;
                 }
-                let pending = super::validate_need_more_feedback(manifest, config, &need)?;
+                let _pending = super::validate_need_more_feedback(manifest, config, &need)?;
                 let symbols_before = symbols_sent;
                 let response_mode = super::quic_need_more_response_mode(&need);
                 let sent = if !need.repair_blocks.is_empty() {
@@ -1710,21 +1769,7 @@ async fn run_sender_session(
                         &mut aimd,
                     )
                     .await?
-                } else if need.source_symbols.is_empty() {
-                    spray_round(
-                        cx,
-                        link,
-                        &mut control,
-                        manifest,
-                        &mut encoders,
-                        &pending,
-                        config,
-                        symbol_auth.as_ref(),
-                        false,
-                        &mut aimd,
-                    )
-                    .await?
-                } else {
+                } else if !need.source_symbols.is_empty() {
                     spray_source_requests(
                         cx,
                         link,
@@ -1737,7 +1782,17 @@ async fn run_sender_session(
                         &mut aimd,
                     )
                     .await?
+                } else {
+                    return Err(QuicTransportError::Integrity(
+                        "receiver NeedMore had pending entries but no targeted repair/source requests"
+                            .to_string(),
+                    ));
                 };
+                if !need.repair_blocks.is_empty() && sent != requested_repair_symbols {
+                    return Err(QuicTransportError::Integrity(format!(
+                        "native QUIC repair round emitted {sent} symbols for {requested_repair_symbols} requested repair symbols"
+                    )));
+                }
                 symbols_sent = symbols_sent.saturating_add(sent);
                 super::trace_quic_sender_repair_round(
                     cx,
@@ -2338,7 +2393,20 @@ async fn run_receiver_session(
                 if let Some(frame) = control.try_recv(cx, &mut link.conn)? {
                     match frame.frame_type() {
                         FrameType::ObjectComplete => {
-                            round_complete = super::parse_quic_round_complete(&frame)?;
+                            let complete = super::parse_quic_round_complete(&frame)?;
+                            if let Some(need) = last_need.as_ref()
+                                && object_complete_exceeds_need_more_response(need, &complete)
+                            {
+                                quic_rqtrace!(
+                                    "receiver: stale ObjectComplete ignored expected_response_symbols={} got_round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={}",
+                                    need_more_expected_response_symbols(need).unwrap_or(0),
+                                    complete.round_symbols_sent,
+                                    round_symbols_observed,
+                                    round_symbols_accepted,
+                                );
+                                continue;
+                            }
+                            round_complete = complete;
                             break;
                         }
                         FrameType::KeepAlive => {
@@ -2356,7 +2424,7 @@ async fn run_receiver_session(
                 link.flush(cx).await?;
                 let round_made_progress = round_symbols_observed > 0;
                 let pump_timeout = if round_made_progress {
-                    ROUND_PROGRESS_IDLE_GRACE
+                    ROUND_COMPLETE_IDLE_GRACE
                 } else if last_need.is_some() {
                     // Awaiting a repair round after a NeedMore: poll on the short control-PTO interval
                     // so a lost NeedMore/repair self-heals quickly rather than stalling for idle_timeout.
@@ -2372,6 +2440,12 @@ async fn run_receiver_session(
                         continue;
                     }
                     if round_made_progress {
+                        quic_rqtrace!(
+                            "receiver: ObjectComplete wait expired after progress; treating marker as lost observed={} accepted={} timeout_ms={}",
+                            round_symbols_observed,
+                            round_symbols_accepted,
+                            ROUND_COMPLETE_IDLE_GRACE.as_millis(),
+                        );
                         break;
                     }
                     // Idle with no progress. If we are awaiting a repair round, the NeedMore (or the
@@ -2389,13 +2463,44 @@ async fn run_receiver_session(
                                 need_more_repair_symbol_count(need),
                                 MAX_NEEDMORE_PTO,
                             );
-                            super::send_native_need_more(cx, &mut link.conn, &mut control, need)?;
+                            let requeued_stream_frames =
+                                control.requeue_last_sent(cx, &mut link.conn)?;
+                            if requeued_stream_frames == 0 {
+                                super::send_native_need_more(
+                                    cx,
+                                    &mut link.conn,
+                                    &mut control,
+                                    need,
+                                )?;
+                            }
+                            quic_rqtrace!(
+                                "receiver: NeedMore PTO stream_requeue round={} attempt={} requeued_stream_frames={}",
+                                feedback_rounds,
+                                needmore_pto_attempts,
+                                requeued_stream_frames,
+                            );
                             link.flush(cx).await?;
                             continue;
                         }
                     }
                     return Err(link.symbol_round_timeout(config.idle_timeout, symbols_accepted));
                 }
+            }
+
+            if round_complete.round_symbols_sent == 0
+                && round_symbols_observed > 0
+                && let Some(expected) = last_need
+                    .as_ref()
+                    .and_then(need_more_expected_response_symbols)
+            {
+                round_complete.round_symbols_sent = expected.max(round_symbols_observed);
+                quic_rqtrace!(
+                    "receiver: inferred repair round_symbols_sent={} from NeedMore response expected={} observed={} accepted={}",
+                    round_complete.round_symbols_sent,
+                    expected,
+                    round_symbols_observed,
+                    round_symbols_accepted,
+                );
             }
 
             flush_cached_quic_staging_files(&mut staged).await?;
@@ -2598,6 +2703,112 @@ mod tests {
     use super::*;
     use crate::bytes::Bytes;
     use crate::net::atp::protocol::quic_frames::QuicFrame;
+
+    #[test]
+    fn need_more_expected_response_counts_targeted_repairs() {
+        let need = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![
+                QuicBlockRepairRequest {
+                    entry: 0,
+                    sbn: 0,
+                    symbols: 4_000,
+                },
+                QuicBlockRepairRequest {
+                    entry: 0,
+                    sbn: 1,
+                    symbols: 3_430,
+                },
+            ],
+            ..QuicNeedMore::default()
+        };
+
+        assert_eq!(need_more_expected_response_symbols(&need), Some(7_430));
+    }
+
+    #[test]
+    fn object_complete_above_targeted_need_more_response_is_stale() {
+        let need = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 0,
+                symbols: 7_430,
+            }],
+            ..QuicNeedMore::default()
+        };
+
+        let stale_full_object = super::super::QuicRoundComplete {
+            round_symbols_sent: 46_000,
+        };
+        assert!(object_complete_exceeds_need_more_response(
+            &need,
+            &stale_full_object
+        ));
+
+        let exact_repair = super::super::QuicRoundComplete {
+            round_symbols_sent: 7_430,
+        };
+        assert!(!object_complete_exceeds_need_more_response(
+            &need,
+            &exact_repair
+        ));
+    }
+
+    #[test]
+    fn native_quic_aimd_loss_decreases_from_cold_start_seed() {
+        let cx = Cx::for_testing();
+        let config = QuicConfig::default();
+        let mut pacer = NativeQuicAimdPacer::new(&config);
+        let initial = super::super::quic_feedback_initial_aimd_rate_bps();
+
+        assert_eq!(pacer.cap_bps(), None);
+
+        pacer.record_spray(46_000, super::super::QUIC_AIMD_MAX_RATE_BPS);
+        pacer.observe_need_more(
+            &cx,
+            &QuicNeedMore {
+                pending: vec![0],
+                repair_blocks: vec![QuicBlockRepairRequest {
+                    entry: 0,
+                    sbn: 0,
+                    symbols: 7_430,
+                }],
+                round_symbols_observed: Some(39_224),
+                round_symbols_accepted: Some(39_224),
+                round_loss_fraction: Some(0.1473),
+                ..QuicNeedMore::default()
+            },
+        );
+
+        let expected =
+            (initial as f64 * super::super::QUIC_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
+        assert_eq!(pacer.cap_bps(), Some(expected));
+        assert_ne!(
+            pacer.cap_bps(),
+            Some(super::super::QUIC_AIMD_MAX_RATE_BPS / 2),
+            "loss response must not be based on the inflated path pacing sample"
+        );
+    }
+
+    #[test]
+    fn need_more_pto_budgets_outlive_matrix_timeout() {
+        let receiver_budget = NEEDMORE_PTO
+            .checked_mul(MAX_NEEDMORE_PTO)
+            .expect("receiver NeedMore PTO budget");
+        let sender_budget = NEEDMORE_PTO
+            .checked_mul(MAX_FEEDBACK_IDLE_PTO)
+            .expect("sender feedback PTO budget");
+
+        assert!(
+            receiver_budget > Duration::from_secs(60),
+            "receiver must not PTO-exhaust a nearly complete lossy transfer before the matrix deadline"
+        );
+        assert!(
+            sender_budget > Duration::from_secs(60),
+            "sender must keep serving late NeedMore instead of abandoning the feedback loop"
+        );
+    }
 
     #[test]
     fn one_rtt_header_round_trips() {
