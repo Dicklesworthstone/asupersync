@@ -913,6 +913,35 @@ pub enum GaussianResult {
     },
 }
 
+/// Stable classification for a [`GaussianResult`] without inspecting payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaussianOutcomeKind {
+    /// Elimination produced a unique solution.
+    Solved,
+    /// Elimination proved the coefficient matrix is rank deficient.
+    Singular,
+    /// Elimination proved the coefficient/RHS system is inconsistent.
+    Inconsistent,
+}
+
+impl GaussianResult {
+    /// Return the deterministic outcome class for solver callers and tests.
+    #[must_use]
+    pub const fn outcome_kind(&self) -> GaussianOutcomeKind {
+        match self {
+            Self::Solved(_) => GaussianOutcomeKind::Solved,
+            Self::Singular { .. } => GaussianOutcomeKind::Singular,
+            Self::Inconsistent { .. } => GaussianOutcomeKind::Inconsistent,
+        }
+    }
+
+    /// True only when elimination produced a solution payload.
+    #[must_use]
+    pub const fn is_solved(&self) -> bool {
+        matches!(self, Self::Solved(_))
+    }
+}
+
 /// Deterministic rank summary for a [`GaussianSolver`] coefficient matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GaussianRankStatus {
@@ -2360,6 +2389,74 @@ mod tests {
     }
 
     #[test]
+    fn gaussian_pivot_strategy_preserves_known_solution_under_row_permutation() {
+        fn dot(coefficients: [u8; 3], solution: [u8; 3]) -> u8 {
+            coefficients
+                .into_iter()
+                .zip(solution)
+                .fold(Gf256::ZERO, |acc, (coefficient, value)| {
+                    acc + (Gf256::new(coefficient) * Gf256::new(value))
+                })
+                .raw()
+        }
+
+        fn build_rows(coefficients: [[u8; 3]; 3], solution: [u8; 3]) -> [([u8; 3], [u8; 1]); 3] {
+            coefficients.map(|row| (row, [dot(row, solution)]))
+        }
+
+        fn permute_rows(
+            rows: [([u8; 3], [u8; 1]); 3],
+            order: [usize; 3],
+        ) -> [([u8; 3], [u8; 1]); 3] {
+            [rows[order[0]], rows[order[1]], rows[order[2]]]
+        }
+
+        fn solve(rows: &[([u8; 3], [u8; 1])], markowitz: bool) -> Vec<DenseRow> {
+            let mut solver = GaussianSolver::new(rows.len(), 3);
+            for (row, (coefficients, rhs)) in rows.iter().enumerate() {
+                solver.set_row(row, coefficients, DenseRow::new(rhs.to_vec()));
+            }
+
+            let result = if markowitz {
+                solver.solve_markowitz()
+            } else {
+                solver.solve()
+            };
+            assert_eq!(
+                result.outcome_kind(),
+                GaussianOutcomeKind::Solved,
+                "row-permuted full-rank fixture must not fail closed: {result:?}"
+            );
+            match result {
+                GaussianResult::Solved(solution) => solution,
+                other => panic!("expected solved result after outcome check, got {other:?}"),
+            }
+        }
+
+        let solution = [0x10, 0x20, 0x30];
+        let expected = vec![
+            DenseRow::new(vec![solution[0]]),
+            DenseRow::new(vec![solution[1]]),
+            DenseRow::new(vec![solution[2]]),
+        ];
+        let rows = build_rows([[0, 1, 2], [0, 0, 1], [1, 3, 4]], solution);
+
+        for order in [[0, 1, 2], [2, 0, 1], [1, 2, 0]] {
+            let permuted = permute_rows(rows, order);
+            assert_eq!(
+                solve(&permuted, false),
+                expected,
+                "basic solver returned a corrupted solution for order {order:?}"
+            );
+            assert_eq!(
+                solve(&permuted, true),
+                expected,
+                "Markowitz solver returned a corrupted solution for order {order:?}"
+            );
+        }
+    }
+
+    #[test]
     fn metamorphic_row_scaling_and_permutation_preserve_solution() {
         fn scale_row(coefficients: [u8; 3], rhs: [u8; 2], factor: Gf256) -> ([u8; 3], [u8; 2]) {
             let mut scaled_coefficients = [0; 3];
@@ -3281,6 +3378,18 @@ mod tests {
         let cloned = s.clone();
         assert_eq!(s, cloned);
         assert_ne!(s, GaussianResult::Inconsistent { row: 3 });
+
+        assert_eq!(s.outcome_kind(), GaussianOutcomeKind::Singular);
+        assert!(!s.is_solved());
+        assert_eq!(
+            GaussianResult::Solved(Vec::new()).outcome_kind(),
+            GaussianOutcomeKind::Solved
+        );
+        assert!(GaussianResult::Solved(Vec::new()).is_solved());
+        assert_eq!(
+            GaussianResult::Inconsistent { row: 3 }.outcome_kind(),
+            GaussianOutcomeKind::Inconsistent
+        );
     }
 
     #[test]
