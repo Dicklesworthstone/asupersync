@@ -756,8 +756,8 @@ impl DeltaResyncPlan {
 /// Receiver-advertised signature for one old chunk.
 ///
 /// The receiver builds this from locally verified old bytes; the sender uses it
-/// to emit a byte-precise sub-chunk op stream for the same positional chunk
-/// instead of sending the whole new chunk.
+/// to emit a byte-precise sub-chunk op stream from the best overlapping prior
+/// chunk instead of sending the whole new chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiverSubchunkSignature {
     /// Receiver manifest chunk that was signed.
@@ -2109,34 +2109,53 @@ fn build_delta_resync_send_item(
         payload: target_payload.to_vec(),
     };
 
-    let Some(base_chunk) = receiver_manifest
+    let same_index_base = receiver_manifest
         .chunks
-        .get(usize::try_from(target_chunk.index).map_err(|_| DeltaError::ChunkCountOverflow)?)
-    else {
+        .get(usize::try_from(target_chunk.index).map_err(|_| DeltaError::ChunkCountOverflow)?);
+    let mut best: Option<(&CasChunkRef, Vec<u8>)> = None;
+
+    for signature in receiver_signatures {
+        if !is_subdelta_base_candidate(target_chunk, &signature.chunk, same_index_base) {
+            continue;
+        }
+
+        let ops = delta_subchunk::diff(target_payload, &signature.signature);
+        let encoded_ops = encode_subdelta_ops(&ops)?;
+        if encoded_ops.len() >= target_payload.len() {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_ops)| encoded_ops.len() < best_ops.len())
+        {
+            best = Some((&signature.chunk, encoded_ops));
+        }
+    }
+
+    let Some((base_chunk, encoded_ops)) = best else {
         return Ok(whole());
     };
-    if base_chunk.content_id == target_chunk.content_id {
-        return Ok(whole());
-    }
-    let Some(signature) = receiver_signatures
-        .iter()
-        .find(|entry| entry.chunk.key() == base_chunk.key())
-    else {
-        return Ok(whole());
-    };
-
-    let ops = delta_subchunk::diff(target_payload, &signature.signature);
-    let encoded_ops = encode_subdelta_ops(&ops)?;
-    if encoded_ops.len() >= target_payload.len() {
-        return Ok(whole());
-    }
-
     Ok(DeltaResyncSendItem::SubchunkOps {
         target_chunk: target_chunk.clone(),
         base_chunk: base_chunk.clone(),
         target_sha256: Sha256::digest(target_payload).into(),
         encoded_ops,
     })
+}
+
+fn is_subdelta_base_candidate(
+    target: &CasChunkRef,
+    base: &CasChunkRef,
+    same_index_base: Option<&CasChunkRef>,
+) -> bool {
+    chunks_byte_ranges_overlap(target, base)
+        || same_index_base.is_some_and(|same_index| same_index.key() == base.key())
+}
+
+fn chunks_byte_ranges_overlap(left: &CasChunkRef, right: &CasChunkRef) -> bool {
+    let left_end = left.byte_offset.saturating_add(left.size_bytes);
+    let right_end = right.byte_offset.saturating_add(right.size_bytes);
+    left.byte_offset < right_end && right.byte_offset < left_end
 }
 
 fn store_has_exact_chunk(store: &ContentAddressedChunkStore, chunk: &CasChunkRef) -> bool {
@@ -3013,6 +3032,67 @@ mod tests {
     }
 
     #[test]
+    fn send_plan_chooses_best_overlapping_subchunk_base_after_cdc_drift() {
+        let wrong_base = (0..(16 * 1024))
+            .map(|idx| ((idx * 5 + 91) % 251) as u8)
+            .collect::<Vec<_>>();
+        let good_base = (0..(64 * 1024))
+            .map(|idx| ((idx * 23 + idx / 7 + 11) % 253) as u8)
+            .collect::<Vec<_>>();
+        let mut target = good_base[..32 * 1024].to_vec();
+        for byte in &mut target[12 * 1024..13 * 1024] {
+            *byte ^= 0x63;
+        }
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(&mut sender_store, "edited-file", vec![target.as_slice()]);
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "edited-file",
+            vec![wrong_base.as_slice(), good_base.as_slice()],
+        );
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let base_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &receiver_coverage,
+        );
+
+        assert_eq!(base_plan.mode, DeltaResyncMode::FullObjectFallback);
+        assert_eq!(
+            base_plan.fallback_reason,
+            Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject)
+        );
+
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let send_plan =
+            build_delta_resync_send_plan(&base_plan, &sender_store, &receiver, &signatures)
+                .expect("send plan");
+
+        assert_eq!(send_plan.subchunk_count(), 1);
+        assert_eq!(send_plan.whole_chunk_count(), 0);
+        assert!(send_plan.payload_bytes < send_plan.whole_chunk_bytes / 4);
+        let DeltaResyncSendItem::SubchunkOps { base_chunk, .. } = &send_plan.items[0] else {
+            panic!("expected subchunk ops");
+        };
+        assert_eq!(
+            base_chunk.content_id, receiver.chunks[1].content_id,
+            "sender should choose the compact overlapping base, not the poor same-index base"
+        );
+
+        let applied = apply_delta_resync_send_plan(&sender, &receiver_store, &send_plan)
+            .expect("apply send plan");
+        let rebuilt = reconstruct_manifest_bytes(&sender, &applied).expect("reconstruct target");
+        assert_eq!(rebuilt, target);
+    }
+
+    #[test]
     fn send_plan_dedupes_repeated_missing_chunks_then_reconstructs() {
         let repeated = (0..(8 * 1024))
             .map(|idx| ((idx * 31 + idx / 7 + 43) % 251) as u8)
@@ -3335,6 +3415,61 @@ mod tests {
         assert_eq!(wire_payload.whole_chunk_count, 0);
         assert!(wire_payload.payload_bytes < wire_payload.whole_chunk_bytes);
         assert!(wire_payload.wire_payload_bytes < sender.total_size_bytes / 4);
+
+        let applied = apply_delta_resync_transmission(&sender, &receiver_store, &transmission)
+            .expect("apply transmission")
+            .expect("delta apply report");
+
+        assert_eq!(applied.reconstructed_bytes, new);
+        assert_eq!(applied.subchunk_count, 1);
+        assert_eq!(applied.whole_chunk_count, 0);
+        assert_eq!(applied.wire_payload_bytes, wire_payload.wire_payload_bytes);
+    }
+
+    #[test]
+    fn transmission_promotes_scattered_byte_flips_to_delta_wire_payload() {
+        let old = (0..(512 * 1024))
+            .map(|idx| ((idx * 31 + idx / 7 + 17) % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut new = old.clone();
+        let scattered_edits = old.len() / 100;
+        for edit in 0..scattered_edits {
+            let pos = (edit * 7919 + 104_729) % new.len();
+            new[pos] ^= 0xa5;
+        }
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(&mut sender_store, "scattered-file", vec![new.as_slice()]);
+        let receiver = ingest_manifest(&mut receiver_store, "scattered-file", vec![old.as_slice()]);
+
+        let chunk_level_plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
+        assert_eq!(chunk_level_plan.mode, DeltaResyncMode::FullObjectFallback);
+        assert_eq!(
+            chunk_level_plan.fallback_reason,
+            Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject)
+        );
+
+        let transmission = build_delta_resync_transmission(
+            &sender,
+            &sender_store,
+            Some(&receiver),
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("transmission");
+
+        assert!(transmission.uses_delta_wire_payload());
+        assert_eq!(transmission.plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(transmission.plan.fallback_reason, None);
+        let wire_payload = transmission
+            .wire_payload
+            .as_ref()
+            .expect("delta wire payload");
+        assert_eq!(wire_payload.subchunk_count, 1);
+        assert_eq!(wire_payload.whole_chunk_count, 0);
+        assert!(wire_payload.beats_full_object(sender.total_size_bytes));
+        assert!(wire_payload.wire_payload_bytes < sender.total_size_bytes * 3 / 4);
 
         let applied = apply_delta_resync_transmission(&sender, &receiver_store, &transmission)
             .expect("apply transmission")
