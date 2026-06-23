@@ -167,6 +167,36 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_reports_preseeded_receiver_payload_reuse() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[&b"alpha"[..], &b"beta"[..], &b"alpha"[..]],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        receiver_store
+            .insert(b"alpha")
+            .expect("preseed receiver CAS");
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let payload_set = build_dedup_payload_set(&plan, &sender_store).expect("payload set");
+
+        let (store, report) =
+            reconcile_dedup_payload_set(&sender, &receiver_store, &payload_set).expect("reconcile");
+
+        assert_eq!(report.unique_payloads, 2);
+        assert_eq!(report.inserted_unique_payloads, 1);
+        assert_eq!(report.reused_receiver_payloads, 1);
+        assert_eq!(report.duplicate_logical_chunks, 1);
+        assert_eq!(report.reconstructed_bytes, sender.total_size_bytes);
+        let rebuilt = reconstruct_manifest_bytes(&sender, &store).expect("reconstruct");
+        assert_eq!(rebuilt, b"alphabetaalpha".as_slice());
+    }
+
+    #[test]
     fn reconcile_fails_closed_on_tampered_unique_payload() {
         let mut sender_store = ContentAddressedChunkStore::new();
         let mut receiver_store = ContentAddressedChunkStore::new();
