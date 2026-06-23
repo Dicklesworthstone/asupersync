@@ -709,6 +709,25 @@ mod tests {
     }
 
     #[test]
+    fn spray_schedule_rejects_repair_budget_overflow() {
+        let descriptor = descriptor();
+        let assignment = DonorAssignment::new_static(0, 1, vec![endpoint()], None);
+
+        let err = schedule_bonded_donor_spray(&descriptor, &assignment, u32::MAX)
+            .expect_err("overflowing repair ESI budget must fail closed");
+
+        assert_eq!(
+            err,
+            BondScheduleError::RepairBudgetOverflow {
+                entry_index: 0,
+                source_block_number: 0,
+                source_symbols: 2,
+                repair_symbols: u32::MAX,
+            }
+        );
+    }
+
+    #[test]
     fn invalid_assignment_shapes_fail_closed() {
         let no_endpoint = DonorAssignment::new_static(0, 1, Vec::new(), None);
         assert!(matches!(
