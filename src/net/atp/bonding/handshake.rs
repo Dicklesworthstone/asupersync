@@ -277,6 +277,20 @@ impl BondingControlRegistry {
     pub fn agreement_for(&self, donor_index: u32) -> Option<&BondingAgreement> {
         self.donors.get(&donor_index)
     }
+
+    /// Donor indexes that have completed control negotiation, sorted ascending.
+    #[must_use]
+    pub fn enrolled_donor_indices(&self) -> Vec<u32> {
+        self.donors.keys().copied().collect()
+    }
+
+    /// Donor indexes still missing from the expected control set.
+    #[must_use]
+    pub fn missing_donor_indices(&self) -> Vec<u32> {
+        (0..self.expected_donor_count)
+            .filter(|donor_index| !self.donors.contains_key(donor_index))
+            .collect()
+    }
 }
 
 /// Bonded-handshake validation or negotiation failure.
@@ -501,6 +515,8 @@ mod tests {
         assert_eq!(registry.enrolled_count(), 2);
         assert!(!registry.is_complete());
         assert!(registry.agreement_for(1).is_none());
+        assert_eq!(registry.enrolled_donor_indices(), vec![0, 2]);
+        assert_eq!(registry.missing_donor_indices(), vec![1]);
 
         registry
             .enroll_donor(1, agreement(3))
@@ -508,6 +524,8 @@ mod tests {
 
         assert!(registry.is_complete());
         assert!(registry.agreement_for(1).is_some());
+        assert_eq!(registry.enrolled_donor_indices(), vec![0, 1, 2]);
+        assert_eq!(registry.missing_donor_indices(), Vec::<u32>::new());
     }
 
     #[test]
