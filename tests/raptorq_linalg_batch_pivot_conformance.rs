@@ -416,3 +416,39 @@ fn rank_profile_reports_stable_pivot_and_free_column_witnesses() {
         );
     }
 }
+
+#[test]
+fn rank_profile_is_stable_under_equivalent_row_space_presentations() {
+    let canonical = [
+        vec![1u8, 0, 0, 0],
+        vec![0, 0, 1, 0],
+        vec![1, 0, 1, 0],
+        vec![0, 0, 0, 0],
+    ];
+    let scaled_and_permuted = [
+        vec![0u8, 0, 9, 0],
+        vec![7, 0, 9, 0],
+        vec![7, 0, 0, 0],
+        vec![0, 0, 0, 0],
+    ];
+
+    for rows in [&canonical, &scaled_and_permuted] {
+        let row_refs = rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let profile = coefficient_rank_profile(&row_refs, 4);
+
+        assert_eq!(profile.rows, 4);
+        assert_eq!(profile.columns, 4);
+        assert_eq!(profile.rank, 2);
+        assert_eq!(profile.deficit, 2);
+        assert_eq!(
+            profile.pivot_columns,
+            vec![0, 2],
+            "equivalent row spaces should expose the same pivot witness"
+        );
+        assert_eq!(
+            profile.free_columns,
+            vec![1, 3],
+            "equivalent row spaces should expose the same free-column witness"
+        );
+    }
+}
