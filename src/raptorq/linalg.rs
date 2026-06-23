@@ -926,6 +926,62 @@ pub struct GaussianRankStatus {
     pub deficit: usize,
 }
 
+/// Deterministic input-construction error for [`GaussianSolver`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaussianInputError {
+    /// Requested row is outside the coefficient/RHS row domain.
+    RowOutOfBounds {
+        /// Requested row.
+        row: usize,
+        /// Number of rows in the solver.
+        rows: usize,
+    },
+    /// Requested column is outside the coefficient column domain.
+    ColumnOutOfBounds {
+        /// Requested row.
+        row: usize,
+        /// Requested column.
+        column: usize,
+        /// Number of columns in the solver.
+        cols: usize,
+    },
+    /// Coefficient row width does not match the solver column count.
+    CoefficientLengthMismatch {
+        /// Requested row.
+        row: usize,
+        /// Expected coefficient count.
+        expected: usize,
+        /// Actual coefficient count.
+        actual: usize,
+    },
+}
+
+impl core::fmt::Display for GaussianInputError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RowOutOfBounds { row, rows } => {
+                write!(f, "row out of bounds: {row} >= {rows}")
+            }
+            Self::ColumnOutOfBounds { row, column, cols } => {
+                write!(
+                    f,
+                    "column out of bounds: row {row}, column {column} >= {cols}"
+                )
+            }
+            Self::CoefficientLengthMismatch {
+                row,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "coefficient length mismatch: row {row}, expected {expected}, actual {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GaussianInputError {}
+
 /// Statistics from Gaussian elimination.
 #[derive(Debug, Clone, Default)]
 pub struct GaussianStats {
@@ -977,23 +1033,92 @@ impl GaussianSolver {
     ///
     /// `coefficients` should have length `cols`.
     pub fn set_row(&mut self, row: usize, coefficients: &[u8], rhs: DenseRow) {
-        assert!(row < self.rows, "row out of bounds");
-        assert_eq!(coefficients.len(), self.cols, "coefficient length mismatch");
+        if let Err(err) = self.try_set_row(row, coefficients, rhs) {
+            panic!("{err}");
+        }
+    }
+
+    /// Fallible row setter for untrusted solver construction paths.
+    ///
+    /// Returns a deterministic error instead of panicking when the row index or
+    /// coefficient width is invalid.
+    pub fn try_set_row(
+        &mut self,
+        row: usize,
+        coefficients: &[u8],
+        rhs: DenseRow,
+    ) -> Result<(), GaussianInputError> {
+        if row >= self.rows {
+            return Err(GaussianInputError::RowOutOfBounds {
+                row,
+                rows: self.rows,
+            });
+        }
+        if coefficients.len() != self.cols {
+            return Err(GaussianInputError::CoefficientLengthMismatch {
+                row,
+                expected: self.cols,
+                actual: coefficients.len(),
+            });
+        }
         self.matrix[row].copy_from_slice(coefficients);
         self.rhs[row] = rhs;
+        Ok(())
     }
 
     /// Set a single coefficient.
     pub fn set_coefficient(&mut self, row: usize, col: usize, value: Gf256) {
-        assert!(row < self.rows, "row out of bounds");
-        assert!(col < self.cols, "column out of bounds");
+        if let Err(err) = self.try_set_coefficient(row, col, value) {
+            panic!("{err}");
+        }
+    }
+
+    /// Fallible coefficient setter for untrusted solver construction paths.
+    ///
+    /// Returns a deterministic error instead of panicking on out-of-range row or
+    /// column indices.
+    pub fn try_set_coefficient(
+        &mut self,
+        row: usize,
+        col: usize,
+        value: Gf256,
+    ) -> Result<(), GaussianInputError> {
+        if row >= self.rows {
+            return Err(GaussianInputError::RowOutOfBounds {
+                row,
+                rows: self.rows,
+            });
+        }
+        if col >= self.cols {
+            return Err(GaussianInputError::ColumnOutOfBounds {
+                row,
+                column: col,
+                cols: self.cols,
+            });
+        }
         self.matrix[row][col] = value.raw();
+        Ok(())
     }
 
     /// Set RHS for a row.
     pub fn set_rhs(&mut self, row: usize, rhs: DenseRow) {
-        assert!(row < self.rows, "row out of bounds");
+        if let Err(err) = self.try_set_rhs(row, rhs) {
+            panic!("{err}");
+        }
+    }
+
+    /// Fallible RHS setter for untrusted solver construction paths.
+    ///
+    /// Returns a deterministic error instead of panicking on an out-of-range row.
+    pub fn try_set_rhs(&mut self, row: usize, rhs: DenseRow) -> Result<(), GaussianInputError> {
+        if row >= self.rows {
+            return Err(GaussianInputError::RowOutOfBounds {
+                row,
+                rows: self.rows,
+            });
+        }
         self.rhs[row] = rhs;
+        Ok(())
     }
 
     /// Returns the current statistics.
@@ -2470,6 +2595,83 @@ mod tests {
     fn gaussian_set_rhs_rejects_out_of_range_row() {
         let mut solver = GaussianSolver::new(2, 2);
         solver.set_rhs(2, DenseRow::new(vec![1]));
+    }
+
+    #[test]
+    fn gaussian_try_setters_report_input_errors_without_mutating_solver() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver
+            .try_set_row(0, &[1, 0], DenseRow::new(vec![0x10]))
+            .expect("baseline row");
+        solver
+            .try_set_coefficient(1, 1, Gf256::new(0x22))
+            .expect("baseline coefficient");
+        solver
+            .try_set_rhs(1, DenseRow::new(vec![0x20]))
+            .expect("baseline rhs");
+
+        let matrix_before = solver.matrix.clone();
+        let rhs_before = solver.rhs.clone();
+
+        assert_eq!(
+            solver.try_set_row(2, &[1, 0], DenseRow::new(vec![0xAA])),
+            Err(GaussianInputError::RowOutOfBounds { row: 2, rows: 2 })
+        );
+        assert_eq!(
+            solver.try_set_row(0, &[1], DenseRow::new(vec![0xAA])),
+            Err(GaussianInputError::CoefficientLengthMismatch {
+                row: 0,
+                expected: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(
+            solver.try_set_coefficient(1, 2, Gf256::ONE),
+            Err(GaussianInputError::ColumnOutOfBounds {
+                row: 1,
+                column: 2,
+                cols: 2,
+            })
+        );
+        assert_eq!(
+            solver.try_set_rhs(7, DenseRow::new(vec![0xFF])),
+            Err(GaussianInputError::RowOutOfBounds { row: 7, rows: 2 })
+        );
+
+        assert_eq!(
+            solver.matrix, matrix_before,
+            "invalid fallible setters must not change coefficients"
+        );
+        assert_eq!(
+            solver.rhs, rhs_before,
+            "invalid fallible setters must not change RHS rows"
+        );
+    }
+
+    #[test]
+    fn gaussian_input_error_display_is_stable_and_triage_friendly() {
+        assert_eq!(
+            GaussianInputError::RowOutOfBounds { row: 4, rows: 3 }.to_string(),
+            "row out of bounds: 4 >= 3"
+        );
+        assert_eq!(
+            GaussianInputError::ColumnOutOfBounds {
+                row: 1,
+                column: 9,
+                cols: 8,
+            }
+            .to_string(),
+            "column out of bounds: row 1, column 9 >= 8"
+        );
+        assert_eq!(
+            GaussianInputError::CoefficientLengthMismatch {
+                row: 2,
+                expected: 5,
+                actual: 4,
+            }
+            .to_string(),
+            "coefficient length mismatch: row 2, expected 5, actual 4"
+        );
     }
 
     /// br-asupersync-yjjgz1: a 3x3 matrix where ONE column is fully
