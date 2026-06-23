@@ -1879,3 +1879,21 @@ Benched encrypted+nocrypto 50M after j80p42 `338c1560b` "fix(atp): cushion lossy
 **ROOT CAUSE (refined):** this is NOT a cushion/overhead-margin tweak — it's that the fountain-feedback loop **terminates before convergence**. True fountain behavior requires the sender to respond to each receiver NeedMore (per-block deficit) with the requested repair symbols and LOOP until the receiver acks every block complete; instead the QUIC path emits a bounded/capped amount then stops, and the receiver times out at 60s still short. Bad's ~2000-symbol deficit (vs good's ~110) shows the cap scales wrong with loss rate.
 
 **NEXT LEVER (re-routed, deeper):** instrument the QUIC repair-round loop (ATP_RQ_TRACE round-by-round: per-round symbols_sent, NeedMore deficit requested, repair symbols emitted in response, round count, cap) to answer: does the sender respond to NeedMore at all on the QUIC path? how many repair symbols/round? is there a round cap or per-block budget that exhausts? Then make the sender loop per-block repair to convergence (uncapped within a deadline) so no block is left short. ALSO: 2/18 lossy reps hit `ASUP-E804 ... receive sender handshake[/ack]` (handshake timeout under heavy concurrent bench load) — possible handshake robustness/contention issue to watch. j80p42 kept OPEN (insufficient). Evidence: `artifacts/atp_bench_matrix/20260623T041722Z/` (counters in cells/50M/{good,bad}/encrypted/atp-quic-tls13/rep*/).
+
+## MATRIX-44 (2026-06-23) — ★ENCRYPTED-LOSSY CONVERGES for the first time (good 2/3 sha-ok) via j80p42 loop-fix — but ~100× slow + bad still fails: trace proves sender RE-SENDS WHOLE OBJECT per round (46000) vs 7430 requested + UNPACED (self-inflicts 14.7% loss)
+
+Benched encrypted 50M after j80p42 loop-fix `f2ba4038c` "keep repair feedback looping". Run `artifacts/atp_bench_matrix/20260623T050640Z/`:
+
+| regime | atp-quic-tls13 | rsync-ssh | vs MATRIX-43 |
+|---|---|---|---|
+| perfect | 32.7s sha-ok (3/3) | 0.9s | unchanged (decode-bound) |
+| good (25ms/0.1%/200mbit) | **2/3 sha-ok, 414.9s** | 4.0s | ★was 0/3 → now CONVERGES |
+| bad (80ms/2%/50mbit) | 0/3 ASUP-E804 | 22.6s | still fails |
+
+**★MILESTONE (partial): encrypted-lossy CONVERGES for the FIRST TIME** — good went 0/3 (always ASUP-E804) → 2/3 sha-ok. The loop-fix achieved correctness on mild loss. (One "errored" good rep actually committed sha-ok at symbols_accepted=46000 then the SENDER timed out on teardown — a completion-signal nit.) **BUT it's a correctness foothold, not a win:** good is **~100× slower than rsync** (414.9 vs 4.0s) and bad still 0/3 (stuck ~44000/46000).
+
+**ROOT CAUSE (pinned from ATP_RQ_TRACE, bad round=2):** `repair_blocks=100 requested_repair_symbols=7430 round_symbols_sent=46000 round_loss_fraction=0.1473 max_feedback_rounds=1024 round_cap_exceeded=false`. Two compounding inefficiencies:
+1. **Over-send:** the receiver requests **7,430** repair symbols (the per-block deficits, max 94/block across 100 blocks), but the sender emits **46,000** (the WHOLE object) that round — a **6× over-send**. The loop re-sprays everything instead of only the requested deficit.
+2. **Unpaced:** sending 46000 symbols into a 50mbit link overruns it → **observed loss 14.73%** (vs netem's 2%) — self-inflicted. Most re-sent symbols are dropped, so per-block deficits shrink slowly → good crawls (414s), bad never converges in budget. (Not a round cap — `round_cap_exceeded=false`, 1024-round budget unused.)
+
+**NEXT LEVER (perf bead filed):** the repair loop must (a) emit ONLY the requested per-block repair symbols (~7430, not 46000) per NeedMore, and (b) PACE them to the link rate (AIMD/token-bucket, like the nocrypto rq path) so self-loss stays ~2% not 15%. That bounded+paced repair should cut good from 414s toward rsync's 4s AND let bad converge. j80p42 = correctness foothold (kept as evidence); the win needs this efficiency fix. Evidence: `artifacts/atp_bench_matrix/20260623T050640Z/` (trace in cells/50M/bad/encrypted/atp-quic-tls13/rep*/).
