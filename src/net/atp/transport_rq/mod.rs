@@ -3480,6 +3480,8 @@ pub async fn send_path(
                     control_wait,
                     total_bytes,
                 );
+                let measured_repair_overhead =
+                    measured_feedback_repair_overhead(adaptive.last_round_loss_fraction);
                 let source_fec_fallback_trigger = source_retransmit_needs_fec_fallback(
                     &config,
                     feedback_rounds,
@@ -3494,12 +3496,14 @@ pub async fn send_path(
                 };
                 pacer.configure(round_tuning.pacing);
                 rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} round_loss_fraction={:.4} aimd_rate_bps={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
+                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} round_loss_fraction={:.4} measured_repair_overhead={:.4} fallback_trigger={} aimd_rate_bps={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
                     pending.len(),
                     source_symbols.len(),
                     sent_this_round,
                     received_this_round,
                     adaptive.last_round_loss_fraction,
+                    measured_repair_overhead,
+                    source_fec_fallback_trigger,
                     adaptive.aimd_rate_bps,
                     round_send_wall.as_millis(),
                     control_wait.as_millis(),
@@ -3851,6 +3855,7 @@ where
             }
         } else {
             let mut feedback_repair_blocks = 0usize;
+            let mut feedback_source_symbols = 0usize;
             let mut feedback_repair_symbols = 0usize;
             let mut feedback_prior_repair_cursor = 0usize;
             let mut feedback_target_repair_cursor = 0usize;
@@ -3869,6 +3874,7 @@ where
                 let repair_count = target_repair.saturating_sub(already);
                 if !with_source {
                     feedback_repair_blocks += 1;
+                    feedback_source_symbols = feedback_source_symbols.saturating_add(block.k);
                     feedback_repair_symbols = feedback_repair_symbols.saturating_add(repair_count);
                     feedback_prior_repair_cursor =
                         feedback_prior_repair_cursor.saturating_add(already);
@@ -3966,14 +3972,20 @@ where
                 enc.repair_cursors[block_index] = target_repair;
             }
             if !with_source {
+                let source_symbols = feedback_source_symbols.max(1) as f64;
+                let emitted_ratio = feedback_repair_symbols as f64 / source_symbols;
+                let target_ratio = feedback_target_repair_cursor as f64 / source_symbols;
                 rqtrace!(
-                    "sender: repair_spray entry={} blocks={} repair_overhead={:.4} emitted_repair_symbols={} prior_repair_cursor={} target_repair_cursor={} pending_entries={}",
+                    "sender: repair_spray entry={} blocks={} source_symbols={} repair_overhead={:.4} emitted_repair_symbols={} emitted_repair_ratio={:.4} prior_repair_cursor={} target_repair_cursor={} target_repair_ratio={:.4} pending_entries={}",
                     enc.index,
                     feedback_repair_blocks,
+                    feedback_source_symbols,
                     round_tuning.repair_overhead,
                     feedback_repair_symbols,
+                    emitted_ratio,
                     feedback_prior_repair_cursor,
                     feedback_target_repair_cursor,
+                    target_ratio,
                     pending.len(),
                 );
             }
