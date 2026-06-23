@@ -1547,7 +1547,6 @@ impl InactivationDecoder {
         symbols: &[ReceivedSymbol],
         object_id: Option<&ObjectId>,
     ) -> Result<(), DecodeError> {
-        let k = self.params.k;
         let l = self.params.l;
         let symbol_size = self.params.symbol_size;
         let required = self.minimum_received_symbols();
@@ -1576,26 +1575,7 @@ impl InactivationDecoder {
                 self.validate_esi_rate_limits(sym.esi, object_id, &mut compute_budget)?;
             }
 
-            if sym.is_source {
-                let esi = sym.esi as usize;
-                if esi >= k {
-                    return Err(DecodeError::SourceEsiOutOfRange {
-                        esi: sym.esi,
-                        max_valid: k,
-                    });
-                }
-                let (expected_cols, expected_coefs) = self.source_equation(sym.esi);
-                let derive_canonical_from_esi =
-                    sym.columns.is_empty() && sym.coefficients.is_empty();
-                let canonical_equation =
-                    sym.columns == expected_cols && sym.coefficients == expected_coefs;
-                if !derive_canonical_from_esi && !canonical_equation {
-                    return Err(DecodeError::InvalidSourceSymbolEquation {
-                        esi: sym.esi,
-                        expected_column: esi,
-                    });
-                }
-            }
+            self.validate_source_symbol_equation(sym)?;
 
             for &column in &sym.columns {
                 if column >= l {
@@ -2982,8 +2962,34 @@ impl InactivationDecoder {
         self.systematic_equation(esi)
     }
 
-    fn validate_rank_input(&self, symbols: &[ReceivedSymbol]) -> Result<(), DecodeError> {
+    fn validate_source_symbol_equation(&self, sym: &ReceivedSymbol) -> Result<(), DecodeError> {
+        if !sym.is_source {
+            return Ok(());
+        }
+
         let k = self.params.k;
+        let esi = sym.esi as usize;
+        if esi >= k {
+            return Err(DecodeError::SourceEsiOutOfRange {
+                esi: sym.esi,
+                max_valid: k,
+            });
+        }
+
+        let (expected_cols, expected_coefs) = self.source_equation(sym.esi);
+        let derive_canonical_from_esi = sym.columns.is_empty() && sym.coefficients.is_empty();
+        let canonical_equation = sym.columns == expected_cols && sym.coefficients == expected_coefs;
+        if !derive_canonical_from_esi && !canonical_equation {
+            return Err(DecodeError::InvalidSourceSymbolEquation {
+                esi: sym.esi,
+                expected_column: esi,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_rank_input(&self, symbols: &[ReceivedSymbol]) -> Result<(), DecodeError> {
         let l = self.params.l;
         let symbol_size = self.params.symbol_size;
 
@@ -3001,26 +3007,7 @@ impl InactivationDecoder {
                     coefficients: sym.coefficients.len(),
                 });
             }
-            if sym.is_source {
-                let esi = sym.esi as usize;
-                if esi >= k {
-                    return Err(DecodeError::SourceEsiOutOfRange {
-                        esi: sym.esi,
-                        max_valid: k,
-                    });
-                }
-                let (expected_cols, expected_coefs) = self.source_equation(sym.esi);
-                let derive_canonical_from_esi =
-                    sym.columns.is_empty() && sym.coefficients.is_empty();
-                let canonical_equation =
-                    sym.columns == expected_cols && sym.coefficients == expected_coefs;
-                if !derive_canonical_from_esi && !canonical_equation {
-                    return Err(DecodeError::InvalidSourceSymbolEquation {
-                        esi: sym.esi,
-                        expected_column: esi,
-                    });
-                }
-            }
+            self.validate_source_symbol_equation(sym)?;
             for &column in &sym.columns {
                 if column >= l {
                     return Err(DecodeError::ColumnIndexOutOfRange {
@@ -3426,6 +3413,37 @@ mod tests {
         assert_eq!(complete_profile.deficit, 0);
         assert!(complete_profile.free_columns.is_empty());
         assert_eq!(complete_profile.pivot_columns.len(), complete.columns);
+    }
+
+    #[test]
+    fn rank_profile_rejects_noncanonical_source_equation_like_decode() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 0x6330_C105_u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let malformed_source = ReceivedSymbol {
+            esi: 0,
+            is_source: true,
+            columns: vec![0],
+            coefficients: vec![Gf256::ONE],
+            data: vec![0xA5; symbol_size],
+        };
+
+        let rank_err = decoder
+            .rank_profile(&[malformed_source.clone()])
+            .expect_err("rank diagnostics must reject malformed source equations");
+        let decode_err = decoder
+            .decode(&[malformed_source])
+            .expect_err("decode must reject the same malformed source equation");
+        assert_eq!(
+            rank_err,
+            DecodeError::InvalidSourceSymbolEquation {
+                esi: 0,
+                expected_column: 0
+            }
+        );
+        assert_eq!(decode_err, rank_err);
+        assert!(rank_err.is_unrecoverable());
     }
 
     use crate::raptorq::systematic::SystematicEncoder;
