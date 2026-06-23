@@ -1818,3 +1818,17 @@ Bandwidth is NOT the limit (receiver `datagrams_dropped=0, pending=0` — it acc
 **This same cap also explains encrypted-clean's 42× loss** (MATRIX-37/39): perfect = 1.5 MB/s vs rsync 58 MB/s. The one-symbol-per-packet rule is the SINGLE encrypted-tier throughput bottleneck across ALL regimes (lossy non-convergence AND clean slowness).
 
 **FIX (filed as a bead):** now that the UDP envelope is 65535, COALESCE MANY symbol-DATAGRAM frames per UDP datagram (~53 symbols × 1216B fit in 65535) — each symbol stays its own RFC 9221 DATAGRAM frame (per-symbol loss granularity preserved), just packed into one UDP send. This is ~50× send-throughput headroom and should fix BOTH encrypted-lossy convergence AND encrypted-clean speed at once. Caveat: the receiver's 256-deep inbound DATAGRAM queue (the original reason for the 1-symbol cap) must drain faster or be enlarged to absorb coalesced bursts — pair the change with a receiver drain/queue-depth bump. Evidence: `artifacts/atp_bench_matrix/20260623T011637Z/` (counters in cells/50M/{good,bad}/encrypted/atp-quic-tls13/rep*/).
+
+## MATRIX-40 (2026-06-23) — AUTH tier scoreboard (50M): healthy + correct everywhere (sha-ok), TIEs rsync on good, loses perfect/bad like nocrypto (no auth-specific bug)
+
+Benched the auth tier (atp-rq-auth `--rq-auth-key-hex` vs rsync-ssh aes128-gcm) at 50M while the cod swarm was credit-blocked. Run `artifacts/atp_bench_matrix/20260623T015724Z/`, 3 reps/cell, ALL sha-ok, zero errors:
+
+| regime | atp-rq-auth median | rsync-ssh median | verdict | atp RSS | rsync RSS |
+|---|---|---|---|---|---|
+| perfect | 3.72s | 0.85s | LOSE 4.4× | 50MB | 51MB |
+| good (25ms/0.1%/200mbit) | **3.954s** | **3.954s** | **TIE** | 48MB | 52MB |
+| bad (80ms/2%/50mbit) | 53.4s | 17.7s | LOSE 3.0× | **877MB** | 52MB |
+
+**The auth tier is correct and healthy** — converges sha-ok in every regime, no ASUP-E804 / no convergence bug (contrast the encrypted/QUIC tier, MATRIX-39, which fails lossy on the one-symbol-per-packet throughput cap). The auth path rides the same rq transport + frozen AIMD as nocrypto, so it inherits the same scoreboard shape: **TIE on good (matches 50M/good nocrypto TIE), lose on perfect (clean per-tree/decode setup overhead) and bad (the single-core lossy decode wall, 53s ≈ nocrypto bad 57s).** The per-symbol auth (AUTH-1 source-first) adds no measurable convergence penalty.
+
+**Watch:** auth/bad peak RSS = **877 MB** (vs rsync 52MB) — the receiver buffers a large symbol backlog during the long single-core lossy decode at 50M. This is the same decode-wall pathology; the LANE-A receiver-parallel-decode lever should cut both the 53s wall AND the 877MB backlog (faster drain → fewer retained symbols). No auth-specific work needed — auth rides nocrypto's fixes. Evidence: `artifacts/atp_bench_matrix/20260623T015724Z/`.
