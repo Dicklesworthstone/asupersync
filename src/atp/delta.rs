@@ -19,9 +19,12 @@ pub const ATP_DELTA_CHUNK_MANIFEST_SCHEMA: &str = "asupersync.atp.delta.chunk-ma
 const MANIFEST_MAGIC: &[u8] = b"ASUP_ATP_DELTA_CHUNK_MANIFEST_V1\0";
 const MANIFEST_HASH_DOMAIN: &[u8] = b"asupersync.atp.delta.chunk-manifest.root.v1\0";
 const SUBDELTA_OPS_MAGIC: &[u8] = b"ASUP_ATP_DELTA_SUBCHUNK_OPS_V1\0";
+const DELTA_RESYNC_SEND_PLAN_MAGIC: &[u8] = b"ASUP_ATP_DELTA_RESYNC_SEND_PLAN_V1\0";
 const ENCODED_CHUNK_BYTES: usize = 4 + 8 + 8 + 32;
 const SUBDELTA_OP_COPY: u8 = 0;
 const SUBDELTA_OP_LITERAL: u8 = 1;
+const DELTA_SEND_ITEM_WHOLE_CHUNK: u8 = 0;
+const DELTA_SEND_ITEM_SUBCHUNK_OPS: u8 = 1;
 const RECEIVER_HAVE_SET_BASE_WIRE_BYTES: u64 = 32 + 8 + 8;
 const RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES: u64 = 32 + 8;
 
@@ -779,6 +782,18 @@ pub enum DeltaResyncSendItem {
 }
 
 impl DeltaResyncSendItem {
+    /// Target logical chunk reconstructed by this payload item.
+    #[must_use]
+    pub const fn target_chunk(&self) -> &CasChunkRef {
+        match self {
+            Self::WholeChunk { chunk, .. }
+            | Self::SubchunkOps {
+                target_chunk: chunk,
+                ..
+            } => chunk,
+        }
+    }
+
     /// Payload bytes emitted on the delta stream for this item.
     #[must_use]
     pub fn payload_bytes(&self) -> usize {
@@ -828,6 +843,153 @@ impl DeltaResyncSendPlan {
     #[must_use]
     pub const fn beats_full_object(&self, full_object_bytes: u64) -> bool {
         self.payload_bytes < full_object_bytes
+    }
+
+    /// Encode this concrete send plan into its deterministic transfer envelope.
+    ///
+    /// The receiver decodes this envelope with the negotiated base plan, applies
+    /// each item in order, and then verifies the target manifest coverage before
+    /// committing reconstructed bytes.
+    pub fn to_wire_bytes(&self) -> Result<Vec<u8>, DeltaError> {
+        validate_send_plan_items(&self.base_plan, &self.items)?;
+        if self.whole_chunk_bytes != self.base_plan.missing_bytes {
+            return Err(DeltaError::DeltaSendPlanWholeBytesMismatch {
+                encoded: self.whole_chunk_bytes,
+                expected: self.base_plan.missing_bytes,
+            });
+        }
+
+        let computed_payload_bytes = send_items_payload_bytes(&self.items)?;
+        if computed_payload_bytes != self.payload_bytes {
+            return Err(DeltaError::DeltaSendPlanPayloadBytesMismatch {
+                encoded: self.payload_bytes,
+                computed: computed_payload_bytes,
+            });
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(DELTA_RESYNC_SEND_PLAN_MAGIC);
+        out.extend_from_slice(self.base_plan.sender_merkle_root.hash());
+        match &self.base_plan.receiver_merkle_root {
+            Some(root) => {
+                out.push(1);
+                out.extend_from_slice(root.hash());
+            }
+            None => out.push(0),
+        }
+        out.extend_from_slice(
+            &u64::try_from(self.items.len())
+                .map_err(|_| DeltaError::ChunkCountOverflow)?
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(&self.payload_bytes.to_be_bytes());
+        out.extend_from_slice(&self.whole_chunk_bytes.to_be_bytes());
+
+        for item in &self.items {
+            match item {
+                DeltaResyncSendItem::WholeChunk { chunk, payload } => {
+                    out.push(DELTA_SEND_ITEM_WHOLE_CHUNK);
+                    encode_chunk_ref(&mut out, chunk);
+                    write_u64_prefixed_bytes(&mut out, payload)?;
+                }
+                DeltaResyncSendItem::SubchunkOps {
+                    target_chunk,
+                    base_chunk,
+                    target_sha256,
+                    encoded_ops,
+                } => {
+                    out.push(DELTA_SEND_ITEM_SUBCHUNK_OPS);
+                    encode_chunk_ref(&mut out, target_chunk);
+                    encode_chunk_ref(&mut out, base_chunk);
+                    out.extend_from_slice(target_sha256);
+                    write_u64_prefixed_bytes(&mut out, encoded_ops)?;
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Decode a deterministic transfer envelope against the negotiated base plan.
+    pub fn from_wire_bytes(base_plan: DeltaResyncPlan, bytes: &[u8]) -> Result<Self, DeltaError> {
+        let mut reader = ByteReader::new(bytes);
+        reader.expect_magic(DELTA_RESYNC_SEND_PLAN_MAGIC)?;
+
+        let sender_merkle_root = MerkleRoot::new(reader.read_hash()?);
+        if sender_merkle_root != base_plan.sender_merkle_root {
+            return Err(DeltaError::DeltaSendPlanSenderRootMismatch {
+                encoded: sender_merkle_root,
+                expected: base_plan.sender_merkle_root.clone(),
+            });
+        }
+
+        let receiver_merkle_root = match reader.read_u8()? {
+            0 => None,
+            1 => Some(MerkleRoot::new(reader.read_hash()?)),
+            tag => return Err(DeltaError::InvalidDeltaSendPlanReceiverRootTag { tag }),
+        };
+        if receiver_merkle_root != base_plan.receiver_merkle_root {
+            return Err(DeltaError::DeltaSendPlanReceiverRootMismatch {
+                encoded: receiver_merkle_root,
+                expected: base_plan.receiver_merkle_root.clone(),
+            });
+        }
+
+        let item_count =
+            usize::try_from(reader.read_u64()?).map_err(|_| DeltaError::ChunkCountOverflow)?;
+        if item_count != base_plan.missing_chunks.len() {
+            return Err(DeltaError::DeltaSendPlanItemCountMismatch {
+                actual: item_count,
+                expected: base_plan.missing_chunks.len(),
+            });
+        }
+
+        let encoded_payload_bytes = reader.read_u64()?;
+        let whole_chunk_bytes = reader.read_u64()?;
+        if whole_chunk_bytes != base_plan.missing_bytes {
+            return Err(DeltaError::DeltaSendPlanWholeBytesMismatch {
+                encoded: whole_chunk_bytes,
+                expected: base_plan.missing_bytes,
+            });
+        }
+
+        let mut items = Vec::with_capacity(item_count);
+        for ordinal in 0..item_count {
+            let item = match reader.read_u8()? {
+                DELTA_SEND_ITEM_WHOLE_CHUNK => DeltaResyncSendItem::WholeChunk {
+                    chunk: decode_chunk_ref(&mut reader)?,
+                    payload: reader.read_u64_prefixed_bytes()?.to_vec(),
+                },
+                DELTA_SEND_ITEM_SUBCHUNK_OPS => DeltaResyncSendItem::SubchunkOps {
+                    target_chunk: decode_chunk_ref(&mut reader)?,
+                    base_chunk: decode_chunk_ref(&mut reader)?,
+                    target_sha256: reader.read_hash()?,
+                    encoded_ops: reader.read_u64_prefixed_bytes()?.to_vec(),
+                },
+                tag => return Err(DeltaError::InvalidDeltaSendItemTag { tag }),
+            };
+
+            if item.target_chunk() != &base_plan.missing_chunks[ordinal] {
+                return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
+            }
+            items.push(item);
+        }
+        reader.expect_eof()?;
+
+        let computed_payload_bytes = send_items_payload_bytes(&items)?;
+        if computed_payload_bytes != encoded_payload_bytes {
+            return Err(DeltaError::DeltaSendPlanPayloadBytesMismatch {
+                encoded: encoded_payload_bytes,
+                computed: computed_payload_bytes,
+            });
+        }
+
+        Ok(Self {
+            base_plan,
+            items,
+            payload_bytes: encoded_payload_bytes,
+            whole_chunk_bytes,
+        })
     }
 }
 
@@ -1153,6 +1315,17 @@ pub fn apply_delta_resync_send_plan(
     Ok(store)
 }
 
+/// Decode and apply a delta transfer envelope, then verify target coverage.
+pub fn apply_delta_resync_wire_payload(
+    target_manifest: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    base_plan: DeltaResyncPlan,
+    wire_payload: &[u8],
+) -> Result<ContentAddressedChunkStore, DeltaError> {
+    let send_plan = DeltaResyncSendPlan::from_wire_bytes(base_plan, wire_payload)?;
+    apply_delta_resync_send_plan(target_manifest, receiver_store, &send_plan)
+}
+
 /// Reconstruct a manifest's logical byte stream from a verified chunk store.
 pub fn reconstruct_manifest_bytes(
     manifest: &PersistentChunkManifest,
@@ -1279,6 +1452,28 @@ pub enum DeltaError {
     },
     /// A compact sub-delta op stream used an unknown operation tag.
     InvalidSubDeltaOpTag { tag: u8 },
+    /// A delta send-plan envelope used an unknown payload item tag.
+    InvalidDeltaSendItemTag { tag: u8 },
+    /// A delta send-plan envelope used an unknown receiver-root tag.
+    InvalidDeltaSendPlanReceiverRootTag { tag: u8 },
+    /// Delta send-plan envelope targeted a different sender manifest root.
+    DeltaSendPlanSenderRootMismatch {
+        encoded: MerkleRoot,
+        expected: MerkleRoot,
+    },
+    /// Delta send-plan envelope targeted a different receiver manifest root.
+    DeltaSendPlanReceiverRootMismatch {
+        encoded: Option<MerkleRoot>,
+        expected: Option<MerkleRoot>,
+    },
+    /// Delta send-plan item order did not match the negotiated missing chunks.
+    DeltaSendPlanChunkMismatch { ordinal: usize },
+    /// Delta send-plan item count did not match the negotiated missing chunks.
+    DeltaSendPlanItemCountMismatch { actual: usize, expected: usize },
+    /// Delta send-plan encoded payload bytes disagreed with item payloads.
+    DeltaSendPlanPayloadBytesMismatch { encoded: u64, computed: u64 },
+    /// Delta send-plan whole-chunk baseline disagreed with the base plan.
+    DeltaSendPlanWholeBytesMismatch { encoded: u64, expected: u64 },
     /// Receiver tried to advertise a manifest chunk it had not verified locally.
     ReceiverHaveSetMissingChunk { index: u32 },
     /// Receiver have-set exceeds the configured chunk-count budget.
@@ -1353,6 +1548,39 @@ impl fmt::Display for DeltaError {
             Self::InvalidSubDeltaOpTag { tag } => {
                 write!(f, "delta sub-chunk op stream used invalid tag {tag}")
             }
+            Self::InvalidDeltaSendItemTag { tag } => {
+                write!(f, "delta send-plan envelope used invalid item tag {tag}")
+            }
+            Self::InvalidDeltaSendPlanReceiverRootTag { tag } => {
+                write!(
+                    f,
+                    "delta send-plan envelope used invalid receiver-root tag {tag}"
+                )
+            }
+            Self::DeltaSendPlanSenderRootMismatch { encoded, expected } => write!(
+                f,
+                "delta send-plan sender root mismatch: encoded {encoded}, expected {expected}"
+            ),
+            Self::DeltaSendPlanReceiverRootMismatch { encoded, expected } => write!(
+                f,
+                "delta send-plan receiver root mismatch: encoded {encoded:?}, expected {expected:?}"
+            ),
+            Self::DeltaSendPlanChunkMismatch { ordinal } => write!(
+                f,
+                "delta send-plan item {ordinal} does not match the negotiated missing chunk"
+            ),
+            Self::DeltaSendPlanItemCountMismatch { actual, expected } => write!(
+                f,
+                "delta send-plan item count mismatch: got {actual}, expected {expected}"
+            ),
+            Self::DeltaSendPlanPayloadBytesMismatch { encoded, computed } => write!(
+                f,
+                "delta send-plan payload byte count mismatch: encoded {encoded}, computed {computed}"
+            ),
+            Self::DeltaSendPlanWholeBytesMismatch { encoded, expected } => write!(
+                f,
+                "delta send-plan whole-chunk byte count mismatch: encoded {encoded}, expected {expected}"
+            ),
             Self::ReceiverHaveSetMissingChunk { index } => {
                 write!(
                     f,
@@ -1400,6 +1628,63 @@ impl CasChunkRef {
 
 fn manifest_chunk_keys(chunks: &[CasChunkRef]) -> BTreeSet<ReceiverChunkKey> {
     chunks.iter().map(CasChunkRef::key).collect()
+}
+
+fn encode_chunk_ref(out: &mut Vec<u8>, chunk: &CasChunkRef) {
+    out.extend_from_slice(&chunk.index.to_be_bytes());
+    out.extend_from_slice(&chunk.byte_offset.to_be_bytes());
+    out.extend_from_slice(&chunk.size_bytes.to_be_bytes());
+    out.extend_from_slice(chunk.content_id.hash());
+}
+
+fn decode_chunk_ref(reader: &mut ByteReader<'_>) -> Result<CasChunkRef, DeltaError> {
+    Ok(CasChunkRef {
+        index: reader.read_u32()?,
+        byte_offset: reader.read_u64()?,
+        size_bytes: reader.read_u64()?,
+        content_id: ContentId::new(reader.read_hash()?),
+    })
+}
+
+fn write_u64_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), DeltaError> {
+    out.extend_from_slice(
+        &u64::try_from(bytes.len())
+            .map_err(|_| DeltaError::ChunkSizeOverflow)?
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn send_items_payload_bytes(items: &[DeltaResyncSendItem]) -> Result<u64, DeltaError> {
+    let mut payload_bytes = 0u64;
+    for item in items {
+        payload_bytes = payload_bytes
+            .checked_add(
+                u64::try_from(item.payload_bytes()).map_err(|_| DeltaError::ChunkSizeOverflow)?,
+            )
+            .ok_or(DeltaError::ChunkSizeOverflow)?;
+    }
+    Ok(payload_bytes)
+}
+
+fn validate_send_plan_items(
+    base_plan: &DeltaResyncPlan,
+    items: &[DeltaResyncSendItem],
+) -> Result<(), DeltaError> {
+    if items.len() != base_plan.missing_chunks.len() {
+        return Err(DeltaError::DeltaSendPlanItemCountMismatch {
+            actual: items.len(),
+            expected: base_plan.missing_chunks.len(),
+        });
+    }
+    for (ordinal, (item, expected_chunk)) in items.iter().zip(&base_plan.missing_chunks).enumerate()
+    {
+        if item.target_chunk() != expected_chunk {
+            return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
+        }
+    }
+    Ok(())
 }
 
 fn receiver_have_set_wire_bytes(chunks: usize) -> Result<u64, DeltaError> {
@@ -1627,6 +1912,11 @@ impl<'a> ByteReader<'a> {
         self.read_exact(32)?
             .try_into()
             .map_err(|_| DeltaError::TruncatedManifest)
+    }
+
+    fn read_u64_prefixed_bytes(&mut self) -> Result<&'a [u8], DeltaError> {
+        let len = usize::try_from(self.read_u64()?).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+        self.read_exact(len)
     }
 
     fn ensure_remaining_chunks(&self, chunk_count: usize) -> Result<(), DeltaError> {
@@ -2227,6 +2517,21 @@ mod tests {
         assert!(send_plan.beats_full_object(sender.total_size_bytes));
         assert!(send_plan.payload_bytes < send_plan.whole_chunk_bytes);
 
+        let wire_payload = send_plan.to_wire_bytes().expect("wire encode");
+        assert!(u64::try_from(wire_payload.len()).expect("wire len") < sender.total_size_bytes);
+        let decoded_plan = DeltaResyncSendPlan::from_wire_bytes(base_plan.clone(), &wire_payload)
+            .expect("wire decode");
+        assert_eq!(decoded_plan, send_plan);
+
+        let mut tampered_root = wire_payload.clone();
+        tampered_root[DELTA_RESYNC_SEND_PLAN_MAGIC.len()] ^= 0x80;
+        let err = DeltaResyncSendPlan::from_wire_bytes(base_plan.clone(), &tampered_root)
+            .expect_err("root tamper");
+        assert!(matches!(
+            err,
+            DeltaError::DeltaSendPlanSenderRootMismatch { .. }
+        ));
+
         let DeltaResyncSendItem::SubchunkOps { encoded_ops, .. } = &send_plan.items[0] else {
             panic!("expected sub-chunk op stream");
         };
@@ -2241,6 +2546,13 @@ mod tests {
             .expect("apply send plan");
         let rebuilt = reconstruct_manifest_bytes(&sender, &applied).expect("reconstruct target");
         assert_eq!(rebuilt, new);
+
+        let applied_from_wire =
+            apply_delta_resync_wire_payload(&sender, &receiver_store, base_plan, &wire_payload)
+                .expect("apply wire payload");
+        let rebuilt_from_wire =
+            reconstruct_manifest_bytes(&sender, &applied_from_wire).expect("reconstruct wire");
+        assert_eq!(rebuilt_from_wire, new);
     }
 
     #[test]
@@ -2298,9 +2610,24 @@ mod tests {
             DeltaResyncSendItem::WholeChunk { .. }
         ));
 
+        let wire_payload = send_plan.to_wire_bytes().expect("wire encode");
+        let decoded_plan = DeltaResyncSendPlan::from_wire_bytes(base_plan.clone(), &wire_payload)
+            .expect("wire decode");
+        assert_eq!(decoded_plan, send_plan);
+
         let applied = apply_delta_resync_send_plan(&sender, &receiver_store, &send_plan)
             .expect("apply mixed send plan");
         let rebuilt = reconstruct_manifest_bytes(&sender, &applied).expect("reconstruct target");
         assert_eq!(rebuilt, [new_a.as_slice(), new_b.as_slice()].concat());
+
+        let applied_from_wire =
+            apply_delta_resync_wire_payload(&sender, &receiver_store, base_plan, &wire_payload)
+                .expect("apply mixed wire payload");
+        let rebuilt_from_wire =
+            reconstruct_manifest_bytes(&sender, &applied_from_wire).expect("reconstruct wire");
+        assert_eq!(
+            rebuilt_from_wire,
+            [new_a.as_slice(), new_b.as_slice()].concat()
+        );
     }
 }
