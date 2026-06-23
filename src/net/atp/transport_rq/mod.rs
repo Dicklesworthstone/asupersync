@@ -4435,7 +4435,9 @@ pub async fn receive_connection(
                         seed_stats.seeded
                     );
                 }
-                let completed_decode_stats = join_all_pending_decodes(cx, &mut decoders).await?;
+                let decode_width_budget = rq_decode_width_budget(&decoders, symbol_size);
+                let completed_decode_stats =
+                    join_all_pending_decodes(cx, &mut decoders, decode_width_budget).await?;
                 round_stats.record_decode_stats(completed_decode_stats);
                 if completed_decode_stats.attempts > 0 {
                     rqtrace!(
@@ -5009,7 +5011,9 @@ async fn feed_symbol(
     )
     .await?;
     while !dec.pending_decodes.is_empty() {
-        let _ = join_one_pending_decode(&cx, dec).await?;
+        let _ =
+            join_one_pending_decode(&cx, dec, true, RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD)
+                .await?;
     }
     Ok(feed.accepted)
 }
@@ -5023,7 +5027,8 @@ async fn dispatch_decode_job(
     transfer_decode_width: usize,
 ) -> Result<DecodeDispatchOutcome, RqError> {
     let block_sbn = job.sbn();
-    let mut decode_stats = drain_ready_entry_decodes(cx, dec).await?;
+    let mut decode_stats =
+        drain_ready_entry_decodes(cx, dec, allow_spawn_decode, transfer_decode_width).await?;
     if block_decode_pending(dec, block_sbn) {
         rqtrace!(
             "receiver: entry {} dropped duplicate decode job for block {} from {trigger}",
@@ -5037,7 +5042,7 @@ async fn dispatch_decode_job(
     }
 
     if !allow_spawn_decode {
-        let joined = join_one_pending_decode(cx, dec).await?;
+        let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
         decode_stats.merge(joined);
         rqtrace!(
             "receiver: entry {} joined {} pending decode job(s) before queueing block {} from {trigger} because transfer decode width is saturated",
@@ -5055,7 +5060,7 @@ async fn dispatch_decode_job(
 
     let entry_decode_width = entry_decode_width_budget(dec, transfer_decode_width);
     if !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width) {
-        let joined = join_one_pending_decode(cx, dec).await?;
+        let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
         decode_stats.merge(joined);
         rqtrace!(
             "receiver: entry {} joined {} pending decode job(s) before queueing block {} from {trigger} (entry_cap={entry_decode_width})",
@@ -5108,7 +5113,7 @@ async fn dispatch_decode_job(
             ))
         }
         Err(err) => {
-            let joined = join_one_pending_decode(cx, dec).await?;
+            let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
             decode_stats.merge(joined);
             rqtrace!(
                 "receiver: entry {} joined {} pending decode job(s) after spawn denial for block {} from {trigger}: {err:?}",
@@ -6310,7 +6315,7 @@ async fn feed_datagram_to_decoders(
     let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
     let mut pending_decode_jobs = rq_pending_decode_jobs(decoders);
     if pending_decode_jobs >= decode_width_budget {
-        decode_stats.merge(drain_ready_decodes(cx, decoders).await?);
+        decode_stats.merge(drain_ready_decodes(cx, decoders, false, decode_width_budget).await?);
         pending_decode_jobs = rq_pending_decode_jobs(decoders);
     }
     let allow_spawn_decode = pending_decode_jobs < decode_width_budget;
@@ -6365,7 +6370,8 @@ async fn feed_datagram_batch_to_decoders(
             .await?,
         );
     }
-    stats.record_decode_stats(drain_ready_decodes(cx, decoders).await?);
+    let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+    stats.record_decode_stats(drain_ready_decodes(cx, decoders, true, decode_width_budget).await?);
     Ok(stats)
 }
 
@@ -6515,10 +6521,14 @@ async fn queue_stale_decode_retry(
 async fn drain_ready_decodes(
     cx: &Cx,
     decoders: &mut [EntryDecoder],
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<RqDecodeRoundStats, RqError> {
     let mut stats = RqDecodeRoundStats::default();
     for dec in decoders {
-        stats.merge(drain_ready_entry_decodes(cx, dec).await?);
+        stats.merge(
+            drain_ready_entry_decodes(cx, dec, allow_spawn_decode, transfer_decode_width).await?,
+        );
     }
     Ok(stats)
 }
@@ -6526,11 +6536,14 @@ async fn drain_ready_decodes(
 async fn join_all_pending_decodes(
     cx: &Cx,
     decoders: &mut [EntryDecoder],
+    transfer_decode_width: usize,
 ) -> Result<RqDecodeRoundStats, RqError> {
     let mut stats = RqDecodeRoundStats::default();
     for dec in decoders {
         while let Some(mut pending) = dec.pending_decodes.pop() {
-            stats.merge(join_pending_decode(cx, dec, &mut pending).await?);
+            stats.merge(
+                join_pending_decode(cx, dec, &mut pending, true, transfer_decode_width).await?,
+            );
         }
     }
     Ok(stats)
@@ -6539,6 +6552,8 @@ async fn join_all_pending_decodes(
 async fn drain_ready_entry_decodes(
     cx: &Cx,
     dec: &mut EntryDecoder,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<RqDecodeRoundStats, RqError> {
     let mut stats = RqDecodeRoundStats::default();
     let mut i = 0usize;
@@ -6548,7 +6563,16 @@ async fn drain_ready_entry_decodes(
             continue;
         }
         let mut pending = dec.pending_decodes.swap_remove(i);
-        stats.merge(join_pending_decode(cx, dec, &mut pending).await?);
+        stats.merge(
+            join_pending_decode(
+                cx,
+                dec,
+                &mut pending,
+                allow_spawn_decode,
+                transfer_decode_width,
+            )
+            .await?,
+        );
     }
     Ok(stats)
 }
@@ -6556,17 +6580,28 @@ async fn drain_ready_entry_decodes(
 async fn join_one_pending_decode(
     cx: &Cx,
     dec: &mut EntryDecoder,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<RqDecodeRoundStats, RqError> {
     let Some(mut pending) = dec.pending_decodes.pop() else {
         return Ok(RqDecodeRoundStats::default());
     };
-    join_pending_decode(cx, dec, &mut pending).await
+    join_pending_decode(
+        cx,
+        dec,
+        &mut pending,
+        allow_spawn_decode,
+        transfer_decode_width,
+    )
+    .await
 }
 
 async fn join_pending_decode(
     cx: &Cx,
     dec: &mut EntryDecoder,
     pending: &mut PendingDecode,
+    allow_spawn_decode: bool,
+    transfer_decode_width: usize,
 ) -> Result<RqDecodeRoundStats, RqError> {
     let block_sbn = pending.block_sbn;
     let outcome = pending.handle.join(cx).await.map_err(|join_err| {
@@ -6575,14 +6610,7 @@ async fn join_pending_decode(
             dec.index, block_sbn
         ))
     })?;
-    finalize_decode_outcome(
-        cx,
-        dec,
-        outcome,
-        true,
-        RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
-    )
-    .await
+    finalize_decode_outcome(cx, dec, outcome, allow_spawn_decode, transfer_decode_width).await
 }
 
 /// Pump UDP symbol datagrams into the decoders until a control frame arrives.
@@ -6623,7 +6651,10 @@ where
     let mut pumped: u64 = 0;
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        round_stats.record_decode_stats(drain_ready_decodes(cx, decoders).await?);
+        let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+        round_stats.record_decode_stats(
+            drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
+        );
 
         // 1) First, non-blockingly drain whatever the control codec already has
         //    buffered (a prior read may have pulled the frame in with symbols).
@@ -6687,7 +6718,10 @@ where
                 pumped = pumped.saturating_add(stats.observed);
                 *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                 round_stats.merge(stats);
-                round_stats.record_decode_stats(drain_ready_decodes(cx, decoders).await?);
+                let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+                round_stats.record_decode_stats(
+                    drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
+                );
 
                 while received_len == RQ_INBOUND_PUMP_BATCH {
                     if batches >= RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES {
@@ -6731,7 +6765,10 @@ where
                     pumped = pumped.saturating_add(stats.observed);
                     *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                     round_stats.merge(stats);
-                    round_stats.record_decode_stats(drain_ready_decodes(cx, decoders).await?);
+                    let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+                    round_stats.record_decode_stats(
+                        drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
+                    );
                     batches = batches.saturating_add(1);
                 }
             }
@@ -6839,7 +6876,10 @@ async fn drain_round_tail(
             }
             quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
         }
-        round_stats.record_decode_stats(drain_ready_decodes(cx, decoders).await?);
+        let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+        round_stats.record_decode_stats(
+            drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
+        );
 
         if drained > 0 && drained % 512 == 0 {
             crate::runtime::yield_now().await;
@@ -8569,8 +8609,12 @@ mod tests {
         )
         .expect("round-boundary seed");
         assert_eq!(seed_stats.seeded, 1);
-        futures_lite::future::block_on(join_all_pending_decodes(&cx, &mut decoders))
-            .expect("join boundary decode");
+        futures_lite::future::block_on(join_all_pending_decodes(
+            &cx,
+            &mut decoders,
+            RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
+        ))
+        .expect("join boundary decode");
 
         let decoder = decoders.pop().expect("decoder");
         assert!(decoder.complete, "round boundary seed should finish block");

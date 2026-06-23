@@ -85,19 +85,30 @@ def parse_rounds(lines) -> list[dict]:
     return rounds
 
 
-# Receiver-intake stages (cc_2 R1, 317hxr.29): the `receiver: ... ObjectComplete`
-# trace splits per-datagram intake into these timers (MATRIX-23 pinpointed feed_micros
-# as the clean-link wall; MATRIX-24 shifted it to recv_micros once feed was fixed).
-INTAKE_STAGE_KEYS = ("feed_micros", "recv_micros", "drain_micros", "parse_micros")
+# Receiver work stages (cc_2 R1, 317hxr.29): the `receiver: ... ObjectComplete`
+# trace splits per-datagram intake and deferred decode into these timers
+# (MATRIX-23 pinpointed feed_micros as the clean-link wall; later large-lossy
+# profiling needs decode_micros to distinguish feed serialization from RaptorQ solve).
+RECEIVER_STAGE_KEYS = (
+    "feed_micros",
+    "decode_micros",
+    "recv_micros",
+    "drain_micros",
+    "parse_micros",
+)
 
 
 def parse_receiver_intake(lines) -> list[dict]:
     records = []
     for line in lines:
-        if "intake_bytes_per_s" not in line and "feed_micros" not in line:
+        if not any(
+            key in line for key in ("intake_bytes_per_s", "feed_micros", "decode_micros")
+        ):
             continue
         kv = {k: v for k, v in KV_RE.findall(line)}
-        stages = {k: v for k in INTAKE_STAGE_KEYS if (v := first_present(kv, (k,))) is not None}
+        stages = {
+            k: v for k in RECEIVER_STAGE_KEYS if (v := first_present(kv, (k,))) is not None
+        }
         if not stages:
             continue
         records.append({"stages": stages, "intake_bytes_per_s": first_present(kv, ("intake_bytes_per_s",))})
@@ -105,11 +116,11 @@ def parse_receiver_intake(lines) -> list[dict]:
 
 
 def report_receiver_intake(records, target_mbps) -> list[str]:
-    """Print the receiver-intake bottleneck breakdown (which stage caps throughput);
+    """Print the receiver-stage bottleneck breakdown (which stage caps throughput);
     return flags. Auto-identifies the dominant stage = SapphireHill's 'attack the top item'."""
     if not records:
         return []
-    agg = {k: 0.0 for k in INTAKE_STAGE_KEYS}
+    agg = {k: 0.0 for k in RECEIVER_STAGE_KEYS}
     rates = []
     for rec in records:
         for k, v in rec["stages"].items():
@@ -118,10 +129,10 @@ def report_receiver_intake(records, target_mbps) -> list[str]:
             rates.append(rec["intake_bytes_per_s"])
     total = sum(agg.values()) or 1.0
     dominant = max(agg, key=lambda k: agg[k])
-    print("\n## Receiver-intake bottleneck (cc_2 R1 trace)\n")
-    print("| stage | micros | % of intake |")
+    print("\n## Receiver-stage bottleneck (cc_2 R1 trace)\n")
+    print("| stage | micros | % of receiver work |")
     print("|--|--:|--:|")
-    for k in INTAKE_STAGE_KEYS:
+    for k in RECEIVER_STAGE_KEYS:
         mark = "  ← WALL" if k == dominant else ""
         print(f"| {k} | {agg[k]:.0f} | {100.0 * agg[k] / total:.2f}%{mark} |")
     flags = []
@@ -131,7 +142,7 @@ def report_receiver_intake(records, target_mbps) -> list[str]:
         suffix = f"mean intake = {mbps:.1f} MB/s; "
         if target_mbps is not None and mbps < target_mbps:
             flags.append(f"receiver intake {mbps:.1f} MB/s < target {target_mbps} MB/s (bottleneck: {dominant})")
-    print(f"\n- {suffix}dominant intake stage = **{dominant}** "
+    print(f"\n- {suffix}dominant receiver stage = **{dominant}** "
           f"({100.0 * agg[dominant] / total:.1f}%) → attack this")
     return flags
 
@@ -209,7 +220,7 @@ def main(argv: list[str]) -> int:
 
     print("\n## Verdict\n")
     print(f"- parsed {len(rounds)} round record(s); highest feedback round = {max_round}; "
-          f"{len(recv_records)} receiver-intake record(s).")
+          f"{len(recv_records)} receiver-stage record(s).")
     if len(rounds) < args.min_rounds and not flags:
         print(f"- only {len(rounds)} round(s) parsed (need ≥{args.min_rounds}); not a collapse sample.")
         return 0
