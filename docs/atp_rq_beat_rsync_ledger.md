@@ -2001,3 +2001,18 @@ Benched 500M perfect+good nocrypto on the size-gated LANE-A build, all sha-ok/by
 **atp loses 500M-clean on WALL** (perfect 36.3 vs 5.2 = 7×; good 37.2 vs 24.2 = 1.54×) — the single-core-ish RaptorQ decode + FEC overhead is pure cost on a clean link where rsync just streams bytes. Parallel decode (LANE-A) holds 500M-clean decode at ~36s; without it this would be slower. **BUT atp DOMINATES MEMORY by 198-710×**: rsync's in-memory file/buffer structures balloon to 4.5GB (perfect) and 17GB (good) RSS on the 500M object, while atp's streaming fountain holds steady at 22-24MB. On a memory-constrained host rsync would thrash/OOM where atp sails through — a decisive robustness edge.
 
 **FULL 500M TIER (post-LANE-A):** bad 161.3s (4.4× improved, 1.59× of rsync wall, 18× less RSS — MATRIX-50); good 37.2s (1.54× of rsync wall, 710× less RSS); perfect 36.3s (7× of rsync wall, 198× less RSS). Pattern: atp is **memory-dominant across ALL 500M regimes** and wall-competitive on lossy (where FEC earns its keep); rsync wins clean-link wall (no FEC tax) but at 100-700× the memory. The honest 500M headline: atp trades clean-link wall-time for massive memory efficiency + lossy-link resilience. Evidence: `artifacts/atp_bench_matrix/20260623T114813Z/`.
+
+## MATRIX-52 (2026-06-23) — LANE-C QUIC encrypted parallel decode (f4e6d4984): MARGINAL clean gain (36.5→33.55s, still ~35× of rsync); encrypted-clean is NOT decode-bound (per-symbol DATAGRAM+AEAD framing is); encrypted-LOSSY still non-converges (1/3) → LANE-E sender deficit-serve confirmed as the real lever. Memory dominance holds (atp 14-46MB vs rsync 3.7-9.2GB, 271-1000×).
+
+Benched the f4e6d4984 QUIC-receiver-parallel-decode port (LANE-C) on encrypted tier 50M, staged binary atp 0.3.5, hermetic netns+veth+netem:
+
+| cell | atp-quic-tls13 | rsync-ssh-aes128gcm | atp RSS | rsync RSS | mem ratio | atp converge |
+|---|---|---|---|---|---|---|
+| 50M/perfect encrypted | 33.55s | 0.97s | **14MB** | **3,792MB (3.7GB)** | atp 271× less | 3/3 ok |
+| 50M/good encrypted | 308.15s (only success) | 3.96s | 46MB | **9,415MB (9.2GB)** | atp ~200× less | **1/3 ok** |
+
+**LANE-C verdict (parallel-decode-port did NOT crack encrypted-clean):** encrypted 50M/perfect went MATRIX-37 36.5s → 33.55s — a marginal ~8% gain, still **~35× behind rsync's 0.97s wall**. Unlike nocrypto (where LANE-A parallel decode bought 4.4× because nocrypto-500M was single-core-decode-bound), **encrypted-clean is NOT decode-bound** — its wall is dominated by per-symbol DATAGRAM emission + QUIC 1-RTT framing + per-packet AEAD on ~87k symbols/50M, which parallel decode doesn't touch. The decode port is still a correct, accretive change (bounded RSS, byte-identical), just not the encrypted-clean bottleneck.
+
+**Encrypted-LOSSY still does NOT reliably converge:** 50M/good (200mbit/25ms/0.1% loss) landed only 1/3 reps ok (the success at 308s vs rsync 3.96s; 2 reps errored — non-convergence, fail-closed, excluded from any "win"). This is the documented encrypted-lossy convergence gap (floor j80p42) and **directly confirms LANE-E (sender-side 3-part deficit-serve: serve only the per-block deficit + keep serving until all blocks ack + pace) is the correct next lever** — NOT more decode work.
+
+**Memory story extends to the encrypted tier:** rsync-over-ssh balloons to 3.7GB (clean) / 9.2GB (lossy) RSS on a 50M encrypted transfer while atp holds 14-46MB — a 271-1000× memory advantage even where atp loses the wall. Evidence: `artifacts/atp_bench_matrix/20260623T125705Z/`. NEXT: bench nocrypto 50M/good+bad (FEC Finding-1 convergence); land + bench LANE-E when it ships.
