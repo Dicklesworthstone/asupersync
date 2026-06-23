@@ -33,9 +33,9 @@
 
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::linalg::{
-    DenseRow, GaussianResult, GaussianSolver, coefficient_rank_profile, collect_batch_candidates,
-    row_scale_add, row_scale_add_batch_multi, row_scale_add_batch2, select_pivot_basic,
-    select_pivot_markowitz,
+    DenseRow, GaussianOutcomeKind, GaussianResult, GaussianSolver, coefficient_rank_profile,
+    collect_batch_candidates, row_scale_add, row_scale_add_batch_multi, row_scale_add_batch2,
+    select_pivot_basic, select_pivot_markowitz,
 };
 
 /// Deterministic LCG (Knuth MMIX constants) for reproducible row generation.
@@ -462,6 +462,46 @@ fn rank_deficient_solver() -> GaussianSolver {
     solver
 }
 
+fn solver_from_rows(rows: &[(&[u8], &[u8])], columns: usize) -> GaussianSolver {
+    let mut solver = GaussianSolver::new(rows.len(), columns);
+    for (row, (coefficients, rhs)) in rows.iter().enumerate() {
+        solver.set_row(row, coefficients, DenseRow::new(rhs.to_vec()));
+    }
+    solver
+}
+
+fn assert_solutions_match(
+    expected_kind: GaussianOutcomeKind,
+    a: &GaussianResult,
+    b: &GaussianResult,
+) {
+    assert_eq!(a.outcome_kind(), expected_kind);
+    assert_eq!(b.outcome_kind(), expected_kind);
+    assert_eq!(
+        a.is_solved(),
+        matches!(expected_kind, GaussianOutcomeKind::Solved)
+    );
+    assert_eq!(
+        b.is_solved(),
+        matches!(expected_kind, GaussianOutcomeKind::Solved)
+    );
+
+    match (a, b) {
+        (GaussianResult::Solved(a_solution), GaussianResult::Solved(b_solution)) => {
+            assert_eq!(
+                a_solution, b_solution,
+                "basic and Markowitz pivoting must emit byte-identical payloads"
+            );
+        }
+        _ => {
+            assert!(
+                !a.is_solved() && !b.is_solved(),
+                "fail-closed outcomes must not expose partial payloads"
+            );
+        }
+    }
+}
+
 #[test]
 fn solver_rank_status_reports_deficit_before_fail_closed_solve() {
     let mut solver = rank_deficient_solver();
@@ -499,4 +539,96 @@ fn markowitz_rank_status_matches_basic_and_fails_closed() {
         "Markowitz pivoting must preserve the same fail-closed rank-deficient outcome"
     );
     assert!(!result.is_solved());
+}
+
+#[test]
+fn adversarial_solver_corpus_keeps_basic_and_markowitz_outcomes_aligned() {
+    struct Case<'a> {
+        name: &'a str,
+        columns: usize,
+        rows: Vec<(&'a [u8], &'a [u8])>,
+        expected_rank: usize,
+        expected_deficit: usize,
+        expected_kind: GaussianOutcomeKind,
+    }
+
+    let full_rank_sparse_permuted = Case {
+        name: "full_rank_sparse_permuted",
+        columns: 3,
+        rows: vec![
+            (&[0, 1, 0], &[0x20]),
+            (&[1, 0, 0], &[0x10]),
+            (&[0, 0, 1], &[0x30]),
+        ],
+        expected_rank: 3,
+        expected_deficit: 0,
+        expected_kind: GaussianOutcomeKind::Solved,
+    };
+    let rank_deficient_consistent = Case {
+        name: "rank_deficient_consistent",
+        columns: 4,
+        rows: vec![
+            (&[1, 0, 0, 0], &[0x10]),
+            (&[0, 0, 1, 0], &[0x20]),
+            (&[1, 0, 1, 0], &[0x30]),
+        ],
+        expected_rank: 2,
+        expected_deficit: 2,
+        expected_kind: GaussianOutcomeKind::Singular,
+    };
+    let inconsistent_zero_row = Case {
+        name: "inconsistent_zero_row",
+        columns: 2,
+        rows: vec![(&[1, 0], &[0x11]), (&[0, 0], &[0x22])],
+        expected_rank: 1,
+        expected_deficit: 1,
+        expected_kind: GaussianOutcomeKind::Inconsistent,
+    };
+    let underdetermined_rows_less_than_columns = Case {
+        name: "underdetermined_rows_less_than_columns",
+        columns: 3,
+        rows: vec![(&[1, 0, 0], &[0x01]), (&[0, 1, 0], &[0x02])],
+        expected_rank: 2,
+        expected_deficit: 1,
+        expected_kind: GaussianOutcomeKind::Singular,
+    };
+
+    for case in [
+        full_rank_sparse_permuted,
+        rank_deficient_consistent,
+        inconsistent_zero_row,
+        underdetermined_rows_less_than_columns,
+    ] {
+        let mut basic = solver_from_rows(&case.rows, case.columns);
+        let mut markowitz = solver_from_rows(&case.rows, case.columns);
+
+        assert_eq!(
+            basic.rank_status(),
+            markowitz.rank_status(),
+            "{}: pre-solve rank status must not depend on pivot strategy",
+            case.name
+        );
+        assert_eq!(
+            basic.rank_profile(),
+            markowitz.rank_profile(),
+            "{}: pre-solve rank witnesses must not depend on pivot strategy",
+            case.name
+        );
+        assert_eq!(
+            basic.rank_status().rank,
+            case.expected_rank,
+            "{}: rank mismatch",
+            case.name
+        );
+        assert_eq!(
+            basic.rank_status().deficit,
+            case.expected_deficit,
+            "{}: deficit mismatch",
+            case.name
+        );
+
+        let basic_result = basic.solve();
+        let markowitz_result = markowitz.solve_markowitz();
+        assert_solutions_match(case.expected_kind, &basic_result, &markowitz_result);
+    }
 }
