@@ -825,18 +825,34 @@ pub fn select_pivot_markowitz(
     best
 }
 
-/// Computes the GF(256) coefficient rank of a dense matrix.
+/// Deterministic pivot/free-column witness for a dense GF(256) matrix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GaussianRankProfile {
+    /// Number of coefficient rows.
+    pub rows: usize,
+    /// Number of coefficient columns / unknowns.
+    pub columns: usize,
+    /// GF(256) row rank of the coefficient matrix.
+    pub rank: usize,
+    /// Number of columns still missing independent support.
+    pub deficit: usize,
+    /// Sorted coefficient columns selected as pivots by deterministic rank reduction.
+    pub pivot_columns: Vec<usize>,
+    /// Sorted coefficient columns without independent pivot support.
+    pub free_columns: Vec<usize>,
+}
+
+/// Computes the deterministic GF(256) rank profile of a dense matrix.
 ///
 /// Rows may be shorter than `columns`; missing entries are treated as zero.
 /// The reduction is deterministic: columns are considered left-to-right, and
 /// the first row that creates a new basis vector for a pivot column is retained.
 /// Unlike the decode solver, rank determination skips free columns and
-/// therefore reports the true row rank of the coefficient matrix even when a
-/// unique solution is impossible.
+/// therefore reports the true row rank and pivot/free-column witness of the
+/// coefficient matrix even when a unique solution is impossible.
 #[must_use]
-pub fn coefficient_rank(matrix: &[&[u8]], columns: usize) -> usize {
+pub fn coefficient_rank_profile(matrix: &[&[u8]], columns: usize) -> GaussianRankProfile {
     let mut basis = vec![None::<Vec<Gf256>>; columns];
-    let mut rank = 0usize;
 
     for row_data in matrix {
         let mut row = vec![Gf256::ZERO; columns];
@@ -860,13 +876,43 @@ pub fn coefficient_rank(matrix: &[&[u8]], columns: usize) -> usize {
                     *value *= inv;
                 }
                 basis[pivot] = Some(row);
-                rank += 1;
                 break;
             }
         }
     }
 
-    rank
+    let mut pivot_columns = Vec::new();
+    let mut free_columns = Vec::new();
+    for (column, basis_row) in basis.iter().enumerate() {
+        if basis_row.is_some() {
+            pivot_columns.push(column);
+        } else {
+            free_columns.push(column);
+        }
+    }
+    let rank = pivot_columns.len();
+
+    GaussianRankProfile {
+        rows: matrix.len(),
+        columns,
+        rank,
+        deficit: columns.saturating_sub(rank),
+        pivot_columns,
+        free_columns,
+    }
+}
+
+/// Computes the GF(256) coefficient rank of a dense matrix.
+///
+/// Rows may be shorter than `columns`; missing entries are treated as zero.
+/// The reduction is deterministic: columns are considered left-to-right, and
+/// the first row that creates a new basis vector for a pivot column is retained.
+/// Unlike the decode solver, rank determination skips free columns and
+/// therefore reports the true row rank of the coefficient matrix even when a
+/// unique solution is impossible.
+#[must_use]
+pub fn coefficient_rank(matrix: &[&[u8]], columns: usize) -> usize {
+    coefficient_rank_profile(matrix, columns).rank
 }
 
 /// Counts nonzeros in a row (useful for Markowitz pivot selection).
@@ -1164,14 +1210,24 @@ impl GaussianSolver {
     /// pivot because a unique solution cannot be reconstructed.
     #[must_use]
     pub fn rank_status(&self) -> GaussianRankStatus {
-        let rows: Vec<&[u8]> = self.matrix.iter().map(Vec::as_slice).collect();
-        let rank = coefficient_rank(&rows, self.cols);
+        let profile = self.rank_profile();
         GaussianRankStatus {
             rows: self.rows,
             columns: self.cols,
-            rank,
-            deficit: self.cols.saturating_sub(rank),
+            rank: profile.rank,
+            deficit: profile.deficit,
         }
+    }
+
+    /// Computes the current deterministic coefficient rank profile.
+    ///
+    /// This exposes the exact pivot/free-column witness used by rank probes,
+    /// without changing solver behavior or treating rank-deficient systems as
+    /// successful decodes.
+    #[must_use]
+    pub fn rank_profile(&self) -> GaussianRankProfile {
+        let rows: Vec<&[u8]> = self.matrix.iter().map(Vec::as_slice).collect();
+        coefficient_rank_profile(&rows, self.cols)
     }
 
     /// Solve the system using Gaussian elimination with partial pivoting.
@@ -2135,6 +2191,38 @@ mod tests {
     }
 
     #[test]
+    fn coefficient_rank_profile_reports_pivot_and_free_columns() {
+        // Column 1 is fully unsupported. The profile must make that free
+        // column explicit so decoder diagnostics cannot confuse aggregate rank
+        // with a unique reconstruction witness.
+        let rows: Vec<Vec<u8>> = vec![vec![1, 0, 1], vec![0, 0, 1], vec![1, 0, 0]];
+        let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+
+        assert_eq!(
+            coefficient_rank_profile(&matrix, 3),
+            GaussianRankProfile {
+                rows: 3,
+                columns: 3,
+                rank: 2,
+                deficit: 1,
+                pivot_columns: vec![0, 2],
+                free_columns: vec![1],
+            }
+        );
+        assert_eq!(
+            coefficient_rank_profile(&matrix, 0),
+            GaussianRankProfile {
+                rows: 3,
+                columns: 0,
+                rank: 0,
+                deficit: 0,
+                pivot_columns: Vec::new(),
+                free_columns: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
     fn coefficient_rank_treats_short_rows_as_structural_zeros() {
         let rows: Vec<Vec<u8>> = vec![vec![1], vec![0, 1], vec![0, 0, 1], vec![1, 1, 1, 0]];
         let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
@@ -2168,6 +2256,11 @@ mod tests {
             coefficient_rank(&base_rows, 4),
             coefficient_rank(&scaled_rows, 4),
             "row scaling by nonzero GF(256) factors and row permutation must preserve rank"
+        );
+        assert_eq!(
+            coefficient_rank_profile(&base_rows, 4),
+            coefficient_rank_profile(&scaled_rows, 4),
+            "rank profile pivot/free columns must also remain deterministic under row scaling and row permutation"
         );
     }
 
