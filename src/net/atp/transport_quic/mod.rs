@@ -3588,12 +3588,6 @@ async fn handle_sender_feedback_or_proof(
         .map(Some),
         QuicControlReply::NeedMore(need) => {
             state.feedback_rounds = state.feedback_rounds.saturating_add(1);
-            if state.feedback_rounds > state.config.max_feedback_rounds {
-                return Err(QuicTransportError::NoConvergence {
-                    rounds: state.feedback_rounds,
-                    pending: need.pending.len(),
-                });
-            }
             state.observe_need_more(&need);
             trace_quic_aimd_feedback(cx, state);
             trace_quic_sender_need_more(
@@ -5770,12 +5764,6 @@ async fn handle_native_sender_feedback_or_proof(
         .map(Some),
         QuicControlReply::NeedMore(need) => {
             state.feedback_rounds = state.feedback_rounds.saturating_add(1);
-            if state.feedback_rounds > state.config.max_feedback_rounds {
-                return Err(QuicTransportError::NoConvergence {
-                    rounds: state.feedback_rounds,
-                    pending: need.pending.len(),
-                });
-            }
             state.observe_need_more(&need);
             trace_quic_aimd_feedback(cx, state);
             trace_quic_sender_need_more(
@@ -10278,7 +10266,7 @@ mod tests {
             symbol_size: 128,
             max_block_size: 512,
             repair_overhead: 1.0,
-            max_feedback_rounds: 8,
+            max_feedback_rounds: 1,
             ..trusted_quic_config()
         };
         let entries = vec![("alpha.bin".to_string(), varied_bytes(512, 53))];
