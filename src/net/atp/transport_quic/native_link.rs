@@ -977,7 +977,12 @@ impl QuicLink {
             } else {
                 self.idle_timeout
             };
-            if self.pump_inbound_for(cx, pump_timeout).await? == 0 {
+            let pumped_packets = if feedback_wait {
+                self.pump_inbound_for(cx, pump_timeout).await?
+            } else {
+                self.pump_inbound(cx).await?
+            };
+            if pumped_packets == 0 {
                 if feedback_wait && idle_pto_attempts < MAX_FEEDBACK_IDLE_PTO {
                     idle_pto_attempts = idle_pto_attempts.saturating_add(1);
                     quic_rqtrace!(
@@ -2423,6 +2428,7 @@ async fn run_receiver_session(
                 }
                 link.flush(cx).await?;
                 let round_made_progress = round_symbols_observed > 0;
+                let full_idle_wait = !round_made_progress && last_need.is_none();
                 let pump_timeout = if round_made_progress {
                     ROUND_COMPLETE_IDLE_GRACE
                 } else if last_need.is_some() {
@@ -2433,7 +2439,11 @@ async fn run_receiver_session(
                     config.idle_timeout
                 };
                 let pump_started = Instant::now(); // ubs:ignore - monotonic pump timing, not crypto randomness
-                let pumped_packets = link.pump_inbound_for(cx, pump_timeout).await?;
+                let pumped_packets = if full_idle_wait {
+                    link.pump_inbound(cx).await?
+                } else {
+                    link.pump_inbound_for(cx, pump_timeout).await?
+                };
                 intake_stats.record_pump(pump_started.elapsed(), pumped_packets);
                 if pumped_packets == 0 {
                     if link.conn.pending_datagram_count() > 0 {
