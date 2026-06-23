@@ -457,11 +457,49 @@ mod tests {
         ]);
 
         let delta = diff_trees(&prior, &current, &have);
-        assert_eq!(delta.changed_files, vec!["dir/a.bin".to_string()], "only a.bin changed");
+        assert_eq!(
+            delta.changed_files,
+            vec!["dir/a.bin".to_string()],
+            "only a.bin changed"
+        );
         assert!(delta.removed_files.is_empty());
         // Only the genuinely new chunk is scheduled; the two reused chunks are
         // dedup hits already in `have`.
         assert_eq!(delta.new_chunks, vec![chunk_id(new_chunk)]);
+    }
+
+    #[test]
+    fn tree_diff_dedups_missing_chunks_across_changed_files() {
+        let prior = TreeManifest::from_files([
+            FileManifest::from_chunks("a.bin", refs_from(&[b"a-old"]).0),
+            FileManifest::from_chunks("b.bin", refs_from(&[b"b-old"]).0),
+            FileManifest::from_chunks("unchanged.bin", refs_from(&[b"already-held"]).0),
+        ]);
+
+        let mut have = ContentAddressedStore::new();
+        have.put(b"already-held");
+
+        let shared_new = b"shared-new-content";
+        let a_only = b"a-only-new";
+        let b_only = b"b-only-new";
+        let current = TreeManifest::from_files([
+            FileManifest::from_chunks("a.bin", refs_from(&[b"already-held", shared_new, a_only]).0),
+            FileManifest::from_chunks("b.bin", refs_from(&[shared_new, b_only]).0),
+            FileManifest::from_chunks("unchanged.bin", refs_from(&[b"already-held"]).0),
+        ]);
+
+        let delta = diff_trees(&prior, &current, &have);
+
+        assert_eq!(
+            delta.changed_files,
+            vec!["a.bin".to_string(), "b.bin".to_string()]
+        );
+        assert!(delta.removed_files.is_empty());
+        assert_eq!(
+            delta.new_chunks,
+            vec![chunk_id(shared_new), chunk_id(a_only), chunk_id(b_only)],
+            "shared missing content must be transmitted once in first-seen order"
+        );
     }
 
     // Helper: rebuild b.bin's refs (same content) for the "current" tree.
