@@ -263,8 +263,10 @@ const RQ_DECODE_MAX_CORES_RESERVED_FOR_IO: usize = 4;
 /// `BlockDecodeJob` owns a cloned symbol set plus matrix-solve workspace. The
 /// width gate estimates that footprint from current block geometry and lowers
 /// the effective transfer width before queued decoders can blow past the
-/// MATRIX-5 receiver RSS target.
-const RQ_DECODE_JOB_MEMORY_BUDGET_BYTES: usize = 96 * 1024 * 1024;
+/// MATRIX-5 receiver RSS target. Keep this bounded, but high enough that the
+/// 500M matrix cell can use most of a 64-core receiver after the large-entry
+/// SBN block-size planner lowers K.
+const RQ_DECODE_JOB_MEMORY_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const RQ_DECODE_JOB_MEMORY_FLOOR_BYTES: usize = 1024 * 1024;
 const RQ_DECODE_JOB_SYMBOL_MEMORY_MULTIPLIER: usize = 1;
 /// RQ repair feedback is round/RTT-bound: do not reject symbols for an
@@ -7120,6 +7122,27 @@ mod tests {
             rq_decode_job_memory_estimate_bytes(DEFAULT_MAX_BLOCK_SIZE, DEFAULT_SYMBOL_SIZE)
         );
         assert_eq!(budget.effective, budget.core_limit.min(budget.memory_limit));
+    }
+
+    #[test]
+    fn decode_memory_budget_keeps_500m_geometry_wide() {
+        let config = RqConfig::default();
+        let workload_500m = 500 * 1024 * 1024;
+        let max_block_size = effective_max_block_size_for_largest_entry(&config, workload_500m)
+            .expect("500M must fit default RQ transfer geometry");
+        let job_memory_bytes =
+            rq_decode_job_memory_estimate_bytes(max_block_size, config.symbol_size);
+        let memory_limit = RQ_DECODE_JOB_MEMORY_BUDGET_BYTES / job_memory_bytes;
+        let effective_memory_width = memory_limit.min(RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD);
+
+        assert!(
+            effective_memory_width >= 48,
+            "500M decode should not collapse back to narrow fan-out: max_block_size={max_block_size} job_memory_bytes={job_memory_bytes} memory_limit={memory_limit} effective_memory_width={effective_memory_width}"
+        );
+        assert!(
+            effective_memory_width <= RQ_MAX_PENDING_DECODE_JOBS_PER_TRANSFER_HARD,
+            "effective memory gate should stay within the hard transfer cap"
+        );
     }
 
     #[test]
