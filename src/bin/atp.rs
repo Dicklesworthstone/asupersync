@@ -1646,6 +1646,8 @@ struct DeltaPackageMetadata {
     missing_chunks: Vec<DeltaPackageChunkMetadata>,
     #[serde(default)]
     subdelta_chunks: Vec<DeltaPackageSubdeltaMetadata>,
+    #[serde(default)]
+    repeated_chunks: Vec<DeltaPackageRepeatedChunkMetadata>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1666,10 +1668,17 @@ struct DeltaPackageSubdeltaMetadata {
     ops_wire_bytes: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DeltaPackageRepeatedChunkMetadata {
+    target_content_id_hex: String,
+    target_size_bytes: u64,
+}
+
 #[derive(Debug)]
 struct DeltaPackageBuild {
     whole_chunks: Vec<DeltaWholeChunkPackage>,
     subdelta_chunks: Vec<DeltaSubdeltaPackage>,
+    repeated_chunks: Vec<DeltaRepeatedChunkPackage>,
     payload_bytes: u64,
 }
 
@@ -1686,6 +1695,11 @@ struct DeltaSubdeltaPackage {
     base_chunk: CasChunkRef,
     encoded_ops: Vec<u8>,
     ops_wire_bytes: u64,
+}
+
+#[derive(Debug)]
+struct DeltaRepeatedChunkPackage {
+    chunk: CasChunkRef,
 }
 
 #[derive(Debug)]
@@ -1992,6 +2006,7 @@ fn build_delta_package(
 
     let mut whole_chunks = Vec::new();
     let mut subdelta_chunks = Vec::new();
+    let mut repeated_chunks = Vec::new();
 
     for item in send_plan.items {
         match item {
@@ -2014,12 +2029,16 @@ fn build_delta_package(
                     ops_wire_bytes,
                 });
             }
+            DeltaResyncSendItem::RepeatedChunk { chunk, .. } => {
+                repeated_chunks.push(DeltaRepeatedChunkPackage { chunk });
+            }
         }
     }
 
     Ok(DeltaPackageBuild {
         whole_chunks,
         subdelta_chunks,
+        repeated_chunks,
         payload_bytes: send_plan.payload_bytes,
     })
 }
@@ -2196,12 +2215,22 @@ fn write_delta_package(
         });
     }
 
+    let repeated_chunks = package
+        .repeated_chunks
+        .iter()
+        .map(|repeated| DeltaPackageRepeatedChunkMetadata {
+            target_content_id_hex: repeated.chunk.content_id.to_hex(),
+            target_size_bytes: repeated.chunk.size_bytes,
+        })
+        .collect();
+
     let metadata = DeltaPackageMetadata {
         schema: DELTA_PACKAGE_SCHEMA.to_string(),
         target_manifest_hex: hex::encode(snapshot.manifest.to_canonical_bytes()),
         object_sha256_hex: snapshot.object_sha256_hex.clone(),
         missing_chunks,
         subdelta_chunks,
+        repeated_chunks,
     };
     let manifest_path = package_root.join(DELTA_PACKAGE_FILE);
     let mut file = fs::File::create(&manifest_path).map_err(|err| {
@@ -2732,6 +2761,32 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
         store
             .insert(&rebuilt)
             .map_err(|err| format!("insert delta package reconstructed chunk: {err}"))?;
+    }
+
+    for repeated in &metadata.repeated_chunks {
+        validate_hex_hash(&repeated.target_content_id_hex)?;
+        let target_chunk = target_manifest
+            .chunks
+            .iter()
+            .find(|chunk| chunk.content_id.to_hex() == repeated.target_content_id_hex)
+            .ok_or_else(|| {
+                format!(
+                    "delta package repeated target {} not present in target manifest",
+                    repeated.target_content_id_hex
+                )
+            })?;
+        if target_chunk.size_bytes != repeated.target_size_bytes {
+            return Err(format!(
+                "delta package repeated target {} size mismatch: expected {}, metadata {}",
+                repeated.target_content_id_hex, target_chunk.size_bytes, repeated.target_size_bytes
+            ));
+        }
+        if store.get(&target_chunk.content_id).is_none() {
+            return Err(format!(
+                "delta package repeated target {} missing carried payload",
+                repeated.target_content_id_hex
+            ));
+        }
     }
 
     target_manifest
@@ -4985,6 +5040,66 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         let rebuilt = delta_subchunk::reconstruct_verified(&old, &ops, &expected_sha256)
             .expect("reconstruct target chunk");
         assert_eq!(rebuilt, new);
+    }
+
+    #[test]
+    fn delta_package_build_dedupes_repeated_missing_chunks() {
+        let repeated = (0..(8 * 1024))
+            .map(|idx| ((idx * 31 + idx / 7 + 43) % 251) as u8)
+            .collect::<Vec<_>>();
+        let unique = (0..(2 * 1024))
+            .map(|idx| ((idx * 11 + idx / 3 + 97) % 253) as u8)
+            .collect::<Vec<_>>();
+        let object_bytes = [repeated.as_slice(), unique.as_slice(), repeated.as_slice()].concat();
+        let chunk0 = CasChunkRef::from_bytes(0, 0, &repeated).expect("chunk 0");
+        let chunk1 = CasChunkRef::from_bytes(
+            1,
+            u64::try_from(repeated.len()).expect("repeat len"),
+            &unique,
+        )
+        .expect("chunk 1");
+        let chunk2 = CasChunkRef::from_bytes(
+            2,
+            u64::try_from(repeated.len() + unique.len()).expect("offset"),
+            &repeated,
+        )
+        .expect("chunk 2");
+        let manifest =
+            PersistentChunkManifest::new("tree-a", vec![chunk0.clone(), chunk1.clone(), chunk2])
+                .expect("manifest");
+        let mut chunks_by_content = BTreeMap::new();
+        chunks_by_content.insert(chunk0.content_id.to_hex(), repeated.clone());
+        chunks_by_content.insert(chunk1.content_id.to_hex(), unique.clone());
+        let sender = DeltaSourceSnapshot {
+            manifest,
+            chunks_by_content,
+            object_sha256_hex: hex::encode(Sha256::digest(&object_bytes)),
+            file_count: 1,
+            logical_file_bytes: u64::try_from(object_bytes.len()).expect("object len"),
+        };
+        let receiver_manifest =
+            PersistentChunkManifest::new("tree-a", Vec::new()).expect("empty receiver manifest");
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver_manifest);
+        let plan = plan_incremental_resync_with_receiver_coverage(
+            &sender.manifest,
+            Some(&receiver_manifest),
+            &receiver_coverage,
+        );
+
+        let package =
+            build_delta_package(&sender, &plan, &receiver_manifest, &[]).expect("package");
+
+        assert_eq!(package.whole_chunks.len(), 2);
+        assert_eq!(package.subdelta_chunks.len(), 0);
+        assert_eq!(package.repeated_chunks.len(), 1);
+        assert_eq!(
+            package.payload_bytes,
+            u64::try_from(repeated.len() + unique.len()).expect("payload len")
+        );
+        assert_eq!(
+            package.repeated_chunks[0].chunk.content_id,
+            package.whole_chunks[0].chunk.content_id
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! content-addressed; the manifest keeps the logical object layout and projects
 //! directly into the existing transfer journal resume shape.
 
+use crate::atp::dedupe::dedupe_delta_missing_chunks;
 use crate::atp::delta_subchunk::{self, SubBlockSignature, SubDeltaOp};
 use crate::atp::journal::TransferResumeChunk;
 use crate::atp::manifest::{ChunkBoundary, ChunkStrategy, MerkleRoot};
@@ -25,6 +26,7 @@ const SUBDELTA_OP_COPY: u8 = 0;
 const SUBDELTA_OP_LITERAL: u8 = 1;
 const DELTA_SEND_ITEM_WHOLE_CHUNK: u8 = 0;
 const DELTA_SEND_ITEM_SUBCHUNK_OPS: u8 = 1;
+const DELTA_SEND_ITEM_REPEATED_CHUNK: u8 = 2;
 const RECEIVER_HAVE_SET_BASE_WIRE_BYTES: u64 = 32 + 8 + 8;
 const RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES: u64 = 32 + 8;
 
@@ -779,6 +781,11 @@ pub enum DeltaResyncSendItem {
         target_sha256: [u8; 32],
         encoded_ops: Vec<u8>,
     },
+    /// Logical missing chunk whose content was already carried by an earlier item.
+    RepeatedChunk {
+        chunk: CasChunkRef,
+        source_ordinal: usize,
+    },
 }
 
 impl DeltaResyncSendItem {
@@ -790,7 +797,8 @@ impl DeltaResyncSendItem {
             | Self::SubchunkOps {
                 target_chunk: chunk,
                 ..
-            } => chunk,
+            }
+            | Self::RepeatedChunk { chunk, .. } => chunk,
         }
     }
 
@@ -800,6 +808,7 @@ impl DeltaResyncSendItem {
         match self {
             Self::WholeChunk { payload, .. } => payload.len(),
             Self::SubchunkOps { encoded_ops, .. } => encoded_ops.len(),
+            Self::RepeatedChunk { .. } => 0,
         }
     }
 
@@ -807,6 +816,12 @@ impl DeltaResyncSendItem {
     #[must_use]
     pub const fn is_subchunk_ops(&self) -> bool {
         matches!(self, Self::SubchunkOps { .. })
+    }
+
+    /// Whether this item carries a whole chunk payload.
+    #[must_use]
+    pub const fn is_whole_chunk(&self) -> bool {
+        matches!(self, Self::WholeChunk { .. })
     }
 }
 
@@ -889,7 +904,10 @@ impl DeltaResyncSendPlan {
     /// Count of payload items still emitted as whole chunks.
     #[must_use]
     pub fn whole_chunk_count(&self) -> usize {
-        self.items.len().saturating_sub(self.subchunk_count())
+        self.items
+            .iter()
+            .filter(|item| item.is_whole_chunk())
+            .count()
     }
 
     /// Whether this concrete payload is smaller than a full-object send.
@@ -957,6 +975,18 @@ impl DeltaResyncSendPlan {
                     out.extend_from_slice(target_sha256);
                     write_u64_prefixed_bytes(&mut out, encoded_ops)?;
                 }
+                DeltaResyncSendItem::RepeatedChunk {
+                    chunk,
+                    source_ordinal,
+                } => {
+                    out.push(DELTA_SEND_ITEM_REPEATED_CHUNK);
+                    encode_chunk_ref(&mut out, chunk);
+                    out.extend_from_slice(
+                        &u64::try_from(*source_ordinal)
+                            .map_err(|_| DeltaError::ChunkCountOverflow)?
+                            .to_be_bytes(),
+                    );
+                }
             }
         }
 
@@ -1019,6 +1049,11 @@ impl DeltaResyncSendPlan {
                     target_sha256: reader.read_hash()?,
                     encoded_ops: reader.read_u64_prefixed_bytes()?.to_vec(),
                 },
+                DELTA_SEND_ITEM_REPEATED_CHUNK => DeltaResyncSendItem::RepeatedChunk {
+                    chunk: decode_chunk_ref(&mut reader)?,
+                    source_ordinal: usize::try_from(reader.read_u64()?)
+                        .map_err(|_| DeltaError::ChunkCountOverflow)?,
+                },
                 tag => return Err(DeltaError::InvalidDeltaSendItemTag { tag }),
             };
 
@@ -1028,6 +1063,7 @@ impl DeltaResyncSendPlan {
             items.push(item);
         }
         reader.expect_eof()?;
+        validate_send_plan_items(&base_plan, &items)?;
 
         let computed_payload_bytes = send_items_payload_bytes(&items)?;
         if computed_payload_bytes != encoded_payload_bytes {
@@ -1377,7 +1413,7 @@ pub fn build_delta_resync_send_plan(
         items.push(item);
     }
 
-    Ok(DeltaResyncSendPlan {
+    compact_repeated_send_plan_if_smaller(DeltaResyncSendPlan {
         base_plan: base_plan.clone(),
         items,
         payload_bytes,
@@ -1518,6 +1554,9 @@ pub fn apply_delta_resync_send_plan(
                         source,
                     })?;
                 store.insert(&rebuilt)?;
+            }
+            DeltaResyncSendItem::RepeatedChunk { chunk, .. } => {
+                verified_chunk_payload(&store, chunk)?;
             }
         }
     }
@@ -1935,6 +1974,56 @@ fn write_u64_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Delta
     Ok(())
 }
 
+fn compact_repeated_send_plan_if_smaller(
+    send_plan: DeltaResyncSendPlan,
+) -> Result<DeltaResyncSendPlan, DeltaError> {
+    let dedup = dedupe_delta_missing_chunks(&send_plan.base_plan)?;
+    if dedup.duplicate_missing_chunks == 0 {
+        return Ok(send_plan);
+    }
+
+    let original_wire_bytes = u64::try_from(send_plan.to_wire_bytes()?.len())
+        .map_err(|_| DeltaError::ChunkSizeOverflow)?;
+    let mut first_by_key: BTreeMap<ReceiverChunkKey, usize> = BTreeMap::new();
+    let mut compact_items = Vec::with_capacity(send_plan.items.len());
+    let mut compact_payload_bytes = 0u64;
+
+    for item in send_plan.items.iter().cloned() {
+        let chunk = item.target_chunk().clone();
+        let key = chunk.key();
+        if let Some(&source_ordinal) = first_by_key.get(&key) {
+            compact_items.push(DeltaResyncSendItem::RepeatedChunk {
+                chunk,
+                source_ordinal,
+            });
+            continue;
+        }
+
+        let ordinal = compact_items.len();
+        compact_payload_bytes = compact_payload_bytes
+            .checked_add(
+                u64::try_from(item.payload_bytes()).map_err(|_| DeltaError::ChunkSizeOverflow)?,
+            )
+            .ok_or(DeltaError::ChunkSizeOverflow)?;
+        first_by_key.insert(key, ordinal);
+        compact_items.push(item);
+    }
+
+    let compact = DeltaResyncSendPlan {
+        base_plan: send_plan.base_plan.clone(),
+        items: compact_items,
+        payload_bytes: compact_payload_bytes,
+        whole_chunk_bytes: send_plan.whole_chunk_bytes,
+    };
+    let compact_wire_bytes =
+        u64::try_from(compact.to_wire_bytes()?.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+    if compact_wire_bytes < original_wire_bytes {
+        Ok(compact)
+    } else {
+        Ok(send_plan)
+    }
+}
+
 fn send_items_payload_bytes(items: &[DeltaResyncSendItem]) -> Result<u64, DeltaError> {
     let mut payload_bytes = 0u64;
     for item in items {
@@ -1961,6 +2050,19 @@ fn validate_send_plan_items(
     {
         if item.target_chunk() != expected_chunk {
             return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
+        }
+        if let DeltaResyncSendItem::RepeatedChunk {
+            chunk,
+            source_ordinal,
+        } = item
+        {
+            if *source_ordinal >= ordinal {
+                return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
+            }
+            let source_chunk = items[*source_ordinal].target_chunk();
+            if source_chunk.key() != chunk.key() {
+                return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
+            }
         }
     }
     Ok(())
@@ -2908,6 +3010,82 @@ mod tests {
             rebuilt_from_wire,
             [new_a.as_slice(), new_b.as_slice()].concat()
         );
+    }
+
+    #[test]
+    fn send_plan_dedupes_repeated_missing_chunks_then_reconstructs() {
+        let repeated = (0..(8 * 1024))
+            .map(|idx| ((idx * 31 + idx / 7 + 43) % 251) as u8)
+            .collect::<Vec<_>>();
+        let unique = (0..(2 * 1024))
+            .map(|idx| ((idx * 11 + idx / 3 + 97) % 253) as u8)
+            .collect::<Vec<_>>();
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "repeated-file",
+            vec![repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = ingest_manifest(&mut receiver_store, "repeated-file", Vec::new());
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let base_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &receiver_coverage,
+        );
+
+        assert_eq!(base_plan.missing_chunks.len(), 3);
+        assert_eq!(base_plan.missing_bytes, sender.total_size_bytes);
+
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let send_plan =
+            build_delta_resync_send_plan(&base_plan, &sender_store, &receiver, &signatures)
+                .expect("send plan");
+
+        assert_eq!(send_plan.whole_chunk_count(), 2);
+        assert_eq!(send_plan.subchunk_count(), 0);
+        assert_eq!(
+            send_plan.payload_bytes,
+            u64::try_from(repeated.len() + unique.len()).expect("payload len")
+        );
+        assert!(matches!(
+            send_plan.items[2],
+            DeltaResyncSendItem::RepeatedChunk {
+                source_ordinal: 0,
+                ..
+            }
+        ));
+
+        let wire_payload = send_plan.to_wire_bytes().expect("wire encode");
+        assert!(
+            u64::try_from(wire_payload.len()).expect("wire len")
+                < sender.total_size_bytes - u64::try_from(repeated.len()).expect("repeat len") / 2
+        );
+        let decoded_plan = DeltaResyncSendPlan::from_wire_bytes(base_plan.clone(), &wire_payload)
+            .expect("wire decode");
+        assert_eq!(decoded_plan, send_plan);
+
+        let applied = apply_delta_resync_send_plan(&sender, &receiver_store, &send_plan)
+            .expect("apply send plan");
+        let rebuilt = reconstruct_manifest_bytes(&sender, &applied).expect("reconstruct target");
+        assert_eq!(
+            rebuilt,
+            [repeated.as_slice(), unique.as_slice(), repeated.as_slice()].concat()
+        );
+
+        let applied_from_wire =
+            apply_delta_resync_wire_payload(&sender, &receiver_store, base_plan, &wire_payload)
+                .expect("apply wire payload");
+        let rebuilt_from_wire =
+            reconstruct_manifest_bytes(&sender, &applied_from_wire).expect("reconstruct wire");
+        assert_eq!(rebuilt_from_wire, rebuilt);
     }
 
     #[test]
