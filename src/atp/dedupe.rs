@@ -1254,6 +1254,34 @@ mod tests {
     }
 
     #[test]
+    fn dedupe_send_set_canonical_metadata_rejects_invalid_unique_ordinal() {
+        let repeated = vec![b'x'; 4096];
+        let unique = vec![b'y'; 2048];
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[repeated.as_slice(), unique.as_slice(), repeated.as_slice()],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let mut send_set = dedupe_delta_missing_chunks(&plan).expect("dedupe send set");
+
+        send_set.placements[1].unique_ordinal = send_set.unique_chunks.len();
+        let encoded = send_set
+            .to_canonical_bytes()
+            .expect("encode forged metadata");
+
+        assert_eq!(
+            DeltaDedupSendSet::from_canonical_bytes(&plan, &encoded),
+            Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal: 1 })
+        );
+    }
+
+    #[test]
     fn dedupe_send_set_canonical_metadata_fails_closed_on_drift() {
         let mut sender_store = ContentAddressedChunkStore::new();
         let mut receiver_store = ContentAddressedChunkStore::new();
