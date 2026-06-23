@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_all_drains_live_members_to_cancel_errors() {
+    fn cancel_all_drains_live_members_as_cancelled_outcomes() {
         let (outcomes, summary) = run_in_runtime(|cx| async move {
             let started = Arc::new(AtomicUsize::new(0));
             let mut set = JoinSet::<u32, crate::error::Error, _>::in_cx(&cx);
@@ -654,10 +654,10 @@ mod tests {
         assert!(
             outcomes
                 .iter()
-                .all(|outcome| matches!(outcome, Outcome::Err(error) if error.is_cancelled())),
-            "cancel_all must drain every live member to a terminal cancellation error: {outcomes:?}"
+                .all(|outcome| matches!(outcome, Outcome::Cancelled(_))),
+            "cancel_all must drain every live member to a terminal Cancelled outcome: {outcomes:?}"
         );
         assert_eq!(summary.completed(), 3);
-        assert_eq!(summary.worst(), Severity::Err);
+        assert_eq!(summary.worst(), Severity::Cancelled);
     }
 }
