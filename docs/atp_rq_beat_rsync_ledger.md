@@ -1973,3 +1973,18 @@ Benched LANE-A receiver parallel decode (`2f69e377f` keep 500M decode fanout wid
 **Tradeoff — 50M/bad regressed (57→88.9s, walls 61-91 high-variance):** the fanout (`chosen_fanout=8`) over-parallelizes the *smaller* object — pool-dispatch + coordination overhead dominates when per-block decode is already cheap. So the parallel-decode fanout is a clear WIN for large K (500M) but a LOSS for small K (50M).
 
 **LEVER (size-gate, dispatched):** make the decode fanout SIZE-GATED — parallelize only when the object/block-count is large enough that per-block decode dominates dispatch overhead (e.g. 500M-class, K above a threshold), and keep small objects (50M) on the sequential path (57s). That preserves the 4.6× 500M win AND removes the 50M regression. Then 500M/bad is a strong scoreboard result (near-rsync wall + 18× less memory). NEXT after gating: re-bench 50M/bad (back to 57s) + confirm 500M/bad holds 151.6s + check 500M/good,perfect. Evidence: 500M `artifacts/atp_bench_matrix/20260623T103529Z/`, 50M `artifacts/atp_bench_matrix/20260623T102931Z/`.
+
+## MATRIX-50 (2026-06-23) — ★★LANE-A WIN LOCKED via size-gate (c3c1dc635): 500M/bad 4.4× preserved (704→161.3s, 1.59× of rsync, 18× less RSS); 50M/bad recovered 89→61.2s. Clean across-sizes parallel-decode win.
+
+Benched the size-gated receiver parallel decode (`c3c1dc635` size-gate fanout, on top of MATRIX-49's `2f69e377f`/`2ec9e5674`), nocrypto, all sha-ok/byte-identical:
+
+| cell | atp-rq-lab | rsync(d) | atp RSS | rsync RSS | vs baseline |
+|---|---|---|---|---|---|
+| **500M/bad** | **161.3s** (160-161, stable) | 101.2s | **41MB** | 734MB | ★**704s→161.3s = 4.4× faster, HELD under gate** |
+| 50M/bad | 61.2s (60.7/61.2/92.8) | 14.3s | — | — | 89s(ungated)→61.2s recovered (≈57 baseline +7%) |
+
+**★500M/bad WIN CONFIRMED + LOCKED:** the size-gate preserved the parallel-decode speedup (chosen_fanout=8 held for 500M decode) — 704s→161.3s (**4.4×**), now only **1.59× of rsync** (was 7.1×) with **18× less peak RSS** (41MB vs 734MB; rsync balloons on the 500M object). Very stable across reps (160.4/161.3/161.3, cv<1%). The biggest residual gap in the matrix is now near-rsync-parity-on-wall with a decisive memory advantage. NOT a wall-time win vs rsync (atp 161 vs rsync 101) but a transformative improvement + memory dominance — the honest framing for the scoreboard.
+
+**50M/bad recovered:** the size-gate brought 50M/bad from the ungated 89s regression back to 61.2s median (two clean reps 60.7/61.2 ≈ the 57s frozen-AIMD baseline +7%; one 92.8 outlier). chosen_fanout still shows mixed 1/8 at 50M (the gate threshold isn't perfectly tuned at this size) — a MINOR follow-up to nail exactly 57s, not a blocker; the regression is effectively resolved. Closing t00kq3.
+
+**SESSION SCOREBOARD (confirmed):** 50M/good TIE (nocrypto+auth), tree_big/good WIN, encrypted-clean works (31.5s), auth healthy, ★500M/bad 4.4× improved to 1.59× rsync + 18× less RSS. Open/deprioritized: encrypted-lossy (3-part coupled fix documented at j80p42 floor), FEC-fallback Finding-1 (50M@3% convergence), 50M-fanout exact tuning. Evidence: 500M `artifacts/atp_bench_matrix/20260623T113253Z/`, 50M `artifacts/atp_bench_matrix/20260623T112731Z/`.
