@@ -9768,6 +9768,38 @@ mod tests {
     }
 
     #[test]
+    fn measured_loss_repair_target_fills_deficit_without_whole_block_respray() {
+        let block_source_n = 512;
+        let measured = measured_feedback_repair_overhead(0.10);
+        let repair_overhead = 1.0 + measured;
+
+        let initial_target = initial_repair_target_per_block(block_source_n, repair_overhead);
+        assert!(
+            (62..=77).contains(&initial_target),
+            "10% measured loss should calibrate to roughly 12-15% repair, got {initial_target}"
+        );
+
+        assert_eq!(
+            repair_target_for_feedback_round(block_source_n, initial_target - 1, repair_overhead),
+            initial_target,
+            "feedback repair should fill only the remaining measured-loss deficit"
+        );
+
+        let follow_up_target =
+            repair_target_for_feedback_round(block_source_n, initial_target, repair_overhead);
+        assert_eq!(
+            follow_up_target,
+            initial_target
+                + adaptive_feedback_repair_batch_per_block(block_source_n, repair_overhead),
+            "once the measured-loss target is satisfied, later rounds should add one bounded batch"
+        );
+        assert!(
+            follow_up_target < block_source_n / 3,
+            "measured-loss feedback must stay bounded and never respray the whole block"
+        );
+    }
+
+    #[test]
     fn source_fec_fallback_preserves_clean_link_batching_floor() {
         let config = RqConfig {
             symbol_size: 1024,
