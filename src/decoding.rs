@@ -15,7 +15,7 @@ use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const REPAIR_RETENTION_MIN_SLACK: usize = 128;
 const REPAIR_RETENTION_MAX_SLACK: usize = 2048;
@@ -191,6 +191,7 @@ pub(crate) struct BlockDecodeOutcome {
 /// Runs an owned block-decode job. Intended for `Cx::spawn_blocking`.
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
+    let started = Instant::now();
     let resolution = match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
         Ok(data) => BlockDecodeResolution::Complete(data),
         Err(DecodingError::InsufficientSymbols { .. }) => {
@@ -211,7 +212,7 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
         sbn: job.sbn,
         input_symbols: job.symbols.len(),
         retain_decoded_block: job.retain_decoded_block,
-        elapsed: Duration::ZERO,
+        elapsed: started.elapsed().max(Duration::from_nanos(1)),
         resolution,
     }
 }
@@ -3245,6 +3246,10 @@ mod tests {
         };
 
         let outcome = run_block_decode_job(job);
+        assert!(
+            outcome.elapsed().as_nanos() > 0,
+            "deferred decode jobs must record solve wall time for receiver profiling"
+        );
         let result = decoder.finish_decode_job(outcome);
         match result {
             SymbolAcceptResult::BlockComplete {
