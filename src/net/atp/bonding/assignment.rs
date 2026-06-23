@@ -315,6 +315,55 @@ pub struct BondedDonorSourceFirstCoverage {
     pub stagger_delay_slots: u32,
 }
 
+/// Receiver-observed donor weight for dynamic repair-window allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondedDonorWindowWeight {
+    /// Zero-based donor index.
+    pub donor_index: u32,
+    /// Relative allocation weight, normally derived from observed goodput.
+    pub weight: u32,
+}
+
+/// One donor's dynamic receiver-allocated repair window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondedDonorRepairWindow {
+    /// Zero-based donor index.
+    pub donor_index: u32,
+    /// Half-open repair ESI window assigned to this donor.
+    pub esi_window: EsiWindow,
+    /// Number of repair symbols in `esi_window`.
+    pub symbol_count: u32,
+}
+
+/// Disjoint dynamic repair windows for one source block and feedback round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedRepairWindowPlan {
+    /// Descriptor-agreed RaptorQ identity and source-block geometry.
+    pub geometry: BondEntryBlockGeometry,
+    /// First repair ESI considered for this allocation round.
+    pub first_repair_esi: u32,
+    /// First unallocated repair ESI after all windows.
+    pub next_repair_esi: u32,
+    /// Per-donor disjoint windows, sorted by donor index.
+    pub windows: Vec<BondedDonorRepairWindow>,
+}
+
+impl BondedRepairWindowPlan {
+    /// True when every allocated window is non-empty and strictly disjoint.
+    #[must_use]
+    pub fn windows_are_disjoint(&self) -> bool {
+        self.windows
+            .windows(2)
+            .all(|pair| pair[0].esi_window.end_exclusive <= pair[1].esi_window.start_inclusive)
+    }
+
+    /// Total repair symbols allocated across all donors.
+    #[must_use]
+    pub fn allocated_symbol_count(&self) -> u32 {
+        self.windows.iter().map(|window| window.symbol_count).sum()
+    }
+}
+
 /// Per-source-block ESI assignment for one donor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BondedBlockSpraySchedule {
@@ -400,6 +449,19 @@ pub enum BondScheduleError {
         /// Reused donor index.
         donor_index: u32,
     },
+    /// Dynamic window allocation needs at least one positive donor weight.
+    ZeroWindowWeightSum,
+    /// A dynamic repair window allocation exceeded the `u32` ESI space.
+    RepairWindowAllocationOverflow {
+        /// Descriptor entry index.
+        entry_index: u32,
+        /// Source block number within the entry.
+        source_block_number: u8,
+        /// First repair ESI candidate for this allocation.
+        first_repair_esi: u32,
+        /// Requested aggregate repair symbols.
+        requested_symbols: u32,
+    },
     /// Repair ESI budget overflowed the `u32` ESI space.
     RepairBudgetOverflow {
         /// Descriptor entry index.
@@ -462,6 +524,18 @@ impl fmt::Display for BondScheduleError {
                 f,
                 "channel-bonding collective schedule has duplicate donor assignment {donor_index}"
             ),
+            Self::ZeroWindowWeightSum => f.write_str(
+                "channel-bonding dynamic repair window allocation has zero total donor weight",
+            ),
+            Self::RepairWindowAllocationOverflow {
+                entry_index,
+                source_block_number,
+                first_repair_esi,
+                requested_symbols,
+            } => write!(
+                f,
+                "channel-bonding dynamic repair window allocation overflow for entry {entry_index} block {source_block_number}: first_repair_esi={first_repair_esi}, requested={requested_symbols}"
+            ),
             Self::RepairBudgetOverflow {
                 entry_index,
                 source_block_number,
@@ -510,6 +584,8 @@ impl std::error::Error for BondScheduleError {
             Self::NoDonorAssignments
             | Self::InconsistentDonorCount { .. }
             | Self::DuplicateDonorAssignment { .. }
+            | Self::ZeroWindowWeightSum
+            | Self::RepairWindowAllocationOverflow { .. }
             | Self::RepairBudgetOverflow { .. }
             | Self::RepairStartBeforeSource { .. }
             | Self::RepairContinuationOverflow { .. }
@@ -600,6 +676,72 @@ pub fn schedule_bonded_source_first_coverage(
     Ok(BondedSourceFirstCoverage {
         assignment_count: assignments.len(),
         blocks,
+    })
+}
+
+/// Allocate fresh disjoint dynamic repair windows for one feedback round.
+///
+/// The receiver is the sole allocator, so windows are contiguous above the
+/// current high-water mark and cannot overlap. Donor sizes are proportional to
+/// `weight`; leftover symbols from integer division go to the largest fractional
+/// remainders, then lower donor indexes for deterministic ties.
+pub fn allocate_bonded_repair_windows(
+    geometry: BondEntryBlockGeometry,
+    first_repair_esi: u32,
+    requested_symbols: u32,
+    donor_weights: &[BondedDonorWindowWeight],
+) -> Result<BondedRepairWindowPlan, BondScheduleError> {
+    let source_symbols = u32::from(geometry.source_symbols);
+    if first_repair_esi < source_symbols {
+        return Err(BondScheduleError::RepairStartBeforeSource {
+            entry_index: geometry.entry_index,
+            source_block_number: geometry.source_block_number,
+            source_symbols: geometry.source_symbols,
+            first_repair_esi,
+        });
+    }
+    validate_window_weights(donor_weights)?;
+
+    if requested_symbols == 0 {
+        return Ok(BondedRepairWindowPlan {
+            geometry,
+            first_repair_esi,
+            next_repair_esi: first_repair_esi,
+            windows: Vec::new(),
+        });
+    }
+
+    let mut donor_weights = donor_weights.to_vec();
+    donor_weights.sort_unstable_by_key(|weight| weight.donor_index);
+    let symbol_counts = proportional_window_symbol_counts(requested_symbols, &donor_weights)?;
+
+    let mut cursor = first_repair_esi;
+    let mut windows = Vec::new();
+    for (weight, symbol_count) in donor_weights.iter().zip(symbol_counts) {
+        if symbol_count == 0 {
+            continue;
+        }
+        let end_exclusive = cursor.checked_add(symbol_count).ok_or(
+            BondScheduleError::RepairWindowAllocationOverflow {
+                entry_index: geometry.entry_index,
+                source_block_number: geometry.source_block_number,
+                first_repair_esi,
+                requested_symbols,
+            },
+        )?;
+        windows.push(BondedDonorRepairWindow {
+            donor_index: weight.donor_index,
+            esi_window: EsiWindow::new(cursor, end_exclusive),
+            symbol_count,
+        });
+        cursor = end_exclusive;
+    }
+
+    Ok(BondedRepairWindowPlan {
+        geometry,
+        first_repair_esi,
+        next_repair_esi: cursor,
+        windows,
     })
 }
 
@@ -719,6 +861,68 @@ fn validate_collective_assignments(
     }
 
     Ok(())
+}
+
+fn validate_window_weights(
+    donor_weights: &[BondedDonorWindowWeight],
+) -> Result<(), BondScheduleError> {
+    if donor_weights.is_empty() {
+        return Err(BondScheduleError::NoDonorAssignments);
+    }
+    let mut donor_indices = BTreeSet::new();
+    for weight in donor_weights {
+        if !donor_indices.insert(weight.donor_index) {
+            return Err(BondScheduleError::DuplicateDonorAssignment {
+                donor_index: weight.donor_index,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn proportional_window_symbol_counts(
+    requested_symbols: u32,
+    donor_weights: &[BondedDonorWindowWeight],
+) -> Result<Vec<u32>, BondScheduleError> {
+    let total_weight = donor_weights
+        .iter()
+        .map(|weight| u64::from(weight.weight))
+        .sum::<u64>();
+    if total_weight == 0 {
+        return Err(BondScheduleError::ZeroWindowWeightSum);
+    }
+
+    let requested = u64::from(requested_symbols);
+    let mut counts = Vec::with_capacity(donor_weights.len());
+    let mut remainders = Vec::with_capacity(donor_weights.len());
+    let mut allocated = 0u32;
+
+    for (position, weight) in donor_weights.iter().enumerate() {
+        let numerator = requested.saturating_mul(u64::from(weight.weight));
+        let base = numerator / total_weight;
+        let count = u32::try_from(base).unwrap_or(u32::MAX);
+        allocated = allocated.saturating_add(count);
+        counts.push(count);
+        remainders.push((numerator % total_weight, weight.donor_index, position));
+    }
+
+    let mut remaining = requested_symbols.saturating_sub(allocated);
+    remainders.sort_unstable_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    for (_, _, position) in remainders {
+        if remaining == 0 {
+            break;
+        }
+        counts[position] = counts[position].saturating_add(1);
+        remaining -= 1;
+    }
+
+    Ok(counts)
 }
 
 fn schedule_block_source_first_coverage(
@@ -1204,6 +1408,178 @@ mod tests {
             Err(BondScheduleError::InconsistentDonorCount {
                 expected: 2,
                 actual: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn dynamic_repair_windows_are_disjoint_and_weighted_by_goodput() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let weights = vec![
+            BondedDonorWindowWeight {
+                donor_index: 0,
+                weight: 1,
+            },
+            BondedDonorWindowWeight {
+                donor_index: 1,
+                weight: 3,
+            },
+        ];
+
+        let plan =
+            allocate_bonded_repair_windows(geometry, 2, 8, &weights).expect("window allocation");
+
+        assert_eq!(plan.first_repair_esi, 2);
+        assert_eq!(plan.next_repair_esi, 10);
+        assert_eq!(plan.allocated_symbol_count(), 8);
+        assert!(plan.windows_are_disjoint());
+        assert_eq!(
+            plan.windows,
+            vec![
+                BondedDonorRepairWindow {
+                    donor_index: 0,
+                    esi_window: EsiWindow::new(2, 4),
+                    symbol_count: 2,
+                },
+                BondedDonorRepairWindow {
+                    donor_index: 1,
+                    esi_window: EsiWindow::new(4, 10),
+                    symbol_count: 6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_repair_windows_distribute_remainders_deterministically() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let weights = vec![
+            BondedDonorWindowWeight {
+                donor_index: 2,
+                weight: 1,
+            },
+            BondedDonorWindowWeight {
+                donor_index: 0,
+                weight: 1,
+            },
+            BondedDonorWindowWeight {
+                donor_index: 1,
+                weight: 1,
+            },
+        ];
+
+        let plan =
+            allocate_bonded_repair_windows(geometry, 2, 5, &weights).expect("window allocation");
+
+        assert!(plan.windows_are_disjoint());
+        assert_eq!(plan.allocated_symbol_count(), 5);
+        assert_eq!(
+            plan.windows,
+            vec![
+                BondedDonorRepairWindow {
+                    donor_index: 0,
+                    esi_window: EsiWindow::new(2, 4),
+                    symbol_count: 2,
+                },
+                BondedDonorRepairWindow {
+                    donor_index: 1,
+                    esi_window: EsiWindow::new(4, 6),
+                    symbol_count: 2,
+                },
+                BondedDonorRepairWindow {
+                    donor_index: 2,
+                    esi_window: EsiWindow::new(6, 7),
+                    symbol_count: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_repair_windows_fail_closed_for_invalid_allocation_inputs() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+
+        assert_eq!(
+            allocate_bonded_repair_windows(geometry, 2, 1, &[]),
+            Err(BondScheduleError::NoDonorAssignments)
+        );
+        assert_eq!(
+            allocate_bonded_repair_windows(
+                geometry,
+                2,
+                1,
+                &[
+                    BondedDonorWindowWeight {
+                        donor_index: 0,
+                        weight: 1,
+                    },
+                    BondedDonorWindowWeight {
+                        donor_index: 0,
+                        weight: 1,
+                    },
+                ],
+            ),
+            Err(BondScheduleError::DuplicateDonorAssignment { donor_index: 0 })
+        );
+        assert_eq!(
+            allocate_bonded_repair_windows(
+                geometry,
+                2,
+                1,
+                &[
+                    BondedDonorWindowWeight {
+                        donor_index: 0,
+                        weight: 0,
+                    },
+                    BondedDonorWindowWeight {
+                        donor_index: 1,
+                        weight: 0,
+                    },
+                ],
+            ),
+            Err(BondScheduleError::ZeroWindowWeightSum)
+        );
+        assert_eq!(
+            allocate_bonded_repair_windows(
+                geometry,
+                1,
+                1,
+                &[BondedDonorWindowWeight {
+                    donor_index: 0,
+                    weight: 1,
+                }],
+            ),
+            Err(BondScheduleError::RepairStartBeforeSource {
+                entry_index: 0,
+                source_block_number: 0,
+                source_symbols: 2,
+                first_repair_esi: 1,
+            })
+        );
+        assert_eq!(
+            allocate_bonded_repair_windows(
+                geometry,
+                u32::MAX,
+                1,
+                &[BondedDonorWindowWeight {
+                    donor_index: 0,
+                    weight: 1,
+                }],
+            ),
+            Err(BondScheduleError::RepairWindowAllocationOverflow {
+                entry_index: 0,
+                source_block_number: 0,
+                first_repair_esi: u32::MAX,
+                requested_symbols: 1,
             })
         );
     }
