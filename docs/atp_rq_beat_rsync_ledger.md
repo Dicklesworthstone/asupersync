@@ -2016,3 +2016,20 @@ Benched the f4e6d4984 QUIC-receiver-parallel-decode port (LANE-C) on encrypted t
 **Encrypted-LOSSY still does NOT reliably converge:** 50M/good (200mbit/25ms/0.1% loss) landed only 1/3 reps ok (the success at 308s vs rsync 3.96s; 2 reps errored — non-convergence, fail-closed, excluded from any "win"). This is the documented encrypted-lossy convergence gap (floor j80p42) and **directly confirms LANE-E (sender-side 3-part deficit-serve: serve only the per-block deficit + keep serving until all blocks ack + pace) is the correct next lever** — NOT more decode work.
 
 **Memory story extends to the encrypted tier:** rsync-over-ssh balloons to 3.7GB (clean) / 9.2GB (lossy) RSS on a 50M encrypted transfer while atp holds 14-46MB — a 271-1000× memory advantage even where atp loses the wall. Evidence: `artifacts/atp_bench_matrix/20260623T125705Z/`. NEXT: bench nocrypto 50M/good+bad (FEC Finding-1 convergence); land + bench LANE-E when it ships.
+
+## MATRIX-53 (2026-06-23) — nocrypto 50M regression check on HEAD f4e6d4984: NO regression from shared decoding.rs change; FEC Finding-1 convergence solid (50M/bad 3/3, 4-8 rounds); 50M/good TIE holds (369× less RSS); 50M/bad honest ~4× wall loss (decode-bound small-lossy) but 32× less RSS.
+
+After landing LANE-C (f4e6d4984), which also edited the SHARED src/decoding.rs, re-benched nocrypto 50M good+bad to confirm the rq decode path didn't regress + FEC Finding-1 (aa12f6fa3) convergence. Staged binary atp 0.3.5 = HEAD f4e6d4984, hermetic netns+veth+netem, all sha-ok:
+
+| cell | atp-rq-lab | rsyncd | atp RSS | rsync RSS | mem ratio | atp converge |
+|---|---|---|---|---|---|---|
+| 50M/good nocrypto | 3.95s | 3.93s | **49MB** | **18,060MB (17.6GB)** | atp 369× less | 3/3, 1 round |
+| 50M/bad nocrypto | 66.47s | 16.14s | **183MB** | **5,852MB (5.7GB)** | atp 32× less | 3/3, 4-8 rounds |
+
+**NO REGRESSION from f4e6d4984's shared decoding.rs edit:** 50M/bad nocrypto = 66.47s vs MATRIX-50's 61.2s (within run-to-run variance; both ~60-66s with the size-gated parallel decode), 3/3 sha_ok byte-identical. The QUIC parallel-decode port did not disturb the rq decode path.
+
+**FEC Finding-1 (repair-only FEC fallback, aa12f6fa3) convergence CONFIRMED:** 50M/bad (2% loss) converges 3/3 reps in 4-8 feedback rounds — the repair-only FEC fallback stays engaged in later repair rounds as the regression test locks. No non-convergence on the lossy nocrypto path.
+
+**50M/good TIE holds** (atp 3.95s vs rsync 3.93s — dead heat on wall) with atp using **369× less memory** (49MB vs rsync 17.6GB; rsync-over-rsyncd balloons its in-memory file/buffer structures even on a 50M plaintext transfer).
+
+**Honest weak spot — 50M/bad loses ~4× on wall** (66.47s vs rsync 16.14s): on a SMALL lossy object the RaptorQ fountain + decode overhead isn't amortized over enough data (contrast 500M/bad where it IS amortized → 1.59× of rsync, MATRIX-50). atp remains 32× more memory-efficient (183MB vs 5.7GB) and converges reliably, but the lossy-SMALL wall is a known CPU/decode-bound loss. Pattern confirmed: atp wins lossy-LARGE + always-memory; ties clean-small; loses clean-perfect-wall and lossy-small-wall. Evidence: `artifacts/atp_bench_matrix/20260623T131225Z/`.
