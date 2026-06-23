@@ -387,8 +387,11 @@ mod tests {
     use super::*;
     use crate::channel::oneshot;
     use crate::cx::Cx;
-    use crate::runtime::RuntimeBuilder;
+    use crate::observability::{LogCollector, LogLevel};
+    use crate::runtime::{RuntimeBuilder, yield_now};
     use crate::types::TaskId;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn run_in_runtime<F, Fut, T>(f: F) -> T
     where
@@ -459,6 +462,53 @@ mod tests {
 
         assert_eq!(set.set_id, scope.region_id().as_u64());
         assert_eq!(set.next_member_index, 0);
+    }
+
+    #[test]
+    fn join_set_spawn_trace_records_parent_set_fields() {
+        let (entries, set_id, region) = run_in_runtime(|cx| async move {
+            let collector = LogCollector::new(8).with_min_level(LogLevel::Trace);
+            cx.set_log_collector(collector.clone());
+
+            let mut set = JoinSet::<u32, (), _>::in_cx(&cx);
+            let set_id = set.set_id.to_string();
+            let region = cx.region_id().to_string();
+
+            set.spawn(&cx, |_| async move { Ok::<u32, ()>(1) })
+                .expect("first member spawns");
+            set.spawn(&cx, |_| async move { Ok::<u32, ()>(2) })
+                .expect("second member spawns");
+
+            let values = set
+                .join_all(&cx)
+                .await
+                .into_iter()
+                .map(|outcome| outcome.expect("member ok"))
+                .collect::<Vec<_>>();
+            assert_eq!(values, vec![1, 2]);
+
+            (collector.peek(), set_id, region)
+        });
+
+        let spawn_entries = entries
+            .iter()
+            .filter(|entry| entry.message() == "join_set.spawn")
+            .collect::<Vec<_>>();
+        assert_eq!(spawn_entries.len(), 2);
+
+        for (index, entry) in spawn_entries.iter().enumerate() {
+            let member_index = index.to_string();
+            let active_members = (index + 1).to_string();
+
+            assert_eq!(entry.get_field("join_set_id"), Some(set_id.as_str()));
+            assert_eq!(entry.get_field("region"), Some(region.as_str()));
+            assert_eq!(entry.get_field("spawn_kind"), Some("send"));
+            assert_eq!(entry.get_field("member_index"), Some(member_index.as_str()));
+            assert_eq!(
+                entry.get_field("active_members"),
+                Some(active_members.as_str())
+            );
+        }
     }
 
     #[test]
@@ -558,5 +608,56 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![30, 10, 20]
         );
+    }
+
+    #[test]
+    fn cancel_all_drains_live_members_to_cancel_errors() {
+        let (outcomes, summary) = run_in_runtime(|cx| async move {
+            let started = Arc::new(AtomicUsize::new(0));
+            let mut set = JoinSet::<u32, crate::error::Error, _>::in_cx(&cx);
+
+            for _ in 0..3 {
+                let started = Arc::clone(&started);
+                set.spawn(&cx, move |member_cx| async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    loop {
+                        if let Err(error) = member_cx.checkpoint() {
+                            return Err(error);
+                        }
+                        yield_now().await;
+                    }
+                })
+                .expect("join-set member spawns");
+            }
+
+            for _ in 0..16 {
+                if started.load(Ordering::SeqCst) == 3 {
+                    break;
+                }
+                yield_now().await;
+            }
+            assert_eq!(
+                started.load(Ordering::SeqCst),
+                3,
+                "all members must start before cancel_all is tested"
+            );
+
+            let outcomes = set.cancel_all(&cx).await;
+            let mut summary = JoinSummary::default();
+            for outcome in &outcomes {
+                summary.record(outcome);
+            }
+            (outcomes, summary)
+        });
+
+        assert_eq!(outcomes.len(), 3);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, Outcome::Err(error) if error.is_cancelled())),
+            "cancel_all must drain every live member to a terminal cancellation error: {outcomes:?}"
+        );
+        assert_eq!(summary.completed(), 3);
+        assert_eq!(summary.worst(), Severity::Err);
     }
 }
