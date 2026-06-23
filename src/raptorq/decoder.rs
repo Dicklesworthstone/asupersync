@@ -1621,7 +1621,7 @@ impl InactivationDecoder {
     fn verify_decoded_output(
         &self,
         symbols: &[ReceivedSymbol],
-        intermediate: &[Vec<u8>],
+        intermediate: &[Option<Vec<u8>>],
     ) -> Result<(), DecodeError> {
         let symbol_size = self.params.symbol_size;
         // Reuse a single scratch buffer across rows to avoid per-symbol
@@ -1641,7 +1641,10 @@ impl InactivationDecoder {
                 if coefficient.is_zero() {
                     continue;
                 }
-                gf256_addmul_slice(&mut reconstructed, &intermediate[column], coefficient);
+                let Some(symbol) = intermediate.get(column).and_then(Option::as_ref) else {
+                    return Err(DecodeError::SingularMatrix { row: column });
+                };
+                gf256_addmul_slice(&mut reconstructed, symbol, coefficient);
             }
             if let Some(byte_index) = first_mismatch_byte(&reconstructed, &sym.data) {
                 return Err(DecodeError::CorruptDecodedOutput {
@@ -1677,8 +1680,6 @@ impl InactivationDecoder {
         symbols: &[ReceivedSymbol],
         object_id: Option<&ObjectId>,
     ) -> Result<DecodeResult, DecodeError> {
-        let symbol_size = self.params.symbol_size;
-
         self.validate_input(symbols, object_id)?;
 
         // Build decoder state
@@ -1690,20 +1691,15 @@ impl InactivationDecoder {
         // Phase 2: Inactivation + Gaussian elimination
         self.inactivate_and_solve(&mut state)?;
 
-        // Extract results
-        let intermediate: Vec<Vec<u8>> = state
-            .solved
-            .into_iter()
-            .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
-            .collect();
-        self.verify_decoded_output(symbols, &intermediate)?;
-
-        let source = self.reconstruct_source_symbols(&intermediate);
+        let DecoderState { solved, stats, .. } = state;
+        self.verify_decoded_output(symbols, &solved)?;
+        let source = self.reconstruct_source_symbols(&solved)?;
+        let intermediate = self.materialize_intermediate_symbols(solved);
 
         Ok(DecodeResult {
             intermediate,
             source,
-            stats: state.stats,
+            stats,
         })
     }
 
@@ -1762,8 +1758,6 @@ impl InactivationDecoder {
         symbols: &[ReceivedSymbol],
         batch_size: usize,
     ) -> Result<DecodeResult, DecodeError> {
-        let symbol_size = self.params.symbol_size;
-
         self.validate_input(symbols, None)?;
 
         // A batch_size of 0 falls back to sequential (single batch = all symbols).
@@ -1852,20 +1846,15 @@ impl InactivationDecoder {
         // Phase 2: Inactivation + Gaussian elimination (same as sequential).
         self.inactivate_and_solve(&mut state)?;
 
-        // Extract results.
-        let intermediate: Vec<Vec<u8>> = state
-            .solved
-            .into_iter()
-            .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
-            .collect();
-        self.verify_decoded_output(symbols, &intermediate)?;
-
-        let source = self.reconstruct_source_symbols(&intermediate);
+        let DecoderState { solved, stats, .. } = state;
+        self.verify_decoded_output(symbols, &solved)?;
+        let source = self.reconstruct_source_symbols(&solved)?;
+        let intermediate = self.materialize_intermediate_symbols(solved);
 
         Ok(DecodeResult {
             intermediate,
             source,
-            stats: state.stats,
+            stats,
         })
     }
 
@@ -1987,18 +1976,20 @@ impl InactivationDecoder {
             return Err((err, proof_builder.build()));
         }
 
-        // Extract results
-        let intermediate: Vec<Vec<u8>> = state
-            .solved
-            .into_iter()
-            .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
-            .collect();
-        if let Err(err) = self.verify_decoded_output(symbols, &intermediate) {
+        let DecoderState { solved, stats, .. } = state;
+        if let Err(err) = self.verify_decoded_output(symbols, &solved) {
             proof_builder.set_failure(FailureReason::from(&err));
             return Err((err, proof_builder.build()));
         }
 
-        let source = self.reconstruct_source_symbols(&intermediate);
+        let source = match self.reconstruct_source_symbols(&solved) {
+            Ok(source) => source,
+            Err(err) => {
+                proof_builder.set_failure(FailureReason::from(&err));
+                return Err((err, proof_builder.build()));
+            }
+        };
+        let intermediate = self.materialize_intermediate_symbols(solved);
 
         // Mark success with a deterministic binding to the recovered payload.
         proof_builder.set_success(&source);
@@ -2007,7 +1998,7 @@ impl InactivationDecoder {
             result: DecodeResult {
                 intermediate,
                 source,
-                stats: state.stats,
+                stats,
             },
             proof: proof_builder.build(),
         })
@@ -2929,7 +2920,10 @@ impl InactivationDecoder {
         }
     }
 
-    fn reconstruct_source_symbols(&self, intermediate: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    fn reconstruct_source_symbols(
+        &self,
+        intermediate: &[Option<Vec<u8>>],
+    ) -> Result<Vec<Vec<u8>>, DecodeError> {
         let mut source = Vec::with_capacity(self.params.k);
         for esi in 0..self.params.k {
             let esi_u32 =
@@ -2937,11 +2931,23 @@ impl InactivationDecoder {
             let (columns, coefficients) = self.source_equation(esi_u32);
             let mut symbol = vec![0u8; self.params.symbol_size];
             for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
-                gf256_addmul_slice(&mut symbol, &intermediate[column], coefficient);
+                let Some(intermediate_symbol) = intermediate.get(column).and_then(Option::as_ref)
+                else {
+                    return Err(DecodeError::SingularMatrix { row: column });
+                };
+                gf256_addmul_slice(&mut symbol, intermediate_symbol, coefficient);
             }
             source.push(symbol);
         }
-        source
+        Ok(source)
+    }
+
+    fn materialize_intermediate_symbols(&self, intermediate: Vec<Option<Vec<u8>>>) -> Vec<Vec<u8>> {
+        let symbol_size = self.params.symbol_size;
+        intermediate
+            .into_iter()
+            .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
+            .collect()
     }
 
     fn systematic_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
@@ -5547,11 +5553,11 @@ mod tests {
         let source = make_source_data(k, symbol_size);
         let received = make_received_source(&decoder, &source);
 
-        let mut intermediate = vec![vec![0u8; symbol_size]; decoder.params().l];
+        let mut intermediate = vec![Some(vec![0u8; symbol_size]); decoder.params().l];
         for (idx, src) in source.iter().enumerate() {
-            intermediate[idx] = src.clone();
+            intermediate[idx] = Some(src.clone());
         }
-        intermediate[0][0] ^= 0xA5;
+        intermediate[0].as_mut().expect("symbol 0 is present")[0] ^= 0xA5;
 
         let err = decoder
             .verify_decoded_output(&received, &intermediate)
@@ -5565,6 +5571,40 @@ mod tests {
             }
         ));
         assert!(err.is_unrecoverable());
+    }
+
+    #[test]
+    fn reconstruction_rejects_unsolved_required_intermediate_column() {
+        let k = 6;
+        let symbol_size = 16;
+        let seed = 0x6330_C004_u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let source = make_source_data(k, symbol_size);
+        let received = make_received_source(&decoder, &source);
+        let (required_columns, _) = decoder.source_equation(0);
+        let missing_column = required_columns[0];
+        let mut intermediate = vec![Some(vec![0u8; symbol_size]); decoder.params().l];
+        intermediate[missing_column] = None;
+
+        let verify_err = decoder
+            .verify_decoded_output(&received, &intermediate)
+            .expect_err("success verification must not materialize missing columns as zeros");
+        assert_eq!(
+            verify_err,
+            DecodeError::SingularMatrix {
+                row: missing_column
+            }
+        );
+
+        let reconstruct_err = decoder
+            .reconstruct_source_symbols(&intermediate)
+            .expect_err("source reconstruction must fail closed on missing source dependencies");
+        assert_eq!(
+            reconstruct_err,
+            DecodeError::SingularMatrix {
+                row: missing_column
+            }
+        );
     }
 
     #[test]
