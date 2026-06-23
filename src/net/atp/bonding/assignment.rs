@@ -366,6 +366,17 @@ impl BondedRepairWindowPlan {
     }
 }
 
+/// A receiver-allocated repair window materialized as a donor assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedDonorRepairWindowAssignment {
+    /// Zero-based donor index.
+    pub donor_index: u32,
+    /// Explicit-window assignment to send to this donor for the repair round.
+    pub assignment: DonorAssignment,
+    /// Repair window that produced `assignment.esi_windows`.
+    pub repair_window: BondedDonorRepairWindow,
+}
+
 /// Per-source-block ESI assignment for one donor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BondedBlockSpraySchedule {
@@ -469,6 +480,22 @@ pub enum BondScheduleError {
         /// Failed donor index with no matching outstanding window.
         donor_index: u32,
     },
+    /// A repair window names a donor that is not in the enrolled assignment set.
+    MissingDonorAssignment {
+        /// Donor index named by the repair window.
+        donor_index: u32,
+    },
+    /// A repair window is empty or its symbol count does not match its ESI range.
+    InvalidRepairWindow {
+        /// Donor index named by the repair window.
+        donor_index: u32,
+        /// First included ESI.
+        start_inclusive: u32,
+        /// First excluded ESI.
+        end_exclusive: u32,
+        /// Advertised number of repair symbols.
+        symbol_count: u32,
+    },
     /// Repair ESI budget overflowed the `u32` ESI space.
     RepairBudgetOverflow {
         /// Descriptor entry index.
@@ -547,6 +574,19 @@ impl fmt::Display for BondScheduleError {
                 f,
                 "channel-bonding failed donor {donor_index} had no outstanding repair window to reallocate"
             ),
+            Self::MissingDonorAssignment { donor_index } => write!(
+                f,
+                "channel-bonding repair window names unenrolled donor {donor_index}"
+            ),
+            Self::InvalidRepairWindow {
+                donor_index,
+                start_inclusive,
+                end_exclusive,
+                symbol_count,
+            } => write!(
+                f,
+                "channel-bonding repair window for donor {donor_index} is invalid: range=[{start_inclusive},{end_exclusive}), symbols={symbol_count}"
+            ),
             Self::RepairBudgetOverflow {
                 entry_index,
                 source_block_number,
@@ -598,6 +638,8 @@ impl std::error::Error for BondScheduleError {
             | Self::ZeroWindowWeightSum
             | Self::RepairWindowAllocationOverflow { .. }
             | Self::MissingFailedDonorWindow { .. }
+            | Self::MissingDonorAssignment { .. }
+            | Self::InvalidRepairWindow { .. }
             | Self::RepairBudgetOverflow { .. }
             | Self::RepairStartBeforeSource { .. }
             | Self::RepairContinuationOverflow { .. }
@@ -797,6 +839,52 @@ pub fn reallocate_failed_bonded_repair_windows(
     )
 }
 
+/// Convert receiver-allocated repair windows into explicit donor assignments.
+///
+/// Dynamic-window repair is receiver-owned: the receiver allocates disjoint ESI
+/// windows, then sends each donor an explicit assignment for only its window.
+/// Donors with no window are omitted instead of receiving an empty window list,
+/// because empty `esi_windows` means static-residue ownership.
+pub fn schedule_bonded_repair_window_assignments(
+    assignments: &[DonorAssignment],
+    plan: &BondedRepairWindowPlan,
+) -> Result<Vec<BondedDonorRepairWindowAssignment>, BondScheduleError> {
+    validate_collective_assignments(assignments)?;
+
+    let mut assigned_donors = BTreeSet::new();
+    let mut windowed = Vec::with_capacity(plan.windows.len());
+    for window in &plan.windows {
+        validate_repair_window_shape(*window)?;
+        if !assigned_donors.insert(window.donor_index) {
+            return Err(BondScheduleError::DuplicateDonorAssignment {
+                donor_index: window.donor_index,
+            });
+        }
+
+        let Some(base_assignment) = assignments
+            .iter()
+            .find(|assignment| assignment.donor_index == window.donor_index)
+        else {
+            return Err(BondScheduleError::MissingDonorAssignment {
+                donor_index: window.donor_index,
+            });
+        };
+
+        let mut assignment = base_assignment.clone();
+        assignment.esi_windows = vec![window.esi_window];
+        assignment
+            .validate()
+            .map_err(BondScheduleError::InvalidAssignment)?;
+        windowed.push(BondedDonorRepairWindowAssignment {
+            donor_index: window.donor_index,
+            assignment,
+            repair_window: *window,
+        });
+    }
+
+    Ok(windowed)
+}
+
 /// Continue one block's repair stream for a receiver `NeedMore` deficit.
 ///
 /// `first_repair_esi` is the first global repair ESI candidate to consider.
@@ -928,6 +1016,22 @@ fn validate_window_weights(
                 donor_index: weight.donor_index,
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_repair_window_shape(window: BondedDonorRepairWindow) -> Result<(), BondScheduleError> {
+    let window_symbol_count = window
+        .esi_window
+        .end_exclusive
+        .checked_sub(window.esi_window.start_inclusive);
+    if !window.esi_window.is_non_empty() || window_symbol_count != Some(window.symbol_count) {
+        return Err(BondScheduleError::InvalidRepairWindow {
+            donor_index: window.donor_index,
+            start_inclusive: window.esi_window.start_inclusive,
+            end_exclusive: window.esi_window.end_exclusive,
+            symbol_count: window.symbol_count,
+        });
     }
     Ok(())
 }
@@ -1754,6 +1858,111 @@ mod tests {
                 }],
             ),
             Err(BondScheduleError::MissingFailedDonorWindow { donor_index: 1 })
+        );
+    }
+
+    #[test]
+    fn repair_window_assignments_preserve_control_metadata_and_override_residue() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let auth = BondAuthKeyRef::ControlPlane("bond-key-1".to_string());
+        let assignments = vec![
+            DonorAssignment::new_static(0, 2, vec![endpoint()], Some(auth.clone())),
+            DonorAssignment::new_static(1, 2, vec![endpoint()], Some(auth.clone())),
+        ];
+        let plan = allocate_bonded_repair_windows(
+            geometry,
+            2,
+            8,
+            &[
+                BondedDonorWindowWeight {
+                    donor_index: 0,
+                    weight: 1,
+                },
+                BondedDonorWindowWeight {
+                    donor_index: 1,
+                    weight: 3,
+                },
+            ],
+        )
+        .expect("window allocation");
+
+        let windowed = schedule_bonded_repair_window_assignments(&assignments, &plan)
+            .expect("window assignments");
+
+        assert_eq!(windowed.len(), 2);
+        assert_eq!(windowed[0].donor_index, 0);
+        assert_eq!(windowed[0].repair_window, plan.windows[0]);
+        assert_eq!(
+            windowed[0].assignment.esi_windows,
+            vec![EsiWindow::new(2, 4)]
+        );
+        assert_eq!(
+            windowed[0].assignment.receiver_udp_endpoints,
+            vec![endpoint()]
+        );
+        assert_eq!(windowed[0].assignment.auth_key_ref, Some(auth.clone()));
+        assert!(windowed[0].assignment.owns_esi(2));
+        assert!(windowed[0].assignment.owns_esi(3));
+        assert!(!windowed[0].assignment.owns_esi(4));
+
+        assert_eq!(windowed[1].donor_index, 1);
+        assert_eq!(windowed[1].repair_window, plan.windows[1]);
+        assert_eq!(
+            windowed[1].assignment.esi_windows,
+            vec![EsiWindow::new(4, 10)]
+        );
+        assert_eq!(windowed[1].assignment.auth_key_ref, Some(auth));
+        assert!(windowed[1].assignment.owns_esi(9));
+        assert!(!windowed[1].assignment.owns_esi(3));
+    }
+
+    #[test]
+    fn repair_window_assignments_fail_closed_for_unknown_or_malformed_windows() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let assignments = vec![DonorAssignment::new_static(0, 2, vec![endpoint()], None)];
+        let missing_donor_plan = BondedRepairWindowPlan {
+            geometry,
+            first_repair_esi: 2,
+            next_repair_esi: 4,
+            windows: vec![BondedDonorRepairWindow {
+                donor_index: 1,
+                esi_window: EsiWindow::new(2, 4),
+                symbol_count: 2,
+                stagger_delay_slots: 0,
+            }],
+        };
+
+        assert_eq!(
+            schedule_bonded_repair_window_assignments(&assignments, &missing_donor_plan),
+            Err(BondScheduleError::MissingDonorAssignment { donor_index: 1 })
+        );
+
+        let malformed_plan = BondedRepairWindowPlan {
+            geometry,
+            first_repair_esi: 2,
+            next_repair_esi: 4,
+            windows: vec![BondedDonorRepairWindow {
+                donor_index: 0,
+                esi_window: EsiWindow::new(2, 4),
+                symbol_count: 3,
+                stagger_delay_slots: 0,
+            }],
+        };
+
+        assert_eq!(
+            schedule_bonded_repair_window_assignments(&assignments, &malformed_plan),
+            Err(BondScheduleError::InvalidRepairWindow {
+                donor_index: 0,
+                start_inclusive: 2,
+                end_exclusive: 4,
+                symbol_count: 3,
+            })
         );
     }
 
