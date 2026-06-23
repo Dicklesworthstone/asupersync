@@ -6773,6 +6773,7 @@ where
 mod tests {
     use super::*;
     use crate::net::atp::protocol::frames::{Frame, ProtocolVersion};
+    use crate::net::atp::protocol::quic_frames::QuicFrame;
     use crate::net::quic_native::{
         DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, PacketNumberSpace, QuicConnection,
         QuicPathStats, QuicTransportMachine, SentPacketMeta, StreamDirection, StreamRole,
