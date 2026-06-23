@@ -215,6 +215,13 @@ const RQ_SOURCE_FEC_FALLBACK_ALPHA: f64 = 1e-6;
 const RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD: f64 = 0.50;
 const RQ_SOURCE_FEC_FALLBACK_MIN_LOSS_BAR: f64 = 0.01;
 const RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD: f64 = 0.03;
+/// Receiver-observed loss must directly size feedback repair rounds. The adaptive
+/// model's smoothed loss bar can be too small after sparse source retransmit
+/// rounds; this floor turns a broken-link sample (p≈0.10) into ≈13% fresh repair
+/// per block while staying zero for clean/good paths.
+const RQ_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = RQ_ROUND0_TARGET_LOSS_ENABLE_MIN;
+const RQ_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
+const RQ_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
 const RQ_AIMD_LOSS_DECREASE_THRESHOLD_MIN: f64 = RQ_MILD_LOSS_PACING_MAX_LOSS;
 const RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN: f64 = 0.03;
 const RQ_AIMD_CLEAN_INCREASE_THRESHOLD: f64 = 0.0015;
@@ -809,9 +816,12 @@ impl RqAdaptiveSendState {
             RQ_SOURCE_FEC_FALLBACK_ALPHA,
             RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
         );
+        let measured_loss_overhead =
+            measured_feedback_repair_overhead(self.last_round_loss_fraction);
         tuning.repair_overhead = tuning
             .repair_overhead
             .max(1.0 + overhead)
+            .max(1.0 + measured_loss_overhead)
             .max(1.0 + RQ_SOURCE_FEC_FALLBACK_MIN_OVERHEAD)
             // Bound the FEC-fallback budget the same as round_tuning: when the wire-loss
             // estimate is inflated by a round-0 over-pace artifact (loss_bar≈0.9),
@@ -1178,6 +1188,18 @@ fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
 fn round0_loss_target_repair_enabled(config: &RqConfig) -> bool {
     let loss = config.round0_loss_target;
     loss.is_finite() && loss >= RQ_ROUND0_TARGET_LOSS_ENABLE_MIN
+}
+
+fn measured_feedback_repair_overhead(loss_fraction: f64) -> f64 {
+    if !loss_fraction.is_finite() {
+        return 0.0;
+    }
+    let loss = loss_fraction.clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD);
+    if loss < RQ_FEEDBACK_REPAIR_LOSS_ENABLE_MIN {
+        return 0.0;
+    }
+    (loss * (1.0 + RQ_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION) + RQ_FEEDBACK_REPAIR_LOSS_MARGIN_MIN)
+        .clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD)
 }
 
 fn aimd_loss_decrease_threshold(config: &RqConfig) -> f64 {
@@ -9685,6 +9707,54 @@ mod tests {
             "fallback must apply adaptive FEC overhead: got {}, expected at least {}",
             tuning.repair_overhead,
             1.0 + expected
+        );
+    }
+
+    #[test]
+    fn measured_feedback_repair_overhead_tracks_receiver_loss() {
+        assert_eq!(measured_feedback_repair_overhead(0.0), 0.0);
+        assert_eq!(measured_feedback_repair_overhead(0.001), 0.0);
+
+        let bad = measured_feedback_repair_overhead(0.02);
+        assert!(
+            (0.029..=0.031).contains(&bad),
+            "2% measured loss should request about 3% repair overhead, got {bad}"
+        );
+
+        let broken = measured_feedback_repair_overhead(0.10);
+        assert!(
+            (0.12..=0.15).contains(&broken),
+            "10% measured loss should request a bounded 12-15% repair overhead, got {broken}"
+        );
+    }
+
+    #[test]
+    fn source_fec_fallback_uses_measured_loss_floor_for_feedback_rounds() {
+        let config = RqConfig {
+            symbol_size: 1024,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(103, &config, 4);
+        state.last_round_loss_fraction = 0.10;
+        state.loss_ema = 0.0;
+        state.loss_bar = 0.0;
+        state.pacing_loss_ema = 0.0;
+        state.est.loss_p_hat = 0.0;
+
+        let tuning = state.source_fec_fallback_tuning(&config);
+        let measured = measured_feedback_repair_overhead(0.10);
+
+        assert!(
+            tuning.repair_overhead >= 1.0 + measured,
+            "fallback must honor receiver-measured loss floor: got {}, expected at least {}",
+            tuning.repair_overhead,
+            1.0 + measured
+        );
+        assert!(
+            repair_target_for_feedback_round(512, 0, tuning.repair_overhead) >= 66,
+            "10% broken-link repair round should send enough fresh repair symbols to avoid serial RTT rounds"
         );
     }
 
