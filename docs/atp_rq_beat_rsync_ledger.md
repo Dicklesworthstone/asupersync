@@ -1860,3 +1860,22 @@ Re-benched encrypted 50M after mh1eg4 `1aa4d74b0` "coalesce symbol datagrams per
 **Encrypted-lossy STILL fails — but the blocker moved from throughput to CONVERGENCE.** Counters: good reaches `symbols_accepted=45926` of ~46000 needed (**99.8%**), `datagrams_dropped_on_receive=0` (receiver drops nothing) → it's starved of the **last ~50–74 straggler symbols** (lost to the 0.1–2% link), requests them via NeedMore, but the error is `[ASUP-E804] transport timeout during receive proof or fountain feedback after 60s` → **the repair round never completes**. This is the per-block fountain-feedback straggler = **the SAME FEC-fallback-self-disables bug as Finding-1 / 317hxr.6.1.1** (FEC repair disables in later rounds via the `requested_sources==0` guard → straggler symbols never resent). 
 
 **Lever (re-routed):** the encrypted-lossy unblocker is NOT more QUIC-specific work — it is **Finding-1 (LANE-B): drop the FEC-fallback self-disable guard** so the sender keeps emitting per-block repair until the receiver converges. That single fix should land BOTH nocrypto-lossy (50M/bad 53.6s→faster/convergent) AND encrypted-lossy (good/bad 0/3 → sha-ok). mh1eg4 stays a real win (throughput foundation + clean −12%); commented on bead. Evidence: `artifacts/atp_bench_matrix/20260623T031907Z/` (counters in cells/50M/{good,bad}/encrypted/atp-quic-tls13/rep*/).
+
+## MATRIX-43 (2026-06-23) — j80p42 "cushion lossy repair feedback" INSUFFICIENT: encrypted-lossy STILL fails ASUP-E804 (sender doesn't keep emitting per-block repair to convergence); nocrypto/bad unchanged
+
+Benched encrypted+nocrypto 50M after j80p42 `338c1560b` "fix(atp): cushion lossy repair feedback". Run `artifacts/atp_bench_matrix/20260623T041722Z/`, 3 reps/cell:
+
+| tier | regime | atp median | rsync | verdict |
+|---|---|---|---|---|
+| nocrypto | perfect | 3.65s | 1.23 | lose |
+| nocrypto | good | 3.95s | 3.93 | TIE |
+| nocrypto | bad | 57.56s | 13.94 | lose (≈ baseline 53.6, no change) |
+| encrypted | perfect | 31.64s sha-ok | 0.85 | lose (≈ 32.7 prior) |
+| encrypted | good | **0/3 ASUP-E804** | 4.35 | FAIL |
+| encrypted | bad | **0/3 ASUP-E804** | 18.07 | FAIL |
+
+**j80p42 did NOT fix encrypted-lossy convergence.** Counters unchanged vs MATRIX-42: good reaches symbols_accepted ~45868–45918 of ~46000 (short ~110); **bad only ~43936–44114 (short ~2000)**; receiver drops nothing (datagrams_dropped_on_receive=0); still `[ASUP-E804] transport timeout during receive proof or fountain feedback after 60s`. The "cushion" added some margin but not enough — especially on bad (2% loss), where the receiver ends ~2000 symbols short, meaning **the sender stops emitting per-block repair well before the receiver has enough**. nocrypto/bad unchanged (57.6 ≈ baseline 53.6, within variance) — so j80p42 also didn't move nocrypto.
+
+**ROOT CAUSE (refined):** this is NOT a cushion/overhead-margin tweak — it's that the fountain-feedback loop **terminates before convergence**. True fountain behavior requires the sender to respond to each receiver NeedMore (per-block deficit) with the requested repair symbols and LOOP until the receiver acks every block complete; instead the QUIC path emits a bounded/capped amount then stops, and the receiver times out at 60s still short. Bad's ~2000-symbol deficit (vs good's ~110) shows the cap scales wrong with loss rate.
+
+**NEXT LEVER (re-routed, deeper):** instrument the QUIC repair-round loop (ATP_RQ_TRACE round-by-round: per-round symbols_sent, NeedMore deficit requested, repair symbols emitted in response, round count, cap) to answer: does the sender respond to NeedMore at all on the QUIC path? how many repair symbols/round? is there a round cap or per-block budget that exhausts? Then make the sender loop per-block repair to convergence (uncapped within a deadline) so no block is left short. ALSO: 2/18 lossy reps hit `ASUP-E804 ... receive sender handshake[/ack]` (handshake timeout under heavy concurrent bench load) — possible handshake robustness/contention issue to watch. j80p42 kept OPEN (insufficient). Evidence: `artifacts/atp_bench_matrix/20260623T041722Z/` (counters in cells/50M/{good,bad}/encrypted/atp-quic-tls13/rep*/).
