@@ -44,5 +44,6 @@ pub use handshake::{
 };
 pub use receiver::{
     BondedBlockCoverage, BondedDonorIngressStats, BondedReceiverIngressStats,
-    BondedReceiverSymbolSet, BondedSymbolDisposition, BondedSymbolKey,
+    BondedReceiverProgressSnapshot, BondedReceiverSymbolSet, BondedSymbolDisposition,
+    BondedSymbolKey,
 };

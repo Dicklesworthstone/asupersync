@@ -159,6 +159,35 @@ impl BondedBlockCoverage {
     }
 }
 
+/// Live receiver progress summary for a bonded transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondedReceiverProgressSnapshot {
+    /// Aggregate symbol ingress counters.
+    pub aggregate: BondedReceiverIngressStats,
+    /// Number of source blocks included in this snapshot.
+    pub total_blocks: usize,
+    /// Blocks whose accepted symbols meet their target.
+    pub complete_blocks: usize,
+    /// Blocks still below their target.
+    pub incomplete_blocks: usize,
+    /// Sum of all incomplete block deficits.
+    pub total_deficit_symbols: u64,
+}
+
+impl BondedReceiverProgressSnapshot {
+    /// True when every tracked block is complete.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        self.incomplete_blocks == 0
+    }
+
+    /// Aggregate duplicate rate in parts-per-million.
+    #[must_use]
+    pub fn duplicate_rate_ppm(self) -> u64 {
+        self.aggregate.duplicate_rate_ppm()
+    }
+}
+
 /// Receiver-side C2 registry for authenticated donor symbols.
 #[derive(Debug, Clone, Default)]
 pub struct BondedReceiverSymbolSet {
@@ -311,6 +340,36 @@ impl BondedReceiverSymbolSet {
             })
             .filter(|coverage| !coverage.is_complete())
             .collect()
+    }
+
+    /// Build a live progress snapshot over the receiver's expected blocks.
+    #[must_use]
+    pub fn progress_snapshot(
+        &self,
+        blocks: impl IntoIterator<Item = (ObjectId, u8, u32)>,
+    ) -> BondedReceiverProgressSnapshot {
+        let mut total_blocks = 0usize;
+        let mut complete_blocks = 0usize;
+        let mut total_deficit_symbols = 0u64;
+
+        for (object_id, sbn, target_symbols) in blocks {
+            total_blocks = total_blocks.saturating_add(1);
+            let coverage = self.block_coverage(object_id, sbn, target_symbols);
+            if coverage.is_complete() {
+                complete_blocks = complete_blocks.saturating_add(1);
+            } else {
+                total_deficit_symbols =
+                    total_deficit_symbols.saturating_add(u64::from(coverage.deficit_symbols));
+            }
+        }
+
+        BondedReceiverProgressSnapshot {
+            aggregate: self.aggregate,
+            total_blocks,
+            complete_blocks,
+            incomplete_blocks: total_blocks.saturating_sub(complete_blocks),
+            total_deficit_symbols,
+        }
     }
 }
 
@@ -486,6 +545,40 @@ mod tests {
                 deficit_symbols: 1,
             }]
         );
+    }
+
+    #[test]
+    fn progress_snapshot_summarizes_block_completion_and_deficit() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(19);
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Repair);
+        set.record_key(2, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
+        set.record_key(3, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
+
+        let snapshot = set.progress_snapshot([(object_id, 0, 2), (object_id, 1, 3)]);
+
+        assert_eq!(snapshot.aggregate.symbols_received, 4);
+        assert_eq!(snapshot.aggregate.symbols_accepted, 3);
+        assert_eq!(snapshot.aggregate.duplicate_symbols, 1);
+        assert_eq!(snapshot.duplicate_rate_ppm(), 250_000);
+        assert_eq!(snapshot.total_blocks, 2);
+        assert_eq!(snapshot.complete_blocks, 1);
+        assert_eq!(snapshot.incomplete_blocks, 1);
+        assert_eq!(snapshot.total_deficit_symbols, 2);
+        assert!(!snapshot.is_complete());
+    }
+
+    #[test]
+    fn progress_snapshot_with_no_blocks_is_complete() {
+        let set = BondedReceiverSymbolSet::new();
+        let snapshot = set.progress_snapshot(std::iter::empty::<(ObjectId, u8, u32)>());
+
+        assert_eq!(snapshot.total_blocks, 0);
+        assert_eq!(snapshot.complete_blocks, 0);
+        assert_eq!(snapshot.incomplete_blocks, 0);
+        assert_eq!(snapshot.total_deficit_symbols, 0);
+        assert!(snapshot.is_complete());
     }
 
     #[test]
