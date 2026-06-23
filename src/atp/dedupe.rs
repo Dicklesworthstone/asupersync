@@ -841,6 +841,29 @@ mod tests {
     }
 
     #[test]
+    fn dedupe_payload_set_rejects_reordered_unique_payloads() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "tree-a",
+            &[&b"alpha"[..], &b"beta"[..], &b"alpha"[..]],
+        );
+        let receiver = manifest(&mut receiver_store, "tree-a", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let mut payload_set = build_dedup_payload_set(&plan, &sender_store).expect("payload set");
+
+        payload_set.payloads.swap(0, 1);
+
+        assert!(matches!(
+            payload_set.validate_against_send_set(),
+            Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal: 0 })
+        ));
+    }
+
+    #[test]
     fn dedupe_send_set_canonical_metadata_round_trips() {
         let repeated = vec![b'x'; 4096];
         let unique = vec![b'y'; 2048];
