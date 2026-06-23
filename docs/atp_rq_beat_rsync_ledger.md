@@ -1756,3 +1756,23 @@ After reverting flat-low-seed, the swarm tried slow-start (`13853a953`) then a h
 **All three round-0 schemes regress vs plain AIMD** (flat-low-seed bad67/broken131; slow-start bad59/broken126; slow-start+ceiling bad60/broken204). Conclusion (definitive): **the plain AIMD baseline — start round-0 at cold-start (16 MiB/s) and let AIMD multiplicative-decrease on observed loss — is the lossy optimum.** Any conservative round-0 start (low seed, ramp, or capped ceiling) loses more to under-utilization/ramp-delay than it saves on overshoot, because the link absorbs a fast first round better than it absorbs a slow start. **ROUND-0 TUNING IS CLOSED** (after AIMD itself, 3 refinements all net-negative).
 
 **Action: revert the slow-start series (`13853a953`+`8b6192367`) to the plain AIMD baseline (restore transport_rq to `325351fbd` state = AIMD + ramp-cleanup, bad 57.1/broken 96.23).** Then PIVOT the swarm off round-0 entirely to the structural-upside fronts: QUIC/encrypted port (encrypted fails all lossy — biggest untapped tier), trees small-entry batching (tree_big/good already BEATS rsync — widen it), and 500M receiver decode/feed profiling (the 500M-lossy wall). Dispatched. **Final lossy verdict: AIMD is the bankable, regression-free lossy win (broken −24%/500M-bad −15% vs pre-AIMD); atp still loses rsync on lossy but the mechanism is at its tuning ceiling — further lossy gains need receiver-decode-at-scale or the QUIC/tree structural edges, not more pacing.** Evidence dir: `artifacts/atp_bench_matrix/20260622T230254Z/`.
+
+## MATRIX-37 (2026-06-23) — QUIC.1 encrypted-AIMD (`315843db9`) benched: encrypted CLEAN works but loses 42×; encrypted LOSSY STILL FAILS — root cause is a 16384-byte UDP packet-too-large on coalesced lossy datagrams, NOT rate control
+
+Benched the encrypted tier (`atp-quic-tls13` vs `rsync-ssh aes128-gcm`), 50M, after the QUIC.1 first commit `315843db9` "add receiver-observed AIMD feedback to encrypted RQ". Run `artifacts/atp_bench_matrix/20260623T000533Z/`, 3 reps/cell:
+
+| regime (netem) | atp-quic-tls13 | rsync-ssh | atp status | verdict |
+|---|---|---|---|---|
+| perfect (2ms/0%/1gbit) | 36.48s sha-ok (3/3, rounds=5, RSS ~13.6MB) | 0.85s sha-ok (RSS ~51MB) | ok | atp WORKS but **loses ~42×** |
+| good (25ms/0.1%/200mbit) | **3×ERROR** ~21s sha-false (RSS ~15MB) | 3.85s sha-ok | error | atp **FAILS** |
+| bad (80ms/20ms/2%/50mbit) | **3×ERROR** ~16s sha-false (RSS ~31MB) | 18.06s sha-ok | error | atp **FAILS** |
+
+**Encrypted-lossy STILL FAILS even with AIMD ported.** The atp runs do not time out — they **error fast** (~16–21s, low RSS) with a single, deterministic, reproducible cause (all 6 lossy reps):
+
+```
+atp failed: native QUIC error: udp endpoint: packet too large: 16385–16390 bytes > 16384 limit
+```
+
+**Root cause (pinned to code):** `ATP_QUIC_UDP_MAX_PACKET = 16 * 1024 = 16384` (`src/net/atp/transport_quic/native_link.rs:186`) is installed as the receiver endpoint's `max_packet_size` (`endpoint.rs:835`), and `endpoint.rs:356` **rejects any inbound UDP datagram > 16384**. On lossy links *only* (ACK frames exist only when there is loss/retransmit), the sender coalesces an ACK frame onto a near-full 1-RTT data packet and the resulting UDP datagram lands **1–6 bytes over 16384**. The `max_app_payload` cap (`native_link.rs:~905`) bounds a *single* packet's app payload but not the *coalesced UDP datagram* including the trailing ACK/control frame. Perfect links never coalesce an ACK (no loss) → no overshoot → clean works.
+
+**Verdict:** AIMD-in-QUIC was a correct port but does NOT address the encrypted-lossy blocker — the blocker is a UDP coalescing/packet-size **off-by-headroom** bug, not rate control. Two clean fixes (sender and receiver must AGREE): (1) bound the sender's coalescing budget to keep the *whole* UDP datagram (all coalesced packets + ACK/control + headers + tags) ≤ the receiver cap; and/or (2) raise the receiver `ATP_QUIC_UDP_MAX_PACKET` to the real max UDP payload (e.g. 65535) so coalesced packets are accepted. Since 16384 is a self-imposed superbuffer size (not a wire MTU — netem MTU is 1500), the robust fix is to make both ends agree at a generous bound AND keep the sender strictly under it. Separately, encrypted CLEAN loses 42× to rsync (36.48s vs 0.85s) — that is the per-symbol-DATAGRAM + single-core decode wall, the same as nocrypto perfect; the okcmis staging-cache + parallel-decode levers apply to QUIC too. Dispatched precise QUIC bead + marching order. Evidence: `artifacts/atp_bench_matrix/20260623T000533Z/` (cell logs `cells/50M/{good,bad}/encrypted/atp-quic-tls13/rep*/`).
