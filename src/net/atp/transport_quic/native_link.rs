@@ -178,12 +178,20 @@ const ONE_RTT_FIXED_BIT: u8 = 0x40;
 /// QUIC short-header key-phase bit (bit 2).
 const ONE_RTT_KEY_PHASE_BIT: u8 = 0x04;
 
-/// UDP max packet size for the link's endpoint. Large enough that the server's
-/// full Handshake flight (certificate chain) fits one loopback packet — the
-/// handshake driver assumes in-order contiguous CRYPTO without fragmentation.
-/// 1-RTT data packets are far smaller. Real-internet path-MTU + CRYPTO
-/// fragmentation is follow-up work.
-const ATP_QUIC_UDP_MAX_PACKET: usize = 16 * 1024;
+/// UDP max packet size for the link's endpoint.
+///
+/// The ATP-over-QUIC data plane intentionally uses large UDP datagrams on the
+/// hermetic netns/veth benchmark links. Keep this as a jumbo endpoint envelope,
+/// not a 1500-byte path-MTU estimate: lossy encrypted runs can coalesce an ACK or
+/// small control frame with an otherwise near-full 1-RTT DATAGRAM packet, so a
+/// self-imposed 16 KiB receiver cap rejected valid packets a few bytes over the
+/// old bound before the fountain loop could recover.
+const ATP_QUIC_UDP_MAX_PACKET: usize = 65_535;
+
+/// Bytes added around each encoded 1-RTT payload before it is handed to UDP.
+const ONE_RTT_PACKET_OVERHEAD: usize = ONE_RTT_HEADER_LEN + ONE_RTT_TAG_LEN;
+/// Reserved bytes below the endpoint cap for ACK/control-frame coalescing slack.
+const ONE_RTT_COALESCED_CONTROL_HEADROOM: usize = 64;
 
 /// Fixed socket buffer budget for the native ATP-QUIC link. This is intentionally
 /// a constant envelope, not proportional to object size, so large transfers cannot
@@ -334,6 +342,12 @@ fn decode_one_rtt_packet(
     tag.copy_from_slice(&body[tag_offset..]);
     let ciphertext = &body[..tag_offset];
     Some((key_phase, packet_number, header, ciphertext, tag))
+}
+
+fn one_rtt_max_payload_for_udp_packet(max_udp_packet: usize) -> usize {
+    max_udp_packet
+        .saturating_sub(ONE_RTT_PACKET_OVERHEAD)
+        .saturating_sub(ONE_RTT_COALESCED_CONTROL_HEADROOM)
 }
 
 /// An established native QUIC connection plus everything needed to drive its
@@ -564,6 +578,13 @@ impl QuicLink {
             data.extend_from_slice(&header);
             data.extend_from_slice(&protected.ciphertext);
             data.extend_from_slice(&protected.tag);
+            if data.len() > ATP_QUIC_UDP_MAX_PACKET {
+                return Err(QuicTransportError::Quic(format!(
+                    "protected 1-RTT packet too large: {} bytes > {} limit",
+                    data.len(),
+                    ATP_QUIC_UDP_MAX_PACKET
+                )));
+            }
             packets.push(OutgoingPacket {
                 dst_addr: self.peer,
                 data,
@@ -871,9 +892,22 @@ fn link_from_handshake(
             "handshake completed without installed 1-RTT keys".to_string(),
         ));
     }
+    // Cap each 1-RTT data packet to carry at most one symbol DATAGRAM (plus a
+    // little control headroom). This keeps loss granularity per-symbol (the
+    // point of RFC 9221 DATAGRAMs) and, crucially, bounds how many symbols a
+    // single inbound pump can queue, so the connection's 256-deep inbound
+    // DATAGRAM queue cannot overflow between drains. `symbol_size` is bounded by
+    // `max_datagram_size` via `QuicConfig::validate`, so this stays well under
+    // the endpoint envelope. Large control frames are split across packets and
+    // reassembled by the frame codec.
+    let one_datagram = usize::from(config.symbol_size)
+        .saturating_add(super::AUTH_ENVELOPE_HEADER_LEN)
+        .saturating_add(16);
+    let max_app_payload =
+        one_datagram.min(one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET));
     let conn_config = NativeQuicConnectionConfig {
         role,
-        max_datagram_frame_size: config.max_datagram_size,
+        max_datagram_frame_size: config.max_datagram_size.min(max_app_payload),
         ..NativeQuicConnectionConfig::default()
     };
     let mut conn = NativeQuicConnection::new(conn_config);
@@ -895,20 +929,6 @@ fn link_from_handshake(
     let provider: RustlsQuicCryptoProvider = driver.into_provider();
     let protection =
         AtpPacketProtection::from_provider(Box::new(provider), QuicLink::protection_config());
-
-    // Cap each 1-RTT data packet to carry at most one symbol DATAGRAM (plus a
-    // little control headroom). This keeps loss granularity per-symbol (the
-    // point of RFC 9221 DATAGRAMs) and, crucially, bounds how many symbols a
-    // single inbound pump can queue, so the connection's 256-deep inbound
-    // DATAGRAM queue cannot overflow between drains. `symbol_size` is bounded by
-    // `max_datagram_size` via `QuicConfig::validate`, so this stays well under
-    // the endpoint MTU. Large control frames are split across packets and
-    // reassembled by the frame codec.
-    let one_datagram = usize::from(config.symbol_size)
-        .saturating_add(super::AUTH_ENVELOPE_HEADER_LEN)
-        .saturating_add(16);
-    let max_app_payload =
-        one_datagram.min(ATP_QUIC_UDP_MAX_PACKET - ONE_RTT_HEADER_LEN - ONE_RTT_TAG_LEN);
 
     Ok(QuicLink {
         conn,
@@ -2398,6 +2418,45 @@ mod tests {
         let mut long = vec![0x80];
         long.extend_from_slice(&[0u8; ONE_RTT_HEADER_LEN + ONE_RTT_TAG_LEN]);
         assert!(decode_one_rtt_packet(&long).is_none());
+    }
+
+    #[test]
+    fn one_rtt_payload_budget_accounts_for_udp_overhead_and_control_headroom() {
+        let legacy_cap = 16 * 1024;
+        assert_eq!(
+            one_rtt_max_payload_for_udp_packet(legacy_cap)
+                + ONE_RTT_PACKET_OVERHEAD
+                + ONE_RTT_COALESCED_CONTROL_HEADROOM,
+            legacy_cap
+        );
+        assert_eq!(
+            one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET)
+                + ONE_RTT_PACKET_OVERHEAD
+                + ONE_RTT_COALESCED_CONTROL_HEADROOM,
+            ATP_QUIC_UDP_MAX_PACKET
+        );
+        let protected_len =
+            one_rtt_max_payload_for_udp_packet(ATP_QUIC_UDP_MAX_PACKET) + ONE_RTT_PACKET_OVERHEAD;
+        assert!(protected_len < ATP_QUIC_UDP_MAX_PACKET);
+        assert_eq!(
+            ATP_QUIC_UDP_MAX_PACKET - protected_len,
+            ONE_RTT_COALESCED_CONTROL_HEADROOM
+        );
+        assert_eq!(
+            one_rtt_max_payload_for_udp_packet(ONE_RTT_PACKET_OVERHEAD - 1),
+            0
+        );
+    }
+
+    #[test]
+    fn quic_endpoint_packet_budget_accepts_matrix37_lossy_overshoot() {
+        // MATRIX-37 encrypted lossy cells failed deterministically at 16 KiB + 1..6
+        // bytes when ACK/control frames were coalesced with near-full 1-RTT data.
+        let legacy_cap = 16 * 1024;
+        let observed_overshoot = legacy_cap + 6;
+
+        assert!(observed_overshoot > legacy_cap);
+        assert!(observed_overshoot <= ATP_QUIC_UDP_MAX_PACKET);
     }
 
     #[test]
