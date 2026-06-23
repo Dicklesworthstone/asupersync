@@ -12,6 +12,7 @@
 //! - Same received symbols in same order produce identical decode results
 
 use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+use crate::raptorq::linalg::{GaussianRankProfile, coefficient_rank_profile};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -1704,15 +1705,28 @@ impl InactivationDecoder {
     /// [`Self::decode`] synthesizes. A deficit of zero means the equation matrix
     /// is full-rank; it does not by itself verify RHS consistency.
     pub fn rank_status(&self, symbols: &[ReceivedSymbol]) -> Result<RankStatus, DecodeError> {
+        let profile = self.rank_profile(symbols)?;
+        Ok(RankStatus {
+            rank: profile.rank,
+            columns: profile.columns,
+            deficit: profile.deficit,
+        })
+    }
+
+    /// Compute the deterministic pivot/free-column rank profile for a received
+    /// block equation set.
+    ///
+    /// This uses the same full decoder system shape as [`Self::rank_status`]:
+    /// caller-supplied equations plus the implicit K..K' padding rows. The
+    /// profile is diagnostic only; decode success still requires RHS
+    /// consistency and decoded-output verification.
+    pub fn rank_profile(
+        &self,
+        symbols: &[ReceivedSymbol],
+    ) -> Result<GaussianRankProfile, DecodeError> {
         self.validate_rank_input(symbols)?;
         let state = self.build_state(symbols);
-        let columns = self.params.l;
-        let rank = equation_rank(&state.equations, columns);
-        Ok(RankStatus {
-            rank,
-            columns,
-            deficit: columns.saturating_sub(rank),
-        })
+        Ok(equation_rank_profile(&state.equations, self.params.l))
     }
 
     /// Decode using the bounded wavefront pipeline.
@@ -3018,38 +3032,23 @@ fn first_mismatch_byte(expected: &[u8], actual: &[u8]) -> Option<usize> {
         .position(|(expected, actual)| expected != actual)
 }
 
+#[cfg(test)]
 fn equation_rank(equations: &[Equation], column_count: usize) -> usize {
-    let mut basis = vec![None::<Vec<Gf256>>; column_count];
-    let mut rank = 0usize;
+    equation_rank_profile(equations, column_count).rank
+}
 
+fn equation_rank_profile(equations: &[Equation], column_count: usize) -> GaussianRankProfile {
+    let mut dense_rows = Vec::with_capacity(equations.len());
     for equation in equations {
-        let mut row = vec![Gf256::ZERO; column_count];
+        let mut row = vec![0u8; column_count];
         for &(col_idx, coefficient) in &equation.terms {
-            row[col_idx] += coefficient;
+            row[col_idx] ^= coefficient.raw();
         }
-
-        for pivot in 0..column_count {
-            if row[pivot].is_zero() {
-                continue;
-            }
-            if let Some(basis_row) = basis[pivot].as_ref() {
-                let factor = row[pivot];
-                for (col_idx, value) in row.iter_mut().enumerate().skip(pivot) {
-                    *value += basis_row[col_idx] * factor;
-                }
-            } else {
-                let inv = row[pivot].inv();
-                for value in row.iter_mut().skip(pivot) {
-                    *value *= inv;
-                }
-                basis[pivot] = Some(row);
-                rank += 1;
-                break;
-            }
-        }
+        dense_rows.push(row);
     }
+    let dense_refs: Vec<&[u8]> = dense_rows.iter().map(Vec::as_slice).collect();
 
-    rank
+    coefficient_rank_profile(&dense_refs, column_count)
 }
 
 fn rebuild_dense_matrix_from_equations(
@@ -3359,6 +3358,23 @@ mod tests {
     }
 
     #[test]
+    fn equation_rank_profile_reports_decoder_pivot_witness() {
+        let equations = vec![
+            Equation::new(vec![0, 2], vec![Gf256::ONE, Gf256::ONE]),
+            Equation::new(vec![2], vec![Gf256::ONE]),
+            Equation::new(vec![0], vec![Gf256::ONE]),
+        ];
+
+        let profile = equation_rank_profile(&equations, 4);
+        assert_eq!(profile.rows, 3);
+        assert_eq!(profile.columns, 4);
+        assert_eq!(profile.rank, 2);
+        assert_eq!(profile.deficit, 2);
+        assert_eq!(profile.pivot_columns, vec![0, 2]);
+        assert_eq!(profile.free_columns, vec![1, 3]);
+    }
+
+    #[test]
     fn rank_status_tracks_missing_source_symbol_deficit() {
         let decoder = InactivationDecoder::new(4, 8, 11);
         let mut symbols = decoder.constraint_symbols();
@@ -3372,6 +3388,20 @@ mod tests {
             partial.deficit
         );
         assert_eq!(partial.deficit, 1);
+        let partial_profile = decoder
+            .rank_profile(&symbols)
+            .expect("partial source set has rank profile");
+        assert_eq!(partial_profile.rank, partial.rank);
+        assert_eq!(partial_profile.columns, partial.columns);
+        assert_eq!(partial_profile.deficit, partial.deficit);
+        assert_eq!(partial_profile.pivot_columns.len(), partial.rank);
+        assert_eq!(partial_profile.free_columns.len(), partial.deficit);
+        assert_eq!(
+            partial_profile,
+            decoder
+                .rank_profile(&symbols)
+                .expect("rank profile should be deterministic")
+        );
 
         symbols.push(ReceivedSymbol::source(3, vec![3u8; 8]));
         let complete = decoder
@@ -3379,6 +3409,12 @@ mod tests {
             .expect("complete source set has rank status");
         assert_eq!(complete.deficit, 0);
         assert_eq!(complete.rank, complete.columns);
+        let complete_profile = decoder
+            .rank_profile(&symbols)
+            .expect("complete source set has rank profile");
+        assert_eq!(complete_profile.deficit, 0);
+        assert!(complete_profile.free_columns.is_empty());
+        assert_eq!(complete_profile.pivot_columns.len(), complete.columns);
     }
 
     use crate::raptorq::systematic::SystematicEncoder;
