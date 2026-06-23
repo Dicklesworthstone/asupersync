@@ -224,6 +224,60 @@ mod tests {
     }
 
     #[test]
+    fn static_partitions_span_source_and_repair_ranges() {
+        const SOURCE_SYMBOLS: u32 = 37;
+        const REPAIR_LIMIT: u32 = SOURCE_SYMBOLS + 89;
+
+        for donor_count in DONOR_COUNTS {
+            let mut source_seen = BTreeSet::new();
+            let mut repair_seen = BTreeSet::new();
+
+            for donor_index in 0..donor_count {
+                let partition =
+                    EsiPartition::new(donor_index, donor_count).expect("valid donor partition");
+
+                let source_owned = (0..SOURCE_SYMBOLS)
+                    .filter(|esi| partition.owns_esi(*esi))
+                    .collect::<Vec<_>>();
+                let repair_owned = (SOURCE_SYMBOLS..REPAIR_LIMIT)
+                    .filter(|esi| partition.owns_esi(*esi))
+                    .collect::<Vec<_>>();
+
+                assert!(
+                    !source_owned.is_empty(),
+                    "donor {donor_index}/{donor_count} owns no source ESIs"
+                );
+                assert!(
+                    !repair_owned.is_empty(),
+                    "donor {donor_index}/{donor_count} owns no repair ESIs"
+                );
+
+                for esi in source_owned {
+                    assert!(esi < SOURCE_SYMBOLS);
+                    assert_eq!(esi % donor_count, donor_index);
+                    assert!(
+                        source_seen.insert(esi),
+                        "source ESI {esi} was assigned to multiple donors"
+                    );
+                }
+
+                for esi in repair_owned {
+                    assert!(esi >= SOURCE_SYMBOLS);
+                    assert!(esi < REPAIR_LIMIT);
+                    assert_eq!(esi % donor_count, donor_index);
+                    assert!(
+                        repair_seen.insert(esi),
+                        "repair ESI {esi} was assigned to multiple donors"
+                    );
+                }
+            }
+
+            assert_eq!(source_seen.len(), SOURCE_SYMBOLS as usize);
+            assert_eq!(repair_seen.len(), (REPAIR_LIMIT - SOURCE_SYMBOLS) as usize);
+        }
+    }
+
+    #[test]
     fn donor_streams_are_pairwise_disjoint() {
         for donor_count in DONOR_COUNTS {
             let mut seen = BTreeSet::new();
