@@ -969,6 +969,38 @@ impl QuicLink {
         super::send_native_symbol(cx, &mut self.conn, symbol, tag, entry, auth_tag)
     }
 
+    async fn finish_paced_spray_round(
+        &mut self,
+        cx: &Cx,
+        control: &mut NativeQuicFrameTransport,
+        sent: u64,
+        pacing: &QuicSprayPacingDecision,
+    ) -> Result<(), QuicTransportError> {
+        if sent == 0 {
+            return Ok(());
+        }
+
+        self.flush(cx).await?;
+        self.service_spray_liveness(cx, control).await?;
+
+        let sent_s = sent.to_string();
+        let pause_after_burst_micros = pacing.pause_after_burst.as_micros().to_string();
+        let pacing_rate_bps = pacing.pacing_rate_bps.to_string();
+        cx.trace_with_fields(
+            "atp_quic.sender.final_paced_spray_flush",
+            &[
+                ("symbols", sent_s.as_str()),
+                (
+                    "pause_after_burst_micros",
+                    pause_after_burst_micros.as_str(),
+                ),
+                ("pacing_rate_bps", pacing_rate_bps.as_str()),
+            ],
+        );
+        crate::time::sleep(cx.now(), pacing.pause_after_burst).await;
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)
+    }
+
     /// Pump inbound until a complete ATP control frame is available on `control`,
     /// flushing pending outbound (e.g. ACKs) between attempts. A full idle
     /// timeout of silence fails closed.
@@ -1500,6 +1532,8 @@ async fn spray_source_requests(
         sent = sent.saturating_add(1);
     }
     aimd.record_spray(sent, pacing.pacing_rate_bps);
+    link.finish_paced_spray_round(cx, control, sent, &pacing)
+        .await?;
     Ok(sent)
 }
 
@@ -1575,6 +1609,8 @@ async fn spray_block_repair_requests(
         );
     }
     aimd.record_spray(sent, pacing.pacing_rate_bps);
+    link.finish_paced_spray_round(cx, control, sent, &pacing)
+        .await?;
     Ok(sent)
 }
 
