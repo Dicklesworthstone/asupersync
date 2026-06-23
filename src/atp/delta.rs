@@ -2242,4 +2242,65 @@ mod tests {
         let rebuilt = reconstruct_manifest_bytes(&sender, &applied).expect("reconstruct target");
         assert_eq!(rebuilt, new);
     }
+
+    #[test]
+    fn send_plan_mixes_subchunk_and_whole_chunks_then_reconstructs_byte_identical() {
+        let old_a = (0..(64 * 1024))
+            .map(|idx| ((idx * 19 + idx / 3 + 7) % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut new_a = old_a.clone();
+        for byte in &mut new_a[31 * 1024..32 * 1024] {
+            *byte ^= 0x33;
+        }
+        let new_b = (0..(24 * 1024))
+            .map(|idx| ((idx * 23 + idx / 11 + 5) % 253) as u8)
+            .collect::<Vec<_>>();
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-a",
+            vec![new_a.as_slice(), new_b.as_slice()],
+        );
+        let receiver = ingest_manifest(&mut receiver_store, "tree-a", vec![old_a.as_slice()]);
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let base_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &receiver_coverage,
+        );
+
+        assert_eq!(base_plan.mode, DeltaResyncMode::FullObjectFallback);
+        assert_eq!(base_plan.missing_chunks.len(), 2);
+        assert_eq!(base_plan.missing_bytes, sender.total_size_bytes);
+
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let send_plan =
+            build_delta_resync_send_plan(&base_plan, &sender_store, &receiver, &signatures)
+                .expect("send plan");
+
+        assert_eq!(send_plan.subchunk_count(), 1);
+        assert_eq!(send_plan.whole_chunk_count(), 1);
+        assert!(send_plan.payload_bytes < send_plan.whole_chunk_bytes);
+
+        assert!(matches!(
+            &send_plan.items[0],
+            DeltaResyncSendItem::SubchunkOps { .. }
+        ));
+        assert!(matches!(
+            &send_plan.items[1],
+            DeltaResyncSendItem::WholeChunk { .. }
+        ));
+
+        let applied = apply_delta_resync_send_plan(&sender, &receiver_store, &send_plan)
+            .expect("apply mixed send plan");
+        let rebuilt = reconstruct_manifest_bytes(&sender, &applied).expect("reconstruct target");
+        assert_eq!(rebuilt, [new_a.as_slice(), new_b.as_slice()].concat());
+    }
 }
