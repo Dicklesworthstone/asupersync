@@ -1988,3 +1988,16 @@ Benched the size-gated receiver parallel decode (`c3c1dc635` size-gate fanout, o
 **50M/bad recovered:** the size-gate brought 50M/bad from the ungated 89s regression back to 61.2s median (two clean reps 60.7/61.2 ≈ the 57s frozen-AIMD baseline +7%; one 92.8 outlier). chosen_fanout still shows mixed 1/8 at 50M (the gate threshold isn't perfectly tuned at this size) — a MINOR follow-up to nail exactly 57s, not a blocker; the regression is effectively resolved. Closing t00kq3.
 
 **SESSION SCOREBOARD (confirmed):** 50M/good TIE (nocrypto+auth), tree_big/good WIN, encrypted-clean works (31.5s), auth healthy, ★500M/bad 4.4× improved to 1.59× rsync + 18× less RSS. Open/deprioritized: encrypted-lossy (3-part coupled fix documented at j80p42 floor), FEC-fallback Finding-1 (50M@3% convergence), 50M-fanout exact tuning. Evidence: 500M `artifacts/atp_bench_matrix/20260623T113253Z/`, 50M `artifacts/atp_bench_matrix/20260623T112731Z/`.
+
+## MATRIX-51 (2026-06-23) — 500M clean-large (LANE-A size-gated): atp loses wall on clean (FEC-decode overhead) but DOMINATES memory 198-710× (atp 22-24MB vs rsync 4.5-17GB RSS). Full 500M tier characterized.
+
+Benched 500M perfect+good nocrypto on the size-gated LANE-A build, all sha-ok/byte-identical:
+
+| cell | atp-rq-lab | rsync(d) | atp RSS | rsync RSS | mem ratio |
+|---|---|---|---|---|---|
+| 500M/perfect | 36.3s | 5.2s | **22MB** | **4,546MB (4.5GB)** | atp 198× less |
+| 500M/good | 37.2s | 24.2s | **24MB** | **17,055MB (17GB)** | atp 710× less |
+
+**atp loses 500M-clean on WALL** (perfect 36.3 vs 5.2 = 7×; good 37.2 vs 24.2 = 1.54×) — the single-core-ish RaptorQ decode + FEC overhead is pure cost on a clean link where rsync just streams bytes. Parallel decode (LANE-A) holds 500M-clean decode at ~36s; without it this would be slower. **BUT atp DOMINATES MEMORY by 198-710×**: rsync's in-memory file/buffer structures balloon to 4.5GB (perfect) and 17GB (good) RSS on the 500M object, while atp's streaming fountain holds steady at 22-24MB. On a memory-constrained host rsync would thrash/OOM where atp sails through — a decisive robustness edge.
+
+**FULL 500M TIER (post-LANE-A):** bad 161.3s (4.4× improved, 1.59× of rsync wall, 18× less RSS — MATRIX-50); good 37.2s (1.54× of rsync wall, 710× less RSS); perfect 36.3s (7× of rsync wall, 198× less RSS). Pattern: atp is **memory-dominant across ALL 500M regimes** and wall-competitive on lossy (where FEC earns its keep); rsync wins clean-link wall (no FEC tax) but at 100-700× the memory. The honest 500M headline: atp trades clean-link wall-time for massive memory efficiency + lossy-link resilience. Evidence: `artifacts/atp_bench_matrix/20260623T114813Z/`.
