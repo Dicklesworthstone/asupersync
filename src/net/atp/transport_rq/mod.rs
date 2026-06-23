@@ -3484,6 +3484,7 @@ pub async fn send_path(
                     &config,
                     feedback_rounds,
                     source_symbols.len(),
+                    adaptive.last_round_loss_fraction,
                 );
                 source_fec_fallback_active |= source_fec_fallback_trigger;
                 round_tuning = if source_fec_fallback_active {
@@ -3580,12 +3581,13 @@ pub async fn send_path(
                 }
                 let emitted_this_response = symbols_sent.saturating_sub(round_symbols_start);
                 rqtrace!(
-                    "sender: NeedMore response round={feedback_rounds} pending={} source_requests={} emitted_symbols={} total_symbols_sent={} max_feedback_rounds={} fec_fallback={}",
+                    "sender: NeedMore response round={feedback_rounds} pending={} source_requests={} emitted_symbols={} total_symbols_sent={} max_feedback_rounds={} repair_overhead={:.4} fec_fallback={}",
                     pending.len(),
                     source_symbols.len(),
                     emitted_this_response,
                     symbols_sent,
                     config.max_feedback_rounds,
+                    round_tuning.repair_overhead,
                     source_fec_fallback_active,
                 );
             }
@@ -3660,7 +3662,11 @@ fn source_retransmit_needs_fec_fallback(
     config: &RqConfig,
     feedback_round: u32,
     requested_sources: usize,
+    measured_loss_fraction: f64,
 ) -> bool {
+    if measured_feedback_repair_overhead(measured_loss_fraction) > 0.0 {
+        return true;
+    }
     if round0_loss_target_repair_enabled(config) {
         return true;
     }
@@ -3844,6 +3850,10 @@ where
                 }
             }
         } else {
+            let mut feedback_repair_blocks = 0usize;
+            let mut feedback_repair_symbols = 0usize;
+            let mut feedback_prior_repair_cursor = 0usize;
+            let mut feedback_target_repair_cursor = 0usize;
             for (block_index, block) in blocks.iter().enumerate() {
                 // Cumulative repair count requested from the encoder for this
                 // block. The encoder always yields repair symbols at
@@ -3857,6 +3867,14 @@ where
                     repair_target_for_feedback_round(block.k, already, round_tuning.repair_overhead)
                 };
                 let repair_count = target_repair.saturating_sub(already);
+                if !with_source {
+                    feedback_repair_blocks += 1;
+                    feedback_repair_symbols = feedback_repair_symbols.saturating_add(repair_count);
+                    feedback_prior_repair_cursor =
+                        feedback_prior_repair_cursor.saturating_add(already);
+                    feedback_target_repair_cursor =
+                        feedback_target_repair_cursor.saturating_add(target_repair);
+                }
                 if !with_source && repair_count == 0 {
                     enc.repair_cursors[block_index] = target_repair;
                     continue;
@@ -3946,6 +3964,18 @@ where
                 send_batch.flush(sockets, symbols_sent).await?;
                 service_rq_spray_control(cx, control, adaptive).await?;
                 enc.repair_cursors[block_index] = target_repair;
+            }
+            if !with_source {
+                rqtrace!(
+                    "sender: repair_spray entry={} blocks={} repair_overhead={:.4} emitted_repair_symbols={} prior_repair_cursor={} target_repair_cursor={} pending_entries={}",
+                    enc.index,
+                    feedback_repair_blocks,
+                    round_tuning.repair_overhead,
+                    feedback_repair_symbols,
+                    feedback_prior_repair_cursor,
+                    feedback_target_repair_cursor,
+                    pending.len(),
+                );
             }
         }
     }
@@ -9501,9 +9531,9 @@ mod tests {
             source_retransmit_request_limit(&config, 1),
             Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
         );
-        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 1));
+        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 1, 0.0));
         assert!(
-            source_retransmit_needs_fec_fallback(&config, 1, 0),
+            source_retransmit_needs_fec_fallback(&config, 1, 0, 0.0),
             "pending rank-only repair feedback must not wait for the source retransmit window"
         );
     }
@@ -9517,7 +9547,7 @@ mod tests {
         };
 
         assert_eq!(source_retransmit_request_limit(&config, 1), None);
-        assert!(source_retransmit_needs_fec_fallback(&config, 1, 0));
+        assert!(source_retransmit_needs_fec_fallback(&config, 1, 0, 0.0));
     }
 
     #[test]
@@ -9555,12 +9585,31 @@ mod tests {
             ..RqConfig::default()
         };
 
-        assert!(source_retransmit_needs_fec_fallback(&config, 1, 0));
-        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 16));
-        assert!(source_retransmit_needs_fec_fallback(&config, 1, 17));
-        assert!(source_retransmit_needs_fec_fallback(&config, 2, 1));
-        assert!(source_retransmit_needs_fec_fallback(&config, 2, 0));
-        assert!(source_retransmit_needs_fec_fallback(&config, 3, 0));
+        assert!(source_retransmit_needs_fec_fallback(&config, 1, 0, 0.0));
+        assert!(!source_retransmit_needs_fec_fallback(&config, 1, 16, 0.0));
+        assert!(source_retransmit_needs_fec_fallback(&config, 1, 17, 0.0));
+        assert!(source_retransmit_needs_fec_fallback(&config, 2, 1, 0.0));
+        assert!(source_retransmit_needs_fec_fallback(&config, 2, 0, 0.0));
+        assert!(source_retransmit_needs_fec_fallback(&config, 3, 0, 0.0));
+    }
+
+    #[test]
+    fn source_retransmit_fec_fallback_uses_measured_loss_with_source_requests() {
+        let config = RqConfig {
+            repair_overhead: 1.0,
+            source_retransmit_rounds: 2,
+            max_source_retransmit_requests: 8192,
+            ..RqConfig::default()
+        };
+
+        assert!(
+            !source_retransmit_needs_fec_fallback(&config, 1, 128, 0.001),
+            "near-clean feedback should preserve source-first repair"
+        );
+        assert!(
+            source_retransmit_needs_fec_fallback(&config, 1, 128, 0.10),
+            "broken-link measured loss must start calibrated FEC repair even while source requests remain"
+        );
     }
 
     #[test]
@@ -9576,7 +9625,7 @@ mod tests {
         assert_eq!(source_retransmit_request_limit(&config, 3), None);
         for feedback_round in (config.source_retransmit_rounds + 1)..=config.max_feedback_rounds {
             assert!(
-                source_retransmit_needs_fec_fallback(&config, feedback_round, 0),
+                source_retransmit_needs_fec_fallback(&config, feedback_round, 0, 0.0),
                 "repair-only feedback round {feedback_round} must keep FEC fallback enabled"
             );
         }
@@ -9600,8 +9649,12 @@ mod tests {
             (3, 1, true),
             (config.max_feedback_rounds, 0, true),
         ] {
-            active |=
-                source_retransmit_needs_fec_fallback(&config, feedback_round, requested_sources);
+            active |= source_retransmit_needs_fec_fallback(
+                &config,
+                feedback_round,
+                requested_sources,
+                0.0,
+            );
             assert_eq!(
                 active, expected_active,
                 "feedback_round={feedback_round} requested_sources={requested_sources}"
@@ -9656,7 +9709,7 @@ mod tests {
             "round-0 loss calibration must not raise sender pacing"
         );
         assert!(
-            source_retransmit_needs_fec_fallback(&config, 2, 0),
+            source_retransmit_needs_fec_fallback(&config, 2, 0, 0.0),
             "repair-only rounds at the source-retransmit boundary must keep FEC fallback enabled"
         );
     }
