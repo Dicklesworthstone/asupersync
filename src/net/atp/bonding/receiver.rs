@@ -333,6 +333,45 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_symbols_do_not_inflate_accepted_kind_counters() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let source = symbol(11, 0, 3, SymbolKind::Source);
+        let repair = symbol(11, 0, 9, SymbolKind::Repair);
+
+        assert!(matches!(
+            set.record_symbol(0, &source),
+            BondedSymbolDisposition::Accepted(_)
+        ));
+        assert!(matches!(
+            set.record_symbol(0, &repair),
+            BondedSymbolDisposition::Accepted(_)
+        ));
+        assert!(matches!(
+            set.record_symbol(1, &source),
+            BondedSymbolDisposition::Duplicate(_)
+        ));
+        assert!(matches!(
+            set.record_symbol(1, &repair),
+            BondedSymbolDisposition::Duplicate(_)
+        ));
+
+        let aggregate = set.aggregate_stats();
+        assert_eq!(aggregate.symbols_received, 4);
+        assert_eq!(aggregate.symbols_accepted, 2);
+        assert_eq!(aggregate.duplicate_symbols, 2);
+        assert_eq!(aggregate.source_symbols_accepted, 1);
+        assert_eq!(aggregate.repair_symbols_accepted, 1);
+        assert_eq!(aggregate.duplicate_rate_ppm(), 500_000);
+
+        let donor1 = set.donor_stats(1).expect("donor 1 stats");
+        assert_eq!(donor1.symbols_received, 2);
+        assert_eq!(donor1.symbols_accepted, 0);
+        assert_eq!(donor1.duplicate_symbols, 2);
+        assert_eq!(donor1.source_symbols_accepted, 0);
+        assert_eq!(donor1.repair_symbols_accepted, 0);
+    }
+
+    #[test]
     fn duplicate_scope_is_object_block_and_esi_not_just_esi() {
         let mut set = BondedReceiverSymbolSet::new();
 
