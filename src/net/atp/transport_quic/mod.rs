@@ -282,11 +282,6 @@ const QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
 const QUIC_AIMD_MIN_RATE_BPS: u64 = 512 * 1024;
 const QUIC_AIMD_MAX_RATE_BPS: u64 = 64 * 1024 * 1024;
 
-pub(super) fn quic_feedback_initial_aimd_rate_bps() -> u64 {
-    (QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64)
-        .clamp(QUIC_AIMD_MIN_RATE_BPS, QUIC_AIMD_MAX_RATE_BPS)
-}
-
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
 /// Mirrors the role of [`transport_tcp::TransferConfig`] while adding the
@@ -1757,12 +1752,6 @@ fn validate_need_more_feedback(
             )));
         }
     }
-    if !pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
-        return Err(QuicTransportError::Integrity(
-            "receiver NeedMore had pending entries but no targeted repair/source requests"
-                .to_string(),
-        ));
-    }
 
     let mut block_requests = std::collections::BTreeSet::new();
     let mut repair_symbols = 0usize;
@@ -2391,7 +2380,7 @@ impl<'a> QuicSenderFeedbackState<'a> {
             round_symbols_start: 0,
             aimd_rate_bps: config
                 .bwlimit_bps
-                .unwrap_or_else(quic_feedback_initial_aimd_rate_bps)
+                .unwrap_or(QUIC_DEFAULT_COLD_START_PACING_BYTES_PER_S as u64)
                 .clamp(QUIC_AIMD_MIN_RATE_BPS, QUIC_AIMD_MAX_RATE_BPS),
             aimd_feedback_seen: false,
             last_round_loss_fraction: 0.0,
@@ -2511,7 +2500,7 @@ fn quic_need_more_response_mode(need: &QuicNeedMore) -> &'static str {
     } else if need.pending.is_empty() && need.source_symbols.is_empty() {
         "empty"
     } else if need.source_symbols.is_empty() {
-        "no_request"
+        "repair_spray"
     } else {
         "source_retransmit"
     }
@@ -3297,7 +3286,7 @@ async fn send_repair_round_and_object_complete(
         send_object_complete(cx, conn, control, 0)?;
         return Ok(0);
     }
-    let _pending = validate_need_more_feedback(manifest, config, need)?;
+    let pending = validate_need_more_feedback(manifest, config, need)?;
     let sent = if !need.repair_blocks.is_empty() {
         send_block_repair_requests(
             cx,
@@ -3309,7 +3298,19 @@ async fn send_repair_round_and_object_complete(
             symbol_auth,
         )
         .await?
-    } else if !need.source_symbols.is_empty() {
+    } else if need.source_symbols.is_empty() {
+        spray_streaming_symbol_round(
+            cx,
+            conn,
+            manifest,
+            encoders,
+            &pending,
+            config,
+            symbol_auth,
+            false,
+        )
+        .await?
+    } else {
         send_source_symbol_requests(
             cx,
             conn,
@@ -3320,20 +3321,7 @@ async fn send_repair_round_and_object_complete(
             symbol_auth,
         )
         .await?
-    } else {
-        return Err(QuicTransportError::Integrity(
-            "receiver NeedMore had pending entries but no targeted repair/source requests"
-                .to_string(),
-        ));
     };
-    if !need.repair_blocks.is_empty() {
-        let expected = quic_repair_symbol_total(&need.repair_blocks);
-        if sent != expected {
-            return Err(QuicTransportError::Integrity(format!(
-                "QUIC repair round emitted {sent} symbols for {expected} requested repair symbols"
-            )));
-        }
-    }
     send_object_complete(cx, conn, control, sent)?;
     Ok(sent)
 }
@@ -5334,7 +5322,7 @@ async fn send_native_repair_round_and_object_complete(
         send_native_object_complete(cx, conn, control, 0)?;
         return Ok(0);
     }
-    let _pending = validate_need_more_feedback(manifest, config, need)?;
+    let pending = validate_need_more_feedback(manifest, config, need)?;
     let sent = if !need.repair_blocks.is_empty() {
         send_native_block_repair_requests(
             cx,
@@ -5346,7 +5334,19 @@ async fn send_native_repair_round_and_object_complete(
             symbol_auth,
         )
         .await?
-    } else if !need.source_symbols.is_empty() {
+    } else if need.source_symbols.is_empty() {
+        spray_native_symbol_round(
+            cx,
+            conn,
+            manifest,
+            encoders,
+            &pending,
+            config,
+            symbol_auth,
+            false,
+        )
+        .await?
+    } else {
         send_native_source_symbol_requests(
             cx,
             conn,
@@ -5357,20 +5357,7 @@ async fn send_native_repair_round_and_object_complete(
             symbol_auth,
         )
         .await?
-    } else {
-        return Err(QuicTransportError::Integrity(
-            "receiver NeedMore had pending entries but no targeted repair/source requests"
-                .to_string(),
-        ));
     };
-    if !need.repair_blocks.is_empty() {
-        let expected = quic_repair_symbol_total(&need.repair_blocks);
-        if sent != expected {
-            return Err(QuicTransportError::Integrity(format!(
-                "native QUIC repair round emitted {sent} symbols for {expected} requested repair symbols"
-            )));
-        }
-    }
     send_native_object_complete(cx, conn, control, sent)?;
     Ok(sent)
 }
@@ -10579,20 +10566,6 @@ mod tests {
             validate_need_more_feedback(&manifest, &config, &valid).expect("valid repair request");
         assert!(pending.contains(&0));
 
-        let pending_only = QuicNeedMore {
-            pending: vec![0],
-            repair_blocks: Vec::new(),
-            source_symbols: Vec::new(),
-            ..QuicNeedMore::default()
-        };
-        let err = validate_need_more_feedback(&manifest, &config, &pending_only)
-            .expect_err("pending-only feedback must not trigger whole-object repair spray");
-        assert!(matches!(
-            err,
-            QuicTransportError::Integrity(message)
-                if message.contains("no targeted repair/source requests")
-        ));
-
         let mixed = QuicNeedMore {
             pending: vec![0],
             repair_blocks: vec![repair],
@@ -10652,28 +10625,6 @@ mod tests {
             err,
             QuicTransportError::Integrity(message) if message.contains("duplicate repair block")
         ));
-    }
-
-    #[test]
-    fn quic_pending_only_need_more_is_not_whole_object_repair_mode() {
-        let config = trusted_quic_config();
-        let entries = vec![("alpha.bin".to_string(), varied_bytes(128, 24))];
-        let manifest = manifest_from_entries("payload", true, &entries);
-        let need = QuicNeedMore {
-            pending: vec![0],
-            repair_blocks: Vec::new(),
-            source_symbols: Vec::new(),
-            ..QuicNeedMore::default()
-        };
-
-        let err = validate_need_more_feedback(&manifest, &config, &need)
-            .expect_err("pending-only feedback must fail closed");
-        assert!(matches!(
-            err,
-            QuicTransportError::Integrity(message)
-                if message.contains("no targeted repair/source requests")
-        ));
-        assert_eq!(quic_need_more_response_mode(&need), "no_request");
     }
 
     #[test]
