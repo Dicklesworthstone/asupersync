@@ -1993,7 +1993,6 @@ impl NativeReceiverIntakeStats {
         let repair_symbol_round_cap = super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
         let repair_block_request_cap =
             super::MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
-        let repair_cushion_per_block = super::FEEDBACK_REPAIR_CUSHION_PER_BLOCK.to_string();
         let drain_calls = self.drain_calls.to_string();
         let symbols_accepted = self.symbols_accepted.to_string();
         let blocks_completed = self.blocks_completed.to_string();
@@ -2020,10 +2019,6 @@ impl NativeReceiverIntakeStats {
                 (
                     "repair_block_request_cap",
                     repair_block_request_cap.as_str(),
-                ),
-                (
-                    "repair_cushion_per_block",
-                    repair_cushion_per_block.as_str(),
                 ),
                 ("drain_calls", drain_calls.as_str()),
                 ("symbols_accepted", symbols_accepted.as_str()),

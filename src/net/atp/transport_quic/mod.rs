@@ -220,14 +220,6 @@ const MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND: usize = 16_384;
 /// Maximum targeted fresh repair symbols accepted in one feedback round.
 const MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND: usize = 1 << 20;
 
-/// Extra fresh repair symbols requested per incomplete block in a feedback round.
-///
-/// Native QUIC now coalesces many symbol DATAGRAM frames into one UDP packet.
-/// Feedback repair therefore has to survive losing one coalesced packet, not
-/// just one symbol frame, otherwise the final straggler block can idle until the
-/// receiver's fail-closed timeout.
-const FEEDBACK_REPAIR_CUSHION_PER_BLOCK: usize = DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH;
-
 /// Maximum native QUIC DATAGRAM symbols decoded before returning to the async
 /// receiver loop.
 ///
@@ -2645,7 +2637,6 @@ fn trace_quic_sender_need_more(
     let round_loss_fraction = format!("{:.6}", need.round_loss_fraction.unwrap_or(0.0));
     let repair_symbol_round_cap = MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
     let repair_block_request_cap = MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
-    let repair_cushion_per_block = FEEDBACK_REPAIR_CUSHION_PER_BLOCK.to_string();
     let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
     let aimd_rate_bps = aimd_rate_bps.map_or_else(|| "none".to_string(), |rate| rate.to_string());
     let native_aimd_cap_bps =
@@ -2673,10 +2664,6 @@ fn trace_quic_sender_need_more(
             (
                 "repair_block_request_cap",
                 repair_block_request_cap.as_str(),
-            ),
-            (
-                "repair_cushion_per_block",
-                repair_cushion_per_block.as_str(),
             ),
             ("repair_block_requests", repair_block_requests.as_str()),
             ("aimd_rate_bps", aimd_rate_bps.as_str()),
@@ -4480,22 +4467,11 @@ fn quic_decoder_block_source_symbols(
 }
 
 #[allow(dead_code)]
-fn quic_targeted_repair_symbols(
-    base_deficit: usize,
-    block_source_symbols: usize,
-    remaining_round_budget: usize,
-) -> usize {
+fn quic_targeted_repair_symbols(base_deficit: usize, remaining_round_budget: usize) -> usize {
     if base_deficit == 0 {
         return 0;
     }
-    let block_cap = block_source_symbols
-        .saturating_add(FEEDBACK_REPAIR_CUSHION_PER_BLOCK)
-        .max(16)
-        .max(base_deficit)
-        .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
-    let target = base_deficit
-        .saturating_add(FEEDBACK_REPAIR_CUSHION_PER_BLOCK)
-        .min(block_cap);
+    let target = base_deficit.min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
     if remaining_round_budget == 0 {
         target
     } else {
@@ -4573,10 +4549,8 @@ fn block_repair_requests(
             } else {
                 limit.saturating_sub(requested_symbols)
             };
-            let block_source_symbols = quic_decoder_block_source_symbols(decoder, sbn, config);
-            let mut deficit =
-                quic_targeted_repair_symbols(base_deficit, block_source_symbols, remaining)
-                    .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
+            let mut deficit = quic_targeted_repair_symbols(base_deficit, remaining)
+                .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
             if deficit == 0 {
                 continue;
             }
@@ -6654,7 +6628,6 @@ async fn receive_native_symbol_round(
     let repair_block_requests = quic_repair_block_request_summary(&need.repair_blocks);
     let repair_symbol_round_cap = MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND.to_string();
     let repair_block_request_cap = MAX_REPAIR_BLOCK_REQUESTS_PER_FEEDBACK_ROUND.to_string();
-    let repair_cushion_per_block = FEEDBACK_REPAIR_CUSHION_PER_BLOCK.to_string();
     let round_text = round.to_string();
     cx.trace_with_fields(
         "atp_quic.receive.need_more",
@@ -6674,10 +6647,6 @@ async fn receive_native_symbol_round(
             (
                 "repair_block_request_cap",
                 repair_block_request_cap.as_str(),
-            ),
-            (
-                "repair_cushion_per_block",
-                repair_cushion_per_block.as_str(),
             ),
         ],
     );
@@ -10021,19 +9990,14 @@ mod tests {
     }
 
     #[test]
-    fn quic_targeted_repair_symbols_adds_bounded_straggler_cushion() {
-        assert_eq!(quic_targeted_repair_symbols(0, 256, 0), 0);
+    fn quic_targeted_repair_symbols_requests_exact_deficit() {
+        assert_eq!(quic_targeted_repair_symbols(0, 0), 0);
+        assert_eq!(quic_targeted_repair_symbols(1, 0), 1);
+        assert_eq!(quic_targeted_repair_symbols(512, 0), 512);
+        assert_eq!(quic_targeted_repair_symbols(10, 12), 10);
+        assert_eq!(quic_targeted_repair_symbols(10, 4), 4);
         assert_eq!(
-            quic_targeted_repair_symbols(1, 256, 0),
-            1 + FEEDBACK_REPAIR_CUSHION_PER_BLOCK
-        );
-        assert_eq!(
-            quic_targeted_repair_symbols(512, 512, 0),
-            512 + FEEDBACK_REPAIR_CUSHION_PER_BLOCK
-        );
-        assert_eq!(quic_targeted_repair_symbols(10, 256, 12), 12);
-        assert_eq!(
-            quic_targeted_repair_symbols(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND, 512, 0),
+            quic_targeted_repair_symbols(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND, 0),
             MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND
         );
     }
@@ -10137,7 +10101,6 @@ mod tests {
         };
         let expected_repair_symbols = u32::try_from(quic_targeted_repair_symbols(
             1,
-            quic_decoder_block_source_symbols(&decoders[0], 0, &config),
             MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
         ))
         .unwrap_or(u32::MAX);
@@ -10148,7 +10111,7 @@ mod tests {
                 sbn: 0,
                 symbols: expected_repair_symbols,
             }],
-            "receiver should request the missing repair deficit plus a lossy straggler cushion"
+            "receiver should request exactly the missing repair deficit"
         );
         send_need_more(&cx, &mut server, &mut receiver_control, &need).expect("send need-more");
         pump_until_idle(
@@ -10238,6 +10201,171 @@ mod tests {
             feedback.symbols_sent,
             initial_sent + u64::from(need.repair_blocks[0].symbols)
         );
+    }
+
+    #[test]
+    fn quic_sender_keeps_serving_exact_targeted_repair_rounds() {
+        let (cx, mut client, mut server) = established_pair();
+        let config = QuicConfig {
+            symbol_size: 128,
+            max_block_size: 512,
+            repair_overhead: 1.0,
+            max_feedback_rounds: 8,
+            ..trusted_quic_config()
+        };
+        let entries = vec![("alpha.bin".to_string(), varied_bytes(512, 53))];
+        let manifest = manifest_from_entries("payload", true, &entries);
+        let mut encoders = encoders_from_entries(&manifest, &entries, &config).expect("encoders");
+        let mut sender_control =
+            QuicFrameTransport::open(&cx, &mut client).expect("open control stream");
+        let mut receiver_control = QuicFrameTransport::for_stream(sender_control.stream());
+        let peer: SocketAddr = "127.0.0.1:4433".parse().expect("peer addr");
+        let mut feedback = QuicSenderFeedbackState::new(&manifest, &mut encoders, &config, peer, 0);
+
+        send_sender_hello(
+            &cx,
+            &mut client,
+            &mut sender_control,
+            &config,
+            "sender-peer",
+            false,
+        )
+        .expect("send hello");
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_198,
+        )
+        .expect("deliver sender hello");
+        receive_sender_hello_and_ack(
+            &cx,
+            &mut server,
+            &mut receiver_control,
+            &config,
+            "receiver-peer",
+            false,
+        )
+        .expect("receiver accepts hello");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_199,
+        )
+        .expect("deliver hello ack");
+        receive_sender_hello_ack(&cx, &mut client, &mut sender_control)
+            .expect("sender receives hello ack");
+
+        let first = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 0,
+                symbols: 2,
+            }],
+            source_symbols: Vec::new(),
+            ..QuicNeedMore::default()
+        };
+        send_need_more(&cx, &mut server, &mut receiver_control, &first)
+            .expect("send first need-more");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_200,
+        )
+        .expect("deliver first need-more");
+        assert!(
+            block_on(handle_sender_feedback_or_proof(
+                &cx,
+                &mut client,
+                &mut sender_control,
+                &mut feedback,
+            ))
+            .expect("sender serves first targeted repair")
+            .is_none()
+        );
+        assert_eq!(feedback.feedback_rounds, 1);
+        assert_eq!(feedback.symbols_sent, 2);
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_201,
+        )
+        .expect("deliver first repair response");
+        let first_complete = receive_object_complete(&cx, &mut server, &mut receiver_control)
+            .expect("receiver sees first repair completion");
+        assert_eq!(first_complete.round_symbols_sent, 2);
+
+        let second = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 0,
+                symbols: 3,
+            }],
+            source_symbols: Vec::new(),
+            round_symbols_observed: Some(2),
+            round_symbols_accepted: Some(2),
+            round_loss_fraction: Some(0.0),
+        };
+        send_need_more(&cx, &mut server, &mut receiver_control, &second)
+            .expect("send second need-more");
+        pump_until_idle(
+            &cx,
+            &mut server,
+            &mut client,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_202,
+        )
+        .expect("deliver second need-more");
+        assert!(
+            block_on(handle_sender_feedback_or_proof(
+                &cx,
+                &mut client,
+                &mut sender_control,
+                &mut feedback,
+            ))
+            .expect("sender keeps serving targeted repair")
+            .is_none()
+        );
+        assert_eq!(feedback.feedback_rounds, 2);
+        assert_eq!(feedback.symbols_sent, 5);
+        pump_until_idle(
+            &cx,
+            &mut client,
+            &mut server,
+            DEFAULT_MAX_PACKET_BYTES,
+            8_203,
+        )
+        .expect("deliver second repair response");
+        let second_complete = receive_object_complete(&cx, &mut server, &mut receiver_control)
+            .expect("receiver sees second repair completion");
+        assert_eq!(second_complete.round_symbols_sent, 3);
+
+        let mut repair_envelopes = Vec::new();
+        while let Some(envelope) =
+            recv_symbol_envelope(&mut server, false).expect("repair envelope parses")
+        {
+            repair_envelopes.push(envelope);
+        }
+        assert_eq!(repair_envelopes.len(), 5);
+        assert!(
+            repair_envelopes
+                .iter()
+                .all(|envelope| envelope.is_repair && envelope.entry == 0 && envelope.sbn == 0)
+        );
+        let repair_esis = repair_envelopes
+            .iter()
+            .map(|envelope| envelope.esi)
+            .collect::<Vec<_>>();
+        assert_eq!(repair_esis, vec![4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -10648,7 +10776,6 @@ mod tests {
         assert_eq!(need.pending, vec![0]);
         let expected_repair_symbols = u32::try_from(quic_targeted_repair_symbols(
             1,
-            quic_decoder_block_source_symbols(&decoders[0], 0, &config),
             MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
         ))
         .unwrap_or(u32::MAX);
@@ -10659,7 +10786,7 @@ mod tests {
                 sbn: 0,
                 symbols: expected_repair_symbols,
             }],
-            "receiver should ask for fresh repair with a lossy straggler cushion"
+            "receiver should ask for exactly the fresh repair deficit"
         );
         assert!(need.source_symbols.is_empty());
         let trace_entries = collector.peek();
