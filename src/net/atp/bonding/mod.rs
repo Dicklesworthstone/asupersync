@@ -26,9 +26,9 @@ pub use assignment::{
     BondedDonorSourceFirstCoverage, BondedDonorSpraySchedule, BondedDonorWindowWeight,
     BondedRepairWindowPlan, BondedSourceFirstCoverage, BondedSymbolAuthVerdict,
     BondedSymbolRejectReason, DonorAssignment, DonorAssignmentError, EsiWindow, MAX_BONDING_DONORS,
-    allocate_bonded_repair_windows, schedule_bonded_donor_spray,
-    schedule_bonded_repair_continuation, schedule_bonded_source_first_coverage,
-    verify_bonded_symbol_tag,
+    allocate_bonded_repair_windows, reallocate_failed_bonded_repair_windows,
+    schedule_bonded_donor_spray, schedule_bonded_repair_continuation,
+    schedule_bonded_source_first_coverage, verify_bonded_symbol_tag,
 };
 pub use descriptor::{
     BondEntry, BondEntryBlockGeometry, BondProofError, BondTransferDescriptor,

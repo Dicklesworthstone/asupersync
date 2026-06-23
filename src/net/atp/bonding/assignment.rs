@@ -462,6 +462,11 @@ pub enum BondScheduleError {
         /// Requested aggregate repair symbols.
         requested_symbols: u32,
     },
+    /// A failed donor was named for reallocation but had no outstanding window.
+    MissingFailedDonorWindow {
+        /// Failed donor index with no matching outstanding window.
+        donor_index: u32,
+    },
     /// Repair ESI budget overflowed the `u32` ESI space.
     RepairBudgetOverflow {
         /// Descriptor entry index.
@@ -536,6 +541,10 @@ impl fmt::Display for BondScheduleError {
                 f,
                 "channel-bonding dynamic repair window allocation overflow for entry {entry_index} block {source_block_number}: first_repair_esi={first_repair_esi}, requested={requested_symbols}"
             ),
+            Self::MissingFailedDonorWindow { donor_index } => write!(
+                f,
+                "channel-bonding failed donor {donor_index} had no outstanding repair window to reallocate"
+            ),
             Self::RepairBudgetOverflow {
                 entry_index,
                 source_block_number,
@@ -586,6 +595,7 @@ impl std::error::Error for BondScheduleError {
             | Self::DuplicateDonorAssignment { .. }
             | Self::ZeroWindowWeightSum
             | Self::RepairWindowAllocationOverflow { .. }
+            | Self::MissingFailedDonorWindow { .. }
             | Self::RepairBudgetOverflow { .. }
             | Self::RepairStartBeforeSource { .. }
             | Self::RepairContinuationOverflow { .. }
@@ -743,6 +753,43 @@ pub fn allocate_bonded_repair_windows(
         next_repair_esi: cursor,
         windows,
     })
+}
+
+/// Reallocate failed donors' outstanding windows to live survivors.
+///
+/// The replacement windows start at `current_high_water_esi` instead of reusing
+/// the failed donors' old ESIs. RaptorQ repair symbols are fungible, so fresh
+/// disjoint ESIs avoid duplicates while preserving the failed donors' aggregate
+/// repair-symbol budget.
+pub fn reallocate_failed_bonded_repair_windows(
+    geometry: BondEntryBlockGeometry,
+    current_high_water_esi: u32,
+    outstanding_windows: &[BondedDonorRepairWindow],
+    failed_donor_indices: &[u32],
+    survivor_weights: &[BondedDonorWindowWeight],
+) -> Result<BondedRepairWindowPlan, BondScheduleError> {
+    let mut failed = BTreeSet::new();
+    for donor_index in failed_donor_indices {
+        failed.insert(*donor_index);
+    }
+
+    let mut requested_symbols = 0u32;
+    for donor_index in failed {
+        let Some(window) = outstanding_windows
+            .iter()
+            .find(|window| window.donor_index == donor_index)
+        else {
+            return Err(BondScheduleError::MissingFailedDonorWindow { donor_index });
+        };
+        requested_symbols = requested_symbols.saturating_add(window.symbol_count);
+    }
+
+    allocate_bonded_repair_windows(
+        geometry,
+        current_high_water_esi,
+        requested_symbols,
+        survivor_weights,
+    )
 }
 
 /// Continue one block's repair stream for a receiver `NeedMore` deficit.
@@ -1581,6 +1628,87 @@ mod tests {
                 first_repair_esi: u32::MAX,
                 requested_symbols: 1,
             })
+        );
+    }
+
+    #[test]
+    fn failed_donor_window_reallocation_moves_budget_to_survivors() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let initial = allocate_bonded_repair_windows(
+            geometry,
+            2,
+            8,
+            &[
+                BondedDonorWindowWeight {
+                    donor_index: 0,
+                    weight: 1,
+                },
+                BondedDonorWindowWeight {
+                    donor_index: 1,
+                    weight: 3,
+                },
+            ],
+        )
+        .expect("initial allocation");
+
+        let replacement = reallocate_failed_bonded_repair_windows(
+            geometry,
+            initial.next_repair_esi,
+            &initial.windows,
+            &[1],
+            &[BondedDonorWindowWeight {
+                donor_index: 0,
+                weight: 1,
+            }],
+        )
+        .expect("reallocation");
+
+        assert_eq!(replacement.first_repair_esi, 10);
+        assert_eq!(replacement.next_repair_esi, 16);
+        assert_eq!(replacement.allocated_symbol_count(), 6);
+        assert!(replacement.windows_are_disjoint());
+        assert_eq!(
+            replacement.windows,
+            vec![BondedDonorRepairWindow {
+                donor_index: 0,
+                esi_window: EsiWindow::new(10, 16),
+                symbol_count: 6,
+            }]
+        );
+    }
+
+    #[test]
+    fn failed_donor_window_reallocation_rejects_unknown_failed_donor() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let initial = allocate_bonded_repair_windows(
+            geometry,
+            2,
+            4,
+            &[BondedDonorWindowWeight {
+                donor_index: 0,
+                weight: 1,
+            }],
+        )
+        .expect("initial allocation");
+
+        assert_eq!(
+            reallocate_failed_bonded_repair_windows(
+                geometry,
+                initial.next_repair_esi,
+                &initial.windows,
+                &[1],
+                &[BondedDonorWindowWeight {
+                    donor_index: 0,
+                    weight: 1,
+                }],
+            ),
+            Err(BondScheduleError::MissingFailedDonorWindow { donor_index: 1 })
         );
     }
 
