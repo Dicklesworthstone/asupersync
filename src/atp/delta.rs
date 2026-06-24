@@ -3005,9 +3005,11 @@ mod tests {
             panic!("expected sub-chunk op stream");
         };
         let decoded_ops = decode_subdelta_ops(encoded_ops).expect("decode op stream");
-        assert!(decoded_ops
-            .iter()
-            .any(|op| matches!(op, SubDeltaOp::Literal(_))));
+        assert!(
+            decoded_ops
+                .iter()
+                .any(|op| matches!(op, SubDeltaOp::Literal(_)))
+        );
 
         let applied = apply_delta_resync_send_plan(&sender, &receiver_store, &send_plan)
             .expect("apply send plan");
