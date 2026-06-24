@@ -3229,6 +3229,21 @@ fn entry_source_block_count(dec: &EntryDecoder) -> usize {
     entry_source_block_count_for_geometry(dec.size, dec.max_block_size, dec.source_blocks.len())
 }
 
+fn source_streaming_entry_complete(dec: &EntryDecoder) -> bool {
+    !dec.source_blocks.is_empty() && dec.bytes_written == dec.size
+}
+
+fn decoder_position_for_entry(decoders: &[EntryDecoder], entry: u32) -> Option<usize> {
+    let direct = usize::try_from(entry).ok()?;
+    if decoders
+        .get(direct)
+        .is_some_and(|decoder| decoder.index == entry)
+    {
+        return Some(direct);
+    }
+    decoders.iter().position(|decoder| decoder.index == entry)
+}
+
 #[cfg(test)]
 fn should_parallel_decode_entry_geometry(
     entry_size: u64,
@@ -6014,7 +6029,7 @@ async fn persist_source_symbol(
             parsed.sbn
         );
     }
-    if dec.source_blocks.iter().all(|block| block.complete) {
+    if source_streaming_entry_complete(dec) {
         dec.complete = true;
         dec.pipeline = None;
         close_cached_entry_staging_file(dec).await?;
@@ -6298,7 +6313,7 @@ async fn persist_decoded_block(
     // `pipeline.is_complete()`) for the mixed source+FEC case, which is what NEITHER tracker fired
     // for before (→ the bad-regime non-convergence). Empty `source_blocks` = non-source-streaming
     // path, whose completion is still owned by `pipeline.is_complete()` at the call sites.
-    if !dec.source_blocks.is_empty() && dec.source_blocks.iter().all(|block| block.complete) {
+    if source_streaming_entry_complete(dec) {
         dec.complete = true;
         dec.pipeline = None;
         close_cached_entry_staging_file(dec).await?;
@@ -6868,6 +6883,68 @@ struct RqDatagramIngest {
     decode_stats: RqDecodeRoundStats,
 }
 
+struct PlainSourceBatchSymbol<'a> {
+    decoder_index: usize,
+    sbn: usize,
+    esi: usize,
+    offset: u64,
+    take: usize,
+    payload: &'a [u8],
+    parse_micros: u64,
+}
+
+struct PlainSourceBatchRun {
+    decoder_index: usize,
+    sbn: usize,
+    first_esi: usize,
+    next_esi: usize,
+    offset: u64,
+    data: Vec<u8>,
+    symbols: u64,
+    payload_bytes: u64,
+    parse_micros: u64,
+}
+
+impl PlainSourceBatchRun {
+    fn new(symbol: PlainSourceBatchSymbol<'_>) -> Self {
+        let mut run = Self {
+            decoder_index: symbol.decoder_index,
+            sbn: symbol.sbn,
+            first_esi: symbol.esi,
+            next_esi: symbol.esi,
+            offset: symbol.offset,
+            data: Vec::with_capacity(symbol.take),
+            symbols: 0,
+            payload_bytes: 0,
+            parse_micros: 0,
+        };
+        run.absorb(symbol);
+        run
+    }
+
+    fn can_absorb(&self, symbol: &PlainSourceBatchSymbol<'_>) -> bool {
+        if self.decoder_index != symbol.decoder_index
+            || self.sbn != symbol.sbn
+            || self.next_esi != symbol.esi
+        {
+            return false;
+        }
+        self.offset
+            .checked_add(u64::try_from(self.data.len()).unwrap_or(u64::MAX))
+            == Some(symbol.offset)
+    }
+
+    fn absorb(&mut self, symbol: PlainSourceBatchSymbol<'_>) {
+        self.next_esi = symbol.esi.saturating_add(1);
+        self.symbols = self.symbols.saturating_add(1);
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(u64::try_from(symbol.payload.len()).unwrap_or(u64::MAX));
+        self.parse_micros = self.parse_micros.saturating_add(symbol.parse_micros);
+        self.data.extend_from_slice(&symbol.payload[..symbol.take]);
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct RqDecodeRoundStats {
     attempts: u64,
@@ -7041,17 +7118,26 @@ async fn feed_datagram_to_decoders(
     let Some((parsed, payload)) = parsed_opt else {
         return Ok(RqDatagramIngest::default());
     };
-    let Some(pos) = decoders.iter().position(|d| d.index == parsed.entry) else {
+    let Some(pos) = decoder_position_for_entry(decoders, parsed.entry) else {
         return Ok(RqDatagramIngest::default());
     };
     let mut decode_stats = RqDecodeRoundStats::default();
-    let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
-    let mut pending_decode_jobs = rq_pending_decode_jobs(decoders);
-    if pending_decode_jobs >= decode_width_budget {
-        decode_stats.merge(drain_ready_decodes(cx, decoders, false, decode_width_budget).await?);
-        pending_decode_jobs = rq_pending_decode_jobs(decoders);
-    }
-    let allow_spawn_decode = pending_decode_jobs < decode_width_budget;
+    let source_streaming_source = decoders[pos].source_streaming && parsed.kind.is_source();
+    let (allow_spawn_decode, decode_width_budget) = if source_streaming_source {
+        (false, 0)
+    } else {
+        let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
+        let mut pending_decode_jobs = rq_pending_decode_jobs(decoders);
+        if pending_decode_jobs >= decode_width_budget {
+            decode_stats
+                .merge(drain_ready_decodes(cx, decoders, false, decode_width_budget).await?);
+            pending_decode_jobs = rq_pending_decode_jobs(decoders);
+        }
+        (
+            pending_decode_jobs < decode_width_budget,
+            decode_width_budget,
+        )
+    };
     let feed_start = trace_intake.then(Instant::now);
     let feed = feed_symbol_with_cx(
         cx,
@@ -7091,6 +7177,176 @@ async fn feed_datagram_to_decoders(
     })
 }
 
+fn plain_source_batch_symbols<'a>(
+    batch: &'a crate::net::UdpRecvBatch,
+    tag: u64,
+    decoders: &[EntryDecoder],
+    symbol_size: u16,
+    trace_intake: bool,
+) -> Option<Vec<PlainSourceBatchSymbol<'a>>> {
+    if batch.packets.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut symbols = Vec::with_capacity(batch.packets.len());
+    let symbol_size = usize::from(symbol_size);
+    if symbol_size == 0 {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    for packet in &batch.packets {
+        let parse_start = trace_intake.then(Instant::now);
+        let (parsed, payload) =
+            parse_symbol_datagram_payload(&packet.payload, packet.payload.len(), tag, false)?;
+        let parse_micros = elapsed_micros_since(parse_start);
+        if !parsed.kind.is_source() || payload.len() != symbol_size {
+            return None;
+        }
+        let decoder_index = decoder_position_for_entry(decoders, parsed.entry)?;
+        let decoder = &decoders[decoder_index];
+        if decoder.complete || !decoder.source_streaming {
+            return None;
+        }
+        let sbn = usize::from(parsed.sbn);
+        let esi = usize::try_from(parsed.esi).ok()?;
+        if !seen.insert((decoder_index, sbn, esi)) {
+            return None;
+        }
+        let within_block = esi.checked_mul(symbol_size)?;
+        let block = decoder.source_blocks.get(sbn)?;
+        if block.complete || esi >= block.k || block.received[esi] || within_block >= block.len {
+            return None;
+        }
+        let take = symbol_size.min(block.len - within_block);
+        let offset = block.start.checked_add(u64::try_from(within_block).ok()?)?;
+        symbols.push(PlainSourceBatchSymbol {
+            decoder_index,
+            sbn,
+            esi,
+            offset,
+            take,
+            payload,
+            parse_micros,
+        });
+    }
+
+    Some(symbols)
+}
+
+async fn persist_plain_source_batch_run(
+    dec: &mut EntryDecoder,
+    run: &PlainSourceBatchRun,
+) -> Result<u64, RqError> {
+    if run.symbols == 0 {
+        return Ok(0);
+    }
+    let Some(block) = dec.source_blocks.get(run.sbn) else {
+        return Ok(0);
+    };
+    if block.complete || run.next_esi > block.k {
+        return Ok(0);
+    }
+    for esi in run.first_esi..run.next_esi {
+        if block.received[esi] {
+            return Ok(0);
+        }
+    }
+
+    write_source_staging_range(dec, run.offset, &run.data).await?;
+
+    let completed_now = {
+        let block = &mut dec.source_blocks[run.sbn];
+        for esi in run.first_esi..run.next_esi {
+            if block.received[esi] {
+                continue;
+            }
+            block.received[esi] = true;
+            block.auth_tags[esi] = None;
+            block.received_count = block.received_count.saturating_add(1);
+        }
+        if block.received_count == block.k {
+            block.complete = true;
+            dec.bytes_written = dec
+                .bytes_written
+                .checked_add(u64::try_from(block.len).unwrap_or(u64::MAX))
+                .ok_or_else(|| {
+                    RqError::Coding(format!("entry {} byte counter overflow", dec.index))
+                })?;
+            true
+        } else {
+            false
+        }
+    };
+
+    if completed_now {
+        rqtrace!(
+            "receiver: entry {} completed source-streamed block {} from plain-source batch",
+            dec.index,
+            run.sbn
+        );
+    }
+    if source_streaming_entry_complete(dec) {
+        dec.complete = true;
+        dec.pipeline = None;
+        close_cached_entry_staging_file(dec).await?;
+    }
+    Ok(run.symbols)
+}
+
+async fn flush_plain_source_batch_run(
+    stats: &mut RqDatagramRoundStats,
+    decoders: &mut [EntryDecoder],
+    run: Option<PlainSourceBatchRun>,
+    trace_intake: bool,
+) -> Result<(), RqError> {
+    let Some(run) = run else {
+        return Ok(());
+    };
+    let persist_start = trace_intake.then(Instant::now);
+    let accepted = persist_plain_source_batch_run(&mut decoders[run.decoder_index], &run).await?;
+    let persist_micros = elapsed_micros_since(persist_start);
+    stats.observed = stats.observed.saturating_add(run.symbols);
+    stats.accepted = stats.accepted.saturating_add(accepted);
+    stats.payload_bytes = stats.payload_bytes.saturating_add(run.payload_bytes);
+    stats.parse_micros = stats.parse_micros.saturating_add(run.parse_micros);
+    stats.feed_micros = stats.feed_micros.saturating_add(persist_micros);
+    stats.source_persist_micros = stats.source_persist_micros.saturating_add(persist_micros);
+    Ok(())
+}
+
+async fn try_feed_plain_source_datagram_batch(
+    batch: &crate::net::UdpRecvBatch,
+    tag: u64,
+    decoders: &mut [EntryDecoder],
+    symbol_size: u16,
+    trace_intake: bool,
+) -> Option<Result<RqDatagramRoundStats, RqError>> {
+    let symbols = plain_source_batch_symbols(batch, tag, decoders, symbol_size, trace_intake)?;
+    let mut stats = RqDatagramRoundStats::default();
+    let mut run = None;
+    for symbol in symbols {
+        let starts_new_run = run
+            .as_ref()
+            .is_some_and(|active: &PlainSourceBatchRun| !active.can_absorb(&symbol));
+        if starts_new_run
+            && let Err(err) =
+                flush_plain_source_batch_run(&mut stats, decoders, run.take(), trace_intake).await
+        {
+            return Some(Err(err));
+        }
+        if let Some(active) = run.as_mut() {
+            active.absorb(symbol);
+        } else {
+            run = Some(PlainSourceBatchRun::new(symbol));
+        }
+    }
+    if let Err(err) = flush_plain_source_batch_run(&mut stats, decoders, run, trace_intake).await {
+        return Some(Err(err));
+    }
+
+    Some(Ok(stats))
+}
+
 async fn feed_datagram_batch_to_decoders(
     cx: &Cx,
     batch: &crate::net::UdpRecvBatch,
@@ -7101,6 +7357,18 @@ async fn feed_datagram_batch_to_decoders(
     symbol_size: u16,
     trace_intake: bool,
 ) -> Result<RqDatagramRoundStats, RqError> {
+    if !auth_required
+        && symbol_auth.is_none()
+        && rq_pending_decode_jobs(decoders) == 0
+        && let Some(result) =
+            try_feed_plain_source_datagram_batch(batch, tag, decoders, symbol_size, trace_intake)
+                .await
+    {
+        let mut stats = result?;
+        stats.record_decode_stats(drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?);
+        return Ok(stats);
+    }
+
     let mut stats = RqDatagramRoundStats::default();
     for packet in &batch.packets {
         stats.record(
@@ -7118,9 +7386,20 @@ async fn feed_datagram_batch_to_decoders(
             .await?,
         );
     }
-    let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
-    stats.record_decode_stats(drain_ready_decodes(cx, decoders, true, decode_width_budget).await?);
+    stats.record_decode_stats(drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?);
     Ok(stats)
+}
+
+async fn drain_ready_decodes_if_pending(
+    cx: &Cx,
+    decoders: &mut [EntryDecoder],
+    symbol_size: u16,
+) -> Result<RqDecodeRoundStats, RqError> {
+    if rq_pending_decode_jobs(decoders) == 0 {
+        return Ok(RqDecodeRoundStats::default());
+    }
+    let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
+    drain_ready_decodes(cx, decoders, true, decode_width_budget).await
 }
 
 async fn apply_decode_result(
@@ -7420,10 +7699,8 @@ where
     let mut pumped: u64 = 0;
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
-        round_stats.record_decode_stats(
-            drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
-        );
+        round_stats
+            .record_decode_stats(drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?);
 
         // 1) First, non-blockingly drain whatever the control codec already has
         //    buffered (a prior read may have pulled the frame in with symbols).
@@ -7492,9 +7769,8 @@ where
                 pumped = pumped.saturating_add(stats.observed);
                 *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                 round_stats.merge(stats);
-                let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
                 round_stats.record_decode_stats(
-                    drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
+                    drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?,
                 );
 
                 while received_len == RQ_INBOUND_PUMP_BATCH {
@@ -7543,10 +7819,8 @@ where
                     pumped = pumped.saturating_add(stats.observed);
                     *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                     round_stats.merge(stats);
-                    let decode_width_budget =
-                        rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
                     round_stats.record_decode_stats(
-                        drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
+                        drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?,
                     );
                     batches = batches.saturating_add(1);
                 }
@@ -7655,10 +7929,8 @@ async fn drain_round_tail(
             }
             quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
         }
-        let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
-        round_stats.record_decode_stats(
-            drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
-        );
+        round_stats
+            .record_decode_stats(drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?);
 
         if drained > 0 && drained % 512 == 0 {
             crate::runtime::yield_now().await;
@@ -9189,6 +9461,72 @@ mod tests {
         (parsed, payload)
     }
 
+    fn udp_recv_batch(datagrams: Vec<Vec<u8>>) -> crate::net::UdpRecvBatch {
+        let src_addr = "127.0.0.1:9000".parse().expect("socket addr");
+        crate::net::UdpRecvBatch {
+            packets: datagrams
+                .into_iter()
+                .map(|payload| crate::net::UdpInboundDatagram {
+                    src_addr,
+                    payload,
+                    possibly_truncated: false,
+                })
+                .collect(),
+            report: crate::net::UdpBatchIoReport::default(),
+        }
+    }
+
+    #[test]
+    fn plain_source_recv_batch_persists_without_pipeline_feed() {
+        let object_id = entry_object_id("plain-source-batch", 0);
+        let symbol_size = 4u16;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 8, symbol_size);
+
+        let first = Symbol::new(
+            SymbolId::new(object_id, 0, 0),
+            vec![1, 2, 3, 4],
+            SymbolKind::Source,
+        );
+        let second = Symbol::new(
+            SymbolId::new(object_id, 0, 1),
+            vec![5, 6, 7, 8],
+            SymbolKind::Source,
+        );
+        let batch = udp_recv_batch(vec![
+            encode_symbol_datagram(0xB47C, 0, &first, None),
+            encode_symbol_datagram(0xB47C, 0, &second, None),
+        ]);
+        let cx = Cx::for_testing();
+        let mut decoders = vec![decoder];
+
+        let stats = futures_lite::future::block_on(feed_datagram_batch_to_decoders(
+            &cx,
+            &batch,
+            0xB47C,
+            false,
+            None,
+            &mut decoders,
+            symbol_size,
+            false,
+        ))
+        .expect("feed plain source batch");
+
+        assert_eq!(stats.observed, 2);
+        assert_eq!(stats.accepted, 2);
+        assert_eq!(stats.payload_bytes, 8);
+        assert_eq!(stats.pipeline_feed_micros, 0);
+        assert_eq!(stats.decode_stats.attempts, 0);
+        assert!(decoders[0].complete);
+        assert_eq!(decoders[0].bytes_written, 8);
+        assert_eq!(
+            std::fs::read(staging_path).expect("read batch-staged source stream"),
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
     #[test]
     fn signed_source_streaming_persists_after_hmac_verification() {
         let ctx = SecurityContext::for_testing(31337);
@@ -9295,6 +9633,73 @@ mod tests {
         assert_eq!(
             std::fs::read(staging_path).expect("read cached source stream"),
             vec![1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[test]
+    fn plain_source_datagram_batch_persists_contiguous_run_once() {
+        let tag = 0xA77E_2024;
+        let object_id = entry_object_id("plain-source-batch-run", 0);
+        let symbol_size = 4u16;
+        let data: Vec<u8> = (1..=16).collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging_path = dir.path().join("entry0");
+        let mut decoder =
+            source_streaming_test_decoder(object_id, staging_path.clone(), 16, symbol_size);
+        decoder.cache_staging_file = true;
+
+        let src_addr: SocketAddr = "127.0.0.1:31337".parse().expect("socket addr");
+        let packets = data
+            .chunks(usize::from(symbol_size))
+            .enumerate()
+            .map(|(esi, chunk)| {
+                let symbol = Symbol::new(
+                    SymbolId::new(object_id, 0, u32::try_from(esi).expect("esi fits")),
+                    chunk.to_vec(),
+                    SymbolKind::Source,
+                );
+                crate::net::UdpInboundDatagram {
+                    src_addr,
+                    payload: encode_symbol_datagram(tag, 0, &symbol, None),
+                    possibly_truncated: false,
+                }
+            })
+            .collect();
+        let batch = crate::net::UdpRecvBatch {
+            packets,
+            report: Default::default(),
+        };
+        let cx = Cx::for_testing();
+        let mut decoders = vec![decoder];
+        let stats = futures_lite::future::block_on(feed_datagram_batch_to_decoders(
+            &cx,
+            &batch,
+            tag,
+            false,
+            None,
+            &mut decoders,
+            symbol_size,
+            true,
+        ))
+        .expect("feed plain source datagram batch");
+
+        let decoder = decoders.pop().expect("decoder");
+        assert_eq!(stats.observed, 4);
+        assert_eq!(stats.accepted, 4);
+        assert_eq!(stats.payload_bytes, 16);
+        assert!(decoder.complete);
+        assert_eq!(decoder.bytes_written, 16);
+        assert!(
+            decoder.staging_file.is_none(),
+            "completed batch must release cached staging descriptor"
+        );
+        assert!(
+            decoder.source_write_buffer.is_empty(),
+            "completed batch must flush the coalesced source buffer"
+        );
+        assert_eq!(
+            std::fs::read(staging_path).expect("read plain-source batch"),
+            data
         );
     }
 

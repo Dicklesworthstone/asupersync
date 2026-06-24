@@ -1203,6 +1203,28 @@ pub struct UdpRecvBatch {
     pub report: UdpBatchIoReport,
 }
 
+impl UdpRecvBatch {
+    /// Move packet payload buffers into `spare_payloads` for reuse by the next
+    /// portable receive batch. This avoids one heap allocation per datagram on
+    /// high-throughput callers while preserving the owned-batch API.
+    pub fn recycle_payloads_into(
+        &mut self,
+        spare_payloads: &mut Vec<Vec<u8>>,
+        max_spare_payloads: usize,
+    ) {
+        for mut packet in self.packets.drain(..) {
+            if spare_payloads.len() >= max_spare_payloads {
+                break;
+            }
+            if packet.payload.capacity() <= UDP_MAX_PACKET_SIZE {
+                packet.payload.clear();
+                spare_payloads.push(packet.payload);
+            }
+        }
+        self.report = UdpBatchIoReport::default();
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[inline]
 fn browser_udp_unsupported(op: &str) -> io::Error {
@@ -1231,6 +1253,23 @@ fn empty_udp_receive_buffer_error(op: &str) -> io::Error {
         io::ErrorKind::InvalidInput,
         format!("UdpSocket::{op} requires a non-empty buffer"),
     )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn recv_batch_payload_buffer(spare_payloads: &mut Vec<Vec<u8>>, packet_size: usize) -> Vec<u8> {
+    let mut buf = spare_payloads
+        .pop()
+        .unwrap_or_else(|| Vec::with_capacity(packet_size));
+    buf.resize(packet_size, 0);
+    buf
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn recycle_unused_recv_batch_payload(spare_payloads: &mut Vec<Vec<u8>>, mut buf: Vec<u8>) {
+    if buf.capacity() <= UDP_MAX_PACKET_SIZE {
+        buf.clear();
+        spare_payloads.push(buf);
+    }
 }
 
 /// A UDP socket.
@@ -2429,9 +2468,22 @@ impl UdpSocket {
         max_packets: usize,
         packet_size: usize,
     ) -> io::Result<UdpRecvBatch> {
+        let mut spare_payloads = Vec::new();
+        self.recv_batch_from_reusing(max_packets, packet_size, &mut spare_payloads)
+            .await
+    }
+
+    /// Receive one readiness-driven packet, then drain immediately-ready
+    /// packets, reusing packet payload buffers supplied by the caller.
+    pub async fn recv_batch_from_reusing(
+        &mut self,
+        max_packets: usize,
+        packet_size: usize,
+        spare_payloads: &mut Vec<Vec<u8>>,
+    ) -> io::Result<UdpRecvBatch> {
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (max_packets, packet_size);
+            let _ = (max_packets, packet_size, spare_payloads);
             browser_udp_unsupported_result("UdpSocket::recv_batch_from")
         }
 
@@ -2464,16 +2516,18 @@ impl UdpSocket {
                 ));
             }
 
-            let mut first = vec![0u8; packet_size];
-            let (bytes_read, src_addr) = self.recv_from(&mut first).await?;
+            let mut first = recv_batch_payload_buffer(spare_payloads, packet_size);
+            let (bytes_read, src_addr) = match self.recv_from(&mut first).await {
+                Ok(received) => received,
+                Err(err) => {
+                    recycle_unused_recv_batch_payload(spare_payloads, first);
+                    return Err(err);
+                }
+            };
             first.truncate(bytes_read);
 
             let mut batch = UdpRecvBatch {
-                packets: vec![UdpInboundDatagram {
-                    src_addr,
-                    payload: first,
-                    possibly_truncated: bytes_read == packet_size,
-                }],
+                packets: Vec::with_capacity(max_packets),
                 report: UdpBatchIoReport {
                     packets_processed: 1,
                     bytes_processed: bytes_read,
@@ -2483,6 +2537,11 @@ impl UdpSocket {
                     error: None,
                 },
             };
+            batch.packets.push(UdpInboundDatagram {
+                src_addr,
+                payload: first,
+                possibly_truncated: bytes_read == packet_size,
+            });
 
             for _ in 1..max_packets {
                 if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
@@ -2490,7 +2549,7 @@ impl UdpSocket {
                     break;
                 }
 
-                let mut buf = vec![0u8; packet_size];
+                let mut buf = recv_batch_payload_buffer(spare_payloads, packet_size);
                 match self.inner.recv_from(&mut buf) {
                     Ok((n, addr)) => {
                         buf.truncate(n);
@@ -2502,8 +2561,12 @@ impl UdpSocket {
                             possibly_truncated: n == packet_size,
                         });
                     }
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        recycle_unused_recv_batch_payload(spare_payloads, buf);
+                        break;
+                    }
                     Err(err) => {
+                        recycle_unused_recv_batch_payload(spare_payloads, buf);
                         batch.report.error = Some(err.to_string());
                         break;
                     }
