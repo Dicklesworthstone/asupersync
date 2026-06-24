@@ -260,7 +260,17 @@ fn loss_compensated_repair_target(base_deficit_symbols: u64, loss_fraction: Opti
     let Some(loss) = loss_fraction.filter(|loss| loss.is_finite()) else {
         return base_deficit_symbols;
     };
-    let delivery_fraction = (1.0 - loss.clamp(0.0, 0.90)).max(0.10);
+    if loss <= 0.0 {
+        return base_deficit_symbols;
+    }
+    let effective_loss = loss
+        .max(super::QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN)
+        .min(super::QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD);
+    let compensated_loss = (effective_loss
+        * (1.0 + super::QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION)
+        + super::QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN)
+        .clamp(0.0, 0.90);
+    let delivery_fraction = (1.0 - compensated_loss).max(0.10);
     ((base_deficit_symbols as f64) / delivery_fraction).ceil() as u64
 }
 
