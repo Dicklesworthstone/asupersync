@@ -2324,3 +2324,25 @@ Built receiver-pump HEAD `14e4d90cd` (git archive). 500M, nocrypto, streams 1/8 
 **★SCOREBOARD CORRECTION — 500M/bad nocrypto is NOT an atp win (the "4.4×" was mis-cited).** Today: atp 153.4s vs rsyncd 98.0s ⇒ atp is **1.56× SLOWER** on wall, with ~comparable/worse RSS (atp 52.7 MB vs rsyncd 38.8 MB). This is **consistent with MATRIX-50** ("500M/bad … 1.59× of rsync wall") — so NO regression. The repeatedly-cited "500M/bad 4.4×" was a **4.4× self-improvement** (atp-vs-its-own-prior-version via LANE-A decode-parallel), landing at **1.59× of rsync's wall (atp slower)** + "18× less RSS" *vs rsync-over-ssh* — NOT a wall win over plaintext rsyncd, and NOT a memory win vs rsyncd. Correcting the running shorthand: **on nocrypto 500M/bad atp loses ~1.6× on wall.** atp's genuine confirmed WINS are: delta-insert (62.5×), 5M/broken (1.48× real wall win, 533× RSS), tree_small/bad (1.10×), and memory where rsync pays ssh/whole-file-hash (16-1665×). The lossy-LARGE story is "wall-competitive-but-slower (~1.6×) + sometimes memory-efficient (vs ssh)", not a win. (TODO: re-verify the AUTH/ENCRYPTED-tier 500M/bad — atp vs rsync-over-ssh — separately; that crypto-tier cell may still favor atp since rsync pays ssh+crypto on the lossy link.)
 
 Evidence: `artifacts/atp_bench_matrix/20260624T200039Z/`.
+
+## MATRIX-72 (2026-06-24) — ★DIRECT PROBE MEASUREMENT overturns the MATRIX-71 window hypothesis: the clean-high-BDP wall is the 16 MiB/s COLD-START PACING RATE that never ramps on clean (rounds=0) transfers — NOT an in-flight window cap (window measured ~36 MB, healthy). atp is co-limited by sender pacing (16 MiB/s) AND the receiver pump (~13–16 MB/s); every single-sided lever failed because the other side caps it.
+
+Built the probe HEAD `0c6229751` and ran a 500M/highbdp/nocrypto transfer with `ATP_RQ_TRACE=1` to read the new `sender: window_probe` trace. The actual numbers (feedback_round=0, the whole clean transfer):
+
+| probe field | value | meaning |
+|---|---|---|
+| `configured_rate_Bps` | 16,777,216 | **exactly 16 MiB/s = RQ_COLD_START_PACING_BPS (mod.rs:194)** |
+| `observed_payload_Bps` | 15,944,495 | ~15.9 MB/s — sender runs AT the cold-start rate |
+| `send_wall_ms` | 32,889 | 32.9s actually sending (= 500MB / 16 MiB/s) |
+| `control_wait_ms` | 2,137 | only 2.1s blocked on control/credit |
+| `peak_window_bytes` | 35,854,798 | **~35.8 MB in-flight window — HEALTHY, ~BDP-scale** |
+| `configured_bdp_bytes` | 0 | atp does NOT estimate the path BDP |
+| wall / rsyncd | 38.2s / 17.6s | atp 2.17× slower (sha_ok 3/3) |
+
+**★The window is NOT the cap (refutes MATRIX-71's inference).** Direct measurement shows the in-flight window peaks at ~35.8 MB — ample for the 50 MB BDP. My MATRIX-71 "≈2.6 MB window cap" was an inference from throughput×RTT and is WRONG; this probe corrects it. (Lesson: measure, don't infer — the 13.2 MB/s was the *rate cap*, not a windowed throughput.)
+
+**★The real cap is the COLD-START PACING RATE that never ramps on clean links.** `RQ_COLD_START_PACING_BPS = 16 MiB/s` (mod.rs:194); rate is clamped to `[RQ_MIN=512KiB/s, RQ_MAX=64MiB/s]` (mod.rs:195-196). The AIMD rate-increase only fires ACROSS feedback rounds — but a clean transfer completes in **round 0** (no NeedMore), so the rate never rises above cold-start. atp paces the entire 500 MB at 16 MiB/s, never reaching even its own 64 MiB/s ceiling, on a 1 gbit (125 MB/s) link. 500 MB / 16 MiB/s ≈ 31s ⇒ the 38s wall. rsync's single TCP ramps via slow-start *within* the transfer and reaches ~28 MB/s ⇒ 17.6s.
+
+**★CO-LIMITED — why all 6 single-sided levers failed.** The sender paces 16 MiB/s; the receiver pump does ~13–16 MB/s (MATRIX-69/71, refuted speeding it). These are nearly matched. Raising ONLY the sender rate would overrun the ~13–16 MB/s receiver → drops → feedback rounds → no gain (likely why prior "slow-start" attempts were marked DEAD). Speeding ONLY the receiver does nothing while the sender paces at 16. **To win clean-high-BDP you must raise BOTH together:** (a) a clean-link within-round pacing RAMP (probe rate up while loss=0, toward/again past RQ_MAX_PACING_BPS — gated to clean links so it can't regress the lossy AIMD floors, which reuse RQ_COLD_START_PACING_BPS), AND (b) a receiver that can absorb >16 MB/s. atp also doesn't estimate path BDP (`configured_bdp_bytes=0`) — a BBR-style delivery-rate+RTT estimator would let it size the rate to the pipe.
+
+**Honest status:** this is DEAD-adjacent ("slow-start / round-0 pacing" are on the never-retry list) but now has a *precise mechanism* the prior blunt attempts lacked. It is a genuine candidate ONLY as a coupled, clean-link-gated effort with a measured A/B (I can't test it myself — `RQ_COLD_START_PACING_BPS` is a hardcoded const with no env/CLI override; needs a code change). If the swarm ships a clean-link rate-ramp, I bench whether the receiver keeps up and the wall drops toward rsync's 17.6s — that would be the first clean-wall win. If the receiver can't absorb it, the clean-high-BDP wall is jointly fundamental (FEC pump + conservative pacing) and atp's domain stays lossy/delta/memory. Evidence: `artifacts/atp_bench_matrix/20260624T212322Z/`.
