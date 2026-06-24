@@ -221,6 +221,20 @@ pub struct BondedDonorSpraySchedule {
 }
 
 impl BondedDonorSpraySchedule {
+    /// Materialize the donor's exact symbol-emission stream in transport order.
+    ///
+    /// This is the B1 handoff to the data path: callers can iterate one flat
+    /// stream and encode `(entry, source block, esi)` without re-running residue
+    /// ownership decisions. Source ESIs are always listed before repair ESIs for
+    /// each block so the receiver's source-first fast path stays available.
+    #[must_use]
+    pub fn symbol_emissions(&self) -> Vec<BondedDonorSymbolEmission> {
+        self.blocks
+            .iter()
+            .flat_map(|block| block.symbol_emissions(self.donor_index))
+            .collect()
+    }
+
     /// Count all source symbols this donor should spray.
     #[must_use]
     pub fn source_symbol_count(&self) -> usize {
@@ -251,6 +265,30 @@ impl BondedDonorSpraySchedule {
     pub fn covers_every_block(&self) -> bool {
         self.blocks.iter().all(|block| !block.is_empty())
     }
+}
+
+/// One `(entry, source block, esi)` that a bonded donor should encode and emit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondedDonorSymbolEmission {
+    /// Donor that owns this symbol under the active assignment.
+    pub donor_index: u32,
+    /// Descriptor-agreed RaptorQ identity and source-block geometry.
+    pub geometry: BondEntryBlockGeometry,
+    /// Encoding symbol id to emit.
+    pub esi: u32,
+    /// Whether this ESI is a systematic source or repair symbol.
+    pub kind: BondedDonorSymbolKind,
+    /// Donor-local stagger slot to preserve B1/B3 pacing order.
+    pub stagger_delay_slots: u32,
+}
+
+/// Scheduled bonded symbol kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BondedDonorSymbolKind {
+    /// Systematic source symbol (`esi < K`).
+    Source,
+    /// Repair/FEC symbol (`esi >= K`).
+    Repair,
 }
 
 /// Collective source-range coverage for a bonded transfer.
@@ -411,6 +449,37 @@ impl BondedBlockSpraySchedule {
         esis.extend_from_slice(&self.source_esis);
         esis.extend_from_slice(&self.repair_esis);
         esis
+    }
+
+    /// Materialize this block's donor-owned symbols in source-first order.
+    #[must_use]
+    pub fn symbol_emissions(&self, donor_index: u32) -> Vec<BondedDonorSymbolEmission> {
+        let mut emissions = Vec::with_capacity(self.source_esis.len() + self.repair_esis.len());
+        emissions.extend(
+            self.source_esis
+                .iter()
+                .copied()
+                .map(|esi| BondedDonorSymbolEmission {
+                    donor_index,
+                    geometry: self.geometry,
+                    esi,
+                    kind: BondedDonorSymbolKind::Source,
+                    stagger_delay_slots: self.stagger_delay_slots,
+                }),
+        );
+        emissions.extend(
+            self.repair_esis
+                .iter()
+                .copied()
+                .map(|esi| BondedDonorSymbolEmission {
+                    donor_index,
+                    geometry: self.geometry,
+                    esi,
+                    kind: BondedDonorSymbolKind::Repair,
+                    stagger_delay_slots: self.stagger_delay_slots,
+                }),
+        );
+        emissions
     }
 
     /// Build a B3 continuation batch for this block after the initial spray.
@@ -1979,6 +2048,89 @@ mod tests {
         assert_eq!(schedule.blocks[1].source_esis, vec![0, 1]);
         assert_eq!(schedule.blocks[1].repair_esis, vec![2, 3, 4]);
         assert_eq!(schedule.total_symbol_count(), 10);
+    }
+
+    #[test]
+    fn donor_count_one_emission_stream_matches_single_source_order() {
+        let descriptor = descriptor();
+        let assignment = DonorAssignment::new_static(0, 1, vec![endpoint()], None);
+
+        let schedule = schedule_bonded_donor_spray(&descriptor, &assignment, 3).expect("schedule");
+        let emissions = schedule
+            .symbol_emissions()
+            .into_iter()
+            .map(|emission| {
+                (
+                    emission.geometry.entry_index,
+                    emission.geometry.source_block_number,
+                    emission.esi,
+                    emission.kind,
+                    emission.donor_index,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            emissions,
+            vec![
+                (0, 0, 0, BondedDonorSymbolKind::Source, 0),
+                (0, 0, 1, BondedDonorSymbolKind::Source, 0),
+                (0, 0, 2, BondedDonorSymbolKind::Repair, 0),
+                (0, 0, 3, BondedDonorSymbolKind::Repair, 0),
+                (0, 0, 4, BondedDonorSymbolKind::Repair, 0),
+                (0, 1, 0, BondedDonorSymbolKind::Source, 0),
+                (0, 1, 1, BondedDonorSymbolKind::Source, 0),
+                (0, 1, 2, BondedDonorSymbolKind::Repair, 0),
+                (0, 1, 3, BondedDonorSymbolKind::Repair, 0),
+                (0, 1, 4, BondedDonorSymbolKind::Repair, 0),
+            ],
+            "donor_count=1 must preserve the single-source source-then-repair ESI stream"
+        );
+    }
+
+    #[test]
+    fn donor_symbol_emissions_are_residue_filtered_and_source_first() {
+        let descriptor = descriptor();
+        let donor = DonorAssignment::new_static(1, 3, vec![endpoint()], None);
+
+        let schedule = schedule_bonded_donor_spray(&descriptor, &donor, 8).expect("schedule");
+        let emissions = schedule.symbol_emissions();
+
+        assert!(!emissions.is_empty());
+        for emission in &emissions {
+            assert_eq!(emission.donor_index, 1);
+            assert!(donor.owns_esi(emission.esi));
+            assert_eq!(emission.esi % 3, 1);
+            assert_eq!(emission.stagger_delay_slots, 1);
+            match emission.kind {
+                BondedDonorSymbolKind::Source => {
+                    assert!(emission.esi < u32::from(emission.geometry.source_symbols));
+                }
+                BondedDonorSymbolKind::Repair => {
+                    assert!(emission.esi >= u32::from(emission.geometry.source_symbols));
+                }
+            }
+        }
+
+        for block in &schedule.blocks {
+            let kinds = block
+                .symbol_emissions(schedule.donor_index)
+                .into_iter()
+                .map(|emission| emission.kind)
+                .collect::<Vec<_>>();
+            let first_repair = kinds
+                .iter()
+                .position(|kind| *kind == BondedDonorSymbolKind::Repair);
+            let last_source = kinds
+                .iter()
+                .rposition(|kind| *kind == BondedDonorSymbolKind::Source);
+            if let (Some(first_repair), Some(last_source)) = (first_repair, last_source) {
+                assert!(
+                    last_source < first_repair,
+                    "source symbols must precede repair symbols within each block"
+                );
+            }
+        }
     }
 
     #[test]
