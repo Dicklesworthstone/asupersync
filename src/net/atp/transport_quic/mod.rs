@@ -1689,6 +1689,15 @@ struct QuicNeedMore {
     /// arrive without improving decode rank.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     round_symbols_accepted: Option<u64>,
+    /// Raw incomplete-block deficit before QUIC repair over-provisioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repair_base_deficit_symbols: Option<u64>,
+    /// Loss-compensated target derived from the raw deficit and measured loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repair_loss_compensated_target_symbols: Option<u64>,
+    /// Gap between the requested repair symbols and the loss-compensated target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repair_request_gap_to_target_symbols: Option<u64>,
 }
 
 /// Request for fresh repair symbols for one incomplete source block.
@@ -1922,6 +1931,25 @@ fn quic_feedback_repair_overhead(round_loss_fraction: Option<f64>) -> f64 {
     (loss * (1.0 + QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION)
         + QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN)
         .clamp(0.0, QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn quic_loss_compensated_repair_target_symbols(
+    base_deficit: usize,
+    round_loss_fraction: Option<f64>,
+) -> usize {
+    if base_deficit == 0 {
+        return 0;
+    }
+    let Some(loss) = round_loss_fraction.filter(|loss| loss.is_finite()) else {
+        return base_deficit;
+    };
+    let delivery_fraction = (1.0 - loss.clamp(0.0, 0.90)).max(0.10);
+    ((base_deficit as f64) / delivery_fraction).ceil() as usize
 }
 
 #[allow(dead_code)]
@@ -4514,6 +4542,14 @@ fn quic_targeted_repair_symbols(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct QuicRepairRequestAccounting {
+    base_deficit_symbols: u64,
+    loss_compensated_target_symbols: u64,
+    requested_repair_symbols: u64,
+    request_gap_to_target_symbols: u64,
+}
+
 #[allow(dead_code)]
 fn block_repair_requests(
     decoders: &[QuicEntryDecoder],
@@ -4521,7 +4557,17 @@ fn block_repair_requests(
     limit: usize,
     round_loss_fraction: Option<f64>,
 ) -> Vec<QuicBlockRepairRequest> {
+    block_repair_requests_with_accounting(decoders, config, limit, round_loss_fraction).0
+}
+
+fn block_repair_requests_with_accounting(
+    decoders: &[QuicEntryDecoder],
+    config: &QuicConfig,
+    limit: usize,
+    round_loss_fraction: Option<f64>,
+) -> (Vec<QuicBlockRepairRequest>, QuicRepairRequestAccounting) {
     let mut requests = Vec::new();
+    let mut accounting = QuicRepairRequestAccounting::default();
     let mut requested_symbols = 0usize;
     'decoders: for decoder in decoders {
         if decoder.complete {
@@ -4575,12 +4621,13 @@ fn block_repair_requests(
                 }
             });
             let missing_source_symbols = missing_by_block.get(&sbn).copied().unwrap_or(0);
-            let base_deficit = status_deficit
-                .unwrap_or(missing_source_symbols)
-                .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
-            if base_deficit == 0 {
+            let raw_base_deficit = status_deficit.unwrap_or(missing_source_symbols);
+            if raw_base_deficit == 0 {
                 continue;
             }
+            let loss_compensated_target =
+                quic_loss_compensated_repair_target_symbols(raw_base_deficit, round_loss_fraction);
+            let base_deficit = raw_base_deficit.min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
             let remaining = if limit == 0 {
                 0
             } else {
@@ -4603,6 +4650,15 @@ fn block_repair_requests(
                 break 'decoders;
             }
             requested_symbols = requested_symbols.saturating_add(deficit);
+            accounting.base_deficit_symbols = accounting
+                .base_deficit_symbols
+                .saturating_add(u64::try_from(raw_base_deficit).unwrap_or(u64::MAX));
+            accounting.loss_compensated_target_symbols = accounting
+                .loss_compensated_target_symbols
+                .saturating_add(u64::try_from(loss_compensated_target).unwrap_or(u64::MAX));
+            accounting.requested_repair_symbols = accounting
+                .requested_repair_symbols
+                .saturating_add(u64::try_from(deficit).unwrap_or(u64::MAX));
             requests.push(QuicBlockRepairRequest {
                 entry: decoder.index,
                 sbn,
@@ -4610,7 +4666,10 @@ fn block_repair_requests(
             });
         }
     }
-    requests
+    accounting.request_gap_to_target_symbols = accounting
+        .loss_compensated_target_symbols
+        .saturating_sub(accounting.requested_repair_symbols);
+    (requests, accounting)
 }
 
 #[allow(dead_code)]
@@ -6643,7 +6702,7 @@ async fn receive_native_symbol_round(
     }
     let round_loss_fraction =
         receiver_round_loss_fraction(round_stats.observed, round_complete.round_symbols_sent);
-    let repair_blocks = block_repair_requests(
+    let (repair_blocks, repair_accounting) = block_repair_requests_with_accounting(
         decoders,
         config,
         MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
@@ -6661,6 +6720,11 @@ async fn receive_native_symbol_round(
         round_symbols_observed: Some(round_stats.observed),
         round_loss_fraction,
         round_symbols_accepted: Some(round_stats.accepted),
+        repair_base_deficit_symbols: Some(repair_accounting.base_deficit_symbols),
+        repair_loss_compensated_target_symbols: Some(
+            repair_accounting.loss_compensated_target_symbols,
+        ),
+        repair_request_gap_to_target_symbols: Some(repair_accounting.request_gap_to_target_symbols),
     };
     let round = (*feedback_rounds).saturating_add(1);
     let pending_count = need.pending.len().to_string();
