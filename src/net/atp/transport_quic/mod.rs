@@ -10462,6 +10462,9 @@ mod tests {
             round_symbols_observed: Some(2),
             round_symbols_accepted: Some(2),
             round_loss_fraction: Some(0.0),
+            repair_base_deficit_symbols: None,
+            repair_loss_compensated_target_symbols: None,
+            repair_request_gap_to_target_symbols: None,
         };
         send_need_more(&cx, &mut server, &mut receiver_control, &second)
             .expect("send second need-more");
