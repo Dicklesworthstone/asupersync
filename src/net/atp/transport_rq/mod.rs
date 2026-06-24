@@ -297,6 +297,9 @@ const RQ_REPAIR_RECEIVE_SYMBOL_CAP_PER_BLOCK: usize = usize::MAX;
 const RQ_REPAIR_SYMBOL_RETENTION_MIN_EXTRA: usize = 256;
 /// Tiny quiet window used only after a full batch, matching the native QUIC pump.
 const RQ_INBOUND_PUMP_DRAIN_GRACE: Duration = Duration::from_millis(1);
+/// Coalesce clean/source-streamed staging writes so the receiver does not issue
+/// one async file write per UDP symbol on large clean transfers.
+const RQ_SOURCE_STAGE_BUFFER_BYTES: usize = 256 * 1024;
 
 /// Process-unique suffix for RQ receive staging directories.
 static RQ_STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -3148,6 +3151,8 @@ struct EntryDecoder {
     source_streaming: bool,
     source_blocks: Vec<SourceBlockProgress>,
     pending_decodes: Vec<PendingDecode>,
+    source_write_buffer: Vec<u8>,
+    source_write_buffer_offset: Option<u64>,
 }
 
 struct PendingDecode {
@@ -3325,11 +3330,21 @@ fn rq_decode_core_limit() -> usize {
     })
 }
 
-fn rq_decode_width_budget_snapshot(
+fn rq_decode_core_limit_for_cx(cx: &Cx) -> usize {
+    // ATP CLI/daemon runtimes size a blocking pool explicitly for CPU-heavy
+    // RaptorQ work. Prefer that live cap over process CPU discovery so cgroup
+    // or container affinity quirks do not collapse receiver decode to one lane.
+    cx.blocking_pool_handle()
+        .map_or_else(rq_decode_core_limit, |pool| {
+            rq_decode_core_limit_for_available(pool.current_max_threads())
+        })
+}
+
+fn rq_decode_width_budget_snapshot_for_core_limit(
     decoders: &[EntryDecoder],
     symbol_size: u16,
+    core_limit: usize,
 ) -> RqDecodeWidthBudget {
-    let core_limit = rq_decode_core_limit();
     let max_block_size = decoders
         .iter()
         .map(|decoder| decoder.max_block_size)
@@ -3350,8 +3365,28 @@ fn rq_decode_width_budget_snapshot(
     }
 }
 
-fn rq_decode_width_budget(decoders: &[EntryDecoder], symbol_size: u16) -> usize {
-    rq_decode_width_budget_snapshot(decoders, symbol_size).effective
+#[cfg(test)]
+fn rq_decode_width_budget_snapshot(
+    decoders: &[EntryDecoder],
+    symbol_size: u16,
+) -> RqDecodeWidthBudget {
+    rq_decode_width_budget_snapshot_for_core_limit(decoders, symbol_size, rq_decode_core_limit())
+}
+
+fn rq_decode_width_budget_snapshot_for_cx(
+    cx: &Cx,
+    decoders: &[EntryDecoder],
+    symbol_size: u16,
+) -> RqDecodeWidthBudget {
+    rq_decode_width_budget_snapshot_for_core_limit(
+        decoders,
+        symbol_size,
+        rq_decode_core_limit_for_cx(cx),
+    )
+}
+
+fn rq_decode_width_budget_for_cx(cx: &Cx, decoders: &[EntryDecoder], symbol_size: u16) -> usize {
+    rq_decode_width_budget_snapshot_for_cx(cx, decoders, symbol_size).effective
 }
 
 fn block_decode_pending(dec: &EntryDecoder, block_sbn: u8) -> bool {
@@ -4849,6 +4884,8 @@ pub async fn receive_connection(
                 source_streaming: entry_source_streaming,
                 source_blocks: source_blocks.unwrap_or_default(),
                 pending_decodes: Vec::new(),
+                source_write_buffer: Vec::with_capacity(RQ_SOURCE_STAGE_BUFFER_BYTES),
+                source_write_buffer_offset: None,
             }
         })
         .collect();
@@ -4933,7 +4970,7 @@ pub async fn receive_connection(
                         seed_stats.seeded
                     );
                 }
-                let decode_width_budget = rq_decode_width_budget(&decoders, symbol_size);
+                let decode_width_budget = rq_decode_width_budget_for_cx(cx, &decoders, symbol_size);
                 let completed_decode_stats =
                     join_all_pending_decodes(cx, &mut decoders, decode_width_budget).await?;
                 round_stats.record_decode_stats(completed_decode_stats);
@@ -4957,7 +4994,8 @@ pub async fn receive_connection(
                     round_stats.observed,
                     round_complete.round_symbols_sent,
                 );
-                let decode_budget = rq_decode_width_budget_snapshot(&decoders, symbol_size);
+                let decode_budget =
+                    rq_decode_width_budget_snapshot_for_cx(cx, &decoders, symbol_size);
                 rqtrace!(
                     "receiver: ObjectComplete; {} of {} entries still pending round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} source_auth_micros={} source_persist_micros={} pipeline_feed_micros={} block_persist_micros={} decode_dispatch_micros={} source_seed_micros={} feed_other_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={}",
                     pending.len(),
@@ -5887,7 +5925,7 @@ async fn flush_and_seed_source_streaming_round_boundary(
             if !source_streaming_block_ready_to_seed(&decoders[decoder_index], sbn) {
                 continue;
             }
-            let transfer_decode_width = rq_decode_width_budget(decoders, symbol_size);
+            let transfer_decode_width = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
             let allow_spawn_decode = rq_pending_decode_jobs(decoders) < transfer_decode_width;
             let Ok(block_sbn) = u8::try_from(sbn) else {
                 break;
@@ -5945,7 +5983,7 @@ async fn persist_source_symbol(
         (offset, take)
     };
 
-    write_entry_staging_range(dec, offset, &payload[..take]).await?;
+    write_source_staging_range(dec, offset, &payload[..take]).await?;
 
     let completed_now = {
         let block = &mut dec.source_blocks[sbn];
@@ -6015,6 +6053,7 @@ async fn open_entry_staging_file(dec: &mut EntryDecoder) -> Result<crate::fs::Fi
 }
 
 async fn close_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), RqError> {
+    flush_source_write_buffer(dec).await?;
     if let Some(mut file) = dec.staging_file.take() {
         file.flush().await?;
     }
@@ -6027,6 +6066,7 @@ async fn flush_cached_entry_staging_file(dec: &mut EntryDecoder) -> Result<(), R
     if is_round_scoped_entry_staging_cache(dec) {
         return close_cached_entry_staging_file(dec).await;
     }
+    flush_source_write_buffer(dec).await?;
     if let Some(file) = dec.staging_file.as_mut() {
         file.flush().await?;
     }
@@ -6046,6 +6086,72 @@ async fn write_entry_staging_range(
     offset: u64,
     data: &[u8],
 ) -> Result<(), RqError> {
+    flush_source_write_buffer(dec).await?;
+    write_entry_staging_range_unbuffered(dec, offset, data).await
+}
+
+async fn write_source_staging_range(
+    dec: &mut EntryDecoder,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), RqError> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if !dec.cache_staging_file {
+        return write_entry_staging_range_unbuffered(dec, offset, data).await;
+    }
+
+    let contiguous = dec.source_write_buffer_offset.is_some_and(|buffer_offset| {
+        buffer_offset.checked_add(u64::try_from(dec.source_write_buffer.len()).unwrap_or(u64::MAX))
+            == Some(offset)
+    });
+
+    if !contiguous
+        || dec.source_write_buffer.len().saturating_add(data.len()) > RQ_SOURCE_STAGE_BUFFER_BYTES
+    {
+        flush_source_write_buffer(dec).await?;
+    }
+
+    if data.len() >= RQ_SOURCE_STAGE_BUFFER_BYTES {
+        return write_entry_staging_range_unbuffered(dec, offset, data).await;
+    }
+
+    if dec.source_write_buffer.is_empty() {
+        dec.source_write_buffer_offset = Some(offset);
+    }
+    dec.source_write_buffer.extend_from_slice(data);
+    if dec.source_write_buffer.len() >= RQ_SOURCE_STAGE_BUFFER_BYTES {
+        flush_source_write_buffer(dec).await?;
+    }
+    Ok(())
+}
+
+async fn flush_source_write_buffer(dec: &mut EntryDecoder) -> Result<(), RqError> {
+    if dec.source_write_buffer.is_empty() {
+        dec.source_write_buffer_offset = None;
+        return Ok(());
+    }
+
+    let offset = dec.source_write_buffer_offset.take().ok_or_else(|| {
+        RqError::Coding(format!(
+            "entry {} source staging buffer missing offset",
+            dec.index
+        ))
+    })?;
+    let mut buffered = Vec::new();
+    std::mem::swap(&mut buffered, &mut dec.source_write_buffer);
+    let result = write_entry_staging_range_unbuffered(dec, offset, &buffered).await;
+    buffered.clear();
+    dec.source_write_buffer = buffered;
+    result
+}
+
+async fn write_entry_staging_range_unbuffered(
+    dec: &mut EntryDecoder,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), RqError> {
     if dec.cache_staging_file {
         if dec.staging_file.is_none() {
             let file = open_entry_staging_file(dec).await?;
@@ -6060,13 +6166,8 @@ async fn write_entry_staging_range(
             .ok_or_else(|| {
                 RqError::Coding(format!("entry {} staging cursor overflow", dec.index))
             })?;
-        // Clean ATP-RQ transfers arrive mostly as contiguous source symbols.
-        // Flush cached staging writes in chunks so large entries avoid
-        // per-symbol open/seek/write/flush overhead without holding dirty data
-        // unboundedly.
-        const SOURCE_STAGE_BUFFER_BYTES: usize = 256 * 1024;
         let unflushed_bytes = dec.staging_unflushed_bytes.saturating_add(data.len());
-        let should_flush = unflushed_bytes >= SOURCE_STAGE_BUFFER_BYTES;
+        let should_flush = unflushed_bytes >= RQ_SOURCE_STAGE_BUFFER_BYTES;
         {
             let file = dec
                 .staging_file
@@ -6944,7 +7045,7 @@ async fn feed_datagram_to_decoders(
         return Ok(RqDatagramIngest::default());
     };
     let mut decode_stats = RqDecodeRoundStats::default();
-    let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+    let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
     let mut pending_decode_jobs = rq_pending_decode_jobs(decoders);
     if pending_decode_jobs >= decode_width_budget {
         decode_stats.merge(drain_ready_decodes(cx, decoders, false, decode_width_budget).await?);
@@ -7017,7 +7118,7 @@ async fn feed_datagram_batch_to_decoders(
             .await?,
         );
     }
-    let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+    let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
     stats.record_decode_stats(drain_ready_decodes(cx, decoders, true, decode_width_budget).await?);
     Ok(stats)
 }
@@ -7319,7 +7420,7 @@ where
     let mut pumped: u64 = 0;
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+        let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
         round_stats.record_decode_stats(
             drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
         );
@@ -7391,7 +7492,7 @@ where
                 pumped = pumped.saturating_add(stats.observed);
                 *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                 round_stats.merge(stats);
-                let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+                let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
                 round_stats.record_decode_stats(
                     drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
                 );
@@ -7442,7 +7543,8 @@ where
                     pumped = pumped.saturating_add(stats.observed);
                     *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                     round_stats.merge(stats);
-                    let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+                    let decode_width_budget =
+                        rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
                     round_stats.record_decode_stats(
                         drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
                     );
@@ -7553,7 +7655,7 @@ async fn drain_round_tail(
             }
             quiet_sleep.reset_after(cx.now_for_observability(), quiet_window);
         }
-        let decode_width_budget = rq_decode_width_budget(decoders, symbol_size);
+        let decode_width_budget = rq_decode_width_budget_for_cx(cx, decoders, symbol_size);
         round_stats.record_decode_stats(
             drain_ready_decodes(cx, decoders, true, decode_width_budget).await?,
         );
@@ -7686,6 +7788,38 @@ mod tests {
     }
 
     #[test]
+    fn decode_width_uses_receiver_blocking_pool_capacity() {
+        let config = RqConfig::default();
+        let size_500m = 500 * 1024 * 1024;
+        let block_500m = effective_max_block_size_for_largest_entry(&config, size_500m)
+            .expect("500M fixture must fit default RQ geometry");
+        let dec_500m = decode_width_fixture_entry(size_500m as u64, block_500m, config.symbol_size);
+        let pool = crate::runtime::blocking_pool::BlockingPool::new(4, 4);
+        let cx = Cx::new(
+            crate::types::RegionId::new_for_test(31, 1),
+            crate::types::TaskId::new_for_test(31, 0),
+            crate::types::Budget::INFINITE,
+        )
+        .with_blocking_pool_handle(Some(pool.handle()));
+
+        let budget = rq_decode_width_budget_snapshot_for_cx(
+            &cx,
+            std::slice::from_ref(&dec_500m),
+            config.symbol_size,
+        );
+
+        assert_eq!(
+            budget.core_limit, 3,
+            "four blocking threads should reserve one core for UDP/control and leave three decode slots"
+        );
+        assert_eq!(
+            budget.effective,
+            budget.core_limit.min(budget.memory_limit),
+            "500M geometry should use the receiver blocking-pool width instead of collapsing to host available_parallelism"
+        );
+    }
+
+    #[test]
     fn decode_width_budget_reports_effective_core_and_memory_caps() {
         let budget = rq_decode_width_budget_snapshot(&[], DEFAULT_SYMBOL_SIZE);
         assert!(budget.effective >= 1);
@@ -7808,6 +7942,8 @@ mod tests {
             source_blocks: source_block_progress_for(size, max_block_size, symbol_size)
                 .expect("fixture must fit source-block table"),
             pending_decodes: Vec::new(),
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
         }
     }
 
@@ -8939,6 +9075,8 @@ mod tests {
             source_streaming: false,
             source_blocks: Vec::new(),
             pending_decodes: Vec::new(),
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
         }];
 
         let err = futures_lite::future::block_on(verify_and_commit(
@@ -9030,6 +9168,8 @@ mod tests {
             )
             .expect("test source blocks"),
             pending_decodes: Vec::new(),
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
         }
     }
 
@@ -9097,7 +9237,7 @@ mod tests {
     }
 
     #[test]
-    fn source_streaming_large_entry_cache_reuses_and_closes_staging_file() {
+    fn source_streaming_large_entry_cache_coalesces_and_closes_staging_file() {
         let object_id = entry_object_id("source-stream-cache", 0);
         let symbol_size = 4u16;
         let dir = tempfile::tempdir().expect("tempdir");
@@ -9125,11 +9265,13 @@ mod tests {
             .expect("persist first cached source symbol")
         );
         assert!(
-            decoder.staging_file.is_some(),
-            "large-entry source streaming should keep the staging file hot mid-block"
+            decoder.staging_file.is_none(),
+            "large-entry source streaming should buffer clean contiguous symbols before opening the staging file"
         );
-        assert_eq!(decoder.staging_cursor, Some(4));
-        assert_eq!(decoder.staging_unflushed_bytes, 4);
+        assert_eq!(decoder.staging_cursor, None);
+        assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert_eq!(decoder.source_write_buffer_offset, Some(0));
+        assert_eq!(decoder.source_write_buffer, vec![1, 2, 3, 4]);
 
         let second = ParsedDatagram { esi: 1, ..first };
         assert!(
@@ -9148,6 +9290,8 @@ mod tests {
         );
         assert_eq!(decoder.staging_cursor, None);
         assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert!(decoder.source_write_buffer.is_empty());
+        assert_eq!(decoder.source_write_buffer_offset, None);
         assert_eq!(
             std::fs::read(staging_path).expect("read cached source stream"),
             vec![1, 2, 3, 4, 5, 6, 7, 8]
@@ -9186,8 +9330,10 @@ mod tests {
             ))
             .expect("persist first cached source symbol")
         );
-        assert!(decoder.staging_file.is_some());
-        assert_eq!(decoder.staging_unflushed_bytes, 4);
+        assert!(decoder.staging_file.is_none());
+        assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert_eq!(decoder.source_write_buffer_offset, Some(0));
+        assert_eq!(decoder.source_write_buffer, vec![1, 2, 3, 4]);
 
         futures_lite::future::block_on(flush_cached_entry_staging_files(std::slice::from_mut(
             &mut decoder,
@@ -9200,6 +9346,8 @@ mod tests {
         );
         assert_eq!(decoder.staging_cursor, Some(4));
         assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert!(decoder.source_write_buffer.is_empty());
+        assert_eq!(decoder.source_write_buffer_offset, None);
     }
 
     #[test]
@@ -9230,9 +9378,11 @@ mod tests {
             ))
             .expect("persist first cached source symbol")
         );
-        assert!(decoder.staging_file.is_some());
-        assert_eq!(decoder.staging_cursor, Some(4));
-        assert_eq!(decoder.staging_unflushed_bytes, 4);
+        assert!(decoder.staging_file.is_none());
+        assert_eq!(decoder.staging_cursor, None);
+        assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert_eq!(decoder.source_write_buffer_offset, Some(0));
+        assert_eq!(decoder.source_write_buffer, vec![1, 2, 3, 4]);
 
         futures_lite::future::block_on(flush_cached_entry_staging_files(std::slice::from_mut(
             &mut decoder,
@@ -9245,6 +9395,8 @@ mod tests {
         );
         assert_eq!(decoder.staging_cursor, None);
         assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert!(decoder.source_write_buffer.is_empty());
+        assert_eq!(decoder.source_write_buffer_offset, None);
         assert_eq!(
             std::fs::read(staging_path).expect("read staged first source symbol"),
             vec![1, 2, 3, 4, 0, 0, 0, 0]
@@ -9550,8 +9702,10 @@ mod tests {
             "no later repair arrived to trigger seeding"
         );
         assert!(source_streaming_block_ready_to_seed(&decoder, 0));
-        assert!(decoder.staging_file.is_some());
-        assert_eq!(decoder.staging_unflushed_bytes, 4);
+        assert!(decoder.staging_file.is_none());
+        assert_eq!(decoder.staging_unflushed_bytes, 0);
+        assert_eq!(decoder.source_write_buffer_offset, Some(0));
+        assert_eq!(decoder.source_write_buffer, data[..4]);
 
         let cx = Cx::for_testing();
         let mut decoders = vec![decoder];
@@ -9671,6 +9825,8 @@ mod tests {
             source_streaming: true,
             source_blocks: source_block_progress_for(8, 4, symbol_size).expect("two source blocks"),
             pending_decodes: Vec::new(),
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
         };
         assert_eq!(decoder.source_blocks.len(), 2);
 
@@ -11032,6 +11188,8 @@ mod tests {
                 source_streaming: false,
                 source_blocks: Vec::new(),
                 pending_decodes: Vec::new(),
+                source_write_buffer: Vec::new(),
+                source_write_buffer_offset: None,
             },
             EntryDecoder {
                 index: 1,
@@ -11050,6 +11208,8 @@ mod tests {
                 source_streaming: false,
                 source_blocks: Vec::new(),
                 pending_decodes: Vec::new(),
+                source_write_buffer: Vec::new(),
+                source_write_buffer_offset: None,
             },
         ];
 
@@ -11350,6 +11510,8 @@ mod tests {
             source_streaming: false,
             source_blocks: Vec::new(),
             pending_decodes: Vec::new(),
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
         }];
 
         let receipt = futures_lite::future::block_on(verify_and_commit(
@@ -11604,6 +11766,8 @@ mod tests {
             source_streaming: false,
             source_blocks: Vec::new(),
             pending_decodes: Vec::new(),
+            source_write_buffer: Vec::new(),
+            source_write_buffer_offset: None,
         }];
 
         let receipt = futures_lite::future::block_on(verify_and_commit(
