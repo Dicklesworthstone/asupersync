@@ -27,6 +27,7 @@ const SUBDELTA_OP_LITERAL: u8 = 1;
 const DELTA_SEND_ITEM_WHOLE_CHUNK: u8 = 0;
 const DELTA_SEND_ITEM_SUBCHUNK_OPS: u8 = 1;
 const DELTA_SEND_ITEM_REPEATED_CHUNK: u8 = 2;
+const DELTA_SEND_ITEM_WHOLE_CHUNK_RUN: u8 = 3;
 const RECEIVER_HAVE_SET_BASE_WIRE_BYTES: u64 = 32 + 8 + 8;
 const RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES: u64 = 32 + 8;
 
@@ -956,36 +957,52 @@ impl DeltaResyncSendPlan {
         out.extend_from_slice(&self.payload_bytes.to_be_bytes());
         out.extend_from_slice(&self.whole_chunk_bytes.to_be_bytes());
 
-        for item in &self.items {
-            match item {
-                DeltaResyncSendItem::WholeChunk { chunk, payload } => {
-                    out.push(DELTA_SEND_ITEM_WHOLE_CHUNK);
-                    encode_chunk_ref(&mut out, chunk);
-                    write_u64_prefixed_bytes(&mut out, payload)?;
-                }
-                DeltaResyncSendItem::SubchunkOps {
-                    target_chunk,
-                    base_chunk,
-                    target_sha256,
-                    encoded_ops,
-                } => {
-                    out.push(DELTA_SEND_ITEM_SUBCHUNK_OPS);
-                    encode_chunk_ref(&mut out, target_chunk);
-                    encode_chunk_ref(&mut out, base_chunk);
-                    out.extend_from_slice(target_sha256);
-                    write_u64_prefixed_bytes(&mut out, encoded_ops)?;
-                }
-                DeltaResyncSendItem::RepeatedChunk {
-                    chunk,
-                    source_ordinal,
-                } => {
-                    out.push(DELTA_SEND_ITEM_REPEATED_CHUNK);
-                    encode_chunk_ref(&mut out, chunk);
-                    out.extend_from_slice(
-                        &u64::try_from(*source_ordinal)
-                            .map_err(|_| DeltaError::ChunkCountOverflow)?
-                            .to_be_bytes(),
-                    );
+        if whole_chunk_run_can_derive_chunks_from_base(&self.base_plan, &self.items) {
+            out.push(DELTA_SEND_ITEM_WHOLE_CHUNK_RUN);
+            out.extend_from_slice(&0u64.to_be_bytes());
+            out.extend_from_slice(
+                &u64::try_from(self.items.len())
+                    .map_err(|_| DeltaError::ChunkCountOverflow)?
+                    .to_be_bytes(),
+            );
+            for item in &self.items {
+                let DeltaResyncSendItem::WholeChunk { payload, .. } = item else {
+                    unreachable!("whole chunk run eligibility excludes non-whole items");
+                };
+                out.extend_from_slice(payload);
+            }
+        } else {
+            for item in &self.items {
+                match item {
+                    DeltaResyncSendItem::WholeChunk { chunk, payload } => {
+                        out.push(DELTA_SEND_ITEM_WHOLE_CHUNK);
+                        encode_chunk_ref(&mut out, chunk);
+                        write_u64_prefixed_bytes(&mut out, payload)?;
+                    }
+                    DeltaResyncSendItem::SubchunkOps {
+                        target_chunk,
+                        base_chunk,
+                        target_sha256,
+                        encoded_ops,
+                    } => {
+                        out.push(DELTA_SEND_ITEM_SUBCHUNK_OPS);
+                        encode_chunk_ref(&mut out, target_chunk);
+                        encode_chunk_ref(&mut out, base_chunk);
+                        out.extend_from_slice(target_sha256);
+                        write_u64_prefixed_bytes(&mut out, encoded_ops)?;
+                    }
+                    DeltaResyncSendItem::RepeatedChunk {
+                        chunk,
+                        source_ordinal,
+                    } => {
+                        out.push(DELTA_SEND_ITEM_REPEATED_CHUNK);
+                        encode_chunk_ref(&mut out, chunk);
+                        out.extend_from_slice(
+                            &u64::try_from(*source_ordinal)
+                                .map_err(|_| DeltaError::ChunkCountOverflow)?
+                                .to_be_bytes(),
+                        );
+                    }
                 }
             }
         }
@@ -1037,7 +1054,8 @@ impl DeltaResyncSendPlan {
         }
 
         let mut items = Vec::with_capacity(item_count);
-        for ordinal in 0..item_count {
+        let mut ordinal = 0usize;
+        while ordinal < item_count {
             let item = match reader.read_u8()? {
                 DELTA_SEND_ITEM_WHOLE_CHUNK => DeltaResyncSendItem::WholeChunk {
                     chunk: decode_chunk_ref(&mut reader)?,
@@ -1054,6 +1072,39 @@ impl DeltaResyncSendPlan {
                     source_ordinal: usize::try_from(reader.read_u64()?)
                         .map_err(|_| DeltaError::ChunkCountOverflow)?,
                 },
+                DELTA_SEND_ITEM_WHOLE_CHUNK_RUN => {
+                    let start_ordinal = usize::try_from(reader.read_u64()?)
+                        .map_err(|_| DeltaError::ChunkCountOverflow)?;
+                    let run_len = usize::try_from(reader.read_u64()?)
+                        .map_err(|_| DeltaError::ChunkCountOverflow)?;
+                    if run_len == 0 {
+                        return Err(DeltaError::DeltaSendPlanItemCountMismatch {
+                            actual: 0,
+                            expected: item_count.saturating_sub(ordinal),
+                        });
+                    }
+                    if start_ordinal != ordinal {
+                        return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
+                    }
+                    let run_end = ordinal
+                        .checked_add(run_len)
+                        .ok_or(DeltaError::ChunkCountOverflow)?;
+                    if run_end > item_count {
+                        return Err(DeltaError::DeltaSendPlanItemCountMismatch {
+                            actual: run_end,
+                            expected: item_count,
+                        });
+                    }
+                    while ordinal < run_end {
+                        let chunk = base_plan.missing_chunks[ordinal].clone();
+                        let payload_len = usize::try_from(chunk.size_bytes)
+                            .map_err(|_| DeltaError::ChunkSizeOverflow)?;
+                        let payload = reader.read_exact(payload_len)?.to_vec();
+                        items.push(DeltaResyncSendItem::WholeChunk { chunk, payload });
+                        ordinal += 1;
+                    }
+                    continue;
+                }
                 tag => return Err(DeltaError::InvalidDeltaSendItemTag { tag }),
             };
 
@@ -1061,6 +1112,7 @@ impl DeltaResyncSendPlan {
                 return Err(DeltaError::DeltaSendPlanChunkMismatch { ordinal });
             }
             items.push(item);
+            ordinal += 1;
         }
         reader.expect_eof()?;
         validate_send_plan_items(&base_plan, &items)?;
@@ -1972,6 +2024,19 @@ fn write_u64_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Delta
     );
     out.extend_from_slice(bytes);
     Ok(())
+}
+
+fn whole_chunk_run_can_derive_chunks_from_base(
+    base_plan: &DeltaResyncPlan,
+    items: &[DeltaResyncSendItem],
+) -> bool {
+    !items.is_empty()
+        && items
+            .iter()
+            .zip(&base_plan.missing_chunks)
+            .all(|(item, expected_chunk)| {
+                matches!(item, DeltaResyncSendItem::WholeChunk { chunk, .. } if chunk == expected_chunk)
+            })
 }
 
 fn compact_repeated_send_plan_if_smaller(
@@ -2940,11 +3005,9 @@ mod tests {
             panic!("expected sub-chunk op stream");
         };
         let decoded_ops = decode_subdelta_ops(encoded_ops).expect("decode op stream");
-        assert!(
-            decoded_ops
-                .iter()
-                .any(|op| matches!(op, SubDeltaOp::Literal(_)))
-        );
+        assert!(decoded_ops
+            .iter()
+            .any(|op| matches!(op, SubDeltaOp::Literal(_))));
 
         let applied = apply_delta_resync_send_plan(&sender, &receiver_store, &send_plan)
             .expect("apply send plan");
@@ -3033,6 +3096,106 @@ mod tests {
             rebuilt_from_wire,
             [new_a.as_slice(), new_b.as_slice()].concat()
         );
+    }
+
+    #[test]
+    fn send_plan_compacts_appended_whole_chunk_run_then_reconstructs() {
+        let base = (0..(64 * 1024))
+            .map(|idx| ((idx * 17 + idx / 5 + 41) % 251) as u8)
+            .collect::<Vec<_>>();
+        let append_a = (0..(32 * 1024))
+            .map(|idx| ((idx * 23 + idx / 11 + 13) % 253) as u8)
+            .collect::<Vec<_>>();
+        let append_b = (0..(32 * 1024))
+            .map(|idx| ((idx * 29 + idx / 7 + 19) % 251) as u8)
+            .collect::<Vec<_>>();
+        let append_c = (0..(16 * 1024))
+            .map(|idx| ((idx * 31 + idx / 3 + 47) % 253) as u8)
+            .collect::<Vec<_>>();
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "append-file",
+            vec![
+                base.as_slice(),
+                append_a.as_slice(),
+                append_b.as_slice(),
+                append_c.as_slice(),
+            ],
+        );
+        let receiver = ingest_manifest(&mut receiver_store, "append-file", vec![base.as_slice()]);
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let base_plan = plan_incremental_resync_with_receiver_coverage(
+            &sender,
+            Some(&receiver),
+            &receiver_coverage,
+        );
+
+        assert_eq!(base_plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(base_plan.shared_chunks, 1);
+        assert_eq!(base_plan.missing_chunks.len(), 3);
+
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+        let send_plan =
+            build_delta_resync_send_plan(&base_plan, &sender_store, &receiver, &signatures)
+                .expect("send plan");
+
+        assert_eq!(send_plan.whole_chunk_count(), 3);
+        assert_eq!(send_plan.subchunk_count(), 0);
+        assert_eq!(send_plan.payload_bytes, send_plan.whole_chunk_bytes);
+
+        let wire_payload = send_plan.to_wire_bytes().expect("wire encode");
+        let header_bytes = DELTA_RESYNC_SEND_PLAN_MAGIC.len() + 32 + 1 + 32 + 8 + 8 + 8;
+        assert_eq!(
+            wire_payload[header_bytes], DELTA_SEND_ITEM_WHOLE_CHUNK_RUN,
+            "append should use one implicit whole-chunk run"
+        );
+
+        let run_overhead = header_bytes + 1 + 8 + 8;
+        assert_eq!(
+            wire_payload.len(),
+            usize::try_from(send_plan.payload_bytes).expect("payload bytes fit") + run_overhead
+        );
+        let explicit_whole_item_overhead = 1 + ENCODED_CHUNK_BYTES + 8;
+        let legacy_whole_wire_len = usize::try_from(send_plan.payload_bytes)
+            .expect("payload bytes fit")
+            + header_bytes
+            + send_plan.items.len() * explicit_whole_item_overhead;
+        assert!(
+            wire_payload.len() + 128 < legacy_whole_wire_len,
+            "implicit append run should remove per-chunk ref/length metadata"
+        );
+
+        let decoded_plan = DeltaResyncSendPlan::from_wire_bytes(base_plan.clone(), &wire_payload)
+            .expect("wire decode");
+        assert_eq!(decoded_plan, send_plan);
+
+        let applied = apply_delta_resync_wire_payload_and_reconstruct(
+            &sender,
+            &receiver_store,
+            base_plan,
+            &wire_payload,
+        )
+        .expect("apply append run");
+        assert_eq!(
+            applied.reconstructed_bytes,
+            [
+                base.as_slice(),
+                append_a.as_slice(),
+                append_b.as_slice(),
+                append_c.as_slice()
+            ]
+            .concat()
+        );
+        assert_eq!(applied.whole_chunk_count, 3);
+        assert_eq!(applied.subchunk_count, 0);
     }
 
     #[test]
