@@ -248,6 +248,12 @@ fn need_more_repair_symbol_count(need: &QuicNeedMore) -> u64 {
     })
 }
 
+fn same_need_more_request_shape(left: &QuicNeedMore, right: &QuicNeedMore) -> bool {
+    left.pending == right.pending
+        && left.repair_blocks == right.repair_blocks
+        && left.source_symbols == right.source_symbols
+}
+
 fn drop_duplicate_need_more_frames(
     pending: &mut VecDeque<Frame>,
     served_need: &QuicNeedMore,
@@ -257,7 +263,7 @@ fn drop_duplicate_need_more_frames(
     while let Some(frame) = pending.pop_front() {
         if frame.frame_type() == FrameType::ObjectRequest {
             let queued = super::parse_json::<QuicNeedMore>(&frame)?;
-            if queued == *served_need {
+            if same_need_more_request_shape(&queued, served_need) {
                 dropped = dropped.saturating_add(1);
                 continue;
             }
@@ -2881,6 +2887,12 @@ mod tests {
             round_loss_fraction: Some(0.10),
             round_symbols_accepted: Some(88),
         };
+        let same_request_different_telemetry = QuicNeedMore {
+            round_symbols_observed: Some(42),
+            round_loss_fraction: Some(0.42),
+            round_symbols_accepted: Some(37),
+            ..served.clone()
+        };
         let changed = QuicNeedMore {
             repair_blocks: vec![QuicBlockRepairRequest {
                 symbols: 3,
@@ -2893,6 +2905,8 @@ mod tests {
         };
         let mut pending = VecDeque::from([
             super::json_frame(FrameType::ObjectRequest, &served).expect("duplicate need-more"),
+            super::json_frame(FrameType::ObjectRequest, &same_request_different_telemetry)
+                .expect("duplicate need-more with fresh telemetry"),
             Frame::empty(FrameType::Proof).expect("proof frame"),
             super::json_frame(FrameType::ObjectRequest, &changed).expect("changed need-more"),
             super::json_frame(FrameType::ObjectRequest, &served).expect("duplicate need-more"),
@@ -2901,7 +2915,7 @@ mod tests {
         let dropped = drop_duplicate_need_more_frames(&mut pending, &served)
             .expect("duplicate filter parses queued feedback");
 
-        assert_eq!(dropped, 2);
+        assert_eq!(dropped, 3);
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].frame_type(), FrameType::Proof);
         assert_eq!(pending[1].frame_type(), FrameType::ObjectRequest);
