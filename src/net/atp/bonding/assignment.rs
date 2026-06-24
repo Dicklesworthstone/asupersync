@@ -392,7 +392,15 @@ impl BondedRepairWindowPlan {
     /// True when every allocated window is non-empty and strictly disjoint.
     #[must_use]
     pub fn windows_are_disjoint(&self) -> bool {
-        self.windows
+        self.windows.iter().all(|window| {
+            window.esi_window.is_non_empty()
+                && window
+                    .esi_window
+                    .end_exclusive
+                    .checked_sub(window.esi_window.start_inclusive)
+                    == Some(window.symbol_count)
+        }) && self
+            .windows
             .windows(2)
             .all(|pair| pair[0].esi_window.end_exclusive <= pair[1].esi_window.start_inclusive)
     }
@@ -544,6 +552,15 @@ pub enum BondScheduleError {
         /// Requested aggregate repair symbols.
         requested_symbols: u32,
     },
+    /// Failed-donor reallocation exceeded the `u32` repair-symbol budget.
+    FailedDonorRepairBudgetOverflow {
+        /// Failed donor whose window would overflow the aggregate budget.
+        donor_index: u32,
+        /// Repair symbols already accumulated from earlier failed donors.
+        accumulated_symbols: u32,
+        /// Repair symbols from this failed donor's outstanding window.
+        added_symbols: u32,
+    },
     /// A failed donor was named for reallocation but had no outstanding window.
     MissingFailedDonorWindow {
         /// Failed donor index with no matching outstanding window.
@@ -564,6 +581,33 @@ pub enum BondScheduleError {
         end_exclusive: u32,
         /// Advertised number of repair symbols.
         symbol_count: u32,
+    },
+    /// A repair window starts before the plan's declared repair cursor.
+    RepairWindowBeforeFirstRepair {
+        /// Donor index named by the repair window.
+        donor_index: u32,
+        /// First included ESI.
+        start_inclusive: u32,
+        /// First repair ESI allowed by the plan.
+        first_repair_esi: u32,
+    },
+    /// Two receiver-allocated repair windows overlap.
+    OverlappingRepairWindows {
+        /// Donor index for the earlier window.
+        previous_donor_index: u32,
+        /// Donor index for the later overlapping window.
+        next_donor_index: u32,
+        /// End of the earlier window.
+        previous_end_exclusive: u32,
+        /// Start of the later overlapping window.
+        next_start_inclusive: u32,
+    },
+    /// The plan's continuation cursor would re-enter an allocated window.
+    RepairWindowCursorBeforeWindowEnd {
+        /// Advertised next repair ESI after this plan.
+        next_repair_esi: u32,
+        /// Highest exclusive end across allocated windows.
+        window_end_exclusive: u32,
     },
     /// Repair ESI budget overflowed the `u32` ESI space.
     RepairBudgetOverflow {
@@ -639,6 +683,14 @@ impl fmt::Display for BondScheduleError {
                 f,
                 "channel-bonding dynamic repair window allocation overflow for entry {entry_index} block {source_block_number}: first_repair_esi={first_repair_esi}, requested={requested_symbols}"
             ),
+            Self::FailedDonorRepairBudgetOverflow {
+                donor_index,
+                accumulated_symbols,
+                added_symbols,
+            } => write!(
+                f,
+                "channel-bonding failed-donor repair budget overflow at donor {donor_index}: accumulated={accumulated_symbols}, added={added_symbols}"
+            ),
             Self::MissingFailedDonorWindow { donor_index } => write!(
                 f,
                 "channel-bonding failed donor {donor_index} had no outstanding repair window to reallocate"
@@ -655,6 +707,30 @@ impl fmt::Display for BondScheduleError {
             } => write!(
                 f,
                 "channel-bonding repair window for donor {donor_index} is invalid: range=[{start_inclusive},{end_exclusive}), symbols={symbol_count}"
+            ),
+            Self::RepairWindowBeforeFirstRepair {
+                donor_index,
+                start_inclusive,
+                first_repair_esi,
+            } => write!(
+                f,
+                "channel-bonding repair window for donor {donor_index} starts at {start_inclusive}, before plan first repair ESI {first_repair_esi}"
+            ),
+            Self::OverlappingRepairWindows {
+                previous_donor_index,
+                next_donor_index,
+                previous_end_exclusive,
+                next_start_inclusive,
+            } => write!(
+                f,
+                "channel-bonding repair windows overlap: donor {previous_donor_index} ends at {previous_end_exclusive}, donor {next_donor_index} starts at {next_start_inclusive}"
+            ),
+            Self::RepairWindowCursorBeforeWindowEnd {
+                next_repair_esi,
+                window_end_exclusive,
+            } => write!(
+                f,
+                "channel-bonding repair window cursor {next_repair_esi} is before allocated window end {window_end_exclusive}"
             ),
             Self::RepairBudgetOverflow {
                 entry_index,
@@ -706,9 +782,13 @@ impl std::error::Error for BondScheduleError {
             | Self::DuplicateDonorAssignment { .. }
             | Self::ZeroWindowWeightSum
             | Self::RepairWindowAllocationOverflow { .. }
+            | Self::FailedDonorRepairBudgetOverflow { .. }
             | Self::MissingFailedDonorWindow { .. }
             | Self::MissingDonorAssignment { .. }
             | Self::InvalidRepairWindow { .. }
+            | Self::RepairWindowBeforeFirstRepair { .. }
+            | Self::OverlappingRepairWindows { .. }
+            | Self::RepairWindowCursorBeforeWindowEnd { .. }
             | Self::RepairBudgetOverflow { .. }
             | Self::RepairStartBeforeSource { .. }
             | Self::RepairContinuationOverflow { .. }
@@ -897,7 +977,14 @@ pub fn reallocate_failed_bonded_repair_windows(
         else {
             return Err(BondScheduleError::MissingFailedDonorWindow { donor_index });
         };
-        requested_symbols = requested_symbols.saturating_add(window.symbol_count);
+        validate_repair_window_shape(*window)?;
+        requested_symbols = requested_symbols.checked_add(window.symbol_count).ok_or(
+            BondScheduleError::FailedDonorRepairBudgetOverflow {
+                donor_index,
+                accumulated_symbols: requested_symbols,
+                added_symbols: window.symbol_count,
+            },
+        )?;
     }
 
     allocate_bonded_repair_windows(
@@ -919,11 +1006,11 @@ pub fn schedule_bonded_repair_window_assignments(
     plan: &BondedRepairWindowPlan,
 ) -> Result<Vec<BondedDonorRepairWindowAssignment>, BondScheduleError> {
     validate_collective_assignments(assignments)?;
+    validate_repair_window_plan(plan)?;
 
     let mut assigned_donors = BTreeSet::new();
     let mut windowed = Vec::with_capacity(plan.windows.len());
     for window in &plan.windows {
-        validate_repair_window_shape(*window)?;
         if !assigned_donors.insert(window.donor_index) {
             return Err(BondScheduleError::DuplicateDonorAssignment {
                 donor_index: window.donor_index,
@@ -1102,6 +1189,58 @@ fn validate_repair_window_shape(window: BondedDonorRepairWindow) -> Result<(), B
             symbol_count: window.symbol_count,
         });
     }
+    Ok(())
+}
+
+fn validate_repair_window_plan(plan: &BondedRepairWindowPlan) -> Result<(), BondScheduleError> {
+    if plan.next_repair_esi < plan.first_repair_esi {
+        return Err(BondScheduleError::RepairWindowCursorBeforeWindowEnd {
+            next_repair_esi: plan.next_repair_esi,
+            window_end_exclusive: plan.first_repair_esi,
+        });
+    }
+
+    let mut windows = plan.windows.clone();
+    windows.sort_unstable_by_key(|window| {
+        (
+            window.esi_window.start_inclusive,
+            window.esi_window.end_exclusive,
+            window.donor_index,
+        )
+    });
+
+    let mut previous: Option<BondedDonorRepairWindow> = None;
+    let mut highest_end = plan.first_repair_esi;
+    for window in windows {
+        validate_repair_window_shape(window)?;
+        if window.esi_window.start_inclusive < plan.first_repair_esi {
+            return Err(BondScheduleError::RepairWindowBeforeFirstRepair {
+                donor_index: window.donor_index,
+                start_inclusive: window.esi_window.start_inclusive,
+                first_repair_esi: plan.first_repair_esi,
+            });
+        }
+        if let Some(previous_window) = previous {
+            if previous_window.esi_window.end_exclusive > window.esi_window.start_inclusive {
+                return Err(BondScheduleError::OverlappingRepairWindows {
+                    previous_donor_index: previous_window.donor_index,
+                    next_donor_index: window.donor_index,
+                    previous_end_exclusive: previous_window.esi_window.end_exclusive,
+                    next_start_inclusive: window.esi_window.start_inclusive,
+                });
+            }
+        }
+        highest_end = highest_end.max(window.esi_window.end_exclusive);
+        previous = Some(window);
+    }
+
+    if plan.next_repair_esi < highest_end {
+        return Err(BondScheduleError::RepairWindowCursorBeforeWindowEnd {
+            next_repair_esi: plan.next_repair_esi,
+            window_end_exclusive: highest_end,
+        });
+    }
+
     Ok(())
 }
 
@@ -1681,6 +1820,74 @@ mod tests {
     }
 
     #[test]
+    fn repair_window_plan_disjointness_rejects_malformed_windows() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+
+        let valid = BondedRepairWindowPlan {
+            geometry,
+            first_repair_esi: 2,
+            next_repair_esi: 6,
+            windows: vec![BondedDonorRepairWindow {
+                donor_index: 0,
+                esi_window: EsiWindow::new(2, 6),
+                symbol_count: 4,
+                stagger_delay_slots: 0,
+            }],
+        };
+        assert!(valid.windows_are_disjoint());
+
+        let empty = BondedRepairWindowPlan {
+            windows: vec![BondedDonorRepairWindow {
+                donor_index: 0,
+                esi_window: EsiWindow::new(6, 6),
+                symbol_count: 0,
+                stagger_delay_slots: 0,
+            }],
+            ..valid.clone()
+        };
+        assert!(
+            !empty.windows_are_disjoint(),
+            "empty windows do not allocate repair symbols"
+        );
+
+        let misreported_count = BondedRepairWindowPlan {
+            windows: vec![BondedDonorRepairWindow {
+                donor_index: 0,
+                esi_window: EsiWindow::new(2, 6),
+                symbol_count: 3,
+                stagger_delay_slots: 0,
+            }],
+            ..valid.clone()
+        };
+        assert!(
+            !misreported_count.windows_are_disjoint(),
+            "symbol_count must match the half-open ESI range"
+        );
+
+        let overlapping = BondedRepairWindowPlan {
+            windows: vec![
+                BondedDonorRepairWindow {
+                    donor_index: 0,
+                    esi_window: EsiWindow::new(2, 5),
+                    symbol_count: 3,
+                    stagger_delay_slots: 0,
+                },
+                BondedDonorRepairWindow {
+                    donor_index: 1,
+                    esi_window: EsiWindow::new(4, 6),
+                    symbol_count: 2,
+                    stagger_delay_slots: 1,
+                },
+            ],
+            ..valid
+        };
+        assert!(!overlapping.windows_are_disjoint());
+    }
+
+    #[test]
     fn dynamic_repair_windows_distribute_remainders_deterministically() {
         let descriptor = descriptor();
         let geometry = descriptor
@@ -1931,6 +2138,79 @@ mod tests {
     }
 
     #[test]
+    fn failed_donor_window_reallocation_rejects_overflowing_budget() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let outstanding_windows = vec![
+            BondedDonorRepairWindow {
+                donor_index: 0,
+                esi_window: EsiWindow::new(0, u32::MAX),
+                symbol_count: u32::MAX,
+                stagger_delay_slots: 0,
+            },
+            BondedDonorRepairWindow {
+                donor_index: 1,
+                esi_window: EsiWindow::new(u32::MAX - 1, u32::MAX),
+                symbol_count: 1,
+                stagger_delay_slots: 1,
+            },
+        ];
+
+        assert_eq!(
+            reallocate_failed_bonded_repair_windows(
+                geometry,
+                u32::from(geometry.source_symbols),
+                &outstanding_windows,
+                &[0, 1],
+                &[BondedDonorWindowWeight {
+                    donor_index: 2,
+                    weight: 1,
+                }],
+            ),
+            Err(BondScheduleError::FailedDonorRepairBudgetOverflow {
+                donor_index: 1,
+                accumulated_symbols: u32::MAX,
+                added_symbols: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn failed_donor_window_reallocation_rejects_malformed_failed_window() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let outstanding_windows = vec![BondedDonorRepairWindow {
+            donor_index: 0,
+            esi_window: EsiWindow::new(4, 6),
+            symbol_count: 3,
+            stagger_delay_slots: 0,
+        }];
+
+        assert_eq!(
+            reallocate_failed_bonded_repair_windows(
+                geometry,
+                6,
+                &outstanding_windows,
+                &[0],
+                &[BondedDonorWindowWeight {
+                    donor_index: 1,
+                    weight: 1,
+                }],
+            ),
+            Err(BondScheduleError::InvalidRepairWindow {
+                donor_index: 0,
+                start_inclusive: 4,
+                end_exclusive: 6,
+                symbol_count: 3,
+            })
+        );
+    }
+
+    #[test]
     fn repair_window_assignments_preserve_control_metadata_and_override_residue() {
         let descriptor = descriptor();
         let geometry = descriptor
@@ -2031,6 +2311,75 @@ mod tests {
                 start_inclusive: 2,
                 end_exclusive: 4,
                 symbol_count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn repair_window_assignments_reject_overlapping_windows() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let assignments = vec![
+            DonorAssignment::new_static(0, 2, vec![endpoint()], None),
+            DonorAssignment::new_static(1, 2, vec![endpoint()], None),
+        ];
+        let overlapping_plan = BondedRepairWindowPlan {
+            geometry,
+            first_repair_esi: 2,
+            next_repair_esi: 8,
+            windows: vec![
+                BondedDonorRepairWindow {
+                    donor_index: 0,
+                    esi_window: EsiWindow::new(2, 6),
+                    symbol_count: 4,
+                    stagger_delay_slots: 0,
+                },
+                BondedDonorRepairWindow {
+                    donor_index: 1,
+                    esi_window: EsiWindow::new(5, 8),
+                    symbol_count: 3,
+                    stagger_delay_slots: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            schedule_bonded_repair_window_assignments(&assignments, &overlapping_plan),
+            Err(BondScheduleError::OverlappingRepairWindows {
+                previous_donor_index: 0,
+                next_donor_index: 1,
+                previous_end_exclusive: 6,
+                next_start_inclusive: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn repair_window_assignments_reject_stale_window_cursor() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let assignments = vec![DonorAssignment::new_static(0, 1, vec![endpoint()], None)];
+        let stale_cursor_plan = BondedRepairWindowPlan {
+            geometry,
+            first_repair_esi: 2,
+            next_repair_esi: 3,
+            windows: vec![BondedDonorRepairWindow {
+                donor_index: 0,
+                esi_window: EsiWindow::new(2, 5),
+                symbol_count: 3,
+                stagger_delay_slots: 0,
+            }],
+        };
+
+        assert_eq!(
+            schedule_bonded_repair_window_assignments(&assignments, &stale_cursor_plan),
+            Err(BondScheduleError::RepairWindowCursorBeforeWindowEnd {
+                next_repair_esi: 3,
+                window_end_exclusive: 5,
             })
         );
     }
