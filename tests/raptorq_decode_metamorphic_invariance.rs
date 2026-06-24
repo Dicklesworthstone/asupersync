@@ -10,9 +10,13 @@
 //!    equations.
 //! 2. **Redundant-symbol invariance** — handing the decoder *more* repair
 //!    symbols than it needs must not change the recovered source.
+//! 3. **Repair-selection invariance** — choosing a different sufficient repair
+//!    ESI window must not change the recovered source.
+//! 4. **Duplicate-symbol invariance** — replaying identical source or repair
+//!    symbols must not perturb a successful solution.
 //!
-//! Both relations are checked here against the live `InactivationDecoder`, with
-//! a plaintext cross-check as a third anchor. Inputs use fixed `DetRng` seeds.
+//! These relations are checked here against the live `InactivationDecoder`, with
+//! explicit plaintext cross-checks. Inputs use fixed `DetRng` seeds.
 //!
 //! # Repro
 //!
@@ -231,5 +235,43 @@ fn decode_is_invariant_to_repair_symbol_selection() {
     assert_eq!(
         recovered_b, recovered_a,
         "a shifted, disjoint repair window must recover identical source"
+    );
+}
+
+/// Relation 4 — exact duplicate symbols may add rows to the received set, but
+/// must be algebraically redundant. This guards the transport-facing case where
+/// lossy repair resends or donor overlap replay an already-accepted symbol.
+#[test]
+fn decode_is_invariant_to_identical_duplicate_symbols() {
+    let source = make_source(K, SYMBOL_SIZE, SEED);
+    let encoder = SystematicEncoder::new(&source, SYMBOL_SIZE, SEED).expect("encoder");
+    let l = InactivationDecoder::new(K, SYMBOL_SIZE, SEED).params().l;
+
+    let decoder_baseline = InactivationDecoder::new(K, SYMBOL_SIZE, SEED);
+    let (baseline, _) = build_received(&encoder, &decoder_baseline, &source, DROPPED, l + 4);
+    let recovered = decode(&decoder_baseline, &baseline, SBN);
+    assert_eq!(recovered, source, "baseline decode must recover the source");
+
+    let source_duplicate = baseline
+        .iter()
+        .find(|symbol| symbol.is_source)
+        .expect("baseline includes at least one surviving source symbol")
+        .clone();
+    let repair_duplicate = baseline
+        .iter()
+        .find(|symbol| !symbol.is_source && symbol.esi >= K as u32)
+        .expect("baseline includes repair symbols")
+        .clone();
+
+    let mut with_duplicates = baseline.clone();
+    with_duplicates.push(repair_duplicate.clone());
+    with_duplicates.push(source_duplicate);
+    with_duplicates.push(repair_duplicate);
+
+    let decoder_duplicate = InactivationDecoder::new(K, SYMBOL_SIZE, SEED);
+    assert_eq!(
+        decode(&decoder_duplicate, &with_duplicates, SBN),
+        recovered,
+        "identical source/repair duplicates must not change the recovered source"
     );
 }
