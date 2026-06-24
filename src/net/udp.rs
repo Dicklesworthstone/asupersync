@@ -2843,6 +2843,61 @@ mod tests {
     }
 
     #[test]
+    fn udp_connected_batch_send_uses_gso_for_fixed_size_payloads_on_linux() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            sender.connect(receiver_addr).await.unwrap();
+
+            let payloads = (0..4)
+                .map(|idx| vec![idx as u8; UDP_DEFAULT_GSO_SEGMENT_BYTES])
+                .collect::<Vec<_>>();
+            let packets = payloads
+                .iter()
+                .map(|payload| UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+
+            let sent = sender.send_batch_to(&packets).await.unwrap();
+            assert_eq!(sent.packets_processed, packets.len());
+            assert_eq!(
+                sent.bytes_processed,
+                UDP_DEFAULT_GSO_SEGMENT_BYTES * packets.len()
+            );
+
+            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
+                assert!(sent.native_send_batch_used);
+                assert!(sent.gso_send_used);
+                assert!(!sent.fallback_used);
+            } else {
+                assert!(!sent.native_send_batch_used);
+                assert!(sent.fallback_used);
+            }
+
+            let received = receiver
+                .recv_batch_from(packets.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
+                .await
+                .unwrap();
+            assert_eq!(received.report.packets_processed, packets.len());
+            assert_eq!(
+                received.report.bytes_processed,
+                UDP_DEFAULT_GSO_SEGMENT_BYTES * packets.len()
+            );
+
+            let mut received_payloads = received
+                .packets
+                .iter()
+                .map(|packet| packet.payload.clone())
+                .collect::<Vec<_>>();
+            received_payloads.sort_by_key(|payload| payload[0]);
+            assert_eq!(received_payloads, payloads);
+        });
+    }
+
+    #[test]
     fn udp_send_recv_from() {
         future::block_on(async {
             let mut server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
