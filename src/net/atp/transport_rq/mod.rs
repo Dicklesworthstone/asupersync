@@ -79,7 +79,9 @@ use crate::net::atp::transport_common::{
     EntryDigest, MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode, plan_multi_object_split,
 };
-use crate::net::{TcpListener, TcpStream, UdpBufferConfig, UdpOutboundDatagram, UdpSocket};
+use crate::net::{
+    TcpListener, TcpStream, UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpOutboundDatagram, UdpSocket,
+};
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::security::tag::TAG_SIZE;
 use crate::security::{AuthenticationTag, SecurityContext};
@@ -119,9 +121,10 @@ const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 /// Byte ceiling for the normal streaming block-size target.
 const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum encoded ATP-RQ symbols sent in one connected UDP batch per socket.
-const RQ_SEND_BATCH_PER_SOCKET: usize = 32;
-/// Maximum encoded ATP-RQ symbols queued globally before flushing all sockets.
-const RQ_SEND_BATCH_GLOBAL_SYMBOLS: usize = 64;
+///
+/// Match the UDP GSO segment budget so fixed-size RQ symbols fill one
+/// super-packet per socket before the sender flushes.
+const RQ_SEND_BATCH_PER_SOCKET: usize = UDP_MAX_GSO_SEGMENTS;
 
 /// Default round-0 repair multiplier.
 ///
@@ -571,6 +574,12 @@ impl RqPendingSendBatch {
         self.by_socket.len()
     }
 
+    fn global_flush_symbols(&self) -> usize {
+        RQ_SEND_BATCH_PER_SOCKET
+            .saturating_mul(self.fanout())
+            .max(RQ_SEND_BATCH_PER_SOCKET)
+    }
+
     fn push(&mut self, socket_index: usize, payload: Vec<u8>) {
         let index = socket_index % self.fanout();
         self.by_socket[index].push(payload);
@@ -578,7 +587,7 @@ impl RqPendingSendBatch {
     }
 
     fn should_flush(&self) -> bool {
-        self.queued >= RQ_SEND_BATCH_GLOBAL_SYMBOLS
+        self.queued >= self.global_flush_symbols()
             || self
                 .by_socket
                 .iter()
@@ -7961,16 +7970,34 @@ mod tests {
     #[test]
     fn rq_pending_send_batch_groups_by_round_robin_socket() {
         let mut batch = RqPendingSendBatch::new(4);
-        for i in 0..RQ_SEND_BATCH_GLOBAL_SYMBOLS {
+        let global_flush_symbols = batch.global_flush_symbols();
+        for i in 0..global_flush_symbols {
             batch.push(i % 4, vec![u8::try_from(i).unwrap_or(u8::MAX)]);
         }
 
-        assert_eq!(batch.queued_count(), RQ_SEND_BATCH_GLOBAL_SYMBOLS);
+        assert_eq!(batch.queued_count(), global_flush_symbols);
         assert!(batch.should_flush());
-        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_GLOBAL_SYMBOLS / 4);
-        assert_eq!(batch.socket_batch_len(1), RQ_SEND_BATCH_GLOBAL_SYMBOLS / 4);
-        assert_eq!(batch.socket_batch_len(2), RQ_SEND_BATCH_GLOBAL_SYMBOLS / 4);
-        assert_eq!(batch.socket_batch_len(3), RQ_SEND_BATCH_GLOBAL_SYMBOLS / 4);
+        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET);
+        assert_eq!(batch.socket_batch_len(1), RQ_SEND_BATCH_PER_SOCKET);
+        assert_eq!(batch.socket_batch_len(2), RQ_SEND_BATCH_PER_SOCKET);
+        assert_eq!(batch.socket_batch_len(3), RQ_SEND_BATCH_PER_SOCKET);
+    }
+
+    #[test]
+    fn rq_pending_send_batch_delays_rr_flush_until_gso_windows_are_full() {
+        let mut batch = RqPendingSendBatch::new(DEFAULT_UDP_FANOUT);
+        let almost_full = batch.global_flush_symbols().saturating_sub(batch.fanout());
+
+        for i in 0..almost_full {
+            batch.push(i % batch.fanout(), vec![u8::try_from(i).unwrap_or(u8::MAX)]);
+        }
+
+        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET - 1);
+        assert!(!batch.should_flush());
+
+        batch.push(0, vec![0]);
+        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET);
+        assert!(batch.should_flush());
     }
 
     #[test]

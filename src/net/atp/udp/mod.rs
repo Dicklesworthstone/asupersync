@@ -6,8 +6,8 @@
 
 use crate::cx::Cx;
 use crate::net::{
-    UdpBatchIoReport, UdpBufferConfig, UdpBufferTuneReport, UdpCapability, UdpOutboundDatagram,
-    UdpRecvBatch, UdpSocket, UdpSocketCapabilities,
+    UDP_MAX_GSO_SEGMENTS, UdpBatchIoReport, UdpBufferConfig, UdpBufferTuneReport, UdpCapability,
+    UdpOutboundDatagram, UdpRecvBatch, UdpSocket, UdpSocketCapabilities,
 };
 use serde_json::{Value, json};
 use smallvec::SmallVec;
@@ -19,7 +19,11 @@ use std::time::Instant;
 /// Default ATP UDP packet payload bound.
 pub const ATP_UDP_DEFAULT_MAX_PACKET_SIZE: usize = 1500;
 /// Default ATP UDP batch bound.
-pub const ATP_UDP_DEFAULT_BATCH_SIZE: usize = 32;
+///
+/// One default batch fills a Linux UDP GSO super-packet when packet payloads are
+/// fixed-size, while variable-sized packets still fall back to one sendmmsg
+/// batch through the portable UDP planner.
+pub const ATP_UDP_DEFAULT_BATCH_SIZE: usize = UDP_MAX_GSO_SEGMENTS;
 
 /// ATP UDP socket configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,6 +526,15 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn default_config_batches_one_udp_gso_window() {
+        let config = AtpUdpSocketConfig::default();
+
+        assert_eq!(ATP_UDP_DEFAULT_BATCH_SIZE, UDP_MAX_GSO_SEGMENTS);
+        assert_eq!(config.max_send_batch, UDP_MAX_GSO_SEGMENTS);
+        assert_eq!(config.max_recv_batch, UDP_MAX_GSO_SEGMENTS);
     }
 
     #[test]
