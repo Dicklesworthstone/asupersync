@@ -28,6 +28,7 @@
 #![allow(missing_docs)]
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::proof::{DecodeProof, FailureReason, ProofOutcome};
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 use asupersync::util::DetRng;
@@ -48,6 +49,61 @@ fn make_source(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>> {
 
 fn object_id() -> ObjectId {
     ObjectId::new(OBJECT_ID_HIGH, OBJECT_ID_LOW)
+}
+
+fn assert_failure_proof_matches_error(err: &DecodeError, proof: &DecodeProof, context: &str) {
+    match (&proof.outcome, err) {
+        (
+            ProofOutcome::Failure {
+                reason:
+                    FailureReason::CorruptDecodedOutput {
+                        esi,
+                        byte_index,
+                        expected,
+                        actual,
+                    },
+            },
+            DecodeError::CorruptDecodedOutput {
+                esi: err_esi,
+                byte_index: err_byte_index,
+                expected: err_expected,
+                actual: err_actual,
+            },
+        ) => {
+            assert_eq!(*esi, *err_esi, "{context}: proof ESI mismatch");
+            assert_eq!(
+                *byte_index, *err_byte_index,
+                "{context}: proof byte index mismatch"
+            );
+            assert_eq!(
+                *expected, *err_expected,
+                "{context}: proof expected byte mismatch"
+            );
+            assert_eq!(
+                *actual, *err_actual,
+                "{context}: proof actual byte mismatch"
+            );
+        }
+        (
+            ProofOutcome::Failure {
+                reason:
+                    FailureReason::SingularMatrix {
+                        row,
+                        attempted_cols,
+                    },
+            },
+            DecodeError::SingularMatrix { row: err_row },
+        ) => {
+            assert_eq!(*row, *err_row, "{context}: proof singular row mismatch");
+            assert!(
+                !attempted_cols.is_empty(),
+                "{context}: proof singular witness should retain attempted columns"
+            );
+        }
+        (outcome, err) => {
+            panic!("{context}: proof outcome {outcome:?} did not match error {err:?}")
+        }
+    }
 }
 
 /// Build an over-determined received set: constraints, every source symbol, and
@@ -139,7 +195,7 @@ fn tampered_repair_byte_is_never_silently_accepted() {
                     "corrupt repair at offset {corrupt_offset} yielded Ok with WRONG source bytes"
                 );
             }
-            Err((err, _proof)) => {
+            Err((err, proof)) => {
                 // Expected: the integrity guard (or an inconsistency in the
                 // linear system) catches the tamper.
                 assert!(
@@ -150,6 +206,11 @@ fn tampered_repair_byte_is_never_silently_accepted() {
                     ),
                     "corrupt repair at offset {corrupt_offset} must fail via the integrity \
                      guard or an inconsistent system, got {err:?}"
+                );
+                assert_failure_proof_matches_error(
+                    &err,
+                    &proof,
+                    &format!("corrupt repair at offset {corrupt_offset}"),
                 );
             }
         }
