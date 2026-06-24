@@ -199,10 +199,11 @@ pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROU
 const RQ_COLD_START_PACING_BPS: u64 = 16 * 1024 * 1024;
 const RQ_MIN_PACING_BPS: u64 = 512 * 1024;
 const RQ_MAX_PACING_BPS: u64 = 64 * 1024 * 1024;
-/// Clean round-0 sprays can probe above cold-start after each cold-start-sized
-/// byte step of emitted datagrams. Loss-configured rounds keep the older AIMD
-/// floor/cap path; UDP fanout shares one aggregate pacer and one aggregate send
-/// batch limit so additional sockets cannot multiply the clean-ramp burst.
+/// Explicitly loss-free round-0 sprays can probe above cold-start after each
+/// cold-start-sized byte step of emitted datagrams. Loss-configured rounds keep
+/// the older AIMD floor/cap path; UDP fanout shares one aggregate pacer and one
+/// aggregate send batch limit so additional sockets cannot multiply the
+/// clean-ramp burst.
 const RQ_ROUND0_CLEAN_RAMP_STEP_BYTES: u64 = RQ_COLD_START_PACING_BPS;
 const RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 128 * 1024 * 1024;
@@ -753,12 +754,14 @@ fn round0_clean_ramp_max_rate(config: &RqConfig) -> u64 {
 }
 
 fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
-    let source_first_loss_target = config.round0_loss_target.is_finite()
-        && config.round0_loss_target >= 0.0
-        && !round0_loss_target_repair_enabled(config);
+    // MATRIX-76: near-clean "good" links remain source-first, but must not take
+    // the no-feedback high-BDP ramp. A fixed 128 MiB/s probe overruns 200 Mbit
+    // paths before the first feedback frame can produce a delivery-rate cap.
+    let loss_free_target = config.round0_loss_target.is_finite()
+        && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
     config.debug_drop_one_in == 0
         && config.repair_overhead <= 1.0
-        && source_first_loss_target
+        && loss_free_target
         && !pacing.loss_detected
         && pacing.rate_bytes_per_sec() == RQ_COLD_START_PACING_BPS
 }
@@ -8618,7 +8621,7 @@ mod tests {
     }
 
     #[test]
-    fn rq_round0_clean_ramp_is_source_first_only() {
+    fn rq_round0_clean_ramp_requires_loss_free_target() {
         let clean = RqConfig {
             symbol_size: 1200,
             repair_overhead: 1.0,
@@ -8629,16 +8632,12 @@ mod tests {
         let pacing = RqSprayPacing::cold_start(clean.symbol_size);
 
         assert!(round0_clean_ramp_enabled(&clean, pacing));
-        let good_subthreshold = RqConfig {
-            round0_loss_target: RQ_ROUND0_TARGET_LOSS_ENABLE_MIN / 5.0,
-            ..clean.clone()
-        };
-        assert!(
-            round0_clean_ramp_enabled(&good_subthreshold, pacing),
-            "source-first good-link targets should exercise the clean ramp"
-        );
 
         for blocked in [
+            RqConfig {
+                round0_loss_target: RQ_ROUND0_TARGET_LOSS_ENABLE_MIN / 5.0,
+                ..clean.clone()
+            },
             RqConfig {
                 round0_loss_target: RQ_ROUND0_TARGET_LOSS_ENABLE_MIN,
                 ..clean.clone()
@@ -8654,7 +8653,7 @@ mod tests {
         ] {
             assert!(
                 !round0_clean_ramp_enabled(&blocked, pacing),
-                "clean ramp must stay off for lossy/debug/repair-configured round 0"
+                "clean ramp must stay off for good/lossy/debug/repair-configured round 0"
             );
         }
 
