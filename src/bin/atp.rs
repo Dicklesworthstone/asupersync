@@ -64,6 +64,7 @@ use asupersync::net::atp::transport_tcp::{
 };
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::{AUTH_KEY_SIZE, AuthKey, SecurityContext};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand, ValueEnum};
 use sha2::{Digest, Sha256};
 
@@ -1640,7 +1641,10 @@ struct DeltaSubchunkSignatureResponse {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DeltaPackageMetadata {
     schema: String,
-    target_manifest_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_manifest_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_manifest_b64: Option<String>,
     object_sha256_hex: String,
     #[serde(default)]
     missing_chunks: Vec<DeltaPackageChunkMetadata>,
@@ -2238,9 +2242,13 @@ fn write_delta_package(
         })
         .collect();
 
+    let target_manifest_bytes = snapshot.manifest.to_canonical_bytes();
+    let (target_manifest_hex, target_manifest_b64) =
+        encode_delta_package_target_manifest(&target_manifest_bytes);
     let metadata = DeltaPackageMetadata {
         schema: DELTA_PACKAGE_SCHEMA.to_string(),
-        target_manifest_hex: hex::encode(snapshot.manifest.to_canonical_bytes()),
+        target_manifest_hex,
+        target_manifest_b64,
         object_sha256_hex: snapshot.object_sha256_hex.clone(),
         missing_chunks,
         subdelta_chunks,
@@ -2253,7 +2261,7 @@ fn write_delta_package(
             manifest_path.display()
         )
     })?;
-    serde_json::to_writer_pretty(&mut file, &metadata).map_err(|err| {
+    serde_json::to_writer(&mut file, &metadata).map_err(|err| {
         format!(
             "write delta package manifest {}: {err}",
             manifest_path.display()
@@ -2271,6 +2279,33 @@ fn write_delta_package(
         package_payload_bytes: package.payload_bytes,
         subdelta_chunks: package.subdelta_chunks.len(),
     })
+}
+
+fn encode_delta_package_target_manifest(bytes: &[u8]) -> (Option<String>, Option<String>) {
+    let manifest_hex = hex::encode(bytes);
+    let manifest_b64 = STANDARD.encode(bytes);
+    if manifest_b64.len() < manifest_hex.len() {
+        (None, Some(manifest_b64))
+    } else {
+        (Some(manifest_hex), None)
+    }
+}
+
+fn decode_delta_package_target_manifest(
+    metadata: &DeltaPackageMetadata,
+) -> Result<PersistentChunkManifest, String> {
+    let target_manifest_bytes = if let Some(encoded) = &metadata.target_manifest_b64 {
+        STANDARD
+            .decode(encoded)
+            .map_err(|err| format!("decode delta package target manifest base64: {err}"))?
+    } else if let Some(encoded) = &metadata.target_manifest_hex {
+        hex::decode(encoded)
+            .map_err(|err| format!("decode delta package target manifest: {err}"))?
+    } else {
+        return Err("delta package target manifest is missing".to_string());
+    };
+    PersistentChunkManifest::from_canonical_bytes(&target_manifest_bytes)
+        .map_err(|err| format!("decode delta package target manifest: {err}"))
 }
 
 fn create_unique_delta_package_root(object_sha256_hex: &str) -> Result<PathBuf, String> {
@@ -2674,10 +2709,7 @@ fn apply_delta_package(dest: &Path, package_root: &Path) -> Result<(), String> {
         ));
     }
 
-    let target_manifest_bytes = hex::decode(&metadata.target_manifest_hex)
-        .map_err(|err| format!("decode delta package target manifest: {err}"))?;
-    let target_manifest = PersistentChunkManifest::from_canonical_bytes(&target_manifest_bytes)
-        .map_err(|err| format!("decode delta package target manifest: {err}"))?;
+    let target_manifest = decode_delta_package_target_manifest(&metadata)?;
 
     let receiver_state = read_local_delta_state(dest)?.ok_or_else(|| {
         "delta package received but receiver has no prior delta state".to_string()
@@ -5096,6 +5128,63 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             file_count: 1,
             logical_file_bytes: size_bytes,
         }
+    }
+
+    #[test]
+    fn delta_package_target_manifest_prefers_base64_metadata_when_smaller() {
+        let mut chunks = Vec::new();
+        let mut byte_offset = 0u64;
+        for index in 0..512u32 {
+            let size = 512 + usize::try_from(index % 17).expect("small modulus fits");
+            let bytes = delta_tree_fixture_bytes(size, index);
+            let chunk = CasChunkRef::from_bytes(index, byte_offset, &bytes).expect("chunk ref");
+            byte_offset = byte_offset
+                .checked_add(chunk.size_bytes)
+                .expect("test manifest size fits");
+            chunks.push(chunk);
+        }
+        let manifest =
+            PersistentChunkManifest::new("large-package-manifest", chunks).expect("large manifest");
+        let manifest_bytes = manifest.to_canonical_bytes();
+        let legacy_hex = hex::encode(&manifest_bytes);
+
+        let (target_manifest_hex, target_manifest_b64) =
+            encode_delta_package_target_manifest(&manifest_bytes);
+
+        assert!(target_manifest_hex.is_none());
+        let encoded = target_manifest_b64.expect("base64 manifest metadata");
+        assert!(
+            encoded.len() * 4 < legacy_hex.len() * 3,
+            "base64 manifest metadata should cut hex bloat: base64={} legacy_hex={}",
+            encoded.len(),
+            legacy_hex.len()
+        );
+
+        let metadata = DeltaPackageMetadata {
+            schema: DELTA_PACKAGE_SCHEMA.to_string(),
+            target_manifest_hex: None,
+            target_manifest_b64: Some(encoded),
+            object_sha256_hex: hex::encode(Sha256::digest(&manifest_bytes)),
+            missing_chunks: Vec::new(),
+            subdelta_chunks: Vec::new(),
+            repeated_chunks: Vec::new(),
+        };
+        let decoded =
+            decode_delta_package_target_manifest(&metadata).expect("decode base64 manifest");
+        assert_eq!(decoded, manifest);
+
+        let legacy = DeltaPackageMetadata {
+            schema: DELTA_PACKAGE_SCHEMA.to_string(),
+            target_manifest_hex: Some(legacy_hex),
+            target_manifest_b64: None,
+            object_sha256_hex: metadata.object_sha256_hex,
+            missing_chunks: Vec::new(),
+            subdelta_chunks: Vec::new(),
+            repeated_chunks: Vec::new(),
+        };
+        let decoded_legacy =
+            decode_delta_package_target_manifest(&legacy).expect("decode legacy hex manifest");
+        assert_eq!(decoded_legacy, manifest);
     }
 
     #[test]
