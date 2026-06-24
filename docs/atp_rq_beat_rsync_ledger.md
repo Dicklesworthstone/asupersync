@@ -2146,3 +2146,20 @@ Re-ran delta re-sync on committed HEAD (archive git 7a60d216, tree-delta + appen
 **APPEND marginally improved** (805KB→778KB via c8b248c99 compact-append-runs) but still 4.1× rsync's 189KB. Both O(change); the gap is atp's per-chunk/manifest framing.
 
 **HONEST DELTA VERDICT:** atp's delta re-sync DECISIVELY WINS the insert/offset-shift case (56.8×, rsync's Achilles heel) and WORKS correctly (O(change), byte-identical) on append + tree-rename — but loses those 4-6× on per-chunk/manifest FRAMING OVERHEAD, because rsync already handles append/rename efficiently. The unifying lever to make delta a clean sweep = cut atp's delta framing overhead (per-chunk headers + manifest) on small-change cases to match rsync. ROUTED to LANE-H. Net mission: atp BEATS rsync on the hardest delta case (insert), is correct-but-higher-overhead elsewhere, and dominates memory across the board. Evidence: `/tmp/atp_resync_bench/20260624T004701Z-3584362/resync.jsonl`.
+
+## MATRIX-61 (2026-06-24) — AUTH tier validated (atp-rq-auth vs rsync-ssh-aes128gcm 50M): converges 3/3 sha-ok BOTH regimes (no authenticated-path fail-closed gap); 50M/good TIE (3.95 vs 3.95s); 50M/bad loses wall 5.6× (100 vs 18s) but 132× less RSS (187MB vs rsync 24.7GB). Mirrors the nocrypto pattern.
+
+First fresh auth-tier validation on committed HEAD (atp-rq-auth `--rq-auth-key-hex` vs rsync over ssh aes128-gcm), netns+veth+netem, all sha-ok:
+
+| cell | atp-rq-auth | rsync-ssh-aes128gcm | atp RSS | rsync RSS | mem ratio | converge |
+|---|---|---|---|---|---|---|
+| 50M/good auth | 3.95s | 3.95s | 48MB | 50MB | ~tie | 3/3 |
+| 50M/bad auth | 100.43s | 17.77s | **187MB** | **24,715MB (24.7GB)** | atp 132× less | 3/3 |
+
+**Auth tier is healthy — converges 3/3 sha-ok on BOTH regimes** with AIMD + the AUTH-1 source-first fast path. No fail-closed gap on the authenticated lossy path (unlike the encrypted/QUIC tier which still struggles at 1/3). This validates the auth tier as a working mission tier.
+
+**50M/good auth = exact TIE** (atp 3.95s vs rsync-ssh 3.95s, ~equal 48-50MB RSS) — auth adds no measurable penalty on a clean link; matches nocrypto 50M/good TIE.
+
+**50M/bad auth = atp loses wall 5.6×** (100.43s vs rsync-ssh 17.77s) — same lossy-small CPU/decode wall as nocrypto 50M/bad (~4×); auth's per-symbol HMAC adds a little CPU. BUT atp uses **132× less memory** (187MB vs rsync-over-ssh's 24.7GB — ssh's buffering at 2% loss explodes RSS). On a memory-constrained host rsync-ssh would OOM where atp holds 187MB.
+
+**Auth tier mirrors nocrypto:** good=TIE, bad=wall-loss-but-massive-memory-win, both converge reliably. Auth is NOT a weak spot (encrypted/QUIC is). Net mission coverage now spans nocrypto + auth + encrypted + delta-resync, all measured. Evidence: `artifacts/atp_bench_matrix/20260624T005003Z/`.
