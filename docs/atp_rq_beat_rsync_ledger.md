@@ -2385,3 +2385,18 @@ Built `a73d963f5` (incl 01daa99b6) and re-ran 500M/highbdp/nocrypto streams 1,8:
 | rsyncd | 17.74 → 17.64s | 0 | baseline |
 
 **The cap-aggregate eliminated the s8 overrun** — all 3 s8 reps now complete in 25-27s with 0 feedback rounds (no 286s blowup). The cost: s8 is rate-capped to ~27s, slower than s1's 18s (the aggregate cap holds total in-flight under the path rate, so 8 streams no longer overrun but also don't beat 1 stream). **Single stream is both fastest AND stable** — consistent with fan-out being a no-op for throughput (MATRIX-68); the new streams=1 default (a73d963f5) is the right call. **clean-high-BDP TIE (18.0s vs rsync 17.6s, 1.02×) confirmed stable at the default.** Evidence: `artifacts/atp_bench_matrix/20260624T225809Z/`.
+
+## MATRIX-76 (2026-06-24) — ★★P0 REGRESSION: the clean round-zero ramp (f2aea2822, default-on) BREAKS 500M/good — round-0 ramps to a FIXED 128 MiB/s regardless of link rate, so on the 200 mbit (25 MB/s) good link it overshoots ~5× → round-0 overrun → 16 feedback rounds → 3/3 NON-CONVERGENCE (status=error, sha=false, ~213s). Was ~37s ok pre-ramp. The ramp helped high-BDP ONLY because 128 MiB/s ≈ the 1 gbit link there.
+
+Benched the rate-ramp binary (a73d963f5) on 500M/good/nocrypto streams=1 ×3 with ATP_RQ_TRACE=1:
+
+| method | wall | rounds | sha | status |
+|---|---|---|---|---|
+| atp-rq-lab /good | **~213s** (212.3/212.3/214.2) | **16** | **false** | **error 3/3** |
+| rsyncd /good | 24.2s | 0 | true | ok 3/3 |
+
+Rate-probe trace (configured_rate_Bps, MiB/s, per round): **128**, 8, 8, 8, … — round 0 ramps straight to **128 MiB/s**, AIMD then collapses to 8 MiB/s after the overshoot causes loss, and 16 rounds can't recover.
+
+**★ROOT CAUSE — the ramp overshoots because it ramps to a FIXED target (128 MiB/s) without measuring path capacity.** `configured_bdp_bytes=0` — atp never estimates the link rate, so the round-0 ramp jumps to 128 MiB/s on EVERY clean-ish link. On high-BDP (1 gbit ≈ 125 MB/s) that's fine (MATRIX-73 TIE). On good (200 mbit ≈ 25 MB/s) it's 5× the link → catastrophic round-0 loss → non-convergence. The loss-gate also lets good's 0.1% loss through (bad's 2% loss correctly gated the ramp OFF — MATRIX-74 unchanged at 153.8s), so good gets the ramp AND the overshoot.
+
+**★P0 — the clean-ramp as shipped is UNSAFE on sub-gigabit clean/mild links (default-on regresses the common "good internet" case).** Routed to swarm: the ramp MUST be delivery-rate-capped (BBR-style) — probe the rate UP gradually based on observed ACK/delivery rate and BACK OFF the instant loss rises or delivery plateaus, instead of jumping to a fixed 128 MiB/s. Until fixed, the MATRIX-73 high-BDP TIE is real but comes with a good-link regression — NET not yet shippable. ★This is exactly why the whole matrix is checked, never one cell: the high-BDP win hid a good-link break. Evidence: `artifacts/atp_bench_matrix/20260624T230317Z/`.
