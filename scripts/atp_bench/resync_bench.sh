@@ -45,7 +45,7 @@ CHANGES="${CHANGES:-0pct 1pct 10pct append insert rename}"
 
 WORKERS="${WORKERS:-4}"
 ATP_TRANSPORT="${ATP_TRANSPORT:-rq}"
-STREAMS="${STREAMS:-8}"
+STREAMS="${STREAMS:-1}"
 SYMBOL_SIZE="${SYMBOL_SIZE:-1200}"
 MAX_BYTES="${MAX_BYTES:-6442450944}"
 if [ -z "${HOST_IP+x}" ] && [ -z "${NS_IP+x}" ]; then

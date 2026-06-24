@@ -18,7 +18,7 @@ RUN_CELL_CMD=""
 WORKLOADS="500K,5M,50M,500M,5G,tree_small,tree_big"
 REGIMES="perfect,good,bad,broken"
 TIERS="nocrypto,auth,encrypted"
-STREAMS_SWEEP="8"
+STREAMS_SWEEP="1"
 
 usage() {
   cat <<'USAGE'
@@ -38,7 +38,7 @@ Options:
   --workloads CSV           workload list
   --regimes CSV             regime list
   --tiers CSV               crypto tier list
-  --streams CSV             ATP-RQ stream counts to sweep (default: 8)
+  --streams CSV             ATP-RQ stream counts to sweep (default: 1)
   --reps N                  default reps per method/cell
   --help                    show this help
 

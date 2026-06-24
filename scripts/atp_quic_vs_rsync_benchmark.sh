@@ -166,7 +166,7 @@ run_one() {
       recvextra="--server-cert leaf.pem --server-key leaf.key"
       sendextra="--ca ca.pem --server-name $RECEIVER_IP"
     else
-      transport="rq"; ready_pat="listening"; recvextra=""; sendextra="--streams ${STREAMS:-8}"
+      transport="rq"; ready_pat="listening"; recvextra=""; sendextra="--streams ${STREAMS:-1}"
     fi
     start_tcpdump "$method" "$label"
     rcv "cd $WR; \
