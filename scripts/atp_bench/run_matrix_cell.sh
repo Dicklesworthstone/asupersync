@@ -223,6 +223,13 @@ if dup:
 rate = c.get("rate")
 if rate:
     parts += ["rate", rate]
+# Optional explicit queue limit (packets). High-BDP links (e.g. 1gbit @ 200ms,
+# BDP ~33k pkts) need a limit well above the netem default of 1000, or the queue
+# tail-drops and silently throttles BOTH transports far below line rate. Only
+# regimes that set "limit" get one; others keep the default for stable baselines.
+limit = c.get("limit", 0) or 0
+if limit:
+    parts += ["limit", str(int(limit))]
 print(" ".join(parts))
 PY
 }

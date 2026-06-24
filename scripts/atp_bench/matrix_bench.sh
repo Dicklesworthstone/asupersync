@@ -164,6 +164,17 @@ netem_json() {
     broken)
       printf '{"rate":"10mbit","delay_ms":200,"jitter_ms":50,"loss_pct":10,"reorder_pct":5,"duplicate_pct":1}'
       ;;
+    highbdp)
+      # Clean fat + long pipe (1gbit @ 200ms RTT => BDP ~33k pkts) to ISOLATE
+      # multi-stream fan-out: a single ATP-RQ stream is capped by per-stream
+      # pacing while N fanned-out streams fill the pipe, and single-TCP rsync is
+      # slow-start-ramp limited. Loss is intentionally 0 here — loss-resilience
+      # is already measured by the */bad cells; mixing 0.1% loss with 200ms RTT
+      # would collapse single-TCP via Mathis (~1.8Mbit/s) and conflate levers.
+      # Large limit avoids netem tail-drop (default 1000 pkts << BDP). Pair with
+      # --streams 1,2,4,8.
+      printf '{"rate":"1gbit","delay_ms":200,"jitter_ms":10,"loss_pct":0,"reorder_pct":0,"duplicate_pct":0,"limit":200000}'
+      ;;
     *)
       die "unknown regime: ${regime}"
       ;;

@@ -2247,3 +2247,23 @@ Benched committed HEAD (incl `perf(atp-rq): batch connected UDP symbol spray` �
 | 50M/good nocrypto | 4.05s | 3.93s | TIE | UNCHANGED (no regression) |
 
 **Connected-spray batching did NOT move the clean wall.** This is the SECOND sendto-batching attempt (MATRIX-66 = unconnected GSO, ineffective/wrong-path; MATRIX-67 = connected batch, ineffective). Both refuted by measurement ⇒ **the clean-link wall is NOT sendto-syscall bound.** For 50M over a 1gbit/2ms perfect link, atp's 3.72s (nocrypto) / 32.5s (encrypted) wall is dominated by RaptorQ encode + decode + datagram/feedback overhead (+ per-packet AEAD on the encrypted tier), NOT the cost of the sendto calls. Batching the sends is a correct micro-optimization (may help higher-BDP throughput) but it can't close a wall that isn't syscall-bound. **The clean-wall gap is fundamentally the FEC/AEAD compute tax** — a fountain transport pays encode+decode+coding-overhead that rsync's raw byte stream doesn't. Closing it would require faster GF(256)/decode (SIMD measured NO benefit earlier) or fundamentally less coding overhead on clean links (≈ not FEC-coding when loss≈0, a design change). NET: clean-wall stays a documented fundamental loss; atp's wins remain lossy/delta/memory. Evidence: `artifacts/atp_bench_matrix/20260624T103628Z/` (encrypted/good cell stopped early — documented-limit convergence, not the clean-wall question).
+
+## MATRIX-68 (2026-06-24) — multi-stream receiver fan-out (bf03b320b 'perf(atp-rq): fan out receiver UDP streams') does NOT scale high-BDP throughput: FLAT ~38–40s across streams 1/2/4/8; atp LOSES clean high-BDP 2.13× to single-TCP rsync (38.1s vs 17.8s). The unmeasured "potentially-winnable" frontier is now MEASURED = a clean-link LOSS; bottleneck = single-core RaptorQ decode, not stream count.
+
+Built fan-out HEAD `bf03b320b` (git archive of origin/main). NEW `highbdp` regime added to the matrix harness: clean **1gbit / 200ms RTT** (BDP ~33k pkts), netem `limit 200000` to avoid tail-drop, **loss=0 to isolate fan-out** from the loss-collapse already measured by */bad. 500M nocrypto, ATP-RQ stream sweep 1/2/4/8 ×3 reps + rsyncd single-TCP ×3. All 15 cells `status=ok sha_ok=true rounds=0`:
+
+| method / streams | median wall | throughput | vs rsync | peak RSS |
+|---|---|---|---|---|
+| atp-rq-lab streams=1 | 38.08s (cv 0%) | 13.1 MB/s | 2.13× slower | 25.5MB |
+| atp-rq-lab streams=2 | 39.48s | 12.7 MB/s | 2.21× | 23.8MB |
+| atp-rq-lab streams=4 | 39.88s | 12.5 MB/s | 2.24× | 24.3MB |
+| atp-rq-lab streams=8 | 39.18s | 12.8 MB/s | 2.20× | 26.5MB |
+| rsyncd (single-TCP) | **17.84s** (cv 2.4%) | 28.0 MB/s | baseline | 38.8MB |
+
+**Receiver-stream fan-out provides ZERO throughput scaling on high-BDP.** atp wall is flat ~38–40s whether 1 or 8 streams (cv 0–1%); throughput stays pinned at ~13 MB/s — far below the 125 MB/s line rate AND below rsync's 28 MB/s. With `rounds=0` (clean link, all source symbols delivered, no feedback) the receiver is doing pure RaptorQ decode of 500M; the wall is the **single-core decode rate (~13 MB/s)**, which fanning out the UDP receive streams cannot parallelize — `bf03b320b` parallelizes the socket/receive side, but the decode bottleneck is downstream and serial. Fan-out is therefore a no-op for clean high-BDP throughput.
+
+**atp LOSES clean high-BDP ~2.13×** (38.1s vs rsync 17.8s). rsync's single TCP, even slow-start-ramp + 200ms-RTT limited, reaches 28 MB/s and finishes in half the time. This extends the clean-link wall (MATRIX-66/67) to the high-BDP case — same root cause (FEC decode-compute tax), NOT an I/O or stream-count problem.
+
+**The "one unmeasured potentially-winnable frontier" is now measured — and it's a LOSS.** Multi-stream fan-out does not win clean high-BDP. atp's high-BDP WIN remains the LOSSY case: on a lossy high-BDP link a single TCP flow collapses via Mathis (~1.8 Mbit/s at 0.1%/200ms RTT) where atp's FEC sails through — already captured by the */bad cells (500M/bad 4.4×). So: **clean high-BDP = loss (decode tax); lossy high-BDP = win (FEC vs TCP collapse).** Fully consistent with the scoreboard: atp wins where there's loss / structure / memory pressure, loses clean-link wall.
+
+**Memory win persists** even here: atp peak RSS 23.6–26.5MB vs rsync 38.8MB (1.64× less). Harness note: this required adding the `highbdp` regime + optional netem `limit` support (matrix_bench.sh + run_matrix_cell.sh) — the default 1000-pkt netem queue would tail-drop a 33k-pkt BDP and silently throttle BOTH transports, invalidating any high-BDP cell; the explicit `limit 200000` makes them valid. Evidence: `artifacts/atp_bench_matrix/20260624T115453Z/`.
