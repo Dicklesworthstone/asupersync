@@ -2178,3 +2178,17 @@ Lossy-tree validation on committed HEAD (atp-rq-lab vs rsyncd, netns+veth+netem 
 **★Memory dominance is EXTREME on lossy trees:** rsync hits **35.4GB RSS on tree_small/bad and 15GB on tree_big/bad** — its file-list + per-file state + retransmit buffers explode across many files under loss — while atp holds 52-65MB (236-697× less). This is the most lopsided memory result class measured: a lossy directory sync that rsync can barely fit in RAM, atp does in <70MB.
 
 **Trees are NOT an atp weak spot:** good→tree_big WIN (earlier), bad→tree_small WIN + tree_big narrow loss, all memory-dominant. Combined with the delta tree-rename (atp O(rename), works), the tree tier is competitive-to-winning + memory-crushing across regimes. Net scoreboard: atp wins or ties most tree/lossy/delta-insert cells + dominates memory universally; loses only single-file clean-perfect wall + lossy-small-single-file wall (both diagnosed FEC/CPU tax). Evidence: `artifacts/atp_bench_matrix/20260624T005747Z/`.
+
+## MATRIX-63 (2026-06-24) — DELTA framing-overhead fix (8983b7364 shrink manifest framing): MARGINAL — append 778→702KB (4.1→3.7×), rename 341→324KB (5.6→5.3×), insert holds 56.8×. Residual append/rename overhead is the RaptorQ symbol ENVELOPE on small delta payloads (partly inherent to FEC-wrapped delta) → diminishing returns; delta lever bounded.
+
+Re-benched delta on committed HEAD (incl 8983b7364), 100M/good, byte-identical:
+
+| change | atp-rq-delta (MATRIX-60 → now) | rsyncd-delta | ratio now |
+|---|---|---|---|
+| append | 777,880 → **702,497 B** | 188,833 B | 3.7× (was 4.1×) |
+| insert | 931,767 → 931,649 B | 52,912,343 B | **56.8× atp WIN (holds)** |
+| rename (tree_big) | 341,449 → **324,310 B** | 61,089 B | 5.3× (was 5.6×) |
+
+**Framing fix is MARGINAL (~5-10% reduction), not the hoped clean-sweep.** 8983b7364 trimmed the package-manifest framing but append stays 3.7× and tree-rename 5.3× behind rsync. ROOT CAUSE of the residual: atp's delta payload is itself transmitted as **RaptorQ symbols (FEC-wrapped)**, so a tiny change (rsync sends 61KB raw) becomes ~324KB once wrapped in symbol envelopes + minimal manifest. The FEC envelope overhead is proportionally large on SMALL deltas and is **partly inherent to a fountain-coded delta** (it buys loss-resilience rsync's raw delta lacks). To match rsync on tiny edits atp would have to send small deltas UN-FEC'd (losing the loss-resilience that wins the insert/lossy cases) — a design trade-off, not a free win.
+
+**DELTA LEVER BOUNDED (diminishing returns):** further manifest/framing micro-tuning won't close a 3-5× gap rooted in the symbol envelope. atp's delta is DECISIVE on insert (56.8×, rsync's offset-shift weakness) and CORRECT (O(change), byte-identical) but carries FEC-envelope overhead on append/rename where rsync's raw delta is already efficient. Honest delta verdict: atp WINS the structural-edit case rsync handles worst, ties/loses the cases rsync handles well, all byte-identical + memory-dominant. The remaining high-value lever is encrypted-lossy convergence, NOT more delta-overhead tuning. Evidence: `/tmp/atp_resync_bench/20260624T013558Z-389702/resync.jsonl`.
