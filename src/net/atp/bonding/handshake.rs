@@ -21,6 +21,9 @@ use super::assignment::{
 /// Current bonded-handshake protocol version.
 pub const BONDING_HANDSHAKE_VERSION: u16 = BONDING_ASSIGNMENT_VERSION;
 
+/// Structured event schema for receiver-side donor admission traces.
+pub const BONDING_DONOR_ADMISSION_TRACE_SCHEMA: &str = "atp-bonding-donor-admission-v1";
+
 /// Transport family advertised during bonded-transfer negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum BondTransport {
@@ -219,6 +222,50 @@ pub struct BondingDonorEnrollment {
     pub agreement: BondingAgreement,
     /// Assignment sent back to the donor before it starts spraying symbols.
     pub assignment: DonorAssignment,
+}
+
+impl BondingDonorEnrollment {
+    /// Build the structured C1 admission trace for this enrollment.
+    #[must_use]
+    pub fn admission_trace(&self) -> BondingDonorAdmissionTrace {
+        BondingDonorAdmissionTrace {
+            schema_version: BONDING_DONOR_ADMISSION_TRACE_SCHEMA,
+            event: "bonding_donor_admitted",
+            donor_index: self.donor_index,
+            donor_count: self.assignment.donor_count,
+            protocol_version: self.agreement.protocol_version,
+            assignment_mode: self.agreement.assignment_mode,
+            supported_transports: self.agreement.supported_transports.clone(),
+            auth_required: self.agreement.auth_required,
+            resume_supported: self.agreement.resume_supported,
+            receiver_udp_endpoints: self.assignment.receiver_udp_endpoints.clone(),
+        }
+    }
+}
+
+/// Redaction-safe receiver-side event emitted after accepting one donor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BondingDonorAdmissionTrace {
+    /// Stable schema marker for downstream log parsers.
+    pub schema_version: &'static str,
+    /// Stable event name.
+    pub event: &'static str,
+    /// Receiver-assigned donor index.
+    pub donor_index: u32,
+    /// Total donors expected for this bonded transfer.
+    pub donor_count: u32,
+    /// Negotiated bonding protocol version.
+    pub protocol_version: u16,
+    /// Negotiated donor assignment mode.
+    pub assignment_mode: BondingAssignmentMode,
+    /// Common transport families negotiated with this donor.
+    pub supported_transports: BTreeSet<BondTransport>,
+    /// Whether symbol authentication is required.
+    pub auth_required: bool,
+    /// Whether resume metadata is supported.
+    pub resume_supported: bool,
+    /// Shared receiver UDP endpoints sent in the donor assignment.
+    pub receiver_udp_endpoints: Vec<SocketAddr>,
 }
 
 /// Receiver-side control-plane allocator for Phase C1 donor admission.
@@ -720,9 +767,11 @@ mod tests {
         let mut control =
             BondingReceiverControlPlane::new(receiver, 3, vec![endpoint()], Some(auth.clone()))
                 .expect("control plane");
+        let mut admission_traces = Vec::new();
 
         for expected_index in 0..3 {
             let enrollment = control.enroll_next_donor(&donor).expect("enrolled");
+            let trace = enrollment.admission_trace();
 
             assert_eq!(enrollment.donor_index, expected_index);
             assert_eq!(enrollment.assignment.donor_index, expected_index);
@@ -739,10 +788,34 @@ mod tests {
                     .agreement
                     .supports_transport(BondTransport::DirectIp)
             );
+            assert_eq!(trace.schema_version, BONDING_DONOR_ADMISSION_TRACE_SCHEMA);
+            assert_eq!(trace.event, "bonding_donor_admitted");
+            assert_eq!(trace.donor_index, expected_index);
+            assert_eq!(trace.donor_count, 3);
+            assert_eq!(trace.protocol_version, BONDING_HANDSHAKE_VERSION);
+            assert_eq!(trace.receiver_udp_endpoints, vec![endpoint()]);
+            let trace_json = serde_json::to_value(&trace).expect("trace serializes");
+            assert_eq!(
+                trace_json["schema_version"].as_str(),
+                Some(BONDING_DONOR_ADMISSION_TRACE_SCHEMA)
+            );
+            assert_eq!(trace_json["event"].as_str(), Some("bonding_donor_admitted"));
+            assert_eq!(
+                trace_json["donor_index"].as_u64(),
+                Some(expected_index as u64)
+            );
+            admission_traces.push(trace);
         }
 
         assert!(control.is_complete());
         assert_eq!(control.registry().enrolled_donor_indices(), vec![0, 1, 2]);
+        assert_eq!(
+            admission_traces
+                .iter()
+                .map(|trace| trace.donor_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         assert_eq!(
             control.enroll_next_donor(&donor),
             Err(BondingHandshakeError::TooManyDonorControls {
