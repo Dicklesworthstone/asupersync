@@ -79,7 +79,6 @@ pub use read_dir::{DirEntry, ReadDir, read_dir};
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 pub use uring::IoUringFile;
 
-#[cfg(unix)]
 pub use path_ops::symlink;
 
 #[cfg(windows)]

@@ -182,6 +182,28 @@ pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::
     }
 }
 
+/// Create a symlink (Windows).
+#[cfg(windows)]
+pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    let original = original.as_ref().to_owned();
+    let link = link.as_ref().to_owned();
+    spawn_blocking_io(move || {
+        let probe = if original.is_absolute() {
+            original.clone()
+        } else {
+            link.parent()
+                .map(|parent| parent.join(&original))
+                .unwrap_or_else(|| original.clone())
+        };
+        if std::fs::metadata(&probe).is_ok_and(|meta| meta.is_dir()) {
+            std::os::windows::fs::symlink_dir(&original, &link)
+        } else {
+            std::os::windows::fs::symlink_file(&original, &link)
+        }
+    })
+    .await
+}
+
 /// Create a symlink to a file (Windows).
 #[cfg(windows)]
 pub async fn symlink_file(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
