@@ -2316,6 +2316,39 @@ mod tests {
     }
 
     #[test]
+    fn repair_window_assignments_reject_duplicate_donor_windows() {
+        let descriptor = descriptor();
+        let geometry = descriptor
+            .entry_block_geometry(0, 0)
+            .expect("descriptor block geometry");
+        let assignments = vec![DonorAssignment::new_static(0, 1, vec![endpoint()], None)];
+        let duplicate_donor_plan = BondedRepairWindowPlan {
+            geometry,
+            first_repair_esi: 2,
+            next_repair_esi: 6,
+            windows: vec![
+                BondedDonorRepairWindow {
+                    donor_index: 0,
+                    esi_window: EsiWindow::new(2, 4),
+                    symbol_count: 2,
+                    stagger_delay_slots: 0,
+                },
+                BondedDonorRepairWindow {
+                    donor_index: 0,
+                    esi_window: EsiWindow::new(4, 6),
+                    symbol_count: 2,
+                    stagger_delay_slots: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            schedule_bonded_repair_window_assignments(&assignments, &duplicate_donor_plan),
+            Err(BondScheduleError::DuplicateDonorAssignment { donor_index: 0 })
+        );
+    }
+
+    #[test]
     fn repair_window_assignments_reject_overlapping_windows() {
         let descriptor = descriptor();
         let geometry = descriptor
