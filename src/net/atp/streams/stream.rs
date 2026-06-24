@@ -301,13 +301,11 @@ impl AtpStream {
 
         match self.reassembly.insert_segment(segment) {
             Outcome::Ok(deliverable) => {
-                if fin {
-                    if self.reassembly.is_complete() {
-                        self.receive_state = ReceiveState::DataRecvd;
-                        self.update_stream_state_on_receive_complete();
-                    } else {
-                        self.receive_state = ReceiveState::SizeKnown;
-                    }
+                if self.reassembly.is_complete() {
+                    self.receive_state = ReceiveState::DataRecvd;
+                    self.update_stream_state_on_receive_complete();
+                } else if self.reassembly.received_final_segment() {
+                    self.receive_state = ReceiveState::SizeKnown;
                 }
 
                 Outcome::ok(deliverable)
@@ -612,6 +610,31 @@ mod tests {
         );
         assert_eq!(received.len(), 1);
         assert!(matches!(stream.receive_state, ReceiveState::DataRecvd));
+    }
+
+    #[test]
+    fn out_of_order_fin_completes_when_gap_is_filled() {
+        let cx = test_cx();
+        let mut stream = AtpStream::new(StreamId::new(16), true, StreamPriority::Data, false);
+
+        let suffix = assert_receive_ok(
+            stream.receive_data(&cx, 5, Bytes::from("world"), true),
+            "out-of-order final suffix receive",
+        );
+        assert!(suffix.is_empty());
+        assert!(matches!(stream.receive_state, ReceiveState::SizeKnown));
+        assert!(matches!(stream.state, StreamState::Open));
+
+        let delivered = assert_receive_ok(
+            stream.receive_data(&cx, 0, Bytes::from("hello"), false),
+            "prefix receive fills final gap",
+        );
+
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0], Bytes::from("hello"));
+        assert_eq!(delivered[1], Bytes::from("world"));
+        assert!(matches!(stream.receive_state, ReceiveState::DataRecvd));
+        assert!(matches!(stream.state, StreamState::RemoteClosed));
     }
 
     #[test]
