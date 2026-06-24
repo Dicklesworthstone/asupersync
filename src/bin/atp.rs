@@ -1046,6 +1046,26 @@ fn print_atp_metrics_line(
     );
 }
 
+fn print_rq_udp_send_acceleration_line(report: &transport_rq::UdpSendAccelerationReport) {
+    eprintln!(
+        "[atp] progress rq_udp_send_acceleration flushes={} datagrams={} \
+         payload_bytes={} native_batch_flushes={} native_batch_datagrams={} \
+         gso_flushes={} gso_datagrams={} fallback_flushes={} fallback_datagrams={} \
+         partial_flushes={} error_flushes={}",
+        report.flushes,
+        report.datagrams,
+        report.payload_bytes,
+        report.native_batch_flushes,
+        report.native_batch_datagrams,
+        report.gso_flushes,
+        report.gso_datagrams,
+        report.fallback_flushes,
+        report.fallback_datagrams,
+        report.partial_flushes,
+        report.error_flushes,
+    );
+}
+
 fn resolve(target: &str) -> Result<SocketAddr, String> {
     target
         .to_socket_addrs()
@@ -1387,6 +1407,7 @@ fn send_to_addr_with_transport(
                 chosen_fanout,
                 Some(elapsed),
             );
+            print_rq_udp_send_acceleration_line(&report.udp_send_acceleration);
             Ok(rq_send_json(&report, chosen_fanout, Some(elapsed)))
         }
         Transport::Quic => {
@@ -4524,6 +4545,7 @@ fn rq_send_json(
         "merkle_root": report.merkle_root_hex,
         "sha_ok": report.receipt.sha_ok,
         "merkle_ok": report.receipt.merkle_ok,
+        "udp_send_acceleration": report.udp_send_acceleration,
         "metrics": atp_metrics_json(
             report.bytes_sent,
             Some(report.symbols_sent),

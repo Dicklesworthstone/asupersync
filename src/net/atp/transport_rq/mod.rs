@@ -79,9 +79,7 @@ use crate::net::atp::transport_common::{
     EntryDigest, MultiObjectSplitConfig, StreamingError, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode, plan_multi_object_split,
 };
-use crate::net::{
-    TcpListener, TcpStream, UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpOutboundDatagram, UdpSocket,
-};
+use crate::net::{TcpListener, TcpStream, UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpSocket};
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::security::tag::TAG_SIZE;
 use crate::security::{AuthenticationTag, SecurityContext};
@@ -561,6 +559,21 @@ struct RqPendingSendBatch {
     queued: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RqSendBatchFlushReport {
+    socket_flushes: usize,
+    native_flushes: usize,
+    native_packets: usize,
+    gso_flushes: usize,
+    gso_packets: usize,
+    fallback_flushes: usize,
+    fallback_packets: usize,
+    partial_flushes: usize,
+    error_flushes: usize,
+    packets_processed: usize,
+    bytes_processed: usize,
+}
+
 impl RqPendingSendBatch {
     fn new(fanout: usize) -> Self {
         let fanout = fanout.max(1);
@@ -598,13 +611,14 @@ impl RqPendingSendBatch {
         &mut self,
         sockets: &mut [UdpSocket],
         symbols_sent: &mut u64,
-    ) -> Result<(), RqError> {
+    ) -> Result<RqSendBatchFlushReport, RqError> {
         debug_assert_eq!(self.by_socket.len(), sockets.len().max(1));
         if self.queued == 0 {
-            return Ok(());
+            return Ok(RqSendBatchFlushReport::default());
         }
 
         let symbols_before_flush = *symbols_sent;
+        let mut flush_report = RqSendBatchFlushReport::default();
         for (socket_index, payloads) in self.by_socket.iter_mut().enumerate() {
             if payloads.is_empty() {
                 continue;
@@ -616,18 +630,33 @@ impl RqPendingSendBatch {
                     "RQ send batch socket index out of range",
                 ))
             })?;
-            let dst_addr = socket.peer_addr()?;
             let expected = payloads.len();
             let report = {
-                let packets = payloads
+                let payload_refs = payloads
                     .iter()
-                    .map(|payload| UdpOutboundDatagram { dst_addr, payload })
+                    .map(Vec::as_slice)
                     .collect::<SmallVec<[_; RQ_SEND_BATCH_PER_SOCKET]>>();
-                socket.send_batch_to(&packets).await?
+                socket.send_connected_batch(&payload_refs).await?
             };
 
             *symbols_sent = symbols_sent
                 .saturating_add(u64::try_from(report.packets_processed).unwrap_or(u64::MAX));
+            flush_report.socket_flushes += 1;
+            flush_report.packets_processed += report.packets_processed;
+            flush_report.bytes_processed += report.bytes_processed;
+            flush_report.native_flushes += usize::from(report.native_send_batch_used);
+            if report.native_send_batch_used {
+                flush_report.native_packets += report.packets_processed;
+            }
+            flush_report.gso_flushes += usize::from(report.gso_send_used);
+            if report.gso_send_used {
+                flush_report.gso_packets += report.packets_processed;
+            }
+            flush_report.fallback_flushes += usize::from(report.fallback_used);
+            if report.fallback_used {
+                flush_report.fallback_packets += report.packets_processed;
+            }
+            flush_report.error_flushes += usize::from(report.error.is_some());
             if report.packets_processed != expected {
                 let reason = report.error.unwrap_or_else(|| {
                     format!(
@@ -635,6 +664,20 @@ impl RqPendingSendBatch {
                         report.packets_processed
                     )
                 });
+                let partial_flushes = flush_report.partial_flushes.saturating_add(1);
+                rqtrace!(
+                    "sender: udp_batch partial flushes={} native_flushes={} gso_flushes={} fallback_flushes={} partial_flushes={} packets={} bytes={} symbols_before={} symbols_after={} error={}",
+                    flush_report.socket_flushes,
+                    flush_report.native_flushes,
+                    flush_report.gso_flushes,
+                    flush_report.fallback_flushes,
+                    partial_flushes,
+                    flush_report.packets_processed,
+                    flush_report.bytes_processed,
+                    symbols_before_flush,
+                    *symbols_sent,
+                    reason,
+                );
                 return Err(RqError::Io(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
                     reason,
@@ -645,10 +688,22 @@ impl RqPendingSendBatch {
         }
 
         self.queued = 0;
+        rqtrace!(
+            "sender: udp_batch flushes={} native_flushes={} gso_flushes={} fallback_flushes={} partial_flushes={} packets={} bytes={} symbols_before={} symbols_after={}",
+            flush_report.socket_flushes,
+            flush_report.native_flushes,
+            flush_report.gso_flushes,
+            flush_report.fallback_flushes,
+            flush_report.partial_flushes,
+            flush_report.packets_processed,
+            flush_report.bytes_processed,
+            symbols_before_flush,
+            *symbols_sent,
+        );
         if send_progress_crossed_yield_boundary(symbols_before_flush, *symbols_sent) {
             crate::runtime::yield_now().await;
         }
-        Ok(())
+        Ok(flush_report)
     }
 
     #[cfg(test)]
@@ -1436,6 +1491,71 @@ struct RqRoundComplete {
     round_symbols_sent: u64,
 }
 
+/// Sender-side UDP batch acceleration counters for the ATP-RQ symbol plane.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UdpSendAccelerationReport {
+    /// Logical per-socket batch flushes issued by the RQ sender.
+    pub flushes: u64,
+    /// Symbol datagrams reported as processed by the UDP layer.
+    pub datagrams: u64,
+    /// Payload bytes reported as processed by the UDP layer.
+    pub payload_bytes: u64,
+    /// Flushes that used an OS-native send batching syscall.
+    pub native_batch_flushes: u64,
+    /// Datagrams processed by flushes that used an OS-native send batching syscall.
+    pub native_batch_datagrams: u64,
+    /// Flushes that used UDP Generic Segmentation Offload.
+    pub gso_flushes: u64,
+    /// Datagrams processed by flushes that used UDP Generic Segmentation Offload.
+    pub gso_datagrams: u64,
+    /// Flushes that used the portable fallback loop for at least part of the batch.
+    pub fallback_flushes: u64,
+    /// Datagrams processed by flushes that used the portable fallback loop.
+    pub fallback_datagrams: u64,
+    /// Flushes that returned fewer datagrams than the sender queued.
+    pub partial_flushes: u64,
+    /// Flushes that surfaced a UDP-layer error string.
+    pub error_flushes: u64,
+}
+
+impl UdpSendAccelerationReport {
+    fn observe_flush_report(&mut self, report: RqSendBatchFlushReport) {
+        self.flushes = self
+            .flushes
+            .saturating_add(u64::try_from(report.socket_flushes).unwrap_or(u64::MAX));
+        self.datagrams = self
+            .datagrams
+            .saturating_add(u64::try_from(report.packets_processed).unwrap_or(u64::MAX));
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(u64::try_from(report.bytes_processed).unwrap_or(u64::MAX));
+        self.native_batch_flushes = self
+            .native_batch_flushes
+            .saturating_add(u64::try_from(report.native_flushes).unwrap_or(u64::MAX));
+        self.native_batch_datagrams = self
+            .native_batch_datagrams
+            .saturating_add(u64::try_from(report.native_packets).unwrap_or(u64::MAX));
+        self.gso_flushes = self
+            .gso_flushes
+            .saturating_add(u64::try_from(report.gso_flushes).unwrap_or(u64::MAX));
+        self.gso_datagrams = self
+            .gso_datagrams
+            .saturating_add(u64::try_from(report.gso_packets).unwrap_or(u64::MAX));
+        self.fallback_flushes = self
+            .fallback_flushes
+            .saturating_add(u64::try_from(report.fallback_flushes).unwrap_or(u64::MAX));
+        self.fallback_datagrams = self
+            .fallback_datagrams
+            .saturating_add(u64::try_from(report.fallback_packets).unwrap_or(u64::MAX));
+        self.partial_flushes = self
+            .partial_flushes
+            .saturating_add(u64::try_from(report.partial_flushes).unwrap_or(u64::MAX));
+        self.error_flushes = self
+            .error_flushes
+            .saturating_add(u64::try_from(report.error_flushes).unwrap_or(u64::MAX));
+    }
+}
+
 /// Receiver → sender fountain feedback: entries still needing more symbols.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct NeedMore {
@@ -1513,6 +1633,8 @@ pub struct SendReport {
     pub merkle_root_hex: String,
     /// The receiver's receipt.
     pub receipt: ReceiveReceipt,
+    /// UDP send acceleration counters observed on the RQ symbol plane.
+    pub udp_send_acceleration: UdpSendAccelerationReport,
     /// Peer control-plane address.
     pub peer: SocketAddr,
 }
@@ -3363,6 +3485,7 @@ pub async fn send_path(
     let mut dropper = 0u32;
     let mut feedback_rounds = 0u32;
     let mut source_fec_fallback_active = false;
+    let mut udp_send_acceleration = UdpSendAccelerationReport::default();
 
     // Parallel per-block encode is on by default, but only while the transfer is small enough that
     // the receiver's recv buffer can absorb the burst (see PARALLEL_ENCODE_MAX_BYTES); larger
@@ -3392,6 +3515,7 @@ pub async fn send_path(
         &mut pacer,
         &round_tuning,
         symbol_auth.as_ref(),
+        &mut udp_send_acceleration,
         /* with_source */ true,
         parallel_encode,
     )
@@ -3438,6 +3562,20 @@ pub async fn send_path(
                             .unwrap_or_else(|| "receiver did not commit".to_string()),
                     ));
                 }
+                rqtrace!(
+                    "sender: udp_send_acceleration flushes={} datagrams={} payload_bytes={} native_flushes={} native_datagrams={} gso_flushes={} gso_datagrams={} fallback_flushes={} fallback_datagrams={} partial_flushes={} error_flushes={}",
+                    udp_send_acceleration.flushes,
+                    udp_send_acceleration.datagrams,
+                    udp_send_acceleration.payload_bytes,
+                    udp_send_acceleration.native_batch_flushes,
+                    udp_send_acceleration.native_batch_datagrams,
+                    udp_send_acceleration.gso_flushes,
+                    udp_send_acceleration.gso_datagrams,
+                    udp_send_acceleration.fallback_flushes,
+                    udp_send_acceleration.fallback_datagrams,
+                    udp_send_acceleration.partial_flushes,
+                    udp_send_acceleration.error_flushes,
+                );
                 return Ok(SendReport {
                     transfer_id,
                     bytes_sent: total_bytes,
@@ -3446,6 +3584,7 @@ pub async fn send_path(
                     feedback_rounds,
                     merkle_root_hex,
                     receipt,
+                    udp_send_acceleration,
                     peer,
                 });
             }
@@ -3545,6 +3684,7 @@ pub async fn send_path(
                         &mut pacer,
                         &round_tuning,
                         symbol_auth.as_ref(),
+                        &mut udp_send_acceleration,
                         /* with_source */ false,
                         parallel_encode,
                     )
@@ -3567,6 +3707,7 @@ pub async fn send_path(
                         &config,
                         &mut pacer,
                         symbol_auth.as_ref(),
+                        &mut udp_send_acceleration,
                     )
                     .await?;
                     if source_fec_fallback_active {
@@ -3585,6 +3726,7 @@ pub async fn send_path(
                             &mut pacer,
                             &round_tuning,
                             symbol_auth.as_ref(),
+                            &mut udp_send_acceleration,
                             /* with_source */ false,
                             parallel_encode,
                         )
@@ -3767,6 +3909,7 @@ async fn spray_round<S>(
     pacer: &mut RqSprayPacer,
     round_tuning: &RqRoundTuning,
     symbol_auth: Option<&SecurityContext>,
+    udp_send_acceleration: &mut UdpSendAccelerationReport,
     with_source: bool,
     parallel_encode: bool,
 ) -> Result<(), RqError>
@@ -3857,6 +4000,7 @@ where
                         config,
                         pacer,
                         symbol_auth,
+                        udp_send_acceleration,
                     )
                     .await?;
                     enc.repair_cursors[block_index] = target_repair;
@@ -3941,6 +4085,7 @@ where
                             pacer,
                             symbol_auth,
                             &mut send_batch,
+                            udp_send_acceleration,
                         )
                         .await?;
                         debug_assert!(ring.is_empty());
@@ -3971,12 +4116,14 @@ where
                             pacer,
                             symbol_auth,
                             &mut send_batch,
+                            udp_send_acceleration,
                         )
                         .await?;
                         debug_assert!(ring.is_empty());
                     }
                 }
-                send_batch.flush(sockets, symbols_sent).await?;
+                let report = send_batch.flush(sockets, symbols_sent).await?;
+                udp_send_acceleration.observe_flush_report(report);
                 service_rq_spray_control(cx, control, adaptive).await?;
                 enc.repair_cursors[block_index] = target_repair;
             }
@@ -4100,6 +4247,7 @@ async fn spray_source_requests<S>(
     config: &RqConfig,
     pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
+    udp_send_acceleration: &mut UdpSendAccelerationReport,
 ) -> Result<(), RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -4132,10 +4280,12 @@ where
             pacer,
             symbol_auth,
             &mut send_batch,
+            udp_send_acceleration,
         )
         .await?;
     }
-    send_batch.flush(sockets, symbols_sent).await?;
+    let report = send_batch.flush(sockets, symbols_sent).await?;
+    udp_send_acceleration.observe_flush_report(report);
     service_rq_spray_control(cx, control, adaptive).await?;
     rqtrace!(
         "sender: retransmitted {} requested source symbols",
@@ -4159,6 +4309,7 @@ async fn send_symbol_datagrams<S>(
     config: &RqConfig,
     pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
+    udp_send_acceleration: &mut UdpSendAccelerationReport,
 ) -> Result<(), RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -4180,10 +4331,12 @@ where
             pacer,
             symbol_auth,
             &mut send_batch,
+            udp_send_acceleration,
         )
         .await?;
     }
-    send_batch.flush(sockets, symbols_sent).await?;
+    let report = send_batch.flush(sockets, symbols_sent).await?;
+    udp_send_acceleration.observe_flush_report(report);
     service_rq_spray_control(cx, control, adaptive).await
 }
 
@@ -4203,6 +4356,7 @@ async fn queue_symbol_datagram<S>(
     pacer: &mut RqSprayPacer,
     symbol_auth: Option<&SecurityContext>,
     send_batch: &mut RqPendingSendBatch,
+    udp_send_acceleration: &mut UdpSendAccelerationReport,
 ) -> Result<(), RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -4224,7 +4378,8 @@ where
     *rr = rr.wrapping_add(1);
     send_batch.push(socket_index, dgram);
     if send_batch.should_flush() {
-        send_batch.flush(sockets, symbols_sent).await?;
+        let report = send_batch.flush(sockets, symbols_sent).await?;
+        udp_send_acceleration.observe_flush_report(report);
         service_rq_spray_control(cx, control, adaptive).await?;
     }
     Ok(())
@@ -8011,6 +8166,57 @@ mod tests {
         assert!(batch.should_flush());
         assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET);
         assert_eq!(batch.socket_batch_len(1), 0);
+    }
+
+    #[test]
+    fn rq_default_authenticated_datagrams_plan_as_one_gso_super_packet() {
+        let dst_addr: SocketAddr = "127.0.0.1:9000".parse().expect("socket address");
+        let ctx = SecurityContext::for_testing(77);
+        let payloads = (0..RQ_SEND_BATCH_PER_SOCKET)
+            .map(|esi| {
+                let sym = Symbol::new(
+                    SymbolId::new(
+                        ObjectId::new(1, 2),
+                        0,
+                        u32::try_from(esi).expect("test ESI fits u32"),
+                    ),
+                    vec![u8::try_from(esi).unwrap_or(u8::MAX); usize::from(DEFAULT_SYMBOL_SIZE)],
+                    SymbolKind::Source,
+                );
+                let auth = ctx.sign_symbol(&sym);
+                encode_symbol_datagram(0xABCD, 0, &sym, Some(auth.tag()))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            payloads.iter().all(|payload| {
+                payload.len() == AUTH_DGRAM_HEADER + usize::from(DEFAULT_SYMBOL_SIZE)
+            }),
+            "default authenticated RQ datagrams must keep fixed GSO segment size",
+        );
+
+        let packets = payloads
+            .iter()
+            .map(|payload| crate::net::UdpOutboundDatagram { dst_addr, payload })
+            .collect::<Vec<_>>();
+        let plan = crate::net::UdpSendBatchPlan::for_packets(
+            &packets,
+            crate::net::UdpSendAccelerationCapabilities {
+                sendmmsg: crate::net::UdpCapability::Supported,
+                gso: crate::net::UdpCapability::Supported,
+                max_sendmmsg_batch: crate::net::UDP_MAX_SENDMMSG_BATCH,
+                max_gso_segments: crate::net::UDP_MAX_GSO_SEGMENTS,
+            },
+            crate::net::UdpSendBatchStrategy::default(),
+        );
+
+        assert_eq!(plan.path, crate::net::UdpSendBatchPath::Gso);
+        assert_eq!(plan.estimated_syscalls, 1);
+        assert_eq!(plan.gso_segments_per_packet, Some(RQ_SEND_BATCH_PER_SOCKET));
+        assert_eq!(
+            plan.gso_segment_bytes,
+            Some(AUTH_DGRAM_HEADER + usize::from(DEFAULT_SYMBOL_SIZE))
+        );
     }
 
     #[test]

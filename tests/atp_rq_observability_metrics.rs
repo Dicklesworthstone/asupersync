@@ -68,6 +68,7 @@ fn send_report_carries_declared_g3_metrics() {
         feedback_rounds: 2,
         merkle_root_hex: "00".repeat(32),
         receipt,
+        udp_send_acceleration: Default::default(),
         peer: "127.0.0.1:8472".parse().unwrap(),
     };
 

@@ -874,6 +874,92 @@ impl UdpSendBatchPlan {
             gso_segments_per_packet: None,
         }
     }
+
+    /// Build a deterministic send-batch plan for payloads sent on an already
+    /// connected UDP socket.
+    #[must_use]
+    pub fn for_connected_payloads(
+        payloads: &[&[u8]],
+        capabilities: UdpSendAccelerationCapabilities,
+        strategy: UdpSendBatchStrategy,
+    ) -> Self {
+        let strategy = strategy.clamped();
+        let max_sendmmsg_batch = strategy
+            .max_sendmmsg_batch
+            .min(capabilities.max_sendmmsg_batch.max(1));
+        let max_gso_segments = strategy
+            .max_gso_segments
+            .min(capabilities.max_gso_segments.max(1));
+        let datagrams = payloads.len();
+        let payload_bytes = payloads.iter().map(|payload| payload.len()).sum();
+
+        if payloads.is_empty() {
+            return Self {
+                path: UdpSendBatchPath::Empty,
+                datagrams,
+                payload_bytes,
+                estimated_syscalls: 0,
+                gso_segment_bytes: None,
+                gso_segments_per_packet: None,
+            };
+        }
+
+        let gso_segment_bytes = if datagrams > 1
+            && strategy.prefer_gso
+            && capability_permits_gso(capabilities.gso, strategy.allow_unknown_gso)
+        {
+            fixed_gso_payload_segment_bytes(payloads, strategy.gso_segment_bytes)
+        } else {
+            None
+        };
+
+        if let Some(gso_segment_bytes) = gso_segment_bytes {
+            let segments_per_packet = datagrams.min(max_gso_segments);
+            let super_packets = div_ceil_usize(datagrams, segments_per_packet);
+            let can_sendmmsg = strategy.prefer_sendmmsg
+                && matches!(capabilities.sendmmsg, UdpCapability::Supported)
+                && super_packets > 1;
+            let path = if can_sendmmsg {
+                UdpSendBatchPath::GsoSendmmsg
+            } else {
+                UdpSendBatchPath::Gso
+            };
+            let estimated_syscalls = if can_sendmmsg {
+                div_ceil_usize(super_packets, max_sendmmsg_batch)
+            } else {
+                super_packets
+            };
+
+            return Self {
+                path,
+                datagrams,
+                payload_bytes,
+                estimated_syscalls,
+                gso_segment_bytes: Some(gso_segment_bytes),
+                gso_segments_per_packet: Some(segments_per_packet),
+            };
+        }
+
+        if strategy.prefer_sendmmsg && matches!(capabilities.sendmmsg, UdpCapability::Supported) {
+            return Self {
+                path: UdpSendBatchPath::Sendmmsg,
+                datagrams,
+                payload_bytes,
+                estimated_syscalls: div_ceil_usize(datagrams, max_sendmmsg_batch),
+                gso_segment_bytes: None,
+                gso_segments_per_packet: None,
+            };
+        }
+
+        Self {
+            path: UdpSendBatchPath::PortableLoop,
+            datagrams,
+            payload_bytes,
+            estimated_syscalls: datagrams,
+            gso_segment_bytes: None,
+            gso_segments_per_packet: None,
+        }
+    }
 }
 
 #[inline]
@@ -915,6 +1001,23 @@ fn fixed_gso_segment_bytes(
 
 #[inline]
 #[must_use]
+fn fixed_gso_payload_segment_bytes(payloads: &[&[u8]], max_segment_bytes: usize) -> Option<usize> {
+    let segment_bytes = payloads.first()?.len();
+    if segment_bytes == 0
+        || segment_bytes > max_segment_bytes
+        || segment_bytes > usize::from(u16::MAX)
+    {
+        return None;
+    }
+
+    payloads
+        .iter()
+        .all(|payload| payload.len() == segment_bytes)
+        .then_some(segment_bytes)
+}
+
+#[inline]
+#[must_use]
 fn div_ceil_usize(value: usize, divisor: usize) -> usize {
     value.div_ceil(divisor.max(1))
 }
@@ -943,6 +1046,24 @@ impl UdpGsoSuperPacket {
         Self {
             dst_addr: first.dst_addr,
             datagram_count: packets.len(),
+            payload_bytes,
+            buffer,
+        }
+    }
+
+    fn from_connected_payloads(payloads: &[&[u8]], dst_addr: SocketAddr) -> Self {
+        let _ = payloads
+            .first()
+            .expect("GSO super-packet requires at least one datagram");
+        let payload_bytes = payloads.iter().map(|payload| payload.len()).sum();
+        let mut buffer = Vec::with_capacity(payload_bytes);
+        for payload in payloads {
+            buffer.extend_from_slice(payload);
+        }
+
+        Self {
+            dst_addr,
+            datagram_count: payloads.len(),
             payload_bytes,
             buffer,
         }
@@ -976,6 +1097,31 @@ fn native_sendmmsg_addrs_for_packets(
     target_os = "netbsd"
 ))]
 type NativeSendmmsgAddr = nix::sys::socket::SockaddrStorage;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+enum NativeSendBatchAttempt {
+    Sent(UdpBatchIoReport),
+    Unavailable,
+    WouldBlock,
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    )
+))]
+#[inline]
+#[must_use]
+fn native_send_error_would_block(error: nix::errno::Errno) -> bool {
+    error == nix::errno::Errno::EAGAIN
+        || error == nix::errno::Errno::EWOULDBLOCK
+        || error == nix::errno::Errno::ENOBUFS
+}
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn native_sendmmsg_addrs_for_gso_packets(
@@ -1533,6 +1679,21 @@ impl UdpSocket {
         UdpSendBatchPlan::for_packets(packets, self.send_acceleration_capabilities(), strategy)
     }
 
+    /// Plan the send-side path for payloads sent to this socket's connected
+    /// peer.
+    #[must_use]
+    pub fn plan_connected_send_batch(
+        &self,
+        payloads: &[&[u8]],
+        strategy: UdpSendBatchStrategy,
+    ) -> UdpSendBatchPlan {
+        UdpSendBatchPlan::for_connected_payloads(
+            payloads,
+            self.send_acceleration_capabilities(),
+            strategy,
+        )
+    }
+
     /// Apply bounded receive/send buffer tuning and report platform-applied sizes.
     pub fn tune_buffers(&self, config: UdpBufferConfig) -> io::Result<UdpBufferTuneReport> {
         #[cfg(target_arch = "wasm32")]
@@ -1571,6 +1732,15 @@ impl UdpSocket {
             .await
     }
 
+    /// Send a batch of payloads to this socket's connected peer.
+    pub async fn send_connected_batch(
+        &mut self,
+        payloads: &[&[u8]],
+    ) -> io::Result<UdpBatchIoReport> {
+        self.send_connected_batch_with_strategy(payloads, UdpSendBatchStrategy::default())
+            .await
+    }
+
     /// Send a batch of datagrams using an explicit send-acceleration strategy.
     pub async fn send_batch_to_with_strategy(
         &mut self,
@@ -1586,22 +1756,89 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(native_report) =
-                self.try_send_batch_to_native(packets, strategy.clamped())?
-            {
-                if native_report.packets_processed == packets.len() {
-                    return Ok(native_report);
-                }
+            let strategy = strategy.clamped();
+            loop {
+                match self.try_send_batch_to_native(packets, strategy)? {
+                    NativeSendBatchAttempt::Sent(native_report) => {
+                        if native_report.packets_processed == packets.len() {
+                            return Ok(native_report);
+                        }
 
-                let tail = &packets[native_report.packets_processed..];
-                return self
-                    .finish_send_batch_after_native_partial(native_report, tail)
-                    .await;
+                        let tail = &packets[native_report.packets_processed..];
+                        return self
+                            .finish_send_batch_after_native_partial(native_report, tail)
+                            .await;
+                    }
+                    NativeSendBatchAttempt::WouldBlock => {
+                        self.wait_writable_for_native_batch().await?;
+                    }
+                    NativeSendBatchAttempt::Unavailable => break,
+                }
             }
 
             self.send_batch_to_portable(packets, packets.len() > 1)
                 .await
         }
+    }
+
+    /// Send connected payloads using an explicit send-acceleration strategy.
+    pub async fn send_connected_batch_with_strategy(
+        &mut self,
+        payloads: &[&[u8]],
+        strategy: UdpSendBatchStrategy,
+    ) -> io::Result<UdpBatchIoReport> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = payloads;
+            let _ = strategy;
+            browser_udp_unsupported_result("UdpSocket::send_connected_batch")
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner.peer_addr()?;
+            let strategy = strategy.clamped();
+            loop {
+                match self.try_send_connected_batch_to_native(payloads, strategy)? {
+                    NativeSendBatchAttempt::Sent(native_report) => {
+                        if native_report.packets_processed == payloads.len() {
+                            return Ok(native_report);
+                        }
+
+                        let tail = &payloads[native_report.packets_processed..];
+                        return self
+                            .finish_connected_batch_after_native_partial(native_report, tail)
+                            .await;
+                    }
+                    NativeSendBatchAttempt::WouldBlock => {
+                        self.wait_writable_for_native_batch().await?;
+                    }
+                    NativeSendBatchAttempt::Unavailable => break,
+                }
+            }
+
+            self.send_connected_batch_portable(payloads, payloads.len() > 1)
+                .await
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn wait_writable_for_native_batch(&mut self) -> io::Result<()> {
+        // Keep native sendmmsg/GSO eligible after transient UDP backpressure.
+        // Falling straight through to the portable loop would reintroduce one
+        // syscall per datagram on the connected ATP-RQ spray path.
+        let mut armed = false;
+        std::future::poll_fn(|cx| {
+            if armed {
+                return Poll::Ready(Ok(()));
+            }
+            armed = true;
+            match self.register_interest(cx, Interest::WRITABLE) {
+                Ok(()) => Poll::Pending,
+                Err(err) => Poll::Ready(Err(err)),
+            }
+        })
+        .await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1615,6 +1852,35 @@ impl UdpSocket {
         }
 
         match self.send_batch_to_portable(tail, true).await {
+            Ok(tail_report) => {
+                report.packets_processed += tail_report.packets_processed;
+                report.bytes_processed += tail_report.bytes_processed;
+                report.fallback_used |= tail_report.fallback_used;
+                report.native_send_batch_used |= tail_report.native_send_batch_used;
+                report.gso_send_used |= tail_report.gso_send_used;
+                report.error = tail_report.error;
+                Ok(report)
+            }
+            Err(err) if report.packets_processed > 0 => {
+                report.fallback_used = true;
+                report.error = Some(err.to_string());
+                Ok(report)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn finish_connected_batch_after_native_partial(
+        &mut self,
+        mut report: UdpBatchIoReport,
+        tail: &[&[u8]],
+    ) -> io::Result<UdpBatchIoReport> {
+        if tail.is_empty() {
+            return Ok(report);
+        }
+
+        match self.send_connected_batch_portable(tail, true).await {
             Ok(tail_report) => {
                 report.packets_processed += tail_report.packets_processed;
                 report.bytes_processed += tail_report.bytes_processed;
@@ -1661,6 +1927,34 @@ impl UdpSocket {
         Ok(report)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn send_connected_batch_portable(
+        &mut self,
+        payloads: &[&[u8]],
+        fallback_used: bool,
+    ) -> io::Result<UdpBatchIoReport> {
+        let mut report = UdpBatchIoReport {
+            fallback_used,
+            ..UdpBatchIoReport::default()
+        };
+
+        for payload in payloads {
+            match self.send(payload).await {
+                Ok(sent) => {
+                    report.packets_processed += 1;
+                    report.bytes_processed += sent;
+                }
+                Err(err) if report.packets_processed == 0 => return Err(err),
+                Err(err) => {
+                    report.error = Some(err.to_string());
+                    break;
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
     #[cfg(all(
         not(target_arch = "wasm32"),
         any(
@@ -1674,9 +1968,9 @@ impl UdpSocket {
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
         strategy: UdpSendBatchStrategy,
-    ) -> io::Result<Option<UdpBatchIoReport>> {
+    ) -> io::Result<NativeSendBatchAttempt> {
         if packets.len() <= 1 {
-            return Ok(None);
+            return Ok(NativeSendBatchAttempt::Unavailable);
         }
         if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
@@ -1685,7 +1979,7 @@ impl UdpSocket {
         let connected_peer = self.inner.peer_addr().ok();
         if let Some(peer_addr) = connected_peer {
             if !packets.iter().all(|packet| packet.dst_addr == peer_addr) {
-                return Ok(None);
+                return Ok(NativeSendBatchAttempt::Unavailable);
             }
         }
 
@@ -1696,16 +1990,72 @@ impl UdpSocket {
                 plan.path,
                 UdpSendBatchPath::Gso | UdpSendBatchPath::GsoSendmmsg
             ) {
-                if let Some(report) =
-                    self.try_send_gso_batch_to_native(packets, &plan, connected_peer)?
-                {
-                    return Ok(Some(report));
+                match self.try_send_gso_batch_to_native(packets, &plan, connected_peer)? {
+                    NativeSendBatchAttempt::Sent(report) => {
+                        return Ok(NativeSendBatchAttempt::Sent(report));
+                    }
+                    NativeSendBatchAttempt::WouldBlock => {
+                        return Ok(NativeSendBatchAttempt::WouldBlock);
+                    }
+                    NativeSendBatchAttempt::Unavailable => {
+                        self.gso_demoted = true;
+                    }
                 }
-                self.gso_demoted = true;
             }
         }
 
         self.try_sendmmsg_batch_to_native(packets, connected_peer)
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd"
+        )
+    ))]
+    fn try_send_connected_batch_to_native(
+        &mut self,
+        payloads: &[&[u8]],
+        strategy: UdpSendBatchStrategy,
+    ) -> io::Result<NativeSendBatchAttempt> {
+        if payloads.len() <= 1 {
+            return Ok(NativeSendBatchAttempt::Unavailable);
+        }
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+
+        let connected_peer = self.inner.peer_addr()?;
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            let plan = self.plan_connected_send_batch(payloads, strategy);
+            if matches!(
+                plan.path,
+                UdpSendBatchPath::Gso | UdpSendBatchPath::GsoSendmmsg
+            ) {
+                match self.try_send_connected_gso_batch_to_native(
+                    payloads,
+                    &plan,
+                    connected_peer,
+                )? {
+                    NativeSendBatchAttempt::Sent(report) => {
+                        return Ok(NativeSendBatchAttempt::Sent(report));
+                    }
+                    NativeSendBatchAttempt::WouldBlock => {
+                        return Ok(NativeSendBatchAttempt::WouldBlock);
+                    }
+                    NativeSendBatchAttempt::Unavailable => {
+                        self.gso_demoted = true;
+                    }
+                }
+            }
+        }
+
+        self.try_send_connected_sendmmsg_batch_to_native(payloads)
     }
 
     #[cfg(all(
@@ -1717,18 +2067,18 @@ impl UdpSocket {
         packets: &[UdpOutboundDatagram<'_>],
         plan: &UdpSendBatchPlan,
         connected_peer: Option<SocketAddr>,
-    ) -> io::Result<Option<UdpBatchIoReport>> {
+    ) -> io::Result<NativeSendBatchAttempt> {
         let Some(segment_bytes) = plan
             .gso_segment_bytes
             .and_then(|bytes| u16::try_from(bytes).ok())
         else {
-            return Ok(None);
+            return Ok(NativeSendBatchAttempt::Unavailable);
         };
         let Some(segments_per_packet) = plan.gso_segments_per_packet else {
-            return Ok(None);
+            return Ok(NativeSendBatchAttempt::Unavailable);
         };
         if segments_per_packet == 0 {
-            return Ok(None);
+            return Ok(NativeSendBatchAttempt::Unavailable);
         }
 
         let super_packets = packets
@@ -1763,10 +2113,15 @@ impl UdpSocket {
                 nix::sys::socket::MsgFlags::MSG_DONTWAIT,
             ) {
                 Ok(results) => results,
-                Err(_) if report.packets_processed == 0 => return Ok(None),
+                Err(err) if native_send_error_would_block(err) && report.packets_processed == 0 => {
+                    return Ok(NativeSendBatchAttempt::WouldBlock);
+                }
+                Err(_) if report.packets_processed == 0 => {
+                    return Ok(NativeSendBatchAttempt::Unavailable);
+                }
                 Err(err) => {
                     report.error = Some(err.to_string());
-                    return Ok(Some(report));
+                    return Ok(NativeSendBatchAttempt::Sent(report));
                 }
             };
 
@@ -1777,7 +2132,7 @@ impl UdpSocket {
                         "native UDP GSO sendmmsg sent {} bytes for {} byte super-packet",
                         result.bytes, super_packet.payload_bytes
                     ));
-                    return Ok(Some(report));
+                    return Ok(NativeSendBatchAttempt::Sent(report));
                 }
                 sent_in_chunk += 1;
                 report.packets_processed += super_packet.datagram_count;
@@ -1785,16 +2140,110 @@ impl UdpSocket {
             }
             if sent_in_chunk < chunk.len() {
                 if sent_in_chunk == 0 && report.packets_processed == 0 {
-                    return Ok(None);
+                    return Ok(NativeSendBatchAttempt::WouldBlock);
                 }
                 if sent_in_chunk == 0 {
                     report.error = Some("native sendmmsg made no progress".to_string());
                 }
-                return Ok(Some(report));
+                return Ok(NativeSendBatchAttempt::Sent(report));
             }
         }
 
-        Ok(Some(report))
+        Ok(NativeSendBatchAttempt::Sent(report))
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(target_os = "linux", target_os = "android")
+    ))]
+    fn try_send_connected_gso_batch_to_native(
+        &mut self,
+        payloads: &[&[u8]],
+        plan: &UdpSendBatchPlan,
+        connected_peer: SocketAddr,
+    ) -> io::Result<NativeSendBatchAttempt> {
+        let Some(segment_bytes) = plan
+            .gso_segment_bytes
+            .and_then(|bytes| u16::try_from(bytes).ok())
+        else {
+            return Ok(NativeSendBatchAttempt::Unavailable);
+        };
+        let Some(segments_per_packet) = plan.gso_segments_per_packet else {
+            return Ok(NativeSendBatchAttempt::Unavailable);
+        };
+        if segments_per_packet == 0 {
+            return Ok(NativeSendBatchAttempt::Unavailable);
+        }
+
+        let super_packets = payloads
+            .chunks(segments_per_packet)
+            .map(|chunk| UdpGsoSuperPacket::from_connected_payloads(chunk, connected_peer))
+            .collect::<Vec<_>>();
+
+        let mut report = UdpBatchIoReport {
+            native_send_batch_used: true,
+            gso_send_used: true,
+            ..UdpBatchIoReport::default()
+        };
+        for chunk in super_packets.chunks(UDP_MAX_SENDMMSG_BATCH) {
+            let iovs = chunk
+                .iter()
+                .map(|packet| [IoSlice::new(packet.buffer.as_slice())])
+                .collect::<Vec<_>>();
+            let addrs = vec![None; chunk.len()];
+            let mut headers = nix::sys::socket::MultiHeaders::<NativeSendmmsgAddr>::preallocate(
+                chunk.len(),
+                Some(nix::cmsg_space!(u16)),
+            );
+            let cmsgs = [nix::sys::socket::ControlMessage::UdpGsoSegments(
+                &segment_bytes,
+            )];
+            let results = match nix::sys::socket::sendmmsg(
+                self.inner.as_raw_fd(),
+                &mut headers,
+                &iovs,
+                addrs,
+                cmsgs,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(results) => results,
+                Err(err) if native_send_error_would_block(err) && report.packets_processed == 0 => {
+                    return Ok(NativeSendBatchAttempt::WouldBlock);
+                }
+                Err(_) if report.packets_processed == 0 => {
+                    return Ok(NativeSendBatchAttempt::Unavailable);
+                }
+                Err(err) => {
+                    report.error = Some(err.to_string());
+                    return Ok(NativeSendBatchAttempt::Sent(report));
+                }
+            };
+
+            let mut sent_in_chunk = 0usize;
+            for (result, super_packet) in results.zip(chunk.iter()) {
+                if result.bytes != super_packet.payload_bytes {
+                    report.error = Some(format!(
+                        "native connected UDP GSO sendmmsg sent {} bytes for {} byte super-packet",
+                        result.bytes, super_packet.payload_bytes
+                    ));
+                    return Ok(NativeSendBatchAttempt::Sent(report));
+                }
+                sent_in_chunk += 1;
+                report.packets_processed += super_packet.datagram_count;
+                report.bytes_processed += result.bytes;
+            }
+            if sent_in_chunk < chunk.len() {
+                if sent_in_chunk == 0 && report.packets_processed == 0 {
+                    return Ok(NativeSendBatchAttempt::WouldBlock);
+                }
+                if sent_in_chunk == 0 {
+                    report.error = Some("native connected sendmmsg made no progress".to_string());
+                }
+                return Ok(NativeSendBatchAttempt::Sent(report));
+            }
+        }
+
+        Ok(NativeSendBatchAttempt::Sent(report))
     }
 
     #[cfg(all(
@@ -1810,7 +2259,7 @@ impl UdpSocket {
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
         connected_peer: Option<SocketAddr>,
-    ) -> io::Result<Option<UdpBatchIoReport>> {
+    ) -> io::Result<NativeSendBatchAttempt> {
         let mut report = UdpBatchIoReport {
             native_send_batch_used: true,
             ..UdpBatchIoReport::default()
@@ -1835,10 +2284,15 @@ impl UdpSocket {
                 nix::sys::socket::MsgFlags::MSG_DONTWAIT,
             ) {
                 Ok(results) => results,
-                Err(_) if report.packets_processed == 0 => return Ok(None),
+                Err(err) if native_send_error_would_block(err) && report.packets_processed == 0 => {
+                    return Ok(NativeSendBatchAttempt::WouldBlock);
+                }
+                Err(_) if report.packets_processed == 0 => {
+                    return Ok(NativeSendBatchAttempt::Unavailable);
+                }
                 Err(err) => {
                     report.error = Some(err.to_string());
-                    return Ok(Some(report));
+                    return Ok(NativeSendBatchAttempt::Sent(report));
                 }
             };
 
@@ -1850,16 +2304,85 @@ impl UdpSocket {
             }
             if sent_in_chunk < chunk.len() {
                 if sent_in_chunk == 0 && report.packets_processed == 0 {
-                    return Ok(None);
+                    return Ok(NativeSendBatchAttempt::WouldBlock);
                 }
                 if sent_in_chunk == 0 {
                     report.error = Some("native sendmmsg made no progress".to_string());
                 }
-                return Ok(Some(report));
+                return Ok(NativeSendBatchAttempt::Sent(report));
             }
         }
 
-        Ok(Some(report))
+        Ok(NativeSendBatchAttempt::Sent(report))
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd"
+        )
+    ))]
+    fn try_send_connected_sendmmsg_batch_to_native(
+        &mut self,
+        payloads: &[&[u8]],
+    ) -> io::Result<NativeSendBatchAttempt> {
+        let mut report = UdpBatchIoReport {
+            native_send_batch_used: true,
+            ..UdpBatchIoReport::default()
+        };
+        for chunk in payloads.chunks(UDP_MAX_SENDMMSG_BATCH) {
+            let iovs = chunk
+                .iter()
+                .map(|payload| [IoSlice::new(payload)])
+                .collect::<Vec<_>>();
+            let addrs = vec![None; chunk.len()];
+            let mut headers = nix::sys::socket::MultiHeaders::<NativeSendmmsgAddr>::preallocate(
+                chunk.len(),
+                None,
+            );
+            let cmsgs: &[nix::sys::socket::ControlMessage<'_>] = &[];
+            let results = match nix::sys::socket::sendmmsg(
+                self.inner.as_raw_fd(),
+                &mut headers,
+                &iovs,
+                addrs,
+                cmsgs,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(results) => results,
+                Err(err) if native_send_error_would_block(err) && report.packets_processed == 0 => {
+                    return Ok(NativeSendBatchAttempt::WouldBlock);
+                }
+                Err(_) if report.packets_processed == 0 => {
+                    return Ok(NativeSendBatchAttempt::Unavailable);
+                }
+                Err(err) => {
+                    report.error = Some(err.to_string());
+                    return Ok(NativeSendBatchAttempt::Sent(report));
+                }
+            };
+
+            let mut sent_in_chunk = 0usize;
+            for result in results {
+                sent_in_chunk += 1;
+                report.packets_processed += 1;
+                report.bytes_processed += result.bytes;
+            }
+            if sent_in_chunk < chunk.len() {
+                if sent_in_chunk == 0 && report.packets_processed == 0 {
+                    return Ok(NativeSendBatchAttempt::WouldBlock);
+                }
+                if sent_in_chunk == 0 {
+                    report.error = Some("native connected sendmmsg made no progress".to_string());
+                }
+                return Ok(NativeSendBatchAttempt::Sent(report));
+            }
+        }
+
+        Ok(NativeSendBatchAttempt::Sent(report))
     }
 
     #[cfg(all(
@@ -1875,10 +2398,29 @@ impl UdpSocket {
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
         strategy: UdpSendBatchStrategy,
-    ) -> io::Result<Option<UdpBatchIoReport>> {
+    ) -> io::Result<NativeSendBatchAttempt> {
         let _ = packets;
         let _ = strategy;
-        Ok(None)
+        Ok(NativeSendBatchAttempt::Unavailable)
+    }
+
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "netbsd"
+        ))
+    ))]
+    fn try_send_connected_batch_to_native(
+        &mut self,
+        payloads: &[&[u8]],
+        strategy: UdpSendBatchStrategy,
+    ) -> io::Result<NativeSendBatchAttempt> {
+        let _ = payloads;
+        let _ = strategy;
+        Ok(NativeSendBatchAttempt::Unavailable)
     }
 
     /// Receive one readiness-driven packet, then drain any immediately-ready packets.
@@ -2270,6 +2812,56 @@ mod tests {
     }
 
     #[test]
+    fn udp_connected_send_batch_plan_keeps_rq_gso_window_eligible() {
+        let payloads = vec![vec![7; UDP_DEFAULT_GSO_SEGMENT_BYTES]; UDP_MAX_GSO_SEGMENTS];
+        let payload_refs = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+        let plan = UdpSendBatchPlan::for_connected_payloads(
+            &payload_refs,
+            UdpSendAccelerationCapabilities {
+                sendmmsg: UdpCapability::Supported,
+                gso: UdpCapability::Supported,
+                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+            },
+            UdpSendBatchStrategy::default(),
+        );
+
+        assert_eq!(plan.path, UdpSendBatchPath::Gso);
+        assert_eq!(plan.datagrams, UDP_MAX_GSO_SEGMENTS);
+        assert_eq!(
+            plan.payload_bytes,
+            UDP_MAX_GSO_SEGMENTS * UDP_DEFAULT_GSO_SEGMENT_BYTES
+        );
+        assert_eq!(plan.estimated_syscalls, 1);
+        assert_eq!(plan.gso_segment_bytes, Some(UDP_DEFAULT_GSO_SEGMENT_BYTES));
+        assert_eq!(plan.gso_segments_per_packet, Some(UDP_MAX_GSO_SEGMENTS));
+    }
+
+    #[test]
+    fn udp_connected_send_batch_plan_batches_multiple_gso_windows() {
+        let payloads = vec![vec![7; UDP_DEFAULT_GSO_SEGMENT_BYTES]; UDP_MAX_GSO_SEGMENTS * 2 + 1];
+        let payload_refs = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+        let plan = UdpSendBatchPlan::for_connected_payloads(
+            &payload_refs,
+            UdpSendAccelerationCapabilities {
+                sendmmsg: UdpCapability::Supported,
+                gso: UdpCapability::Supported,
+                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+            },
+            UdpSendBatchStrategy::default(),
+        );
+
+        assert_eq!(plan.path, UdpSendBatchPath::GsoSendmmsg);
+        assert_eq!(plan.datagrams, UDP_MAX_GSO_SEGMENTS * 2 + 1);
+        assert_eq!(plan.estimated_syscalls, 1);
+        assert_eq!(plan.gso_segment_bytes, Some(UDP_DEFAULT_GSO_SEGMENT_BYTES));
+        assert_eq!(plan.gso_segments_per_packet, Some(UDP_MAX_GSO_SEGMENTS));
+    }
+
+    #[test]
     fn udp_send_batch_plan_demotes_gso_after_socket_rejection() {
         future::block_on(async {
             let mut socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -2390,6 +2982,22 @@ mod tests {
         assert_eq!(plan.gso_segment_bytes, Some(900));
         assert_eq!(plan.gso_segments_per_packet, Some(4));
         assert_eq!(plan.estimated_syscalls, 1);
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    #[test]
+    fn native_send_backpressure_keeps_native_batch_path_retryable() {
+        assert!(native_send_error_would_block(nix::errno::Errno::EAGAIN));
+        assert!(native_send_error_would_block(
+            nix::errno::Errno::EWOULDBLOCK
+        ));
+        assert!(native_send_error_would_block(nix::errno::Errno::ENOBUFS));
+        assert!(!native_send_error_would_block(nix::errno::Errno::EINVAL));
     }
 
     #[test]
@@ -3064,6 +3672,55 @@ mod tests {
             assert_eq!(
                 received.report.bytes_processed,
                 UDP_DEFAULT_GSO_SEGMENT_BYTES * packets.len()
+            );
+
+            let mut received_payloads = received
+                .packets
+                .iter()
+                .map(|packet| packet.payload.clone())
+                .collect::<Vec<_>>();
+            received_payloads.sort_by_key(|payload| payload[0]);
+            assert_eq!(received_payloads, payloads);
+        });
+    }
+
+    #[test]
+    fn udp_connected_payload_batch_send_uses_gso_for_fixed_size_payloads_on_linux() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            sender.connect(receiver_addr).await.unwrap();
+
+            let payloads = (0..4)
+                .map(|idx| vec![idx as u8; UDP_DEFAULT_GSO_SEGMENT_BYTES])
+                .collect::<Vec<_>>();
+            let payload_refs = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+            let sent = sender.send_connected_batch(&payload_refs).await.unwrap();
+            assert_eq!(sent.packets_processed, payload_refs.len());
+            assert_eq!(
+                sent.bytes_processed,
+                UDP_DEFAULT_GSO_SEGMENT_BYTES * payload_refs.len()
+            );
+
+            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
+                assert!(sent.native_send_batch_used);
+                assert!(sent.gso_send_used);
+                assert!(!sent.fallback_used);
+            } else {
+                assert!(!sent.native_send_batch_used);
+                assert!(sent.fallback_used);
+            }
+
+            let received = receiver
+                .recv_batch_from(payload_refs.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
+                .await
+                .unwrap();
+            assert_eq!(received.report.packets_processed, payload_refs.len());
+            assert_eq!(
+                received.report.bytes_processed,
+                UDP_DEFAULT_GSO_SEGMENT_BYTES * payload_refs.len()
             );
 
             let mut received_payloads = received
