@@ -11,8 +11,8 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
-use crate::raptorq::linalg::{coefficient_rank_profile, GaussianRankProfile};
+use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+use crate::raptorq::linalg::{GaussianRankProfile, coefficient_rank_profile};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -3461,7 +3461,7 @@ mod tests {
 
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::{
-        validate_unit_log_json, UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry,
+        UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry, validate_unit_log_json,
     };
 
     fn rfc_eq_context(
@@ -5676,40 +5676,52 @@ mod tests {
 
     #[test]
     fn failure_classification_is_explicit() {
-        assert!(DecodeError::InsufficientSymbols {
-            received: 1,
-            required: 2
-        }
-        .is_recoverable());
+        assert!(
+            DecodeError::InsufficientSymbols {
+                received: 1,
+                required: 2
+            }
+            .is_recoverable()
+        );
         assert!(DecodeError::SingularMatrix { row: 3 }.is_recoverable());
-        assert!(DecodeError::SymbolSizeMismatch {
-            expected: 8,
-            actual: 7
-        }
-        .is_unrecoverable());
-        assert!(DecodeError::ColumnIndexOutOfRange {
-            esi: 1,
-            column: 99,
-            max_valid: 12
-        }
-        .is_unrecoverable());
-        assert!(DecodeError::SourceEsiOutOfRange {
-            esi: 12,
-            max_valid: 8
-        }
-        .is_unrecoverable());
-        assert!(DecodeError::InvalidSourceSymbolEquation {
-            esi: 3,
-            expected_column: 3
-        }
-        .is_unrecoverable());
-        assert!(DecodeError::CorruptDecodedOutput {
-            esi: 1,
-            byte_index: 0,
-            expected: 1,
-            actual: 2
-        }
-        .is_unrecoverable());
+        assert!(
+            DecodeError::SymbolSizeMismatch {
+                expected: 8,
+                actual: 7
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::ColumnIndexOutOfRange {
+                esi: 1,
+                column: 99,
+                max_valid: 12
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::SourceEsiOutOfRange {
+                esi: 12,
+                max_valid: 8
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::InvalidSourceSymbolEquation {
+                esi: 3,
+                expected_column: 3
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::CorruptDecodedOutput {
+                esi: 1,
+                byte_index: 0,
+                expected: 1,
+                actual: 2
+            }
+            .is_unrecoverable()
+        );
     }
 
     fn make_rank_deficient_state(
@@ -7200,9 +7212,11 @@ mod tests {
         assert_eq!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
         assert_eq!(decision.reason, "policy_budget_exhausted_conservative");
         assert!(decision.features.budget_exhausted);
-        assert!(decision
-            .governance
-            .is_some_and(|telemetry| telemetry.deterministic_fallback_triggered));
+        assert!(
+            decision
+                .governance
+                .is_some_and(|telemetry| telemetry.deterministic_fallback_triggered)
+        );
     }
 
     #[test]
