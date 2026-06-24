@@ -2561,6 +2561,62 @@ mod tests {
     }
 
     #[test]
+    fn zero_repair_request_is_noop_before_systematic_emission() {
+        let symbol_size = 24;
+        let mut enc = make_encoder(16, symbol_size, 0x5EED_CAFE);
+        let k = enc.params().k;
+
+        let baseline_stats = enc.stats().clone();
+        let baseline_repair_esi = enc.next_repair_esi();
+        let repairs = enc.emit_repair(0);
+
+        assert!(repairs.is_empty(), "zero repair request emits no symbols");
+        assert_eq!(
+            enc.next_repair_esi(),
+            baseline_repair_esi,
+            "zero repair request must not advance the repair cursor"
+        );
+        assert!(
+            !enc.systematic_emitted(),
+            "zero repair request must not close the systematic lane"
+        );
+        assert_eq!(
+            enc.stats().repair_symbols_generated,
+            baseline_stats.repair_symbols_generated
+        );
+        assert_eq!(
+            enc.stats().repair_bytes_emitted,
+            baseline_stats.repair_bytes_emitted
+        );
+        assert_eq!(
+            enc.stats().systematic_bytes_emitted,
+            baseline_stats.systematic_bytes_emitted
+        );
+
+        let systematic = enc.emit_systematic();
+        assert_eq!(
+            systematic.len(),
+            k,
+            "systematic emission must remain available after a zero repair request"
+        );
+        assert_eq!(
+            systematic.first().map(|symbol| symbol.esi),
+            Some(0),
+            "systematic source stream must still start at ESI 0"
+        );
+        assert_eq!(
+            systematic.last().map(|symbol| symbol.esi),
+            Some(k as u32 - 1),
+            "systematic source stream must still end at K-1"
+        );
+        assert_eq!(
+            enc.stats().systematic_bytes_emitted,
+            k * symbol_size,
+            "zero repair request must not affect source-byte accounting"
+        );
+    }
+
+    #[test]
     fn stats_initialized() {
         let k = 8;
         let symbol_size = 64;
