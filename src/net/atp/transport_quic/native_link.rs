@@ -248,6 +248,72 @@ fn need_more_repair_symbol_count(need: &QuicNeedMore) -> u64 {
     })
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn loss_compensated_repair_target(
+    requested_deficit_symbols: u64,
+    loss_fraction: Option<f64>,
+) -> u64 {
+    if requested_deficit_symbols == 0 {
+        return 0;
+    }
+    let Some(loss) = loss_fraction.filter(|loss| loss.is_finite()) else {
+        return requested_deficit_symbols;
+    };
+    let delivery_fraction = (1.0 - loss.clamp(0.0, 0.90)).max(0.10);
+    ((requested_deficit_symbols as f64) / delivery_fraction).ceil() as u64
+}
+
+fn trace_native_repair_accounting(
+    cx: &Cx,
+    direction: &'static str,
+    feedback_round: u32,
+    requested_deficit_symbols: u64,
+    loss_compensated_target_symbols: u64,
+    emitted_repair_symbols: Option<u64>,
+    need: &QuicNeedMore,
+) {
+    let feedback_round_s = feedback_round.to_string();
+    let requested_deficit_symbols_s = requested_deficit_symbols.to_string();
+    let loss_compensated_target_symbols_s = loss_compensated_target_symbols.to_string();
+    let emitted_repair_symbols_s = emitted_repair_symbols
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "pending".to_string());
+    let gap_to_target_symbols = emitted_repair_symbols
+        .map(|emitted| loss_compensated_target_symbols.saturating_sub(emitted))
+        .unwrap_or_else(|| {
+            loss_compensated_target_symbols.saturating_sub(requested_deficit_symbols)
+        })
+        .to_string();
+    let round_loss_fraction_s = format!("{:.6}", need.round_loss_fraction.unwrap_or(0.0));
+    let repair_blocks_s = need.repair_blocks.len().to_string();
+    let source_requests_s = need.source_symbols.len().to_string();
+    cx.trace_with_fields(
+        "atp_quic.repair_accounting",
+        &[
+            ("transport", "quic"),
+            ("direction", direction),
+            ("feedback_round", feedback_round_s.as_str()),
+            (
+                "requested_deficit_symbols",
+                requested_deficit_symbols_s.as_str(),
+            ),
+            (
+                "loss_compensated_target_symbols",
+                loss_compensated_target_symbols_s.as_str(),
+            ),
+            ("emitted_repair_symbols", emitted_repair_symbols_s.as_str()),
+            ("gap_to_target_symbols", gap_to_target_symbols.as_str()),
+            ("round_loss_fraction", round_loss_fraction_s.as_str()),
+            ("repair_blocks", repair_blocks_s.as_str()),
+            ("source_requests", source_requests_s.as_str()),
+        ],
+    );
+}
+
 fn same_need_more_request_shape(left: &QuicNeedMore, right: &QuicNeedMore) -> bool {
     left.pending == right.pending
         && left.repair_blocks == right.repair_blocks
@@ -1750,12 +1816,20 @@ async fn run_sender_session(
                 aimd.observe_need_more(cx, &need);
                 feedback_rounds = feedback_rounds.saturating_add(1);
                 let requested_repair_symbols = need_more_repair_symbol_count(&need);
+                let loss_compensated_target_symbols = loss_compensated_repair_target(
+                    requested_repair_symbols,
+                    need.round_loss_fraction,
+                );
+                let exact_request_gap_to_target =
+                    loss_compensated_target_symbols.saturating_sub(requested_repair_symbols);
                 let repair_detail = repair_block_trace_summary(&need.repair_blocks);
                 quic_rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
+                    "sender: NeedMore round={feedback_rounds} pending={} repair_blocks={} requested_repair_symbols={} loss_compensated_target_symbols={} exact_request_gap_to_target={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} prior_total_symbols_sent={} prior_round_symbols_sent={} prior_pacing_rate_bps={} repair_blocks_detail={}",
                     need.pending.len(),
                     need.repair_blocks.len(),
                     requested_repair_symbols,
+                    loss_compensated_target_symbols,
+                    exact_request_gap_to_target,
                     need.source_symbols.len(),
                     need.round_symbols_observed.unwrap_or(0),
                     need.round_symbols_accepted.unwrap_or(0),
@@ -1836,6 +1910,15 @@ async fn run_sender_session(
                     )));
                 }
                 symbols_sent = symbols_sent.saturating_add(sent);
+                trace_native_repair_accounting(
+                    cx,
+                    "sender",
+                    feedback_rounds,
+                    requested_repair_symbols,
+                    loss_compensated_target_symbols,
+                    Some(sent),
+                    &need,
+                );
                 super::trace_quic_sender_repair_round(
                     cx,
                     feedback_rounds,
@@ -1844,8 +1927,9 @@ async fn run_sender_session(
                     sent,
                     &need,
                 );
+                let emission_gap_to_target = loss_compensated_target_symbols.saturating_sub(sent);
                 quic_rqtrace!(
-                    "sender: repair_round round={feedback_rounds} emitted_symbols={sent} requested_repair_symbols={requested_repair_symbols} total_symbols_sent={symbols_sent} pacing_rate_bps={} max_feedback_rounds={} round_cap_enforced=false",
+                    "sender: repair_round round={feedback_rounds} emitted_symbols={sent} requested_repair_symbols={requested_repair_symbols} loss_compensated_target_symbols={loss_compensated_target_symbols} emission_gap_to_target={emission_gap_to_target} total_symbols_sent={symbols_sent} pacing_rate_bps={} max_feedback_rounds={} round_cap_enforced=false",
                     aimd.last_round_pacing_rate_bps,
                     config.max_feedback_rounds,
                 );
@@ -2533,13 +2617,28 @@ async fn run_receiver_session(
             };
             intake_stats.trace_need_more(cx, feedback_rounds.saturating_add(1), &need);
             let requested_repair_symbols = need_more_repair_symbol_count(&need);
+            let loss_compensated_target_symbols =
+                loss_compensated_repair_target(requested_repair_symbols, need.round_loss_fraction);
+            let exact_request_gap_to_target =
+                loss_compensated_target_symbols.saturating_sub(requested_repair_symbols);
+            trace_native_repair_accounting(
+                cx,
+                "receiver",
+                feedback_rounds.saturating_add(1),
+                requested_repair_symbols,
+                loss_compensated_target_symbols,
+                None,
+                &need,
+            );
             let repair_detail = repair_block_trace_summary(&need.repair_blocks);
             quic_rqtrace!(
-                "receiver: NeedMore round={} pending={} repair_blocks={} requested_repair_symbols={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_symbols_sent={} round_loss_fraction={:.4} symbols_accepted={} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} repair_blocks_detail={}",
+                "receiver: NeedMore round={} pending={} repair_blocks={} requested_repair_symbols={} loss_compensated_target_symbols={} exact_request_gap_to_target={} source_requests={} round_symbols_observed={} round_symbols_accepted={} round_symbols_sent={} round_loss_fraction={:.4} symbols_accepted={} max_feedback_rounds={} round_cap_exceeded={} repair_symbol_round_cap={} repair_blocks_detail={}",
                 feedback_rounds.saturating_add(1),
                 need.pending.len(),
                 need.repair_blocks.len(),
                 requested_repair_symbols,
+                loss_compensated_target_symbols,
+                exact_request_gap_to_target,
                 need.source_symbols.len(),
                 round_symbols_observed,
                 round_symbols_accepted,
