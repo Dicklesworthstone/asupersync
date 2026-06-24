@@ -25,6 +25,7 @@
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
+use asupersync::raptorq::proof::{DecodeProof, FailureReason, ProofOutcome};
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 use asupersync::util::DetRng;
@@ -53,8 +54,9 @@ fn object_id() -> ObjectId {
     ObjectId::new(OBJECT_ID_HIGH, OBJECT_ID_LOW)
 }
 
-/// A clean, over-determined received set: constraints, every source symbol, and
-/// `REPAIRS` repairs starting at ESI `K`. Decodes successfully on its own.
+/// A clean, over-determined received set: constraints, every source equation,
+/// and a full deterministic repair frontier starting at ESI `K`. Decodes
+/// successfully on its own.
 fn clean_received(
     encoder: &SystematicEncoder,
     decoder: &InactivationDecoder,
@@ -62,10 +64,19 @@ fn clean_received(
 ) -> Vec<ReceivedSymbol> {
     let k = source.len();
     let mut received = decoder.constraint_symbols();
+    let source_eqs = decoder.all_source_equations();
     for (esi, data) in source.iter().enumerate() {
-        received.push(ReceivedSymbol::source(esi as u32, data.clone()));
+        let (columns, coefficients) = source_eqs[esi].clone();
+        received.push(ReceivedSymbol {
+            esi: esi as u32,
+            is_source: true,
+            columns,
+            coefficients,
+            data: data.clone(),
+        });
     }
-    for offset in 0..REPAIRS {
+    let repair_count = decoder.params().l.max(REPAIRS);
+    for offset in 0..repair_count {
         let esi = k as u32 + offset as u32;
         let (columns, coefficients) = decoder
             .repair_equation(esi)
@@ -79,6 +90,12 @@ fn clean_received(
 /// Decode an otherwise-valid set with one appended malformed symbol and return
 /// the error, asserting the decoder neither accepted it nor panicked.
 fn reject(malformed: ReceivedSymbol, context: &str) -> DecodeError {
+    reject_with_proof(malformed, context).0
+}
+
+/// Decode an otherwise-valid set with one appended malformed symbol and return
+/// both the structured error and proof artifact emitted by the fail-closed path.
+fn reject_with_proof(malformed: ReceivedSymbol, context: &str) -> (DecodeError, DecodeProof) {
     let source = make_source(K, SYMBOL_SIZE, SEED);
     let encoder = SystematicEncoder::new(&source, SYMBOL_SIZE, SEED).expect("encoder");
     let decoder = InactivationDecoder::new(K, SYMBOL_SIZE, SEED);
@@ -88,7 +105,7 @@ fn reject(malformed: ReceivedSymbol, context: &str) -> DecodeError {
 
     match decoder.decode_with_proof(&received, object_id(), SBN) {
         Ok(_) => panic!("{context}: malformed symbol was SILENTLY ACCEPTED (decode returned Ok)"),
-        Err((err, _proof)) => err,
+        Err((err, proof)) => (err, proof),
     }
 }
 
@@ -138,6 +155,44 @@ fn equation_arity_mismatch_is_rejected() {
         }
         other => panic!("expected SymbolEquationArityMismatch, got {other:?}"),
     }
+}
+
+#[test]
+fn validation_failure_records_structured_proof_failure_before_solving() {
+    let bogus =
+        ReceivedSymbol::repair(K as u32, vec![0, 1], vec![Gf256(1)], vec![0u8; SYMBOL_SIZE]);
+    let (err, proof) = reject_with_proof(bogus, "arity-proof");
+
+    assert_eq!(
+        err,
+        DecodeError::SymbolEquationArityMismatch {
+            esi: K as u32,
+            columns: 2,
+            coefficients: 1,
+        }
+    );
+    assert_eq!(
+        proof.outcome,
+        ProofOutcome::Failure {
+            reason: FailureReason::SymbolEquationArityMismatch {
+                esi: K as u32,
+                columns: 2,
+                coefficients: 1,
+            },
+        },
+        "proof outcome must preserve the exact validation failure"
+    );
+    let source = make_source(K, SYMBOL_SIZE, SEED);
+    let encoder = SystematicEncoder::new(&source, SYMBOL_SIZE, SEED).expect("encoder");
+    let decoder = InactivationDecoder::new(K, SYMBOL_SIZE, SEED);
+    let expected_received_total = clean_received(&encoder, &decoder, &source).len() + 1;
+    assert_eq!(
+        proof.received.total, expected_received_total,
+        "proof should bind the malformed symbol into the received summary"
+    );
+    assert_eq!(proof.peeling.solved, 0);
+    assert_eq!(proof.elimination.pivots, 0);
+    assert_eq!(proof.elimination.row_ops, 0);
 }
 
 #[test]
