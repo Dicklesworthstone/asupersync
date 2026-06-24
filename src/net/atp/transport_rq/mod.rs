@@ -118,10 +118,12 @@ pub const DEFAULT_MAX_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 const TARGET_SOURCE_SYMBOLS_PER_BLOCK: usize = 512;
 /// Byte ceiling for the normal streaming block-size target.
 const TARGET_STREAMING_BLOCK_BYTES: usize = 4 * 1024 * 1024;
-/// Maximum encoded ATP-RQ symbols sent in one connected UDP batch per socket.
+/// Maximum encoded ATP-RQ symbols sent in one connected UDP batch.
 ///
 /// Match the UDP GSO segment budget so fixed-size RQ symbols fill one
-/// super-packet per socket before the sender flushes.
+/// super-packet before the sender flushes. Fanout must not multiply this
+/// aggregate burst, or a clean round-0 ramp can overrun the receiver despite
+/// aggregate pacing.
 const RQ_SEND_BATCH_PER_SOCKET: usize = UDP_MAX_GSO_SEGMENTS;
 
 /// Default round-0 repair multiplier.
@@ -133,7 +135,10 @@ const RQ_SEND_BATCH_PER_SOCKET: usize = UDP_MAX_GSO_SEGMENTS;
 pub const DEFAULT_REPAIR_OVERHEAD: f64 = 1.0;
 
 /// Default number of UDP sockets the sender sprays across.
-pub const DEFAULT_UDP_FANOUT: usize = 4;
+///
+/// A single stream is the stable default for the clean round-0 pacing ramp.
+/// Multi-stream fanout remains opt-in for targeted experiments.
+pub const DEFAULT_UDP_FANOUT: usize = 1;
 
 /// Default ceiling on a single transfer's total bytes (receiver buffers + decode
 /// matrices live in memory in v1).
@@ -196,11 +201,12 @@ const RQ_MIN_PACING_BPS: u64 = 512 * 1024;
 const RQ_MAX_PACING_BPS: u64 = 64 * 1024 * 1024;
 /// Clean round-0 sprays can probe above cold-start after each cold-start-sized
 /// byte step of emitted datagrams. Loss-configured rounds keep the older AIMD
-/// floor/cap path; this clean-only probe intentionally stresses whether the
-/// receiver can absorb a sender rate above the 16 MiB/s cold-start ceiling.
+/// floor/cap path; UDP fanout shares one aggregate pacer and one aggregate send
+/// batch limit so additional sockets cannot multiply the clean-ramp burst.
 const RQ_ROUND0_CLEAN_RAMP_STEP_BYTES: u64 = RQ_COLD_START_PACING_BPS;
 const RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 128 * 1024 * 1024;
+const RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS: u64 = 32 * 1024 * 1024;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
@@ -676,6 +682,7 @@ struct RqSprayPacer {
 struct RqRound0CleanPacingRamp {
     sent_datagrams: u64,
     next_step_bytes: u64,
+    max_rate_bytes_per_sec: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -685,13 +692,18 @@ struct RqRound0CleanPacingRampReport {
     old_rate_bytes_per_sec: u64,
     new_rate_bytes_per_sec: u64,
     next_step_bytes: u64,
+    max_rate_bytes_per_sec: u64,
 }
 
 impl RqRound0CleanPacingRamp {
-    fn new() -> Self {
+    fn new(max_rate_bytes_per_sec: u64) -> Self {
         Self {
             sent_datagrams: 0,
             next_step_bytes: RQ_ROUND0_CLEAN_RAMP_STEP_BYTES,
+            max_rate_bytes_per_sec: max_rate_bytes_per_sec.clamp(
+                RQ_COLD_START_PACING_BPS.max(RQ_MIN_PACING_BPS),
+                RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+            ),
         }
     }
 
@@ -706,16 +718,16 @@ impl RqRound0CleanPacingRamp {
         let old_rate = pacing.rate_bytes_per_sec();
         let mut changed = false;
         while sent_bytes >= self.next_step_bytes
-            && pacing.rate_bytes_per_sec() < RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
+            && pacing.rate_bytes_per_sec() < self.max_rate_bytes_per_sec
         {
             let current = pacing.rate_bytes_per_sec();
             let next = current
                 .saturating_add(RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S)
-                .clamp(RQ_MIN_PACING_BPS, RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS);
+                .clamp(RQ_MIN_PACING_BPS, self.max_rate_bytes_per_sec);
             if next == current {
                 break;
             }
-            pacing.set_rate_bytes_per_sec(next, RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS);
+            pacing.set_rate_bytes_per_sec(next, self.max_rate_bytes_per_sec);
             self.next_step_bytes = self
                 .next_step_bytes
                 .saturating_add(RQ_ROUND0_CLEAN_RAMP_STEP_BYTES);
@@ -727,30 +739,41 @@ impl RqRound0CleanPacingRamp {
             old_rate_bytes_per_sec: old_rate,
             new_rate_bytes_per_sec: pacing.rate_bytes_per_sec(),
             next_step_bytes: self.next_step_bytes,
+            max_rate_bytes_per_sec: self.max_rate_bytes_per_sec,
         })
     }
 }
 
+fn round0_clean_ramp_max_rate(config: &RqConfig) -> u64 {
+    if config.udp_fanout.max(1) == 1 {
+        RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
+    } else {
+        RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS
+    }
+}
+
 fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
-    let clean_loss_target = config.round0_loss_target.is_finite()
-        && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
+    let source_first_loss_target = config.round0_loss_target.is_finite()
+        && config.round0_loss_target >= 0.0
+        && !round0_loss_target_repair_enabled(config);
     config.debug_drop_one_in == 0
         && config.repair_overhead <= 1.0
-        && clean_loss_target
+        && source_first_loss_target
         && !pacing.loss_detected
         && pacing.rate_bytes_per_sec() == RQ_COLD_START_PACING_BPS
 }
 
 impl RqSprayPacer {
     fn new_round0(pacing: RqSprayPacing, config: &RqConfig) -> Self {
-        let round0_ramp =
-            round0_clean_ramp_enabled(config, pacing).then(RqRound0CleanPacingRamp::new);
+        let round0_ramp = round0_clean_ramp_enabled(config, pacing)
+            .then(|| RqRound0CleanPacingRamp::new(round0_clean_ramp_max_rate(config)));
         if round0_ramp.is_some() {
             rqtrace!(
-                "sender: round0_clean_pacing_ramp enabled start_rate_Bps={} step_bytes={} max_rate_Bps={} datagram_bytes={} burst_symbols={}",
+                "sender: round0_clean_pacing_ramp enabled start_rate_Bps={} step_bytes={} max_rate_Bps={} udp_fanout={} datagram_bytes={} burst_symbols={}",
                 pacing.rate_bytes_per_sec(),
                 RQ_ROUND0_CLEAN_RAMP_STEP_BYTES,
-                RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+                round0_clean_ramp_max_rate(config),
+                config.udp_fanout.max(1),
                 pacing.datagram_bytes,
                 pacing.max_burst_size,
             );
@@ -804,7 +827,7 @@ impl RqSprayPacer {
                 report.new_rate_bytes_per_sec,
                 self.pacing.path_rate_bps,
                 report.next_step_bytes,
-                RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+                report.max_rate_bytes_per_sec,
             );
         }
     }
@@ -860,8 +883,6 @@ impl RqPendingSendBatch {
 
     fn global_flush_symbols(&self) -> usize {
         RQ_SEND_BATCH_PER_SOCKET
-            .saturating_mul(self.fanout())
-            .max(RQ_SEND_BATCH_PER_SOCKET)
     }
 
     fn push(&mut self, socket_index: usize, payload: Vec<u8>) {
@@ -8597,7 +8618,7 @@ mod tests {
     }
 
     #[test]
-    fn rq_round0_clean_ramp_is_loss_free_source_first_only() {
+    fn rq_round0_clean_ramp_is_source_first_only() {
         let clean = RqConfig {
             symbol_size: 1200,
             repair_overhead: 1.0,
@@ -8608,12 +8629,16 @@ mod tests {
         let pacing = RqSprayPacing::cold_start(clean.symbol_size);
 
         assert!(round0_clean_ramp_enabled(&clean, pacing));
+        let good_subthreshold = RqConfig {
+            round0_loss_target: RQ_ROUND0_TARGET_LOSS_ENABLE_MIN / 5.0,
+            ..clean.clone()
+        };
+        assert!(
+            round0_clean_ramp_enabled(&good_subthreshold, pacing),
+            "source-first good-link targets should exercise the clean ramp"
+        );
 
         for blocked in [
-            RqConfig {
-                round0_loss_target: 0.001,
-                ..clean.clone()
-            },
             RqConfig {
                 round0_loss_target: RQ_ROUND0_TARGET_LOSS_ENABLE_MIN,
                 ..clean.clone()
@@ -8632,12 +8657,21 @@ mod tests {
                 "clean ramp must stay off for lossy/debug/repair-configured round 0"
             );
         }
+
+        let fanout = RqConfig {
+            udp_fanout: 8,
+            ..clean.clone()
+        };
+        assert!(
+            round0_clean_ramp_enabled(&fanout, pacing),
+            "fanout should share the aggregate clean ramp instead of disabling it"
+        );
     }
 
     #[test]
     fn rq_round0_clean_ramp_additively_probes_inside_source_round() {
         let mut pacing = RqSprayPacing::cold_start(1200);
-        let mut ramp = RqRound0CleanPacingRamp::new();
+        let mut ramp = RqRound0CleanPacingRamp::new(RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS);
         let step_datagrams =
             RQ_ROUND0_CLEAN_RAMP_STEP_BYTES.div_ceil(u64::from(pacing.datagram_bytes));
 
@@ -8686,6 +8720,46 @@ mod tests {
         assert!(
             pacing.rate_bytes_per_sec() > RQ_MAX_PACING_BPS,
             "clean round-0 probe must be able to test beyond the adaptive cap"
+        );
+    }
+
+    #[test]
+    fn rq_round0_clean_ramp_caps_fanout_aggregate_rate() {
+        let single = RqConfig {
+            udp_fanout: 1,
+            ..RqConfig::default()
+        };
+        let fanout = RqConfig {
+            udp_fanout: 8,
+            ..RqConfig::default()
+        };
+        assert_eq!(
+            round0_clean_ramp_max_rate(&single),
+            RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
+        );
+        assert_eq!(
+            round0_clean_ramp_max_rate(&fanout),
+            RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS
+        );
+
+        let mut pacing = RqSprayPacing::cold_start(1200);
+        let mut ramp = RqRound0CleanPacingRamp::new(round0_clean_ramp_max_rate(&fanout));
+        while pacing.rate_bytes_per_sec() < RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS {
+            ramp.sent_datagrams = ramp
+                .next_step_bytes
+                .div_ceil(u64::from(pacing.datagram_bytes))
+                .saturating_sub(1);
+            let report = ramp
+                .observe_datagram(&mut pacing)
+                .expect("fanout ramp should step until aggregate cap");
+            assert_eq!(
+                report.max_rate_bytes_per_sec,
+                RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS
+            );
+        }
+        assert_eq!(
+            pacing.rate_bytes_per_sec(),
+            RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS
         );
     }
 
@@ -9211,33 +9285,45 @@ mod tests {
     fn rq_pending_send_batch_groups_by_round_robin_socket() {
         let mut batch = RqPendingSendBatch::new(4);
         let global_flush_symbols = batch.global_flush_symbols();
+        assert_eq!(global_flush_symbols, RQ_SEND_BATCH_PER_SOCKET);
         for i in 0..global_flush_symbols {
             batch.push(i % 4, vec![u8::try_from(i).unwrap_or(u8::MAX)]);
         }
 
         assert_eq!(batch.queued_count(), global_flush_symbols);
         assert!(batch.should_flush());
-        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET);
-        assert_eq!(batch.socket_batch_len(1), RQ_SEND_BATCH_PER_SOCKET);
-        assert_eq!(batch.socket_batch_len(2), RQ_SEND_BATCH_PER_SOCKET);
-        assert_eq!(batch.socket_batch_len(3), RQ_SEND_BATCH_PER_SOCKET);
+        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET / 4);
+        assert_eq!(batch.socket_batch_len(1), RQ_SEND_BATCH_PER_SOCKET / 4);
+        assert_eq!(batch.socket_batch_len(2), RQ_SEND_BATCH_PER_SOCKET / 4);
+        assert_eq!(batch.socket_batch_len(3), RQ_SEND_BATCH_PER_SOCKET / 4);
     }
 
     #[test]
-    fn rq_pending_send_batch_delays_rr_flush_until_gso_windows_are_full() {
-        let mut batch = RqPendingSendBatch::new(DEFAULT_UDP_FANOUT);
-        let almost_full = batch.global_flush_symbols().saturating_sub(batch.fanout());
+    fn rq_pending_send_batch_caps_aggregate_burst_across_fanout() {
+        let mut batch = RqPendingSendBatch::new(8);
+        let almost_full = batch.global_flush_symbols().saturating_sub(1);
 
         for i in 0..almost_full {
             batch.push(i % batch.fanout(), vec![u8::try_from(i).unwrap_or(u8::MAX)]);
         }
 
-        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET - 1);
         assert!(!batch.should_flush());
+        assert!(
+            batch
+                .by_socket
+                .iter()
+                .all(|payloads| payloads.len() < RQ_SEND_BATCH_PER_SOCKET)
+        );
 
-        batch.push(0, vec![0]);
-        assert_eq!(batch.socket_batch_len(0), RQ_SEND_BATCH_PER_SOCKET);
+        batch.push(almost_full % batch.fanout(), vec![0]);
         assert!(batch.should_flush());
+        assert_eq!(batch.queued_count(), RQ_SEND_BATCH_PER_SOCKET);
+        assert!(
+            batch
+                .by_socket
+                .iter()
+                .all(|payloads| payloads.len() <= RQ_SEND_BATCH_PER_SOCKET.div_ceil(8))
+        );
     }
 
     #[test]
