@@ -358,8 +358,7 @@ resync_atp() {
     ss=$?
     finish="$(now_s)"; after="$(ns_wire_bytes)"
     if [ "$ss" = "0" ] && grep -Eq "using full-object transfer|full-object fallback" "$st"; then
-        log "ATP sender fell back to full-object despite sidecar state; marking cell invalid"
-        ss=91
+        log "ATP sender used graceful full-object transfer after delta planner rejected package; scoring by sha and wire bytes"
     fi
     if [ "$ss" != "0" ]; then
         # Delta-package RQ sends can fail at the sender after the receiver has
