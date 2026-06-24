@@ -758,3 +758,62 @@ fn full_rank_solver_payload_is_invariant_under_equivalent_row_presentations() {
         );
     }
 }
+
+#[test]
+fn pivot_strategies_agree_on_deterministic_small_system_corpus() {
+    for rows in 1..=5usize {
+        for columns in 1..=4usize {
+            for seed in 0..48u64 {
+                let system_rows: Vec<(Vec<u8>, Vec<u8>)> = (0..rows)
+                    .map(|row| {
+                        let row_seed =
+                            seed ^ ((rows as u64) << 48) ^ ((columns as u64) << 32) ^ row as u64;
+                        (
+                            random_row(columns, row_seed, 160),
+                            random_row(2, row_seed ^ 0xD00D_F00D, 255),
+                        )
+                    })
+                    .collect();
+
+                let mut basic = solver_from_owned_rows(&system_rows, columns);
+                let mut markowitz = solver_from_owned_rows(&system_rows, columns);
+
+                assert_eq!(
+                    basic.rank_status(),
+                    markowitz.rank_status(),
+                    "rank status changed by pivot strategy (rows={rows}, columns={columns}, seed={seed})"
+                );
+
+                let basic_result = basic.solve();
+                let markowitz_result = markowitz.solve_markowitz();
+                assert_eq!(
+                    basic_result.outcome_kind(),
+                    markowitz_result.outcome_kind(),
+                    "pivot strategies classified the same system differently \
+                     (rows={rows}, columns={columns}, seed={seed}, \
+                      basic={basic_result:?}, markowitz={markowitz_result:?})"
+                );
+
+                match (&basic_result, &markowitz_result) {
+                    (
+                        GaussianResult::Solved(basic_payload),
+                        GaussianResult::Solved(markowitz_payload),
+                    ) => {
+                        assert_eq!(
+                            basic_payload, markowitz_payload,
+                            "pivot strategies solved to different payloads \
+                             (rows={rows}, columns={columns}, seed={seed})"
+                        );
+                    }
+                    _ => {
+                        assert!(
+                            !basic_result.is_solved() && !markowitz_result.is_solved(),
+                            "unsolved classifications must not expose payloads \
+                             (rows={rows}, columns={columns}, seed={seed})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

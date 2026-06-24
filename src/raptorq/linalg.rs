@@ -1261,11 +1261,7 @@ impl GaussianSolver {
                 // it is genuinely Singular. Both solvers use the
                 // same scan, so they cannot disagree on the same
                 // input.
-                return self
-                    .first_inconsistent_row_from(pivot_col)
-                    .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
-                        GaussianResult::Inconsistent { row }
-                    });
+                return self.classify_missing_pivot(pivot_col);
             };
 
             // Swap if needed
@@ -1320,11 +1316,7 @@ impl GaussianSolver {
                 // in `solve` for the rationale (cross-solver
                 // agreement is a function of the system, not of the
                 // pivot strategy).
-                return self
-                    .first_inconsistent_row_from(pivot_col)
-                    .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
-                        GaussianResult::Inconsistent { row }
-                    });
+                return self.classify_missing_pivot(pivot_col);
             };
 
             // Swap if needed
@@ -1426,6 +1418,71 @@ impl GaussianSolver {
 
     fn first_inconsistent_row_from(&self, start_row: usize) -> Option<usize> {
         (start_row..self.rows).find(|&row| self.is_inconsistent_row(row))
+    }
+
+    fn classify_missing_pivot(&self, pivot_col: usize) -> GaussianResult {
+        self.first_inconsistent_row_from(pivot_col)
+            .or_else(|| self.first_augmented_inconsistent_row())
+            .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
+                GaussianResult::Inconsistent { row }
+            })
+    }
+
+    fn first_augmented_inconsistent_row(&self) -> Option<usize> {
+        let rhs_width = self.rhs.first().map_or(0, DenseRow::len);
+        if rhs_width == 0 {
+            return None;
+        }
+
+        let total_columns = self.cols + rhs_width;
+        let mut augmented = Vec::with_capacity(self.rows);
+        for (coefficients, rhs) in self.matrix.iter().zip(&self.rhs) {
+            let mut row = Vec::with_capacity(total_columns);
+            row.extend(coefficients.iter().copied().map(Gf256::new));
+            row.extend(rhs.as_slice().iter().copied().map(Gf256::new));
+            augmented.push(row);
+        }
+
+        let mut pivot_row = 0usize;
+        for pivot_col in 0..self.cols {
+            let Some(selected_row) =
+                (pivot_row..self.rows).find(|&row| !augmented[row][pivot_col].is_zero())
+            else {
+                continue;
+            };
+            if selected_row != pivot_row {
+                augmented.swap(pivot_row, selected_row);
+            }
+
+            let inv = augmented[pivot_row][pivot_col].inv();
+            for value in augmented[pivot_row].iter_mut().skip(pivot_col) {
+                *value *= inv;
+            }
+            let pivot_tail = augmented[pivot_row][pivot_col..total_columns].to_vec();
+
+            for row in 0..self.rows {
+                if row == pivot_row {
+                    continue;
+                }
+                let factor = augmented[row][pivot_col];
+                if factor.is_zero() {
+                    continue;
+                }
+                for (offset, &pivot_value) in pivot_tail.iter().enumerate() {
+                    augmented[row][pivot_col + offset] += pivot_value * factor;
+                }
+            }
+
+            pivot_row += 1;
+            if pivot_row == self.rows {
+                break;
+            }
+        }
+
+        augmented.iter().position(|row| {
+            row[..self.cols].iter().all(|value| value.is_zero())
+                && row[self.cols..].iter().any(|value| !value.is_zero())
+        })
     }
 
     /// True when a transformed row is `0 = b` with non-zero RHS.
