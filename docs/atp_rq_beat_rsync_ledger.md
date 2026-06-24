@@ -2286,3 +2286,20 @@ Built parallel-decode HEAD `019b9ada0` (git archive). Same exact cell as MATRIX-
 **Clean high-BDP loss now has FOUR refuted levers — all wrong-bottleneck:** GSO-unconnected (66), connected-spray (67), multi-stream fan-out (68), parallel-decode (69). The clean-link wall is neither sendto-syscall, nor stream count, nor decode — it is the per-symbol receiver pump (intake→dedup→order→reassemble→write at ~13 MB/s). ★REDIRECT for the swarm: to beat clean high-BDP, parallelize/batch the RECEIVER SYMBOL PUMP itself (e.g. shard symbol intake+reassembly across cores; batch per-symbol work; cut per-symbol overhead) — NOT decode. (Real RaptorQ decode only dominates on LOSSY-large transfers, which atp already wins via FEC: 500M/bad 4.4×.) Caveat: a single global in-flight/window cap (~throughput×RTT ≈ 2.6 MB at 13 MB/s × 200 ms, far below the 50 MB BDP) is a secondary candidate, but the flat-across-fan-out result favours the serial-pump explanation over per-flow windowing.
 
 **Memory win persists**: atp 23.8–26.6 MB vs rsync 38.9 MB (~1.5× less). Evidence: `artifacts/atp_bench_matrix/20260624T182006Z/`.
+
+## MATRIX-70 (2026-06-24) — encrypted AEAD-batch (00bb8ea5d 'perf(atp-quic): batch 1-RTT AEAD protection') does NOT cut the encrypted-clean wall: 50M/perfect atp 33.24s (was 32.5s) vs rsync-ssh 0.85s (~39×, UNCHANGED). Batching the AEAD *calls* doesn't reduce the per-packet AES-GCM *compute* — consistent with MATRIX-69 (clean wall is receiver-pump + per-packet crypto, not call overhead).
+
+Built AEAD-batch HEAD `92f54553c` (incl 00bb8ea5d), benched encrypted 50M perfect+good (atp-quic-tls13 vs rsync-ssh aes128-gcm):
+
+| cell | atp (MATRIX-66/67 → MATRIX-70) | rsync-ssh | ratio | sha_ok | RSS atp / rsync |
+|---|---|---|---|---|---|
+| 50M/perfect encrypted | 32.5 → **33.24s** | 0.85s | ~39× | 3/3 ok | **20 MB / 768 MB** |
+| 50M/good encrypted | (765s, status=error) | — | — | 0/1 (fail-closed) | — |
+
+**AEAD-batch = NO change on encrypted-clean** (33.24s vs 32.5s baseline, within noise; still ~39× rsync). The commit batches 1-RTT AEAD *protection calls* on the send path, but AEAD is inherently per-packet (each QUIC packet has its own nonce + auth tag): batching the call sites cuts per-call overhead, not the actual AES-GCM work over the same bytes. So if the wall is the per-packet crypto compute (+ the single-threaded receiver pump from MATRIX-69, + receive-side unprotect which this commit does not batch), call-batching can't move it. encrypted-clean stays a ~39× wall loss.
+
+**encrypted/good = documented non-convergence limit, unchanged.** rep1 ran 765s and finished `status=error sha_ok=false` (the QUIC-DATAGRAM-fountain-over-lossy-link limit established MATRIX-65); AEAD-batch is a send-path crypto change and does not address lossy convergence (a different issue). Bench stopped after rep1 rather than grind 2 more guaranteed-failures (~25min); fail-closed, excluded from any win claim.
+
+**Memory dominance is striking here:** atp **20 MB** vs rsync-over-ssh **768 MB** peak RSS for a 50M encrypted transfer (~38× less) — rsync+ssh buffers heavily. So the encrypted tier is: atp loses clean wall ~39× (per-packet AEAD compute + receiver pump, fundamental — AEAD-batch refuted), best-effort on lossy (~2/3, documented), but uses ~38× less memory.
+
+**Net (clean-wall levers this session, ALL refuted): GSO-unconnected (66), connected-spray (67), multi-stream fan-out (68), parallel-decode (69), AEAD-batch (70).** The clean-link wall — nocrypto AND encrypted — is fundamental to the design: nocrypto is the single-threaded receiver symbol pump (~13 MB/s); encrypted adds per-packet AES-GCM compute on top (~1.5 MB/s). The ONE un-refuted lever is **receiver-pump parallelization** (the MATRIX-69 redirect, routed to the swarm) for the nocrypto wall; the encrypted AEAD compute is intrinsic (can't batch away the crypto). atp's wins remain lossy / structural-edit / memory. Evidence: `artifacts/atp_bench_matrix/20260624T184246Z/`.
