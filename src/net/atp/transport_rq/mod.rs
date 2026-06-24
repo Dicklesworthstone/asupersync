@@ -194,6 +194,13 @@ pub const DEFAULT_ROUND_TAIL_DRAIN: Duration = Duration::from_millis(DEFAULT_ROU
 const RQ_COLD_START_PACING_BPS: u64 = 16 * 1024 * 1024;
 const RQ_MIN_PACING_BPS: u64 = 512 * 1024;
 const RQ_MAX_PACING_BPS: u64 = 64 * 1024 * 1024;
+/// Clean round-0 sprays can probe above cold-start after each cold-start-sized
+/// byte step of emitted datagrams. Loss-configured rounds keep the older AIMD
+/// floor/cap path; this clean-only probe intentionally stresses whether the
+/// receiver can absorb a sender rate above the 16 MiB/s cold-start ceiling.
+const RQ_ROUND0_CLEAN_RAMP_STEP_BYTES: u64 = RQ_COLD_START_PACING_BPS;
+const RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
+const RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 128 * 1024 * 1024;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
@@ -518,6 +525,14 @@ impl RqSprayPacing {
         self.path_rate_bps / 8
     }
 
+    fn set_rate_bytes_per_sec(&mut self, rate_bytes_per_sec: u64, max_rate_bytes_per_sec: u64) {
+        let rate = rate_bytes_per_sec.clamp(
+            RQ_MIN_PACING_BPS,
+            max_rate_bytes_per_sec.max(RQ_MIN_PACING_BPS),
+        );
+        self.path_rate_bps = rate.saturating_mul(8);
+    }
+
     fn burst_bytes(self) -> u64 {
         u64::from(self.datagram_bytes).saturating_mul(u64::from(self.max_burst_size))
     }
@@ -653,28 +668,145 @@ fn duration_millis_u64(duration: Duration) -> u64 {
 
 struct RqSprayPacer {
     controller: CongestionController,
+    pacing: RqSprayPacing,
+    round0_ramp: Option<RqRound0CleanPacingRamp>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RqRound0CleanPacingRamp {
+    sent_datagrams: u64,
+    next_step_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RqRound0CleanPacingRampReport {
+    sent_datagrams: u64,
+    sent_bytes: u64,
+    old_rate_bytes_per_sec: u64,
+    new_rate_bytes_per_sec: u64,
+    next_step_bytes: u64,
+}
+
+impl RqRound0CleanPacingRamp {
+    fn new() -> Self {
+        Self {
+            sent_datagrams: 0,
+            next_step_bytes: RQ_ROUND0_CLEAN_RAMP_STEP_BYTES,
+        }
+    }
+
+    fn observe_datagram(
+        &mut self,
+        pacing: &mut RqSprayPacing,
+    ) -> Option<RqRound0CleanPacingRampReport> {
+        self.sent_datagrams = self.sent_datagrams.saturating_add(1);
+        let sent_bytes = self
+            .sent_datagrams
+            .saturating_mul(u64::from(pacing.datagram_bytes.max(1)));
+        let old_rate = pacing.rate_bytes_per_sec();
+        let mut changed = false;
+        while sent_bytes >= self.next_step_bytes
+            && pacing.rate_bytes_per_sec() < RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
+        {
+            let current = pacing.rate_bytes_per_sec();
+            let next = current
+                .saturating_add(RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S)
+                .clamp(RQ_MIN_PACING_BPS, RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS);
+            if next == current {
+                break;
+            }
+            pacing.set_rate_bytes_per_sec(next, RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS);
+            self.next_step_bytes = self
+                .next_step_bytes
+                .saturating_add(RQ_ROUND0_CLEAN_RAMP_STEP_BYTES);
+            changed = true;
+        }
+        changed.then_some(RqRound0CleanPacingRampReport {
+            sent_datagrams: self.sent_datagrams,
+            sent_bytes,
+            old_rate_bytes_per_sec: old_rate,
+            new_rate_bytes_per_sec: pacing.rate_bytes_per_sec(),
+            next_step_bytes: self.next_step_bytes,
+        })
+    }
+}
+
+fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
+    let clean_loss_target = config.round0_loss_target.is_finite()
+        && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
+    config.debug_drop_one_in == 0
+        && config.repair_overhead <= 1.0
+        && clean_loss_target
+        && !pacing.loss_detected
+        && pacing.rate_bytes_per_sec() == RQ_COLD_START_PACING_BPS
 }
 
 impl RqSprayPacer {
-    fn new(pacing: RqSprayPacing) -> Self {
+    fn new_round0(pacing: RqSprayPacing, config: &RqConfig) -> Self {
+        let round0_ramp =
+            round0_clean_ramp_enabled(config, pacing).then(RqRound0CleanPacingRamp::new);
+        if round0_ramp.is_some() {
+            rqtrace!(
+                "sender: round0_clean_pacing_ramp enabled start_rate_Bps={} step_bytes={} max_rate_Bps={} datagram_bytes={} burst_symbols={}",
+                pacing.rate_bytes_per_sec(),
+                RQ_ROUND0_CLEAN_RAMP_STEP_BYTES,
+                RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+                pacing.datagram_bytes,
+                pacing.max_burst_size,
+            );
+        }
+        Self::new_with_round0_ramp(pacing, round0_ramp)
+    }
+
+    fn new_with_round0_ramp(
+        pacing: RqSprayPacing,
+        round0_ramp: Option<RqRound0CleanPacingRamp>,
+    ) -> Self {
         let mut controller = CongestionController::new(CongestionConfig::default());
+        Self::configure_controller(&mut controller, pacing);
+        Self {
+            controller,
+            pacing,
+            round0_ramp,
+        }
+    }
+
+    fn configure_controller(controller: &mut CongestionController, pacing: RqSprayPacing) {
         controller.configure_for_path_rate(
             pacing.path_rate_bps,
             pacing.datagram_bytes,
             pacing.max_burst_size,
         );
         controller.update_congestion_feedback(pacing.rtt, pacing.loss_detected);
-        Self { controller }
     }
 
     fn configure(&mut self, pacing: RqSprayPacing) {
-        self.controller.configure_for_path_rate(
-            pacing.path_rate_bps,
-            pacing.datagram_bytes,
-            pacing.max_burst_size,
-        );
-        self.controller
-            .update_congestion_feedback(pacing.rtt, pacing.loss_detected);
+        self.pacing = pacing;
+        self.round0_ramp = None;
+        Self::configure_controller(&mut self.controller, pacing);
+    }
+
+    fn pacing(&self) -> RqSprayPacing {
+        self.pacing
+    }
+
+    fn observe_datagram_sent(&mut self) {
+        let Some(ramp) = &mut self.round0_ramp else {
+            return;
+        };
+        if let Some(report) = ramp.observe_datagram(&mut self.pacing) {
+            Self::configure_controller(&mut self.controller, self.pacing);
+            rqtrace!(
+                "sender: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} path_rate_bps={} next_step_bytes={} max_rate_Bps={}",
+                report.sent_datagrams,
+                report.sent_bytes,
+                report.old_rate_bytes_per_sec,
+                report.new_rate_bytes_per_sec,
+                self.pacing.path_rate_bps,
+                report.next_step_bytes,
+                RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+            );
+        }
     }
 
     async fn before_send(&mut self, cx: &Cx) -> Result<(), RqError> {
@@ -3862,7 +3994,7 @@ pub async fn send_path(
     let mut round_tuning = adaptive.round0_tuning(&config);
     // One token bucket owns the whole transfer. Recreating it per source/repair
     // spray would grant a fresh burst each time and overflow rate-capped qdiscs.
-    let mut pacer = RqSprayPacer::new(round_tuning.pacing);
+    let mut pacer = RqSprayPacer::new_round0(round_tuning.pacing, &config);
     let mut round_started = Instant::now();
     let mut round_symbols_start = symbols_sent;
     spray_round(
@@ -3905,7 +4037,7 @@ pub async fn send_path(
         let reply = control.recv().await?;
         let control_wait = control_wait_started.elapsed();
         let window_probe = RqSenderWindowProbe::new(
-            round_tuning.pacing,
+            pacer.pacing(),
             sent_this_round,
             config.symbol_size,
             round_send_wall,
@@ -4764,6 +4896,7 @@ where
     let socket_index = *rr % fanout;
     *rr = rr.wrapping_add(1);
     send_batch.push(socket_index, dgram);
+    pacer.observe_datagram_sent();
     if send_batch.should_flush() {
         let report = send_batch.flush(sockets, symbols_sent).await?;
         udp_send_acceleration.observe_flush_report(report);
@@ -8460,6 +8593,155 @@ mod tests {
         assert_eq!(
             pacing.max_burst_size,
             u32::try_from(RQ_COLD_START_BURST_SYMBOLS).unwrap()
+        );
+    }
+
+    #[test]
+    fn rq_round0_clean_ramp_is_loss_free_source_first_only() {
+        let clean = RqConfig {
+            symbol_size: 1200,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.0,
+            debug_drop_one_in: 0,
+            ..RqConfig::default()
+        };
+        let pacing = RqSprayPacing::cold_start(clean.symbol_size);
+
+        assert!(round0_clean_ramp_enabled(&clean, pacing));
+
+        for blocked in [
+            RqConfig {
+                round0_loss_target: 0.001,
+                ..clean.clone()
+            },
+            RqConfig {
+                round0_loss_target: RQ_ROUND0_TARGET_LOSS_ENABLE_MIN,
+                ..clean.clone()
+            },
+            RqConfig {
+                repair_overhead: 1.01,
+                ..clean.clone()
+            },
+            RqConfig {
+                debug_drop_one_in: 7,
+                ..clean.clone()
+            },
+        ] {
+            assert!(
+                !round0_clean_ramp_enabled(&blocked, pacing),
+                "clean ramp must stay off for lossy/debug/repair-configured round 0"
+            );
+        }
+    }
+
+    #[test]
+    fn rq_round0_clean_ramp_additively_probes_inside_source_round() {
+        let mut pacing = RqSprayPacing::cold_start(1200);
+        let mut ramp = RqRound0CleanPacingRamp::new();
+        let step_datagrams =
+            RQ_ROUND0_CLEAN_RAMP_STEP_BYTES.div_ceil(u64::from(pacing.datagram_bytes));
+
+        ramp.sent_datagrams = step_datagrams.saturating_sub(1);
+        let first = ramp
+            .observe_datagram(&mut pacing)
+            .expect("first clean-ramp step");
+        assert_eq!(
+            first.new_rate_bytes_per_sec,
+            RQ_COLD_START_PACING_BPS + RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S
+        );
+        assert_eq!(
+            pacing.rate_bytes_per_sec(),
+            RQ_COLD_START_PACING_BPS + RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S
+        );
+
+        ramp.sent_datagrams = ramp
+            .next_step_bytes
+            .div_ceil(u64::from(pacing.datagram_bytes))
+            .saturating_sub(1);
+        let second = ramp
+            .observe_datagram(&mut pacing)
+            .expect("second clean-ramp step");
+        assert_eq!(
+            second.new_rate_bytes_per_sec,
+            RQ_COLD_START_PACING_BPS + RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S * 2
+        );
+        assert_eq!(
+            pacing.rate_bytes_per_sec(),
+            RQ_COLD_START_PACING_BPS + RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S * 2
+        );
+
+        while pacing.rate_bytes_per_sec() < RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS {
+            ramp.sent_datagrams = ramp
+                .next_step_bytes
+                .div_ceil(u64::from(pacing.datagram_bytes))
+                .saturating_sub(1);
+            let _ = ramp
+                .observe_datagram(&mut pacing)
+                .expect("clean ramp should keep stepping until max");
+        }
+        assert_eq!(
+            pacing.rate_bytes_per_sec(),
+            RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
+        );
+        assert!(
+            pacing.rate_bytes_per_sec() > RQ_MAX_PACING_BPS,
+            "clean round-0 probe must be able to test beyond the adaptive cap"
+        );
+    }
+
+    #[test]
+    fn rq_round0_clean_ramp_resets_on_feedback_pacer_reconfigure() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.0,
+            ..RqConfig::default()
+        };
+        let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config);
+        assert!(pacer.round0_ramp.is_some());
+
+        pacer.configure(RqSprayPacing::from_rate(
+            RQ_COLD_START_PACING_BPS / 2,
+            1200,
+            RQ_ADAPTIVE_BURST_SYMBOLS,
+            Some(Duration::from_millis(200)),
+            true,
+        ));
+
+        assert!(pacer.round0_ramp.is_none());
+        assert_eq!(
+            pacer.pacing().rate_bytes_per_sec(),
+            RQ_COLD_START_PACING_BPS / 2
+        );
+    }
+
+    #[test]
+    fn rq_round0_clean_pacer_reports_ramped_rate_to_window_probe() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.0,
+            ..RqConfig::default()
+        };
+        let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config);
+        let datagrams = RQ_ROUND0_CLEAN_RAMP_STEP_BYTES
+            .div_ceil(u64::from(pacer.pacing().datagram_bytes.max(1)));
+        for _ in 0..datagrams {
+            pacer.observe_datagram_sent();
+        }
+
+        let probe = RqSenderWindowProbe::new(
+            pacer.pacing(),
+            1,
+            config.symbol_size,
+            Duration::from_millis(1),
+            Duration::from_millis(200),
+        );
+
+        assert_eq!(
+            probe.configured_rate_bytes_per_sec,
+            RQ_COLD_START_PACING_BPS + RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S,
+            "ATP_RQ_TRACE window_probe should expose the within-round clean ramp"
         );
     }
 
