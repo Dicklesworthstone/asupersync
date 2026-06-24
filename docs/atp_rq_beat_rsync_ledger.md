@@ -2362,3 +2362,14 @@ Built rate-ramp HEAD `f2aea2822` ('perf(atp-rq): ramp clean round-zero pacing') 
 **★Caveat — streams=8 is unstable under the ramp.** s8 reps: 20.3s / **286.6s (6 feedback rounds)** / 19.6s. At 8 streams the ramped aggregate sometimes overruns the path/receiver → loss → 6 recovery rounds → 286s. Single stream (the default) is both fastest and stable. Confirms fan-out remains a no-op-to-harmful for throughput (MATRIX-68) — and now actively destabilizes under the ramp. **Recommendation: keep streams=1 default; do NOT combine fan-out with the clean-ramp.**
 
 **★SCOREBOARD UPDATE — clean-high-BDP: LOSS → TIE.** The session's six refuted clean-wall levers (66-71) were all the *wrong* mechanism; MATRIX-72's probe found the right one (cold-start rate never ramps) and MATRIX-73 confirms the fix ties rsync. atp now: WINS lossy (5M/broken 1.48×, delta-insert 62.5×), TIES clean-high-BDP (NEW, 1.03×) + 50M/good + auth-good, dominates memory; remaining clean losses = clean-perfect-small wall (50M-perfect 3×, FEC encode tax at small size) + encrypted-clean (per-packet AEAD) + lossy-small. ★MUST-VERIFY NEXT: (a) lossy-regression — confirm the clean-ramp's gating didn't slow 500M/bad (was 153s) — MATRIX-74; (b) does the ramp also help 500M/good (200mbit/25ms) + clean-perfect? Evidence: `artifacts/atp_bench_matrix/20260624T220357Z/`.
+
+## MATRIX-74 (2026-06-24) — ★GATING CONFIRMED: the clean round-zero pacing ramp (f2aea2822, MATRIX-73) did NOT regress lossy. 500M/bad nocrypto = atp 153.8s (unchanged from MATRIX-71's 153s), rounds=0, sha 3/3. The clean-link ramp is correctly clean-link-gated — safe to keep default-on.
+
+Re-ran 500M/bad/nocrypto streams=1 ×2 on the rate-ramp binary `f2aea2822`:
+
+| method | MATRIX-71 → MATRIX-74 | rounds | sha |
+|---|---|---|---|
+| atp-rq-lab /bad | 153.4 → **153.8s** (153.5/154.1) | 0 | 3:3 ok |
+| rsyncd /bad | 98.0 → 97.4s | 0 | 3:3 ok |
+
+**Lossy is byte-for-byte the same wall** (153.8 vs 153.4, within noise) — the clean-ramp's loss-gate works; the higher clean-link pacing does not leak into the lossy AIMD path. (atp/bad still loses 1.58× to plaintext rsyncd, the documented pre-existing nocrypto-bad state from MATRIX-71 — NOT a regression; atp's lossy edge is the crypto tiers + memory.) **Net: MATRIX-73's clean-high-BDP TIE is a clean, regression-free win — f2aea2822 is safe default-on.** Evidence: `artifacts/atp_bench_matrix/20260624T221510Z/`.
