@@ -11,8 +11,8 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
-use crate::raptorq::linalg::{GaussianRankProfile, coefficient_rank_profile};
+use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::linalg::{coefficient_rank_profile, GaussianRankProfile};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -1621,9 +1621,7 @@ impl InactivationDecoder {
                 if coefficient.is_zero() {
                     continue;
                 }
-                let Some(symbol) = intermediate.get(column).and_then(Option::as_ref) else {
-                    return Err(DecodeError::SingularMatrix { row: column });
-                };
+                let symbol = require_intermediate_symbol(intermediate, column, symbol_size)?;
                 gf256_addmul_slice(&mut reconstructed, symbol, coefficient);
             }
             if let Some(byte_index) = first_mismatch_byte(&reconstructed, &sym.data) {
@@ -2911,10 +2909,8 @@ impl InactivationDecoder {
             let (columns, coefficients) = self.source_equation(esi_u32);
             let mut symbol = vec![0u8; self.params.symbol_size];
             for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
-                let Some(intermediate_symbol) = intermediate.get(column).and_then(Option::as_ref)
-                else {
-                    return Err(DecodeError::SingularMatrix { row: column });
-                };
+                let intermediate_symbol =
+                    require_intermediate_symbol(intermediate, column, self.params.symbol_size)?;
                 gf256_addmul_slice(&mut symbol, intermediate_symbol, coefficient);
             }
             source.push(symbol);
@@ -3028,6 +3024,23 @@ fn first_mismatch_byte(expected: &[u8], actual: &[u8]) -> Option<usize> {
         .iter()
         .zip(actual.iter())
         .position(|(expected, actual)| expected != actual)
+}
+
+fn require_intermediate_symbol(
+    intermediate: &[Option<Vec<u8>>],
+    column: usize,
+    symbol_size: usize,
+) -> Result<&[u8], DecodeError> {
+    let Some(symbol) = intermediate.get(column).and_then(Option::as_ref) else {
+        return Err(DecodeError::SingularMatrix { row: column });
+    };
+    if symbol.len() != symbol_size {
+        return Err(DecodeError::SymbolSizeMismatch {
+            expected: symbol_size,
+            actual: symbol.len(),
+        });
+    }
+    Ok(symbol)
 }
 
 #[cfg(test)]
@@ -3448,7 +3461,7 @@ mod tests {
 
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::{
-        UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry, validate_unit_log_json,
+        validate_unit_log_json, UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry,
     };
 
     fn rfc_eq_context(
@@ -5626,53 +5639,77 @@ mod tests {
     }
 
     #[test]
-    fn failure_classification_is_explicit() {
-        assert!(
-            DecodeError::InsufficientSymbols {
-                received: 1,
-                required: 2
-            }
-            .is_recoverable()
-        );
-        assert!(DecodeError::SingularMatrix { row: 3 }.is_recoverable());
-        assert!(
+    fn reconstruction_rejects_wrong_width_intermediate_symbol() {
+        let k = 6;
+        let symbol_size = 16;
+        let seed = 0x6330_C005_u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let source = make_source_data(k, symbol_size);
+        let received = make_received_source(&decoder, &source);
+        let (required_columns, _) = decoder.source_equation(0);
+        let bad_column = required_columns[0];
+        let mut intermediate = vec![Some(vec![0u8; symbol_size]); decoder.params().l];
+        intermediate[bad_column] = Some(vec![0xA5; symbol_size - 1]);
+
+        let verify_err = decoder
+            .verify_decoded_output(&received, &intermediate)
+            .expect_err("success verification must reject short intermediate symbols");
+        assert_eq!(
+            verify_err,
             DecodeError::SymbolSizeMismatch {
-                expected: 8,
-                actual: 7
+                expected: symbol_size,
+                actual: symbol_size - 1,
             }
-            .is_unrecoverable()
         );
-        assert!(
-            DecodeError::ColumnIndexOutOfRange {
-                esi: 1,
-                column: 99,
-                max_valid: 12
+
+        let reconstruct_err = decoder
+            .reconstruct_source_symbols(&intermediate)
+            .expect_err("source reconstruction must reject short intermediate symbols");
+        assert_eq!(
+            reconstruct_err,
+            DecodeError::SymbolSizeMismatch {
+                expected: symbol_size,
+                actual: symbol_size - 1,
             }
-            .is_unrecoverable()
         );
-        assert!(
-            DecodeError::SourceEsiOutOfRange {
-                esi: 12,
-                max_valid: 8
-            }
-            .is_unrecoverable()
-        );
-        assert!(
-            DecodeError::InvalidSourceSymbolEquation {
-                esi: 3,
-                expected_column: 3
-            }
-            .is_unrecoverable()
-        );
-        assert!(
-            DecodeError::CorruptDecodedOutput {
-                esi: 1,
-                byte_index: 0,
-                expected: 1,
-                actual: 2
-            }
-            .is_unrecoverable()
-        );
+    }
+
+    #[test]
+    fn failure_classification_is_explicit() {
+        assert!(DecodeError::InsufficientSymbols {
+            received: 1,
+            required: 2
+        }
+        .is_recoverable());
+        assert!(DecodeError::SingularMatrix { row: 3 }.is_recoverable());
+        assert!(DecodeError::SymbolSizeMismatch {
+            expected: 8,
+            actual: 7
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::ColumnIndexOutOfRange {
+            esi: 1,
+            column: 99,
+            max_valid: 12
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::SourceEsiOutOfRange {
+            esi: 12,
+            max_valid: 8
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::InvalidSourceSymbolEquation {
+            esi: 3,
+            expected_column: 3
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::CorruptDecodedOutput {
+            esi: 1,
+            byte_index: 0,
+            expected: 1,
+            actual: 2
+        }
+        .is_unrecoverable());
     }
 
     fn make_rank_deficient_state(
@@ -7163,11 +7200,9 @@ mod tests {
         assert_eq!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
         assert_eq!(decision.reason, "policy_budget_exhausted_conservative");
         assert!(decision.features.budget_exhausted);
-        assert!(
-            decision
-                .governance
-                .is_some_and(|telemetry| telemetry.deterministic_fallback_triggered)
-        );
+        assert!(decision
+            .governance
+            .is_some_and(|telemetry| telemetry.deterministic_fallback_triggered));
     }
 
     #[test]
