@@ -135,6 +135,9 @@ pub struct ReceivedSymbol {
     pub data: Vec<u8>,
 }
 
+type SeenEquationPayload<'a> = (&'a [usize], &'a [Gf256], &'a [u8]);
+type SeenEquationPayloads<'a> = HashMap<u32, Vec<SeenEquationPayload<'a>>>;
+
 /// Reason for decode failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
@@ -1553,7 +1556,8 @@ impl InactivationDecoder {
 
         // br-asupersync-ju2k01: Create compute budget for dense operations
         let mut compute_budget = ComputeBudget::new(MAX_DENSE_COMPUTE_BUDGET);
-        let mut seen_source_payloads = vec![None; self.params.k];
+        let mut seen_source_payloads = HashMap::with_capacity(self.params.k.min(symbols.len()));
+        let mut seen_equation_payloads = SeenEquationPayloads::with_capacity(symbols.len());
 
         for sym in symbols {
             if sym.data.len() != symbol_size {
@@ -1577,7 +1581,11 @@ impl InactivationDecoder {
             }
 
             self.validate_source_symbol_equation(sym)?;
-            self.validate_source_symbol_payload_consistency(sym, &mut seen_source_payloads)?;
+            self.validate_symbol_payload_consistency(
+                sym,
+                &mut seen_source_payloads,
+                &mut seen_equation_payloads,
+            )?;
 
             for &column in &sym.columns {
                 if column >= l {
@@ -1600,31 +1608,44 @@ impl InactivationDecoder {
         Ok(())
     }
 
-    fn validate_source_symbol_payload_consistency<'a>(
+    fn validate_symbol_payload_consistency<'a>(
         &self,
         sym: &'a ReceivedSymbol,
-        seen_source_payloads: &mut [Option<&'a [u8]>],
+        seen_source_payloads: &mut HashMap<u32, &'a [u8]>,
+        seen_equation_payloads: &mut SeenEquationPayloads<'a>,
     ) -> Result<(), DecodeError> {
-        if !sym.is_source {
+        let payload = sym.data.as_slice();
+        if sym.is_source {
+            if let Some(expected_payload) = seen_source_payloads.get(&sym.esi).copied() {
+                return Self::validate_payload_against_prior(sym.esi, payload, expected_payload);
+            }
+            seen_source_payloads.insert(sym.esi, payload);
             return Ok(());
         }
 
-        let esi = sym.esi as usize;
-        let Some(slot) = seen_source_payloads.get_mut(esi) else {
-            return Ok(());
-        };
-        let payload = sym.data.as_slice();
-        if let Some(expected_payload) = *slot {
-            if let Some(byte_index) = first_mismatch_byte(expected_payload, payload) {
-                return Err(DecodeError::CorruptDecodedOutput {
-                    esi: sym.esi,
-                    byte_index,
-                    expected: expected_payload[byte_index],
-                    actual: payload[byte_index],
-                });
+        let same_esi_payloads = seen_equation_payloads.entry(sym.esi).or_default();
+        for &(columns, coefficients, expected_payload) in same_esi_payloads.iter() {
+            if columns == sym.columns.as_slice() && coefficients == sym.coefficients.as_slice() {
+                return Self::validate_payload_against_prior(sym.esi, payload, expected_payload);
             }
-        } else {
-            *slot = Some(payload);
+        }
+        same_esi_payloads.push((sym.columns.as_slice(), sym.coefficients.as_slice(), payload));
+
+        Ok(())
+    }
+
+    fn validate_payload_against_prior(
+        esi: u32,
+        payload: &[u8],
+        expected_payload: &[u8],
+    ) -> Result<(), DecodeError> {
+        if let Some(byte_index) = first_mismatch_byte(expected_payload, payload) {
+            return Err(DecodeError::CorruptDecodedOutput {
+                esi,
+                byte_index,
+                expected: expected_payload[byte_index],
+                actual: payload[byte_index],
+            });
         }
 
         Ok(())
@@ -3042,7 +3063,8 @@ impl InactivationDecoder {
     fn validate_rank_input(&self, symbols: &[ReceivedSymbol]) -> Result<(), DecodeError> {
         let l = self.params.l;
         let symbol_size = self.params.symbol_size;
-        let mut seen_source_payloads = vec![None; self.params.k];
+        let mut seen_source_payloads = HashMap::with_capacity(self.params.k.min(symbols.len()));
+        let mut seen_equation_payloads = SeenEquationPayloads::with_capacity(symbols.len());
 
         for sym in symbols {
             if sym.data.len() != symbol_size {
@@ -3059,7 +3081,11 @@ impl InactivationDecoder {
                 });
             }
             self.validate_source_symbol_equation(sym)?;
-            self.validate_source_symbol_payload_consistency(sym, &mut seen_source_payloads)?;
+            self.validate_symbol_payload_consistency(
+                sym,
+                &mut seen_source_payloads,
+                &mut seen_equation_payloads,
+            )?;
             for &column in &sym.columns {
                 if column >= l {
                     return Err(DecodeError::ColumnIndexOutOfRange {
@@ -4639,6 +4665,70 @@ mod tests {
             ),
             "expected corruption or inconsistency in proof"
         );
+    }
+
+    #[test]
+    fn duplicate_repair_esi_with_conflicting_bytes_fails_closed_before_elimination() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 0xC4_C0DE_u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+        let repair_esi = (l - 1) as u32;
+        let mut original_repair = None;
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+            let repair_data = encoder.repair_symbol(esi);
+            let repair = ReceivedSymbol::repair(esi, cols, coefs, repair_data);
+            if esi == repair_esi {
+                original_repair = Some(repair.clone());
+            }
+            received.push(repair);
+        }
+
+        let original_repair = original_repair.expect("must include the selected repair symbol");
+        let mut conflicting_repair = original_repair.clone();
+        conflicting_repair.data[0] ^= 0x5A;
+        let expected = original_repair.data[0];
+        let actual = conflicting_repair.data[0];
+        received.push(conflicting_repair);
+
+        let rank_err = decoder
+            .rank_profile(&received)
+            .expect_err("conflicting duplicate repair ESI must fail rank validation");
+        assert_eq!(
+            rank_err,
+            DecodeError::CorruptDecodedOutput {
+                esi: original_repair.esi,
+                byte_index: 0,
+                expected,
+                actual,
+            }
+        );
+
+        let (err, proof) = decoder
+            .decode_with_proof(&received, ObjectId::new_for_test(9292), 0)
+            .expect_err("conflicting duplicate repair ESI must fail proof decode");
+        assert_eq!(err, rank_err);
+        assert!(matches!(
+            proof.outcome,
+            crate::raptorq::proof::ProofOutcome::Failure {
+                reason: FailureReason::CorruptDecodedOutput {
+                    esi,
+                    byte_index: 0,
+                    expected: proof_expected,
+                    actual: proof_actual,
+                }
+            } if esi == original_repair.esi
+                && proof_expected == expected
+                && proof_actual == actual
+        ));
     }
 
     #[test]
