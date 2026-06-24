@@ -105,6 +105,57 @@ pub fn reconcile_dedup_payload_set(
     ))
 }
 
+/// Reconstruct a target manifest directly from receiver-held CAS bytes.
+///
+/// This is the zero-payload apply path for rename/reorder-style tree deltas:
+/// the target manifest differs, but the receiver already has every target
+/// content chunk. The final manifest coverage and byte reconstruction checks
+/// remain the commit authority.
+pub fn reconcile_existing_receiver_store_and_reconstruct(
+    target_manifest: &PersistentChunkManifest,
+    receiver_store: &ContentAddressedChunkStore,
+    plan: &DeltaResyncPlan,
+) -> Result<DeltaDedupReconstructReport, DeltaError> {
+    if plan.sender_merkle_root != target_manifest.merkle_root {
+        return Err(DeltaError::DeltaSendPlanSenderRootMismatch {
+            encoded: plan.sender_merkle_root.clone(),
+            expected: target_manifest.merkle_root.clone(),
+        });
+    }
+    if !plan.missing_chunks.is_empty() {
+        return Err(DeltaError::DeltaSendPlanItemCountMismatch {
+            actual: 0,
+            expected: plan.missing_chunks.len(),
+        });
+    }
+    if plan.missing_bytes != 0 {
+        return Err(DeltaError::DeltaSendPlanWholeBytesMismatch {
+            encoded: 0,
+            expected: plan.missing_bytes,
+        });
+    }
+
+    target_manifest.verify_store_coverage(receiver_store)?;
+    let reconstructed_bytes = reconstruct_manifest_bytes(target_manifest, receiver_store)?;
+    Ok(DeltaDedupReconstructReport {
+        store: receiver_store.clone(),
+        reconcile: DeltaReconcileReport {
+            unique_payloads: 0,
+            inserted_unique_payloads: 0,
+            reused_receiver_payloads: 0,
+            duplicate_logical_chunks: 0,
+            reconstructed_bytes: target_manifest.total_size_bytes,
+        },
+        reconstructed_bytes,
+        metadata_wire_bytes: 0,
+        unique_payload_wire_bytes: 0,
+        compact_wire_bytes: 0,
+        logical_missing_bytes: 0,
+        duplicate_missing_chunks: 0,
+        duplicate_missing_bytes: 0,
+    })
+}
+
 /// Decode canonical dedupe parts and apply them to the receiver CAS.
 pub fn reconcile_canonical_dedup_payload_parts(
     target_manifest: &PersistentChunkManifest,
@@ -247,7 +298,7 @@ mod tests {
     use super::*;
     use crate::atp::dedupe::{build_canonical_dedup_payload_parts, build_dedup_payload_set};
     use crate::atp::delta::{
-        PersistentChunkManifest, ReceiverCasCoverage,
+        DeltaResyncMode, PersistentChunkManifest, ReceiverCasCoverage,
         plan_incremental_resync_with_receiver_coverage, reconstruct_manifest_bytes,
     };
 
@@ -260,6 +311,18 @@ mod tests {
             .ingest_ordered_chunks(chunks.iter().copied())
             .expect("ingest chunks");
         PersistentChunkManifest::new(tree_id, report.chunks).expect("manifest")
+    }
+
+    fn pattern_bytes(len: usize, seed: u32) -> Vec<u8> {
+        (0..len)
+            .map(|idx| {
+                let value = idx as u32;
+                value
+                    .wrapping_mul(seed | 1)
+                    .wrapping_add(value / 7)
+                    .wrapping_add(seed.rotate_left(5)) as u8
+            })
+            .collect()
     }
 
     #[test]
@@ -317,6 +380,53 @@ mod tests {
         assert_eq!(report.reconstructed_bytes, sender.total_size_bytes);
         let rebuilt = reconstruct_manifest_bytes(&sender, &store).expect("reconstruct");
         assert_eq!(rebuilt, b"alphabetaalpha".as_slice());
+    }
+
+    #[test]
+    fn reconcile_existing_receiver_store_reconstructs_tree_rename_without_payload() {
+        let alpha = pattern_bytes(32 * 1024, 11);
+        let beta = pattern_bytes(24 * 1024, 29);
+        let gamma = pattern_bytes(40 * 1024, 47);
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let receiver = manifest(
+            &mut receiver_store,
+            "old-tree",
+            &[alpha.as_slice(), beta.as_slice(), gamma.as_slice()],
+        );
+        let sender = manifest(
+            &mut sender_store,
+            "renamed-tree",
+            &[gamma.as_slice(), alpha.as_slice(), beta.as_slice()],
+        );
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+
+        assert_eq!(plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(plan.missing_chunks.len(), 0);
+        assert_eq!(plan.missing_bytes, 0);
+
+        let report =
+            reconcile_existing_receiver_store_and_reconstruct(&sender, &receiver_store, &plan)
+                .expect("zero-payload reconcile");
+
+        assert_eq!(report.metadata_wire_bytes, 0);
+        assert_eq!(report.unique_payload_wire_bytes, 0);
+        assert_eq!(report.compact_wire_bytes, 0);
+        assert_eq!(report.logical_missing_bytes, 0);
+        assert_eq!(report.reconcile.unique_payloads, 0);
+        assert_eq!(
+            report.reconcile.reconstructed_bytes,
+            sender.total_size_bytes
+        );
+        assert_eq!(
+            report.reconstructed_bytes,
+            [gamma.as_slice(), alpha.as_slice(), beta.as_slice()].concat()
+        );
+        sender
+            .verify_store_coverage(&report.store)
+            .expect("receiver CAS covers renamed target");
     }
 
     #[test]
@@ -454,6 +564,58 @@ mod tests {
         assert_eq!(
             report.reconstructed_bytes,
             [repeated.as_slice(), unique.as_slice(), repeated.as_slice()].concat()
+        );
+    }
+
+    #[test]
+    fn reconcile_canonical_dedup_parts_reconstructs_larger_repeated_tree_payloads() {
+        let repeated = pattern_bytes(512 * 1024, 61);
+        let unique = pattern_bytes(128 * 1024, 83);
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = manifest(
+            &mut sender_store,
+            "large-tree",
+            &[
+                repeated.as_slice(),
+                unique.as_slice(),
+                repeated.as_slice(),
+                repeated.as_slice(),
+            ],
+        );
+        let receiver = manifest(&mut receiver_store, "large-tree", &[]);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+        let parts =
+            build_canonical_dedup_payload_parts(&plan, &sender_store).expect("canonical parts");
+
+        let report = reconcile_canonical_dedup_parts_and_reconstruct(
+            &sender,
+            &receiver_store,
+            &plan,
+            &parts,
+        )
+        .expect("large repeated reconcile");
+
+        assert!(report.saves_bytes());
+        assert_eq!(report.unique_payload_wire_bytes, 640 * 1024);
+        assert_eq!(report.logical_missing_bytes, sender.total_size_bytes);
+        assert_eq!(report.duplicate_missing_chunks, 2);
+        assert_eq!(report.duplicate_missing_bytes, 1024 * 1024);
+        assert!(report.saved_wire_bytes() > 900 * 1024);
+        assert_eq!(report.reconcile.unique_payloads, 2);
+        assert_eq!(report.reconcile.inserted_unique_payloads, 2);
+        assert_eq!(report.reconcile.duplicate_logical_chunks, 2);
+        assert_eq!(
+            report.reconstructed_bytes,
+            [
+                repeated.as_slice(),
+                unique.as_slice(),
+                repeated.as_slice(),
+                repeated.as_slice()
+            ]
+            .concat()
         );
     }
 
