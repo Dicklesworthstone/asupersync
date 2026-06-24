@@ -1,12 +1,16 @@
 #![allow(missing_docs)]
 
+use asupersync::atp::dedupe::build_canonical_dedup_payload_parts_if_smaller;
 use asupersync::atp::delta::{
     ContentAddressedChunkStore, DeltaResyncMode, PersistentChunkManifest,
     apply_delta_resync_transmission, build_delta_resync_transmission, plan_incremental_resync,
     reconstruct_manifest_bytes,
 };
 use asupersync::atp::delta_subchunk;
-use asupersync::atp::reconcile::reconcile_existing_receiver_store_and_reconstruct;
+use asupersync::atp::reconcile::{
+    reconcile_canonical_dedup_parts_and_reconstruct,
+    reconcile_existing_receiver_store_and_reconstruct,
+};
 
 fn pattern_bytes(len: usize, seed: usize) -> Vec<u8> {
     (0..len)
@@ -174,4 +178,74 @@ fn public_rename_reorder_resync_reconstructs_from_existing_receiver_store_withou
 
     let rebuilt = reconstruct_manifest_bytes(&sender, &report.store).expect("rebuild target");
     assert_eq!(rebuilt, report.reconstructed_bytes);
+}
+
+#[test]
+fn public_dedup_canonical_parts_send_repeated_missing_payloads_once() {
+    let alpha = pattern_bytes(96 * 1024, 41);
+    let beta = pattern_bytes(80 * 1024, 43);
+    let gamma = pattern_bytes(64 * 1024, 47);
+    let expected = [
+        alpha.as_slice(),
+        beta.as_slice(),
+        alpha.as_slice(),
+        gamma.as_slice(),
+        beta.as_slice(),
+        alpha.as_slice(),
+    ]
+    .concat();
+
+    let mut sender_store = ContentAddressedChunkStore::new();
+    let mut receiver_store = ContentAddressedChunkStore::new();
+    let sender = manifest(
+        &mut sender_store,
+        "repeated-missing-file",
+        vec![
+            alpha.as_slice(),
+            beta.as_slice(),
+            alpha.as_slice(),
+            gamma.as_slice(),
+            beta.as_slice(),
+            alpha.as_slice(),
+        ],
+    );
+    let receiver = manifest(&mut receiver_store, "repeated-missing-file", Vec::new());
+
+    let plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
+    assert_eq!(plan.missing_chunks.len(), 6);
+    assert_eq!(plan.missing_bytes, sender.total_size_bytes);
+
+    let parts = build_canonical_dedup_payload_parts_if_smaller(&plan, &sender_store, 128)
+        .expect("dedupe parts decision")
+        .expect("repeated missing chunks should beat full missing bytes");
+    assert_eq!(parts.duplicate_missing_chunks, 3);
+    assert_eq!(
+        parts.unique_payload_wire_bytes,
+        u64::try_from(alpha.len() + beta.len() + gamma.len()).expect("unique payload bytes fit")
+    );
+    assert!(parts.saves_bytes());
+    assert!(
+        parts
+            .saved_bytes_with_outer_overhead(128)
+            .expect("saved bytes")
+            > 0
+    );
+
+    let payload_set = parts
+        .decode_payload_set(&plan)
+        .expect("decode canonical parts");
+    assert_eq!(payload_set.unique_payload_count(), 3);
+    assert_eq!(payload_set.send_set.logical_missing_chunk_count(), 6);
+
+    let report =
+        reconcile_canonical_dedup_parts_and_reconstruct(&sender, &receiver_store, &plan, &parts)
+            .expect("dedupe canonical reconcile");
+    assert_eq!(report.reconstructed_bytes, expected);
+    assert_eq!(
+        report.unique_payload_wire_bytes,
+        parts.unique_payload_wire_bytes
+    );
+    assert_eq!(report.duplicate_missing_chunks, 3);
+    assert_eq!(report.reconcile.unique_payloads, 3);
+    assert_eq!(report.reconcile.duplicate_logical_chunks, 3);
 }
