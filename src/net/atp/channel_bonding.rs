@@ -1311,6 +1311,66 @@ mod tests {
     }
 
     #[test]
+    fn assignment_windows_are_exact_static_residue_intersections() {
+        let windows = vec![EsiWindow::new(2, 11), EsiWindow::new(15, 22)];
+        for donor_count in [2, 3, 5, 8] {
+            for donor_index in 0..donor_count {
+                let assignment = DonorAssignment {
+                    donor_index,
+                    donor_count,
+                    esi_windows: Some(windows.clone()),
+                    receiver_udp_endpoints: Vec::new(),
+                    auth_key_ref: None,
+                };
+                assignment.validate().expect("valid assignment");
+
+                for esi in 0..25 {
+                    let expected = owns_esi(donor_index, donor_count, esi)
+                        && windows.iter().any(|window| window.contains(esi));
+                    assert_eq!(
+                        assignment.owns_esi(esi),
+                        expected,
+                        "donor {donor_index}/{donor_count} ownership mismatch for esi {esi}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn assignment_validation_rejects_invalid_window_and_donor_ceiling() {
+        let invalid_window = DonorAssignment {
+            donor_index: 0,
+            donor_count: 1,
+            esi_windows: Some(vec![EsiWindow::new(5, 5)]),
+            receiver_udp_endpoints: Vec::new(),
+            auth_key_ref: None,
+        };
+        assert_eq!(
+            invalid_window.validate().unwrap_err(),
+            ChannelBondingError::InvalidEsiWindow {
+                start_inclusive: 5,
+                end_exclusive: 5,
+            }
+        );
+
+        let too_many_donors = DonorAssignment {
+            donor_index: 0,
+            donor_count: MAX_STATIC_RESIDUE_DONORS + 1,
+            esi_windows: None,
+            receiver_udp_endpoints: Vec::new(),
+            auth_key_ref: None,
+        };
+        assert_eq!(
+            too_many_donors.validate().unwrap_err(),
+            ChannelBondingError::TooManyDonors {
+                donor_count: MAX_STATIC_RESIDUE_DONORS + 1,
+                max: MAX_STATIC_RESIDUE_DONORS,
+            }
+        );
+    }
+
+    #[test]
     fn handshake_degrades_to_static_residue_when_dynamic_missing() {
         let receiver = BondingHandshake::v1_static(
             [BondTransport::DirectIp, BondTransport::Tailscale],
