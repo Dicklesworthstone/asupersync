@@ -283,8 +283,13 @@ impl AtpPacketProtection {
             .into()
     }
 
-    /// Protect a packet with ATP error handling.
-    pub async fn protect_packet(
+    /// Protect a packet with ATP error handling on the current task.
+    ///
+    /// This is the synchronous primitive used by the hot QUIC send path when it
+    /// has already assembled a batch of plaintext packets. It avoids building
+    /// one async state machine per packet while preserving the public async
+    /// wrapper below for existing callers.
+    pub fn protect_packet_now(
         &mut self,
         cx: &Cx,
         request: PacketProtectionRequest<'_>,
@@ -324,6 +329,45 @@ impl AtpPacketProtection {
         }
 
         result
+    }
+
+    /// Protect a batch of packets with one ATP boundary call.
+    ///
+    /// Requests are processed in order, preserving packet-number order and
+    /// failing closed on the first provider error. Packet protection does not
+    /// mutate replay windows; anti-replay state is still updated only by
+    /// [`Self::unprotect_packet`] after authentication succeeds.
+    pub fn protect_packets(
+        &mut self,
+        cx: &Cx,
+        requests: &[PacketProtectionRequest<'_>],
+    ) -> AtpOutcome<Vec<ProtectedPacket>> {
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields(
+                "atp_packet_protection_protect_batch",
+                &[("packets", &requests.len().to_string())],
+            );
+        }
+
+        let mut protected = Vec::with_capacity(requests.len());
+        for request in requests {
+            match self.protect_packet_now(cx, *request) {
+                Outcome::Ok(packet) => protected.push(packet),
+                Outcome::Err(err) => return Outcome::Err(err),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+        Outcome::ok(protected)
+    }
+
+    /// Protect a packet with ATP error handling.
+    pub async fn protect_packet(
+        &mut self,
+        cx: &Cx,
+        request: PacketProtectionRequest<'_>,
+    ) -> AtpOutcome<ProtectedPacket> {
+        self.protect_packet_now(cx, request)
     }
 
     /// Unprotect a packet with ATP error handling.
@@ -799,6 +843,69 @@ mod tests {
                 .expect_err("same packet number in same space must be rejected");
             assert_eq!(replay, AtpError::Auth(AuthError::ReplayedNonce));
             assert_eq!(protection.accepted_packet_count(), 1);
+        });
+    }
+
+    #[test]
+    fn protect_packets_batches_ordered_one_rtt_payloads() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection = deterministic_one_rtt_protection(&cx, b"one-rtt-batch-seed").await;
+            let payloads = [
+                encoded_application_payload(),
+                b"second application payload".to_vec(),
+                b"third application payload".to_vec(),
+            ];
+            let associated_data = [
+                b"batch short header pn=100".as_slice(),
+                b"batch short header pn=101".as_slice(),
+                b"batch short header pn=102".as_slice(),
+            ];
+            let requests = [
+                PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 100,
+                    associated_data: associated_data[0],
+                    payload: &payloads[0],
+                },
+                PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 101,
+                    associated_data: associated_data[1],
+                    payload: &payloads[1],
+                },
+                PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 102,
+                    associated_data: associated_data[2],
+                    payload: &payloads[2],
+                },
+            ];
+
+            let protected = protection
+                .protect_packets(&cx, &requests)
+                .expect("batch protects");
+
+            assert_eq!(protected.len(), requests.len());
+            assert_eq!(
+                protection.accepted_packet_count(),
+                0,
+                "protecting packets must not mutate the receive replay window"
+            );
+
+            for (idx, packet) in protected.iter().enumerate() {
+                assert_eq!(packet.packet_number, requests[idx].packet_number);
+                assert_ne!(packet.ciphertext, payloads[idx]);
+                let unprotected = protection
+                    .unprotect_packet(&cx, packet, associated_data[idx])
+                    .await
+                    .expect("batched packet unprotects");
+                assert_eq!(unprotected.plaintext, payloads[idx]);
+            }
+            assert_eq!(protection.accepted_packet_count(), requests.len());
         });
     }
 

@@ -537,6 +537,20 @@ fn coalesced_datagram_frames_per_packet(
     (max_app_payload / datagram_frame_len.max(1)).max(1)
 }
 
+fn coalesced_spray_flush_symbol_limit(
+    max_burst_symbols: usize,
+    max_symbol_frames_per_packet: usize,
+) -> usize {
+    let burst = max_burst_symbols.max(1);
+    let packet_width = max_symbol_frames_per_packet.max(1);
+    let full_packet_multiple = (burst / packet_width).saturating_mul(packet_width);
+    if full_packet_multiple == 0 {
+        burst
+    } else {
+        full_packet_multiple
+    }
+}
+
 fn quic_varint_len(value: usize) -> usize {
     match value {
         0..=63 => 1,
@@ -578,6 +592,10 @@ pub struct QuicLink {
     /// Expected upper bound on ATP symbol DATAGRAM frames one received UDP
     /// packet may enqueue before the symbol decoder gets a turn to drain them.
     max_datagram_frames_per_packet: usize,
+    /// Auth-posture-aware symbol DATAGRAM frame width used to align paced
+    /// sender flushes to full protected packets.
+    max_symbol_frames_per_packet: usize,
+    symbol_datagram_frame_len: usize,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
     pending_control_frames: VecDeque<Frame>,
@@ -719,6 +737,27 @@ impl QuicLink {
         )
     }
 
+    fn paced_flush_symbol_limit(&self, pacing: &QuicSprayPacingDecision) -> usize {
+        coalesced_spray_flush_symbol_limit(
+            pacing.max_burst_symbols,
+            self.max_symbol_frames_per_packet,
+        )
+    }
+
+    fn pause_after_symbol_flush(
+        &self,
+        symbols: usize,
+        pacing: &QuicSprayPacingDecision,
+    ) -> Duration {
+        if symbols == pacing.max_burst_symbols {
+            return pacing.pause_after_burst;
+        }
+        let bytes = u64::try_from(symbols.max(1))
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(self.symbol_datagram_frame_len).unwrap_or(u64::MAX));
+        super::pacing_pause_for_bytes(bytes, pacing.pacing_rate_bps)
+    }
+
     async fn service_spray_liveness(
         &mut self,
         cx: &Cx,
@@ -795,7 +834,13 @@ impl QuicLink {
     /// Drain all currently-pending application frames, protect each into a 1-RTT
     /// packet, and send the batch over UDP. Returns the number of packets sent.
     async fn flush(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
-        let mut packets = Vec::new();
+        struct PlainOneRttPacket {
+            packet_number: u64,
+            header: [u8; ONE_RTT_HEADER_LEN],
+            payload: BytesMut,
+        }
+
+        let mut plain_packets = Vec::new();
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let frames = self.conn.generate_frames(
@@ -811,41 +856,48 @@ impl QuicLink {
             let packet_number = self.send_pn;
             self.send_pn = self.send_pn.saturating_add(1);
             let header = encode_one_rtt_header(packet_number);
-            let protected = protection_result(
-                self.protection
-                    .protect_packet(
-                        cx,
-                        PacketProtectionRequest {
-                            space: PacketProtectionSpace::OneRtt,
-                            key_phase: false,
-                            packet_number,
-                            associated_data: &header,
-                            payload: &payload,
-                        },
-                    )
-                    .await,
-            )?;
-            let mut data = Vec::with_capacity(
-                ONE_RTT_HEADER_LEN + protected.ciphertext.len() + ONE_RTT_TAG_LEN,
-            );
-            data.extend_from_slice(&header);
-            data.extend_from_slice(&protected.ciphertext);
-            data.extend_from_slice(&protected.tag);
-            if data.len() > ATP_QUIC_UDP_MAX_PACKET {
-                return Err(QuicTransportError::Quic(format!(
-                    "protected 1-RTT packet too large: {} bytes > {} limit",
-                    data.len(),
-                    ATP_QUIC_UDP_MAX_PACKET
-                )));
-            }
-            packets.push(OutgoingPacket {
-                dst_addr: self.peer,
-                data,
-                send_time: None,
+            plain_packets.push(PlainOneRttPacket {
+                packet_number,
+                header,
+                payload,
             });
         }
-        let count = packets.len();
-        if !packets.is_empty() {
+        let count = plain_packets.len();
+        if !plain_packets.is_empty() {
+            let requests = plain_packets
+                .iter()
+                .map(|packet| PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: packet.packet_number,
+                    associated_data: packet.header.as_slice(),
+                    payload: packet.payload.as_ref(),
+                })
+                .collect::<Vec<_>>();
+            let protected_packets =
+                protection_result(self.protection.protect_packets(cx, &requests))?;
+            let mut packets = Vec::with_capacity(protected_packets.len());
+            for (plain, protected) in plain_packets.iter().zip(protected_packets) {
+                debug_assert_eq!(protected.packet_number, plain.packet_number);
+                let mut data = Vec::with_capacity(
+                    ONE_RTT_HEADER_LEN + protected.ciphertext.len() + ONE_RTT_TAG_LEN,
+                );
+                data.extend_from_slice(&plain.header);
+                data.extend_from_slice(&protected.ciphertext);
+                data.extend_from_slice(&protected.tag);
+                if data.len() > ATP_QUIC_UDP_MAX_PACKET {
+                    return Err(QuicTransportError::Quic(format!(
+                        "protected 1-RTT packet too large: {} bytes > {} limit",
+                        data.len(),
+                        ATP_QUIC_UDP_MAX_PACKET
+                    )));
+                }
+                packets.push(OutgoingPacket {
+                    dst_addr: self.peer,
+                    data,
+                    send_time: None,
+                });
+            }
             let report = self
                 .endpoint
                 .send_batch(cx, &packets)
@@ -1068,10 +1120,15 @@ impl QuicLink {
         auth_tag: Option<[u8; TAG_SIZE]>,
         pacing: &QuicSprayPacingDecision,
     ) -> Result<(), QuicTransportError> {
-        if self.conn.pending_outbound_datagram_count() >= pacing.max_burst_symbols {
+        let flush_symbols = self.paced_flush_symbol_limit(pacing);
+        if self.conn.pending_outbound_datagram_count() >= flush_symbols {
             self.flush(cx).await?;
             self.service_spray_liveness(cx, control).await?;
-            crate::time::sleep(cx.now(), pacing.pause_after_burst).await;
+            crate::time::sleep(
+                cx.now(),
+                self.pause_after_symbol_flush(flush_symbols, pacing),
+            )
+            .await;
         }
         super::send_native_symbol(cx, &mut self.conn, symbol, tag, entry, auth_tag)
     }
@@ -1087,11 +1144,14 @@ impl QuicLink {
             return Ok(());
         }
 
+        let pending_symbols = self.conn.pending_outbound_datagram_count();
         self.flush(cx).await?;
         self.service_spray_liveness(cx, control).await?;
 
+        let flushed_symbols = pending_symbols.min(self.paced_flush_symbol_limit(pacing));
         let sent_s = sent.to_string();
-        let pause_after_burst_micros = pacing.pause_after_burst.as_micros().to_string();
+        let pause_after_flush = self.pause_after_symbol_flush(flushed_symbols, pacing);
+        let pause_after_burst_micros = pause_after_flush.as_micros().to_string();
         let pacing_rate_bps = pacing.pacing_rate_bps.to_string();
         cx.trace_with_fields(
             "atp_quic.sender.final_paced_spray_flush",
@@ -1104,7 +1164,7 @@ impl QuicLink {
                 ("pacing_rate_bps", pacing_rate_bps.as_str()),
             ],
         );
-        crate::time::sleep(cx.now(), pacing.pause_after_burst).await;
+        crate::time::sleep(cx.now(), pause_after_flush).await;
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)
     }
 
@@ -1196,6 +1256,15 @@ fn link_from_handshake(
         symbol_datagram_frame_len(config.symbol_size, super::ENVELOPE_HEADER_LEN);
     let max_datagram_frames_per_packet =
         coalesced_datagram_frames_per_packet(max_app_payload, symbol_frame_len);
+    let send_envelope_header_len = if config.symbol_auth_context.is_some() {
+        super::AUTH_ENVELOPE_HEADER_LEN
+    } else {
+        super::ENVELOPE_HEADER_LEN
+    };
+    let send_symbol_frame_len =
+        symbol_datagram_frame_len(config.symbol_size, send_envelope_header_len);
+    let max_symbol_frames_per_packet =
+        coalesced_datagram_frames_per_packet(max_app_payload, send_symbol_frame_len);
     let conn_config = NativeQuicConnectionConfig {
         role,
         max_datagram_frame_size,
@@ -1230,6 +1299,8 @@ fn link_from_handshake(
         clock: 0,
         max_app_payload,
         max_datagram_frames_per_packet,
+        max_symbol_frames_per_packet,
+        symbol_datagram_frame_len: send_symbol_frame_len,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
         pending_control_frames: VecDeque::new(),
@@ -2946,6 +3017,20 @@ mod tests {
                 .saturating_mul(coalesced_symbols.saturating_add(1))
                 > max_app_payload
         );
+    }
+
+    #[test]
+    fn spray_flush_limit_avoids_underfilled_aead_tail_packets() {
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(54, 51),
+            51,
+            "MATRIX encrypted-clean shape should not flush 51 full symbols plus a 3-symbol packet"
+        );
+        assert_eq!(coalesced_spray_flush_symbol_limit(50, 51), 50);
+        assert_eq!(coalesced_spray_flush_symbol_limit(128, 51), 102);
+        assert_eq!(coalesced_spray_flush_symbol_limit(256, 51), 255);
+        assert_eq!(coalesced_spray_flush_symbol_limit(0, 51), 1);
+        assert_eq!(coalesced_spray_flush_symbol_limit(54, 0), 54);
     }
 
     #[test]
