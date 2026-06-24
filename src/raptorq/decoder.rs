@@ -1609,6 +1609,12 @@ impl InactivationDecoder {
         let mut reconstructed = vec![0u8; symbol_size];
 
         for sym in symbols {
+            if sym.data.len() != symbol_size {
+                return Err(DecodeError::SymbolSizeMismatch {
+                    expected: symbol_size,
+                    actual: sym.data.len(),
+                });
+            }
             reconstructed.fill(0);
             let source_equation_storage;
             let (columns, coefficients): (&[usize], &[Gf256]) = if sym.is_source {
@@ -5621,6 +5627,31 @@ mod tests {
     }
 
     #[test]
+    fn verify_decoded_output_rejects_short_received_symbol() {
+        let k = 6;
+        let symbol_size = 16;
+        let seed = 0x6330_C006_u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let source = make_source_data(k, symbol_size);
+        let mut received = make_received_source(&decoder, &source);
+        received[0].data.truncate(symbol_size - 1);
+
+        let intermediate = vec![Some(vec![0u8; symbol_size]); decoder.params().l];
+        let err = decoder
+            .verify_decoded_output(&received, &intermediate)
+            .expect_err("success verification must reject malformed received symbol widths");
+
+        assert_eq!(
+            err,
+            DecodeError::SymbolSizeMismatch {
+                expected: symbol_size,
+                actual: symbol_size - 1,
+            }
+        );
+        assert!(err.is_unrecoverable());
+    }
+
+    #[test]
     fn reconstruction_rejects_unsolved_required_intermediate_column() {
         let k = 6;
         let symbol_size = 16;
@@ -5765,6 +5796,22 @@ mod tests {
                 byte_index: 0,
                 expected: 1,
                 actual: 2
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::ComputeBudgetExhausted {
+                used: 10,
+                requested: 5,
+                max: 12,
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::EsiRateLimitExceeded {
+                esi: MAX_ALLOWED_ESI + 1,
+                column_count: MAX_COLUMNS_PER_ESI + 1,
+                max_columns: MAX_COLUMNS_PER_ESI,
             }
             .is_unrecoverable()
         );
