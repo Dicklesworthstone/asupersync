@@ -727,6 +727,7 @@ fn send_progress_crossed_yield_boundary(before: u64, after: u64) -> bool {
 struct RqReceiverUdpFanout {
     sockets: Vec<UdpSocket>,
     next_poll: usize,
+    recv_payload_pool: Vec<Vec<u8>>,
 }
 
 impl RqReceiverUdpFanout {
@@ -749,6 +750,7 @@ impl RqReceiverUdpFanout {
         Ok(Self {
             sockets,
             next_poll: 0,
+            recv_payload_pool: Vec::with_capacity(RQ_INBOUND_PUMP_BATCH),
         })
     }
 
@@ -813,9 +815,13 @@ impl RqReceiverUdpFanout {
         for offset in 0..socket_count {
             let socket_index = (self.next_poll + offset) % socket_count;
             let poll_result = {
-                let mut recv = std::pin::pin!(
-                    self.sockets[socket_index].recv_batch_from(max_packets, packet_size)
-                );
+                let socket = &mut self.sockets[socket_index];
+                let recv_payload_pool = &mut self.recv_payload_pool;
+                let mut recv = std::pin::pin!(socket.recv_batch_from_reusing(
+                    max_packets,
+                    packet_size,
+                    recv_payload_pool
+                ));
                 Future::poll(recv.as_mut(), task_cx)
             };
             match poll_result {
@@ -843,7 +849,13 @@ impl RqReceiverUdpFanout {
                 "RQ receiver UDP fanout socket index out of range",
             )
         })?;
-        socket.recv_batch_from(max_packets, packet_size).await
+        socket
+            .recv_batch_from_reusing(max_packets, packet_size, &mut self.recv_payload_pool)
+            .await
+    }
+
+    fn recycle_recv_batch(&mut self, batch: &mut crate::net::UdpRecvBatch, max_spare: usize) {
+        batch.recycle_payloads_into(&mut self.recv_payload_pool, max_spare);
     }
 }
 
@@ -7748,7 +7760,7 @@ where
         match ready {
             Ready::Udp {
                 socket_index,
-                batch,
+                mut batch,
             } => {
                 let mut received_len = batch.packets.len();
                 let mut batches = 1usize;
@@ -7772,6 +7784,7 @@ where
                 round_stats.record_decode_stats(
                     drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?,
                 );
+                udp.recycle_recv_batch(&mut batch, RQ_INBOUND_PUMP_BATCH);
 
                 while received_len == RQ_INBOUND_PUMP_BATCH {
                     if batches >= RQ_INBOUND_PUMP_MAX_DRAIN_BATCHES {
@@ -7782,7 +7795,7 @@ where
                     }
 
                     let tail_recv_started = trace_intake.then(Instant::now);
-                    let tail = match crate::time::timeout(
+                    let mut tail = match crate::time::timeout(
                         cx.now(),
                         RQ_INBOUND_PUMP_DRAIN_GRACE,
                         udp.recv_batch_from_socket(
@@ -7822,6 +7835,7 @@ where
                     round_stats.record_decode_stats(
                         drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?,
                     );
+                    udp.recycle_recv_batch(&mut tail, RQ_INBOUND_PUMP_BATCH);
                     batches = batches.saturating_add(1);
                 }
             }
