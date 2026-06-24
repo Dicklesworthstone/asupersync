@@ -430,6 +430,46 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_existing_receiver_store_reconstructs_larger_tree_reorder_without_payload() {
+        let chunks: Vec<Vec<u8>> = (0..16)
+            .map(|idx| pattern_bytes(64 * 1024 + idx * 1024, 101 + idx as u32 * 17))
+            .collect();
+        let receiver_refs: Vec<&[u8]> = chunks.iter().map(Vec::as_slice).collect();
+        let reorder = [7usize, 3, 0, 15, 11, 5, 9, 2, 10, 1, 14, 4, 8, 13, 6, 12];
+        let sender_refs: Vec<&[u8]> = reorder
+            .iter()
+            .map(|&chunk_idx| chunks[chunk_idx].as_slice())
+            .collect();
+        let expected: Vec<u8> = sender_refs
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let receiver = manifest(&mut receiver_store, "tree-before-rename", &receiver_refs);
+        let sender = manifest(&mut sender_store, "tree-after-rename", &sender_refs);
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver);
+        let plan =
+            plan_incremental_resync_with_receiver_coverage(&sender, Some(&receiver), &coverage);
+
+        assert!(sender.total_size_bytes > 1024 * 1024);
+        assert_eq!(plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(plan.missing_chunks.len(), 0);
+        assert_eq!(plan.missing_bytes, 0);
+
+        let report =
+            reconcile_existing_receiver_store_and_reconstruct(&sender, &receiver_store, &plan)
+                .expect("larger zero-payload reorder reconcile");
+
+        assert_eq!(report.compact_wire_bytes, 0);
+        assert_eq!(report.reconstructed_bytes, expected);
+        sender
+            .verify_store_coverage(&report.store)
+            .expect("receiver CAS covers larger reordered target");
+    }
+
+    #[test]
     fn reconcile_applies_canonical_dedup_payload_parts() {
         let mut sender_store = ContentAddressedChunkStore::new();
         let mut receiver_store = ContentAddressedChunkStore::new();
