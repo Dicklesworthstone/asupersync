@@ -773,4 +773,32 @@ mod tests {
             Err(BondingHandshakeError::MissingRequiredAuthKeyRef)
         );
     }
+
+    #[test]
+    fn receiver_control_plane_failed_donor_offer_does_not_consume_slot() {
+        let receiver = BondingHandshake::v1_static([BondTransport::DirectIp], 3, false);
+        let mut control = BondingReceiverControlPlane::new(receiver, 3, vec![endpoint()], None)
+            .expect("control plane");
+
+        let donor_too_small = BondingHandshake::v1_static([BondTransport::DirectIp], 2, false);
+        assert_eq!(
+            control.enroll_next_donor(&donor_too_small),
+            Err(BondingHandshakeError::AgreementDonorCountTooSmall {
+                donor_index: 0,
+                expected_donor_count: 3,
+                agreement_max_donor_count: 2,
+            })
+        );
+        assert_eq!(control.registry().enrolled_count(), 0);
+        assert_eq!(control.registry().missing_donor_indices(), vec![0, 1, 2]);
+        assert!(!control.is_complete());
+
+        let compatible_donor = BondingHandshake::v1_static([BondTransport::DirectIp], 3, false);
+        let enrollment = control
+            .enroll_next_donor(&compatible_donor)
+            .expect("compatible donor should still receive first slot");
+        assert_eq!(enrollment.donor_index, 0);
+        assert_eq!(enrollment.assignment.donor_index, 0);
+        assert_eq!(control.registry().enrolled_donor_indices(), vec![0]);
+    }
 }
