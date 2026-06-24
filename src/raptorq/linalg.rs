@@ -3032,6 +3032,47 @@ mod tests {
     }
 
     #[test]
+    fn gaussian_multibyte_rhs_contradiction_preserves_coefficient_rank_witness() {
+        fn build_solver() -> GaussianSolver {
+            let mut solver = GaussianSolver::new(3, 2);
+            solver.set_row(0, &[1, 0], DenseRow::new(vec![0x10, 0x20]));
+            solver.set_row(1, &[0, 1], DenseRow::new(vec![0x30, 0x40]));
+            // Coefficients are row0 + row1, but the second RHS byte is off by 1.
+            // The matrix rank is still full for two variables; only the
+            // augmented system is inconsistent.
+            solver.set_row(2, &[1, 1], DenseRow::new(vec![0x20, 0x61]));
+            solver
+        }
+
+        for (name, mut solver, solve) in [
+            (
+                "basic",
+                build_solver(),
+                GaussianSolver::solve as fn(&mut GaussianSolver) -> GaussianResult,
+            ),
+            ("markowitz", build_solver(), GaussianSolver::solve_markowitz),
+        ] {
+            assert_eq!(
+                solver.rank_profile(),
+                GaussianRankProfile {
+                    rows: 3,
+                    columns: 2,
+                    rank: 2,
+                    deficit: 0,
+                    pivot_columns: vec![0, 1],
+                    free_columns: Vec::new(),
+                },
+                "{name} coefficient-rank probe must ignore RHS contradictions"
+            );
+            assert_eq!(
+                solve(&mut solver),
+                GaussianResult::Inconsistent { row: 2 },
+                "{name} solver must reject any-byte RHS contradiction without reporting rank deficiency"
+            );
+        }
+    }
+
+    #[test]
     fn gaussian_consistent_overdetermined_matrix_returns_variable_rows_only() {
         let mut basic = GaussianSolver::new(3, 2);
         basic.set_row(0, &[1, 0], DenseRow::new(vec![0x10]));
