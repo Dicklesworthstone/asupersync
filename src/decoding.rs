@@ -192,22 +192,27 @@ pub(crate) struct BlockDecodeOutcome {
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
     let started = Instant::now();
-    let resolution = match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
-        Ok(data) => BlockDecodeResolution::Complete(data),
-        Err(DecodingError::InsufficientSymbols { .. }) => {
-            BlockDecodeResolution::Retry(RejectReason::InsufficientRank)
-        }
-        Err(DecodingError::MatrixInversionFailed { .. }) => {
-            BlockDecodeResolution::Retry(RejectReason::InconsistentEquations)
-        }
-        Err(DecodingError::InconsistentMetadata { .. }) => {
-            BlockDecodeResolution::Failed(RejectReason::InvalidMetadata)
-        }
-        Err(DecodingError::SymbolSizeMismatch { .. }) => {
-            BlockDecodeResolution::Failed(RejectReason::SymbolSizeMismatch)
-        }
-        Err(_) => BlockDecodeResolution::Failed(RejectReason::InconsistentEquations),
-    };
+    let resolution =
+        if let Some(data) = complete_block_data_from_source_symbols(&job.plan, &job.symbols) {
+            BlockDecodeResolution::Complete(data)
+        } else {
+            match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
+                Ok(data) => BlockDecodeResolution::Complete(data),
+                Err(DecodingError::InsufficientSymbols { .. }) => {
+                    BlockDecodeResolution::Retry(RejectReason::InsufficientRank)
+                }
+                Err(DecodingError::MatrixInversionFailed { .. }) => {
+                    BlockDecodeResolution::Retry(RejectReason::InconsistentEquations)
+                }
+                Err(DecodingError::InconsistentMetadata { .. }) => {
+                    BlockDecodeResolution::Failed(RejectReason::InvalidMetadata)
+                }
+                Err(DecodingError::SymbolSizeMismatch { .. }) => {
+                    BlockDecodeResolution::Failed(RejectReason::SymbolSizeMismatch)
+                }
+                Err(_) => BlockDecodeResolution::Failed(RejectReason::InconsistentEquations),
+            }
+        };
     BlockDecodeOutcome {
         sbn: job.sbn,
         input_symbols: job.symbols.len(),
@@ -676,11 +681,6 @@ impl DecodingPipeline {
                         block.state = BlockDecodingState::Decoding;
                     }
                     if matches!(mode, FeedDecodeMode::Deferred) {
-                        if let Some(result) =
-                            self.try_complete_source_block(sbn, retain_decoded_block)
-                        {
-                            return Ok(DeferredSymbolAcceptResult::Immediate(result));
-                        }
                         if let Some(job) = self.prepare_decode_job(sbn, retain_decoded_block) {
                             return Ok(DeferredSymbolAcceptResult::Decode(job));
                         }
@@ -1002,10 +1002,6 @@ impl DecodingPipeline {
                 }
                 let current_symbols = self.symbols.symbols_for_block(sbn).count();
                 if current_symbols > input_symbols {
-                    if let Some(result) = self.try_complete_source_block(sbn, retain_decoded_block)
-                    {
-                        return DeferredSymbolAcceptResult::Immediate(result);
-                    }
                     if let Some(job) = self.prepare_decode_job(sbn, retain_decoded_block) {
                         if let Some(block) = self.blocks.get_mut(&sbn) {
                             block.state = BlockDecodingState::Decoding;
@@ -1516,6 +1512,39 @@ fn decode_block_data(
     }
     block_data.truncate(plan.len);
     Ok(block_data)
+}
+
+fn complete_block_data_from_source_symbols(
+    plan: &BlockPlan,
+    symbols: &[Symbol],
+) -> Option<Vec<u8>> {
+    if plan.k == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut source_payloads = vec![None; plan.k];
+    for symbol in symbols {
+        if symbol.kind() != SymbolKind::Source {
+            continue;
+        }
+        let esi = usize::try_from(symbol.esi()).ok()?;
+        if esi < plan.k {
+            source_payloads[esi] = Some(symbol.data());
+        }
+    }
+
+    let mut block_data = Vec::with_capacity(plan.len);
+    for payload in source_payloads {
+        let payload = payload?;
+        let remaining = plan.len.saturating_sub(block_data.len());
+        if remaining == 0 {
+            break;
+        }
+        let take = remaining.min(payload.len());
+        block_data.extend_from_slice(&payload[..take]);
+    }
+
+    (block_data.len() == plan.len).then_some(block_data)
 }
 
 fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
@@ -2751,6 +2780,7 @@ mod tests {
 
         let mut decoder = decoder_with_params(&config, object_id, data.len(), 1.0, 0);
         let mut completed = None;
+        let mut deferred_jobs = 0usize;
         for symbol in symbols {
             let auth = AuthenticatedSymbol::from_parts(
                 symbol,
@@ -2761,13 +2791,13 @@ mod tests {
                 .expect("feed streaming source")
             {
                 DeferredSymbolAcceptResult::Immediate(SymbolAcceptResult::BlockComplete {
-                    data,
                     ..
                 }) => {
-                    completed = Some(data);
+                    panic!("source-complete deferred feed must return a decode job");
                 }
                 DeferredSymbolAcceptResult::Immediate(_) => {}
                 DeferredSymbolAcceptResult::Decode(job) => {
+                    deferred_jobs = deferred_jobs.saturating_add(1);
                     let result = decoder.finish_decode_job(run_block_decode_job(job));
                     if let SymbolAcceptResult::BlockComplete { data, .. } = result {
                         completed = Some(data);
@@ -2776,6 +2806,12 @@ mod tests {
             }
         }
 
+        crate::assert_with_log!(
+            deferred_jobs == 1,
+            "source-complete deferred feed queues one blocking job",
+            1,
+            deferred_jobs
+        );
         let decoded = completed.expect("source-complete block");
         crate::assert_with_log!(decoded == data, "decoded source block", data, decoded);
         let complete = decoder.is_complete();
