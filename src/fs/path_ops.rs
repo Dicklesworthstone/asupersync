@@ -198,6 +198,25 @@ pub async fn symlink_dir(original: impl AsRef<Path>, link: impl AsRef<Path>) -> 
     spawn_blocking_io(move || std::os::windows::fs::symlink_dir(&original, &link)).await
 }
 
+/// Create a symlink (Windows), choosing file vs directory based on the target.
+///
+/// Mirrors the unix `symlink` so callers can use a single `crate::fs::symlink`
+/// across platforms; the ATP transport recreates symlinks from a live source,
+/// so the target exists and `is_dir()` selects the correct Windows variant.
+#[cfg(windows)]
+pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    let original = original.as_ref().to_owned();
+    let link = link.as_ref().to_owned();
+    spawn_blocking_io(move || {
+        if original.is_dir() {
+            std::os::windows::fs::symlink_dir(&original, &link)
+        } else {
+            std::os::windows::fs::symlink_file(&original, &link)
+        }
+    })
+    .await
+}
+
 /// Read an entire file into a byte vector.
 pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref().to_owned();

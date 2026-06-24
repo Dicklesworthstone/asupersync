@@ -476,6 +476,12 @@ nix = { version = "0.31", features = ["fs", "net", "poll", "signal", "socket", "
 signal-hook = "0.4"
 aes-gcm = "0.10.3"
 chacha20poly1305 = "0.10.1"
+
+# xattr is unix-only (its source references std::os::unix); gate the dependency
+# so non-unix targets (e.g. x86_64-pc-windows-msvc) don't try to compile it.
+# The xattr call sites in src/net/atp/transport_common/metadata.rs are already
+# #[cfg(unix)]-gated.
+[target.'cfg(unix)'.dependencies]
 xattr = "1.6.1"
 
 [dev-dependencies]

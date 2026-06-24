@@ -83,7 +83,7 @@ pub use uring::IoUringFile;
 pub use path_ops::symlink;
 
 #[cfg(windows)]
-pub use path_ops::{symlink_dir, symlink_file};
+pub use path_ops::{symlink, symlink_dir, symlink_file};
 
 pub use std::io::SeekFrom;
 
