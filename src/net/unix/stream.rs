@@ -853,6 +853,12 @@ fn recvmsg_with_raw_ancillary(
     } else {
         (cmsg_buf.as_mut_ptr().cast(), cmsg_buf.len())
     };
+    let msg_controllen = control_len.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ancillary buffer length exceeds platform msghdr control length",
+        )
+    })?;
 
     // SAFETY: `iov` points at the caller-provided mutable data buffer for the
     // duration of the syscall, `cmsg_buf` is initialized and writable for
@@ -863,7 +869,7 @@ fn recvmsg_with_raw_ancillary(
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = control_ptr;
-        msg.msg_controllen = control_len;
+        msg.msg_controllen = msg_controllen;
 
         let bytes = loop {
             let rc = libc::recvmsg(fd, &mut msg, 0);

@@ -473,6 +473,8 @@ nix = { version = "0.31", features = ["fs", "net", "poll", "signal", "socket", "
 signal-hook = "0.4"
 aes-gcm = "0.10.3"
 chacha20poly1305 = "0.10.1"
+
+[target.'cfg(unix)'.dependencies]
 xattr = "1.6.1"
 
 [dev-dependencies]
