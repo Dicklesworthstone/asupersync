@@ -188,6 +188,39 @@ impl BondedReceiverProgressSnapshot {
     }
 }
 
+/// Broadcast feedback computed from aggregate bonded receiver progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedReceiverFeedbackPlan {
+    /// Donor control connections that should receive every feedback action.
+    pub donor_targets: Vec<u32>,
+    /// Aggregate block deficits to broadcast as NeedMore.
+    pub need_more: Vec<BondedBlockCoverage>,
+    /// True when the receiver should broadcast ObjectComplete/Close.
+    pub close: bool,
+    /// Progress snapshot used to derive the plan.
+    pub progress: BondedReceiverProgressSnapshot,
+}
+
+impl BondedReceiverFeedbackPlan {
+    /// True when there is no feedback to broadcast.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        !self.should_broadcast_need_more() && !self.should_broadcast_close()
+    }
+
+    /// True when at least one donor target should receive a NeedMore frame.
+    #[must_use]
+    pub fn should_broadcast_need_more(&self) -> bool {
+        !self.donor_targets.is_empty() && !self.need_more.is_empty()
+    }
+
+    /// True when at least one donor target should receive ObjectComplete/Close.
+    #[must_use]
+    pub fn should_broadcast_close(&self) -> bool {
+        self.close && !self.donor_targets.is_empty()
+    }
+}
+
 /// Receiver-side C2 registry for authenticated donor symbols.
 #[derive(Debug, Clone, Default)]
 pub struct BondedReceiverSymbolSet {
@@ -301,6 +334,12 @@ impl BondedReceiverSymbolSet {
         self.donor_stats.get(&donor_index).copied()
     }
 
+    /// Sorted donor indexes that have contributed authenticated symbols.
+    #[must_use]
+    pub fn donor_targets(&self) -> Vec<u32> {
+        self.donor_stats.keys().copied().collect()
+    }
+
     /// Compute aggregate coverage for one source block.
     ///
     /// The count is global across donors and deduplicated by `(object_id, sbn,
@@ -369,6 +408,33 @@ impl BondedReceiverSymbolSet {
             complete_blocks,
             incomplete_blocks: total_blocks.saturating_sub(complete_blocks),
             total_deficit_symbols,
+        }
+    }
+
+    /// Compute aggregate feedback that should be broadcast to every donor.
+    ///
+    /// `object_verified_complete` is the receiver's fail-closed byte/object
+    /// verification result. Once true, Close wins over any stale per-block
+    /// deficit so no donor keeps spraying into a completed transfer.
+    #[must_use]
+    pub fn feedback_broadcast_plan(
+        &self,
+        blocks: impl IntoIterator<Item = (ObjectId, u8, u32)>,
+        object_verified_complete: bool,
+    ) -> BondedReceiverFeedbackPlan {
+        let block_list: Vec<_> = blocks.into_iter().collect();
+        let progress = self.progress_snapshot(block_list.iter().copied());
+        let need_more = if object_verified_complete {
+            Vec::new()
+        } else {
+            self.blocks_needing_more(block_list.iter().copied())
+        };
+
+        BondedReceiverFeedbackPlan {
+            donor_targets: self.donor_targets(),
+            need_more,
+            close: object_verified_complete,
+            progress,
         }
     }
 }
@@ -579,6 +645,66 @@ mod tests {
         assert_eq!(snapshot.incomplete_blocks, 0);
         assert_eq!(snapshot.total_deficit_symbols, 0);
         assert!(snapshot.is_complete());
+    }
+
+    #[test]
+    fn feedback_plan_broadcasts_aggregate_need_more_to_all_donors() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(23);
+
+        set.record_key(2, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Repair);
+        set.record_key(1, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
+        set.record_key(2, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
+
+        let plan = set.feedback_broadcast_plan([(object_id, 0, 2), (object_id, 1, 3)], false);
+
+        assert_eq!(plan.donor_targets, vec![0, 1, 2]);
+        assert_eq!(
+            plan.need_more,
+            vec![BondedBlockCoverage {
+                object_id,
+                sbn: 1,
+                target_symbols: 3,
+                accepted_symbols: 1,
+                deficit_symbols: 2,
+            }]
+        );
+        assert!(!plan.close);
+        assert!(plan.should_broadcast_need_more());
+        assert!(!plan.should_broadcast_close());
+        assert_eq!(plan.progress.total_deficit_symbols, 2);
+    }
+
+    #[test]
+    fn feedback_plan_close_suppresses_stale_need_more() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(29);
+
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Repair);
+
+        let plan = set.feedback_broadcast_plan([(object_id, 0, 4)], true);
+
+        assert_eq!(plan.donor_targets, vec![0, 1]);
+        assert!(plan.need_more.is_empty());
+        assert!(plan.close);
+        assert!(!plan.should_broadcast_need_more());
+        assert!(plan.should_broadcast_close());
+        assert_eq!(plan.progress.total_deficit_symbols, 2);
+    }
+
+    #[test]
+    fn feedback_plan_without_donor_targets_is_not_broadcastable() {
+        let set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(31);
+        let plan = set.feedback_broadcast_plan([(object_id, 0, 1)], false);
+
+        assert!(plan.donor_targets.is_empty());
+        assert_eq!(plan.need_more.len(), 1);
+        assert!(!plan.should_broadcast_need_more());
+        assert!(!plan.should_broadcast_close());
+        assert_eq!(plan.progress.total_deficit_symbols, 1);
     }
 
     #[test]
