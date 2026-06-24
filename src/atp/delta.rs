@@ -2368,6 +2368,10 @@ mod tests {
         PersistentChunkManifest::new(tree_id, ingest.chunks).expect("manifest")
     }
 
+    fn fixed_chunks(bytes: &[u8], chunk_size: usize) -> Vec<&[u8]> {
+        bytes.chunks(chunk_size).collect()
+    }
+
     #[test]
     fn content_addressed_store_deduplicates_repeated_chunks() {
         let mut store = ContentAddressedChunkStore::new();
@@ -3477,6 +3481,69 @@ mod tests {
 
         assert_eq!(applied.reconstructed_bytes, new);
         assert_eq!(applied.subchunk_count, 1);
+        assert_eq!(applied.whole_chunk_count, 0);
+        assert_eq!(applied.wire_payload_bytes, wire_payload.wire_payload_bytes);
+    }
+
+    #[test]
+    fn transmission_keeps_scattered_multichunk_edits_on_delta_wire_path() {
+        let chunk_size = 64 * 1024;
+        let old = (0..(8 * chunk_size))
+            .map(|idx| ((idx * 37 + idx / 11 + 53) % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut new = old.clone();
+        let scattered_edits = old.len() / 100;
+        for edit in 0..scattered_edits {
+            let pos = (edit * 7919 + 104_729) % new.len();
+            new[pos] ^= 0xa5;
+        }
+
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "scattered-multichunk-file",
+            fixed_chunks(&new, chunk_size),
+        );
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "scattered-multichunk-file",
+            fixed_chunks(&old, chunk_size),
+        );
+
+        let chunk_level_plan = plan_incremental_resync(&sender, Some(&receiver), &receiver_store);
+        assert_eq!(chunk_level_plan.mode, DeltaResyncMode::FullObjectFallback);
+        assert_eq!(
+            chunk_level_plan.fallback_reason,
+            Some(DeltaResyncFallbackReason::DeltaNotSmallerThanFullObject)
+        );
+
+        let transmission = build_delta_resync_transmission(
+            &sender,
+            &sender_store,
+            Some(&receiver),
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("transmission");
+
+        assert!(transmission.uses_delta_wire_payload());
+        assert_eq!(transmission.plan.mode, DeltaResyncMode::DeltaChunks);
+        assert_eq!(transmission.plan.fallback_reason, None);
+        let wire_payload = transmission
+            .wire_payload
+            .as_ref()
+            .expect("delta wire payload");
+        assert_eq!(wire_payload.subchunk_count, sender.chunks.len());
+        assert_eq!(wire_payload.whole_chunk_count, 0);
+        assert!(wire_payload.beats_full_object(sender.total_size_bytes));
+
+        let applied = apply_delta_resync_transmission(&sender, &receiver_store, &transmission)
+            .expect("apply transmission")
+            .expect("delta apply report");
+
+        assert_eq!(applied.reconstructed_bytes, new);
+        assert_eq!(applied.subchunk_count, sender.chunks.len());
         assert_eq!(applied.whole_chunk_count, 0);
         assert_eq!(applied.wire_payload_bytes, wire_payload.wire_payload_bytes);
     }
