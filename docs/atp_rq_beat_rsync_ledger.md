@@ -2373,3 +2373,15 @@ Re-ran 500M/bad/nocrypto streams=1 ×2 on the rate-ramp binary `f2aea2822`:
 | rsyncd /bad | 98.0 → 97.4s | 0 | 3:3 ok |
 
 **Lossy is byte-for-byte the same wall** (153.8 vs 153.4, within noise) — the clean-ramp's loss-gate works; the higher clean-link pacing does not leak into the lossy AIMD path. (atp/bad still loses 1.58× to plaintext rsyncd, the documented pre-existing nocrypto-bad state from MATRIX-71 — NOT a regression; atp's lossy edge is the crypto tiers + memory.) **Net: MATRIX-73's clean-high-BDP TIE is a clean, regression-free win — f2aea2822 is safe default-on.** Evidence: `artifacts/atp_bench_matrix/20260624T221510Z/`.
+
+## MATRIX-75 (2026-06-24) — streams=8 instability FIXED: cap-aggregate (01daa99b6 'default single-stream fanout + cap aggregate') stabilized streams=8 under the ramp — was 20.3/**286.6**/19.6s (1/3 blowup, 6 rounds), now 25.2/27.0/27.1s (all rounds=0, stable). streams=1 holds the 18.0s TIE. Single-stream remains best (s8 stable-but-slower); the new streams=1 default (a73d963f5) is correct.
+
+Built `a73d963f5` (incl 01daa99b6) and re-ran 500M/highbdp/nocrypto streams 1,8:
+
+| streams | MATRIX-73 → MATRIX-75 | rounds | vs rsync 17.6s |
+|---|---|---|---|
+| 1 | 18.27 → **18.0s** (17.7/18.4) | 0 | TIE (1.02×) |
+| 8 | 20.3/**286.6**/19.6 → **25.2/27.0/27.1** (stable) | 0 (was 6) | stable but slower |
+| rsyncd | 17.74 → 17.64s | 0 | baseline |
+
+**The cap-aggregate eliminated the s8 overrun** — all 3 s8 reps now complete in 25-27s with 0 feedback rounds (no 286s blowup). The cost: s8 is rate-capped to ~27s, slower than s1's 18s (the aggregate cap holds total in-flight under the path rate, so 8 streams no longer overrun but also don't beat 1 stream). **Single stream is both fastest AND stable** — consistent with fan-out being a no-op for throughput (MATRIX-68); the new streams=1 default (a73d963f5) is the right call. **clean-high-BDP TIE (18.0s vs rsync 17.6s, 1.02×) confirmed stable at the default.** Evidence: `artifacts/atp_bench_matrix/20260624T225809Z/`.
