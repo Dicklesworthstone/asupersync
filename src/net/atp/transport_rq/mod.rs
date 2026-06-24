@@ -513,6 +513,142 @@ impl RqSprayPacing {
             loss_detected,
         }
     }
+
+    fn rate_bytes_per_sec(self) -> u64 {
+        self.path_rate_bps / 8
+    }
+
+    fn burst_bytes(self) -> u64 {
+        u64::from(self.datagram_bytes).saturating_mul(u64::from(self.max_burst_size))
+    }
+
+    fn configured_bdp_bytes(self) -> Option<u64> {
+        self.rtt
+            .map(|rtt| rate_window_bytes(self.rate_bytes_per_sec(), rtt))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RqSenderWindowProbe {
+    sent_symbols: u64,
+    payload_bytes: u64,
+    wire_bytes: u64,
+    send_wall_ms: u64,
+    control_wait_ms: u64,
+    configured_rate_bytes_per_sec: u64,
+    observed_payload_bytes_per_sec: u64,
+    observed_wire_bytes_per_sec: u64,
+    configured_bdp_bytes: u64,
+    configured_control_window_bytes: u64,
+    observed_payload_window_bytes: u64,
+    observed_wire_window_bytes: u64,
+    burst_bytes: u64,
+    burst_symbols: u32,
+    datagram_bytes: u32,
+}
+
+impl RqSenderWindowProbe {
+    fn new(
+        pacing: RqSprayPacing,
+        sent_symbols: u64,
+        symbol_size: u16,
+        send_wall: Duration,
+        control_wait: Duration,
+    ) -> Self {
+        let payload_bytes = sent_symbols.saturating_mul(u64::from(symbol_size.max(1)));
+        let wire_bytes = sent_symbols.saturating_mul(u64::from(pacing.datagram_bytes));
+        let observed_payload_bytes_per_sec = bytes_per_second_ceil(payload_bytes, send_wall);
+        let observed_wire_bytes_per_sec = bytes_per_second_ceil(wire_bytes, send_wall);
+        Self {
+            sent_symbols,
+            payload_bytes,
+            wire_bytes,
+            send_wall_ms: duration_millis_u64(send_wall),
+            control_wait_ms: duration_millis_u64(control_wait),
+            configured_rate_bytes_per_sec: pacing.rate_bytes_per_sec(),
+            observed_payload_bytes_per_sec,
+            observed_wire_bytes_per_sec,
+            configured_bdp_bytes: pacing.configured_bdp_bytes().unwrap_or(0),
+            configured_control_window_bytes: rate_window_bytes(
+                pacing.rate_bytes_per_sec(),
+                control_wait,
+            ),
+            observed_payload_window_bytes: rate_window_bytes(
+                observed_payload_bytes_per_sec,
+                control_wait,
+            ),
+            observed_wire_window_bytes: rate_window_bytes(
+                observed_wire_bytes_per_sec,
+                control_wait,
+            ),
+            burst_bytes: pacing.burst_bytes(),
+            burst_symbols: pacing.max_burst_size,
+            datagram_bytes: pacing.datagram_bytes,
+        }
+    }
+
+    fn peak_window_bytes(self) -> u64 {
+        self.configured_bdp_bytes
+            .max(self.configured_control_window_bytes)
+            .max(self.observed_payload_window_bytes)
+            .max(self.observed_wire_window_bytes)
+    }
+}
+
+fn trace_sender_window_probe(
+    phase: &str,
+    feedback_round: u32,
+    probe: RqSenderWindowProbe,
+    peak_window_bytes: u64,
+    udp_send_acceleration: UdpSendAccelerationReport,
+) {
+    rqtrace!(
+        "sender: window_probe phase={} feedback_round={} sent_symbols={} payload_bytes={} wire_bytes={} send_wall_ms={} control_wait_ms={} configured_rate_Bps={} observed_payload_Bps={} observed_wire_Bps={} configured_bdp_bytes={} configured_control_window_bytes={} observed_payload_window_bytes={} observed_wire_window_bytes={} peak_window_bytes={} burst_bytes={} burst_symbols={} datagram_bytes={} udp_flushes={} udp_datagrams={} udp_payload_bytes={}",
+        phase,
+        feedback_round,
+        probe.sent_symbols,
+        probe.payload_bytes,
+        probe.wire_bytes,
+        probe.send_wall_ms,
+        probe.control_wait_ms,
+        probe.configured_rate_bytes_per_sec,
+        probe.observed_payload_bytes_per_sec,
+        probe.observed_wire_bytes_per_sec,
+        probe.configured_bdp_bytes,
+        probe.configured_control_window_bytes,
+        probe.observed_payload_window_bytes,
+        probe.observed_wire_window_bytes,
+        peak_window_bytes,
+        probe.burst_bytes,
+        probe.burst_symbols,
+        probe.datagram_bytes,
+        udp_send_acceleration.flushes,
+        udp_send_acceleration.datagrams,
+        udp_send_acceleration.payload_bytes,
+    );
+}
+
+fn bytes_per_second_ceil(bytes: u64, elapsed: Duration) -> u64 {
+    let nanos = elapsed.as_nanos().max(1);
+    let rate = u128::from(bytes)
+        .saturating_mul(1_000_000_000)
+        .div_ceil(nanos);
+    u64::try_from(rate).unwrap_or(u64::MAX)
+}
+
+fn rate_window_bytes(bytes_per_sec: u64, rtt: Duration) -> u64 {
+    let nanos = rtt.as_nanos();
+    if nanos == 0 || bytes_per_sec == 0 {
+        return 0;
+    }
+    let bytes = u128::from(bytes_per_sec)
+        .saturating_mul(nanos)
+        .div_ceil(1_000_000_000);
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 struct RqSprayPacer {
@@ -3753,6 +3889,7 @@ pub async fn send_path(
     rqtrace!("sender: round 0 sprayed, symbols_sent={symbols_sent}");
 
     // Feedback loop.
+    let mut peak_sender_window_bytes = 0u64;
     loop {
         let control_wait_started = Instant::now();
         let sent_this_round = symbols_sent.saturating_sub(round_symbols_start);
@@ -3767,6 +3904,27 @@ pub async fn send_path(
         rqtrace!("sender: sent ObjectComplete, awaiting reply");
         let reply = control.recv().await?;
         let control_wait = control_wait_started.elapsed();
+        let window_probe = RqSenderWindowProbe::new(
+            round_tuning.pacing,
+            sent_this_round,
+            config.symbol_size,
+            round_send_wall,
+            control_wait,
+        );
+        let window_probe_phase = match reply.frame_type() {
+            FrameType::Proof => "proof",
+            FrameType::ObjectRequest => "need_more",
+            FrameType::KeepAlive => "keep_alive",
+            _ => "other",
+        };
+        peak_sender_window_bytes = peak_sender_window_bytes.max(window_probe.peak_window_bytes());
+        trace_sender_window_probe(
+            window_probe_phase,
+            feedback_rounds,
+            window_probe,
+            peak_sender_window_bytes,
+            udp_send_acceleration,
+        );
         rqtrace!("sender: got reply {:?}", reply.frame_type());
         match reply.frame_type() {
             FrameType::Proof => {
@@ -8870,6 +9028,42 @@ mod tests {
         assert!(send_progress_crossed_yield_boundary(63, 64));
         assert!(send_progress_crossed_yield_boundary(60, 96));
         assert!(!send_progress_crossed_yield_boundary(64, 96));
+    }
+
+    #[test]
+    fn rq_sender_window_probe_estimates_bdp_limited_window() {
+        let pacing = RqSprayPacing::from_rate(
+            16 * 1024 * 1024,
+            1000,
+            RQ_COLD_START_BURST_SYMBOLS,
+            None,
+            false,
+        );
+        let probe = RqSenderWindowProbe::new(
+            pacing,
+            13_200,
+            1000,
+            Duration::from_secs(1),
+            Duration::from_millis(200),
+        );
+
+        assert_eq!(probe.payload_bytes, 13_200_000);
+        assert_eq!(probe.observed_payload_bytes_per_sec, 13_200_000);
+        assert_eq!(probe.observed_payload_window_bytes, 2_640_000);
+        assert_eq!(probe.configured_rate_bytes_per_sec, 16 * 1024 * 1024);
+        assert_eq!(probe.configured_bdp_bytes, 0);
+        assert_eq!(
+            probe.configured_control_window_bytes,
+            rate_window_bytes(16 * 1024 * 1024, Duration::from_millis(200))
+        );
+        assert_eq!(
+            probe.peak_window_bytes(),
+            probe
+                .configured_bdp_bytes
+                .max(probe.configured_control_window_bytes)
+                .max(probe.observed_payload_window_bytes)
+                .max(probe.observed_wire_window_bytes)
+        );
     }
 
     #[test]
