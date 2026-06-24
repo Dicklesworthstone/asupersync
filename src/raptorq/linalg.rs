@@ -50,6 +50,27 @@ pub struct DenseRowIndexError {
     pub len: usize,
 }
 
+/// Index outside the bounds of a sparse GF(256) row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SparseRowIndexError {
+    /// Requested element index.
+    pub index: usize,
+    /// Current row length.
+    pub len: usize,
+}
+
+impl core::fmt::Display for SparseRowIndexError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "sparse row index out of range: {} >= {}",
+            self.index, self.len
+        )
+    }
+}
+
+impl std::error::Error for SparseRowIndexError {}
+
 /// A dense row vector over GF(256).
 ///
 /// Stores all elements contiguously in a `Vec<u8>`. Efficient for operations
@@ -276,16 +297,28 @@ impl SparseRow {
     /// Panics if any entry index is out of bounds for `len`.
     #[must_use]
     pub fn new(entries: Vec<(usize, Gf256)>, len: usize) -> Self {
-        let mut filtered: Vec<_> = entries
-            .into_iter()
-            .filter_map(|(index, value)| {
-                assert!(
-                    index < len,
-                    "sparse row index out of range: {index} >= {len}"
-                );
-                (!value.is_zero()).then_some((index, value))
-            })
-            .collect();
+        Self::try_new(entries, len).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible constructor for sparse rows built from untrusted schedules.
+    ///
+    /// Duplicate indices are canonicalized exactly like [`Self::new`], but
+    /// out-of-range indices return a deterministic error instead of panicking.
+    pub fn try_new(entries: Vec<(usize, Gf256)>, len: usize) -> Result<Self, SparseRowIndexError> {
+        let mut filtered = Vec::with_capacity(entries.len());
+        for (index, value) in entries {
+            if index >= len {
+                return Err(SparseRowIndexError { index, len });
+            }
+            if !value.is_zero() {
+                filtered.push((index, value));
+            }
+        }
+
+        Ok(Self::from_valid_entries(filtered, len))
+    }
+
+    fn from_valid_entries(mut filtered: Vec<(usize, Gf256)>, len: usize) -> Self {
         filtered.sort_by_key(|(i, _)| *i);
 
         let mut canonical: Vec<(usize, Gf256)> = Vec::with_capacity(filtered.len());
@@ -320,17 +353,29 @@ impl SparseRow {
     #[inline]
     #[must_use]
     pub fn singleton(index: usize, value: Gf256, len: usize) -> Self {
-        assert!(
-            index < len,
-            "sparse row index out of range: {index} >= {len}"
-        );
+        Self::try_singleton(index, value, len).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Fallible single-entry sparse-row constructor.
+    ///
+    /// Rejects out-of-range indices even when `value` is zero, matching
+    /// [`Self::singleton`] without panicking.
+    #[inline]
+    pub fn try_singleton(
+        index: usize,
+        value: Gf256,
+        len: usize,
+    ) -> Result<Self, SparseRowIndexError> {
+        if index >= len {
+            return Err(SparseRowIndexError { index, len });
+        }
         if value.is_zero() {
-            Self::zeros(len)
+            Ok(Self::zeros(len))
         } else {
-            Self {
+            Ok(Self {
                 entries: vec![(index, value)],
                 len,
-            }
+            })
         }
     }
 
@@ -1971,6 +2016,62 @@ mod tests {
     #[should_panic(expected = "sparse row index out of range")]
     fn sparse_row_singleton_zero_value_still_rejects_out_of_range_indices() {
         let _ = SparseRow::singleton(4, Gf256::ZERO, 4);
+    }
+
+    #[test]
+    fn sparse_row_try_new_canonicalizes_or_returns_index_error() {
+        let row = SparseRow::try_new(
+            vec![
+                (3, Gf256::new(7)),
+                (1, Gf256::new(5)),
+                (1, Gf256::new(5)),
+                (1, Gf256::new(3)),
+                (2, Gf256::ZERO),
+            ],
+            5,
+        )
+        .expect("valid sparse row");
+
+        assert_eq!(row.nonzero_count(), 2);
+        assert_eq!(row.get(1), Gf256::new(3));
+        assert_eq!(row.get(3), Gf256::new(7));
+        assert_eq!(row.to_dense().as_slice(), &[0, 3, 0, 7, 0]);
+        assert_eq!(
+            SparseRow::try_new(vec![(4, Gf256::new(1))], 4),
+            Err(SparseRowIndexError { index: 4, len: 4 })
+        );
+    }
+
+    #[test]
+    fn sparse_row_try_singleton_rejects_out_of_range_even_for_zero_value() {
+        assert_eq!(
+            SparseRow::try_singleton(5, Gf256::new(42), 10)
+                .expect("valid singleton")
+                .to_dense()
+                .as_slice(),
+            &[0, 0, 0, 0, 0, 42, 0, 0, 0, 0]
+        );
+        assert!(
+            SparseRow::try_singleton(5, Gf256::ZERO, 10)
+                .expect("valid zero singleton")
+                .is_zero()
+        );
+        assert_eq!(
+            SparseRow::try_singleton(4, Gf256::new(1), 4),
+            Err(SparseRowIndexError { index: 4, len: 4 })
+        );
+        assert_eq!(
+            SparseRow::try_singleton(4, Gf256::ZERO, 4),
+            Err(SparseRowIndexError { index: 4, len: 4 })
+        );
+    }
+
+    #[test]
+    fn sparse_row_index_error_display_is_stable() {
+        assert_eq!(
+            SparseRowIndexError { index: 8, len: 8 }.to_string(),
+            "sparse row index out of range: 8 >= 8"
+        );
     }
 
     // -- Slice operations --
