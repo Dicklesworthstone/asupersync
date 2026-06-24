@@ -698,6 +698,35 @@ fn adversarial_solver_corpus_keeps_basic_and_markowitz_outcomes_aligned() {
 }
 
 #[test]
+fn pivot_strategies_reject_mixed_rhs_widths_even_when_coefficients_are_full_rank() {
+    let rows = [
+        (&[1u8, 0][..], &[0x11, 0x12][..]),
+        (&[0u8, 1][..], &[0x21][..]),
+    ];
+    let mut basic = solver_from_rows(&rows, 2);
+    let mut markowitz = solver_from_rows(&rows, 2);
+
+    assert_eq!(basic.rank_status().rank, 2);
+    assert_eq!(basic.rank_status().deficit, 0);
+    assert_eq!(
+        basic.rank_status(),
+        markowitz.rank_status(),
+        "coefficient rank is full before the RHS-width guard runs"
+    );
+
+    assert_eq!(
+        basic.solve(),
+        GaussianResult::Inconsistent { row: 1 },
+        "basic pivoting must fail closed instead of padding or truncating RHS symbols"
+    );
+    assert_eq!(
+        markowitz.solve_markowitz(),
+        GaussianResult::Inconsistent { row: 1 },
+        "Markowitz pivoting must enforce the same RHS-width guard"
+    );
+}
+
+#[test]
 fn full_rank_solver_payload_is_invariant_under_equivalent_row_presentations() {
     let expected_solution = vec![vec![0x10, 0x11], vec![0x20, 0x21], vec![0x30, 0x31]];
     let base_coefficients = [vec![1u8, 2, 3], vec![0, 1, 4], vec![0, 0, 1]];
