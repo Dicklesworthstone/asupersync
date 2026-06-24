@@ -80,7 +80,7 @@ const DELTA_SUBCHUNK_SIGNATURE_REQUEST_SCHEMA: &str =
 const DELTA_SUBCHUNK_SIGNATURE_RESPONSE_SCHEMA: &str =
     "asupersync.atp.cli-delta-subchunk-signature-response.v1";
 const DELTA_PACKAGE_SCHEMA: &str = "asupersync.atp.cli-delta-package.v1";
-const DELTA_TREE_OBJECT_MAGIC: &[u8] = b"ASUP_ATP_CLI_DELTA_TREE_OBJECT_V1\0";
+const DELTA_TREE_OBJECT_MAGIC: &[u8] = b"ASUP_ATP_CLI_DELTA_TREE_OBJECT_V2\0";
 const DELTA_TREE_OBJECT_CDC_WINDOW_BYTES: usize = 64;
 const DELTA_TREE_OBJECT_MIN_CHUNK_BYTES: usize = 16 * 1024;
 const DELTA_TREE_OBJECT_AVG_CHUNK_BYTES: usize = 32 * 1024;
@@ -2553,18 +2553,36 @@ fn collect_delta_dir(
 
 fn encode_delta_tree_object(files: &[DeltaTreeFile]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
+    let mut payloads = BTreeMap::<([u8; 32], u64), &[u8]>::new();
+
     out.extend_from_slice(DELTA_TREE_OBJECT_MAGIC);
     put_u64(&mut out, files.len() as u64);
     for file in files {
+        let payload_len = u64::try_from(file.bytes.len())
+            .map_err(|_| "delta file length exceeds u64::MAX".to_string())?;
+        let payload_sha256 = sha256_array(&file.bytes);
         put_len_prefixed(&mut out, file.rel_path.as_bytes())?;
-        put_u64(
-            &mut out,
-            u64::try_from(file.bytes.len())
-                .map_err(|_| "delta file length exceeds u64::MAX".to_string())?,
-        );
-        out.extend_from_slice(&file.bytes);
+        put_u64(&mut out, payload_len);
+        out.extend_from_slice(&payload_sha256);
+        payloads
+            .entry((payload_sha256, payload_len))
+            .or_insert_with(|| file.bytes.as_slice());
+    }
+
+    put_u64(&mut out, payloads.len() as u64);
+    for ((payload_sha256, payload_len), payload) in payloads {
+        out.extend_from_slice(&payload_sha256);
+        put_u64(&mut out, payload_len);
+        out.extend_from_slice(payload);
     }
     Ok(out)
+}
+
+fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }
 
 fn put_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), String> {
@@ -3139,17 +3157,49 @@ fn decode_delta_tree_object(bytes: &[u8]) -> Result<Vec<DeltaTreeFile>, String> 
     let file_count = reader.read_u64()?;
     let file_count = usize::try_from(file_count)
         .map_err(|_| "delta object file count exceeds usize::MAX".to_string())?;
-    let mut files = Vec::with_capacity(file_count);
+    let mut entries = Vec::with_capacity(file_count);
     for _ in 0..file_count {
         let rel_path = reader.read_string()?;
         validate_delta_rel_path(&rel_path)?;
         let len = reader.read_u64()?;
-        let len = usize::try_from(len)
-            .map_err(|_| "delta object file length exceeds usize::MAX".to_string())?;
+        let payload_sha256 = reader.read_sha256()?;
+        entries.push((rel_path, len, payload_sha256));
+    }
+
+    let payload_count = reader.read_u64()?;
+    let payload_count = usize::try_from(payload_count)
+        .map_err(|_| "delta object payload count exceeds usize::MAX".to_string())?;
+    let mut payloads = BTreeMap::<([u8; 32], u64), Vec<u8>>::new();
+    for _ in 0..payload_count {
+        let payload_sha256 = reader.read_sha256()?;
+        let payload_len = reader.read_u64()?;
+        let len = usize::try_from(payload_len)
+            .map_err(|_| "delta object payload length exceeds usize::MAX".to_string())?;
         let payload = reader.read_exact(len)?.to_vec();
+        let observed_sha256 = sha256_array(&payload);
+        if observed_sha256 != payload_sha256 {
+            return Err("delta object payload sha256 mismatch".to_string());
+        }
+        if payloads
+            .insert((payload_sha256, payload_len), payload)
+            .is_some()
+        {
+            return Err("delta object contains duplicate payload entry".to_string());
+        }
+    }
+
+    let mut files = Vec::with_capacity(file_count);
+    for (rel_path, len, payload_sha256) in entries {
+        let payload = payloads.get(&(payload_sha256, len)).ok_or_else(|| {
+            format!(
+                "delta object missing payload {}:{} for {rel_path}",
+                hex::encode(payload_sha256),
+                len
+            )
+        })?;
         files.push(DeltaTreeFile {
             rel_path,
-            bytes: payload,
+            bytes: payload.clone(),
         });
     }
     reader.expect_eof()?;
@@ -3335,6 +3385,12 @@ impl<'a> DeltaObjectReader<'a> {
             .try_into()
             .map_err(|_| "delta object ended mid-u64".to_string())?;
         Ok(u64::from_be_bytes(bytes))
+    }
+
+    fn read_sha256(&mut self) -> Result<[u8; 32], String> {
+        self.read_exact(32)?
+            .try_into()
+            .map_err(|_| "delta object ended mid-sha256".to_string())
     }
 
     fn read_exact(&mut self, len: usize) -> Result<&'a [u8], String> {
@@ -4941,6 +4997,87 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
             edited_missing_bytes <= 192 * 1024,
             "100KiB same-length edit should not dirty {} bytes of delta chunks",
             edited_missing_bytes
+        );
+    }
+
+    fn delta_tree_fixture_bytes(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|idx| {
+                state = state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223)
+                    .wrapping_add(u32::try_from(idx & 0xffff).expect("masked index fits"));
+                (state >> 16) as u8
+            })
+            .collect()
+    }
+
+    fn sort_delta_tree_files(files: &mut [DeltaTreeFile]) {
+        files.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    }
+
+    #[test]
+    fn delta_tree_object_move_keeps_payload_chunks_path_independent() {
+        let payloads = (0..64)
+            .map(|idx| delta_tree_fixture_bytes(24 * 1024 + (idx % 5) * 307, 97 + idx as u32))
+            .collect::<Vec<_>>();
+
+        let mut before = payloads
+            .iter()
+            .enumerate()
+            .map(|(idx, bytes)| DeltaTreeFile {
+                rel_path: format!("tree/a/file-{idx:02}.bin"),
+                bytes: bytes.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut after = payloads
+            .iter()
+            .enumerate()
+            .map(|(idx, bytes)| DeltaTreeFile {
+                rel_path: if idx == 0 {
+                    "tree/z/file-00.bin".to_string()
+                } else {
+                    format!("tree/a/file-{idx:02}.bin")
+                },
+                bytes: bytes.clone(),
+            })
+            .collect::<Vec<_>>();
+        sort_delta_tree_files(&mut before);
+        sort_delta_tree_files(&mut after);
+
+        let encoded = encode_delta_tree_object(&after).expect("encode moved tree object");
+        let decoded = decode_delta_tree_object(&encoded).expect("decode moved tree object");
+        assert_eq!(decoded.len(), after.len());
+        for (observed, expected) in decoded.iter().zip(&after) {
+            assert_eq!(observed.rel_path, expected.rel_path);
+            assert_eq!(observed.bytes, expected.bytes);
+        }
+
+        let receiver = build_delta_snapshot_from_files(before).expect("receiver snapshot");
+        let sender = build_delta_snapshot_from_files(after).expect("sender snapshot");
+        let coverage = ReceiverCasCoverage::from_manifest(&receiver.manifest);
+        let plan = plan_incremental_resync_with_receiver_coverage(
+            &sender.manifest,
+            Some(&receiver.manifest),
+            &coverage,
+        );
+
+        assert_eq!(plan.mode, DeltaResyncMode::DeltaChunks);
+        assert!(
+            plan.missing_bytes < sender.manifest.total_size_bytes / 4,
+            "tree move should not dirty the full payload table: missing={} total={}",
+            plan.missing_bytes,
+            sender.manifest.total_size_bytes
+        );
+
+        let package =
+            build_delta_package(&sender, &plan, &receiver.manifest, &[]).expect("delta package");
+        assert!(
+            package.payload_bytes < sender.manifest.total_size_bytes / 4,
+            "tree move package should stay proportional to path/index churn: payload={} total={}",
+            package.payload_bytes,
+            sender.manifest.total_size_bytes
         );
     }
 
