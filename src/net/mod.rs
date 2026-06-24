@@ -94,15 +94,15 @@ pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, Writ
 pub use tcp::stream::TcpStream;
 pub use tcp::stream::TcpStreamBuilder;
 pub use udp::{
-    RecvStream, SendSink, UDP_MAX_GSO_SEGMENTS, UDP_RENDEZVOUS_MAX_ATTEMPTS,
-    UDP_RENDEZVOUS_MAX_CANDIDATES, UDP_RENDEZVOUS_MAX_ID_BYTES, UDP_RENDEZVOUS_NONCE_BYTES,
-    UdpAddressFamily, UdpBatchCapabilities, UdpBatchIoReport, UdpBufferConfig, UdpBufferTuneReport,
-    UdpCapability, UdpEndpointObservation, UdpHairpinSupport, UdpInboundDatagram, UdpNatAssessment,
-    UdpNatConfidence, UdpNatKind, UdpOutboundDatagram, UdpPlatform, UdpRecvBatch,
-    UdpRendezvousCandidate, UdpRendezvousCandidateKind, UdpRendezvousCandidateSet,
-    UdpRendezvousSignature, UdpRendezvousValidationError, UdpSendAccelerationCapabilities,
-    UdpSendBatchPath, UdpSendBatchPlan, UdpSendBatchStrategy, UdpSocket, UdpSocketCapabilities,
-    classify_udp_nat, validate_udp_rendezvous_candidates,
+    RecvStream, SendSink, UDP_DEFAULT_GSO_SEGMENT_BYTES, UDP_MAX_GSO_SEGMENTS,
+    UDP_RENDEZVOUS_MAX_ATTEMPTS, UDP_RENDEZVOUS_MAX_CANDIDATES, UDP_RENDEZVOUS_MAX_ID_BYTES,
+    UDP_RENDEZVOUS_NONCE_BYTES, UdpAddressFamily, UdpBatchCapabilities, UdpBatchIoReport,
+    UdpBufferConfig, UdpBufferTuneReport, UdpCapability, UdpEndpointObservation, UdpHairpinSupport,
+    UdpInboundDatagram, UdpNatAssessment, UdpNatConfidence, UdpNatKind, UdpOutboundDatagram,
+    UdpPlatform, UdpRecvBatch, UdpRendezvousCandidate, UdpRendezvousCandidateKind,
+    UdpRendezvousCandidateSet, UdpRendezvousSignature, UdpRendezvousValidationError,
+    UdpSendAccelerationCapabilities, UdpSendBatchPath, UdpSendBatchPlan, UdpSendBatchStrategy,
+    UdpSocket, UdpSocketCapabilities, classify_udp_nat, validate_udp_rendezvous_candidates,
 };
 #[cfg(unix)]
 pub use unix::{

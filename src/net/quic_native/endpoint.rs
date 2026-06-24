@@ -13,7 +13,8 @@
 
 use crate::cx::Cx;
 use crate::net::{
-    UdpBufferConfig, UdpBufferTuneReport, UdpOutboundDatagram, UdpSocket, UdpSocketCapabilities,
+    UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpBufferTuneReport, UdpOutboundDatagram, UdpSocket,
+    UdpSocketCapabilities,
 };
 use smallvec::SmallVec;
 use std::io;
@@ -42,7 +43,7 @@ impl Default for QuicUdpEndpointConfig {
             max_packet_size: 1500,                      // Standard MTU
             socket_recv_buffer_size: Some(1024 * 1024), // 1MB receive buffer
             socket_send_buffer_size: Some(1024 * 1024), // 1MB send buffer
-            max_batch_size: 32,                         // Reasonable batching
+            max_batch_size: UDP_MAX_GSO_SEGMENTS,
             enable_timestamping: true,
         }
     }
@@ -81,6 +82,12 @@ pub struct BatchResult {
     pub bytes_processed: usize,
     /// Processing duration.
     pub duration: Duration,
+    /// True when at least one chunk used the portable fallback send loop.
+    pub fallback_used: bool,
+    /// True when at least one chunk used an OS-native send batching syscall.
+    pub native_send_batch_used: bool,
+    /// True when at least one chunk used UDP Generic Segmentation Offload.
+    pub gso_send_used: bool,
     /// Any error that terminated the batch early.
     pub error: Option<String>,
 }
@@ -343,6 +350,9 @@ impl QuicUdpEndpoint {
         let mut total_packets = 0;
         let mut total_bytes = 0;
         let mut batch_error = None;
+        let mut fallback_used = false;
+        let mut native_send_batch_used = false;
+        let mut gso_send_used = false;
 
         for chunk in packets.chunks(self.config.max_batch_size) {
             let mut datagrams: SmallVec<[UdpOutboundDatagram<'_>; 32]> =
@@ -381,6 +391,9 @@ impl QuicUdpEndpoint {
 
             total_packets += report.packets_processed;
             total_bytes += report.bytes_processed;
+            fallback_used |= report.fallback_used;
+            native_send_batch_used |= report.native_send_batch_used;
+            gso_send_used |= report.gso_send_used;
             self.metrics.packets_sent.fetch_add(
                 report.packets_processed as u64,
                 std::sync::atomic::Ordering::Relaxed,
@@ -409,6 +422,9 @@ impl QuicUdpEndpoint {
             packets_processed: total_packets,
             bytes_processed: total_bytes,
             duration: batch_duration,
+            fallback_used,
+            native_send_batch_used,
+            gso_send_used,
             error: batch_error,
         })
     }
@@ -622,6 +638,73 @@ mod tests {
                     .load(std::sync::atomic::Ordering::Relaxed),
                 5
             );
+        });
+    }
+
+    #[test]
+    fn test_send_batch_uses_unconnected_native_gso_for_fixed_size_payloads_on_linux() {
+        run_test_with_cx(|cx| async move {
+            const TEST_GSO_SEGMENT_BYTES: usize = 1456;
+            assert_eq!(
+                TEST_GSO_SEGMENT_BYTES,
+                crate::net::UDP_DEFAULT_GSO_SEGMENT_BYTES
+            );
+
+            let config = QuicUdpEndpointConfig::default();
+            let mut sender =
+                QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config.clone())
+                    .await
+                    .expect("bind sender");
+            let mut receiver = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config)
+                .await
+                .expect("bind receiver");
+
+            let receiver_addr = receiver.local_addr();
+            let payloads = (0..4)
+                .map(|idx| vec![idx as u8; TEST_GSO_SEGMENT_BYTES])
+                .collect::<Vec<_>>();
+            let packets = payloads
+                .iter()
+                .map(|payload| OutgoingPacket {
+                    dst_addr: receiver_addr,
+                    data: payload.clone(),
+                    send_time: None,
+                })
+                .collect::<Vec<_>>();
+
+            let send_result = sender
+                .send_batch(&cx, &packets)
+                .await
+                .expect("send fixed-size packet batch");
+            assert_eq!(send_result.packets_processed, packets.len());
+            assert_eq!(
+                send_result.bytes_processed,
+                TEST_GSO_SEGMENT_BYTES * packets.len()
+            );
+
+            if matches!(
+                crate::net::UdpPlatform::current(),
+                crate::net::UdpPlatform::Linux
+            ) {
+                assert!(send_result.native_send_batch_used);
+                assert!(send_result.gso_send_used);
+                assert!(!send_result.fallback_used);
+            } else {
+                assert!(!send_result.native_send_batch_used);
+                assert!(send_result.fallback_used);
+            }
+
+            let received = receiver
+                .receive_batch(&cx, packets.len())
+                .await
+                .expect("receive fixed-size packet batch");
+            assert_eq!(received.len(), packets.len());
+            let mut received_payloads = received
+                .into_iter()
+                .map(|packet| packet.data)
+                .collect::<Vec<_>>();
+            received_payloads.sort_by_key(|payload| payload[0]);
+            assert_eq!(received_payloads, payloads);
         });
     }
 

@@ -5,7 +5,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use futures_lite::future;
 
 const PACKETS_PER_BATCH: usize = 64;
-const PAYLOAD_BYTES: usize = 1424;
+/// Default authenticated ATP-RQ datagram shape: 24-byte RQ header + 32-byte tag
+/// + 1400-byte symbol payload.
+const PAYLOAD_BYTES: usize = 1456;
 
 #[derive(Debug, Clone, Copy)]
 enum SendBatchBenchCase {
@@ -21,10 +23,6 @@ impl SendBatchBenchCase {
             Self::NativeSendmmsgOnly => "native_sendmmsg_only",
             Self::NativeGsoSendmmsg => "native_gso_sendmmsg",
         }
-    }
-
-    fn connected_sender(self) -> bool {
-        !matches!(self, Self::PortableLoop)
     }
 
     fn strategy(self) -> UdpSendBatchStrategy {
@@ -49,9 +47,6 @@ fn send_and_drain(payloads: &[Vec<u8>], bench_case: SendBatchBenchCase) {
         let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let receiver_addr = receiver.local_addr().unwrap();
         let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        if bench_case.connected_sender() {
-            sender.connect(receiver_addr).await.unwrap();
-        }
 
         let packets = payloads
             .iter()

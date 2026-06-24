@@ -54,10 +54,11 @@ pub const UDP_MAX_PACKET_SIZE: usize = 1024 * 1024; // 1MB per packet
 pub const UDP_MAX_BATCH_SIZE: usize = 1000;
 /// Default UDP GSO segment size used by send-batch planning.
 ///
-/// ATP-RQ's default symbol is 1400 bytes and its unauthenticated datagram header is
-/// 24 bytes, so this ceiling keeps that hot clean-link path eligible for GSO
-/// instead of silently falling back to plain sendmmsg.
-pub const UDP_DEFAULT_GSO_SEGMENT_BYTES: usize = 1424;
+/// ATP-RQ's default symbol is 1400 bytes, its datagram header is 24 bytes, and
+/// authenticated/encrypted transfers add a 32-byte tag. This ceiling keeps both
+/// clean-link RQ shapes eligible for UDP GSO instead of silently falling back to
+/// plain sendmmsg.
+pub const UDP_DEFAULT_GSO_SEGMENT_BYTES: usize = 1456;
 /// Maximum UDP GSO segments planned into one super-packet.
 pub const UDP_MAX_GSO_SEGMENTS: usize = 64;
 /// Maximum datagrams planned into one sendmmsg syscall batch.
@@ -921,6 +922,7 @@ fn div_ceil_usize(value: usize, divisor: usize) -> usize {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[derive(Debug)]
 struct UdpGsoSuperPacket {
+    dst_addr: SocketAddr,
     datagram_count: usize,
     payload_bytes: usize,
     buffer: Vec<u8>,
@@ -929,6 +931,9 @@ struct UdpGsoSuperPacket {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 impl UdpGsoSuperPacket {
     fn from_packets(packets: &[UdpOutboundDatagram<'_>]) -> Self {
+        let first = packets
+            .first()
+            .expect("GSO super-packet requires at least one datagram");
         let payload_bytes = packets.iter().map(|packet| packet.payload.len()).sum();
         let mut buffer = Vec::with_capacity(payload_bytes);
         for packet in packets {
@@ -936,10 +941,54 @@ impl UdpGsoSuperPacket {
         }
 
         Self {
+            dst_addr: first.dst_addr,
             datagram_count: packets.len(),
             payload_bytes,
             buffer,
         }
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+fn native_sendmmsg_addrs_for_packets(
+    packets: &[UdpOutboundDatagram<'_>],
+    connected_peer: Option<SocketAddr>,
+) -> Vec<Option<nix::sys::socket::SockaddrStorage>> {
+    if connected_peer.is_some() {
+        vec![None; packets.len()]
+    } else {
+        packets
+            .iter()
+            .map(|packet| Some(nix::sys::socket::SockaddrStorage::from(packet.dst_addr)))
+            .collect()
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+type NativeSendmmsgAddr = nix::sys::socket::SockaddrStorage;
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn native_sendmmsg_addrs_for_gso_packets(
+    packets: &[UdpGsoSuperPacket],
+    connected_peer: Option<SocketAddr>,
+) -> Vec<Option<nix::sys::socket::SockaddrStorage>> {
+    if connected_peer.is_some() {
+        vec![None; packets.len()]
+    } else {
+        packets
+            .iter()
+            .map(|packet| Some(nix::sys::socket::SockaddrStorage::from(packet.dst_addr)))
+            .collect()
     }
 }
 
@@ -1538,7 +1587,7 @@ impl UdpSocket {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if let Some(native_report) =
-                self.try_send_batch_to_connected_native(packets, strategy.clamped())?
+                self.try_send_batch_to_native(packets, strategy.clamped())?
             {
                 if native_report.packets_processed == packets.len() {
                     return Ok(native_report);
@@ -1621,7 +1670,7 @@ impl UdpSocket {
             target_os = "netbsd"
         )
     ))]
-    fn try_send_batch_to_connected_native(
+    fn try_send_batch_to_native(
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
         strategy: UdpSendBatchStrategy,
@@ -1633,11 +1682,11 @@ impl UdpSocket {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
 
-        let Ok(peer_addr) = self.inner.peer_addr() else {
-            return Ok(None);
-        };
-        if !packets.iter().all(|packet| packet.dst_addr == peer_addr) {
-            return Ok(None);
+        let connected_peer = self.inner.peer_addr().ok();
+        if let Some(peer_addr) = connected_peer {
+            if !packets.iter().all(|packet| packet.dst_addr == peer_addr) {
+                return Ok(None);
+            }
         }
 
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1647,24 +1696,27 @@ impl UdpSocket {
                 plan.path,
                 UdpSendBatchPath::Gso | UdpSendBatchPath::GsoSendmmsg
             ) {
-                if let Some(report) = self.try_send_gso_batch_to_connected_native(packets, &plan)? {
+                if let Some(report) =
+                    self.try_send_gso_batch_to_native(packets, &plan, connected_peer)?
+                {
                     return Ok(Some(report));
                 }
                 self.gso_demoted = true;
             }
         }
 
-        self.try_sendmmsg_batch_to_connected_native(packets)
+        self.try_sendmmsg_batch_to_native(packets, connected_peer)
     }
 
     #[cfg(all(
         not(target_arch = "wasm32"),
         any(target_os = "linux", target_os = "android")
     ))]
-    fn try_send_gso_batch_to_connected_native(
+    fn try_send_gso_batch_to_native(
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
         plan: &UdpSendBatchPlan,
+        connected_peer: Option<SocketAddr>,
     ) -> io::Result<Option<UdpBatchIoReport>> {
         let Some(segment_bytes) = plan
             .gso_segment_bytes
@@ -1694,8 +1746,8 @@ impl UdpSocket {
                 .iter()
                 .map(|packet| [IoSlice::new(packet.buffer.as_slice())])
                 .collect::<Vec<_>>();
-            let addrs = vec![None; chunk.len()];
-            let mut headers = nix::sys::socket::MultiHeaders::<()>::preallocate(
+            let addrs = native_sendmmsg_addrs_for_gso_packets(chunk, connected_peer);
+            let mut headers = nix::sys::socket::MultiHeaders::<NativeSendmmsgAddr>::preallocate(
                 chunk.len(),
                 Some(nix::cmsg_space!(u16)),
             );
@@ -1706,7 +1758,7 @@ impl UdpSocket {
                 self.inner.as_raw_fd(),
                 &mut headers,
                 &iovs,
-                &addrs,
+                addrs,
                 cmsgs,
                 nix::sys::socket::MsgFlags::MSG_DONTWAIT,
             ) {
@@ -1754,9 +1806,10 @@ impl UdpSocket {
             target_os = "netbsd"
         )
     ))]
-    fn try_sendmmsg_batch_to_connected_native(
+    fn try_sendmmsg_batch_to_native(
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
+        connected_peer: Option<SocketAddr>,
     ) -> io::Result<Option<UdpBatchIoReport>> {
         let mut report = UdpBatchIoReport {
             native_send_batch_used: true,
@@ -1767,14 +1820,17 @@ impl UdpSocket {
                 .iter()
                 .map(|packet| [IoSlice::new(packet.payload)])
                 .collect::<Vec<_>>();
-            let addrs = vec![None; chunk.len()];
-            let mut headers = nix::sys::socket::MultiHeaders::<()>::preallocate(chunk.len(), None);
+            let addrs = native_sendmmsg_addrs_for_packets(chunk, connected_peer);
+            let mut headers = nix::sys::socket::MultiHeaders::<NativeSendmmsgAddr>::preallocate(
+                chunk.len(),
+                None,
+            );
             let cmsgs: &[nix::sys::socket::ControlMessage<'_>] = &[];
             let results = match nix::sys::socket::sendmmsg(
                 self.inner.as_raw_fd(),
                 &mut headers,
                 &iovs,
-                &addrs,
+                addrs,
                 cmsgs,
                 nix::sys::socket::MsgFlags::MSG_DONTWAIT,
             ) {
@@ -1815,7 +1871,7 @@ impl UdpSocket {
             target_os = "netbsd"
         ))
     ))]
-    fn try_send_batch_to_connected_native(
+    fn try_send_batch_to_native(
         &mut self,
         packets: &[UdpOutboundDatagram<'_>],
         strategy: UdpSendBatchStrategy,
@@ -2173,31 +2229,44 @@ mod tests {
     fn udp_send_batch_plan_keeps_default_rq_datagrams_gso_eligible() {
         const DEFAULT_RQ_SYMBOL_BYTES: usize = 1400;
         const RQ_DATAGRAM_HEADER_BYTES: usize = 24;
-        let rq_datagram_bytes = DEFAULT_RQ_SYMBOL_BYTES + RQ_DATAGRAM_HEADER_BYTES;
-        let dst = socket_addr("127.0.0.1:9000");
-        let payloads = vec![vec![7; rq_datagram_bytes]; 4];
-        let packets = payloads
-            .iter()
-            .map(|payload| UdpOutboundDatagram {
-                dst_addr: dst,
-                payload,
-            })
-            .collect::<Vec<_>>();
-
-        let plan = UdpSendBatchPlan::for_packets(
-            &packets,
-            UdpSendAccelerationCapabilities {
-                sendmmsg: UdpCapability::Supported,
-                gso: UdpCapability::Supported,
-                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
-                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
-            },
-            UdpSendBatchStrategy::default(),
+        const RQ_AUTH_TAG_BYTES: usize = 32;
+        let unauthenticated_rq_datagram_bytes = DEFAULT_RQ_SYMBOL_BYTES + RQ_DATAGRAM_HEADER_BYTES;
+        let authenticated_rq_datagram_bytes =
+            DEFAULT_RQ_SYMBOL_BYTES + RQ_DATAGRAM_HEADER_BYTES + RQ_AUTH_TAG_BYTES;
+        assert_eq!(
+            UDP_DEFAULT_GSO_SEGMENT_BYTES,
+            authenticated_rq_datagram_bytes
         );
 
-        assert_eq!(plan.path, UdpSendBatchPath::Gso);
-        assert_eq!(plan.gso_segment_bytes, Some(rq_datagram_bytes));
-        assert_eq!(plan.estimated_syscalls, 1);
+        let dst = socket_addr("127.0.0.1:9000");
+        for rq_datagram_bytes in [
+            unauthenticated_rq_datagram_bytes,
+            authenticated_rq_datagram_bytes,
+        ] {
+            let payloads = vec![vec![7; rq_datagram_bytes]; 4];
+            let packets = payloads
+                .iter()
+                .map(|payload| UdpOutboundDatagram {
+                    dst_addr: dst,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+
+            let plan = UdpSendBatchPlan::for_packets(
+                &packets,
+                UdpSendAccelerationCapabilities {
+                    sendmmsg: UdpCapability::Supported,
+                    gso: UdpCapability::Supported,
+                    max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+                    max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+                },
+                UdpSendBatchStrategy::default(),
+            );
+
+            assert_eq!(plan.path, UdpSendBatchPath::Gso);
+            assert_eq!(plan.gso_segment_bytes, Some(rq_datagram_bytes));
+            assert_eq!(plan.estimated_syscalls, 1);
+        }
     }
 
     #[test]
@@ -2709,6 +2778,7 @@ mod tests {
                 .send_batch_to_with_strategy(
                     &packets,
                     UdpSendBatchStrategy {
+                        prefer_sendmmsg: false,
                         prefer_gso: false,
                         ..UdpSendBatchStrategy::default()
                     },
@@ -2728,6 +2798,61 @@ mod tests {
                     .map(|packet| packet.payload.as_slice())
                     .collect::<Vec<_>>(),
                 vec![b"one".as_slice(), b"two".as_slice()]
+            );
+        });
+    }
+
+    #[test]
+    fn udp_unconnected_batch_send_prefers_native_sendmmsg_on_linux() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            let packets = [
+                UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload: b"native-one",
+                },
+                UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload: b"native-two",
+                },
+            ];
+            let sent = sender
+                .send_batch_to_with_strategy(
+                    &packets,
+                    UdpSendBatchStrategy {
+                        prefer_gso: false,
+                        ..UdpSendBatchStrategy::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(sent.packets_processed, 2);
+            assert_eq!(
+                sent.bytes_processed,
+                b"native-one".len() + b"native-two".len()
+            );
+
+            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
+                assert!(sent.native_send_batch_used);
+                assert!(!sent.gso_send_used);
+                assert!(!sent.fallback_used);
+            } else {
+                assert!(!sent.native_send_batch_used);
+                assert!(sent.fallback_used);
+            }
+
+            let received = receiver.recv_batch_from(2, 32).await.unwrap();
+            assert_eq!(received.report.packets_processed, 2);
+            assert_eq!(
+                received
+                    .packets
+                    .iter()
+                    .map(|packet| packet.payload.as_slice())
+                    .collect::<Vec<_>>(),
+                vec![b"native-one".as_slice(), b"native-two".as_slice()]
             );
         });
     }
@@ -2839,6 +2964,60 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(received.report.packets_processed, packets.len());
+        });
+    }
+
+    #[test]
+    fn udp_unconnected_batch_send_uses_gso_for_fixed_size_payloads_on_linux() {
+        future::block_on(async {
+            let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let receiver_addr = receiver.local_addr().unwrap();
+            let mut sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            let payloads = (0..4)
+                .map(|idx| vec![idx as u8; UDP_DEFAULT_GSO_SEGMENT_BYTES])
+                .collect::<Vec<_>>();
+            let packets = payloads
+                .iter()
+                .map(|payload| UdpOutboundDatagram {
+                    dst_addr: receiver_addr,
+                    payload,
+                })
+                .collect::<Vec<_>>();
+
+            let sent = sender.send_batch_to(&packets).await.unwrap();
+            assert_eq!(sent.packets_processed, packets.len());
+            assert_eq!(
+                sent.bytes_processed,
+                UDP_DEFAULT_GSO_SEGMENT_BYTES * packets.len()
+            );
+
+            if matches!(UdpPlatform::current(), UdpPlatform::Linux) {
+                assert!(sent.native_send_batch_used);
+                assert!(sent.gso_send_used);
+                assert!(!sent.fallback_used);
+            } else {
+                assert!(!sent.native_send_batch_used);
+                assert!(sent.fallback_used);
+            }
+
+            let received = receiver
+                .recv_batch_from(packets.len(), UDP_DEFAULT_GSO_SEGMENT_BYTES)
+                .await
+                .unwrap();
+            assert_eq!(received.report.packets_processed, packets.len());
+            assert_eq!(
+                received.report.bytes_processed,
+                UDP_DEFAULT_GSO_SEGMENT_BYTES * packets.len()
+            );
+
+            let mut received_payloads = received
+                .packets
+                .iter()
+                .map(|packet| packet.payload.clone())
+                .collect::<Vec<_>>();
+            received_payloads.sort_by_key(|payload| payload[0]);
+            assert_eq!(received_payloads, payloads);
         });
     }
 
