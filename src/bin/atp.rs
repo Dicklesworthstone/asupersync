@@ -2096,17 +2096,31 @@ fn receiver_subchunk_signature_candidates(
     for target in &plan.missing_chunks {
         let target_index = usize::try_from(target.index)
             .map_err(|_| "delta target chunk index exceeds usize::MAX".to_string())?;
-        let Some(base) = receiver_manifest.chunks.get(target_index) else {
-            continue;
-        };
-        if base.content_id == target.content_id {
-            continue;
+        let same_index_base = receiver_manifest.chunks.get(target_index);
+        for base in receiver_manifest.chunks.iter().filter(|base| {
+            delta_chunk_ranges_overlap(target, base)
+                || same_index_base
+                    .is_some_and(|same_index| delta_chunk_refs_match(same_index, base))
+        }) {
+            if base.content_id == target.content_id {
+                continue;
+            }
+            candidates
+                .entry((base.content_id.to_hex(), base.size_bytes))
+                .or_insert_with(|| base.clone());
         }
-        candidates
-            .entry((base.content_id.to_hex(), base.size_bytes))
-            .or_insert_with(|| base.clone());
     }
     Ok(candidates.into_values().collect())
+}
+
+fn delta_chunk_ranges_overlap(left: &CasChunkRef, right: &CasChunkRef) -> bool {
+    let left_end = left.byte_offset.saturating_add(left.size_bytes);
+    let right_end = right.byte_offset.saturating_add(right.size_bytes);
+    left.byte_offset < right_end && right.byte_offset < left_end
+}
+
+fn delta_chunk_refs_match(left: &CasChunkRef, right: &CasChunkRef) -> bool {
+    left.content_id == right.content_id && left.size_bytes == right.size_bytes
 }
 
 fn receiver_subchunk_signatures_from_states(
@@ -5040,6 +5054,84 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         let rebuilt = delta_subchunk::reconstruct_verified(&old, &ops, &expected_sha256)
             .expect("reconstruct target chunk");
         assert_eq!(rebuilt, new);
+    }
+
+    #[test]
+    fn delta_package_build_fetches_overlapping_subdelta_base_after_cdc_drift() {
+        let wrong_base = (0..(16 * 1024))
+            .map(|idx| ((idx * 5 + 91) % 251) as u8)
+            .collect::<Vec<_>>();
+        let good_base = (0..(64 * 1024))
+            .map(|idx| ((idx * 23 + idx / 7 + 11) % 253) as u8)
+            .collect::<Vec<_>>();
+        let mut target = good_base[..32 * 1024].to_vec();
+        for byte in &mut target[12 * 1024..13 * 1024] {
+            *byte ^= 0x63;
+        }
+
+        let sender = one_chunk_delta_snapshot("edited-file", target.clone());
+        let wrong_chunk = CasChunkRef::from_bytes(0, 0, &wrong_base).expect("wrong chunk");
+        let good_chunk = CasChunkRef::from_bytes(
+            1,
+            u64::try_from(wrong_base.len()).expect("wrong len"),
+            &good_base,
+        )
+        .expect("good chunk");
+        let receiver_manifest =
+            PersistentChunkManifest::new("edited-file", vec![wrong_chunk, good_chunk.clone()])
+                .expect("receiver manifest");
+        let receiver_coverage = ReceiverCasCoverage::from_manifest(&receiver_manifest);
+        let plan = plan_incremental_resync_with_receiver_coverage(
+            &sender.manifest,
+            Some(&receiver_manifest),
+            &receiver_coverage,
+        );
+        assert_eq!(plan.mode, DeltaResyncMode::FullObjectFallback);
+
+        let candidates =
+            receiver_subchunk_signature_candidates(&plan, &receiver_manifest).expect("candidates");
+        assert!(
+            candidates
+                .iter()
+                .any(|chunk| delta_chunk_refs_match(chunk, &good_chunk)),
+            "CLI sidecar must request overlapping bases, not only same-index bases"
+        );
+
+        let receiver_signatures = candidates
+            .iter()
+            .map(|chunk| {
+                let payload = if delta_chunk_refs_match(chunk, &good_chunk) {
+                    good_base.as_slice()
+                } else {
+                    wrong_base.as_slice()
+                };
+                ReceiverSubchunkSignature {
+                    chunk: chunk.clone(),
+                    signature: delta_subchunk::signature(
+                        payload,
+                        delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let package = build_delta_package(&sender, &plan, &receiver_manifest, &receiver_signatures)
+            .expect("package");
+
+        assert_eq!(package.whole_chunks.len(), 0);
+        assert_eq!(package.subdelta_chunks.len(), 1);
+        assert!(package.payload_bytes < sender.manifest.total_size_bytes / 4);
+        assert_eq!(
+            package.subdelta_chunks[0].base_chunk.content_id,
+            good_chunk.content_id
+        );
+
+        let subdelta = &package.subdelta_chunks[0];
+        let ops = decode_subdelta_ops(&subdelta.encoded_ops).expect("sub-delta ops");
+        let expected_sha256 =
+            decode_sha256_hex(&subdelta.target_sha256_hex, "test target sha256").unwrap();
+        let rebuilt = delta_subchunk::reconstruct_verified(&good_base, &ops, &expected_sha256)
+            .expect("reconstruct target chunk");
+        assert_eq!(rebuilt, target);
     }
 
     #[test]
