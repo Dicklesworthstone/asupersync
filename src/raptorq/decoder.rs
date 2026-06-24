@@ -1553,6 +1553,7 @@ impl InactivationDecoder {
 
         // br-asupersync-ju2k01: Create compute budget for dense operations
         let mut compute_budget = ComputeBudget::new(MAX_DENSE_COMPUTE_BUDGET);
+        let mut seen_source_payloads = vec![None; self.params.k];
 
         for sym in symbols {
             if sym.data.len() != symbol_size {
@@ -1576,6 +1577,7 @@ impl InactivationDecoder {
             }
 
             self.validate_source_symbol_equation(sym)?;
+            self.validate_source_symbol_payload_consistency(sym, &mut seen_source_payloads)?;
 
             for &column in &sym.columns {
                 if column >= l {
@@ -1593,6 +1595,36 @@ impl InactivationDecoder {
                 received: symbols.len(),
                 required,
             });
+        }
+
+        Ok(())
+    }
+
+    fn validate_source_symbol_payload_consistency<'a>(
+        &self,
+        sym: &'a ReceivedSymbol,
+        seen_source_payloads: &mut [Option<&'a [u8]>],
+    ) -> Result<(), DecodeError> {
+        if !sym.is_source {
+            return Ok(());
+        }
+
+        let esi = sym.esi as usize;
+        let Some(slot) = seen_source_payloads.get_mut(esi) else {
+            return Ok(());
+        };
+        let payload = sym.data.as_slice();
+        if let Some(expected_payload) = *slot {
+            if let Some(byte_index) = first_mismatch_byte(expected_payload, payload) {
+                return Err(DecodeError::CorruptDecodedOutput {
+                    esi: sym.esi,
+                    byte_index,
+                    expected: expected_payload[byte_index],
+                    actual: payload[byte_index],
+                });
+            }
+        } else {
+            *slot = Some(payload);
         }
 
         Ok(())
@@ -3010,6 +3042,7 @@ impl InactivationDecoder {
     fn validate_rank_input(&self, symbols: &[ReceivedSymbol]) -> Result<(), DecodeError> {
         let l = self.params.l;
         let symbol_size = self.params.symbol_size;
+        let mut seen_source_payloads = vec![None; self.params.k];
 
         for sym in symbols {
             if sym.data.len() != symbol_size {
@@ -3026,6 +3059,7 @@ impl InactivationDecoder {
                 });
             }
             self.validate_source_symbol_equation(sym)?;
+            self.validate_source_symbol_payload_consistency(sym, &mut seen_source_payloads)?;
             for &column in &sym.columns {
                 if column >= l {
                     return Err(DecodeError::ColumnIndexOutOfRange {

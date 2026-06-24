@@ -170,6 +170,27 @@ fn source_esi_out_of_range_is_rejected() {
 }
 
 #[test]
+fn duplicate_source_esi_with_conflicting_bytes_is_rejected_as_corruption() {
+    let mut conflicting = make_source(K, SYMBOL_SIZE, SEED)[0].clone();
+    conflicting[0] ^= 0xFF;
+
+    let bogus = ReceivedSymbol::source(0, conflicting);
+    match reject(bogus, "duplicate-source-conflict") {
+        DecodeError::CorruptDecodedOutput {
+            esi,
+            byte_index,
+            expected,
+            actual,
+        } => {
+            assert_eq!(esi, 0);
+            assert_eq!(byte_index, 0);
+            assert_ne!(expected, actual);
+        }
+        other => panic!("expected CorruptDecodedOutput, got {other:?}"),
+    }
+}
+
+#[test]
 fn non_identity_source_equation_is_rejected() {
     // A source symbol (ESI < K) carrying a non-empty, non-canonical equation
     // instead of the required identity. Lets a peer smuggle a different equation
