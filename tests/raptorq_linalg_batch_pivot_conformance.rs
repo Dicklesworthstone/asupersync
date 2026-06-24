@@ -727,6 +727,46 @@ fn pivot_strategies_reject_mixed_rhs_widths_even_when_coefficients_are_full_rank
 }
 
 #[test]
+fn inconsistent_rank_deficient_solve_preserves_rank_witness_after_failure() {
+    let rows = [
+        (&[1u8, 0, 0][..], &[0x10][..]),
+        (&[0u8, 1, 0][..], &[0x20][..]),
+        (&[1u8, 1, 0][..], &[0x40][..]),
+    ];
+
+    for (name, mut solver, solve) in [
+        (
+            "basic",
+            solver_from_rows(&rows, 3),
+            GaussianSolver::solve as fn(&mut GaussianSolver) -> GaussianResult,
+        ),
+        (
+            "markowitz",
+            solver_from_rows(&rows, 3),
+            GaussianSolver::solve_markowitz,
+        ),
+    ] {
+        let before = solver.rank_profile();
+        assert_eq!(before.rank, 2, "{name}: fixture starts rank-deficient");
+        assert_eq!(before.deficit, 1, "{name}: fixture has one free column");
+        assert_eq!(before.pivot_columns, vec![0, 1]);
+        assert_eq!(before.free_columns, vec![2]);
+
+        assert_eq!(
+            solve(&mut solver),
+            GaussianResult::Inconsistent { row: 2 },
+            "{name}: dependent row contradicts RHS and must fail closed"
+        );
+
+        let after = solver.rank_profile();
+        assert_eq!(
+            after, before,
+            "{name}: failed solve must not pollute the coefficient-rank witness"
+        );
+    }
+}
+
+#[test]
 fn full_rank_solver_payload_is_invariant_under_equivalent_row_presentations() {
     let expected_solution = vec![vec![0x10, 0x11], vec![0x20, 0x21], vec![0x30, 0x31]];
     let base_coefficients = [vec![1u8, 2, 3], vec![0, 1, 4], vec![0, 0, 1]];
