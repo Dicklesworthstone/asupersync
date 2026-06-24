@@ -202,7 +202,7 @@ struct SendArgs {
     /// RaptorQ symbol size in bytes (rq only).
     #[arg(long, default_value_t = DEFAULT_SYMBOL_SIZE)]
     symbol_size: u16,
-    /// Number of UDP sockets to spray across (rq only).
+    /// Number of RQ UDP sender/receiver socket pairs to spray across (rq only).
     #[arg(long, default_value_t = DEFAULT_UDP_FANOUT)]
     streams: usize,
     /// Maximum RaptorQ source-block size in bytes, `auto`, or `0` (rq/quic only).
@@ -4715,6 +4715,7 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
         assert_eq!(config.max_block_size, 512 * 1024);
         assert_eq!(config.max_block_size / usize::from(config.symbol_size), 512);
+        assert_eq!(config.udp_fanout, 4);
         assert_eq!(config.round0_loss_target, 0.02);
     }
 

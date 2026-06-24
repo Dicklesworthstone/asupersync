@@ -721,6 +721,129 @@ fn send_progress_crossed_yield_boundary(before: u64, after: u64) -> bool {
     after > before && before / 64 != after / 64
 }
 
+struct RqReceiverUdpFanout {
+    sockets: Vec<UdpSocket>,
+    next_poll: usize,
+}
+
+impl RqReceiverUdpFanout {
+    async fn bind(
+        bind_ip: std::net::IpAddr,
+        fanout: usize,
+        recv_buffer_bytes: usize,
+    ) -> std::io::Result<Self> {
+        let fanout = fanout.max(1);
+        let mut sockets = Vec::with_capacity(fanout);
+        for _ in 0..fanout {
+            let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
+            let _ = socket.tune_buffers(UdpBufferConfig {
+                recv_buffer_bytes: Some(recv_buffer_bytes),
+                send_buffer_bytes: None,
+            });
+            sockets.push(socket);
+        }
+
+        Ok(Self {
+            sockets,
+            next_poll: 0,
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.sockets.len()
+    }
+
+    fn local_ports(&self) -> std::io::Result<Vec<u16>> {
+        self.sockets
+            .iter()
+            .map(|socket| socket.local_addr().map(|addr| addr.port()))
+            .collect()
+    }
+
+    fn poll_recv_any(
+        &mut self,
+        task_cx: &std::task::Context<'_>,
+        rbuf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<(usize, usize)>> {
+        use std::task::Poll;
+
+        if self.sockets.is_empty() {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "RQ receiver UDP fanout has no sockets",
+            )));
+        }
+
+        let socket_count = self.sockets.len();
+        for offset in 0..socket_count {
+            let socket_index = (self.next_poll + offset) % socket_count;
+            match self.sockets[socket_index].poll_recv(task_cx, rbuf) {
+                Poll::Ready(Ok(n)) => {
+                    self.next_poll = (socket_index + 1) % socket_count;
+                    return Poll::Ready(Ok((socket_index, n)));
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => {}
+            }
+        }
+
+        Poll::Pending
+    }
+
+    fn poll_recv_batch_any(
+        &mut self,
+        task_cx: &mut std::task::Context<'_>,
+        max_packets: usize,
+        packet_size: usize,
+    ) -> std::task::Poll<std::io::Result<(usize, crate::net::UdpRecvBatch)>> {
+        use std::future::Future;
+        use std::task::Poll;
+
+        if self.sockets.is_empty() {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "RQ receiver UDP fanout has no sockets",
+            )));
+        }
+
+        let socket_count = self.sockets.len();
+        for offset in 0..socket_count {
+            let socket_index = (self.next_poll + offset) % socket_count;
+            let poll_result = {
+                let mut recv = std::pin::pin!(
+                    self.sockets[socket_index].recv_batch_from(max_packets, packet_size)
+                );
+                Future::poll(recv.as_mut(), task_cx)
+            };
+            match poll_result {
+                Poll::Ready(Ok(batch)) => {
+                    self.next_poll = (socket_index + 1) % socket_count;
+                    return Poll::Ready(Ok((socket_index, batch)));
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => {}
+            }
+        }
+
+        Poll::Pending
+    }
+
+    async fn recv_batch_from_socket(
+        &mut self,
+        socket_index: usize,
+        max_packets: usize,
+        packet_size: usize,
+    ) -> std::io::Result<crate::net::UdpRecvBatch> {
+        let socket = self.sockets.get_mut(socket_index).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "RQ receiver UDP fanout socket index out of range",
+            )
+        })?;
+        socket.recv_batch_from(max_packets, packet_size).await
+    }
+}
+
 struct RqAdaptiveSendState {
     controller: AdaptiveController,
     loss_detector: AtpLossDetector,
@@ -1390,10 +1513,50 @@ struct Hello {
 struct HelloAck {
     accepted: bool,
     peer_id: String,
-    /// UDP port the receiver is listening on for symbol datagrams.
+    /// First UDP port the receiver is listening on for symbol datagrams.
     udp_port: u16,
+    /// Full receiver-side UDP fanout. Empty means legacy single-port `udp_port`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    udp_ports: Vec<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+}
+
+fn hello_ack_udp_ports(ack: &HelloAck) -> SmallVec<[u16; DEFAULT_UDP_FANOUT]> {
+    let mut ports = SmallVec::<[u16; DEFAULT_UDP_FANOUT]>::new();
+    if ack.udp_ports.is_empty() {
+        if ack.udp_port != 0 {
+            ports.push(ack.udp_port);
+        }
+        return ports;
+    }
+
+    if ack.udp_port != 0 {
+        ports.push(ack.udp_port);
+    }
+    for &port in &ack.udp_ports {
+        if port != 0 && !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    ports
+}
+
+fn receiver_udp_addr_for_socket(
+    peer: SocketAddr,
+    udp_ports: &[u16],
+    socket_index: usize,
+) -> Result<SocketAddr, RqError> {
+    if udp_ports.is_empty() {
+        return Err(RqError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "RQ receiver did not advertise any UDP data ports",
+        )));
+    }
+    Ok(SocketAddr::new(
+        peer.ip(),
+        udp_ports[socket_index % udp_ports.len()],
+    ))
 }
 
 /// One logical file packed into a combined RaptorQ object (E-15 coalescing).
@@ -3428,10 +3591,13 @@ pub async fn send_path(
             ack.reason.unwrap_or_else(|| "no reason given".to_string()),
         ));
     }
-    rqtrace!("sender: handshake ok, peer udp_port={}", ack.udp_port);
+    let udp_ports = hello_ack_udp_ports(&ack);
+    rqtrace!(
+        "sender: handshake ok, peer udp_ports={:?}",
+        udp_ports.as_slice()
+    );
 
-    // Data plane: open UDP sockets connected to the receiver's UDP endpoint.
-    let udp_addr = SocketAddr::new(peer.ip(), ack.udp_port);
+    // Data plane: open UDP sockets connected across the receiver's advertised UDP fanout.
     let fanout = config.udp_fanout.max(1);
     let mut adaptive = RqAdaptiveSendState::new(tag, &config, fanout);
     let local_unspec = if peer.ip().is_ipv4() {
@@ -3440,7 +3606,8 @@ pub async fn send_path(
         std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
     };
     let mut sockets: Vec<UdpSocket> = Vec::with_capacity(fanout);
-    for _ in 0..fanout {
+    for socket_index in 0..fanout {
+        let udp_addr = receiver_udp_addr_for_socket(peer, &udp_ports, socket_index)?;
         let sock = UdpSocket::bind(SocketAddr::new(local_unspec, 0)).await?;
         sock.connect(udp_addr).await?;
         // Large send buffer absorbs bursts so the spray loop does not busy-spin
@@ -4527,13 +4694,12 @@ pub async fn receive_connection(
     let hello: Hello = parse_json(&hello_frame)?;
     let accepted = hello.protocol == ATP_RQ_PROTOCOL && hello.symbol_auth == symbol_auth_enabled;
 
-    // Bind the UDP data socket before acking so the sender can spray immediately.
+    // Bind the UDP data sockets before acking so the sender can spray immediately.
     // Build an owned `SocketAddr` (Copy + 'static) so it satisfies
     // `UdpSocket::bind`'s `'static` address bound and handles IPv6 correctly.
     let bind_ip: std::net::IpAddr = udp_bind_ip
         .parse()
         .map_err(|e| RqError::Source(format!("invalid UDP bind ip '{udp_bind_ip}': {e}")))?;
-    let mut udp = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
     // Size the receive buffer to ABSORB the sender's symbol burst: the sender now encodes blocks in
     // parallel (F3) and can spray them faster than the CPU-bound decode drains, so we set the buffer
     // to the transfer size plus headroom, clamped to a generous cap (the kernel further caps at
@@ -4548,11 +4714,20 @@ pub async fn receive_connection(
             .unwrap_or(usize::MAX)
             .clamp(16 * 1024 * 1024, 120 * 1024 * 1024)
     };
-    let _ = udp.tune_buffers(UdpBufferConfig {
-        recv_buffer_bytes: Some(recv_buf_bytes),
-        send_buffer_bytes: None,
-    });
-    let udp_port = udp.local_addr()?.port();
+    let mut udp =
+        RqReceiverUdpFanout::bind(bind_ip, config.udp_fanout.max(1), recv_buf_bytes).await?;
+    let udp_ports = udp.local_ports()?;
+    let udp_port = udp_ports.first().copied().ok_or_else(|| {
+        RqError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "RQ receiver UDP fanout has no bound sockets",
+        ))
+    })?;
+    rqtrace!(
+        "receiver: udp fanout sockets={} ports={:?}",
+        udp.len(),
+        udp_ports
+    );
 
     control
         .send(&json_frame(
@@ -4561,6 +4736,7 @@ pub async fn receive_connection(
                 accepted,
                 peer_id: peer_id.to_string(),
                 udp_port,
+                udp_ports,
                 reason: if accepted {
                     None
                 } else if hello.protocol != ATP_RQ_PROTOCOL {
@@ -7112,7 +7288,7 @@ async fn join_pending_decode(
 async fn pump_until_control<S>(
     cx: &Cx,
     control: &mut FrameTransport<S>,
-    udp: &mut UdpSocket,
+    udp: &mut RqReceiverUdpFanout,
     tag: u64,
     auth_required: bool,
     symbol_auth: Option<&SecurityContext>,
@@ -7126,13 +7302,16 @@ async fn pump_until_control<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
-    use std::future::{Future, poll_fn};
+    use std::future::poll_fn;
     use std::pin::Pin;
     use std::task::Poll;
 
     enum Ready {
         Control(usize),
-        Udp(crate::net::UdpRecvBatch),
+        Udp {
+            socket_index: usize,
+            batch: crate::net::UdpRecvBatch,
+        },
     }
 
     let packet_size = rbuf.len();
@@ -7159,18 +7338,20 @@ where
             return Ok(frame);
         }
 
-        // 2) Poll both the control stream and a readiness-driven UDP batch.
+        // 2) Poll both the control stream and a readiness-driven UDP fanout batch.
         //    Whichever is ready makes progress; if only UDP is ready we keep
         //    pumping symbols. Both register their waker via task_cx, so the task
         //    parks until EITHER fd is ready — a biased two-way select.
         let recv_started = trace_intake.then(Instant::now);
         let ready = {
-            let mut udp_batch = Box::pin(udp.recv_batch_from(RQ_INBOUND_PUMP_BATCH, packet_size));
             poll_fn(|task_cx| {
                 // UDP first so bulk data drains promptly under load.
-                match Future::poll(udp_batch.as_mut(), task_cx) {
-                    Poll::Ready(Ok(batch)) => {
-                        return Poll::Ready(Ok::<Ready, std::io::Error>(Ready::Udp(batch)));
+                match udp.poll_recv_batch_any(task_cx, RQ_INBOUND_PUMP_BATCH, packet_size) {
+                    Poll::Ready(Ok((socket_index, batch))) => {
+                        return Poll::Ready(Ok::<Ready, std::io::Error>(Ready::Udp {
+                            socket_index,
+                            batch,
+                        }));
                     }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => {}
@@ -7187,7 +7368,10 @@ where
         let recv_elapsed = recv_started.map(|started| started.elapsed());
 
         match ready {
-            Ready::Udp(batch) => {
+            Ready::Udp {
+                socket_index,
+                batch,
+            } => {
                 let mut received_len = batch.packets.len();
                 let mut batches = 1usize;
                 let mut stats = feed_datagram_batch_to_decoders(
@@ -7224,7 +7408,11 @@ where
                     let tail = match crate::time::timeout(
                         cx.now(),
                         RQ_INBOUND_PUMP_DRAIN_GRACE,
-                        udp.recv_batch_from(RQ_INBOUND_PUMP_BATCH, packet_size),
+                        udp.recv_batch_from_socket(
+                            socket_index,
+                            RQ_INBOUND_PUMP_BATCH,
+                            packet_size,
+                        ),
                     )
                     .await
                     {
@@ -7289,7 +7477,7 @@ where
 /// cap of 8x that window so stale or hostile UDP traffic cannot pin the task.
 async fn drain_round_tail(
     cx: &Cx,
-    udp: &mut UdpSocket,
+    udp: &mut RqReceiverUdpFanout,
     tag: u64,
     auth_required: bool,
     symbol_auth: Option<&SecurityContext>,
@@ -7323,8 +7511,8 @@ async fn drain_round_tail(
                 return Poll::Ready(Ok::<Option<usize>, std::io::Error>(None));
             }
 
-            match udp.poll_recv(task_cx, rbuf) {
-                Poll::Ready(Ok(n)) => return Poll::Ready(Ok(Some(n))),
+            match udp.poll_recv_any(task_cx, rbuf) {
+                Poll::Ready(Ok((_socket_index, n))) => return Poll::Ready(Ok(Some(n))),
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {}
             }
@@ -7415,6 +7603,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hello_ack_udp_ports_defaults_to_legacy_port() {
+        let ack = HelloAck {
+            accepted: true,
+            peer_id: "receiver".to_string(),
+            udp_port: 8472,
+            udp_ports: Vec::new(),
+            reason: None,
+        };
+
+        assert_eq!(hello_ack_udp_ports(&ack).as_slice(), &[8472]);
+    }
+
+    #[test]
+    fn hello_ack_udp_ports_drive_socket_round_robin() {
+        let ack = HelloAck {
+            accepted: true,
+            peer_id: "receiver".to_string(),
+            udp_port: 3001,
+            udp_ports: vec![3001, 3002, 3003],
+            reason: None,
+        };
+        let ports = hello_ack_udp_ports(&ack);
+        let peer: SocketAddr = "192.0.2.10:8472".parse().unwrap();
+        let mapped_ports = (0..7)
+            .map(|socket_index| {
+                receiver_udp_addr_for_socket(peer, &ports, socket_index)
+                    .unwrap()
+                    .port()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(mapped_ports, vec![3001, 3002, 3003, 3001, 3002, 3003, 3001]);
+    }
 
     #[test]
     fn parallel_decode_spawn_gate_respects_matrix5_width_cap() {
