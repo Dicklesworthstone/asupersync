@@ -1672,7 +1672,7 @@ impl InactivationDecoder {
         let DecoderState { solved, stats, .. } = state;
         self.verify_decoded_output(symbols, &solved)?;
         let source = self.reconstruct_source_symbols(&solved)?;
-        let intermediate = self.materialize_intermediate_symbols(solved);
+        let intermediate = self.materialize_intermediate_symbols(solved)?;
 
         Ok(DecodeResult {
             intermediate,
@@ -1827,7 +1827,7 @@ impl InactivationDecoder {
         let DecoderState { solved, stats, .. } = state;
         self.verify_decoded_output(symbols, &solved)?;
         let source = self.reconstruct_source_symbols(&solved)?;
-        let intermediate = self.materialize_intermediate_symbols(solved);
+        let intermediate = self.materialize_intermediate_symbols(solved)?;
 
         Ok(DecodeResult {
             intermediate,
@@ -1967,7 +1967,13 @@ impl InactivationDecoder {
                 return Err((err, proof_builder.build()));
             }
         };
-        let intermediate = self.materialize_intermediate_symbols(solved);
+        let intermediate = match self.materialize_intermediate_symbols(solved) {
+            Ok(intermediate) => intermediate,
+            Err(err) => {
+                proof_builder.set_failure(FailureReason::from(&err));
+                return Err((err, proof_builder.build()));
+            }
+        };
 
         // Mark success with a deterministic binding to the recovered payload.
         proof_builder.set_success(&source);
@@ -2918,11 +2924,21 @@ impl InactivationDecoder {
         Ok(source)
     }
 
-    fn materialize_intermediate_symbols(&self, intermediate: Vec<Option<Vec<u8>>>) -> Vec<Vec<u8>> {
+    fn materialize_intermediate_symbols(
+        &self,
+        intermediate: Vec<Option<Vec<u8>>>,
+    ) -> Result<Vec<Vec<u8>>, DecodeError> {
         let symbol_size = self.params.symbol_size;
         intermediate
             .into_iter()
-            .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
+            .map(|opt| match opt {
+                Some(symbol) if symbol.len() == symbol_size => Ok(symbol),
+                Some(symbol) => Err(DecodeError::SymbolSizeMismatch {
+                    expected: symbol_size,
+                    actual: symbol.len(),
+                }),
+                None => Ok(vec![0u8; symbol_size]),
+            })
             .collect()
     }
 
@@ -5672,6 +5688,36 @@ mod tests {
                 actual: symbol_size - 1,
             }
         );
+    }
+
+    #[test]
+    fn materialization_rejects_wrong_width_intermediate_symbol() {
+        let k = 6;
+        let symbol_size = 16;
+        let seed = 0x6330_C006_u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let mut intermediate = vec![Some(vec![0x11; symbol_size]); decoder.params().l];
+        intermediate[1] = None;
+        intermediate[2] = Some(vec![0x22; symbol_size + 1]);
+
+        let err = decoder
+            .materialize_intermediate_symbols(intermediate)
+            .expect_err("materialization must reject malformed solved symbol widths");
+        assert_eq!(
+            err,
+            DecodeError::SymbolSizeMismatch {
+                expected: symbol_size,
+                actual: symbol_size + 1,
+            }
+        );
+
+        let mut intermediate = vec![Some(vec![0x33; symbol_size]); decoder.params().l];
+        intermediate[1] = None;
+        let materialized = decoder
+            .materialize_intermediate_symbols(intermediate)
+            .expect("missing unused columns materialize as zero blocks");
+        assert_eq!(materialized[0], vec![0x33; symbol_size]);
+        assert_eq!(materialized[1], vec![0u8; symbol_size]);
     }
 
     #[test]

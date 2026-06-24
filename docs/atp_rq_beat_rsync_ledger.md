@@ -2163,3 +2163,18 @@ First fresh auth-tier validation on committed HEAD (atp-rq-auth `--rq-auth-key-h
 **50M/bad auth = atp loses wall 5.6×** (100.43s vs rsync-ssh 17.77s) — same lossy-small CPU/decode wall as nocrypto 50M/bad (~4×); auth's per-symbol HMAC adds a little CPU. BUT atp uses **132× less memory** (187MB vs rsync-over-ssh's 24.7GB — ssh's buffering at 2% loss explodes RSS). On a memory-constrained host rsync-ssh would OOM where atp holds 187MB.
 
 **Auth tier mirrors nocrypto:** good=TIE, bad=wall-loss-but-massive-memory-win, both converge reliably. Auth is NOT a weak spot (encrypted/QUIC is). Net mission coverage now spans nocrypto + auth + encrypted + delta-resync, all measured. Evidence: `artifacts/atp_bench_matrix/20260624T005003Z/`.
+
+## MATRIX-62 (2026-06-24) — LOSSY TREES (bad 50mbit/80ms/2%): atp competitive on wall (tree_small WINS 1.10×, tree_big narrow loss 1.38×) + MEMORY-CRUSHING (atp 52-65MB vs rsync 15-36GB = 236-697× less). Trees are NOT a weak spot on lossy links.
+
+Lossy-tree validation on committed HEAD (atp-rq-lab vs rsyncd, netns+veth+netem bad regime), all sha-ok:
+
+| cell | atp-rq-lab | rsyncd | atp RSS | rsync RSS | mem ratio | verdict |
+|---|---|---|---|---|---|---|
+| tree_small/bad | 5.76s | 6.33s | **52MB** | **36,255MB (35.4GB)** | atp 697× less | ★atp WINS 1.10× |
+| tree_big/bad | 10.56s | 7.64s | **65MB** | **15,330MB (15.0GB)** | atp 236× less | atp loses 1.38× |
+
+**tree_small/bad is an atp WIN** (5.76s vs rsync 6.33s, 5/5 reps) — at small-tree + lossy, atp's FEC delivers without rsync's per-file retransmit round-trips. **tree_big/bad is a narrow loss** (10.56 vs 7.64s, 1.38×) — within striking distance, not the 4-7× losses seen on single-file lossy-small.
+
+**★Memory dominance is EXTREME on lossy trees:** rsync hits **35.4GB RSS on tree_small/bad and 15GB on tree_big/bad** — its file-list + per-file state + retransmit buffers explode across many files under loss — while atp holds 52-65MB (236-697× less). This is the most lopsided memory result class measured: a lossy directory sync that rsync can barely fit in RAM, atp does in <70MB.
+
+**Trees are NOT an atp weak spot:** good→tree_big WIN (earlier), bad→tree_small WIN + tree_big narrow loss, all memory-dominant. Combined with the delta tree-rename (atp O(rename), works), the tree tier is competitive-to-winning + memory-crushing across regimes. Net scoreboard: atp wins or ties most tree/lossy/delta-insert cells + dominates memory universally; loses only single-file clean-perfect wall + lossy-small-single-file wall (both diagnosed FEC/CPU tax). Evidence: `artifacts/atp_bench_matrix/20260624T005747Z/`.
