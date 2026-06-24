@@ -2617,6 +2617,58 @@ mod tests {
     }
 
     #[test]
+    fn emit_all_zero_repairs_emits_source_only_and_preserves_repair_cursor() {
+        let symbol_size = 24;
+        let mut enc = make_encoder(16, symbol_size, 0xA11_5EED);
+        let k = enc.params().k;
+        let baseline_repair_esi = enc.next_repair_esi();
+
+        let emitted = enc.emit_all(0);
+
+        assert_eq!(
+            emitted.len(),
+            k,
+            "emit_all(0) should emit exactly the systematic source symbols"
+        );
+        assert!(
+            emitted.iter().all(|symbol| symbol.is_source),
+            "emit_all(0) must not synthesize repair symbols"
+        );
+        for (expected_esi, symbol) in emitted.iter().enumerate() {
+            assert_eq!(
+                symbol.esi, expected_esi as u32,
+                "source ESIs must remain the exact 0..K-1 prefix"
+            );
+            assert_eq!(symbol.degree, 1, "source symbols keep degree=1");
+        }
+        assert_eq!(
+            enc.next_repair_esi(),
+            baseline_repair_esi,
+            "emit_all(0) must not advance the repair cursor"
+        );
+        assert_eq!(enc.stats().repair_symbols_generated, 0);
+        assert_eq!(enc.stats().degree_count, 0);
+        assert_eq!(enc.stats().repair_bytes_emitted, 0);
+        assert_eq!(enc.stats().systematic_bytes_emitted, k * symbol_size);
+        assert_eq!(enc.stats().total_bytes_emitted(), k * symbol_size);
+        assert!(
+            (enc.stats().encoding_efficiency() - 1.0).abs() < f64::EPSILON,
+            "source-only emit_all(0) should have perfect encoding efficiency"
+        );
+        assert!(
+            enc.stats().repair_overhead().abs() < f64::EPSILON,
+            "source-only emit_all(0) should have zero repair overhead"
+        );
+
+        let later_repairs = enc.emit_repair(2);
+        assert_eq!(
+            later_repairs.first().map(|symbol| symbol.esi),
+            Some(k as u32),
+            "later repairs must still begin at the first repair ESI"
+        );
+    }
+
+    #[test]
     fn stats_initialized() {
         let k = 8;
         let symbol_size = 64;
