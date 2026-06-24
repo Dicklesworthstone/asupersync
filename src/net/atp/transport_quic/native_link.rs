@@ -2923,6 +2923,56 @@ mod tests {
         assert_eq!(retained, changed);
     }
 
+    #[test]
+    fn sender_retains_need_more_with_changed_pending_or_source_shape() {
+        let served = QuicNeedMore {
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 1,
+                symbols: 7,
+            }],
+            source_symbols: vec![QuicSourceSymbolRequest {
+                entry: 0,
+                sbn: 1,
+                esi: 4,
+            }],
+            round_symbols_observed: Some(90),
+            round_loss_fraction: Some(0.10),
+            round_symbols_accepted: Some(88),
+        };
+        let changed_pending = QuicNeedMore {
+            pending: vec![1],
+            ..served.clone()
+        };
+        let changed_source = QuicNeedMore {
+            source_symbols: vec![QuicSourceSymbolRequest {
+                esi: 5,
+                ..served.source_symbols[0]
+            }],
+            ..served.clone()
+        };
+        let mut pending = VecDeque::from([
+            super::json_frame(FrameType::ObjectRequest, &served).expect("duplicate need-more"),
+            super::json_frame(FrameType::ObjectRequest, &changed_pending)
+                .expect("changed pending need-more"),
+            super::json_frame(FrameType::ObjectRequest, &changed_source)
+                .expect("changed source need-more"),
+        ]);
+
+        let dropped = drop_duplicate_need_more_frames(&mut pending, &served)
+            .expect("duplicate filter parses queued feedback");
+
+        assert_eq!(dropped, 1);
+        assert_eq!(pending.len(), 2);
+        let retained_pending =
+            super::parse_json::<QuicNeedMore>(&pending[0]).expect("retained pending need-more");
+        let retained_source =
+            super::parse_json::<QuicNeedMore>(&pending[1]).expect("retained source need-more");
+        assert_eq!(retained_pending, changed_pending);
+        assert_eq!(retained_source, changed_source);
+    }
+
     fn quic_staging_test_entry(size: u64) -> crate::net::atp::transport_quic::ManifestEntry {
         crate::net::atp::transport_quic::ManifestEntry {
             index: 0,
