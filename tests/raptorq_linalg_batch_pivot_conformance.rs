@@ -470,6 +470,14 @@ fn solver_from_rows(rows: &[(&[u8], &[u8])], columns: usize) -> GaussianSolver {
     solver
 }
 
+fn solver_from_owned_rows(rows: &[(Vec<u8>, Vec<u8>)], columns: usize) -> GaussianSolver {
+    let mut solver = GaussianSolver::new(rows.len(), columns);
+    for (row, (coefficients, rhs)) in rows.iter().enumerate() {
+        solver.set_row(row, coefficients, DenseRow::new(rhs.clone()));
+    }
+    solver
+}
+
 fn assert_solutions_match(
     expected_kind: GaussianOutcomeKind,
     a: &GaussianResult,
@@ -499,6 +507,62 @@ fn assert_solutions_match(
                 "fail-closed outcomes must not expose partial payloads"
             );
         }
+    }
+}
+
+fn equation_rhs(coefficients: &[u8], solution: &[Vec<u8>]) -> Vec<u8> {
+    let width = solution.first().map_or(0, Vec::len);
+    let mut rhs = vec![0u8; width];
+    for (&coefficient, unknown) in coefficients.iter().zip(solution) {
+        let c = Gf256::new(coefficient);
+        for (dst, &value) in rhs.iter_mut().zip(unknown) {
+            *dst ^= c.mul_field(Gf256::new(value)).raw();
+        }
+    }
+    rhs
+}
+
+fn scaled_equation(coefficients: &[u8], rhs: &[u8], scale: u8) -> (Vec<u8>, Vec<u8>) {
+    let s = Gf256::new(scale);
+    let coefficients = coefficients
+        .iter()
+        .map(|&coefficient| s.mul_field(Gf256::new(coefficient)).raw())
+        .collect();
+    let rhs = rhs
+        .iter()
+        .map(|&value| s.mul_field(Gf256::new(value)).raw())
+        .collect();
+    (coefficients, rhs)
+}
+
+fn add_scaled_equation(
+    lhs: &(Vec<u8>, Vec<u8>),
+    rhs: &(Vec<u8>, Vec<u8>),
+    rhs_scale: u8,
+) -> (Vec<u8>, Vec<u8>) {
+    let s = Gf256::new(rhs_scale);
+    let coefficients = lhs
+        .0
+        .iter()
+        .zip(&rhs.0)
+        .map(|(&a, &b)| a ^ s.mul_field(Gf256::new(b)).raw())
+        .collect();
+    let rhs = lhs
+        .1
+        .iter()
+        .zip(&rhs.1)
+        .map(|(&a, &b)| a ^ s.mul_field(Gf256::new(b)).raw())
+        .collect();
+    (coefficients, rhs)
+}
+
+fn solved_payload(result: GaussianResult, label: &str) -> Vec<Vec<u8>> {
+    match result {
+        GaussianResult::Solved(rows) => rows
+            .into_iter()
+            .map(|row| row.as_slice().to_vec())
+            .collect(),
+        other => panic!("{label}: expected solved payload, got {other:?}"),
     }
 }
 
@@ -630,5 +694,67 @@ fn adversarial_solver_corpus_keeps_basic_and_markowitz_outcomes_aligned() {
         let basic_result = basic.solve();
         let markowitz_result = markowitz.solve_markowitz();
         assert_solutions_match(case.expected_kind, &basic_result, &markowitz_result);
+    }
+}
+
+#[test]
+fn full_rank_solver_payload_is_invariant_under_equivalent_row_presentations() {
+    let expected_solution = vec![vec![0x10, 0x11], vec![0x20, 0x21], vec![0x30, 0x31]];
+    let base_coefficients = [vec![1u8, 2, 3], vec![0, 1, 4], vec![0, 0, 1]];
+    let base_rows: Vec<(Vec<u8>, Vec<u8>)> = base_coefficients
+        .iter()
+        .map(|coefficients| {
+            (
+                coefficients.clone(),
+                equation_rhs(coefficients, &expected_solution),
+            )
+        })
+        .collect();
+    let scaled_permuted_rows = vec![
+        scaled_equation(&base_rows[2].0, &base_rows[2].1, 9),
+        scaled_equation(&base_rows[0].0, &base_rows[0].1, 7),
+        scaled_equation(&base_rows[1].0, &base_rows[1].1, 5),
+    ];
+    let overdetermined_consistent_rows = vec![
+        add_scaled_equation(&base_rows[0], &base_rows[1], 6),
+        base_rows[2].clone(),
+        scaled_equation(&base_rows[0].0, &base_rows[0].1, 3),
+        base_rows[1].clone(),
+    ];
+
+    for (name, rows) in [
+        ("base_triangular", base_rows),
+        ("scaled_permuted", scaled_permuted_rows),
+        ("overdetermined_consistent", overdetermined_consistent_rows),
+    ] {
+        let mut basic = solver_from_owned_rows(&rows, 3);
+        let mut markowitz = solver_from_owned_rows(&rows, 3);
+
+        assert_eq!(
+            basic.rank_status().rank,
+            3,
+            "{name}: presentation must be full-rank before solve"
+        );
+        assert_eq!(
+            basic.rank_status().deficit,
+            0,
+            "{name}: presentation must not report a rank deficit"
+        );
+        assert_eq!(
+            basic.rank_status(),
+            markowitz.rank_status(),
+            "{name}: pivot strategy must not alter pre-solve rank"
+        );
+
+        let basic_payload = solved_payload(basic.solve(), name);
+        let markowitz_payload = solved_payload(markowitz.solve_markowitz(), name);
+        assert_eq!(
+            basic_payload, expected_solution,
+            "{name}: basic pivoting changed solved payload"
+        );
+        assert_eq!(
+            markowitz_payload, expected_solution,
+            "{name}: Markowitz pivoting changed solved payload"
+        );
     }
 }
