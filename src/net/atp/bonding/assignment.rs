@@ -2083,10 +2083,10 @@ mod tests {
 
     #[test]
     fn spray_schedule_fails_closed_for_invalid_inputs() {
-        let descriptor = descriptor();
+        let valid_descriptor = descriptor();
         let invalid_assignment = DonorAssignment::new_static(2, 2, vec![endpoint()], None);
         assert!(matches!(
-            schedule_bonded_donor_spray(&descriptor, &invalid_assignment, 1),
+            schedule_bonded_donor_spray(&valid_descriptor, &invalid_assignment, 1),
             Err(BondScheduleError::InvalidAssignment(
                 DonorAssignmentError::InvalidPartition(
                     EsiPartitionError::DonorIndexOutOfRange { .. }
