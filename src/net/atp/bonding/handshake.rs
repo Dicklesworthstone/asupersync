@@ -6,11 +6,17 @@
 //! required before any donor starts spraying symbols.
 
 use core::fmt;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+};
 
 use serde::{Deserialize, Serialize};
 
-use super::assignment::{BONDING_ASSIGNMENT_VERSION, MAX_BONDING_DONORS};
+use super::assignment::{
+    BONDING_ASSIGNMENT_VERSION, BondAuthKeyRef, DonorAssignment, DonorAssignmentError,
+    MAX_BONDING_DONORS,
+};
 
 /// Current bonded-handshake protocol version.
 pub const BONDING_HANDSHAKE_VERSION: u16 = BONDING_ASSIGNMENT_VERSION;
@@ -204,6 +210,108 @@ impl BondingAgreement {
     }
 }
 
+/// Receiver-side result of accepting one bonded donor control connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondingDonorEnrollment {
+    /// Receiver-assigned donor index.
+    pub donor_index: u32,
+    /// Negotiated control-plane agreement with this donor.
+    pub agreement: BondingAgreement,
+    /// Assignment sent back to the donor before it starts spraying symbols.
+    pub assignment: DonorAssignment,
+}
+
+/// Receiver-side control-plane allocator for Phase C1 donor admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondingReceiverControlPlane {
+    receiver_offer: BondingHandshake,
+    registry: BondingControlRegistry,
+    receiver_udp_endpoints: Vec<SocketAddr>,
+    auth_key_ref: Option<BondAuthKeyRef>,
+}
+
+impl BondingReceiverControlPlane {
+    /// Create a receiver control plane for one bonded transfer.
+    pub fn new(
+        receiver_offer: BondingHandshake,
+        expected_donor_count: u32,
+        receiver_udp_endpoints: Vec<SocketAddr>,
+        auth_key_ref: Option<BondAuthKeyRef>,
+    ) -> Result<Self, BondingHandshakeError> {
+        receiver_offer.validate_offer()?;
+        if receiver_udp_endpoints.is_empty() {
+            return Err(BondingHandshakeError::NoReceiverUdpEndpoint);
+        }
+        if receiver_offer.auth_required && auth_key_ref.is_none() {
+            return Err(BondingHandshakeError::MissingRequiredAuthKeyRef);
+        }
+        if expected_donor_count > receiver_offer.max_donor_count {
+            return Err(BondingHandshakeError::ReceiverDonorCountTooSmall {
+                expected_donor_count,
+                receiver_max_donor_count: receiver_offer.max_donor_count,
+            });
+        }
+
+        Ok(Self {
+            receiver_offer,
+            registry: BondingControlRegistry::new(expected_donor_count)?,
+            receiver_udp_endpoints,
+            auth_key_ref,
+        })
+    }
+
+    /// Enroll the next donor that completed the control handshake.
+    ///
+    /// Donor indexes are allocated in arrival order. Every donor receives the
+    /// same receiver UDP endpoint set so all residue classes feed one data-plane
+    /// listener.
+    pub fn enroll_next_donor(
+        &mut self,
+        donor_offer: &BondingHandshake,
+    ) -> Result<BondingDonorEnrollment, BondingHandshakeError> {
+        if self.registry.is_complete() {
+            return Err(BondingHandshakeError::TooManyDonorControls {
+                expected_donor_count: self.registry.expected_donor_count(),
+            });
+        }
+
+        let donor_index = self.registry.enrolled_count() as u32;
+        let agreement = self.receiver_offer.negotiate(donor_offer)?;
+        self.registry.enroll_donor(donor_index, agreement.clone())?;
+
+        let assignment = DonorAssignment::new_static(
+            donor_index,
+            self.registry.expected_donor_count(),
+            self.receiver_udp_endpoints.clone(),
+            self.auth_key_ref.clone(),
+        );
+        assignment
+            .validate()
+            .map_err(|error| BondingHandshakeError::InvalidDonorAssignment {
+                donor_index,
+                error,
+            })?;
+
+        Ok(BondingDonorEnrollment {
+            donor_index,
+            agreement,
+            assignment,
+        })
+    }
+
+    /// Borrow the receiver's donor-control registry.
+    #[must_use]
+    pub const fn registry(&self) -> &BondingControlRegistry {
+        &self.registry
+    }
+
+    /// True when every expected donor control connection has been enrolled.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.registry.is_complete()
+    }
+}
+
 /// Receiver-side registry of negotiated donor control connections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BondingControlRegistry {
@@ -321,6 +429,22 @@ pub enum BondingHandshakeError {
         expected_donor_count: u32,
         agreement_max_donor_count: u32,
     },
+    /// Receiver offer cannot support the expected donor count.
+    ReceiverDonorCountTooSmall {
+        expected_donor_count: u32,
+        receiver_max_donor_count: u32,
+    },
+    /// Receiver did not publish a UDP spray endpoint for the donors.
+    NoReceiverUdpEndpoint,
+    /// Receiver requires bonded symbol auth but has no assignable key reference.
+    MissingRequiredAuthKeyRef,
+    /// More donor control connections arrived than this transfer accepts.
+    TooManyDonorControls { expected_donor_count: u32 },
+    /// The generated assignment failed the Phase-A assignment validator.
+    InvalidDonorAssignment {
+        donor_index: u32,
+        error: DonorAssignmentError,
+    },
 }
 
 impl fmt::Display for BondingHandshakeError {
@@ -366,6 +490,29 @@ impl fmt::Display for BondingHandshakeError {
                 f,
                 "channel-bonding donor {donor_index} agreement supports {agreement_max_donor_count} donors, below expected {expected_donor_count}"
             ),
+            Self::ReceiverDonorCountTooSmall {
+                expected_donor_count,
+                receiver_max_donor_count,
+            } => write!(
+                f,
+                "channel-bonding receiver offer supports {receiver_max_donor_count} donors, below expected {expected_donor_count}"
+            ),
+            Self::NoReceiverUdpEndpoint => {
+                f.write_str("channel-bonding receiver has no UDP spray endpoint")
+            }
+            Self::MissingRequiredAuthKeyRef => f.write_str(
+                "channel-bonding receiver requires symbol auth but has no assignable key reference",
+            ),
+            Self::TooManyDonorControls {
+                expected_donor_count,
+            } => write!(
+                f,
+                "channel-bonding receiver already enrolled all {expected_donor_count} donors"
+            ),
+            Self::InvalidDonorAssignment { donor_index, error } => write!(
+                f,
+                "channel-bonding donor {donor_index} assignment is invalid: {error}"
+            ),
         }
     }
 }
@@ -385,6 +532,10 @@ mod tests {
             auth_required: true,
             max_donor_count,
         }
+    }
+
+    fn endpoint() -> SocketAddr {
+        "127.0.0.1:8472".parse().expect("test endpoint")
     }
 
     #[test]
@@ -558,6 +709,68 @@ mod tests {
                 expected_donor_count: 2,
                 agreement_max_donor_count: 1,
             })
+        );
+    }
+
+    #[test]
+    fn receiver_control_plane_assigns_distinct_indices_and_one_udp_endpoint() {
+        let receiver = BondingHandshake::v1_static([BondTransport::DirectIp], 3, true);
+        let donor = BondingHandshake::v1_static([BondTransport::DirectIp], 3, false);
+        let auth = BondAuthKeyRef::ControlPlane("bond-key-7".to_string());
+        let mut control =
+            BondingReceiverControlPlane::new(receiver, 3, vec![endpoint()], Some(auth.clone()))
+                .expect("control plane");
+
+        for expected_index in 0..3 {
+            let enrollment = control.enroll_next_donor(&donor).expect("enrolled");
+
+            assert_eq!(enrollment.donor_index, expected_index);
+            assert_eq!(enrollment.assignment.donor_index, expected_index);
+            assert_eq!(enrollment.assignment.donor_count, 3);
+            assert_eq!(
+                enrollment.assignment.receiver_udp_endpoints,
+                vec![endpoint()]
+            );
+            assert_eq!(enrollment.assignment.auth_key_ref, Some(auth.clone()));
+            assert!(enrollment.assignment.owns_esi(expected_index));
+            assert_eq!(enrollment.agreement.max_donor_count, 3);
+            assert!(
+                enrollment
+                    .agreement
+                    .supports_transport(BondTransport::DirectIp)
+            );
+        }
+
+        assert!(control.is_complete());
+        assert_eq!(control.registry().enrolled_donor_indices(), vec![0, 1, 2]);
+        assert_eq!(
+            control.enroll_next_donor(&donor),
+            Err(BondingHandshakeError::TooManyDonorControls {
+                expected_donor_count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn receiver_control_plane_fails_closed_for_invalid_admission_shape() {
+        let receiver = BondingHandshake::v1_static([BondTransport::DirectIp], 2, false);
+
+        assert_eq!(
+            BondingReceiverControlPlane::new(receiver.clone(), 3, vec![endpoint()], None),
+            Err(BondingHandshakeError::ReceiverDonorCountTooSmall {
+                expected_donor_count: 3,
+                receiver_max_donor_count: 2,
+            })
+        );
+        assert_eq!(
+            BondingReceiverControlPlane::new(receiver.clone(), 2, Vec::new(), None),
+            Err(BondingHandshakeError::NoReceiverUdpEndpoint)
+        );
+
+        let auth_required = BondingHandshake::v1_static([BondTransport::DirectIp], 2, true);
+        assert_eq!(
+            BondingReceiverControlPlane::new(auth_required, 2, vec![endpoint()], None),
+            Err(BondingHandshakeError::MissingRequiredAuthKeyRef)
         );
     }
 }
