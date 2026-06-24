@@ -227,9 +227,21 @@ const ROUND_PROGRESS_IDLE_GRACE: Duration = Duration::from_millis(250);
 /// otherwise deadlocks both sides until the full idle timeout. Re-send the NeedMore on this interval
 /// instead; this is what lets cross-machine transfers converge through control-frame loss.
 const NEEDMORE_PTO: Duration = Duration::from_millis(1500);
-/// Max NeedMore re-sends while awaiting one round's repair before giving up
-/// (`NEEDMORE_PTO * MAX_NEEDMORE_PTO` is the effective per-round idle budget).
-const MAX_NEEDMORE_PTO: u32 = 40;
+/// Minimum NeedMore re-sends while awaiting one round's repair before giving up.
+///
+/// The live budget is derived from [`QuicConfig::idle_timeout`], so explicit
+/// short-timeout tests still fail fast while the default encrypted lossy lane
+/// gets a larger convergence window.
+const MIN_NEEDMORE_PTO_ATTEMPTS: u32 = 1;
+
+fn needmore_pto_attempt_budget(idle_timeout: Duration) -> u32 {
+    let pto_millis = NEEDMORE_PTO.as_millis().max(1);
+    let idle_millis = idle_timeout.as_millis().max(pto_millis);
+    let attempts = idle_millis.div_ceil(pto_millis);
+    u32::try_from(attempts)
+        .unwrap_or(u32::MAX)
+        .max(MIN_NEEDMORE_PTO_ATTEMPTS)
+}
 
 /// Opt-in stderr tracing for ATP/RQ benchmark diagnosis. Reuses the existing
 /// ATP_RQ_TRACE switch so matrix runs can grep one trace stream across RQ and
@@ -2475,6 +2487,7 @@ async fn run_receiver_session(
     // awaiting this round's repair. Lets a lost control frame self-heal instead of deadlocking.
     let mut last_need: Option<QuicNeedMore> = None;
     let mut needmore_pto_attempts = 0u32;
+    let needmore_pto_max_attempts = needmore_pto_attempt_budget(config.idle_timeout);
 
     let receive_result: Result<ReceiveReport, QuicTransportError> = async {
         'rounds: loop {
@@ -2592,7 +2605,7 @@ async fn run_receiver_session(
                     // repair) was lost on the wire — re-send the NeedMore (control PTO) up to a budget
                     // before giving up, so cross-machine transfers converge through control-frame loss.
                     if let Some(need) = last_need.as_ref() {
-                        if needmore_pto_attempts < MAX_NEEDMORE_PTO {
+                        if needmore_pto_attempts < needmore_pto_max_attempts {
                             needmore_pto_attempts = needmore_pto_attempts.saturating_add(1);
                             quic_rqtrace!(
                                 "receiver: NeedMore PTO resend round={} attempt={} pending={} repair_blocks={} requested_repair_symbols={} max_attempts={}",
@@ -2601,7 +2614,7 @@ async fn run_receiver_session(
                                 need.pending.len(),
                                 need.repair_blocks.len(),
                                 need_more_repair_symbol_count(need),
-                                MAX_NEEDMORE_PTO,
+                                needmore_pto_max_attempts,
                             );
                             super::send_native_need_more(cx, &mut link.conn, &mut control, need)?;
                             link.flush(cx).await?;
@@ -3049,12 +3062,15 @@ mod tests {
             ..served.clone()
         };
         let mut pending = VecDeque::from([
-            super::json_frame(FrameType::ObjectRequest, &served).expect("duplicate need-more"),
-            super::json_frame(FrameType::ObjectRequest, &same_request_different_telemetry)
+            super::super::json_frame(FrameType::ObjectRequest, &served)
+                .expect("duplicate need-more"),
+            super::super::json_frame(FrameType::ObjectRequest, &same_request_different_telemetry)
                 .expect("duplicate need-more with fresh telemetry"),
             Frame::empty(FrameType::Proof).expect("proof frame"),
-            super::json_frame(FrameType::ObjectRequest, &changed).expect("changed need-more"),
-            super::json_frame(FrameType::ObjectRequest, &served).expect("duplicate need-more"),
+            super::super::json_frame(FrameType::ObjectRequest, &changed)
+                .expect("changed need-more"),
+            super::super::json_frame(FrameType::ObjectRequest, &served)
+                .expect("duplicate need-more"),
         ]);
 
         let dropped = drop_duplicate_need_more_frames(&mut pending, &served)
@@ -3064,7 +3080,8 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].frame_type(), FrameType::Proof);
         assert_eq!(pending[1].frame_type(), FrameType::ObjectRequest);
-        let retained = super::parse_json::<QuicNeedMore>(&pending[1]).expect("retained need-more");
+        let retained =
+            super::super::parse_json::<QuicNeedMore>(&pending[1]).expect("retained need-more");
         assert_eq!(retained, changed);
     }
 
@@ -3099,10 +3116,11 @@ mod tests {
             ..served.clone()
         };
         let mut pending = VecDeque::from([
-            super::json_frame(FrameType::ObjectRequest, &served).expect("duplicate need-more"),
-            super::json_frame(FrameType::ObjectRequest, &changed_pending)
+            super::super::json_frame(FrameType::ObjectRequest, &served)
+                .expect("duplicate need-more"),
+            super::super::json_frame(FrameType::ObjectRequest, &changed_pending)
                 .expect("changed pending need-more"),
-            super::json_frame(FrameType::ObjectRequest, &changed_source)
+            super::super::json_frame(FrameType::ObjectRequest, &changed_source)
                 .expect("changed source need-more"),
         ]);
 
@@ -3111,12 +3129,31 @@ mod tests {
 
         assert_eq!(dropped, 1);
         assert_eq!(pending.len(), 2);
-        let retained_pending =
-            super::parse_json::<QuicNeedMore>(&pending[0]).expect("retained pending need-more");
-        let retained_source =
-            super::parse_json::<QuicNeedMore>(&pending[1]).expect("retained source need-more");
+        let retained_pending = super::super::parse_json::<QuicNeedMore>(&pending[0])
+            .expect("retained pending need-more");
+        let retained_source = super::super::parse_json::<QuicNeedMore>(&pending[1])
+            .expect("retained source need-more");
         assert_eq!(retained_pending, changed_pending);
         assert_eq!(retained_source, changed_source);
+    }
+
+    #[test]
+    fn needmore_pto_attempt_budget_tracks_configured_idle_timeout() {
+        assert_eq!(
+            needmore_pto_attempt_budget(Duration::from_secs(60)),
+            40,
+            "the old default maps to the historical 60s PTO window"
+        );
+        assert_eq!(
+            needmore_pto_attempt_budget(super::super::DEFAULT_IDLE_TIMEOUT),
+            240,
+            "the encrypted-lossy default gives repair rounds a 360s PTO window"
+        );
+        assert_eq!(
+            needmore_pto_attempt_budget(Duration::from_millis(100)),
+            MIN_NEEDMORE_PTO_ATTEMPTS,
+            "short-timeout tests still fail fast instead of inheriting the production budget"
+        );
     }
 
     fn quic_staging_test_entry(size: u64) -> crate::net::atp::transport_quic::ManifestEntry {

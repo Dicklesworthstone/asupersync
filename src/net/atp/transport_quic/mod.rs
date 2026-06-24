@@ -192,7 +192,12 @@ pub const DEFAULT_REPAIR_OVERHEAD: f64 = 1.001;
 pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Default maximum time to wait for a connected peer to make protocol progress.
-pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+///
+/// Encrypted lossy transfers use this as the native NeedMore/repair convergence
+/// budget after feedback starts. MATRIX-64 showed converging 50M/good reps
+/// around 288s with one residual timeout, so keep the default above that slow
+/// recovery envelope instead of killing a transfer mid-decode.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(360);
 
 /// Default maximum time to wait for the QUIC handshake to complete.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -7696,6 +7701,7 @@ mod tests {
         assert_eq!(c.max_block_size, usize::from(DEFAULT_SYMBOL_SIZE) * 512);
         assert_eq!(c.max_datagram_size, DEFAULT_MAX_DATAGRAM_SIZE);
         assert_eq!(c.max_transfer_bytes, DEFAULT_MAX_TRANSFER_BYTES);
+        assert_eq!(DEFAULT_IDLE_TIMEOUT, Duration::from_secs(360));
         assert_eq!(c.idle_timeout, DEFAULT_IDLE_TIMEOUT);
         assert_eq!(c.handshake_timeout, DEFAULT_HANDSHAKE_TIMEOUT);
         assert_eq!(c.accept_timeout, DEFAULT_ACCEPT_TIMEOUT);
