@@ -51,6 +51,8 @@ use crate::types::symbol::ObjectId as RaptorqObjectId;
 
 /// Reused streaming-hash buffer for the donor proof (per file, 64 KiB).
 const BOND_HASH_BUFFER_SIZE: usize = 1 << 16;
+/// Structured event schema for donor-side byte-proof refusal traces.
+pub const BONDING_DONOR_REFUSAL_TRACE_SCHEMA: &str = "atp-bonding-donor-refusal-v1";
 
 /// One file within a [`BondTransferDescriptor`].
 ///
@@ -147,6 +149,38 @@ pub struct BondedDonorHoldingProof {
     pub total_bytes: u64,
     /// Number of descriptor entries covered by the proof.
     pub entry_count: usize,
+}
+
+/// Structured trace emitted when a donor refuses to participate.
+///
+/// This is intentionally serializable control-plane evidence, not a side-effecting
+/// logger. Donor data paths can attach or log it when
+/// [`BondTransferDescriptor::prove_local_digests_for_donation_traced`] fails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BondedDonorRefusalTrace {
+    /// Stable schema token for downstream log parsers.
+    pub schema_version: &'static str,
+    /// Stable event name.
+    pub event: &'static str,
+    /// Transfer whose local copy failed the byte-identical proof.
+    pub transfer_id: String,
+    /// Descriptor-committed flat-graph merkle root.
+    pub expected_merkle_root_hex: String,
+    /// Merkle root recomputed from the supplied local digests, when available.
+    pub recomputed_merkle_root_hex: Option<String>,
+    /// Stable machine-readable refusal reason.
+    pub refusal_code: &'static str,
+    /// Human-readable typed proof error.
+    pub refusal_error: String,
+    /// Entry associated with the refusal, when the error is entry-scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_rel_path: Option<String>,
+    /// Descriptor entry count.
+    pub descriptor_entry_count: usize,
+    /// Number of local digests supplied by the donor proof caller.
+    pub local_digest_count: usize,
+    /// Descriptor-declared total bytes.
+    pub descriptor_total_bytes: u64,
 }
 
 /// Why a donor (or the receiver) refused a bonded descriptor / failed its proof.
@@ -249,6 +283,36 @@ impl core::fmt::Display for BondProofError {
 }
 
 impl std::error::Error for BondProofError {}
+
+impl BondProofError {
+    fn refusal_code(&self) -> &'static str {
+        match self {
+            Self::DuplicateEntryIndex { .. } => "duplicate_entry_index",
+            Self::DuplicateEntryPath { .. } => "duplicate_entry_path",
+            Self::TotalBytesOverflow => "total_bytes_overflow",
+            Self::TotalBytesMismatch { .. } => "total_bytes_mismatch",
+            Self::MissingEntry { .. } => "missing_entry",
+            Self::EntryMismatch { .. } => "entry_mismatch",
+            Self::MerkleMismatch { .. } => "merkle_mismatch",
+            Self::UnsafePath { .. } => "unsafe_path",
+            Self::Io { .. } => "io",
+        }
+    }
+
+    fn entry_rel_path(&self) -> Option<&str> {
+        match self {
+            Self::DuplicateEntryPath { rel_path }
+            | Self::MissingEntry { rel_path }
+            | Self::EntryMismatch { rel_path }
+            | Self::UnsafePath { rel_path }
+            | Self::Io { rel_path, .. } => Some(rel_path),
+            Self::DuplicateEntryIndex { .. }
+            | Self::TotalBytesOverflow
+            | Self::TotalBytesMismatch { .. }
+            | Self::MerkleMismatch { .. } => None,
+        }
+    }
+}
 
 impl BondTransferDescriptor {
     /// Build the descriptor from an rq [`TransferManifest`] plus the object params
@@ -435,6 +499,44 @@ impl BondTransferDescriptor {
         })
     }
 
+    /// Verify local digests and return either the donor proof token or a
+    /// structured refusal trace suitable for control-plane logging.
+    ///
+    /// This is B2's "refuse before spray" API shape for donor paths that need a
+    /// machine-readable receipt. It does not emit logs itself; callers decide
+    /// whether to attach the trace to Agent Mail, structured tracing, or an
+    /// operator artifact.
+    pub fn prove_local_digests_for_donation_traced(
+        &self,
+        digests: &[EntryDigest],
+    ) -> Result<BondedDonorHoldingProof, BondedDonorRefusalTrace> {
+        self.prove_local_digests_for_donation(digests)
+            .map_err(|error| self.refusal_trace(&error, digests))
+    }
+
+    /// Build a structured refusal trace for an already-classified proof error.
+    #[must_use]
+    pub fn refusal_trace(
+        &self,
+        error: &BondProofError,
+        digests: &[EntryDigest],
+    ) -> BondedDonorRefusalTrace {
+        BondedDonorRefusalTrace {
+            schema_version: BONDING_DONOR_REFUSAL_TRACE_SCHEMA,
+            event: "bonding_donor_refused",
+            transfer_id: self.transfer_id.clone(),
+            expected_merkle_root_hex: self.merkle_root_hex.clone(),
+            recomputed_merkle_root_hex: (!digests.is_empty())
+                .then(|| flat_merkle_root_from_digests(digests)),
+            refusal_code: error.refusal_code(),
+            refusal_error: error.to_string(),
+            entry_rel_path: error.entry_rel_path().map(str::to_string),
+            descriptor_entry_count: self.entries.len(),
+            local_digest_count: digests.len(),
+            descriptor_total_bytes: self.total_bytes,
+        }
+    }
+
     /// Donor enrolment proof over an on-disk copy rooted at `root_dir`: stream-hash
     /// each entry's local file and run [`Self::verify_local_digests`]. Returns
     /// `Ok(())` only if every byte matches; otherwise refuse to donate.
@@ -593,6 +695,55 @@ mod tests {
         assert_eq!(proof.merkle_root_hex, desc.merkle_root_hex);
         assert_eq!(proof.total_bytes, desc.total_bytes);
         assert_eq!(proof.entry_count, desc.entries.len());
+    }
+
+    #[test]
+    fn traced_donation_proof_accepts_matching_local_digests() {
+        let desc = descriptor_for(FILES);
+        let digests: Vec<EntryDigest> = FILES.iter().map(|(_, p, b)| digest_for(p, b)).collect();
+
+        let proof = desc
+            .prove_local_digests_for_donation_traced(&digests)
+            .expect("byte-identical donor proof");
+
+        assert_eq!(proof.transfer_id, desc.transfer_id);
+        assert_eq!(proof.merkle_root_hex, desc.merkle_root_hex);
+    }
+
+    #[test]
+    fn traced_donation_proof_refuses_tampered_copy_with_merkle_evidence() {
+        let desc = descriptor_for(FILES);
+        let digests = vec![
+            digest_for("a.bin", b"HELLO bonded world"),
+            digest_for("sub/b.bin", b"second donor file"),
+        ];
+        let recomputed = flat_merkle_root_from_digests(&digests);
+
+        let trace = desc
+            .prove_local_digests_for_donation_traced(&digests)
+            .expect_err("tampered donor copy must refuse before spray");
+
+        assert_eq!(trace.schema_version, BONDING_DONOR_REFUSAL_TRACE_SCHEMA);
+        assert_eq!(trace.event, "bonding_donor_refused");
+        assert_eq!(trace.transfer_id, desc.transfer_id);
+        assert_eq!(trace.expected_merkle_root_hex, desc.merkle_root_hex);
+        assert_eq!(trace.recomputed_merkle_root_hex, Some(recomputed));
+        assert_ne!(
+            trace.recomputed_merkle_root_hex.as_deref(),
+            Some(desc.merkle_root_hex.as_str())
+        );
+        assert_eq!(trace.refusal_code, "entry_mismatch");
+        assert_eq!(trace.entry_rel_path.as_deref(), Some("a.bin"));
+        assert_eq!(trace.descriptor_entry_count, desc.entries.len());
+        assert_eq!(trace.local_digest_count, digests.len());
+
+        let json = serde_json::to_value(&trace).expect("refusal trace serializes");
+        assert_eq!(
+            json["schema_version"].as_str(),
+            Some(BONDING_DONOR_REFUSAL_TRACE_SCHEMA)
+        );
+        assert_eq!(json["event"].as_str(), Some("bonding_donor_refused"));
+        assert_eq!(json["refusal_code"].as_str(), Some("entry_mismatch"));
     }
 
     #[test]
