@@ -2601,3 +2601,22 @@ Benched origin/main HEAD `b0da22b87` (built clean from `git archive`, 0 errors, 
 **Also: even when it converges, encrypted 50M/good loses 4× to rsync** (15.8s vs 3.95s), consistent with the MATRIX-88/89 finding that the encrypted/QUIC path is per-symbol-AEAD/header-protection-CPU-bound (~4–5 MB/s) vs rsync's single bulk-TCP+hardware-AES stream. So encrypted-good has BOTH a residual correctness bug AND a perf gap.
 
 **Routed to swarm (br-asupersync-lqmfsi owner):** (1) ★root-cause the residual intermittent 1024-round wedge — reproduce by sweeping the loss seed / repeating reps until it fires, then trace why the receiver never reaches K (suspect: a specific loss pattern starves a block of source+repair symbols and the repair-request/FEC-fallback logic doesn't escalate, cf. the open 317hxr.6.1.1 "FEC fallback self-disables in repair rounds" finding — likely the SAME root cause); (2) the 1024-round hard cap should fail FAST / escalate FEC overhead aggressively rather than spinning 758s. Perf (4× gap) is secondary to closing the correctness hole. Evidence: `artifacts/atp_bench_matrix/20260625T203840Z/`.
+
+## MATRIX-91 (2026-06-25) — encrypted-`good` wedge NOT closed by `505806a22` ('stabilize lossy repair feedback', lqmfsi): ★HONEST NEGATIVE. reps5 verification (deliberately more reps than the swarm's local 3/3 to stress the flaky path) shows the intermittent 1024-round wedge is STILL PRESENT and FREQUENT — converged only **2/5**, with reps 2,3,4 all wedged 1024-round / ~741s / sha-fail. Combined with MATRIX-90 (1/3 wedged), the wedge fires ~**50% of runs** at 0.1% loss = highly reproducible, NOT a rare edge. The fix changed the dynamics (a converged rep now took 4 rounds/43.9s vs the prior clean 2 rounds) but did NOT address the root cause. Bug remains OPEN; routed back to owners with a reproduce-and-trace directive.
+
+Benched origin/main HEAD `cc486262a` (fix `505806a22`; built clean from `git archive`, 0 errors, atp 0.3.5), 50M / `good` (25ms / 0.1% loss / 200mbit) / `encrypted`, streams=1, reps=5, sha-verified, ATP_RQ_TRACE=1:
+
+| rep | atp-quic-tls13 wall | feedback_rounds | status / sha |
+|---|---|---|---|
+| 1 | 43.89s | 4 | ok / sha ✓ |
+| 2 | **741.00s** | **1024** | **error / sha ✗ — WEDGED** |
+| 3 | **740.70s** | **1024** | **error / sha ✗ — WEDGED** |
+| 4 | **741.30s** | **1024** | **error / sha ✗ — WEDGED** |
+| 5 | 14.76s | 2 | ok / sha ✓ |
+
+- **Converged 2/5** (gate 5/5 NOT met; was 2/3 in MATRIX-90 — no improvement). Converged-rep median 29.3s; rsync-ssh median 3.95s (5/5) → **7.42× slower** on converged reps.
+- **Cross-run wedge rate ≈ 50%** (MATRIX-90 1/3 + MATRIX-91 3/5 = 4/8 reps wedged). The wedge is the dominant failure mode at this loss level, not a tail event.
+
+**Verdict: the "stabilize lossy repair feedback" change is INSUFFICIENT.** It did not eliminate (and did not measurably reduce) the intermittent non-convergence — 3 of 5 reps still spun to the 1024-round hard cap (~741s) and failed sha. The ~50% cross-run hit rate means this is **trivially reproducible** by simply re-running the 50M/good/encrypted cell, so the owner can capture a wedged run directly and trace it.
+
+**Routed to swarm (br-asupersync-lqmfsi / 317hxr.6.1.1 owners, panes 3/5/8):** STOP shipping convergence "stabilization" tweaks and self-certifying on a 3-rep local pass — reps5 central A/B refutes it. Instead: (1) reproduce a wedged run (≈50% chance per run), capture the ATP_RQ_TRACE; (2) at the 1024-round cap, inspect the receiver state — is it short by a few source symbols of K on one block, and is the sender (a) still generating/sending REPAIR symbols in rounds 3..1024, or (b) sending nothing new (the 317hxr.6.1.1 `requested_sources==0` / `source_retransmit_rounds` guard self-disabling FEC fallback)? (3) the 1024-round cap should escalate FEC overhead and/or fail-fast, not spin ~741s. This is a real correctness hole that blocks banking encrypted-good at any speed. Evidence: `artifacts/atp_bench_matrix/20260625T212957Z/`.
