@@ -2581,3 +2581,23 @@ Benched origin/main HEAD `cb5f5fe93` (built clean), 50M/perfect encrypted, strea
 **★Encrypted-perfect is DONE (banked, floor reached) — stop tuning it.** Remaining open frontiers, by value: (B) ★encrypted-`good` NON-CONVERGENCE (correctness — MATRIX-83 was 1024-round/sha-fail; the fill+GSO+recv-batch changes may now help, or it's a real repair-loop bug worth a bead/root-cause); (C) small-clean nocrypto FEC-encode tax (2.29×, adaptive overhead→0 for tiny/clean). 500M/bad (1.14×) and good (1.60×) are parked near-ties; clean+high-BDP + delta + memory are wins. Routed to swarm: pivot off encrypted-perfect to encrypted-good convergence + small-clean. Evidence: `artifacts/atp_bench_matrix/20260625T075854Z/`.
 
 **Headroom remains (next levers):** 11.56s for 50MB is still ~4.3 MB/s, far below hardware-crypto speed, so a *second* layer of per-symbol cost remains — candidates: (a) **GSO send batching** (one `sendmsg`/`UDP_SEGMENT` for the coalesced superpacket — the trace's 54×1200B=64.8KB "packets" look like coalesced sends that could go via GSO in one syscall; GSO is OPEN for the encrypted/QUIC path even though it was refuted for the nocrypto spray MATRIX-66/67); (b) receiver-side per-symbol `unprotect`/processing batching; (c) push the fill ratio higher / to path-MTU. Routed to swarm: push fill-ratio + GSO compounding, and re-check whether fuller packets also ease the encrypted-good non-convergence. Evidence: `artifacts/atp_bench_matrix/20260625T070456Z/`.
+
+## MATRIX-90 (2026-06-25) — encrypted-`good` convergence fix (`0b4bb938d` 'repair encrypted lossy control loop' + `cbb179b3b` test, br-asupersync-lqmfsi): ★MAJOR CORRECTNESS PROGRESS but NOT a clean pass. 50M/good encrypted now converges **2/3** (was **0/3** all-1024-round/sha-fail in MATRIX-83) in **2 rounds / ~15.8s** — but rep2 STILL wedged **1024 rounds / 758.8s / sha-fail** = a residual **INTERMITTENT (non-deterministic) non-convergence**. Gate (sha 3/3) NOT met. Even on converged reps atp is **4.0× slower** than rsync. Routed back to owner: root-cause the residual flaky wedge.
+
+Benched origin/main HEAD `b0da22b87` (built clean from `git archive`, 0 errors, atp 0.3.5), workload 50M, regime `good` (netem both ends: 25ms delay / 0.1% loss / 200mbit), tier `encrypted`, streams=1, reps=3, sha-verified, ATP_RQ_TRACE=1:
+
+| rep | atp-quic-tls13 wall | feedback_rounds | status / sha | peak RSS |
+|---|---|---|---|---|
+| 1 | 14.86s | 2 | ok / sha ✓ | 39.3 MB |
+| 2 | **758.81s** | **1024** | **error / sha ✗ — WEDGED** | 36.8 MB |
+| 3 | 16.76s | 2 | ok / sha ✓ | 44.0 MB |
+
+- **atp converged median (reps 1,3): 15.81s** (per integrity rule the sha-fail rep2 is excluded from the median — it cannot read as a win or a "slow loss").
+- **rsync-ssh-aes128gcm median: 3.95s** (4.55 / 3.86 / 3.95, sha 3/3) → **atp converged is 4.00× slower**.
+- RSS: atp ~40 MB vs rsync ~48 MB (atp lighter — consistent with prior memory wins).
+
+**Verdict: the fix is real and large, but the bug is not fully closed.** MATRIX-83 had encrypted 50M/good wedging on *every* run (1024 rounds = the repair loop's hard cap, sha-fail, ~440–760s). After `0b4bb938d` the common path converges cleanly in **2 feedback rounds (~15s)** — a genuine repair of the encrypted lossy control loop. **However, 1 of 3 reps still hit the identical 1024-round/758s/sha-fail wedge**, so a **non-deterministic** path (likely seed/packet-ordering/loss-pattern dependent — the only variable across the 3 reps is the random netem 0.1% drop pattern + ephemeral port) still drives the repair loop to its cap without ever satisfying the decoder. This is an **intermittent correctness bug**, not a clean convergence — it must NOT be banked as a win.
+
+**Also: even when it converges, encrypted 50M/good loses 4× to rsync** (15.8s vs 3.95s), consistent with the MATRIX-88/89 finding that the encrypted/QUIC path is per-symbol-AEAD/header-protection-CPU-bound (~4–5 MB/s) vs rsync's single bulk-TCP+hardware-AES stream. So encrypted-good has BOTH a residual correctness bug AND a perf gap.
+
+**Routed to swarm (br-asupersync-lqmfsi owner):** (1) ★root-cause the residual intermittent 1024-round wedge — reproduce by sweeping the loss seed / repeating reps until it fires, then trace why the receiver never reaches K (suspect: a specific loss pattern starves a block of source+repair symbols and the repair-request/FEC-fallback logic doesn't escalate, cf. the open 317hxr.6.1.1 "FEC fallback self-disables in repair rounds" finding — likely the SAME root cause); (2) the 1024-round hard cap should fail FAST / escalate FEC overhead aggressively rather than spinning 758s. Perf (4× gap) is secondary to closing the correctness hole. Evidence: `artifacts/atp_bench_matrix/20260625T203840Z/`.
