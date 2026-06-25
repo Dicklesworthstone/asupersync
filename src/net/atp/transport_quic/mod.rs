@@ -1840,6 +1840,10 @@ struct QuicHelloAck {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct QuicRoundComplete {
+    /// Feedback/spray round this marker closes. The initial source spray is
+    /// round 0; each NeedMore repair round uses that NeedMore's feedback round.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    round: u32,
     /// Number of QUIC DATAGRAM symbols the sender emitted in the completed
     /// spray round. Empty legacy ObjectComplete frames parse as unknown.
     #[serde(default)]
@@ -1850,6 +1854,10 @@ struct QuicRoundComplete {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 struct QuicNeedMore {
+    /// Monotonic feedback round assigned by the receiver. This distinguishes
+    /// same-shape sparse-loss repair requests from duplicate PTO resends.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    feedback_round: u32,
     /// Entry indices that have not yet decoded.
     pending: Vec<u32>,
     /// Fresh repair deficits for specific incomplete blocks.
@@ -1883,6 +1891,10 @@ struct QuicNeedMore {
     /// Gap between the requested repair symbols and the loss-compensated target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repair_request_gap_to_target_symbols: Option<u64>,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Request for fresh repair symbols for one incomplete source block.
@@ -3627,12 +3639,13 @@ async fn send_repair_round_and_object_complete(
     manifest: &TransferManifest,
     encoders: &mut [QuicEntryEncoder],
     need: &QuicNeedMore,
+    feedback_round: u32,
     config: &QuicConfig,
     symbol_auth: Option<&SecurityContext>,
 ) -> Result<u64, QuicTransportError> {
     validate_quic_manifest(manifest, config)?;
     if need.pending.is_empty() && need.repair_blocks.is_empty() && need.source_symbols.is_empty() {
-        send_object_complete(cx, conn, control, 0)?;
+        send_object_complete_for_round(cx, conn, control, feedback_round, 0)?;
         return Ok(0);
     }
     validate_need_more_feedback(manifest, config, need)?;
@@ -3670,7 +3683,7 @@ async fn send_repair_round_and_object_complete(
             "sender emitted {sent} repair symbols for receiver-requested deficit {requested_repair_symbols}"
         )));
     }
-    send_object_complete(cx, conn, control, sent)?;
+    send_object_complete_for_round(cx, conn, control, feedback_round, sent)?;
     Ok(sent)
 }
 
@@ -3890,6 +3903,7 @@ async fn handle_sender_feedback_or_proof(
                 state.manifest,
                 state.encoders,
                 &need,
+                state.feedback_rounds,
                 &round_config,
                 symbol_auth.as_ref(),
             )
@@ -5488,11 +5502,25 @@ fn send_object_complete(
     control: &mut QuicFrameTransport,
     round_symbols_sent: u64,
 ) -> Result<(), QuicTransportError> {
+    send_object_complete_for_round(cx, conn, control, 0, round_symbols_sent)
+}
+
+#[allow(dead_code)]
+fn send_object_complete_for_round(
+    cx: &Cx,
+    conn: &mut QuicConnection,
+    control: &mut QuicFrameTransport,
+    round: u32,
+    round_symbols_sent: u64,
+) -> Result<(), QuicTransportError> {
     control.send_json(
         cx,
         conn,
         FrameType::ObjectComplete,
-        &QuicRoundComplete { round_symbols_sent },
+        &QuicRoundComplete {
+            round,
+            round_symbols_sent,
+        },
     )
 }
 
@@ -5539,7 +5567,10 @@ fn send_native_object_complete(
         cx,
         conn,
         FrameType::ObjectComplete,
-        &QuicRoundComplete { round_symbols_sent },
+        &QuicRoundComplete {
+            round_symbols_sent,
+            ..QuicRoundComplete::default()
+        },
     )
 }
 
@@ -6953,7 +6984,9 @@ async fn receive_native_symbol_round(
     } else {
         Vec::new()
     };
+    let round = (*feedback_rounds).saturating_add(1);
     let need = QuicNeedMore {
+        feedback_round: round,
         pending,
         repair_blocks,
         source_symbols,
@@ -6966,7 +6999,6 @@ async fn receive_native_symbol_round(
         ),
         repair_request_gap_to_target_symbols: Some(repair_accounting.request_gap_to_target_symbols),
     };
-    let round = (*feedback_rounds).saturating_add(1);
     let pending_count = need.pending.len().to_string();
     let block_request_count = need.repair_blocks.len().to_string();
     let repair_symbol_count = need
@@ -10765,6 +10797,7 @@ mod tests {
             .expect("sender receives hello ack");
 
         let first = QuicNeedMore {
+            feedback_round: 1,
             pending: vec![0],
             repair_blocks: vec![QuicBlockRepairRequest {
                 entry: 0,
@@ -10806,9 +10839,11 @@ mod tests {
         .expect("deliver first repair response");
         let first_complete = receive_object_complete(&cx, &mut server, &mut receiver_control)
             .expect("receiver sees first repair completion");
+        assert_eq!(first_complete.round, 1);
         assert_eq!(first_complete.round_symbols_sent, 2);
 
         let second = QuicNeedMore {
+            feedback_round: 2,
             pending: vec![0],
             repair_blocks: vec![QuicBlockRepairRequest {
                 entry: 0,
@@ -10855,6 +10890,7 @@ mod tests {
         .expect("deliver second repair response");
         let second_complete = receive_object_complete(&cx, &mut server, &mut receiver_control)
             .expect("receiver sees second repair completion");
+        assert_eq!(second_complete.round, 2);
         assert_eq!(second_complete.round_symbols_sent, 3);
 
         let mut repair_envelopes = Vec::new();
