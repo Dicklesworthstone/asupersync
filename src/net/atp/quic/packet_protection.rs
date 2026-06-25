@@ -260,21 +260,6 @@ impl AtpPacketProtection {
             );
         }
 
-        if std::env::var_os("ATP_RQ_TRACE").is_some() {
-            eprintln!(
-                "[ATP_RQ_TRACE] [atp-quic] aead_provider operation={} provider_kind={} backend={} tls_cipher_suite={} quic_aead={} arch={} hardware_probe={} hardware_aes={} hardware_ghash={} hardware_aes_gcm_capable={}",
-                operation,
-                profile.provider_kind,
-                profile.backend,
-                profile.tls_cipher_suite,
-                profile.quic_aead,
-                std::env::consts::ARCH,
-                profile.hardware.probe,
-                hardware_aes,
-                hardware_ghash,
-                hardware_aes_gcm_capable,
-            );
-        }
     }
 
     /// Number of unique protected packets accepted by this boundary.
