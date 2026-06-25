@@ -283,6 +283,12 @@ const QUIC_AIMD_MULTIPLICATIVE_DECREASE: f64 = 0.50;
 const QUIC_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
 const QUIC_AIMD_MIN_RATE_BPS: u64 = 512 * 1024;
 const QUIC_AIMD_MAX_RATE_BPS: u64 = 64 * 1024 * 1024;
+const QUIC_ROUND0_CLEAN_RAMP_STEP_BYTES: u64 = 8 * 1024 * 1024;
+const QUIC_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
+// Keep QUIC's first clean encrypted probe near the 200 Mbit "good" fixture
+// until central A/B proves a higher encrypted sender rate is good-safe.
+const QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 24 * 1024 * 1024;
+const QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD: f64 = DEFAULT_REPAIR_OVERHEAD;
 const QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
@@ -1380,30 +1386,186 @@ fn pacing_pause_for_bytes(bytes: u64, rate_bps: u64) -> Duration {
     duration_from_secs_clamped(bytes.max(1) as f64 / rate_bps.max(1) as f64)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QuicRound0CleanPacingRamp {
+    sent_datagrams: u64,
+    next_step_bytes: u64,
+    burst_cap_symbols: usize,
+    max_rate_bps: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QuicRound0CleanPacingRampReport {
+    pub(crate) sent_datagrams: u64,
+    pub(crate) sent_bytes: u64,
+    pub(crate) old_rate_bps: u64,
+    pub(crate) new_rate_bps: u64,
+    pub(crate) next_step_bytes: u64,
+    pub(crate) max_rate_bps: u64,
+}
+
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+impl QuicRound0CleanPacingRamp {
+    #[cfg(test)]
+    pub(crate) fn new(max_rate_bps: u64) -> Self {
+        Self::new_with_burst_cap(max_rate_bps, usize::MAX)
+    }
+
+    pub(crate) fn new_with_burst_cap(max_rate_bps: u64, burst_cap_symbols: usize) -> Self {
+        Self {
+            sent_datagrams: 0,
+            next_step_bytes: QUIC_ROUND0_CLEAN_RAMP_STEP_BYTES,
+            burst_cap_symbols: burst_cap_symbols.max(1),
+            max_rate_bps: max_rate_bps.clamp(
+                QUIC_AIMD_MIN_RATE_BPS,
+                QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+            ),
+        }
+    }
+
+    pub(crate) fn observe_datagram(
+        &mut self,
+        pacing: &mut QuicSprayPacingDecision,
+        datagram_frame_bytes: usize,
+    ) -> Option<QuicRound0CleanPacingRampReport> {
+        self.sent_datagrams = self.sent_datagrams.saturating_add(1);
+        let frame_bytes = u64::try_from(datagram_frame_bytes.max(1)).unwrap_or(u64::MAX);
+        let sent_bytes = self.sent_datagrams.saturating_mul(frame_bytes);
+        let old_rate = pacing.pacing_rate_bps;
+        let mut changed = false;
+        while sent_bytes >= self.next_step_bytes && pacing.pacing_rate_bps < self.max_rate_bps {
+            let current = pacing.pacing_rate_bps;
+            let next = current
+                .saturating_add(QUIC_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S)
+                .clamp(QUIC_AIMD_MIN_RATE_BPS, self.max_rate_bps);
+            if next == current {
+                break;
+            }
+            pacing.pacing_rate_bps = next;
+            update_quic_pacing_pause(pacing, datagram_frame_bytes, self.burst_cap_symbols);
+            self.next_step_bytes = self
+                .next_step_bytes
+                .saturating_add(QUIC_ROUND0_CLEAN_RAMP_STEP_BYTES);
+            changed = true;
+        }
+        changed.then_some(QuicRound0CleanPacingRampReport {
+            sent_datagrams: self.sent_datagrams,
+            sent_bytes,
+            old_rate_bps: old_rate,
+            new_rate_bps: pacing.pacing_rate_bps,
+            next_step_bytes: self.next_step_bytes,
+            max_rate_bps: self.max_rate_bps,
+        })
+    }
+}
+
+pub(crate) fn quic_round0_clean_ramp_enabled(
+    config: &QuicConfig,
+    pacing: &QuicSprayPacingDecision,
+    with_source: bool,
+) -> bool {
+    with_source
+        && config.debug_drop_one_in == 0
+        && config.bwlimit_bps.is_none()
+        && quic_effective_datagram_fanout(config, usize::MAX) == 1
+        && config.repair_overhead.is_finite()
+        && config.repair_overhead <= QUIC_ROUND0_CLEAN_RAMP_MAX_REPAIR_OVERHEAD
+        && pacing.path_loss_rate <= f64::EPSILON
+        && pacing.pacing_rate_bps < QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
+}
+
+fn update_quic_pacing_pause(
+    pacing: &mut QuicSprayPacingDecision,
+    datagram_frame_bytes: usize,
+    burst_cap_symbols: usize,
+) {
+    let frame_bytes = u64::try_from(datagram_frame_bytes.max(1)).unwrap_or(u64::MAX);
+    let burst_by_rate =
+        ((pacing.pacing_rate_bps.max(1) as f64 * pacing.path_rtt_s * QUIC_SPRAY_BURST_RTT_FRACTION)
+            / frame_bytes.max(1) as f64)
+            .ceil()
+            .max(1.0) as usize;
+    pacing.max_burst_symbols = burst_by_rate
+        .min(pacing.cwnd_share_symbols)
+        .min(burst_cap_symbols.max(1))
+        .max(1);
+    let burst_bytes = u64::try_from(pacing.max_burst_symbols.max(1))
+        .unwrap_or(u64::MAX)
+        .saturating_mul(frame_bytes);
+    pacing.pause_after_burst = pacing_pause_for_bytes(burst_bytes, pacing.pacing_rate_bps);
+}
+
 struct QuicSymbolPacer {
     decision: QuicSprayPacingDecision,
+    round0_ramp: Option<QuicRound0CleanPacingRamp>,
+    datagram_frame_bytes: usize,
     sent_since_pause: usize,
     epoch: u64,
 }
 
 impl QuicSymbolPacer {
     fn from_connection(config: &QuicConfig, connection: &QuicConnection) -> Self {
-        Self::new(quic_spray_pacing_decision_from_config(
+        Self::from_connection_for_round(config, connection, false)
+    }
+
+    fn from_connection_for_round(
+        config: &QuicConfig,
+        connection: &QuicConnection,
+        with_source: bool,
+    ) -> Self {
+        Self::new(
             config,
-            quic_path_signal_from_connection(connection),
-        ))
+            quic_spray_pacing_decision_from_config(
+                config,
+                quic_path_signal_from_connection(connection),
+            ),
+            with_source,
+        )
     }
 
     fn from_native_connection(config: &QuicConfig, connection: &NativeQuicConnection) -> Self {
-        Self::new(quic_spray_pacing_decision_from_config(
-            config,
-            quic_path_signal_from_native_connection(connection),
-        ))
+        Self::from_native_connection_for_round(config, connection, false)
     }
 
-    fn new(decision: QuicSprayPacingDecision) -> Self {
+    fn from_native_connection_for_round(
+        config: &QuicConfig,
+        connection: &NativeQuicConnection,
+        with_source: bool,
+    ) -> Self {
+        Self::new(
+            config,
+            quic_spray_pacing_decision_from_config(
+                config,
+                quic_path_signal_from_native_connection(connection),
+            ),
+            with_source,
+        )
+    }
+
+    fn new(config: &QuicConfig, decision: QuicSprayPacingDecision, with_source: bool) -> Self {
+        let datagram_frame_bytes =
+            usize::from(config.symbol_size.max(1)).saturating_add(AUTH_ENVELOPE_HEADER_LEN);
+        let round0_ramp =
+            quic_round0_clean_ramp_enabled(config, &decision, with_source).then(|| {
+                QuicRound0CleanPacingRamp::new_with_burst_cap(
+                    QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+                    config.max_spray_symbols_per_flush,
+                )
+            });
+        if round0_ramp.is_some() {
+            quic_rqtrace(format_args!(
+                "sender-native: round0_clean_pacing_ramp enabled start_rate_Bps={} step_bytes={} max_rate_Bps={} datagram_bytes={} burst_symbols={}",
+                decision.pacing_rate_bps,
+                QUIC_ROUND0_CLEAN_RAMP_STEP_BYTES,
+                QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+                datagram_frame_bytes,
+                decision.max_burst_symbols,
+            ));
+        }
         Self {
             decision,
+            round0_ramp,
+            datagram_frame_bytes,
             sent_since_pause: 0,
             epoch: 0,
         }
@@ -1411,6 +1573,21 @@ impl QuicSymbolPacer {
 
     async fn after_symbol_sent(&mut self, cx: &Cx) -> Result<(), QuicTransportError> {
         self.sent_since_pause = self.sent_since_pause.saturating_add(1);
+        if let Some(ramp) = &mut self.round0_ramp {
+            if let Some(report) =
+                ramp.observe_datagram(&mut self.decision, self.datagram_frame_bytes)
+            {
+                quic_rqtrace(format_args!(
+                    "sender-native: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} next_step_bytes={} max_rate_Bps={}",
+                    report.sent_datagrams,
+                    report.sent_bytes,
+                    report.old_rate_bps,
+                    report.new_rate_bps,
+                    report.next_step_bytes,
+                    report.max_rate_bps,
+                ));
+            }
+        }
         if self.sent_since_pause < self.decision.max_burst_symbols {
             return Ok(());
         }
@@ -3180,7 +3357,7 @@ async fn spray_streaming_symbol_round(
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
-    let mut pacer = QuicSymbolPacer::from_connection(config, conn);
+    let mut pacer = QuicSymbolPacer::from_connection_for_round(config, conn, with_source);
     let repair_batch = repair_batch_per_block(config);
     for entry in encoders
         .iter_mut()
@@ -5501,7 +5678,7 @@ async fn spray_native_symbol_round(
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
-    let mut pacer = QuicSymbolPacer::from_native_connection(config, conn);
+    let mut pacer = QuicSymbolPacer::from_native_connection_for_round(config, conn, with_source);
     let repair_batch = repair_batch_per_block(config);
     for entry in encoders
         .iter_mut()
@@ -8400,6 +8577,98 @@ mod tests {
         assert_eq!(
             decision.cwnd_symbols, 1,
             "cwnd symbol accounting must use the QUIC symbol envelope size, not raw RaptorQ payload bytes"
+        );
+    }
+
+    #[test]
+    fn quic_round0_clean_ramp_requires_clean_source_round() {
+        let config = trusted_quic_config();
+        let clean =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.0));
+
+        assert!(quic_round0_clean_ramp_enabled(&config, &clean, true));
+        assert!(!quic_round0_clean_ramp_enabled(&config, &clean, false));
+
+        for blocked in [
+            QuicConfig {
+                debug_drop_one_in: 7,
+                ..config.clone()
+            },
+            QuicConfig {
+                bwlimit_bps: Some(8 * 1024 * 1024),
+                ..config.clone()
+            },
+            QuicConfig {
+                repair_overhead: 1.01,
+                ..config.clone()
+            },
+            QuicConfig {
+                datagram_fanout: 2,
+                ..config.clone()
+            },
+        ] {
+            assert!(
+                !quic_round0_clean_ramp_enabled(&blocked, &clean, true),
+                "clean ramp must stay off for debug loss, operator caps, repair-heavy, and fanout configs"
+            );
+        }
+
+        let lossy =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 1_048_576, 0.001));
+        assert!(
+            !quic_round0_clean_ramp_enabled(&config, &lossy, true),
+            "observed path loss must block the clean ramp"
+        );
+    }
+
+    #[test]
+    fn quic_round0_clean_ramp_additively_updates_rate_and_pause() {
+        let config = QuicConfig {
+            max_spray_symbols_per_flush: 54,
+            ..trusted_quic_config()
+        };
+        let mut pacing =
+            quic_spray_pacing_decision_from_config(&config, pacing_signal(0.050, 256 * 1024, 0.0));
+        let datagram_frame_bytes = usize::from(config.symbol_size) + AUTH_ENVELOPE_HEADER_LEN;
+        let mut ramp = QuicRound0CleanPacingRamp::new(QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS);
+        let start_rate = pacing.pacing_rate_bps;
+        let step_datagrams = QUIC_ROUND0_CLEAN_RAMP_STEP_BYTES
+            .div_ceil(u64::try_from(datagram_frame_bytes).expect("test frame size fits"));
+
+        ramp.sent_datagrams = step_datagrams.saturating_sub(1);
+        let first = ramp
+            .observe_datagram(&mut pacing, datagram_frame_bytes)
+            .expect("first clean-ramp step");
+        assert_eq!(first.old_rate_bps, start_rate);
+        assert_eq!(
+            first.new_rate_bps,
+            start_rate + QUIC_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S
+        );
+        assert_eq!(pacing.pacing_rate_bps, first.new_rate_bps);
+        assert_eq!(
+            pacing.pause_after_burst,
+            pacing_pause_for_bytes(
+                u64::try_from(pacing.max_burst_symbols)
+                    .expect("test burst fits")
+                    .saturating_mul(
+                        u64::try_from(datagram_frame_bytes).expect("test frame size fits")
+                    ),
+                pacing.pacing_rate_bps,
+            )
+        );
+
+        while pacing.pacing_rate_bps < QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS {
+            ramp.sent_datagrams = ramp
+                .next_step_bytes
+                .div_ceil(u64::try_from(datagram_frame_bytes).expect("test frame size fits"))
+                .saturating_sub(1);
+            let _ = ramp
+                .observe_datagram(&mut pacing, datagram_frame_bytes)
+                .expect("clean ramp should keep stepping until max");
+        }
+        assert_eq!(
+            pacing.pacing_rate_bps,
+            QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS
         );
     }
 

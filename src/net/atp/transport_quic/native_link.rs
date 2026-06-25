@@ -1587,7 +1587,25 @@ async fn spray_round(
     let tag = super::transfer_tag(&manifest.transfer_id);
     let repair_batch = super::repair_batch_per_block(config);
     let drop_one_in = config.debug_drop_one_in;
-    let pacing = link.spray_pacing_decision(config, aimd.cap_bps());
+    let mut pacing = link.spray_pacing_decision(config, aimd.cap_bps());
+    let mut clean_ramp =
+        super::quic_round0_clean_ramp_enabled(config, &pacing, with_source).then(|| {
+            super::QuicRound0CleanPacingRamp::new_with_burst_cap(
+                super::QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+                config.max_spray_symbols_per_flush,
+            )
+        });
+    if clean_ramp.is_some() {
+        quic_rqtrace!(
+            "sender-native: round0_clean_pacing_ramp enabled start_rate_Bps={} step_bytes={} max_rate_Bps={} datagram_fanout={} datagram_frame_bytes={} burst_symbols={}",
+            pacing.pacing_rate_bps,
+            super::QUIC_ROUND0_CLEAN_RAMP_STEP_BYTES,
+            super::QUIC_ROUND0_CLEAN_RAMP_MAX_PACING_BPS,
+            config.datagram_fanout.max(1),
+            link.symbol_datagram_frame_len,
+            pacing.max_burst_symbols,
+        );
+    }
     pacing.trace_epoch(cx, u64::from(!with_source));
     let mut sent = 0u64;
     let mut sprayed = 0u64;
@@ -1646,6 +1664,21 @@ async fn spray_round(
                 link.spray_symbol(cx, control, &symbol, tag, entry_index, auth_tag, &pacing)
                     .await?;
                 sent = sent.saturating_add(1);
+                if let Some(ramp) = &mut clean_ramp {
+                    if let Some(report) =
+                        ramp.observe_datagram(&mut pacing, link.symbol_datagram_frame_len)
+                    {
+                        quic_rqtrace!(
+                            "sender-native: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} next_step_bytes={} max_rate_Bps={}",
+                            report.sent_datagrams,
+                            report.sent_bytes,
+                            report.old_rate_bps,
+                            report.new_rate_bps,
+                            report.next_step_bytes,
+                            report.max_rate_bps,
+                        );
+                    }
+                }
             }
             entry.set_repair_cursor(sbn, target_repair);
         }
