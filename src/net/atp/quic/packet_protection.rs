@@ -8,8 +8,8 @@ use crate::cx::Cx;
 use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, AuthError, ProtocolError};
 use crate::net::quic_native::tls::{
     HeaderProtectionMask, PacketProtectionRequest, PacketProtectionSpace, ProtectedPacket,
-    ProtectionKeySnapshot, QuicHandshakeTranscript, QuicPacketProtectionProvider, QuicTlsError,
-    TranscriptHash, UnprotectedPacket,
+    ProtectionKeySnapshot, QuicAeadProviderProfile, QuicHandshakeTranscript,
+    QuicPacketProtectionProvider, QuicTlsError, TranscriptHash, UnprotectedPacket,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -92,6 +92,8 @@ pub struct AtpPacketProtection {
     config: AtpPacketProtectionConfig,
     /// Provider kind for logging.
     provider_kind: &'static str,
+    /// One-shot provider profile trace guard for ATP_RQ_TRACE bench runs.
+    provider_profile_traced: bool,
     /// Bounded accepted-packet windows by packet-number space. QUIC packet
     /// numbers must not be reused inside a space, including across key phases.
     accepted_packets: BTreeMap<PacketProtectionSpace, PacketReplayWindow>,
@@ -214,6 +216,7 @@ impl AtpPacketProtection {
             provider,
             config,
             provider_kind,
+            provider_profile_traced: false,
             accepted_packets: BTreeMap::new(),
         })
     }
@@ -221,6 +224,57 @@ impl AtpPacketProtection {
     /// Get the provider kind for logging.
     pub fn provider_kind(&self) -> &'static str {
         self.provider_kind
+    }
+
+    /// Redaction-safe provider/cipher metadata for encrypted-path diagnosis.
+    #[must_use]
+    pub fn aead_provider_profile(&self) -> QuicAeadProviderProfile {
+        self.provider.aead_provider_profile()
+    }
+
+    fn trace_provider_profile_once(&mut self, cx: &Cx, operation: &'static str) {
+        if self.provider_profile_traced {
+            return;
+        }
+        self.provider_profile_traced = true;
+
+        let profile = self.aead_provider_profile();
+        let hardware_aes = trace_bool(profile.hardware.aes);
+        let hardware_ghash = trace_bool(profile.hardware.ghash);
+        let hardware_aes_gcm_capable = trace_bool(profile.hardware.aes_gcm_capable());
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields(
+                "atp_quic.aead_provider",
+                &[
+                    ("operation", operation),
+                    ("provider_kind", profile.provider_kind),
+                    ("backend", profile.backend),
+                    ("tls_cipher_suite", profile.tls_cipher_suite),
+                    ("quic_aead", profile.quic_aead),
+                    ("arch", std::env::consts::ARCH),
+                    ("hardware_probe", profile.hardware.probe),
+                    ("hardware_aes", hardware_aes),
+                    ("hardware_ghash", hardware_ghash),
+                    ("hardware_aes_gcm_capable", hardware_aes_gcm_capable),
+                ],
+            );
+        }
+
+        if std::env::var_os("ATP_RQ_TRACE").is_some() {
+            eprintln!(
+                "[ATP_RQ_TRACE] [atp-quic] aead_provider operation={} provider_kind={} backend={} tls_cipher_suite={} quic_aead={} arch={} hardware_probe={} hardware_aes={} hardware_ghash={} hardware_aes_gcm_capable={}",
+                operation,
+                profile.provider_kind,
+                profile.backend,
+                profile.tls_cipher_suite,
+                profile.quic_aead,
+                std::env::consts::ARCH,
+                profile.hardware.probe,
+                hardware_aes,
+                hardware_ghash,
+                hardware_aes_gcm_capable,
+            );
+        }
     }
 
     /// Number of unique protected packets accepted by this boundary.
@@ -294,6 +348,8 @@ impl AtpPacketProtection {
         cx: &Cx,
         request: PacketProtectionRequest<'_>,
     ) -> AtpOutcome<ProtectedPacket> {
+        self.trace_provider_profile_once(cx, "protect");
+
         if cx.trace_buffer().is_some() {
             cx.trace_with_fields(
                 "atp_packet_protection_protect",
@@ -377,6 +433,8 @@ impl AtpPacketProtection {
         packet: &ProtectedPacket,
         associated_data: &[u8],
     ) -> AtpOutcome<UnprotectedPacket> {
+        self.trace_provider_profile_once(cx, "unprotect");
+
         if self
             .accepted_packets
             .get(&packet.space)
@@ -623,9 +681,14 @@ impl AtpPacketProtection {
             provider,
             config,
             provider_kind,
+            provider_profile_traced: false,
             accepted_packets: BTreeMap::new(),
         }
     }
+}
+
+const fn trace_bool(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 #[cfg(test)]
@@ -715,6 +778,31 @@ mod tests {
     }
 
     #[test]
+    fn aead_provider_profile_identifies_deterministic_test_path() {
+        let protection = AtpPacketProtection::new_client(true).expect("deterministic protection");
+        let profile = protection.aead_provider_profile();
+
+        assert_eq!(profile.provider_kind, "deterministic-lab");
+        assert_eq!(profile.backend, "deterministic-test-provider");
+        assert_eq!(profile.tls_cipher_suite, "none");
+        assert_eq!(profile.quic_aead, "deterministic-xor-tag");
+        assert!(!profile.hardware.aes_gcm_capable());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn rustls_aead_provider_profile_reports_aes_gcm_hardware_probe() {
+        let protection = AtpPacketProtection::new_client(false).expect("rustls protection");
+        let profile = protection.aead_provider_profile();
+
+        assert_eq!(profile.provider_kind, "rustls-quic-ring");
+        assert_eq!(profile.backend, "rustls/ring");
+        assert_eq!(profile.tls_cipher_suite, "TLS13_AES_128_GCM_SHA256");
+        assert_eq!(profile.quic_aead, "AES-128-GCM");
+        assert_ne!(profile.hardware.probe, "not-probed");
+    }
+
+    #[test]
     fn test_deterministic_protection_lifecycle() {
         futures_lite::future::block_on(async {
             let cx = test_cx();
@@ -742,6 +830,13 @@ mod tests {
 
             assert_eq!(client.provider_kind(), "rustls-quic-ring");
             assert_eq!(server.provider_kind(), "rustls-quic-ring");
+
+            let profile = client.aead_provider_profile();
+            assert_eq!(profile.provider_kind, "rustls-quic-ring");
+            assert_eq!(profile.backend, "rustls/ring");
+            assert_eq!(profile.tls_cipher_suite, "TLS13_AES_128_GCM_SHA256");
+            assert_eq!(profile.quic_aead, "AES-128-GCM");
+            assert!(!profile.hardware.probe.is_empty());
 
             // Test basic operations don't panic
             let transcript = QuicHandshakeTranscript::new();

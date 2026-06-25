@@ -540,6 +540,11 @@ pub trait QuicPacketProtectionProvider {
     /// Stable provider kind for redacted logs.
     fn provider_kind(&self) -> &'static str;
 
+    /// Redaction-safe AEAD/provider metadata for performance diagnosis.
+    fn aead_provider_profile(&self) -> QuicAeadProviderProfile {
+        QuicAeadProviderProfile::unknown(self.provider_kind())
+    }
+
     /// Derive and install packet-protection keys for a packet number space.
     fn derive_keys(
         &mut self,
@@ -587,6 +592,108 @@ pub trait QuicPacketProtectionProvider {
 
     /// Discard keys for a packet number space.
     fn discard_keys(&mut self, space: PacketProtectionSpace) -> Result<(), QuicTlsError>;
+}
+
+/// Runtime CPU features relevant to AES-GCM packet protection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicAeadHardwareProfile {
+    /// Whether the current CPU reports AES block-cipher instructions.
+    pub aes: bool,
+    /// Whether the current CPU reports carry-less multiply instructions used by
+    /// GHASH in fast AES-GCM implementations.
+    pub ghash: bool,
+    /// Human-readable probe family for traces.
+    pub probe: &'static str,
+}
+
+impl QuicAeadHardwareProfile {
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self {
+            aes: false,
+            ghash: false,
+            probe: "not-probed",
+        }
+    }
+
+    #[must_use]
+    pub fn detect() -> Self {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            return Self {
+                aes: std::is_x86_feature_detected!("aes"),
+                ghash: std::is_x86_feature_detected!("pclmulqdq"),
+                probe: "x86-aes-pclmulqdq",
+            };
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            return Self {
+                aes: std::arch::is_aarch64_feature_detected!("aes"),
+                ghash: std::arch::is_aarch64_feature_detected!("pmull"),
+                probe: "aarch64-aes-pmull",
+            };
+        }
+
+        #[allow(unreachable_code)]
+        Self::unknown()
+    }
+
+    #[must_use]
+    pub const fn aes_gcm_capable(self) -> bool {
+        self.aes && self.ghash
+    }
+}
+
+/// Redaction-safe QUIC packet-protection provider profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicAeadProviderProfile {
+    /// Stable provider kind.
+    pub provider_kind: &'static str,
+    /// Concrete crypto backend selected by the provider.
+    pub backend: &'static str,
+    /// TLS cipher suite supplying the QUIC AEAD.
+    pub tls_cipher_suite: &'static str,
+    /// QUIC AEAD algorithm used for packet protection.
+    pub quic_aead: &'static str,
+    /// Runtime hardware feature probe for AES-GCM acceleration.
+    pub hardware: QuicAeadHardwareProfile,
+}
+
+impl QuicAeadProviderProfile {
+    #[must_use]
+    pub fn rustls_ring_aes_128_gcm() -> Self {
+        Self {
+            provider_kind: "rustls-quic-ring",
+            backend: "rustls/ring",
+            tls_cipher_suite: "TLS13_AES_128_GCM_SHA256",
+            quic_aead: "AES-128-GCM",
+            hardware: QuicAeadHardwareProfile::detect(),
+        }
+    }
+
+    #[must_use]
+    pub const fn deterministic() -> Self {
+        Self {
+            provider_kind: "deterministic-lab",
+            backend: "deterministic-test-provider",
+            tls_cipher_suite: "none",
+            quic_aead: "deterministic-xor-tag",
+            hardware: QuicAeadHardwareProfile::unknown(),
+        }
+    }
+
+    #[must_use]
+    pub const fn unknown(provider_kind: &'static str) -> Self {
+        Self {
+            provider_kind,
+            backend: "unknown",
+            tls_cipher_suite: "unknown",
+            quic_aead: "unknown",
+            hardware: QuicAeadHardwareProfile::unknown(),
+        }
+    }
 }
 
 /// Local QUIC endpoint side for the rustls packet-protection provider.
@@ -802,6 +909,10 @@ impl RustlsQuicCryptoProvider {
 impl QuicPacketProtectionProvider for RustlsQuicCryptoProvider {
     fn provider_kind(&self) -> &'static str {
         "rustls-quic-ring"
+    }
+
+    fn aead_provider_profile(&self) -> QuicAeadProviderProfile {
+        QuicAeadProviderProfile::rustls_ring_aes_128_gcm()
     }
 
     fn derive_keys(
@@ -1154,6 +1265,10 @@ impl DeterministicQuicCryptoProvider {
 impl QuicPacketProtectionProvider for DeterministicQuicCryptoProvider {
     fn provider_kind(&self) -> &'static str {
         "deterministic-lab"
+    }
+
+    fn aead_provider_profile(&self) -> QuicAeadProviderProfile {
+        QuicAeadProviderProfile::deterministic()
     }
 
     fn derive_keys(
