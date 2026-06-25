@@ -223,6 +223,7 @@ const RQ_PENDING_PRESSURE_LOSS_FLOOR: f64 = 0.05;
 const RQ_REGIME_SHIFT_LOSS_DELTA: f64 = 0.20;
 /// Keep mild-loss repair rounds from turning sparse feedback into a self-reinforcing crawl.
 const RQ_MILD_LOSS_PACING_FLOOR_FRACTION: f64 = 0.50;
+const RQ_SOURCE_FIRST_MILD_LOSS_PACING_FLOOR_FRACTION: f64 = 1.0;
 const RQ_MILD_LOSS_PACING_MAX_LOSS: f64 = 0.03;
 const RQ_STALLED_REPAIR_PRESSURE_MIN: f64 = 0.50;
 const RQ_STALLED_REPAIR_PAYLOAD_FRACTION_MAX: f64 = 0.50;
@@ -757,7 +758,7 @@ fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
     // MATRIX-76: near-clean "good" links remain source-first, but must not take
     // the no-feedback high-BDP ramp. A fixed 128 MiB/s probe overruns 200 Mbit
     // paths before the first feedback frame can produce a delivery-rate cap.
-    let loss_free_target = config.round0_loss_target.is_finite()
+    let loss_free_target = round0_source_first_loss_target(config)
         && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
     config.debug_drop_one_in == 0
         && config.repair_overhead <= 1.0
@@ -1262,7 +1263,7 @@ impl RqAdaptiveSendState {
             .repair_overhead
             .max(1.0 + plan.overhead)
             .max(1.0 + self.loss_fec_floor);
-        let model_rate = self.pacing_rate_for(plan);
+        let model_rate = self.pacing_rate_for(plan, config);
         let mut rate = if self.aimd_feedback_seen {
             self.aimd_rate_bps
         } else {
@@ -1271,7 +1272,7 @@ impl RqAdaptiveSendState {
         if !self.aimd_feedback_seen
             && let Some(cap) = self.loss_pacing_cap_bps
         {
-            rate = rate.min(self.loss_pacing_cap_for_current_regime(cap));
+            rate = rate.min(self.loss_pacing_cap_for_current_regime(cap, config));
         }
         if self.regime_shift || self.pacing_loss_bar >= RQ_REGIME_SHIFT_LOSS_DELTA {
             repair_overhead = repair_overhead.max(1.03);
@@ -1471,7 +1472,7 @@ impl RqAdaptiveSendState {
         if loss > decrease_threshold {
             let reduced =
                 (self.aimd_rate_bps as f64 * RQ_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
-            self.aimd_rate_bps = reduced.clamp(RQ_MIN_PACING_BPS, RQ_MAX_PACING_BPS);
+            self.aimd_rate_bps = reduced.clamp(aimd_decrease_floor_bps(config), RQ_MAX_PACING_BPS);
         } else if loss <= RQ_AIMD_CLEAN_INCREASE_THRESHOLD {
             self.aimd_rate_bps = self
                 .aimd_rate_bps
@@ -1595,15 +1596,14 @@ impl RqAdaptiveSendState {
         );
     }
 
-    fn pacing_rate_for(&self, plan: BlockPlan) -> u64 {
+    fn pacing_rate_for(&self, plan: BlockPlan, config: &RqConfig) -> u64 {
         let mut network_bps = if self.est.bw_median_bps > 0.0 {
             self.est.bw_median_bps.min(self.est.bw_trough_bps.max(1.0))
         } else {
             RQ_COLD_START_PACING_BPS as f64
         };
         if self.mild_loss_pacing_floor_applies() {
-            network_bps = network_bps
-                .max(RQ_COLD_START_PACING_BPS as f64 * RQ_MILD_LOSS_PACING_FLOOR_FRACTION);
+            network_bps = network_bps.max(self.mild_loss_pacing_floor_bps(config) as f64);
         }
         let decode_bps =
             self.est.decode_symbols_per_s_at(plan.k) * f64::from(self.symbol_size.max(1));
@@ -1642,13 +1642,20 @@ impl RqAdaptiveSendState {
             && self.est.bw_median_bps > 0.0
     }
 
-    fn mild_loss_pacing_floor_bps(&self) -> u64 {
-        (RQ_COLD_START_PACING_BPS as f64 * RQ_MILD_LOSS_PACING_FLOOR_FRACTION).ceil() as u64
+    fn mild_loss_pacing_floor_bps(&self, config: &RqConfig) -> u64 {
+        let floor_fraction = if round0_source_first_loss_target(config)
+            && config.round0_loss_target > f64::EPSILON
+        {
+            RQ_SOURCE_FIRST_MILD_LOSS_PACING_FLOOR_FRACTION
+        } else {
+            RQ_MILD_LOSS_PACING_FLOOR_FRACTION
+        };
+        (RQ_COLD_START_PACING_BPS as f64 * floor_fraction).ceil() as u64
     }
 
-    fn loss_pacing_cap_for_current_regime(&self, cap: u64) -> u64 {
+    fn loss_pacing_cap_for_current_regime(&self, cap: u64, config: &RqConfig) -> u64 {
         if self.mild_loss_pacing_floor_applies() {
-            cap.max(self.mild_loss_pacing_floor_bps())
+            cap.max(self.mild_loss_pacing_floor_bps(config))
         } else {
             cap
         }
@@ -1684,6 +1691,11 @@ fn round0_loss_target_repair_enabled(config: &RqConfig) -> bool {
     loss.is_finite() && loss >= RQ_ROUND0_TARGET_LOSS_ENABLE_MIN
 }
 
+fn round0_source_first_loss_target(config: &RqConfig) -> bool {
+    let loss = config.round0_loss_target;
+    loss.is_finite() && loss >= 0.0 && !round0_loss_target_repair_enabled(config)
+}
+
 fn measured_feedback_repair_overhead(loss_fraction: f64) -> f64 {
     if !loss_fraction.is_finite() {
         return 0.0;
@@ -1705,6 +1717,17 @@ fn aimd_loss_decrease_threshold(config: &RqConfig) -> f64 {
     (expected_loss + RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN)
         .max(RQ_AIMD_LOSS_DECREASE_THRESHOLD_MIN)
         .clamp(0.0, 0.90)
+}
+
+fn aimd_decrease_floor_bps(config: &RqConfig) -> u64 {
+    if round0_source_first_loss_target(config) && config.round0_loss_target > f64::EPSILON {
+        // MATRIX-77: the good cell's sparse residual feedback should size
+        // repair without dragging the next spray below cold-start. Bad/broken
+        // cells use round-0 repair targets and keep the older AIMD decrease.
+        RQ_COLD_START_PACING_BPS
+    } else {
+        RQ_MIN_PACING_BPS
+    }
 }
 
 fn pending_bytes(digests: &[EntryDigest], pending: &BTreeSet<u32>) -> u64 {
@@ -8848,7 +8871,7 @@ mod tests {
         let measured = 2_u64 * 1024 * 1024;
         state.est = rq_test_path_estimate(&config, measured as f64);
 
-        let rate = state.pacing_rate_for(rq_test_block_plan(&config));
+        let rate = state.pacing_rate_for(rq_test_block_plan(&config), &config);
 
         assert_eq!(rate, measured);
     }
@@ -8863,7 +8886,7 @@ mod tests {
         state.loss_bar = 0.01;
         state.pacing_loss_ema = 0.001;
 
-        let rate = state.pacing_rate_for(rq_test_block_plan(&config));
+        let rate = state.pacing_rate_for(rq_test_block_plan(&config), &config);
 
         assert!(
             rate >= RQ_COLD_START_PACING_BPS / 2,
@@ -8884,7 +8907,7 @@ mod tests {
         state.pacing_loss_ema = RQ_MILD_LOSS_PACING_MAX_LOSS * 2.0;
         state.loss_bar = RQ_REGIME_SHIFT_LOSS_DELTA;
 
-        let rate = state.pacing_rate_for(rq_test_block_plan(&config));
+        let rate = state.pacing_rate_for(rq_test_block_plan(&config), &config);
 
         assert_eq!(rate, RQ_MIN_PACING_BPS);
     }
@@ -8904,8 +8927,54 @@ mod tests {
 
         assert_eq!(
             tuning.pacing.path_rate_bps,
-            state.mild_loss_pacing_floor_bps().saturating_mul(8),
+            state.mild_loss_pacing_floor_bps(&config).saturating_mul(8),
             "stale mild-loss caps must not reintroduce the pacing crawl"
+        );
+    }
+
+    #[test]
+    fn rq_good_link_source_first_feedback_uses_full_cold_start_floor() {
+        let config = RqConfig {
+            round0_loss_target: RQ_ROUND0_TARGET_LOSS_ENABLE_MIN / 5.0,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.est = rq_test_path_estimate(&config, 32.0 * 1024.0 * 1024.0);
+        state.controller.update_estimate(state.est);
+        state.loss_ema = 0.01;
+        state.loss_bar = RQ_PENDING_PRESSURE_LOSS_FLOOR;
+        state.pacing_loss_ema = config.round0_loss_target;
+        state.loss_pacing_cap_bps = Some(RQ_COLD_START_PACING_BPS / 4);
+
+        let tuning = state.round_tuning(&config);
+
+        assert_eq!(
+            tuning.pacing.rate_bytes_per_sec(),
+            RQ_COLD_START_PACING_BPS,
+            "sub-threshold good-link feedback should recover at cold-start instead of the half-rate repair floor"
+        );
+    }
+
+    #[test]
+    fn rq_bad_link_feedback_keeps_conservative_mild_loss_floor() {
+        let config = RqConfig {
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.est = rq_test_path_estimate(&config, 32.0 * 1024.0 * 1024.0);
+        state.controller.update_estimate(state.est);
+        state.loss_ema = 0.01;
+        state.loss_bar = RQ_PENDING_PRESSURE_LOSS_FLOOR;
+        state.pacing_loss_ema = config.round0_loss_target;
+        state.loss_pacing_cap_bps = Some(RQ_COLD_START_PACING_BPS / 4);
+
+        let tuning = state.round_tuning(&config);
+
+        assert_eq!(
+            tuning.pacing.rate_bytes_per_sec(),
+            RQ_COLD_START_PACING_BPS / 2,
+            "configured lossy repair-target cells must not inherit the good-link cold-start floor"
         );
     }
 
@@ -9055,6 +9124,54 @@ mod tests {
     }
 
     #[test]
+    fn rq_aimd_keeps_cold_start_floor_for_good_source_first_feedback() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.001,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 500_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "good.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"good.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            10_000,
+            9_400,
+            Some(0.06),
+            Duration::from_millis(800),
+            Duration::from_millis(25),
+            total_bytes,
+        );
+
+        assert_eq!(state.last_round_loss_fraction, 0.06);
+        assert_eq!(
+            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
+            "good-link source-first feedback should not halve below cold-start"
+        );
+        assert!(
+            state.loss_bar >= RQ_PENDING_PRESSURE_LOSS_FLOOR,
+            "repair sizing should still see pending pressure"
+        );
+        let tuning = state.round_tuning(&config);
+        assert_eq!(
+            tuning.pacing.path_rate_bps,
+            RQ_COLD_START_PACING_BPS.saturating_mul(8),
+            "feedback spray should keep the cold-start sender floor"
+        );
+    }
+
+    #[test]
     fn rq_aimd_additively_increases_on_clean_receiver_round() {
         let config = RqConfig {
             symbol_size: 1200,
@@ -9161,7 +9278,7 @@ mod tests {
             state.loss_pacing_cap_bps, None,
             "one residual pending entry must not manufacture a congestion cap"
         );
-        let rate = state.pacing_rate_for(rq_test_block_plan(&config));
+        let rate = state.pacing_rate_for(rq_test_block_plan(&config), &config);
         assert!(
             rate >= RQ_COLD_START_PACING_BPS / 2,
             "mild residual repair should recover from the slow-sample floor, got {rate} B/s"
@@ -9229,8 +9346,8 @@ mod tests {
             "receiver-observed wire loss may stay mild while FEC pressure remains high"
         );
         assert!(
-            state.pacing_rate_for(rq_test_block_plan(&config))
-                >= state.mild_loss_pacing_floor_bps(),
+            state.pacing_rate_for(rq_test_block_plan(&config), &config)
+                >= state.mild_loss_pacing_floor_bps(&config),
             "stalled repair rounds must not drag pacing below the mild-loss floor"
         );
     }
