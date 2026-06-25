@@ -177,6 +177,15 @@ enum BlockDecodeResolution {
     Failed(RejectReason),
 }
 
+/// Which path produced a block-decode outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockDecodeKind {
+    /// The block had every source symbol, so no RaptorQ matrix solve was needed.
+    SourceComplete,
+    /// The block required repair rows and a RaptorQ matrix solve.
+    RaptorQRepair,
+}
+
 /// Output from a [`BlockDecodeJob`]. Feed it back through
 /// [`DecodingPipeline::finish_decode_job`] to update pipeline state.
 #[derive(Debug)]
@@ -184,6 +193,7 @@ pub(crate) struct BlockDecodeOutcome {
     sbn: u8,
     input_symbols: usize,
     retain_decoded_block: bool,
+    kind: BlockDecodeKind,
     elapsed: Duration,
     resolution: BlockDecodeResolution,
 }
@@ -192,11 +202,14 @@ pub(crate) struct BlockDecodeOutcome {
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
     let started = Instant::now();
-    let resolution =
-        if let Some(data) = complete_block_data_from_source_symbols(&job.plan, &job.symbols) {
-            BlockDecodeResolution::Complete(data)
-        } else {
-            match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
+    let (kind, resolution) = match complete_block_data_from_source_symbols(&job.plan, &job.symbols)
+    {
+        Some(data) => (
+            BlockDecodeKind::SourceComplete,
+            BlockDecodeResolution::Complete(data),
+        ),
+        None => {
+            let resolution = match decode_block_data(&job.plan, &job.symbols, job.symbol_size) {
                 Ok(data) => BlockDecodeResolution::Complete(data),
                 Err(DecodingError::InsufficientSymbols { .. }) => {
                     BlockDecodeResolution::Retry(RejectReason::InsufficientRank)
@@ -211,12 +224,15 @@ pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
                     BlockDecodeResolution::Failed(RejectReason::SymbolSizeMismatch)
                 }
                 Err(_) => BlockDecodeResolution::Failed(RejectReason::InconsistentEquations),
-            }
-        };
+            };
+            (BlockDecodeKind::RaptorQRepair, resolution)
+        }
+    };
     BlockDecodeOutcome {
         sbn: job.sbn,
         input_symbols: job.symbols.len(),
         retain_decoded_block: job.retain_decoded_block,
+        kind,
         elapsed: started.elapsed().max(Duration::from_nanos(1)),
         resolution,
     }
@@ -226,6 +242,11 @@ impl BlockDecodeOutcome {
     #[must_use]
     pub(crate) fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+
+    #[must_use]
+    pub(crate) fn kind(&self) -> BlockDecodeKind {
+        self.kind
     }
 }
 
@@ -926,6 +947,7 @@ impl DecodingPipeline {
             sbn,
             input_symbols: _,
             retain_decoded_block,
+            kind: _,
             elapsed: _,
             resolution,
         } = outcome;
@@ -979,6 +1001,7 @@ impl DecodingPipeline {
             sbn,
             input_symbols,
             retain_decoded_block,
+            kind: _,
             elapsed: _,
             resolution,
         } = outcome;
@@ -3497,6 +3520,7 @@ mod tests {
             sbn: job.sbn(),
             input_symbols: 2,
             retain_decoded_block: false,
+            kind: BlockDecodeKind::RaptorQRepair,
             elapsed: Duration::ZERO,
             resolution: BlockDecodeResolution::Retry(RejectReason::InconsistentEquations),
         };

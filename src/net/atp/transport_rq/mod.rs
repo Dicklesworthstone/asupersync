@@ -65,7 +65,7 @@ use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::decoding::{
-    BlockDecodeJob, BlockDecodeOutcome, DecodingConfig, DecodingPipeline,
+    BlockDecodeJob, BlockDecodeKind, BlockDecodeOutcome, DecodingConfig, DecodingPipeline,
     DeferredSymbolAcceptResult, MissingSourceSymbol, SymbolAcceptResult, run_block_decode_job,
 };
 use crate::encoding::{EncodedSymbol, EncodingPipeline, MAX_SOURCE_BLOCKS, max_object_size};
@@ -5427,6 +5427,7 @@ pub async fn receive_connection(
         DGRAM_HEADER
     };
     let mut rbuf = vec![0u8; usize::from(symbol_size) + datagram_header_len + 64];
+    let mut round_wall_start = trace_receiver_intake.then(Instant::now);
 
     // Drive: alternate between draining UDP symbols and responding to the
     // sender's ObjectComplete on the control channel. We pump UDP between
@@ -5497,16 +5498,29 @@ pub async fn receive_connection(
                     );
                 }
                 let decode_width_budget = rq_decode_width_budget_for_cx(cx, &decoders, symbol_size);
+                let pending_decode_jobs_before_join = rq_pending_decode_jobs(&decoders);
                 let completed_decode_stats =
                     join_all_pending_decodes(cx, &mut decoders, decode_width_budget).await?;
                 round_stats.record_decode_stats(completed_decode_stats);
+                let pending_decode_jobs_after_join = rq_pending_decode_jobs(&decoders);
                 if completed_decode_stats.attempts > 0 {
                     rqtrace!(
-                        "receiver: finalized {} pending decode job(s) after ObjectComplete (completed_blocks={} stale_requeues={} decode_micros={})",
+                        "receiver: finalized {} pending decode job(s) after ObjectComplete (decode_repair_attempts={} decode_source_complete_attempts={} completed_blocks={} stale_requeues={} decode_micros={} decode_join_wait_micros={} decode_apply_micros={} decode_persist_micros={} decode_queued_jobs={} decode_inline_jobs={} decode_spawn_denials={} decode_entry_cap_saturations={} decode_transfer_cap_saturations={} decode_pending_peak={})",
                         completed_decode_stats.attempts,
+                        completed_decode_stats.repair_attempts,
+                        completed_decode_stats.source_complete_attempts,
                         completed_decode_stats.completed_blocks,
                         completed_decode_stats.stale_requeues,
-                        completed_decode_stats.decode_micros
+                        completed_decode_stats.decode_micros,
+                        completed_decode_stats.join_wait_micros,
+                        completed_decode_stats.apply_micros,
+                        completed_decode_stats.persist_micros,
+                        completed_decode_stats.queued_jobs,
+                        completed_decode_stats.inline_jobs,
+                        completed_decode_stats.spawn_denials,
+                        completed_decode_stats.entry_cap_saturations,
+                        completed_decode_stats.transfer_cap_saturations,
+                        completed_decode_stats.pending_peak
                     );
                 }
                 flush_cached_entry_staging_files(&mut decoders).await?;
@@ -5522,15 +5536,23 @@ pub async fn receive_connection(
                 );
                 let decode_budget =
                     rq_decode_width_budget_snapshot_for_cx(cx, &decoders, symbol_size);
+                let round_wall_micros = elapsed_micros_since(round_wall_start);
                 rqtrace!(
-                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} source_auth_micros={} source_persist_micros={} pipeline_feed_micros={} block_persist_micros={} decode_dispatch_micros={} source_seed_micros={} feed_other_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={}",
+                    "receiver: ObjectComplete; {} of {} entries still pending round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_source_observed={} round_source_accepted={} round_repair_observed={} round_repair_accepted={} round_loss_fraction={:.4} intake_payload_bytes={} round_wall_micros={} round_wall_symbols_per_s={} round_wall_bytes_per_s={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} source_auth_micros={} source_persist_micros={} pipeline_feed_micros={} block_persist_micros={} decode_dispatch_micros={} source_seed_micros={} feed_other_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_repair_attempts={} decode_source_complete_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_join_wait_micros={} decode_apply_micros={} decode_persist_micros={} decode_queued_jobs={} decode_inline_jobs={} decode_spawn_denials={} decode_entry_cap_saturations={} decode_transfer_cap_saturations={} decode_pending_peak={} pending_decode_jobs_before_join={} pending_decode_jobs_after_join={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={}",
                     pending.len(),
                     decoders.len(),
                     round_complete.round_symbols_sent,
                     round_stats.observed,
                     round_stats.accepted,
+                    round_stats.source_observed,
+                    round_stats.source_accepted,
+                    round_stats.repair_observed,
+                    round_stats.repair_accepted,
                     round_loss_fraction.unwrap_or(0.0),
                     round_stats.payload_bytes,
+                    round_wall_micros,
+                    rate_per_second(round_stats.observed, round_wall_micros),
+                    rate_per_second(round_stats.payload_bytes, round_wall_micros),
                     round_stats.intake_micros(),
                     round_stats.intake_symbols_per_s(),
                     round_stats.intake_bytes_per_s(),
@@ -5546,14 +5568,33 @@ pub async fn receive_connection(
                     round_stats.recv_micros,
                     round_stats.drain_micros,
                     round_stats.decode_stats.attempts,
+                    round_stats.decode_stats.repair_attempts,
+                    round_stats.decode_stats.source_complete_attempts,
                     round_stats.decode_stats.completed_blocks,
                     round_stats.decode_stats.stale_requeues,
                     round_stats.decode_stats.decode_micros,
+                    round_stats.decode_stats.join_wait_micros,
+                    round_stats.decode_stats.apply_micros,
+                    round_stats.decode_stats.persist_micros,
+                    round_stats.decode_stats.queued_jobs,
+                    round_stats.decode_stats.inline_jobs,
+                    round_stats.decode_stats.spawn_denials,
+                    round_stats.decode_stats.entry_cap_saturations,
+                    round_stats.decode_stats.transfer_cap_saturations,
+                    round_stats.decode_stats.pending_peak,
+                    pending_decode_jobs_before_join,
+                    pending_decode_jobs_after_join,
                     decode_budget.effective,
                     decode_budget.core_limit,
                     decode_budget.memory_limit,
                     decode_budget.job_memory_bytes,
                     decode_budget.max_block_size
+                );
+                trace_receiver_decode_profile(
+                    "ObjectComplete",
+                    feedback_rounds,
+                    round_stats.decode_stats,
+                    decode_budget.effective,
                 );
 
                 if pending.is_empty() {
@@ -5645,15 +5686,22 @@ pub async fn receive_connection(
                 if trace_receiver_intake {
                     let progress = source_progress_for_pending(&decoders, &pending);
                     rqtrace!(
-                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_loss_fraction={:.4} symbols_accepted={} intake_payload_bytes={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} source_auth_micros={} source_persist_micros={} pipeline_feed_micros={} block_persist_micros={} decode_dispatch_micros={} source_seed_micros={} feed_other_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
+                        "receiver: NeedMore round={feedback_rounds} pending={} source_requests={} round_symbols_sent={} round_symbols_observed={} round_symbols_accepted={} round_source_observed={} round_source_accepted={} round_repair_observed={} round_repair_accepted={} round_loss_fraction={:.4} symbols_accepted={} intake_payload_bytes={} round_wall_micros={} round_wall_symbols_per_s={} round_wall_bytes_per_s={} intake_micros={} intake_symbols_per_s={} intake_bytes_per_s={} parse_micros={} feed_micros={} source_auth_micros={} source_persist_micros={} pipeline_feed_micros={} block_persist_micros={} decode_dispatch_micros={} source_seed_micros={} feed_other_micros={} recv_micros={} drain_micros={} decode_attempts={} decode_repair_attempts={} decode_source_complete_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_join_wait_micros={} decode_apply_micros={} decode_persist_micros={} decode_queued_jobs={} decode_inline_jobs={} decode_spawn_denials={} decode_entry_cap_saturations={} decode_transfer_cap_saturations={} decode_pending_peak={} decode_width_budget={} decode_core_limit={} decode_memory_limit={} decode_job_memory_bytes={} decode_max_block_bytes={} source_received={}/{} pending_decode_jobs={} rank={}/{} rank_deficit={} rank_blocks={}",
                         pending.len(),
                         source_symbols.len(),
                         round_complete.round_symbols_sent,
                         round_stats.observed,
                         round_stats.accepted,
+                        round_stats.source_observed,
+                        round_stats.source_accepted,
+                        round_stats.repair_observed,
+                        round_stats.repair_accepted,
                         round_loss_fraction.unwrap_or(0.0),
                         symbols_accepted,
                         round_stats.payload_bytes,
+                        round_wall_micros,
+                        rate_per_second(round_stats.observed, round_wall_micros),
+                        rate_per_second(round_stats.payload_bytes, round_wall_micros),
                         round_stats.intake_micros(),
                         round_stats.intake_symbols_per_s(),
                         round_stats.intake_bytes_per_s(),
@@ -5669,9 +5717,20 @@ pub async fn receive_connection(
                         round_stats.recv_micros,
                         round_stats.drain_micros,
                         round_stats.decode_stats.attempts,
+                        round_stats.decode_stats.repair_attempts,
+                        round_stats.decode_stats.source_complete_attempts,
                         round_stats.decode_stats.completed_blocks,
                         round_stats.decode_stats.stale_requeues,
                         round_stats.decode_stats.decode_micros,
+                        round_stats.decode_stats.join_wait_micros,
+                        round_stats.decode_stats.apply_micros,
+                        round_stats.decode_stats.persist_micros,
+                        round_stats.decode_stats.queued_jobs,
+                        round_stats.decode_stats.inline_jobs,
+                        round_stats.decode_stats.spawn_denials,
+                        round_stats.decode_stats.entry_cap_saturations,
+                        round_stats.decode_stats.transfer_cap_saturations,
+                        round_stats.decode_stats.pending_peak,
                         decode_budget.effective,
                         decode_budget.core_limit,
                         decode_budget.memory_limit,
@@ -5684,6 +5743,12 @@ pub async fn receive_connection(
                         progress.rank_columns,
                         progress.rank_deficit,
                         progress.rank_blocks,
+                    );
+                    trace_receiver_decode_profile(
+                        "NeedMore",
+                        feedback_rounds,
+                        round_stats.decode_stats,
+                        decode_budget.effective,
                     );
                 }
 
@@ -5700,6 +5765,7 @@ pub async fn receive_connection(
                     )?)
                     .await?;
                 round_stats = RqDatagramRoundStats::default();
+                round_wall_start = trace_receiver_intake.then(Instant::now);
             }
             FrameType::KeepAlive => {
                 control
@@ -6172,6 +6238,7 @@ async fn dispatch_decode_job(
             )
             .await?,
         );
+        decode_stats.record_inline_job();
         rqtrace!(
             "receiver: entry {} ran decode block {} inline from {trigger} because entry size/block-count is below the parallel decode gate",
             dec.index,
@@ -6184,6 +6251,7 @@ async fn dispatch_decode_job(
     }
 
     if !allow_spawn_decode {
+        decode_stats.record_transfer_cap_saturation();
         let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
         decode_stats.merge(joined);
         rqtrace!(
@@ -6200,6 +6268,7 @@ async fn dispatch_decode_job(
         }
     }
     if !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width) {
+        decode_stats.record_entry_cap_saturation();
         let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
         decode_stats.merge(joined);
         rqtrace!(
@@ -6221,6 +6290,7 @@ async fn dispatch_decode_job(
         Ok(handle) => {
             dec.pending_decodes
                 .push(PendingDecode { block_sbn, handle });
+            decode_stats.record_queued_job(dec.pending_decodes.len());
             rqtrace!(
                 "receiver: entry {} queued parallel decode block {} from {trigger}",
                 dec.index,
@@ -6232,6 +6302,7 @@ async fn dispatch_decode_job(
             ))
         }
         Err(crate::runtime::state::SpawnError::RuntimeUnavailable) => {
+            decode_stats.record_spawn_denial();
             decode_stats.merge(
                 finalize_decode_outcome(
                     cx,
@@ -6242,6 +6313,7 @@ async fn dispatch_decode_job(
                 )
                 .await?,
             );
+            decode_stats.record_inline_job();
             rqtrace!(
                 "receiver: entry {} ran decode block {} inline from {trigger} because no runtime spawn gateway is available",
                 dec.index,
@@ -6253,6 +6325,7 @@ async fn dispatch_decode_job(
             ))
         }
         Err(err) => {
+            decode_stats.record_spawn_denial();
             let joined = join_one_pending_decode(cx, dec, false, transfer_decode_width).await?;
             decode_stats.merge(joined);
             rqtrace!(
@@ -6271,6 +6344,7 @@ async fn dispatch_decode_job(
                 Ok(handle) => {
                     dec.pending_decodes
                         .push(PendingDecode { block_sbn, handle });
+                    decode_stats.record_queued_job(dec.pending_decodes.len());
                     rqtrace!(
                         "receiver: entry {} queued parallel decode block {} from {trigger} after spawn-denial backpressure",
                         dec.index,
@@ -6282,6 +6356,7 @@ async fn dispatch_decode_job(
                     ))
                 }
                 Err(retry_err) => {
+                    decode_stats.record_spawn_denial();
                     rqtrace!(
                         "receiver: entry {} deferred decode block {} from {trigger} after repeated spawn denial: {retry_err:?}",
                         dec.index,
@@ -7086,12 +7161,23 @@ async fn verify_and_commit(
     symbols_accepted: u64,
     feedback_rounds: u32,
 ) -> Result<ReceiveReceipt, RqError> {
+    let trace_commit = std::env::var_os("ATP_RQ_TRACE").is_some();
+    let total_started = trace_commit.then(Instant::now);
+    let mut close_flush_micros = 0u64;
+    let mut verify_hash_micros = 0u64;
+    let mut merkle_micros = 0u64;
+    let mut commit_plan_micros = 0u64;
+    let mut symlink_guard_micros = 0u64;
+    let mut commit_write_micros = 0u64;
+
     for d in decoders.iter_mut() {
+        let close_started = trace_commit.then(Instant::now);
         close_cached_entry_staging_file(d).await?;
         if d.size == 0 && !d.staging_created {
             let mut file = open_entry_staging_file(d).await?;
             file.flush().await?;
         }
+        close_flush_micros = close_flush_micros.saturating_add(elapsed_micros_since(close_started));
     }
 
     let mut sha_ok = true;
@@ -7139,10 +7225,12 @@ async fn verify_and_commit(
         }
         // Object-level integrity: the staging file's size + SHA-256 must match the
         // manifest entry. This applies to packed objects too (the concatenation).
+        let hash_started = trace_commit.then(Instant::now);
         let (size, content_id, content_sha256) =
             hash_file_streaming(&decoder.staging_path, &mut hash_buf)
                 .await
                 .map_err(|e| RqError::Source(e.into_message()))?;
+        verify_hash_micros = verify_hash_micros.saturating_add(elapsed_micros_since(hash_started));
         received = received.saturating_add(size);
         if size != e.size || hex_encode(&content_sha256) != e.sha256_hex {
             sha_ok = false;
@@ -7174,6 +7262,7 @@ async fn verify_and_commit(
             // E-15 packed object: split the staging file into member byte ranges,
             // verify each member's own SHA-256, and build a per-member logical
             // digest. The packed object itself is not committed.
+            let hash_started = trace_commit.then(Instant::now);
             sha_ok &= hash_packed_members_streaming(
                 &decoder.staging_path,
                 &e.members,
@@ -7182,6 +7271,8 @@ async fn verify_and_commit(
                 &mut hash_buf,
             )
             .await?;
+            verify_hash_micros =
+                verify_hash_micros.saturating_add(elapsed_micros_since(hash_started));
             commits.push(EntryCommit::Split {
                 staging_path: decoder.staging_path.clone(),
                 members: e.members.clone(),
@@ -7191,8 +7282,10 @@ async fn verify_and_commit(
 
     for (rel_path, mut shards) in fragment_groups {
         shards.sort_by_key(|shard| shard.fragment.shard_index);
+        let hash_started = trace_commit.then(Instant::now);
         let (size, content_id, content_sha256) =
             hash_large_object_fragments(&shards, &mut hash_buf).await?;
+        verify_hash_micros = verify_hash_micros.saturating_add(elapsed_micros_since(hash_started));
         let Some(first) = shards.first() else {
             sha_ok = false;
             continue;
@@ -7212,7 +7305,9 @@ async fn verify_and_commit(
         commits.push(EntryCommit::Fragments { rel_path, shards });
     }
 
+    let merkle_started = trace_commit.then(Instant::now);
     let merkle_ok = flat_merkle_root_from_digests(&logical_digests) == manifest.merkle_root_hex;
+    merkle_micros = merkle_micros.saturating_add(elapsed_micros_since(merkle_started));
 
     let committed = sha_ok && merkle_ok;
     let mut committed_paths: Vec<String> = Vec::new();
@@ -7224,6 +7319,7 @@ async fn verify_and_commit(
 
         // Resolve every LOGICAL destination path, rejecting any symlink prefix,
         // before writing anything.
+        let plan_started = trace_commit.then(Instant::now);
         enum CommitWrite {
             Rename {
                 staging_path: PathBuf,
@@ -7288,7 +7384,9 @@ async fn verify_and_commit(
                 }
             }
         }
+        commit_plan_micros = commit_plan_micros.saturating_add(elapsed_micros_since(plan_started));
 
+        let symlink_started = trace_commit.then(Instant::now);
         for write in &writes {
             match write {
                 CommitWrite::Rename { out_path, .. } | CommitWrite::Fragments { out_path, .. } => {
@@ -7301,7 +7399,10 @@ async fn verify_and_commit(
                 }
             }
         }
+        symlink_guard_micros =
+            symlink_guard_micros.saturating_add(elapsed_micros_since(symlink_started));
 
+        let write_started = trace_commit.then(Instant::now);
         for write in writes {
             match write {
                 CommitWrite::Rename {
@@ -7338,7 +7439,27 @@ async fn verify_and_commit(
                 }
             }
         }
+        commit_write_micros =
+            commit_write_micros.saturating_add(elapsed_micros_since(write_started));
     }
+
+    rqtrace!(
+        "receiver: verify_commit committed={} sha_ok={} merkle_ok={} bytes_received={} logical_files={} committed_paths={} feedback_rounds={} close_flush_micros={} verify_hash_micros={} merkle_micros={} commit_plan_micros={} symlink_guard_micros={} commit_write_micros={} total_micros={}",
+        committed,
+        sha_ok,
+        merkle_ok,
+        received,
+        logical_files,
+        committed_paths.len(),
+        feedback_rounds,
+        close_flush_micros,
+        verify_hash_micros,
+        merkle_micros,
+        commit_plan_micros,
+        symlink_guard_micros,
+        commit_write_micros,
+        elapsed_micros_since(total_started),
+    );
 
     Ok(ReceiveReceipt {
         committed,
@@ -7378,6 +7499,10 @@ fn parse_symbol_datagram_payload(
 struct RqDatagramIngest {
     observed: bool,
     accepted: bool,
+    source_observed: bool,
+    source_accepted: bool,
+    repair_observed: bool,
+    repair_accepted: bool,
     payload_bytes: u64,
     // Per-symbol receiver-intake stage timing. `feed_micros` is the legacy
     // aggregate; the sub-stages below make large-lossy traces identify the
@@ -7459,31 +7584,129 @@ impl PlainSourceBatchRun {
 #[derive(Debug, Default, Clone, Copy)]
 struct RqDecodeRoundStats {
     attempts: u64,
+    repair_attempts: u64,
+    source_complete_attempts: u64,
     completed_blocks: u64,
     stale_requeues: u64,
     decode_micros: u64,
+    join_wait_micros: u64,
+    apply_micros: u64,
+    persist_micros: u64,
+    queued_jobs: u64,
+    inline_jobs: u64,
+    spawn_denials: u64,
+    entry_cap_saturations: u64,
+    transfer_cap_saturations: u64,
+    pending_peak: u64,
 }
 
 impl RqDecodeRoundStats {
     fn merge(&mut self, other: Self) {
         self.attempts = self.attempts.saturating_add(other.attempts);
+        self.repair_attempts = self.repair_attempts.saturating_add(other.repair_attempts);
+        self.source_complete_attempts = self
+            .source_complete_attempts
+            .saturating_add(other.source_complete_attempts);
         self.completed_blocks = self.completed_blocks.saturating_add(other.completed_blocks);
         self.stale_requeues = self.stale_requeues.saturating_add(other.stale_requeues);
         self.decode_micros = self.decode_micros.saturating_add(other.decode_micros);
+        self.join_wait_micros = self.join_wait_micros.saturating_add(other.join_wait_micros);
+        self.apply_micros = self.apply_micros.saturating_add(other.apply_micros);
+        self.persist_micros = self.persist_micros.saturating_add(other.persist_micros);
+        self.queued_jobs = self.queued_jobs.saturating_add(other.queued_jobs);
+        self.inline_jobs = self.inline_jobs.saturating_add(other.inline_jobs);
+        self.spawn_denials = self.spawn_denials.saturating_add(other.spawn_denials);
+        self.entry_cap_saturations = self
+            .entry_cap_saturations
+            .saturating_add(other.entry_cap_saturations);
+        self.transfer_cap_saturations = self
+            .transfer_cap_saturations
+            .saturating_add(other.transfer_cap_saturations);
+        self.pending_peak = self.pending_peak.max(other.pending_peak);
     }
 
-    fn record_attempt(&mut self, elapsed: Duration) {
+    fn record_attempt(&mut self, kind: BlockDecodeKind, elapsed: Duration) {
         self.attempts = self.attempts.saturating_add(1);
+        match kind {
+            BlockDecodeKind::SourceComplete => {
+                self.source_complete_attempts = self.source_complete_attempts.saturating_add(1);
+            }
+            BlockDecodeKind::RaptorQRepair => {
+                self.repair_attempts = self.repair_attempts.saturating_add(1);
+            }
+        }
         self.decode_micros = self
             .decode_micros
             .saturating_add(duration_micros_saturating(elapsed));
     }
+
+    fn record_join_wait(&mut self, elapsed: Duration) {
+        self.join_wait_micros = self
+            .join_wait_micros
+            .saturating_add(duration_micros_saturating(elapsed));
+    }
+
+    fn record_queued_job(&mut self, pending_jobs: usize) {
+        self.queued_jobs = self.queued_jobs.saturating_add(1);
+        self.pending_peak = self
+            .pending_peak
+            .max(u64::try_from(pending_jobs).unwrap_or(u64::MAX));
+    }
+
+    fn record_inline_job(&mut self) {
+        self.inline_jobs = self.inline_jobs.saturating_add(1);
+    }
+
+    fn record_spawn_denial(&mut self) {
+        self.spawn_denials = self.spawn_denials.saturating_add(1);
+    }
+
+    fn record_entry_cap_saturation(&mut self) {
+        self.entry_cap_saturations = self.entry_cap_saturations.saturating_add(1);
+    }
+
+    fn record_transfer_cap_saturation(&mut self) {
+        self.transfer_cap_saturations = self.transfer_cap_saturations.saturating_add(1);
+    }
+}
+
+fn trace_receiver_decode_profile(
+    phase: &str,
+    feedback_round: u32,
+    stats: RqDecodeRoundStats,
+    decode_width_budget: usize,
+) {
+    rqtrace!(
+        "receiver: decode_profile phase={} feedback_round={} decode_attempts={} decode_repair_attempts={} decode_source_complete_attempts={} decode_completed_blocks={} decode_stale_requeues={} decode_micros={} decode_join_wait_micros={} decode_apply_micros={} decode_persist_micros={} decode_queued_jobs={} decode_inline_jobs={} decode_spawn_denials={} decode_entry_cap_saturations={} decode_transfer_cap_saturations={} decode_pending_peak={} decode_width_budget={}",
+        phase,
+        feedback_round,
+        stats.attempts,
+        stats.repair_attempts,
+        stats.source_complete_attempts,
+        stats.completed_blocks,
+        stats.stale_requeues,
+        stats.decode_micros,
+        stats.join_wait_micros,
+        stats.apply_micros,
+        stats.persist_micros,
+        stats.queued_jobs,
+        stats.inline_jobs,
+        stats.spawn_denials,
+        stats.entry_cap_saturations,
+        stats.transfer_cap_saturations,
+        stats.pending_peak,
+        decode_width_budget,
+    );
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 struct RqDatagramRoundStats {
     observed: u64,
     accepted: u64,
+    source_observed: u64,
+    source_accepted: u64,
+    repair_observed: u64,
+    repair_accepted: u64,
     payload_bytes: u64,
     // LEVER-R1 receiver-intake throughput instrumentation (sums over the round).
     parse_micros: u64,
@@ -7508,6 +7731,18 @@ impl RqDatagramRoundStats {
         }
         if ingest.accepted {
             self.accepted = self.accepted.saturating_add(1);
+        }
+        if ingest.source_observed {
+            self.source_observed = self.source_observed.saturating_add(1);
+        }
+        if ingest.source_accepted {
+            self.source_accepted = self.source_accepted.saturating_add(1);
+        }
+        if ingest.repair_observed {
+            self.repair_observed = self.repair_observed.saturating_add(1);
+        }
+        if ingest.repair_accepted {
+            self.repair_accepted = self.repair_accepted.saturating_add(1);
         }
         self.parse_micros = self.parse_micros.saturating_add(ingest.parse_micros);
         self.feed_micros = self.feed_micros.saturating_add(ingest.feed_micros);
@@ -7538,6 +7773,10 @@ impl RqDatagramRoundStats {
     fn merge(&mut self, other: Self) {
         self.observed = self.observed.saturating_add(other.observed);
         self.accepted = self.accepted.saturating_add(other.accepted);
+        self.source_observed = self.source_observed.saturating_add(other.source_observed);
+        self.source_accepted = self.source_accepted.saturating_add(other.source_accepted);
+        self.repair_observed = self.repair_observed.saturating_add(other.repair_observed);
+        self.repair_accepted = self.repair_accepted.saturating_add(other.repair_accepted);
         self.payload_bytes = self.payload_bytes.saturating_add(other.payload_bytes);
         self.parse_micros = self.parse_micros.saturating_add(other.parse_micros);
         self.feed_micros = self.feed_micros.saturating_add(other.feed_micros);
@@ -7671,9 +7910,15 @@ async fn feed_datagram_to_decoders(
         .saturating_add(feed.block_persist_micros)
         .saturating_add(feed.decode_dispatch_micros)
         .saturating_add(feed.source_seed_micros);
+    let source_symbol = parsed.kind.is_source();
+    let repair_symbol = parsed.kind.is_repair();
     Ok(RqDatagramIngest {
         observed: true,
         accepted: feed.accepted,
+        source_observed: source_symbol,
+        source_accepted: source_symbol && feed.accepted,
+        repair_observed: repair_symbol,
+        repair_accepted: repair_symbol && feed.accepted,
         payload_bytes: u64::try_from(payload.len()).unwrap_or(u64::MAX),
         parse_micros,
         feed_micros,
@@ -7818,6 +8063,8 @@ async fn flush_plain_source_batch_run(
     let persist_micros = elapsed_micros_since(persist_start);
     stats.observed = stats.observed.saturating_add(run.symbols);
     stats.accepted = stats.accepted.saturating_add(accepted);
+    stats.source_observed = stats.source_observed.saturating_add(run.symbols);
+    stats.source_accepted = stats.source_accepted.saturating_add(accepted);
     stats.payload_bytes = stats.payload_bytes.saturating_add(run.payload_bytes);
     stats.parse_micros = stats.parse_micros.saturating_add(run.parse_micros);
     stats.feed_micros = stats.feed_micros.saturating_add(persist_micros);
@@ -7913,15 +8160,23 @@ async fn drain_ready_decodes_if_pending(
     drain_ready_decodes(cx, decoders, true, decode_width_budget).await
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct DecodeApplyOutcome {
+    completed: bool,
+    persist_micros: u64,
+}
+
 async fn apply_decode_result(
     dec: &mut EntryDecoder,
     result: SymbolAcceptResult,
     decode_elapsed: Duration,
-) -> Result<bool, RqError> {
+) -> Result<DecodeApplyOutcome, RqError> {
     let decode_micros = duration_micros_saturating(decode_elapsed);
     match result {
         SymbolAcceptResult::BlockComplete { block_sbn, data } => {
+            let persist_start = Instant::now();
             persist_decoded_block(dec, block_sbn, &data).await?;
+            let persist_micros = duration_micros_saturating(persist_start.elapsed());
             if dec.complete
                 || dec
                     .pipeline
@@ -7937,7 +8192,10 @@ async fn apply_decode_result(
                 block_sbn,
                 decode_micros
             );
-            Ok(true)
+            Ok(DecodeApplyOutcome {
+                completed: true,
+                persist_micros,
+            })
         }
         SymbolAcceptResult::Rejected(reason) => {
             rqtrace!(
@@ -7945,11 +8203,11 @@ async fn apply_decode_result(
                 dec.index,
                 decode_micros
             );
-            Ok(false)
+            Ok(DecodeApplyOutcome::default())
         }
         SymbolAcceptResult::Accepted { .. }
         | SymbolAcceptResult::DecodingStarted { .. }
-        | SymbolAcceptResult::Duplicate => Ok(false),
+        | SymbolAcceptResult::Duplicate => Ok(DecodeApplyOutcome::default()),
     }
 }
 
@@ -7962,19 +8220,28 @@ async fn finalize_decode_outcome(
 ) -> Result<RqDecodeRoundStats, RqError> {
     let mut stats = RqDecodeRoundStats::default();
     let decode_elapsed = outcome.elapsed();
-    stats.record_attempt(decode_elapsed);
+    stats.record_attempt(outcome.kind(), decode_elapsed);
     let Some(pipeline) = dec.pipeline.as_mut() else {
         return Ok(stats);
     };
+    let apply_start = Instant::now();
     match pipeline.finish_decode_job_deferred(outcome) {
         DeferredSymbolAcceptResult::Immediate(result) => {
-            if apply_decode_result(dec, result, decode_elapsed).await? {
+            let applied = apply_decode_result(dec, result, decode_elapsed).await?;
+            stats.apply_micros = stats
+                .apply_micros
+                .saturating_add(duration_micros_saturating(apply_start.elapsed()));
+            stats.persist_micros = stats.persist_micros.saturating_add(applied.persist_micros);
+            if applied.completed {
                 stats.completed_blocks = stats.completed_blocks.saturating_add(1);
             }
         }
         DeferredSymbolAcceptResult::Decode(job) => {
             let block_sbn = job.sbn();
             let decode_micros = duration_micros_saturating(decode_elapsed);
+            stats.apply_micros = stats
+                .apply_micros
+                .saturating_add(duration_micros_saturating(apply_start.elapsed()));
             rqtrace!(
                 "receiver: entry {} requeued stale parallel decode block {} decode_micros={}",
                 dec.index,
@@ -8011,12 +8278,19 @@ async fn queue_stale_decode_retry(
     if entry_decode_width <= 1 {
         let outcome = run_block_decode_job(job);
         let decode_elapsed = outcome.elapsed();
-        stats.record_attempt(decode_elapsed);
+        stats.record_attempt(outcome.kind(), decode_elapsed);
         let Some(pipeline) = dec.pipeline.as_mut() else {
             return Ok(stats);
         };
+        let apply_start = Instant::now();
         let result = pipeline.finish_decode_job(outcome);
-        if apply_decode_result(dec, result, decode_elapsed).await? {
+        let applied = apply_decode_result(dec, result, decode_elapsed).await?;
+        stats.apply_micros = stats
+            .apply_micros
+            .saturating_add(duration_micros_saturating(apply_start.elapsed()));
+        stats.persist_micros = stats.persist_micros.saturating_add(applied.persist_micros);
+        stats.record_inline_job();
+        if applied.completed {
             stats.completed_blocks = stats.completed_blocks.saturating_add(1);
         }
         rqtrace!(
@@ -8029,6 +8303,11 @@ async fn queue_stale_decode_retry(
     if !allow_spawn_decode
         || !can_spawn_parallel_decode(dec.pending_decodes.len(), entry_decode_width)
     {
+        if !allow_spawn_decode {
+            stats.record_transfer_cap_saturation();
+        } else {
+            stats.record_entry_cap_saturation();
+        }
         if let Some(pipeline) = dec.pipeline.as_mut() {
             pipeline.cancel_decode_job(block_sbn);
         }
@@ -8045,22 +8324,32 @@ async fn queue_stale_decode_retry(
         Ok(handle) => {
             dec.pending_decodes
                 .push(PendingDecode { block_sbn, handle });
+            stats.record_queued_job(dec.pending_decodes.len());
             Ok(stats)
         }
         Err(crate::runtime::state::SpawnError::RuntimeUnavailable) => {
+            stats.record_spawn_denial();
             let outcome = run_block_decode_job(inline_job);
             let decode_elapsed = outcome.elapsed();
-            stats.record_attempt(decode_elapsed);
+            stats.record_attempt(outcome.kind(), decode_elapsed);
             let Some(pipeline) = dec.pipeline.as_mut() else {
                 return Ok(stats);
             };
+            let apply_start = Instant::now();
             let result = pipeline.finish_decode_job(outcome);
-            if apply_decode_result(dec, result, decode_elapsed).await? {
+            let applied = apply_decode_result(dec, result, decode_elapsed).await?;
+            stats.apply_micros = stats
+                .apply_micros
+                .saturating_add(duration_micros_saturating(apply_start.elapsed()));
+            stats.persist_micros = stats.persist_micros.saturating_add(applied.persist_micros);
+            stats.record_inline_job();
+            if applied.completed {
                 stats.completed_blocks = stats.completed_blocks.saturating_add(1);
             }
             Ok(stats)
         }
         Err(err) => {
+            stats.record_spawn_denial();
             if let Some(pipeline) = dec.pipeline.as_mut() {
                 pipeline.cancel_decode_job(block_sbn);
             }
@@ -8160,13 +8449,19 @@ async fn join_pending_decode(
     transfer_decode_width: usize,
 ) -> Result<RqDecodeRoundStats, RqError> {
     let block_sbn = pending.block_sbn;
+    let join_start = Instant::now();
     let outcome = pending.handle.join(cx).await.map_err(|join_err| {
         RqError::Coding(format!(
             "decode task failed for entry {} block {}: {join_err:?}",
             dec.index, block_sbn
         ))
     })?;
-    finalize_decode_outcome(cx, dec, outcome, allow_spawn_decode, transfer_decode_width).await
+    let join_wait = join_start.elapsed();
+    let mut stats =
+        finalize_decode_outcome(cx, dec, outcome, allow_spawn_decode, transfer_decode_width)
+            .await?;
+    stats.record_join_wait(join_wait);
+    Ok(stats)
 }
 
 /// Pump UDP symbol datagrams into the decoders until a control frame arrives.
@@ -8556,6 +8851,41 @@ mod tests {
             !can_spawn_parallel_decode(0, 1),
             "one-wide inline decode gate must not spawn"
         );
+    }
+
+    #[test]
+    fn decode_round_stats_merge_preserves_trace_counters() {
+        let mut first = RqDecodeRoundStats::default();
+        first.record_attempt(BlockDecodeKind::RaptorQRepair, Duration::from_micros(7));
+        first.record_join_wait(Duration::from_micros(11));
+        first.record_queued_job(3);
+        first.record_inline_job();
+        first.record_spawn_denial();
+        first.record_entry_cap_saturation();
+
+        let mut second = RqDecodeRoundStats::default();
+        second.record_attempt(BlockDecodeKind::SourceComplete, Duration::from_micros(13));
+        second.record_join_wait(Duration::from_micros(17));
+        second.record_queued_job(9);
+        second.record_transfer_cap_saturation();
+        second.apply_micros = 19;
+        second.persist_micros = 23;
+
+        first.merge(second);
+
+        assert_eq!(first.attempts, 2);
+        assert_eq!(first.repair_attempts, 1);
+        assert_eq!(first.source_complete_attempts, 1);
+        assert_eq!(first.decode_micros, 20);
+        assert_eq!(first.join_wait_micros, 28);
+        assert_eq!(first.queued_jobs, 2);
+        assert_eq!(first.inline_jobs, 1);
+        assert_eq!(first.spawn_denials, 1);
+        assert_eq!(first.entry_cap_saturations, 1);
+        assert_eq!(first.transfer_cap_saturations, 1);
+        assert_eq!(first.pending_peak, 9);
+        assert_eq!(first.apply_micros, 19);
+        assert_eq!(first.persist_micros, 23);
     }
 
     #[test]
