@@ -298,6 +298,13 @@ const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD: f64 = 0.50;
 const QUIC_FEEDBACK_REPAIR_ESCALATE_AFTER_ROUNDS: u32 = 2;
 const QUIC_FEEDBACK_REPAIR_ESCALATE_MAX_EXTRA_PER_BLOCK: usize = 64;
+// On encrypted-good, the first NeedMore often reflects a sparse K-gap after
+// round-0 source spray. Send a small K-scaled cushion immediately instead of
+// spending several RTTs discovering the same residual one symbol at a time.
+const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MIN_BLOCK_SYMBOLS: usize = 128;
+const QUIC_FEEDBACK_FIRST_REPAIR_BURST_Z_ALPHA: f64 = 2.0;
+const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MARGIN_SYMBOLS: usize = 2;
+const QUIC_FEEDBACK_FIRST_REPAIR_BURST_MAX_EXTRA_PER_BLOCK: usize = 32;
 
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
@@ -4788,6 +4795,44 @@ fn quic_feedback_round_extra_repair_symbols(block_source_n: usize, feedback_roun
     )
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn quic_first_repair_burst_target_symbols(
+    base_deficit: usize,
+    block_source_n: usize,
+    round_loss_fraction: Option<f64>,
+    feedback_round: u32,
+) -> usize {
+    if base_deficit == 0 {
+        return 0;
+    }
+    if feedback_round != 1 || block_source_n < QUIC_FEEDBACK_FIRST_REPAIR_BURST_MIN_BLOCK_SYMBOLS {
+        return base_deficit;
+    }
+    let Some(loss) = round_loss_fraction.filter(|loss| loss.is_finite()) else {
+        return base_deficit;
+    };
+    if loss <= 0.0 {
+        return base_deficit;
+    }
+    let effective_loss = loss
+        .max(QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN)
+        .min(QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD);
+    let delivery_fraction = (1.0 - effective_loss).max(0.10);
+    let expected_lost_symbols = (block_source_n as f64) * effective_loss / delivery_fraction;
+    let capacity_extra = (expected_lost_symbols
+        + QUIC_FEEDBACK_FIRST_REPAIR_BURST_Z_ALPHA * expected_lost_symbols.sqrt()
+        + QUIC_FEEDBACK_FIRST_REPAIR_BURST_MARGIN_SYMBOLS as f64)
+        .ceil() as usize;
+    let extra = capacity_extra
+        .min(QUIC_FEEDBACK_FIRST_REPAIR_BURST_MAX_EXTRA_PER_BLOCK)
+        .min(block_source_n);
+    base_deficit.saturating_add(extra)
+}
+
 fn quic_targeted_repair_symbols_for_round(
     base_deficit: usize,
     round_loss_fraction: Option<f64>,
@@ -4804,9 +4849,16 @@ fn quic_targeted_repair_symbols_for_round(
         block_source_n,
         feedback_round,
     ));
+    let first_repair_burst_target = quic_first_repair_burst_target_symbols(
+        base_deficit,
+        block_source_n,
+        round_loss_fraction,
+        feedback_round,
+    );
     let target = base_deficit
         .max(loss_compensated_target)
         .max(escalated_target)
+        .max(first_repair_burst_target)
         .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
     if remaining_round_budget == 0 {
         target
@@ -4899,8 +4951,13 @@ fn block_repair_requests_with_accounting(
                 continue;
             }
             let block_source_n = quic_decoder_block_source_symbols(decoder, sbn, config);
-            let loss_compensated_target =
-                quic_loss_compensated_repair_target_symbols(raw_base_deficit, round_loss_fraction);
+            let loss_compensated_target = quic_targeted_repair_symbols_for_round(
+                raw_base_deficit.min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND),
+                round_loss_fraction,
+                0,
+                feedback_round,
+                block_source_n,
+            );
             let base_deficit = raw_base_deficit.min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
             let remaining = if limit == 0 {
                 0
@@ -10586,6 +10643,26 @@ mod tests {
     #[test]
     fn quic_repair_feedback_rounds_escalate_sparse_residuals_after_common_path() {
         assert_eq!(
+            quic_targeted_repair_symbols_for_round(1, Some(0.001), 0, 1, 512),
+            9,
+            "the first encrypted-good repair round sends capacity-matched loss*K plus margin"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols_for_round(54, Some(0.001), 0, 1, 512),
+            62,
+            "one lost coalesced packet gets enough first-round block repair slack to avoid RTT trickle"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols_for_round(1, Some(0.001), 0, 1, 64),
+            2,
+            "small blocks keep the normal loss-compensated sparse repair path"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols_for_round(1, Some(0.0), 0, 1, 512),
+            1,
+            "clean first repair remains exact-deficit"
+        );
+        assert_eq!(
             quic_targeted_repair_symbols_for_round(1, None, 0, 2, 512),
             1,
             "the normal two-round encrypted-good path keeps exact sparse repair"
@@ -11394,10 +11471,12 @@ mod tests {
         assert_eq!(feedback_rounds, 1);
         assert_eq!(need.pending, vec![0]);
         let expected_round_loss = receiver_round_loss_fraction(2, initial_sent);
-        let expected_repair_symbols = u32::try_from(quic_targeted_repair_symbols(
+        let expected_repair_symbols = u32::try_from(quic_targeted_repair_symbols_for_round(
             1,
             expected_round_loss,
             MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
+            feedback_rounds,
+            config.max_block_size / usize::from(config.symbol_size),
         ))
         .unwrap_or(u32::MAX);
         assert_eq!(
