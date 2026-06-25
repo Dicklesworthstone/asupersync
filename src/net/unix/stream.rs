@@ -863,19 +863,16 @@ fn recvmsg_with_raw_ancillary(
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = control_ptr;
-        #[cfg(target_os = "linux")]
-        {
-            msg.msg_controllen = control_len;
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            msg.msg_controllen = control_len.try_into().map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "ancillary buffer length exceeds msg_controllen",
-                )
-            })?;
-        }
+        // `msg_controllen` is `size_t` on glibc but `socklen_t` (u32) on musl,
+        // so a plain `usize` assignment fails to compile under
+        // `*-unknown-linux-musl`. Use a checked conversion on every target;
+        // it is a no-op widening on glibc and a safe narrowing on musl.
+        msg.msg_controllen = control_len.try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ancillary buffer length exceeds msg_controllen",
+            )
+        })?;
 
         let bytes = loop {
             let rc = libc::recvmsg(fd, &mut msg, 0);
