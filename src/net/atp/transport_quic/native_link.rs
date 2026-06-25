@@ -124,11 +124,10 @@ const QUIC_STAGE_BUFFER_BYTES: usize = 256 * 1024;
 fn send_native_keep_alive(
     cx: &Cx,
     conn: &mut NativeQuicConnection,
-    control: &mut NativeQuicFrameTransport,
+    _control: &mut NativeQuicFrameTransport,
 ) -> Result<(), QuicTransportError> {
-    let frame = Frame::empty(FrameType::KeepAlive)
-        .map_err(|err| QuicTransportError::Frame(err.to_string()))?;
-    control.send(cx, conn, &frame)
+    conn.queue_ping(cx)?;
+    Ok(())
 }
 
 async fn send_and_flush_native_keep_alive(
@@ -3492,6 +3491,19 @@ mod tests {
     use crate::bytes::Bytes;
     use crate::net::atp::protocol::quic_frames::QuicFrame;
 
+    fn established_native_test_conn() -> NativeQuicConnection {
+        let cx = Cx::for_testing();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin handshake");
+        conn.on_handshake_keys_available(&cx)
+            .expect("handshake keys");
+        conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
+        conn.record_verified_server_identity();
+        conn.on_handshake_confirmed(&cx)
+            .expect("handshake confirmed");
+        conn
+    }
+
     #[test]
     fn native_feedback_round_budget_allows_first_pending_round() {
         assert_eq!(
@@ -3592,6 +3604,20 @@ mod tests {
             4,
             "stale/out-of-round NeedMore state does not contaminate another round"
         );
+    }
+
+    #[test]
+    fn native_keep_alive_uses_ping_not_ordered_control_stream() {
+        let cx = Cx::for_testing();
+        let mut conn = established_native_test_conn();
+        let mut control = NativeQuicFrameTransport::open(&cx, &mut conn).expect("control stream");
+
+        send_native_keep_alive(&cx, &mut conn, &mut control).expect("queue native keepalive");
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("keepalive frame should generate");
+
+        assert_eq!(frames, vec![QuicFrame::Ping]);
     }
 
     #[test]

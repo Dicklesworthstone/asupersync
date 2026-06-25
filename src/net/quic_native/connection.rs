@@ -1001,6 +1001,14 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Queue an ack-eliciting PING without advancing PTO backoff state.
+    pub fn queue_ping(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        self.ensure_data_state()?;
+        self.pending_control_frames.push_back(QuicFrame::Ping);
+        Ok(())
+    }
+
     /// Request local key update.
     pub fn request_local_key_update(
         &mut self,
@@ -2206,6 +2214,19 @@ mod tests {
                 "application-data packets require established 1-RTT state"
             )
         );
+    }
+
+    #[test]
+    fn queue_ping_emits_ack_eliciting_ping_without_stream_payload() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+
+        conn.queue_ping(&cx).expect("queue ping");
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
+            .expect("queued ping should generate");
+
+        assert_eq!(frames, vec![QuicFrame::Ping]);
     }
 
     #[test]
