@@ -2476,3 +2476,17 @@ Benched origin/main code HEAD `36acfdaf0` (built clean via git archive, 0 errors
 **★The BBR delivery-rate-capped good-link ramp is REFUTED as a lever.** Root cause of the whole failed arc (see analysis): on the `good` regime (200mbit, 0.1% loss, rounds=0 source-complete) there is no per-RTT ACK/delivery feedback loop to cap *against* — the transfer is a single forward fountain spray with no return-path rate signal mid-transfer, so a "delivery-ack-rate" cap has only the cold-start estimate to work from and clamps pacing far below the link. Capping by delivery-acks is the right idea on a link that produces ack-clocked feedback (highbdp/lossy with feedback rounds), but `good` finishes in one source-complete pass with effectively no acks to clock against → the cap starves it. The MATRIX-79 floor (`c891cd689`) is what was holding good at 37.9s; the cap commits pulled pacing below that floor.
 
 **Routed (swarm dispatch `/data/tmp/swarm_revert_pivot_v16.txt`):** (1) REVERT `5471867cb`+`36acfdaf0` back to the `c891cd689` MATRIX-79 baseline (good=37.9s) — do not leave a 4.3× good regression on HEAD; I will re-A/B to confirm restore (→ MATRIX-82). (2) PIVOT off the marginal good-link ramp (1.59×→tie was always the smallest available win) to the **encrypted-clean** frontier (50M/perfect encrypted ~39×, much larger headroom; the clean ramp has never been A/B'd on the QUIC/TLS-1.3 tier). Evidence: `artifacts/atp_bench_matrix/20260625T031858Z/`.
+
+## MATRIX-82 (2026-06-25) — ★BASELINE RESTORED: revert 38843533a 'restore matrix79 pacing baseline' brought 500M/good back to **38.9s** (1.60× rsync), the BBR regression is GONE, main is clean. high-BDP WIN held (atp AHEAD 0.98×), bad held. The BBR good-link delivery-ack-cap arc is closed/refuted.
+
+Benched origin/main HEAD after the revert (38843533a; -431 lines, transport_rq pacing restored to c891cd689 state; built clean via git archive, 0 errors), 500M/{good,highbdp,bad}/nocrypto streams=1 ×3, sha-verified:
+
+| regime | atp wall (median) | rsync | ratio | verdict |
+|---|---|---|---|---|
+| good | **38.88s** (65.7/38.6/38.9) | 24.24s | 1.60× | ★RESTORED (≈ MATRIX-79 37.9s; rep1 65.7s is cold-start noise, median solid) |
+| highbdp | 18.07s (18.1/17.8/18.5) | 18.44s | **0.98× = atp AHEAD** | WIN held |
+| bad | 151.28s (152/151/151) | 97.10s | 1.56× | held (= MATRIX-79 150.7s) |
+
+**The revert worked and the regression saga is closed.** 500M/good is back to its MATRIX-79 floor (38.9s median, 1.60×), high-BDP keeps the WIN (atp marginally ahead, 0.98×), bad unchanged. main HEAD is once again the known-good clean-ramp baseline with no good-link regression. **Lesson banked:** the BBR delivery-rate-capped ramp is refuted for the `good` regime because good is a rounds=0 source-complete transfer with no ack-clock to cap against; the only principled way to speed good would be a handshake-time path-capacity probe (set the *initial* spray rate from a measured estimate, not a mid-transfer cap) — deprioritized as low-payoff (good is already only 1.60×).
+
+**Swarm pivoted to the encrypted-clean frontier (per dispatch v16):** new commits `84ea0a202 perf(atp-quic): pace native initial symbol spray` + `eea2b0f2a net/atp-quic: ramp clean native symbol spray` wire the clean pacing/ramp into the QUIC/TLS-1.3 native symbol spray (the encrypted tier, never A/B'd for the ramp). Next: A/B the encrypted tier (atp-quic-tls13) 50M/perfect+good to see if the QUIC clean ramp dents the ~39× per-packet-AES-GCM wall (→ MATRIX-83). Evidence: `artifacts/atp_bench_matrix/20260625T035448Z/`.
