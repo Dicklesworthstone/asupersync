@@ -258,7 +258,8 @@ fn trace_quic_flush_coalescing(
     cx: &Cx,
     packets: usize,
     datagram_frames: usize,
-    max_datagram_frames_per_packet: usize,
+    observed_max_datagram_frames_per_packet: usize,
+    configured_max_symbol_frames_per_packet: usize,
     plaintext_payload_bytes: usize,
     protected_udp_bytes: usize,
     native_send_batch_used: bool,
@@ -271,7 +272,10 @@ fn trace_quic_flush_coalescing(
     let avg_datagram_frames_per_packet_x100 = datagram_frames.saturating_mul(100) / packets.max(1);
     let packets_s = packets.to_string();
     let datagram_frames_s = datagram_frames.to_string();
-    let max_datagram_frames_per_packet_s = max_datagram_frames_per_packet.to_string();
+    let observed_max_datagram_frames_per_packet_s =
+        observed_max_datagram_frames_per_packet.to_string();
+    let configured_max_symbol_frames_per_packet_s =
+        configured_max_symbol_frames_per_packet.to_string();
     let avg_datagram_frames_per_packet_x100_s = avg_datagram_frames_per_packet_x100.to_string();
     let plaintext_payload_bytes_s = plaintext_payload_bytes.to_string();
     let protected_udp_bytes_s = protected_udp_bytes.to_string();
@@ -284,8 +288,12 @@ fn trace_quic_flush_coalescing(
             ("packets", packets_s.as_str()),
             ("datagram_frames", datagram_frames_s.as_str()),
             (
-                "max_datagram_frames_per_packet",
-                max_datagram_frames_per_packet_s.as_str(),
+                "observed_max_datagram_frames_per_packet",
+                observed_max_datagram_frames_per_packet_s.as_str(),
+            ),
+            (
+                "configured_max_symbol_frames_per_packet",
+                configured_max_symbol_frames_per_packet_s.as_str(),
             ),
             (
                 "avg_datagram_frames_per_packet_x100",
@@ -302,10 +310,11 @@ fn trace_quic_flush_coalescing(
         ],
     );
     quic_rqtrace!(
-        "sender: flush_coalescing packets={} datagram_frames={} max_datagrams_per_packet={} avg_datagrams_per_packet_x100={} plaintext_payload_bytes={} protected_udp_bytes={} native_send_batch_used={} gso_send_used={} fallback_used={}",
+        "sender: flush_coalescing packets={} datagram_frames={} observed_max_datagrams_per_packet={} configured_max_symbol_frames_per_packet={} avg_datagrams_per_packet_x100={} plaintext_payload_bytes={} protected_udp_bytes={} native_send_batch_used={} gso_send_used={} fallback_used={}",
         packets,
         datagram_frames,
-        max_datagram_frames_per_packet,
+        observed_max_datagram_frames_per_packet,
+        configured_max_symbol_frames_per_packet,
         avg_datagram_frames_per_packet_x100,
         plaintext_payload_bytes,
         protected_udp_bytes,
@@ -1012,6 +1021,7 @@ impl QuicLink {
                 count,
                 datagram_frames,
                 max_datagram_frames_per_plain_packet,
+                self.max_symbol_frames_per_packet,
                 plaintext_payload_bytes,
                 report.bytes_processed,
                 report.native_send_batch_used,
