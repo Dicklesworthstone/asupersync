@@ -259,7 +259,6 @@ impl AtpPacketProtection {
                 ],
             );
         }
-
     }
 
     /// Number of unique protected packets accepted by this boundary.
