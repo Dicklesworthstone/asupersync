@@ -208,6 +208,14 @@ const RQ_ROUND0_CLEAN_RAMP_STEP_BYTES: u64 = RQ_COLD_START_PACING_BPS;
 const RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 128 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS: u64 = 32 * 1024 * 1024;
+const RQ_DELIVERY_ACK_MIN_INTERVAL: Duration = Duration::from_millis(100);
+const RQ_DELIVERY_ACK_MIN_PAYLOAD_BYTES: u64 = 4 * 1024 * 1024;
+const RQ_DELIVERY_RAMP_ADD_BYTES_PER_S: u64 = 4 * 1024 * 1024;
+const RQ_DELIVERY_RAMP_GAIN_NUM: u64 = 5;
+const RQ_DELIVERY_RAMP_GAIN_DEN: u64 = 4;
+const RQ_SOURCE_FIRST_DELIVERY_PROBE_LOSS_MULTIPLIER: f64 = 3.0;
+const RQ_SOURCE_FIRST_DELIVERY_PROBE_LOSS_MARGIN: f64 = 0.0015;
+const RQ_SOURCE_FIRST_DELIVERY_PROBE_MAX_PACING_BPS: u64 = 32 * 1024 * 1024;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
@@ -836,6 +844,12 @@ impl RqSprayPacer {
         }
     }
 
+    fn set_rate_bytes_per_sec(&mut self, rate_bytes_per_sec: u64, max_rate_bytes_per_sec: u64) {
+        self.pacing
+            .set_rate_bytes_per_sec(rate_bytes_per_sec, max_rate_bytes_per_sec);
+        Self::configure_controller(&mut self.controller, self.pacing);
+    }
+
     async fn before_send(&mut self, cx: &Cx) -> Result<(), RqError> {
         loop {
             let now = Instant::now();
@@ -1355,6 +1369,8 @@ impl RqAdaptiveSendState {
         let sent_symbols = sent_this_round.max(1);
         let pending_units = u64::try_from(pending.len()).unwrap_or(u64::MAX).max(1);
         let received_symbols = received_this_round.min(sent_symbols);
+        let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
+        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
         let decode_pending_loss = (pending_units as f64 / sent_symbols as f64).clamp(0.0, 0.90);
         let derived_wire_loss = if sent_this_round == 0 {
             0.0
@@ -1397,7 +1413,6 @@ impl RqAdaptiveSendState {
         }
         .clamp(0.0, 0.90);
 
-        let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
         let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
         let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
         let useful_factor = (1.0 - wire_loss_hat * 0.5).clamp(0.25, 1.0);
@@ -1433,7 +1448,6 @@ impl RqAdaptiveSendState {
         };
         self.controller.update_estimate(self.est);
 
-        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
         let cwnd_bytes = (self.bw_ema_bps * rtt_s)
             .max(f64::from(config.symbol_size.max(1)))
             .ceil() as u64;
@@ -1461,6 +1475,48 @@ impl RqAdaptiveSendState {
                 congestion_window_bytes: cwnd_bytes.max(u64::from(config.symbol_size.max(1))),
                 loss_rate: wire_loss_hat,
             },
+        );
+    }
+
+    fn observe_delivery_ack(
+        &mut self,
+        config: &RqConfig,
+        ack: RqDeliveryAck,
+        pacer: &mut RqSprayPacer,
+    ) {
+        if !delivery_rate_ramp_enabled(config, self) {
+            return;
+        }
+        let observed_bps = delivery_ack_payload_bps(ack);
+        if observed_bps == 0 {
+            return;
+        }
+        let current = pacer.pacing().rate_bytes_per_sec();
+        let cap = delivery_rate_probe_cap_bps(observed_bps);
+        let stepped = current
+            .saturating_add(RQ_DELIVERY_RAMP_ADD_BYTES_PER_S)
+            .min(RQ_MAX_PACING_BPS);
+        let next = if cap < current { cap } else { stepped.min(cap) };
+        if next == current {
+            return;
+        }
+        pacer.set_rate_bytes_per_sec(next, cap);
+        if next < current {
+            self.aimd_rate_bps = self.aimd_rate_bps.min(next).max(RQ_COLD_START_PACING_BPS);
+        } else {
+            self.aimd_rate_bps = self.aimd_rate_bps.max(next).min(RQ_MAX_PACING_BPS);
+        }
+        let action = if next < current { "plateau" } else { "probe" };
+        rqtrace!(
+            "sender: delivery_rate_ramp action={} observed_symbols={} payload_bytes={} elapsed_micros={} observed_Bps={} old_rate_Bps={} new_rate_Bps={} cap_Bps={}",
+            action,
+            ack.round_symbols_observed,
+            ack.round_payload_bytes,
+            ack.elapsed_micros,
+            observed_bps,
+            current,
+            next,
+            cap,
         );
     }
 
@@ -1694,6 +1750,45 @@ fn round0_loss_target_repair_enabled(config: &RqConfig) -> bool {
 fn round0_source_first_loss_target(config: &RqConfig) -> bool {
     let loss = config.round0_loss_target;
     loss.is_finite() && loss >= 0.0 && !round0_loss_target_repair_enabled(config)
+}
+
+fn source_first_delivery_probe_enabled(config: &RqConfig) -> bool {
+    round0_source_first_loss_target(config)
+        && config.round0_loss_target > f64::EPSILON
+        && config.debug_drop_one_in == 0
+        && config.repair_overhead <= 1.0
+}
+
+fn source_first_delivery_probe_loss_ceiling(config: &RqConfig) -> f64 {
+    (config.round0_loss_target * RQ_SOURCE_FIRST_DELIVERY_PROBE_LOSS_MULTIPLIER
+        + RQ_SOURCE_FIRST_DELIVERY_PROBE_LOSS_MARGIN)
+        .clamp(
+            RQ_AIMD_CLEAN_INCREASE_THRESHOLD,
+            RQ_MILD_LOSS_PACING_MAX_LOSS,
+        )
+}
+
+fn delivery_rate_ramp_enabled(config: &RqConfig, state: &RqAdaptiveSendState) -> bool {
+    source_first_delivery_probe_enabled(config)
+        && !state.regime_shift
+        && state.pacing_loss_ema <= source_first_delivery_probe_loss_ceiling(config)
+}
+
+fn delivery_ack_payload_bps(ack: RqDeliveryAck) -> u64 {
+    if ack.elapsed_micros == 0 || ack.round_payload_bytes == 0 {
+        return 0;
+    }
+    rate_per_second(ack.round_payload_bytes, ack.elapsed_micros)
+}
+
+fn delivery_rate_probe_cap_bps(observed_bps: u64) -> u64 {
+    let cap = u128::from(observed_bps)
+        .saturating_mul(u128::from(RQ_DELIVERY_RAMP_GAIN_NUM))
+        .div_ceil(u128::from(RQ_DELIVERY_RAMP_GAIN_DEN));
+    u64::try_from(cap).unwrap_or(u64::MAX).clamp(
+        RQ_COLD_START_PACING_BPS,
+        RQ_SOURCE_FIRST_DELIVERY_PROBE_MAX_PACING_BPS,
+    )
 }
 
 fn measured_feedback_repair_overhead(loss_fraction: f64) -> f64 {
@@ -1984,6 +2079,18 @@ struct RqRoundComplete {
     round_symbols_sent: u64,
 }
 
+/// Receiver → sender delivery sample carried on a `KeepAlive` payload while a
+/// source-first spray is still in flight.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct RqDeliveryAck {
+    #[serde(default)]
+    round_symbols_observed: u64,
+    #[serde(default)]
+    round_payload_bytes: u64,
+    #[serde(default)]
+    elapsed_micros: u64,
+}
+
 /// Sender-side UDP batch acceleration counters for the ATP-RQ symbol plane.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UdpSendAccelerationReport {
@@ -2263,6 +2370,13 @@ fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, RqError> 
 
 fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, RqError> {
     serde_json::from_slice(frame.payload()).map_err(|e| RqError::Control(e.to_string()))
+}
+
+fn parse_delivery_ack(frame: &Frame) -> Option<RqDeliveryAck> {
+    if frame.payload().is_empty() {
+        return None;
+    }
+    serde_json::from_slice(frame.payload()).ok()
 }
 
 fn parse_round_complete(frame: &Frame) -> Result<RqRoundComplete, RqError> {
@@ -4155,6 +4269,9 @@ pub async fn send_path(
                 });
             }
             FrameType::KeepAlive => {
+                if let Some(ack) = parse_delivery_ack(&reply) {
+                    adaptive.observe_delivery_ack(&config, ack, &mut pacer);
+                }
                 adaptive.mark_control_peer_activity();
             }
             FrameType::ObjectRequest => {
@@ -4690,7 +4807,7 @@ where
                 }
                 let report = send_batch.flush(sockets, symbols_sent).await?;
                 udp_send_acceleration.observe_flush_report(report);
-                service_rq_spray_control(cx, control, adaptive).await?;
+                service_rq_spray_control(cx, control, adaptive, config, pacer).await?;
                 enc.repair_cursors[block_index] = target_repair;
             }
             if !with_source {
@@ -4852,7 +4969,7 @@ where
     }
     let report = send_batch.flush(sockets, symbols_sent).await?;
     udp_send_acceleration.observe_flush_report(report);
-    service_rq_spray_control(cx, control, adaptive).await?;
+    service_rq_spray_control(cx, control, adaptive, config, pacer).await?;
     rqtrace!(
         "sender: retransmitted {} requested source symbols",
         requests.len()
@@ -4903,7 +5020,7 @@ where
     }
     let report = send_batch.flush(sockets, symbols_sent).await?;
     udp_send_acceleration.observe_flush_report(report);
-    service_rq_spray_control(cx, control, adaptive).await
+    service_rq_spray_control(cx, control, adaptive, config, pacer).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4947,7 +5064,7 @@ where
     if send_batch.should_flush() {
         let report = send_batch.flush(sockets, symbols_sent).await?;
         udp_send_acceleration.observe_flush_report(report);
-        service_rq_spray_control(cx, control, adaptive).await?;
+        service_rq_spray_control(cx, control, adaptive, config, pacer).await?;
     }
     Ok(())
 }
@@ -4956,6 +5073,8 @@ async fn service_rq_spray_control<S>(
     cx: &Cx,
     control: &mut FrameTransport<S>,
     adaptive: &mut RqAdaptiveSendState,
+    config: &RqConfig,
+    pacer: &mut RqSprayPacer,
 ) -> Result<(), RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -4963,7 +5082,12 @@ where
     cx.checkpoint().map_err(|_| RqError::Cancelled)?;
     while let Some(frame) = control.try_recv_ready().await? {
         match frame.frame_type() {
-            FrameType::KeepAlive => adaptive.mark_control_peer_activity(),
+            FrameType::KeepAlive => {
+                if let Some(ack) = parse_delivery_ack(&frame) {
+                    adaptive.observe_delivery_ack(config, ack, pacer);
+                }
+                adaptive.mark_control_peer_activity();
+            }
             FrameType::Close => {
                 return Err(RqError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -5293,6 +5417,7 @@ pub async fn receive_connection(
             &mut symbols_accepted,
             &mut round_stats,
             trace_receiver_intake,
+            source_first_delivery_probe_enabled(&config),
         )
         .await?;
         rqtrace!(
@@ -8008,6 +8133,52 @@ async fn join_pending_decode(
     finalize_decode_outcome(cx, dec, outcome, allow_spawn_decode, transfer_decode_width).await
 }
 
+async fn maybe_send_delivery_ack<S>(
+    control: &mut FrameTransport<S>,
+    enabled: bool,
+    round_started: Instant,
+    last_sent_at: &mut Instant,
+    last_payload_bytes: &mut u64,
+    round_stats: &RqDatagramRoundStats,
+) -> Result<(), RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    if !enabled {
+        return Ok(());
+    }
+    let new_payload_bytes = round_stats
+        .payload_bytes
+        .saturating_sub(*last_payload_bytes);
+    if new_payload_bytes < RQ_DELIVERY_ACK_MIN_PAYLOAD_BYTES {
+        return Ok(());
+    }
+    if last_sent_at.elapsed() < RQ_DELIVERY_ACK_MIN_INTERVAL {
+        return Ok(());
+    }
+    let elapsed_micros = duration_micros_saturating(round_started.elapsed());
+    if elapsed_micros == 0 {
+        return Ok(());
+    }
+    let ack = RqDeliveryAck {
+        round_symbols_observed: round_stats.observed,
+        round_payload_bytes: round_stats.payload_bytes,
+        elapsed_micros,
+    };
+    control
+        .send(&json_frame(FrameType::KeepAlive, &ack)?)
+        .await?;
+    *last_sent_at = Instant::now();
+    *last_payload_bytes = round_stats.payload_bytes;
+    rqtrace!(
+        "receiver: delivery_ack observed_symbols={} payload_bytes={} elapsed_micros={}",
+        ack.round_symbols_observed,
+        ack.round_payload_bytes,
+        ack.elapsed_micros
+    );
+    Ok(())
+}
+
 /// Pump UDP symbol datagrams into the decoders until a control frame arrives.
 ///
 /// The sender finishes a spray round and *then* sends `ObjectComplete` on TCP,
@@ -8028,6 +8199,7 @@ async fn pump_until_control<S>(
     symbols_accepted: &mut u64,
     round_stats: &mut RqDatagramRoundStats,
     trace_intake: bool,
+    delivery_ack_enabled: bool,
 ) -> Result<Frame, RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -8047,6 +8219,9 @@ where
     let packet_size = rbuf.len();
     let mut cbuf = vec![0u8; 65536];
     let mut pumped: u64 = 0;
+    let delivery_ack_started = Instant::now();
+    let mut last_delivery_ack_at = delivery_ack_started;
+    let mut last_delivery_ack_payload_bytes = 0u64;
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
         round_stats
@@ -8119,6 +8294,15 @@ where
                 pumped = pumped.saturating_add(stats.observed);
                 *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                 round_stats.merge(stats);
+                maybe_send_delivery_ack(
+                    control,
+                    delivery_ack_enabled,
+                    delivery_ack_started,
+                    &mut last_delivery_ack_at,
+                    &mut last_delivery_ack_payload_bytes,
+                    round_stats,
+                )
+                .await?;
                 round_stats.record_decode_stats(
                     drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?,
                 );
@@ -8170,6 +8354,15 @@ where
                     pumped = pumped.saturating_add(stats.observed);
                     *symbols_accepted = (*symbols_accepted).saturating_add(stats.accepted);
                     round_stats.merge(stats);
+                    maybe_send_delivery_ack(
+                        control,
+                        delivery_ack_enabled,
+                        delivery_ack_started,
+                        &mut last_delivery_ack_at,
+                        &mut last_delivery_ack_payload_bytes,
+                        round_stats,
+                    )
+                    .await?;
                     round_stats.record_decode_stats(
                         drain_ready_decodes_if_pending(cx, decoders, symbol_size).await?,
                     );
@@ -9169,6 +9362,99 @@ mod tests {
             RQ_COLD_START_PACING_BPS.saturating_mul(8),
             "feedback spray should keep the cold-start sender floor"
         );
+    }
+
+    #[test]
+    fn rq_delivery_ack_ramp_raises_active_source_first_pacer_from_observed_delivery() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.001,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config);
+        let delivery = 20_u64 * 1024 * 1024;
+        let ack = RqDeliveryAck {
+            round_symbols_observed: delivery / u64::from(config.symbol_size),
+            round_payload_bytes: delivery,
+            elapsed_micros: 1_000_000,
+        };
+
+        state.observe_delivery_ack(&config, ack, &mut pacer);
+
+        assert_eq!(
+            state.aimd_rate_bps,
+            RQ_COLD_START_PACING_BPS + RQ_DELIVERY_RAMP_ADD_BYTES_PER_S,
+            "delivery ACK ramp should step from the active cold-start pacer"
+        );
+        assert_eq!(
+            pacer.pacing().rate_bytes_per_sec(),
+            state.aimd_rate_bps,
+            "mid-round delivery ACK must reconfigure the active token bucket"
+        );
+    }
+
+    #[test]
+    fn rq_delivery_ack_ramp_stays_off_for_bad_loss_target() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config);
+        let ack = RqDeliveryAck {
+            round_symbols_observed: 20_000,
+            round_payload_bytes: 20 * 1024 * 1024,
+            elapsed_micros: 1_000_000,
+        };
+
+        state.observe_delivery_ack(&config, ack, &mut pacer);
+
+        assert_eq!(
+            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
+            "configured lossy cells must not inherit the source-first delivery ACK ramp"
+        );
+        assert_eq!(
+            pacer.pacing().rate_bytes_per_sec(),
+            RQ_COLD_START_PACING_BPS
+        );
+    }
+
+    #[test]
+    fn rq_delivery_ack_ramp_caps_to_observed_delivery_headroom() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.001,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let mut pacer = RqSprayPacer::new_with_round0_ramp(
+            RqSprayPacing::from_rate(
+                24 * 1024 * 1024,
+                config.symbol_size,
+                RQ_ADAPTIVE_BURST_SYMBOLS,
+                Some(Duration::from_millis(25)),
+                false,
+            ),
+            None,
+        );
+        let delivery = 20_u64 * 1024 * 1024;
+        let ack = RqDeliveryAck {
+            round_symbols_observed: delivery / u64::from(config.symbol_size),
+            round_payload_bytes: delivery,
+            elapsed_micros: 1_000_000,
+        };
+        state.aimd_rate_bps = pacer.pacing().rate_bytes_per_sec();
+
+        state.observe_delivery_ack(&config, ack, &mut pacer);
+
+        assert_eq!(
+            state.aimd_rate_bps,
+            delivery_rate_probe_cap_bps(delivery),
+            "delivery ACK ramp should cap the probe target near observed path rate"
+        );
+        assert_eq!(pacer.pacing().rate_bytes_per_sec(), state.aimd_rate_bps);
     }
 
     #[test]
