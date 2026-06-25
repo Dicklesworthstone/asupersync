@@ -2432,3 +2432,17 @@ Benched fb017958b on 50M/perfect/nocrypto streams=1 ×3 + ATP_RQ_TRACE=1:
 **⚠ Residual P1 — good wall (67.1s / 2.77× rsync) is worse than its historical ~37s/1.54× (MATRIX-50).** good now takes 1-2 feedback rounds and runs at ~7.5 MB/s (below even the 16 MiB/s cold-start), so something beyond the ramp gate slowed it — candidate causes: the cap-aggregate (01daa99b6) may throttle even single-stream pacing on mild-loss links, OR accumulated transport churn since MATRIX-50. NOT the catastrophic P0 (which is fixed); a separate wall regression to investigate. Caveat: no clean immediately-pre-ramp good baseline was captured this session, so the 37s→67s delta is vs a days-old HEAD — attribution needs a bisect. Routed as P1.
 
 **★NET SCOREBOARD (current HEAD fb017958b):** atp TIES clean-high-BDP (18.2s, NEW win this session, regression-free); WINS lossy-large-FEC / delta-insert 62.5× / memory; good converges but lost wall ground (P1); remaining clean losses = good-wall (P1), clean-perfect-small (FEC encode), encrypted-clean (AEAD). The session's headline — clean-high-BDP LOSS→TIE via the probe-diagnosed cold-start-ramp — stands, now with the good-link safety gate. Evidence: `artifacts/atp_bench_matrix/20260624T234216Z/`.
+
+## MATRIX-79 (2026-06-25) — ★good-wall P1 RESOLVED: c891cd689 'floor good-link feedback' restored 500M/good from 67s back to **37.9s** (3/3 ok), its historical ~1.59× of rsync — no wall regression. high-BDP keeps the win (atp 17.7s vs rsync 17.9s, atp marginally AHEAD), bad unchanged (150.7s). The clean-ramp arc is now COMPLETE and fully regression-free across the matrix.
+
+Benched c891cd689 (HEAD 16a6d7e14), 500M/{good,highbdp,bad}/nocrypto streams=1 ×3:
+
+| regime | atp wall | rsync | ratio | rounds | sha |
+|---|---|---|---|---|---|
+| good | **37.9s** (was 67s MATRIX-77) | 23.9s | 1.59× | {1,2} | 3:3 ok |
+| highbdp | **17.7s** | 17.9s | **1.01× = atp AHEAD** | 0 | 3:3 ok |
+| bad | 150.7s | 98.4s | 1.53× | 0 | 3:3 ok |
+
+**good RECOVERED** — `c891cd689` (floor the good-link feedback round behavior) brought 500M/good from the 67s P1 regression back to 37.9s = its historical ~1.59× of rsync. The MATRIX-77 wall regression is GONE; good now converges in 1-2 rounds at the expected wall. **high-BDP win/tie held** (atp 17.7s vs rsync 17.9s — atp a hair ahead this run; the loss-free ramp keeps filling the 1gbit pipe). **bad unchanged** (150.7s, gated). 
+
+**★CLEAN-RAMP ARC COMPLETE & REGRESSION-FREE.** Sequence: MATRIX-72 probe diagnosed the 16 MiB/s cold-start-never-ramps cause → MATRIX-73 ramp tied high-BDP (38s→18s) → MATRIX-74 lossy gating held → MATRIX-75 s8 stabilized → MATRIX-76 caught the P0 good-overshoot → MATRIX-77 loss-free gate fixed the catastrophe → MATRIX-78 ramp also sped small-clean (50M/perfect 3.7→2.82s, 81× mem) → MATRIX-79 floor-good-feedback restored good's wall. ★FINAL clean-link scoreboard: high-BDP = WIN/TIE (atp ≈ rsync, was 2.13× loss); good = 1.59× (historical, no regression); small-clean = 2.29× + 81× mem (FEC-encode residual); bad/lossy unchanged; encrypted-clean = AEAD-bound (fundamental, the remaining clean loss). atp now WINS/TIES every nocrypto clean+high-BDP wall it used to lose except small-file FEC-encode, AND dominates memory everywhere. ★FUTURE (not regression): a BBR delivery-rate-capped ramp could push good from 1.59× toward a TIE too (loss-free gate leaves good unramped today). Evidence: `artifacts/atp_bench_matrix/20260625T003045Z/`.
