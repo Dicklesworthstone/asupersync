@@ -1106,10 +1106,7 @@ type NativeSendmmsgAddr = nix::sys::socket::SockaddrStorage;
 // crate-level `deny(dead_code)` (non-Windows) turns that into a hard error and
 // breaks the apple-darwin build. Matches the existing
 // `cfg_attr(target_arch = "wasm32", allow(dead_code))` precedent in this file.
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "android")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 #[derive(Debug)]
 enum NativeSendBatchAttempt {
     Sent(UdpBatchIoReport),
