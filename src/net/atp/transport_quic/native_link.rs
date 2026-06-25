@@ -254,6 +254,67 @@ macro_rules! quic_rqtrace {
     };
 }
 
+fn trace_quic_flush_coalescing(
+    cx: &Cx,
+    packets: usize,
+    datagram_frames: usize,
+    max_datagram_frames_per_packet: usize,
+    plaintext_payload_bytes: usize,
+    protected_udp_bytes: usize,
+    native_send_batch_used: bool,
+    gso_send_used: bool,
+    fallback_used: bool,
+) {
+    if packets == 0 || std::env::var_os("ATP_RQ_TRACE").is_none() {
+        return;
+    }
+    let avg_datagram_frames_per_packet_x100 = datagram_frames.saturating_mul(100) / packets.max(1);
+    let packets_s = packets.to_string();
+    let datagram_frames_s = datagram_frames.to_string();
+    let max_datagram_frames_per_packet_s = max_datagram_frames_per_packet.to_string();
+    let avg_datagram_frames_per_packet_x100_s = avg_datagram_frames_per_packet_x100.to_string();
+    let plaintext_payload_bytes_s = plaintext_payload_bytes.to_string();
+    let protected_udp_bytes_s = protected_udp_bytes.to_string();
+    let native_send_batch_used_s = native_send_batch_used.to_string();
+    let gso_send_used_s = gso_send_used.to_string();
+    let fallback_used_s = fallback_used.to_string();
+    cx.trace_with_fields(
+        "atp_quic.sender.flush_coalescing",
+        &[
+            ("packets", packets_s.as_str()),
+            ("datagram_frames", datagram_frames_s.as_str()),
+            (
+                "max_datagram_frames_per_packet",
+                max_datagram_frames_per_packet_s.as_str(),
+            ),
+            (
+                "avg_datagram_frames_per_packet_x100",
+                avg_datagram_frames_per_packet_x100_s.as_str(),
+            ),
+            (
+                "plaintext_payload_bytes",
+                plaintext_payload_bytes_s.as_str(),
+            ),
+            ("protected_udp_bytes", protected_udp_bytes_s.as_str()),
+            ("native_send_batch_used", native_send_batch_used_s.as_str()),
+            ("gso_send_used", gso_send_used_s.as_str()),
+            ("fallback_used", fallback_used_s.as_str()),
+        ],
+    );
+    quic_rqtrace!(
+        "sender: flush_coalescing packets={} datagram_frames={} max_datagrams_per_packet={} avg_datagrams_per_packet_x100={} plaintext_payload_bytes={} protected_udp_bytes={} native_send_batch_used={} gso_send_used={} fallback_used={}",
+        packets,
+        datagram_frames,
+        max_datagram_frames_per_packet,
+        avg_datagram_frames_per_packet_x100,
+        plaintext_payload_bytes,
+        protected_udp_bytes,
+        native_send_batch_used,
+        gso_send_used,
+        fallback_used,
+    );
+}
+
 fn need_more_repair_symbol_count(need: &QuicNeedMore) -> u64 {
     need.repair_blocks.iter().fold(0u64, |acc, request| {
         acc.saturating_add(u64::from(request.symbols))
@@ -538,11 +599,22 @@ fn coalesced_datagram_frames_per_packet(
 }
 
 fn coalesced_spray_flush_symbol_limit(
-    max_burst_symbols: usize,
+    pacing_burst_symbols: usize,
     max_symbol_frames_per_packet: usize,
+    max_flush_symbols: usize,
+    path_loss_rate: f64,
 ) -> usize {
-    let burst = max_burst_symbols.max(1);
+    let flush_cap = max_flush_symbols.max(1);
     let packet_width = max_symbol_frames_per_packet.max(1);
+    let burst = if path_loss_rate <= f64::EPSILON {
+        // Loss-free encrypted sprays are dominated by per-packet QUIC work.
+        // Queue one full protected packet worth of DATAGRAM frames, then sleep
+        // by byte count so average pacing stays unchanged.
+        let packet_floor = packet_width.min(flush_cap);
+        pacing_burst_symbols.max(1).max(packet_floor).min(flush_cap)
+    } else {
+        pacing_burst_symbols.max(1).min(flush_cap)
+    };
     let full_packet_multiple = (burst / packet_width).saturating_mul(packet_width);
     if full_packet_multiple == 0 {
         burst
@@ -595,6 +667,8 @@ pub struct QuicLink {
     /// Auth-posture-aware symbol DATAGRAM frame width used to align paced
     /// sender flushes to full protected packets.
     max_symbol_frames_per_packet: usize,
+    /// Configured upper bound on symbols queued before a protected packet flush.
+    max_spray_symbols_per_flush: usize,
     symbol_datagram_frame_len: usize,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
@@ -741,6 +815,8 @@ impl QuicLink {
         coalesced_spray_flush_symbol_limit(
             pacing.max_burst_symbols,
             self.max_symbol_frames_per_packet,
+            self.max_spray_symbols_per_flush,
+            pacing.path_loss_rate,
         )
     }
 
@@ -841,6 +917,9 @@ impl QuicLink {
         }
 
         let mut plain_packets = Vec::new();
+        let mut datagram_frames = 0usize;
+        let mut max_datagram_frames_per_plain_packet = 0usize;
+        let mut plaintext_payload_bytes = 0usize;
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let frames = self.conn.generate_frames(
@@ -851,8 +930,21 @@ impl QuicLink {
             if frames.is_empty() {
                 break;
             }
+            let packet_datagram_frames = frames
+                .iter()
+                .filter(|frame| {
+                    matches!(
+                        frame,
+                        crate::net::atp::protocol::quic_frames::QuicFrame::Datagram { .. }
+                    )
+                })
+                .count();
             let mut payload = BytesMut::new();
             NativeQuicConnection::encode_frames(&frames, &mut payload)?;
+            datagram_frames = datagram_frames.saturating_add(packet_datagram_frames);
+            max_datagram_frames_per_plain_packet =
+                max_datagram_frames_per_plain_packet.max(packet_datagram_frames);
+            plaintext_payload_bytes = plaintext_payload_bytes.saturating_add(payload.len());
             let packet_number = self.send_pn;
             self.send_pn = self.send_pn.saturating_add(1);
             let header = encode_one_rtt_header(packet_number);
@@ -915,6 +1007,17 @@ impl QuicLink {
                     report.packets_processed, count
                 )));
             }
+            trace_quic_flush_coalescing(
+                cx,
+                count,
+                datagram_frames,
+                max_datagram_frames_per_plain_packet,
+                plaintext_payload_bytes,
+                report.bytes_processed,
+                report.native_send_batch_used,
+                report.gso_send_used,
+                report.fallback_used,
+            );
         }
         Ok(count)
     }
@@ -1148,8 +1251,12 @@ impl QuicLink {
         self.flush(cx).await?;
         self.service_spray_liveness(cx, control).await?;
 
-        let flushed_symbols = pending_symbols.min(self.paced_flush_symbol_limit(pacing));
+        let flush_symbol_limit = self.paced_flush_symbol_limit(pacing);
+        let flushed_symbols = pending_symbols.min(flush_symbol_limit);
         let sent_s = sent.to_string();
+        let pending_symbols_s = pending_symbols.to_string();
+        let flush_symbol_limit_s = flush_symbol_limit.to_string();
+        let max_symbol_frames_per_packet_s = self.max_symbol_frames_per_packet.to_string();
         let pause_after_flush = self.pause_after_symbol_flush(flushed_symbols, pacing);
         let pause_after_burst_micros = pause_after_flush.as_micros().to_string();
         let pacing_rate_bps = pacing.pacing_rate_bps.to_string();
@@ -1162,6 +1269,12 @@ impl QuicLink {
                     pause_after_burst_micros.as_str(),
                 ),
                 ("pacing_rate_bps", pacing_rate_bps.as_str()),
+                ("pending_symbols", pending_symbols_s.as_str()),
+                ("flush_symbol_limit", flush_symbol_limit_s.as_str()),
+                (
+                    "max_symbol_frames_per_packet",
+                    max_symbol_frames_per_packet_s.as_str(),
+                ),
             ],
         );
         crate::time::sleep(cx.now(), pause_after_flush).await;
@@ -1300,6 +1413,7 @@ fn link_from_handshake(
         max_app_payload,
         max_datagram_frames_per_packet,
         max_symbol_frames_per_packet,
+        max_spray_symbols_per_flush: config.max_spray_symbols_per_flush.max(1),
         symbol_datagram_frame_len: send_symbol_frame_len,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
@@ -3053,17 +3167,51 @@ mod tests {
     }
 
     #[test]
-    fn spray_flush_limit_avoids_underfilled_aead_tail_packets() {
+    fn clean_spray_flush_limit_fills_one_protected_packet_before_flushing() {
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(54, 51),
+            coalesced_spray_flush_symbol_limit(54, 51, 54, 0.0),
             51,
             "MATRIX encrypted-clean shape should not flush 51 full symbols plus a 3-symbol packet"
         );
-        assert_eq!(coalesced_spray_flush_symbol_limit(50, 51), 50);
-        assert_eq!(coalesced_spray_flush_symbol_limit(128, 51), 102);
-        assert_eq!(coalesced_spray_flush_symbol_limit(256, 51), 255);
-        assert_eq!(coalesced_spray_flush_symbol_limit(0, 51), 1);
-        assert_eq!(coalesced_spray_flush_symbol_limit(54, 0), 54);
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(1, 51, 54, 0.0),
+            51,
+            "clean encrypted sprays should amortize one-symbol pacing bursts into one protected packet"
+        );
+        assert_eq!(coalesced_spray_flush_symbol_limit(50, 51, 54, 0.0), 51);
+        assert_eq!(coalesced_spray_flush_symbol_limit(128, 51, 256, 0.0), 102);
+        assert_eq!(coalesced_spray_flush_symbol_limit(256, 51, 256, 0.0), 255);
+        assert_eq!(coalesced_spray_flush_symbol_limit(0, 51, 54, 0.0), 51);
+        assert_eq!(coalesced_spray_flush_symbol_limit(54, 0, 54, 0.0), 54);
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(2, 60, 54, 0.0),
+            54,
+            "configured flush cap still bounds packet fill when one packet can hold more"
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(2, 51, 16, 0.0),
+            16,
+            "operator burst cap remains the hard queueing envelope"
+        );
+    }
+
+    #[test]
+    fn lossy_spray_flush_limit_preserves_pacing_burst() {
+        let mild_loss = 0.001;
+        assert_eq!(coalesced_spray_flush_symbol_limit(1, 51, 54, mild_loss), 1);
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(50, 51, 54, mild_loss),
+            50
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(54, 51, 54, mild_loss),
+            51
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(128, 51, 256, mild_loss),
+            102
+        );
+        assert_eq!(coalesced_spray_flush_symbol_limit(0, 51, 54, mild_loss), 1);
     }
 
     #[test]
