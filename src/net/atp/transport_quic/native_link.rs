@@ -343,6 +343,48 @@ fn need_more_repair_symbol_count(need: &QuicNeedMore) -> u64 {
     })
 }
 
+fn need_more_requested_symbol_count(need: &QuicNeedMore) -> u64 {
+    need_more_repair_symbol_count(need)
+        .saturating_add(u64::try_from(need.source_symbols.len()).unwrap_or(u64::MAX))
+}
+
+fn infer_missing_round_complete_symbols(
+    expected_round: u32,
+    observed_symbols: u64,
+    last_need: Option<&QuicNeedMore>,
+) -> u64 {
+    last_need
+        .filter(|need| need.feedback_round == expected_round)
+        .map(need_more_requested_symbol_count)
+        .unwrap_or(observed_symbols)
+        .max(observed_symbols)
+}
+
+fn trace_inferred_round_complete_symbols(
+    cx: &Cx,
+    expected_round: u32,
+    observed_symbols: u64,
+    inferred_symbols: u64,
+) {
+    let expected_round_s = expected_round.to_string();
+    let observed_symbols_s = observed_symbols.to_string();
+    let inferred_symbols_s = inferred_symbols.to_string();
+    cx.trace_with_fields(
+        "atp_quic.receive.inferred_round_complete_symbols",
+        &[
+            ("round", expected_round_s.as_str()),
+            ("round_symbols_observed", observed_symbols_s.as_str()),
+            ("round_symbols_sent", inferred_symbols_s.as_str()),
+        ],
+    );
+    quic_rqtrace!(
+        "receiver: inferred ObjectComplete round={} round_symbols_observed={} round_symbols_sent={}",
+        expected_round,
+        observed_symbols,
+        inferred_symbols,
+    );
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -402,6 +444,20 @@ fn next_feedback_round_or_no_convergence(
 struct SentControlStreamFrame {
     stream: StreamId,
     offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NeedMorePtoMode {
+    RetransmitRecorded,
+    SendFresh,
+}
+
+fn need_more_pto_mode(need_frames: &[SentControlStreamFrame]) -> NeedMorePtoMode {
+    if need_frames.is_empty() {
+        NeedMorePtoMode::SendFresh
+    } else {
+        NeedMorePtoMode::RetransmitRecorded
+    }
 }
 
 fn feedback_round_for_need_or_no_convergence(
@@ -3138,13 +3194,14 @@ async fn run_receiver_session(
                         break;
                     }
                     // Idle with no progress. If we are awaiting a repair round, the NeedMore (or the
-                    // repair) was lost on the wire — re-send the NeedMore (control PTO) up to a budget
-                    // before giving up, so cross-machine transfers converge through control-frame loss.
+                    // repair) was lost on the wire. Requeue the same STREAM offsets instead of
+                    // appending a fresh NeedMore each PTO: appending duplicates can leave an older lost
+                    // duplicate ahead of the newer request and head-of-line block the sender forever.
                     if let Some((need, need_frames)) = last_need.as_ref() {
                         if needmore_pto_attempts < needmore_pto_max_attempts {
                             needmore_pto_attempts = needmore_pto_attempts.saturating_add(1);
                             let need = need.clone();
-                            let mut refreshed_need_frames = need_frames.clone();
+                            let need_frames = need_frames.clone();
                             quic_rqtrace!(
                                 "receiver: NeedMore PTO retransmit round={} attempt={} pending={} repair_blocks={} requested_repair_symbols={} stream_frames={} max_attempts={}",
                                 feedback_rounds,
@@ -3155,17 +3212,23 @@ async fn run_receiver_session(
                                 need_frames.len(),
                                 needmore_pto_max_attempts,
                             );
-                            link.retransmit_stream_frames(
-                                cx,
-                                &refreshed_need_frames,
-                                "need_more_pto",
-                            )
-                                .await?;
-                            super::send_native_need_more(cx, &mut link.conn, &mut control, &need)?;
-                            link.flush(cx).await?;
-                            refreshed_need_frames.extend(link.last_flushed_stream_frames());
-                            if let Some((_, stored_need_frames)) = last_need.as_mut() {
-                                *stored_need_frames = refreshed_need_frames;
+                            match need_more_pto_mode(&need_frames) {
+                                NeedMorePtoMode::SendFresh => {
+                                    super::send_native_need_more(
+                                        cx,
+                                        &mut link.conn,
+                                        &mut control,
+                                        &need,
+                                    )?;
+                                    link.flush(cx).await?;
+                                    if let Some((_, stored_need_frames)) = last_need.as_mut() {
+                                        *stored_need_frames = link.last_flushed_stream_frames();
+                                    }
+                                }
+                                NeedMorePtoMode::RetransmitRecorded => {
+                                    link.retransmit_stream_frames(cx, &need_frames, "need_more_pto")
+                                        .await?;
+                                }
                             }
                             continue;
                         }
@@ -3175,6 +3238,22 @@ async fn run_receiver_session(
             }
 
             flush_cached_quic_staging_files(&mut staged).await?;
+            if round_complete.round_symbols_sent == 0 && round_symbols_observed > 0 {
+                let inferred_symbols = infer_missing_round_complete_symbols(
+                    expected_round_complete,
+                    round_symbols_observed,
+                    last_need.as_ref().map(|(need, _)| need),
+                );
+                if inferred_symbols > 0 {
+                    trace_inferred_round_complete_symbols(
+                        cx,
+                        expected_round_complete,
+                        round_symbols_observed,
+                        inferred_symbols,
+                    );
+                    round_complete.round_symbols_sent = inferred_symbols;
+                }
+            }
             let pending = super::pending_entries(&decoders);
             if pending.is_empty() {
                 break;
@@ -3204,6 +3283,7 @@ async fn run_receiver_session(
                 config,
                 super::MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
                 round_loss_fraction,
+                next_feedback_round,
             );
             let need = QuicNeedMore {
                 feedback_round: next_feedback_round,
@@ -3470,6 +3550,48 @@ mod tests {
                 pending: 1,
             }
         ));
+    }
+
+    #[test]
+    fn native_receiver_infers_missing_repair_round_complete_symbols_from_last_need() {
+        let need = QuicNeedMore {
+            feedback_round: 7,
+            pending: vec![0],
+            repair_blocks: vec![QuicBlockRepairRequest {
+                entry: 0,
+                sbn: 3,
+                symbols: 5,
+            }],
+            source_symbols: vec![
+                QuicSourceSymbolRequest {
+                    entry: 0,
+                    sbn: 3,
+                    esi: 11,
+                },
+                QuicSourceSymbolRequest {
+                    entry: 0,
+                    sbn: 3,
+                    esi: 12,
+                },
+            ],
+            ..QuicNeedMore::default()
+        };
+
+        assert_eq!(
+            infer_missing_round_complete_symbols(7, 4, Some(&need)),
+            7,
+            "missing ObjectComplete on the active repair round uses the requested symbol count"
+        );
+        assert_eq!(
+            infer_missing_round_complete_symbols(7, 9, Some(&need)),
+            9,
+            "the observed count remains a lower bound when more symbols arrive than requested"
+        );
+        assert_eq!(
+            infer_missing_round_complete_symbols(6, 4, Some(&need)),
+            4,
+            "stale/out-of-round NeedMore state does not contaminate another round"
+        );
     }
 
     #[test]
@@ -3860,6 +3982,19 @@ mod tests {
         let retained =
             super::super::parse_json::<QuicNeedMore>(&pending[2]).expect("retained need-more");
         assert_eq!(retained, changed);
+    }
+
+    #[test]
+    fn need_more_pto_retransmits_recorded_offsets_without_appending() {
+        assert_eq!(need_more_pto_mode(&[]), NeedMorePtoMode::SendFresh);
+        let recorded = [SentControlStreamFrame {
+            stream: StreamId(0),
+            offset: 4096,
+        }];
+        assert_eq!(
+            need_more_pto_mode(&recorded),
+            NeedMorePtoMode::RetransmitRecorded
+        );
     }
 
     #[test]

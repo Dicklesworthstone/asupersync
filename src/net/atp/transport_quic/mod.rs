@@ -296,6 +296,8 @@ const QUIC_FEEDBACK_REPAIR_LOSS_ENABLE_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_FRACTION: f64 = 0.25;
 const QUIC_FEEDBACK_REPAIR_LOSS_MARGIN_MIN: f64 = 0.005;
 const QUIC_FEEDBACK_REPAIR_MAX_OVERHEAD: f64 = 0.50;
+const QUIC_FEEDBACK_REPAIR_ESCALATE_AFTER_ROUNDS: u32 = 2;
+const QUIC_FEEDBACK_REPAIR_ESCALATE_MAX_EXTRA_PER_BLOCK: usize = 64;
 
 /// Tuning knobs for the ATP-over-QUIC transport.
 ///
@@ -4762,13 +4764,49 @@ fn quic_targeted_repair_symbols(
     round_loss_fraction: Option<f64>,
     remaining_round_budget: usize,
 ) -> usize {
+    quic_targeted_repair_symbols_for_round(
+        base_deficit,
+        round_loss_fraction,
+        remaining_round_budget,
+        0,
+        base_deficit,
+    )
+}
+
+fn quic_feedback_round_extra_repair_symbols(block_source_n: usize, feedback_round: u32) -> usize {
+    if feedback_round <= QUIC_FEEDBACK_REPAIR_ESCALATE_AFTER_ROUNDS || block_source_n == 0 {
+        return 0;
+    }
+    let shift = feedback_round
+        .saturating_sub(QUIC_FEEDBACK_REPAIR_ESCALATE_AFTER_ROUNDS + 1)
+        .min(6);
+    let extra = 1usize << shift;
+    extra.min(
+        block_source_n
+            .max(1)
+            .min(QUIC_FEEDBACK_REPAIR_ESCALATE_MAX_EXTRA_PER_BLOCK),
+    )
+}
+
+fn quic_targeted_repair_symbols_for_round(
+    base_deficit: usize,
+    round_loss_fraction: Option<f64>,
+    remaining_round_budget: usize,
+    feedback_round: u32,
+    block_source_n: usize,
+) -> usize {
     if base_deficit == 0 {
         return 0;
     }
     let loss_compensated_target =
         quic_loss_compensated_repair_target_symbols(base_deficit, round_loss_fraction);
+    let escalated_target = base_deficit.saturating_add(quic_feedback_round_extra_repair_symbols(
+        block_source_n,
+        feedback_round,
+    ));
     let target = base_deficit
         .max(loss_compensated_target)
+        .max(escalated_target)
         .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
     if remaining_round_budget == 0 {
         target
@@ -4792,7 +4830,7 @@ fn block_repair_requests(
     limit: usize,
     round_loss_fraction: Option<f64>,
 ) -> Vec<QuicBlockRepairRequest> {
-    block_repair_requests_with_accounting(decoders, config, limit, round_loss_fraction).0
+    block_repair_requests_with_accounting(decoders, config, limit, round_loss_fraction, 0).0
 }
 
 fn block_repair_requests_with_accounting(
@@ -4800,6 +4838,7 @@ fn block_repair_requests_with_accounting(
     config: &QuicConfig,
     limit: usize,
     round_loss_fraction: Option<f64>,
+    feedback_round: u32,
 ) -> (Vec<QuicBlockRepairRequest>, QuicRepairRequestAccounting) {
     let mut requests = Vec::new();
     let mut accounting = QuicRepairRequestAccounting::default();
@@ -4859,6 +4898,7 @@ fn block_repair_requests_with_accounting(
             if raw_base_deficit == 0 {
                 continue;
             }
+            let block_source_n = quic_decoder_block_source_symbols(decoder, sbn, config);
             let loss_compensated_target =
                 quic_loss_compensated_repair_target_symbols(raw_base_deficit, round_loss_fraction);
             let base_deficit = raw_base_deficit.min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
@@ -4867,9 +4907,14 @@ fn block_repair_requests_with_accounting(
             } else {
                 limit.saturating_sub(requested_symbols)
             };
-            let mut deficit =
-                quic_targeted_repair_symbols(base_deficit, round_loss_fraction, remaining)
-                    .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
+            let mut deficit = quic_targeted_repair_symbols_for_round(
+                base_deficit,
+                round_loss_fraction,
+                remaining,
+                feedback_round,
+                block_source_n,
+            )
+            .min(MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND);
             if deficit == 0 {
                 continue;
             }
@@ -6973,18 +7018,19 @@ async fn receive_native_symbol_round(
     }
     let round_loss_fraction =
         receiver_round_loss_fraction(round_stats.observed, round_complete.round_symbols_sent);
+    let round = (*feedback_rounds).saturating_add(1);
     let (repair_blocks, repair_accounting) = block_repair_requests_with_accounting(
         decoders,
         config,
         MAX_REPAIR_SYMBOLS_PER_FEEDBACK_ROUND,
         round_loss_fraction,
+        round,
     );
     let source_symbols = if repair_blocks.is_empty() {
         source_symbol_requests(decoders, MAX_SOURCE_SYMBOL_REQUESTS_PER_FEEDBACK_ROUND)
     } else {
         Vec::new()
     };
-    let round = (*feedback_rounds).saturating_add(1);
     let need = QuicNeedMore {
         feedback_round: round,
         pending,
@@ -10534,6 +10580,35 @@ mod tests {
             quic_targeted_repair_symbols(1, Some(0.10), 1),
             1,
             "feedback round budget can still cap one-symbol repair over-provisioning"
+        );
+    }
+
+    #[test]
+    fn quic_repair_feedback_rounds_escalate_sparse_residuals_after_common_path() {
+        assert_eq!(
+            quic_targeted_repair_symbols_for_round(1, None, 0, 2, 512),
+            1,
+            "the normal two-round encrypted-good path keeps exact sparse repair"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols_for_round(1, None, 0, 3, 512),
+            2,
+            "the first residual round adds one fresh repair symbol"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols_for_round(1, None, 0, 6, 512),
+            9,
+            "continued residual rounds double extra fresh repair before the cap"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols_for_round(1, None, 0, 9, 512),
+            65,
+            "long residual loops hit the per-block escalation cap instead of spinning exact-deficit"
+        );
+        assert_eq!(
+            quic_targeted_repair_symbols_for_round(1, None, 4, 9, 512),
+            4,
+            "the per-round symbol budget still caps escalated repair"
         );
     }
 
