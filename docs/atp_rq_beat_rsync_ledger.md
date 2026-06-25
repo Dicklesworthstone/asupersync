@@ -2400,3 +2400,22 @@ Rate-probe trace (configured_rate_Bps, MiB/s, per round): **128**, 8, 8, 8, … 
 **★ROOT CAUSE — the ramp overshoots because it ramps to a FIXED target (128 MiB/s) without measuring path capacity.** `configured_bdp_bytes=0` — atp never estimates the link rate, so the round-0 ramp jumps to 128 MiB/s on EVERY clean-ish link. On high-BDP (1 gbit ≈ 125 MB/s) that's fine (MATRIX-73 TIE). On good (200 mbit ≈ 25 MB/s) it's 5× the link → catastrophic round-0 loss → non-convergence. The loss-gate also lets good's 0.1% loss through (bad's 2% loss correctly gated the ramp OFF — MATRIX-74 unchanged at 153.8s), so good gets the ramp AND the overshoot.
 
 **★P0 — the clean-ramp as shipped is UNSAFE on sub-gigabit clean/mild links (default-on regresses the common "good internet" case).** Routed to swarm: the ramp MUST be delivery-rate-capped (BBR-style) — probe the rate UP gradually based on observed ACK/delivery rate and BACK OFF the instant loss rises or delivery plateaus, instead of jumping to a fixed 128 MiB/s. Until fixed, the MATRIX-73 high-BDP TIE is real but comes with a good-link regression — NET not yet shippable. ★This is exactly why the whole matrix is checked, never one cell: the high-BDP win hid a good-link break. Evidence: `artifacts/atp_bench_matrix/20260624T230317Z/`.
+
+## MATRIX-77 (2026-06-24) — P0 CATASTROPHIC regression FIXED (fb017958b 'gate fixed clean ramp to loss-free links'): 500M/good now CONVERGES 3/3 (was 3/3 error/non-converge). high-BDP TIE preserved (18.2s, ramp still engages on loss=0), bad unchanged (150.8s). ★Residual: good converges at 67.1s (2.77× rsync) — slower than its historical ~37s/1.54× (a milder wall regression, NOT the catastrophic P0). The clean-high-BDP win is now regression-FREE in the no-failure sense; the good wall is a P1 follow-up.
+
+Built fb017958b, full A/B 500M/{good,highbdp,bad}/nocrypto streams=1 ×3 + ATP_RQ_TRACE=1:
+
+| regime | method | wall | n_ok | rounds | sha | ramp engaged? |
+|---|---|---|---|---|---|---|
+| good | atp-rq-lab | **67.1s** (was 3/3 ERROR) | 3/3 | {1,2} | ok | NO (max 17 MiB/s — gated off ✓) |
+| good | rsyncd | 24.2s | 3/3 | 0 | ok | — |
+| highbdp | atp-rq-lab | **18.2s = TIE** (rsync 17.6s) | 3/3 | 0 | ok | YES (128 MiB/s) |
+| highbdp | rsyncd | 17.6s | 3/3 | 0 | ok | — |
+| bad | atp-rq-lab | 150.8s | 3/3 | 0 | ok | NO (gated, unchanged) |
+| bad | rsyncd | 100.3s | 3/3 | 0 | ok | — |
+
+**★P0 FIXED — good no longer fails.** The loss-free gate (fb017958b) stops the ramp engaging on good's 0.1% loss (probe confirms good caps at 17 MiB/s, NOT 128) — so the round-0 overshoot is gone and good converges 3/3 sha-ok. **high-BDP keeps the MATRIX-73 TIE** (18.2s vs rsync 17.6s, ramp engages at 128 MiB/s on loss=0). **bad unchanged** (150.8s). So the clean-high-BDP win is now bankable WITHOUT the catastrophic good break.
+
+**⚠ Residual P1 — good wall (67.1s / 2.77× rsync) is worse than its historical ~37s/1.54× (MATRIX-50).** good now takes 1-2 feedback rounds and runs at ~7.5 MB/s (below even the 16 MiB/s cold-start), so something beyond the ramp gate slowed it — candidate causes: the cap-aggregate (01daa99b6) may throttle even single-stream pacing on mild-loss links, OR accumulated transport churn since MATRIX-50. NOT the catastrophic P0 (which is fixed); a separate wall regression to investigate. Caveat: no clean immediately-pre-ramp good baseline was captured this session, so the 37s→67s delta is vs a days-old HEAD — attribution needs a bisect. Routed as P1.
+
+**★NET SCOREBOARD (current HEAD fb017958b):** atp TIES clean-high-BDP (18.2s, NEW win this session, regression-free); WINS lossy-large-FEC / delta-insert 62.5× / memory; good converges but lost wall ground (P1); remaining clean losses = good-wall (P1), clean-perfect-small (FEC encode), encrypted-clean (AEAD). The session's headline — clean-high-BDP LOSS→TIE via the probe-diagnosed cold-start-ramp — stands, now with the good-link safety gate. Evidence: `artifacts/atp_bench_matrix/20260624T234216Z/`.
