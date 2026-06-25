@@ -11,3 +11,7 @@
 # of truth is docs/atp_bench_matrix_spec.md plus scripts/atp_bench/*; local
 # run directories can be multi-GB and must not be part of remote proof sync.
 artifacts/atp_bench_matrix/
+
+# Local perf profile captures can be root-owned after sudo/netns benchmark runs
+# and must not be part of remote proof sync.
+artifacts/perf/matrix92-small-clean-profile/
