@@ -1179,8 +1179,18 @@ impl NativeQuicConnection {
         let frames = Self::decode_frames(payload)?;
         let ack_eliciting = frames.iter().any(frame_is_ack_eliciting);
 
-        for frame in &frames {
-            self.process_frame_at(cx, frame, space, now_micros)?;
+        let mut index = 0usize;
+        while index < frames.len() {
+            if matches!(frames[index], QuicFrame::Datagram { .. }) {
+                let start = index;
+                while index < frames.len() && matches!(frames[index], QuicFrame::Datagram { .. }) {
+                    index = index.saturating_add(1);
+                }
+                self.process_datagram_frame_run(cx, &frames[start..index], space)?;
+            } else {
+                self.process_frame_at(cx, &frames[index], space, now_micros)?;
+                index = index.saturating_add(1);
+            }
         }
 
         if ack_eliciting {
@@ -1302,40 +1312,8 @@ impl NativeQuicConnection {
                 }
                 Ok(())
             }
-            QuicFrame::Datagram { data } => {
-                // Surface the unreliable datagram payload to the application via
-                // the bounded inbound queue. Unlike the outbound unreliable
-                // queue, the receiver side must not evict buffered symbols: ATP
-                // convergence depends on preserving already-accepted survivors.
-                if self.inbound_datagrams.len() >= MAX_INBOUND_DATAGRAMS {
-                    quictrace!(
-                        "event=datagram_recv_backpressure size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} capacity={} total_received={} total_dropped={}",
-                        data.len(),
-                        self.active_path_id,
-                        space,
-                        self.inbound_datagrams.len(),
-                        MAX_INBOUND_DATAGRAMS,
-                        self.datagrams_received,
-                        self.datagrams_dropped_on_receive
-                    );
-                    return Err(NativeQuicConnectionError::DatagramReceiveQueueFull {
-                        capacity: MAX_INBOUND_DATAGRAMS,
-                    });
-                }
-                self.datagrams_received = self.datagrams_received.saturating_add(1);
-                self.inbound_datagrams.push_back(data.clone());
-                quictrace!(
-                    "event=datagram_recv size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} receive_backpressure=false total_received={} total_dropped={}",
-                    data.len(),
-                    self.active_path_id,
-                    space,
-                    self.inbound_datagrams.len(),
-                    self.datagrams_received,
-                    self.datagrams_dropped_on_receive
-                );
-                if let Some(waker) = self.inbound_datagram_waker.take() {
-                    waker.wake();
-                }
+            QuicFrame::Datagram { .. } => {
+                self.process_datagram_frame_run(cx, std::slice::from_ref(frame), space)?;
                 Ok(())
             }
             QuicFrame::MaxStreams { .. }
@@ -1343,6 +1321,90 @@ impl NativeQuicConnection {
             | QuicFrame::StreamDataBlocked { .. }
             | QuicFrame::StreamsBlocked { .. } => Ok(()),
         }
+    }
+
+    fn process_datagram_frame_run(
+        &mut self,
+        cx: &Cx,
+        frames: &[QuicFrame],
+        space: PacketNumberSpace,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        if frames.is_empty() {
+            return Ok(());
+        }
+
+        let available = MAX_INBOUND_DATAGRAMS.saturating_sub(self.inbound_datagrams.len());
+        if available == 0 {
+            let size = frames
+                .first()
+                .and_then(|frame| match frame {
+                    QuicFrame::Datagram { data } => Some(data.len()),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            quictrace!(
+                "event=datagram_recv_backpressure size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} capacity={} total_received={} total_dropped={}",
+                size,
+                self.active_path_id,
+                space,
+                self.inbound_datagrams.len(),
+                MAX_INBOUND_DATAGRAMS,
+                self.datagrams_received,
+                self.datagrams_dropped_on_receive
+            );
+            return Err(NativeQuicConnectionError::DatagramReceiveQueueFull {
+                capacity: MAX_INBOUND_DATAGRAMS,
+            });
+        }
+
+        let accept = available.min(frames.len());
+        let mut accepted_bytes = 0usize;
+        for frame in &frames[..accept] {
+            let QuicFrame::Datagram { data } = frame else {
+                unreachable!("datagram frame run contained non-datagram frame");
+            };
+            accepted_bytes = accepted_bytes.saturating_add(data.len());
+            self.inbound_datagrams.push_back(data.clone());
+        }
+        self.datagrams_received = self
+            .datagrams_received
+            .saturating_add(u64::try_from(accept).unwrap_or(u64::MAX));
+        quictrace!(
+            "event=datagram_recv_batch frames={} bytes={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} receive_backpressure=false total_received={} total_dropped={}",
+            accept,
+            accepted_bytes,
+            self.active_path_id,
+            space,
+            self.inbound_datagrams.len(),
+            self.datagrams_received,
+            self.datagrams_dropped_on_receive
+        );
+        if let Some(waker) = self.inbound_datagram_waker.take() {
+            waker.wake();
+        }
+
+        if accept < frames.len() {
+            let size = match &frames[accept] {
+                QuicFrame::Datagram { data } => data.len(),
+                _ => 0,
+            };
+            quictrace!(
+                "event=datagram_recv_backpressure size={} src_cid=unavailable path_id={} pn_space={:?} queue_len={} capacity={} total_received={} total_dropped={}",
+                size,
+                self.active_path_id,
+                space,
+                self.inbound_datagrams.len(),
+                MAX_INBOUND_DATAGRAMS,
+                self.datagrams_received,
+                self.datagrams_dropped_on_receive
+            );
+            return Err(NativeQuicConnectionError::DatagramReceiveQueueFull {
+                capacity: MAX_INBOUND_DATAGRAMS,
+            });
+        }
+
+        Ok(())
     }
 
     /// Receive the next decoded DATAGRAM payload, if one is buffered.
@@ -1354,6 +1416,27 @@ impl NativeQuicConnection {
     /// block, so a higher-level `poll_recv_datagram` can layer a waker on top.
     pub fn recv_datagram(&mut self) -> Option<Bytes> {
         self.inbound_datagrams.pop_front()
+    }
+
+    /// Receive up to `max_datagrams` decoded DATAGRAM payloads into `out`.
+    ///
+    /// The batch preserves arrival order and clears `out` before writing. This
+    /// lets hot consumers amortize queue traffic without changing the
+    /// application-facing single-DATAGRAM receive contract.
+    pub fn recv_datagram_batch(
+        &mut self,
+        max_datagrams: usize,
+        out: &mut VecDeque<Bytes>,
+    ) -> usize {
+        out.clear();
+        let take = max_datagrams.min(self.inbound_datagrams.len());
+        out.reserve(take);
+        for _ in 0..take {
+            if let Some(datagram) = self.inbound_datagrams.pop_front() {
+                out.push_back(datagram);
+            }
+        }
+        out.len()
     }
 
     /// Poll for the next decoded DATAGRAM payload without busy-polling.
@@ -3133,6 +3216,39 @@ mod tests {
     }
 
     #[test]
+    fn process_packet_payload_batches_coalesced_datagrams_in_order() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let payloads = (0..8)
+            .map(|idx| Bytes::from(vec![idx as u8; 4]))
+            .collect::<Vec<_>>();
+        let mut packet_payload = BytesMut::new();
+        for payload in &payloads {
+            QuicFrame::Datagram {
+                data: payload.clone(),
+            }
+            .encode(&mut packet_payload)
+            .expect("datagram frame encodes");
+        }
+
+        conn.process_packet_payload(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            7,
+            &packet_payload,
+            1,
+        )
+        .expect("coalesced datagram packet accepted");
+
+        assert_eq!(conn.pending_datagram_count(), payloads.len());
+        assert_eq!(conn.datagrams_received(), payloads.len() as u64);
+        for expected in payloads {
+            assert_eq!(conn.recv_datagram().expect("queued datagram"), expected);
+        }
+        assert!(conn.recv_datagram().is_none());
+    }
+
+    #[test]
     fn inbound_datagram_queue_full_backpressures_without_evicting_survivors() {
         let cx = test_cx();
         let mut conn = established_conn();
@@ -3185,6 +3301,40 @@ mod tests {
             conn.inbound_datagram_remaining_capacity(),
             MAX_INBOUND_DATAGRAMS
         );
+    }
+
+    #[test]
+    fn recv_datagram_batch_preserves_order_and_limit() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+
+        for idx in 0u8..5 {
+            conn.process_frame(
+                &cx,
+                &QuicFrame::Datagram {
+                    data: Bytes::from(vec![idx]),
+                },
+                PacketNumberSpace::ApplicationData,
+            )
+            .expect("datagram accepted");
+        }
+
+        let mut batch = VecDeque::new();
+        assert_eq!(conn.recv_datagram_batch(0, &mut batch), 0);
+        assert!(batch.is_empty());
+        assert_eq!(conn.pending_datagram_count(), 5);
+
+        assert_eq!(conn.recv_datagram_batch(3, &mut batch), 3);
+        let first: Vec<_> = batch.iter().map(|bytes| bytes[0]).collect();
+        assert_eq!(first, vec![0, 1, 2]);
+        assert_eq!(conn.pending_datagram_count(), 2);
+
+        assert_eq!(conn.recv_datagram_batch(10, &mut batch), 2);
+        let second: Vec<_> = batch.iter().map(|bytes| bytes[0]).collect();
+        assert_eq!(second, vec![3, 4]);
+        assert_eq!(conn.pending_datagram_count(), 0);
+        assert_eq!(conn.recv_datagram_batch(10, &mut batch), 0);
+        assert!(batch.is_empty());
     }
 
     // --- Gap 10: NativeQuicConnectionError Display/From impls ---

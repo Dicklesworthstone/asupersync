@@ -73,6 +73,7 @@ pub mod native_link;
 pub mod symbol_datagram;
 pub mod symbol_envelope;
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -6193,15 +6194,22 @@ where
     }
 }
 
+fn decode_native_symbol_envelope(
+    bytes: Bytes,
+    auth_required: bool,
+) -> Result<QuicSymbolEnvelope, QuicTransportError> {
+    QuicSymbolEnvelope::decode_bytes(bytes, auth_required)
+        .map_err(SymbolDatagramError::from)
+        .map_err(QuicTransportError::from)
+}
+
+#[allow(dead_code)]
 fn recv_native_symbol_envelope(
     conn: &mut NativeQuicConnection,
     auth_required: bool,
 ) -> Result<Option<QuicSymbolEnvelope>, QuicTransportError> {
     match conn.recv_datagram() {
-        Some(bytes) => QuicSymbolEnvelope::decode_bytes(bytes, auth_required)
-            .map(Some)
-            .map_err(SymbolDatagramError::from)
-            .map_err(QuicTransportError::from),
+        Some(bytes) => decode_native_symbol_envelope(bytes, auth_required).map(Some),
         None => Ok(None),
     }
 }
@@ -6230,40 +6238,47 @@ fn drain_native_symbol_datagrams_with_aggregator(
     let auth_required = symbol_auth.is_some();
     let tag = transfer_tag(&manifest.transfer_id);
     let mut accepted = 0u64;
-    while let Some(envelope) = recv_native_symbol_envelope(conn, auth_required)? {
-        if envelope.transfer_tag != tag {
-            return Err(QuicTransportError::Integrity(format!(
-                "symbol transfer tag mismatch: got {}, expected {tag}",
-                envelope.transfer_tag
-            )));
+    let mut datagrams = VecDeque::with_capacity(NATIVE_SYMBOL_DRAIN_BATCH);
+    loop {
+        if conn.recv_datagram_batch(NATIVE_SYMBOL_DRAIN_BATCH, &mut datagrams) == 0 {
+            break;
         }
-        if envelope.payload.len() != usize::from(config.symbol_size) {
-            return Err(QuicTransportError::Integrity(format!(
-                "symbol payload has {} bytes, expected {}",
-                envelope.payload.len(),
-                config.symbol_size
-            )));
+        while let Some(bytes) = datagrams.pop_front() {
+            let envelope = decode_native_symbol_envelope(bytes, auth_required)?;
+            if envelope.transfer_tag != tag {
+                return Err(QuicTransportError::Integrity(format!(
+                    "symbol transfer tag mismatch: got {}, expected {tag}",
+                    envelope.transfer_tag
+                )));
+            }
+            if envelope.payload.len() != usize::from(config.symbol_size) {
+                return Err(QuicTransportError::Integrity(format!(
+                    "symbol payload has {} bytes, expected {}",
+                    envelope.payload.len(),
+                    config.symbol_size
+                )));
+            }
+            let decoder = decoders
+                .iter()
+                .find(|decoder| decoder.index == envelope.entry)
+                .ok_or_else(|| {
+                    QuicTransportError::Integrity(format!(
+                        "symbol for unknown manifest entry {}",
+                        envelope.entry
+                    ))
+                })?;
+            let auth_symbol = verified_authenticated_symbol_from_envelope(
+                &envelope,
+                decoder.object_id,
+                symbol_auth.as_ref(),
+            )?;
+            accepted = accepted.saturating_add(feed_aggregated_symbol_for_entry(
+                decoders,
+                envelope.entry,
+                auth_symbol,
+                receive,
+            )?);
         }
-        let decoder = decoders
-            .iter()
-            .find(|decoder| decoder.index == envelope.entry)
-            .ok_or_else(|| {
-                QuicTransportError::Integrity(format!(
-                    "symbol for unknown manifest entry {}",
-                    envelope.entry
-                ))
-            })?;
-        let auth_symbol = verified_authenticated_symbol_from_envelope(
-            &envelope,
-            decoder.object_id,
-            symbol_auth.as_ref(),
-        )?;
-        accepted = accepted.saturating_add(feed_aggregated_symbol_for_entry(
-            decoders,
-            envelope.entry,
-            auth_symbol,
-            receive,
-        )?);
     }
     Ok(accepted)
 }
@@ -6281,47 +6296,55 @@ async fn drain_native_symbol_datagrams_with_aggregator_deferred(
     let auth_required = symbol_auth.is_some();
     let tag = transfer_tag(&manifest.transfer_id);
     let mut stats = QuicRoundSymbolStats::default();
-    while let Some(envelope) = recv_native_symbol_envelope(conn, auth_required)? {
-        if envelope.transfer_tag != tag {
-            return Err(QuicTransportError::Integrity(format!(
-                "symbol transfer tag mismatch: got {}, expected {tag}",
-                envelope.transfer_tag
-            )));
+    let mut datagrams = VecDeque::with_capacity(NATIVE_SYMBOL_DRAIN_BATCH);
+    loop {
+        if conn.recv_datagram_batch(NATIVE_SYMBOL_DRAIN_BATCH, &mut datagrams) == 0 {
+            break;
         }
-        if envelope.payload.len() != usize::from(config.symbol_size) {
-            return Err(QuicTransportError::Integrity(format!(
-                "symbol payload has {} bytes, expected {}",
-                envelope.payload.len(),
-                config.symbol_size
-            )));
+        while let Some(bytes) = datagrams.pop_front() {
+            let envelope = decode_native_symbol_envelope(bytes, auth_required)?;
+            if envelope.transfer_tag != tag {
+                return Err(QuicTransportError::Integrity(format!(
+                    "symbol transfer tag mismatch: got {}, expected {tag}",
+                    envelope.transfer_tag
+                )));
+            }
+            if envelope.payload.len() != usize::from(config.symbol_size) {
+                return Err(QuicTransportError::Integrity(format!(
+                    "symbol payload has {} bytes, expected {}",
+                    envelope.payload.len(),
+                    config.symbol_size
+                )));
+            }
+            let decoder = decoders
+                .iter()
+                .find(|decoder| decoder.index == envelope.entry)
+                .ok_or_else(|| {
+                    QuicTransportError::Integrity(format!(
+                        "symbol for unknown manifest entry {}",
+                        envelope.entry
+                    ))
+                })?;
+            stats.observed = stats.observed.saturating_add(1);
+            let auth_symbol = verified_authenticated_symbol_from_envelope(
+                &envelope,
+                decoder.object_id,
+                symbol_auth.as_ref(),
+            )?;
+            stats.accepted =
+                stats
+                    .accepted
+                    .saturating_add(feed_aggregated_symbol_for_entry_deferred(
+                        cx,
+                        decoders,
+                        envelope.entry,
+                        auth_symbol,
+                        receive,
+                        config,
+                        decode_stats,
+                    )?);
+            let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
         }
-        let decoder = decoders
-            .iter()
-            .find(|decoder| decoder.index == envelope.entry)
-            .ok_or_else(|| {
-                QuicTransportError::Integrity(format!(
-                    "symbol for unknown manifest entry {}",
-                    envelope.entry
-                ))
-            })?;
-        stats.observed = stats.observed.saturating_add(1);
-        let auth_symbol = verified_authenticated_symbol_from_envelope(
-            &envelope,
-            decoder.object_id,
-            symbol_auth.as_ref(),
-        )?;
-        stats.accepted = stats
-            .accepted
-            .saturating_add(feed_aggregated_symbol_for_entry_deferred(
-                cx,
-                decoders,
-                envelope.entry,
-                auth_symbol,
-                receive,
-                config,
-                decode_stats,
-            )?);
-        let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
     }
     let _ = drain_ready_quic_decodes(cx, decoders, decode_stats).await?;
     Ok(stats)
@@ -6342,7 +6365,10 @@ async fn drain_native_symbol_datagrams_with_blocks(
     let mut accepted = 0u64;
     let mut completed = Vec::new();
     let mut drained = 0usize;
-    while let Some(envelope) = recv_native_symbol_envelope(conn, auth_required)? {
+    let mut datagrams = VecDeque::with_capacity(NATIVE_SYMBOL_DRAIN_BATCH);
+    let _ = conn.recv_datagram_batch(NATIVE_SYMBOL_DRAIN_BATCH, &mut datagrams);
+    while let Some(bytes) = datagrams.pop_front() {
+        let envelope = decode_native_symbol_envelope(bytes, auth_required)?;
         if envelope.transfer_tag != tag {
             return Err(QuicTransportError::Integrity(format!(
                 "symbol transfer tag mismatch: got {}, expected {tag}",
@@ -6399,9 +6425,6 @@ async fn drain_native_symbol_datagrams_with_blocks(
             .await?,
         );
         drained = drained.saturating_add(1);
-        if drained >= NATIVE_SYMBOL_DRAIN_BATCH {
-            break;
-        }
     }
     let transfer_decode_width = quic_transfer_decode_width(decoders, config);
     completed.extend(

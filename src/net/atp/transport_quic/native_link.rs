@@ -65,7 +65,9 @@ use crate::cx::Cx;
 use crate::io::AsyncWriteExt;
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
 use crate::net::atp::protocol::frames::{Frame, FrameType};
-use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
+use crate::net::atp::quic::packet_protection::{
+    AtpPacketProtection, AtpPacketProtectionConfig, PacketUnprotectionRequest,
+};
 use crate::net::atp::transport_common::{
     EntryDigest, flat_merkle_root_from_digests, hash_file_streaming, hex_encode,
 };
@@ -603,6 +605,40 @@ fn decode_one_rtt_packet(
     Some((key_phase, packet_number, header, ciphertext, tag))
 }
 
+struct PendingOneRttPacket {
+    packet_number: u64,
+    header: [u8; ONE_RTT_HEADER_LEN],
+    protected: ProtectedPacket,
+}
+
+fn decode_protected_one_rtt_packet(
+    provider_kind: &'static str,
+    packet: &ReceivedPacket,
+) -> Option<PendingOneRttPacket> {
+    let (key_phase, packet_number, header, ciphertext, tag) = decode_one_rtt_packet(&packet.data)?;
+    let mut header_bytes = [0u8; ONE_RTT_HEADER_LEN];
+    header_bytes.copy_from_slice(header);
+    Some(PendingOneRttPacket {
+        packet_number,
+        header: header_bytes,
+        protected: ProtectedPacket {
+            space: PacketProtectionSpace::OneRtt,
+            key_phase,
+            packet_number,
+            ciphertext: ciphertext.to_vec(),
+            tag,
+            proof: ProtectionProof {
+                provider_kind,
+                space: PacketProtectionSpace::OneRtt,
+                key_phase,
+                generation: 0,
+                transcript_hash: TranscriptHash::from_bytes([0u8; 32]),
+                failure_code: None,
+            },
+        },
+    })
+}
+
 fn one_rtt_max_payload_for_udp_packet(max_udp_packet: usize) -> usize {
     max_udp_packet
         .saturating_sub(ONE_RTT_PACKET_OVERHEAD)
@@ -1086,59 +1122,23 @@ impl QuicLink {
         Ok(count)
     }
 
-    /// Unprotect and process a single received UDP packet as a 1-RTT data-plane
-    /// packet. Returns `true` if it was a valid, decryptable 1-RTT packet that was
-    /// fed into the connection; non-1-RTT or undecryptable/replayed packets are
-    /// silently dropped (QUIC semantics) and return `false`.
-    async fn ingest_packet(
+    fn process_unprotected_one_rtt_packet(
         &mut self,
         cx: &Cx,
-        packet: &ReceivedPacket,
-    ) -> Result<bool, QuicTransportError> {
-        let Some((key_phase, packet_number, header, ciphertext, tag)) =
-            decode_one_rtt_packet(&packet.data)
-        else {
-            self.non_one_rtt_packets_dropped = self.non_one_rtt_packets_dropped.saturating_add(1);
-            return Ok(false);
-        };
-        let protected = ProtectedPacket {
-            space: PacketProtectionSpace::OneRtt,
-            key_phase,
-            packet_number,
-            ciphertext: ciphertext.to_vec(),
-            tag,
-            proof: ProtectionProof {
-                provider_kind: self.protection.provider_kind(),
-                space: PacketProtectionSpace::OneRtt,
-                key_phase,
-                generation: 0,
-                transcript_hash: TranscriptHash::from_bytes([0u8; 32]),
-                failure_code: None,
-            },
-        };
-        let unprotected = match self
-            .protection
-            .unprotect_packet(cx, &protected, header)
-            .await
-        {
-            Outcome::Ok(value) => value,
-            // Undecryptable / replayed / stray packet: drop it (QUIC semantics).
-            Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
-                self.unprotect_packets_dropped = self.unprotect_packets_dropped.saturating_add(1);
-                return Ok(false);
-            }
-        };
+        packet_number: u64,
+        plaintext: &[u8],
+    ) -> Result<(), QuicTransportError> {
         self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
         self.conn.process_packet_payload(
             cx,
             PacketNumberSpace::ApplicationData,
             packet_number,
-            &unprotected.plaintext,
+            plaintext,
             self.clock,
         )?;
         self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
         self.mark_peer_activity();
-        Ok(true)
+        Ok(())
     }
 
     /// Feed a batch of already-received packets (e.g. 1-RTT data that arrived at
@@ -1148,10 +1148,45 @@ impl QuicLink {
         cx: &Cx,
         packets: &[ReceivedPacket],
     ) -> Result<usize, QuicTransportError> {
-        let mut processed = 0usize;
+        let provider_kind = self.protection.provider_kind();
+        let mut pending = Vec::with_capacity(packets.len());
         for packet in packets {
-            if self.ingest_packet(cx, packet).await? {
-                processed = processed.saturating_add(1);
+            if let Some(decoded) = decode_protected_one_rtt_packet(provider_kind, packet) {
+                pending.push(decoded);
+            } else {
+                self.non_one_rtt_packets_dropped =
+                    self.non_one_rtt_packets_dropped.saturating_add(1);
+            }
+        }
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        let requests = pending
+            .iter()
+            .map(|packet| PacketUnprotectionRequest {
+                packet: &packet.protected,
+                associated_data: &packet.header,
+            })
+            .collect::<Vec<_>>();
+        let unprotected = self.protection.unprotect_packets(cx, &requests);
+
+        let mut processed = 0usize;
+        for (packet, outcome) in pending.iter().zip(unprotected) {
+            match outcome {
+                Outcome::Ok(unprotected) => {
+                    self.process_unprotected_one_rtt_packet(
+                        cx,
+                        packet.packet_number,
+                        &unprotected.plaintext,
+                    )?;
+                    processed = processed.saturating_add(1);
+                }
+                // Undecryptable / replayed / stray packet: drop it (QUIC semantics).
+                Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                    self.unprotect_packets_dropped =
+                        self.unprotect_packets_dropped.saturating_add(1);
+                }
             }
         }
         Ok(processed)

@@ -23,6 +23,15 @@ use crate::net::quic_native::tls::DeterministicQuicCryptoProvider;
 use crate::net::quic_native::tls::{RustlsQuicCryptoProvider, RustlsQuicProviderSide};
 use crate::types::outcome::Outcome;
 
+/// Packet-unprotection request borrowed by the batch receive hot path.
+#[derive(Debug, Clone, Copy)]
+pub struct PacketUnprotectionRequest<'a> {
+    /// Protected packet to authenticate and decrypt.
+    pub packet: &'a ProtectedPacket,
+    /// Header bytes authenticated but not encrypted.
+    pub associated_data: &'a [u8],
+}
+
 /// ATP packet protection configuration.
 #[derive(Debug, Clone)]
 pub struct AtpPacketProtectionConfig {
@@ -410,8 +419,13 @@ impl AtpPacketProtection {
         self.protect_packet_now(cx, request)
     }
 
-    /// Unprotect a packet with ATP error handling.
-    pub async fn unprotect_packet(
+    /// Unprotect a packet with ATP error handling on the current task.
+    ///
+    /// This synchronous primitive is used by the hot receive path when it has
+    /// already pulled a socket batch. It preserves the same anti-replay update
+    /// point as the async wrapper: a packet number is accepted only after
+    /// authentication succeeds.
+    pub fn unprotect_packet_now(
         &mut self,
         cx: &Cx,
         packet: &ProtectedPacket,
@@ -479,6 +493,41 @@ impl AtpPacketProtection {
         }
 
         result
+    }
+
+    /// Unprotect a batch of packets with one ATP boundary call.
+    ///
+    /// Requests are processed in order. Each result is independent so a stray,
+    /// replayed, or undecryptable packet drops exactly as it did in the
+    /// per-packet receive loop without preventing later packets in the socket
+    /// batch from being considered.
+    #[must_use]
+    pub fn unprotect_packets(
+        &mut self,
+        cx: &Cx,
+        requests: &[PacketUnprotectionRequest<'_>],
+    ) -> Vec<AtpOutcome<UnprotectedPacket>> {
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields(
+                "atp_packet_protection_unprotect_batch",
+                &[("packets", &requests.len().to_string())],
+            );
+        }
+
+        requests
+            .iter()
+            .map(|request| self.unprotect_packet_now(cx, request.packet, request.associated_data))
+            .collect()
+    }
+
+    /// Unprotect a packet with ATP error handling.
+    pub async fn unprotect_packet(
+        &mut self,
+        cx: &Cx,
+        packet: &ProtectedPacket,
+        associated_data: &[u8],
+    ) -> AtpOutcome<UnprotectedPacket> {
+        self.unprotect_packet_now(cx, packet, associated_data)
     }
 
     /// Generate header protection mask with ATP error handling.
@@ -985,6 +1034,81 @@ mod tests {
                 assert_eq!(unprotected.plaintext, payloads[idx]);
             }
             assert_eq!(protection.accepted_packet_count(), requests.len());
+        });
+    }
+
+    #[test]
+    fn unprotect_packets_batches_ordered_one_rtt_payloads() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection =
+                deterministic_one_rtt_protection(&cx, b"one-rtt-unprotect-batch-seed").await;
+            let payloads = [
+                encoded_application_payload(),
+                b"second batched encrypted payload".to_vec(),
+                b"third batched encrypted payload".to_vec(),
+            ];
+            let associated_data = [
+                b"batch unprotect short header pn=200".as_slice(),
+                b"batch unprotect short header pn=201".as_slice(),
+                b"batch unprotect short header pn=202".as_slice(),
+            ];
+            let protect_requests = [
+                PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 200,
+                    associated_data: associated_data[0],
+                    payload: &payloads[0],
+                },
+                PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 201,
+                    associated_data: associated_data[1],
+                    payload: &payloads[1],
+                },
+                PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 202,
+                    associated_data: associated_data[2],
+                    payload: &payloads[2],
+                },
+            ];
+
+            let protected = protection
+                .protect_packets(&cx, &protect_requests)
+                .expect("batch protects");
+            let unprotect_requests = protected
+                .iter()
+                .zip(associated_data)
+                .map(|(packet, aad)| PacketUnprotectionRequest {
+                    packet,
+                    associated_data: aad,
+                })
+                .collect::<Vec<_>>();
+            let unprotected = protection.unprotect_packets(&cx, &unprotect_requests);
+
+            assert_eq!(unprotected.len(), payloads.len());
+            for (idx, outcome) in unprotected.into_iter().enumerate() {
+                let packet = outcome.expect("batched packet unprotects");
+                assert_eq!(packet.packet_number, protect_requests[idx].packet_number);
+                assert_eq!(packet.plaintext, payloads[idx]);
+            }
+            assert_eq!(protection.accepted_packet_count(), payloads.len());
+
+            let replay = protection.unprotect_packets(&cx, &unprotect_requests[..1]);
+            assert_eq!(replay.len(), 1);
+            assert_eq!(
+                replay
+                    .into_iter()
+                    .next()
+                    .expect("one replay result")
+                    .expect_err("same packet number in same space must be rejected"),
+                AtpError::Auth(AuthError::ReplayedNonce)
+            );
+            assert_eq!(protection.accepted_packet_count(), payloads.len());
         });
     }
 
