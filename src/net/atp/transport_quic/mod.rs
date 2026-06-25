@@ -11382,6 +11382,7 @@ mod tests {
             &received_manifest,
             &mut encoders,
             &need,
+            need.feedback_round,
             &config,
             symbol_auth.as_ref(),
         ))
