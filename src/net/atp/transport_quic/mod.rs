@@ -5501,6 +5501,7 @@ async fn spray_native_symbol_round(
 ) -> Result<u64, QuicTransportError> {
     let tag = transfer_tag(&manifest.transfer_id);
     let mut sent = 0u64;
+    let mut pacer = QuicSymbolPacer::from_native_connection(config, conn);
     let repair_batch = repair_batch_per_block(config);
     for entry in encoders
         .iter_mut()
@@ -5551,6 +5552,7 @@ async fn spray_native_symbol_round(
                 let auth_tag = symbol_auth.map(|ctx| *ctx.sign_symbol(&symbol).tag().as_bytes());
                 send_native_symbol(cx, conn, &symbol, tag, entry.index, auth_tag)?;
                 sent = sent.saturating_add(1);
+                pacer.after_symbol_sent(cx).await?;
             }
             entry.set_repair_cursor(sbn, target_repair);
         }
