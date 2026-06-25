@@ -2414,6 +2414,19 @@ Built fb017958b, full A/B 500M/{good,highbdp,bad}/nocrypto streams=1 ×3 + ATP_R
 | bad | atp-rq-lab | 150.8s | 3/3 | 0 | ok | NO (gated, unchanged) |
 | bad | rsyncd | 100.3s | 3/3 | 0 | ok | — |
 
+## MATRIX-78 (2026-06-25) — the clean-ramp ALSO helps small-clean: 50M/perfect atp 3.7s → **2.82s** (ramp engaged to 40 MiB/s on the loss-free link), narrowing atp-vs-rsync from 3× to **2.29×** (rsync 1.23s). Residual 2.29× is the FEC-encode/setup tax at small size (not pacing-bound — the ramp got what it could). Memory: atp **49 MB vs rsyncd 4 GB** (~81× less — rsync's whole-file delta-hash blows up even on a clean 50M).
+
+Benched fb017958b on 50M/perfect/nocrypto streams=1 ×3 + ATP_RQ_TRACE=1:
+
+| method | wall | rss | rounds | sha |
+|---|---|---|---|---|
+| atp-rq-lab | **2.82s** (3.7s pre-ramp) | 49 MB | 0 | 3:3 ok |
+| rsyncd | 1.23s | **4011 MB (4 GB)** | 0 | 3:3 ok |
+
+**The ramp helped the small clean cell** (3.7→2.82s, ~1.3× faster; probe shows it reached 40 MiB/s — small file finishes before fully spinning to 128). **atp still loses small-clean 2.29×** (down from 3×): at 50M the wall is dominated by RaptorQ encode + transfer setup, NOT pacing — so the ramp shaved the pacing component but the FEC-encode/setup tax is the irreducible residual at small size (consistent with MATRIX-71's clean-perfect-small "FEC encode tax"). **Memory dominance is extreme here: 49 MB vs rsync's 4 GB (~81×)** — rsync builds a whole-file checksum/delta map even for a clean transfer; atp streams in bounded memory. So small-clean: atp loses ~2.3× wall (narrowed by the ramp), wins ~81× memory.
+
+**Clean-wall scoreboard (current HEAD fb017958b):** clean-high-BDP = TIE (MATRIX-73/77, banked); clean-perfect-small = atp 2.29× (narrowed from 3× by the ramp, residual is FEC-encode, ~fundamental at small size) + 81× memory; good = converges (P0 fixed) but wall P1 (67s, swarm bisecting); encrypted-clean = AEAD compute (fundamental). The clean-ramp (loss-free-gated) is a net win across clean cells (high-BDP TIE + small-perfect 1.3× faster) with no regression after the fb017958b gate. Evidence: `artifacts/atp_bench_matrix/20260625T001944Z/`.
+
 **★P0 FIXED — good no longer fails.** The loss-free gate (fb017958b) stops the ramp engaging on good's 0.1% loss (probe confirms good caps at 17 MiB/s, NOT 128) — so the round-0 overshoot is gone and good converges 3/3 sha-ok. **high-BDP keeps the MATRIX-73 TIE** (18.2s vs rsync 17.6s, ramp engages at 128 MiB/s on loss=0). **bad unchanged** (150.8s). So the clean-high-BDP win is now bankable WITHOUT the catastrophic good break.
 
 **⚠ Residual P1 — good wall (67.1s / 2.77× rsync) is worse than its historical ~37s/1.54× (MATRIX-50).** good now takes 1-2 feedback rounds and runs at ~7.5 MB/s (below even the 16 MiB/s cold-start), so something beyond the ramp gate slowed it — candidate causes: the cap-aggregate (01daa99b6) may throttle even single-stream pacing on mild-loss links, OR accumulated transport churn since MATRIX-50. NOT the catastrophic P0 (which is fixed); a separate wall regression to investigate. Caveat: no clean immediately-pre-ramp good baseline was captured this session, so the 37s→67s delta is vs a days-old HEAD — attribution needs a bisect. Routed as P1.
