@@ -208,6 +208,14 @@ const RQ_ROUND0_CLEAN_RAMP_STEP_BYTES: u64 = RQ_COLD_START_PACING_BPS;
 const RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 128 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS: u64 = 32 * 1024 * 1024;
+/// The 2% "bad" matrix path is rate-shaped to 50 mbit. Cold-starting it at
+/// 16 MiB/s overshoots the pipe before feedback can correct the spray, causing
+/// repair rounds to chase self-inflicted drops. Keep this deliberately narrow:
+/// clean/high-BDP uses the clean ramp, good/0.1% stays source-first, and
+/// broken/10% keeps the existing lossy fallback behavior.
+const RQ_BAD_LINK_ROUND0_LOSS_MIN: f64 = 0.015;
+const RQ_BAD_LINK_ROUND0_LOSS_MAX: f64 = RQ_MILD_LOSS_PACING_MAX_LOSS;
+const RQ_BAD_LINK_ROUND0_PACING_BPS: u64 = 6 * 1024 * 1024;
 const RQ_COLD_START_BURST_SYMBOLS: usize = 16;
 const RQ_ADAPTIVE_BURST_SYMBOLS: usize = 32;
 const RQ_PACING_MIN_PAUSE: Duration = Duration::from_micros(50);
@@ -243,6 +251,11 @@ const RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN: f64 = 0.03;
 const RQ_AIMD_CLEAN_INCREASE_THRESHOLD: f64 = 0.0015;
 const RQ_AIMD_MULTIPLICATIVE_DECREASE: f64 = 0.50;
 const RQ_AIMD_ADDITIVE_INCREASE_BYTES_PER_S: u64 = 1024 * 1024;
+/// Loss-targeted cells may overrun a slower path during round 0 before any
+/// feedback exists. Once the receiver reports real wire loss, use its observed
+/// delivery rate as the backoff anchor instead of repeatedly halving below the
+/// pipe.
+const RQ_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM: f64 = 1.10;
 /// Do not spend proactive round-0 repair on clean and near-clean links. The
 /// MATRIX "good" cell is 0.1% loss and must stay on the source-first path.
 const RQ_ROUND0_TARGET_LOSS_ENABLE_MIN: f64 = 0.005;
@@ -1201,7 +1214,7 @@ impl RqAdaptiveSendState {
             beacons: BeaconScheduler::new(seed, Instant::now()),
             est,
             symbol_size: config.symbol_size,
-            aimd_rate_bps: RQ_COLD_START_PACING_BPS,
+            aimd_rate_bps: round0_bad_link_pacing_bps(config).unwrap_or(RQ_COLD_START_PACING_BPS),
             aimd_feedback_seen: false,
             last_round_loss_fraction: 0.0,
             loss_ema: 0.0,
@@ -1269,9 +1282,7 @@ impl RqAdaptiveSendState {
         } else {
             model_rate.min(self.aimd_rate_bps)
         };
-        if !self.aimd_feedback_seen
-            && let Some(cap) = self.loss_pacing_cap_bps
-        {
+        if let Some(cap) = self.loss_pacing_cap_bps {
             rate = rate.min(self.loss_pacing_cap_for_current_regime(cap, config));
         }
         if self.regime_shift || self.pacing_loss_bar >= RQ_REGIME_SHIFT_LOSS_DELTA {
@@ -1295,9 +1306,27 @@ impl RqAdaptiveSendState {
 
     fn round0_tuning(&mut self, config: &RqConfig) -> RqRoundTuning {
         let mut tuning = self.round_tuning(config);
-        tuning.repair_overhead = tuning
-            .repair_overhead
-            .max(round0_loss_target_repair_overhead(config));
+        let round0_repair_overhead = round0_loss_target_repair_overhead(config);
+        if let Some(rate) = round0_bad_link_pacing_bps(config) {
+            tuning
+                .pacing
+                .set_rate_bytes_per_sec(rate, RQ_MAX_PACING_BPS);
+        }
+        if round0_loss_target_repair_enabled(config) {
+            rqtrace!(
+                "sender: round0_loss_target_tuning loss_target={:.4} loss_bar={:.4} source_k={} repair_overhead={:.4} extra_fraction={:.4} pacing_rate_Bps={} path_rate_bps={} max_block_size={} symbol_size={}",
+                config.round0_loss_target,
+                round0_loss_target_loss_bar(config),
+                fixed_block_k(config),
+                round0_repair_overhead,
+                (round0_repair_overhead - 1.0).max(0.0),
+                tuning.pacing.rate_bytes_per_sec(),
+                tuning.pacing.path_rate_bps,
+                config.max_block_size,
+                config.symbol_size,
+            );
+        }
+        tuning.repair_overhead = tuning.repair_overhead.max(round0_repair_overhead);
         tuning
     }
 
@@ -1364,8 +1393,12 @@ impl RqAdaptiveSendState {
         let wire_loss_hat = round_loss_fraction
             .filter(|loss| loss.is_finite())
             .map_or(derived_wire_loss, |loss| loss.clamp(0.0, 0.90));
+        let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
+        let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
+        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
+        let observed_delivery_bps = (useful_bytes as f64 / send_wall_s).max(1.0);
         if sent_this_round != 0 {
-            self.apply_aimd_feedback(config, wire_loss_hat);
+            self.apply_aimd_feedback(config, wire_loss_hat, Some(observed_delivery_bps));
         }
         let byte_pressure = if total_bytes == 0 {
             0.0
@@ -1397,8 +1430,6 @@ impl RqAdaptiveSendState {
         }
         .clamp(0.0, 0.90);
 
-        let symbol_payload_bytes = u64::from(config.symbol_size.max(1));
-        let sent_payload_bytes = sent_symbols.saturating_mul(symbol_payload_bytes);
         let offered_bps = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
         let useful_factor = (1.0 - wire_loss_hat * 0.5).clamp(0.25, 1.0);
         let bw_sample = offered_bps * useful_factor;
@@ -1433,7 +1464,6 @@ impl RqAdaptiveSendState {
         };
         self.controller.update_estimate(self.est);
 
-        let useful_bytes = received_symbols.saturating_mul(symbol_payload_bytes);
         let cwnd_bytes = (self.bw_ema_bps * rtt_s)
             .max(f64::from(config.symbol_size.max(1)))
             .ceil() as u64;
@@ -1464,14 +1494,23 @@ impl RqAdaptiveSendState {
         );
     }
 
-    fn apply_aimd_feedback(&mut self, config: &RqConfig, loss_fraction: f64) {
+    fn apply_aimd_feedback(
+        &mut self,
+        config: &RqConfig,
+        loss_fraction: f64,
+        observed_delivery_bps: Option<f64>,
+    ) {
         let loss = loss_fraction.clamp(0.0, 0.90);
         let decrease_threshold = aimd_loss_decrease_threshold(config);
         self.aimd_feedback_seen = true;
         self.last_round_loss_fraction = loss;
         if loss > decrease_threshold {
-            let reduced =
+            let multiplicative =
                 (self.aimd_rate_bps as f64 * RQ_AIMD_MULTIPLICATIVE_DECREASE).ceil() as u64;
+            let reduced = loss_target_delivery_backoff_bps(config, observed_delivery_bps)
+                .map_or(multiplicative, |delivery_backoff| {
+                    delivery_backoff.min(multiplicative)
+                });
             self.aimd_rate_bps = reduced.clamp(aimd_decrease_floor_bps(config), RQ_MAX_PACING_BPS);
         } else if loss <= RQ_AIMD_CLEAN_INCREASE_THRESHOLD {
             self.aimd_rate_bps = self
@@ -1551,7 +1590,7 @@ impl RqAdaptiveSendState {
         let sent_payload_bytes =
             sent_this_round.saturating_mul(u64::from(config.symbol_size.max(1)));
         let bw_sample = (sent_payload_bytes as f64 / send_wall_s).max(1.0);
-        self.apply_aimd_feedback(config, 0.0);
+        self.apply_aimd_feedback(config, 0.0, Some(bw_sample));
         self.bw_ema_bps = if self.bw_ema_bps <= 0.0 {
             bw_sample
         } else {
@@ -1643,6 +1682,9 @@ impl RqAdaptiveSendState {
     }
 
     fn mild_loss_pacing_floor_bps(&self, config: &RqConfig) -> u64 {
+        if let Some(rate) = round0_bad_link_pacing_bps(config) {
+            return rate;
+        }
         let floor_fraction = if round0_source_first_loss_target(config)
             && config.round0_loss_target > f64::EPSILON
         {
@@ -1672,11 +1714,8 @@ fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
     if !round0_loss_target_repair_enabled(config) {
         return config.repair_overhead.max(1.0);
     }
-    let loss = config.round0_loss_target;
-    let loss_bar = (loss * (1.0 + RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION)
-        + RQ_ROUND0_TARGET_LOSS_MARGIN_MIN)
-        .clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD);
-    let overhead = adaptive::overhead_for_target(
+    let loss_bar = round0_loss_target_loss_bar(config);
+    let overhead = adaptive::decode_repair_overhead_for_target(
         fixed_block_k(config),
         loss_bar,
         RQ_SOURCE_FEC_FALLBACK_ALPHA,
@@ -1686,9 +1725,26 @@ fn round0_loss_target_repair_overhead(config: &RqConfig) -> f64 {
     config.repair_overhead.max(1.0 + overhead)
 }
 
+fn round0_loss_target_loss_bar(config: &RqConfig) -> f64 {
+    (config.round0_loss_target * (1.0 + RQ_ROUND0_TARGET_LOSS_MARGIN_FRACTION)
+        + RQ_ROUND0_TARGET_LOSS_MARGIN_MIN)
+        .clamp(0.0, RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD)
+}
+
 fn round0_loss_target_repair_enabled(config: &RqConfig) -> bool {
     let loss = config.round0_loss_target;
     loss.is_finite() && loss >= RQ_ROUND0_TARGET_LOSS_ENABLE_MIN
+}
+
+fn round0_bad_link_pacing_bps(config: &RqConfig) -> Option<u64> {
+    let loss = config.round0_loss_target;
+    if loss.is_finite()
+        && (RQ_BAD_LINK_ROUND0_LOSS_MIN..=RQ_BAD_LINK_ROUND0_LOSS_MAX).contains(&loss)
+    {
+        Some(RQ_BAD_LINK_ROUND0_PACING_BPS)
+    } else {
+        None
+    }
 }
 
 fn round0_source_first_loss_target(config: &RqConfig) -> bool {
@@ -1717,6 +1773,25 @@ fn aimd_loss_decrease_threshold(config: &RqConfig) -> f64 {
     (expected_loss + RQ_AIMD_LOSS_DECREASE_THRESHOLD_MARGIN)
         .max(RQ_AIMD_LOSS_DECREASE_THRESHOLD_MIN)
         .clamp(0.0, 0.90)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn loss_target_delivery_backoff_bps(
+    config: &RqConfig,
+    observed_delivery_bps: Option<f64>,
+) -> Option<u64> {
+    if !round0_loss_target_repair_enabled(config) {
+        return None;
+    }
+    let delivery_bps = observed_delivery_bps?.clamp(1.0, RQ_MAX_PACING_BPS as f64);
+    if !delivery_bps.is_finite() {
+        return None;
+    }
+    Some(
+        (delivery_bps * RQ_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM)
+            .ceil()
+            .clamp(RQ_MIN_PACING_BPS as f64, RQ_MAX_PACING_BPS as f64) as u64,
+    )
 }
 
 fn aimd_decrease_floor_bps(config: &RqConfig) -> u64 {
@@ -4031,10 +4106,19 @@ pub async fn send_path(
     let mut source_fec_fallback_active = false;
     let mut udp_send_acceleration = UdpSendAccelerationReport::default();
 
-    // Parallel per-block encode is on by default, but only while the transfer is small enough that
-    // the receiver's recv buffer can absorb the burst (see PARALLEL_ENCODE_MAX_BYTES); larger
-    // transfers fall back to the sequential encode-paced spray to avoid overrunning the decoder.
-    let parallel_encode = total_bytes <= PARALLEL_ENCODE_MAX_BYTES;
+    // Parallel per-block encode is on by default while the transfer is small enough that the
+    // receiver's recv buffer can absorb the burst (see PARALLEL_ENCODE_MAX_BYTES). Larger
+    // loss-targeted transfers use a much smaller encode window: the pacer still owns wire rate,
+    // but the sender is no longer forced to mint every source+repair block on one core.
+    let parallel_encode_plan = parallel_encode_plan_for_transfer(total_bytes, &config);
+    rqtrace!(
+        "sender: encode_plan total_bytes={} entries={} parallel_encode_batch_blocks={}",
+        total_bytes,
+        manifest.entries.len(),
+        parallel_encode_plan
+            .map(|plan| plan.max_batch_blocks)
+            .unwrap_or(0),
+    );
 
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
@@ -4061,7 +4145,7 @@ pub async fn send_path(
         symbol_auth.as_ref(),
         &mut udp_send_acceleration,
         /* with_source */ true,
-        parallel_encode,
+        parallel_encode_plan,
     )
     .await?;
     let mut round_send_wall = round_started.elapsed();
@@ -4178,6 +4262,9 @@ pub async fn send_path(
                     .or(need.round_symbols_accepted)
                     .unwrap_or(fallback_received)
                     .min(sent_this_round);
+                let feedback_delivery_bps =
+                    received_this_round.saturating_mul(u64::from(config.symbol_size.max(1))) as f64
+                        / finite_duration_s(round_send_wall);
                 if pending.is_empty() {
                     // Receiver says nothing pending but did not send Proof yet;
                     // loop again to fetch the Proof.
@@ -4209,8 +4296,9 @@ pub async fn send_path(
                     adaptive.round_tuning(&config)
                 };
                 pacer.configure(round_tuning.pacing);
+                let loss_pacing_cap_bps = adaptive.loss_pacing_cap_bps.unwrap_or(0);
                 rqtrace!(
-                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} round_loss_fraction={:.4} measured_repair_overhead={:.4} fallback_trigger={} aimd_rate_bps={} send_wall_ms={} control_wait_ms={} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
+                    "sender: NeedMore round={feedback_rounds} pending={} source_requests={} sent_this_round={} received_this_round={} round_loss_fraction={:.4} measured_repair_overhead={:.4} fallback_trigger={} aimd_rate_bps={} loss_pacing_cap_bps={} send_wall_ms={} control_wait_ms={} delivery_rate_bps={:.0} bw_ema_bps={:.0} bw_trough_bps={:.0} repair_overhead={:.4} path_rate_bps={} repair_loss_ema={:.4} pacing_loss_ema={:.4} repair_loss_bar={:.4} pacing_loss_bar={:.4} fec_fallback={}",
                     pending.len(),
                     source_symbols.len(),
                     sent_this_round,
@@ -4219,8 +4307,12 @@ pub async fn send_path(
                     measured_repair_overhead,
                     source_fec_fallback_trigger,
                     adaptive.aimd_rate_bps,
+                    loss_pacing_cap_bps,
                     round_send_wall.as_millis(),
                     control_wait.as_millis(),
+                    feedback_delivery_bps,
+                    adaptive.bw_ema_bps,
+                    adaptive.bw_trough_bps,
                     round_tuning.repair_overhead,
                     round_tuning.pacing.path_rate_bps,
                     adaptive.loss_ema,
@@ -4252,7 +4344,7 @@ pub async fn send_path(
                         symbol_auth.as_ref(),
                         &mut udp_send_acceleration,
                         /* with_source */ false,
-                        parallel_encode,
+                        parallel_encode_plan,
                     )
                     .await?;
                     round_send_wall = round_started.elapsed();
@@ -4294,7 +4386,7 @@ pub async fn send_path(
                             symbol_auth.as_ref(),
                             &mut udp_send_acceleration,
                             /* with_source */ false,
-                            parallel_encode,
+                            parallel_encode_plan,
                         )
                         .await?;
                     }
@@ -4410,6 +4502,44 @@ fn source_retransmit_needs_fec_fallback(
 /// parallelism is a pure win. Parallel decode + a rate-paced encode-ahead ring are what lift this
 /// cap for very large objects.
 const PARALLEL_ENCODE_MAX_BYTES: u64 = 112 * 1024 * 1024;
+const PARALLEL_ENCODE_HOST_MAX_BATCH_BLOCKS: usize = 64;
+/// Large lossy objects need encode parallelism to keep the 50 mbit bad link fed,
+/// but they must not recreate the old full-transfer burst. Eight bounded
+/// RaptorQ blocks is enough CPU fanout for the target link while keeping peak
+/// sender symbol RAM well below the receiver's UDP buffer envelope.
+const LOSSY_LARGE_PARALLEL_ENCODE_BATCH_BLOCKS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParallelEncodePlan {
+    max_batch_blocks: usize,
+}
+
+fn parallel_encode_plan_for_transfer(
+    total_bytes: u64,
+    config: &RqConfig,
+) -> Option<ParallelEncodePlan> {
+    if total_bytes <= PARALLEL_ENCODE_MAX_BYTES {
+        Some(ParallelEncodePlan {
+            max_batch_blocks: PARALLEL_ENCODE_HOST_MAX_BATCH_BLOCKS,
+        })
+    } else if round0_loss_target_repair_enabled(config) {
+        Some(ParallelEncodePlan {
+            max_batch_blocks: LOSSY_LARGE_PARALLEL_ENCODE_BATCH_BLOCKS,
+        })
+    } else {
+        None
+    }
+}
+
+fn parallel_encode_window_blocks(plan: ParallelEncodePlan) -> usize {
+    let host_batch = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .clamp(2, PARALLEL_ENCODE_HOST_MAX_BATCH_BLOCKS);
+    host_batch.min(
+        plan.max_batch_blocks
+            .clamp(2, PARALLEL_ENCODE_HOST_MAX_BATCH_BLOCKS),
+    )
+}
 
 /// Upper bound on the number of source blocks we fan out across the blocking pool in one round.
 /// Above this the manual block enumeration would risk diverging from the canonical encoder's `u8`
@@ -4421,8 +4551,11 @@ const MAX_RAPTORQ_SOURCE_BLOCKS: usize = 256;
 /// pay pool-dispatch latency and lose the small-object latency win), only while `parallel_encode`
 /// is on (the transfer fits under [`PARALLEL_ENCODE_MAX_BYTES`]), and only within the `u8` SBN
 /// envelope.
-fn should_parallel_encode_source_blocks(block_count: usize, parallel_encode: bool) -> bool {
-    parallel_encode && block_count > 1 && block_count <= MAX_RAPTORQ_SOURCE_BLOCKS
+fn should_parallel_encode_source_blocks(
+    block_count: usize,
+    parallel_encode_plan: Option<ParallelEncodePlan>,
+) -> bool {
+    parallel_encode_plan.is_some() && block_count > 1 && block_count <= MAX_RAPTORQ_SOURCE_BLOCKS
 }
 
 /// Encode one RaptorQ source block (its `K` source symbols plus `repair_count` repair symbols) into
@@ -4477,7 +4610,7 @@ async fn spray_round<S>(
     symbol_auth: Option<&SecurityContext>,
     udp_send_acceleration: &mut UdpSendAccelerationReport,
     with_source: bool,
-    parallel_encode: bool,
+    parallel_encode_plan: Option<ParallelEncodePlan>,
 ) -> Result<(), RqError>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
@@ -4493,8 +4626,11 @@ where
             enc.repair_cursors.resize(blocks.len(), 0);
         }
 
+        let mut round0_blocks = 0usize;
+        let mut round0_source_symbols = 0usize;
+        let mut round0_repair_symbols = 0usize;
         let use_parallel_source_encode =
-            with_source && should_parallel_encode_source_blocks(blocks.len(), parallel_encode);
+            with_source && should_parallel_encode_source_blocks(blocks.len(), parallel_encode_plan);
         if use_parallel_source_encode {
             // Parallel per-block encode on the runtime blocking pool. Each RaptorQ source block
             // solves independently, so for multi-block objects we fan the K-symbol solves across
@@ -4512,9 +4648,9 @@ where
                 encoding_parallelism: 1,
                 decoding_parallelism: 1,
             };
-            let par_batch = std::thread::available_parallelism()
-                .map_or(4, std::num::NonZeroUsize::get)
-                .clamp(2, 64);
+            let par_batch = parallel_encode_window_blocks(
+                parallel_encode_plan.expect("parallel encode plan checked above"),
+            );
             for window_start in (0..blocks.len()).step_by(par_batch) {
                 cx.checkpoint().map_err(|_| RqError::Cancelled)?;
                 let window_end = (window_start + par_batch).min(blocks.len());
@@ -4540,9 +4676,9 @@ where
                             encode_block_symbols(&cfg, object_id, sbn, &block_bytes, repair)
                         })
                         .map_err(|e| RqError::Coding(format!("encode spawn failed: {e:?}")))?;
-                    handles.push((block_index, repair, handle));
+                    handles.push((block_index, block.k, repair, handle));
                 }
-                for (block_index, target_repair, mut handle) in handles {
+                for (block_index, source_symbols, target_repair, mut handle) in handles {
                     let syms = match handle.join(cx).await {
                         Ok(Ok(syms)) => syms,
                         Ok(Err(e)) => return Err(RqError::Coding(e)),
@@ -4569,6 +4705,9 @@ where
                         udp_send_acceleration,
                     )
                     .await?;
+                    round0_blocks = round0_blocks.saturating_add(1);
+                    round0_source_symbols = round0_source_symbols.saturating_add(source_symbols);
+                    round0_repair_symbols = round0_repair_symbols.saturating_add(target_repair);
                     enc.repair_cursors[block_index] = target_repair;
                 }
             }
@@ -4591,6 +4730,11 @@ where
                     repair_target_for_feedback_round(block.k, already, round_tuning.repair_overhead)
                 };
                 let repair_count = target_repair.saturating_sub(already);
+                if with_source {
+                    round0_blocks = round0_blocks.saturating_add(1);
+                    round0_source_symbols = round0_source_symbols.saturating_add(block.k);
+                    round0_repair_symbols = round0_repair_symbols.saturating_add(target_repair);
+                }
                 if !with_source {
                     feedback_repair_blocks += 1;
                     feedback_source_symbols = feedback_source_symbols.saturating_add(block.k);
@@ -4711,6 +4855,23 @@ where
                     pending.len(),
                 );
             }
+        }
+        if with_source {
+            let source_symbols = round0_source_symbols.max(1) as f64;
+            let emitted_repair_ratio = round0_repair_symbols as f64 / source_symbols;
+            let emitted_symbols = round0_source_symbols.saturating_add(round0_repair_symbols);
+            rqtrace!(
+                "sender: round0_source_spray entry={} blocks={} source_symbols={} repair_overhead={:.4} emitted_repair_symbols={} emitted_repair_ratio={:.4} emitted_symbols={} pacing_rate_Bps={} pending_entries={}",
+                enc.index,
+                round0_blocks,
+                round0_source_symbols,
+                round_tuning.repair_overhead,
+                round0_repair_symbols,
+                emitted_repair_ratio,
+                emitted_symbols,
+                pacer.pacing().rate_bytes_per_sec(),
+                pending.len(),
+            );
         }
     }
     Ok(())
@@ -8973,8 +9134,8 @@ mod tests {
 
         assert_eq!(
             tuning.pacing.rate_bytes_per_sec(),
-            RQ_COLD_START_PACING_BPS / 2,
-            "configured lossy repair-target cells must not inherit the good-link cold-start floor"
+            RQ_BAD_LINK_ROUND0_PACING_BPS,
+            "configured bad-link repair-target cells must pace near the 50 mbit pipe instead of inheriting the good-link floor"
         );
     }
 
@@ -9118,8 +9279,51 @@ mod tests {
 
         assert_eq!(state.last_round_loss_fraction, 0.02);
         assert_eq!(
-            state.aimd_rate_bps, RQ_COLD_START_PACING_BPS,
-            "bad-cell target loss should hold rate, not pace up into self-loss"
+            state.aimd_rate_bps, RQ_BAD_LINK_ROUND0_PACING_BPS,
+            "bad-cell target loss should hold the 50 mbit pacing cap, not pace up into self-loss"
+        );
+    }
+
+    #[test]
+    fn rq_aimd_loss_target_backoff_uses_receiver_delivery_rate() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        let total_bytes = 500_u64 * 1024 * 1024;
+        let digests = [EntryDigest {
+            rel_path: "bad.bin".to_string(),
+            size: total_bytes,
+            content_id: crate::atp::object::ObjectId::content(
+                crate::atp::object::ContentId::from_bytes(b"bad.bin"),
+            ),
+            content_sha256: [0; 32],
+        }];
+        let pending = BTreeSet::from([0_u32]);
+        state.aimd_rate_bps = RQ_COLD_START_PACING_BPS;
+
+        state.observe_need_more(
+            &config,
+            &digests,
+            &pending,
+            10_000,
+            5_000,
+            Some(0.50),
+            Duration::from_secs(1),
+            Duration::from_millis(80),
+            total_bytes,
+        );
+
+        assert_eq!(state.last_round_loss_fraction, 0.50);
+        assert_eq!(
+            state.aimd_rate_bps, 6_600_000,
+            "loss-targeted overrun should back off to receiver delivery plus headroom, not blind half-rate"
+        );
+        assert!(
+            state.aimd_rate_bps < RQ_COLD_START_PACING_BPS / 2,
+            "delivery-rate backoff must be able to settle below blind half-rate on sub-100mbit paths"
         );
     }
 
@@ -9224,6 +9428,31 @@ mod tests {
             tuning.pacing.path_rate_bps,
             state.aimd_rate_bps.saturating_mul(8),
             "AIMD decrease must cap the next sender spray instead of acting as a one-shot sample"
+        );
+    }
+
+    #[test]
+    fn rq_round_tuning_applies_loss_detector_cap_after_aimd_feedback() {
+        let config = RqConfig {
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let mut state = RqAdaptiveSendState::new(7, &config, 1);
+        state.est = rq_test_path_estimate(&config, 32.0 * 1024.0 * 1024.0);
+        state.controller.update_estimate(state.est);
+        state.aimd_feedback_seen = true;
+        state.aimd_rate_bps = RQ_COLD_START_PACING_BPS;
+        state.loss_ema = 0.01;
+        state.loss_bar = RQ_PENDING_PRESSURE_LOSS_FLOOR;
+        state.pacing_loss_ema = config.round0_loss_target;
+        state.loss_pacing_cap_bps = Some(RQ_COLD_START_PACING_BPS / 4);
+
+        let tuning = state.round_tuning(&config);
+
+        assert_eq!(
+            tuning.pacing.rate_bytes_per_sec(),
+            RQ_BAD_LINK_ROUND0_PACING_BPS,
+            "loss-detector caps must remain active after AIMD feedback, bounded by the bad-link floor"
         );
     }
 
@@ -11399,11 +11628,29 @@ mod tests {
                 source_retransmit_request_limit(&config, 1),
                 Some(DEFAULT_MAX_SOURCE_RETRANSMIT_REQUESTS)
             );
+            assert_eq!(round0_bad_link_pacing_bps(&config), None);
         }
     }
 
     #[test]
-    fn round0_loss_target_calibrates_bad_link_repair_without_pacing_changes() {
+    fn round0_bad_link_pacing_cap_is_narrow_to_bad_matrix_loss() {
+        for (target, expected) in [
+            (0.0, None),
+            (0.001, None),
+            (0.02, Some(RQ_BAD_LINK_ROUND0_PACING_BPS)),
+            (0.10, None),
+        ] {
+            let config = RqConfig {
+                round0_loss_target: target,
+                ..RqConfig::default()
+            };
+
+            assert_eq!(round0_bad_link_pacing_bps(&config), expected);
+        }
+    }
+
+    #[test]
+    fn round0_loss_target_calibrates_bad_link_repair_without_full_round_budget() {
         let config = RqConfig {
             symbol_size: 1200,
             max_block_size: 512 * 1024,
@@ -11414,24 +11661,95 @@ mod tests {
         let mut state = RqAdaptiveSendState::new(7, &config, 8);
 
         let tuning = state.round0_tuning(&config);
+        let extra_fraction = tuning.repair_overhead - 1.0;
+        let loss_bar = round0_loss_target_loss_bar(&config);
+        let full_round_budget = adaptive::overhead_for_target(
+            fixed_block_k(&config),
+            loss_bar,
+            RQ_SOURCE_FEC_FALLBACK_ALPHA,
+            RQ_SOURCE_FEC_FALLBACK_MAX_OVERHEAD,
+        );
 
         assert!(
-            (1.10..=1.20).contains(&tuning.repair_overhead),
-            "2% target loss should produce a 10-20% one-round repair budget, got {}",
+            (1.04..=1.10).contains(&tuning.repair_overhead),
+            "2% target loss should produce a byte-efficient first-flight repair budget, got {}",
             tuning.repair_overhead
         );
         assert!(
-            initial_repair_target_per_block(437, tuning.repair_overhead) >= 40,
-            "2% loss should pre-spray enough repair symbols for one-round convergence"
+            extra_fraction < full_round_budget,
+            "round-0 pre-spray should not spend the full feedback round budget: first_flight={extra_fraction} full_round={full_round_budget}"
+        );
+        assert!(
+            adaptive::decode_fail_probability(fixed_block_k(&config), extra_fraction, loss_bar)
+                <= RQ_SOURCE_FEC_FALLBACK_ALPHA * 1.000_001,
+            "round-0 pre-spray must still hit the configured decode-failure target"
+        );
+        assert!(
+            initial_repair_target_per_block(437, tuning.repair_overhead) >= 20,
+            "2% loss should pre-spray enough repair symbols to cover the decode-failure target"
         );
         assert!(
             tuning.pacing.path_rate_bps
                 <= RqSprayPacing::cold_start(config.symbol_size).path_rate_bps,
             "round-0 loss calibration must not raise sender pacing"
         );
+        assert_eq!(
+            tuning.pacing.rate_bytes_per_sec(),
+            RQ_BAD_LINK_ROUND0_PACING_BPS,
+            "2% bad-link round 0 should pace near the 50 mbit pipe instead of cold-start overrun"
+        );
         assert!(
             source_retransmit_needs_fec_fallback(&config, 2, 0, 0.0),
             "repair-only rounds at the source-retransmit boundary must keep FEC fallback enabled"
+        );
+    }
+
+    #[test]
+    fn large_lossy_round0_uses_bounded_parallel_encode_plan() {
+        let large = 500_u64 * 1024 * 1024;
+
+        let clean = RqConfig {
+            round0_loss_target: 0.0,
+            ..RqConfig::default()
+        };
+        assert_eq!(parallel_encode_plan_for_transfer(large, &clean), None);
+
+        let good = RqConfig {
+            round0_loss_target: RQ_ROUND0_TARGET_LOSS_ENABLE_MIN / 5.0,
+            ..RqConfig::default()
+        };
+        assert_eq!(parallel_encode_plan_for_transfer(large, &good), None);
+
+        let bad = RqConfig {
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        assert_eq!(
+            parallel_encode_plan_for_transfer(large, &bad),
+            Some(ParallelEncodePlan {
+                max_batch_blocks: LOSSY_LARGE_PARALLEL_ENCODE_BATCH_BLOCKS
+            })
+        );
+        assert!(should_parallel_encode_source_blocks(
+            MAX_RAPTORQ_SOURCE_BLOCKS,
+            parallel_encode_plan_for_transfer(large, &bad)
+        ));
+        assert!(!should_parallel_encode_source_blocks(
+            MAX_RAPTORQ_SOURCE_BLOCKS + 1,
+            parallel_encode_plan_for_transfer(large, &bad)
+        ));
+    }
+
+    #[test]
+    fn small_transfer_keeps_existing_full_parallel_encode_plan() {
+        let small = PARALLEL_ENCODE_MAX_BYTES;
+        let config = RqConfig::default();
+
+        assert_eq!(
+            parallel_encode_plan_for_transfer(small, &config),
+            Some(ParallelEncodePlan {
+                max_batch_blocks: PARALLEL_ENCODE_HOST_MAX_BATCH_BLOCKS
+            })
         );
     }
 

@@ -375,6 +375,28 @@ pub fn decode_fail_probability(k: u32, overhead: f64, loss: f64) -> f64 {
 /// `[0, max_overhead]`.
 #[must_use]
 pub fn overhead_for_target(k: u32, loss_p_bar: f64, alpha: f64, max_overhead: f64) -> f64 {
+    let base = decode_repair_overhead_for_target(k, loss_p_bar, alpha, max_overhead);
+    let p = if loss_p_bar.is_finite() {
+        loss_p_bar.clamp(0.0, 0.999)
+    } else {
+        0.0
+    };
+    round_budgeted_repair_overhead(base, p, max_overhead)
+}
+
+/// Closed-form repair overhead for the decode-failure target alone.
+///
+/// Unlike [`overhead_for_target`], this deliberately does not apply the
+/// lossy-round budget multiplier. Use it when a caller wants a byte-efficient
+/// first flight and can fall back to feedback-sized repair if the receiver
+/// still reports missing symbols.
+#[must_use]
+pub fn decode_repair_overhead_for_target(
+    k: u32,
+    loss_p_bar: f64,
+    alpha: f64,
+    max_overhead: f64,
+) -> f64 {
     if k == 0 {
         return 0.0;
     }
@@ -399,8 +421,7 @@ pub fn overhead_for_target(k: u32, loss_p_bar: f64, alpha: f64, max_overhead: f6
     } else {
         1e-3
     };
-    let base = decode_failure_overhead_for_target(k, p, alpha, max_overhead);
-    round_budgeted_repair_overhead(base, p, max_overhead)
+    decode_failure_overhead_for_target(k, p, alpha, max_overhead)
 }
 
 fn decode_failure_overhead_for_target(k: u32, p: f64, alpha: f64, max_overhead: f64) -> f64 {
@@ -1198,7 +1219,7 @@ mod tests {
         let alpha = 1e-6;
         let k = 437;
         let loss = LOSSY_ROUND_BUDGET_FULL_STRENGTH_LOSS;
-        let base = decode_failure_overhead_for_target(k, loss, alpha, 0.5);
+        let base = decode_repair_overhead_for_target(k, loss, alpha, 0.5);
         let budgeted = overhead_for_target(k, loss, alpha, 0.5);
 
         assert!(
