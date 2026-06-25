@@ -13,8 +13,8 @@
 
 use crate::cx::Cx;
 use crate::net::{
-    UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpBufferTuneReport, UdpOutboundDatagram, UdpSocket,
-    UdpSocketCapabilities,
+    UDP_MAX_GSO_SEGMENTS, UdpBufferConfig, UdpBufferTuneReport, UdpOutboundDatagram,
+    UdpSendBatchStrategy, UdpSocket, UdpSocketCapabilities,
 };
 use smallvec::SmallVec;
 use std::io;
@@ -90,6 +90,31 @@ pub struct BatchResult {
     pub gso_send_used: bool,
     /// Any error that terminated the batch early.
     pub error: Option<String>,
+}
+
+fn homogeneous_packet_run_len(packets: &[OutgoingPacket]) -> usize {
+    let Some(first) = packets.first() else {
+        return 0;
+    };
+    let first_len = first.data.len();
+    let first_dst = first.dst_addr;
+    packets
+        .iter()
+        .take_while(|packet| packet.data.len() == first_len && packet.dst_addr == first_dst)
+        .count()
+}
+
+fn send_strategy_for_packet_run(
+    packets: &[OutgoingPacket],
+    base: UdpSendBatchStrategy,
+) -> UdpSendBatchStrategy {
+    let mut strategy = base;
+    if packets.len() > 1 {
+        if let Some(packet) = packets.first() {
+            strategy.gso_segment_bytes = packet.data.len();
+        }
+    }
+    strategy
 }
 
 /// Native UDP endpoint for QUIC packet exchange.
@@ -346,6 +371,17 @@ impl QuicUdpEndpoint {
         cx: &Cx,
         packets: &[OutgoingPacket],
     ) -> Result<BatchResult, QuicUdpEndpointError> {
+        self.send_batch_with_strategy(cx, packets, UdpSendBatchStrategy::default())
+            .await
+    }
+
+    /// Send a batch of packets with an explicit UDP acceleration strategy.
+    pub async fn send_batch_with_strategy(
+        &mut self,
+        cx: &Cx,
+        packets: &[OutgoingPacket],
+        strategy: UdpSendBatchStrategy,
+    ) -> Result<BatchResult, QuicUdpEndpointError> {
         let batch_start = Instant::now();
         let mut total_packets = 0;
         let mut total_bytes = 0;
@@ -355,59 +391,73 @@ impl QuicUdpEndpoint {
         let mut gso_send_used = false;
 
         for chunk in packets.chunks(self.config.max_batch_size) {
-            let mut datagrams: SmallVec<[UdpOutboundDatagram<'_>; 32]> =
-                SmallVec::with_capacity(chunk.len());
+            let mut offset = 0usize;
+            while offset < chunk.len() {
+                let run_len = homogeneous_packet_run_len(&chunk[offset..]).max(1);
+                let run = &chunk[offset..offset.saturating_add(run_len)];
+                let run_strategy = send_strategy_for_packet_run(run, strategy);
+                let mut datagrams: SmallVec<[UdpOutboundDatagram<'_>; 32]> =
+                    SmallVec::with_capacity(run.len());
 
-            for packet in chunk {
-                if cx.checkpoint().is_err() {
-                    return Err(QuicUdpEndpointError::Cancelled);
-                }
+                for packet in run {
+                    if cx.checkpoint().is_err() {
+                        return Err(QuicUdpEndpointError::Cancelled);
+                    }
 
-                if packet.data.len() > self.config.max_packet_size {
-                    return Err(QuicUdpEndpointError::PacketTooLarge {
-                        size: packet.data.len(),
-                        limit: self.config.max_packet_size,
+                    if packet.data.len() > self.config.max_packet_size {
+                        return Err(QuicUdpEndpointError::PacketTooLarge {
+                            size: packet.data.len(),
+                            limit: self.config.max_packet_size,
+                        });
+                    }
+
+                    datagrams.push(UdpOutboundDatagram {
+                        dst_addr: packet.dst_addr,
+                        payload: &packet.data,
                     });
                 }
 
-                datagrams.push(UdpOutboundDatagram {
-                    dst_addr: packet.dst_addr,
-                    payload: &packet.data,
-                });
-            }
+                let report = match self
+                    .socket
+                    .send_batch_to_with_strategy(&datagrams, run_strategy)
+                    .await
+                {
+                    Ok(report) => report,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                        return Err(QuicUdpEndpointError::Cancelled);
+                    }
+                    Err(e) => {
+                        self.metrics
+                            .send_errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return Err(e.into());
+                    }
+                };
 
-            let report = match self.socket.send_batch_to(&datagrams).await {
-                Ok(report) => report,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                    return Err(QuicUdpEndpointError::Cancelled);
-                }
-                Err(e) => {
+                total_packets += report.packets_processed;
+                total_bytes += report.bytes_processed;
+                fallback_used |= report.fallback_used;
+                native_send_batch_used |= report.native_send_batch_used;
+                gso_send_used |= report.gso_send_used;
+                self.metrics.packets_sent.fetch_add(
+                    report.packets_processed as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                self.metrics.bytes_sent.fetch_add(
+                    report.bytes_processed as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+
+                if let Some(error) = report.error {
                     self.metrics
                         .send_errors
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Err(e.into());
+                    batch_error = Some(error);
+                    break;
                 }
-            };
-
-            total_packets += report.packets_processed;
-            total_bytes += report.bytes_processed;
-            fallback_used |= report.fallback_used;
-            native_send_batch_used |= report.native_send_batch_used;
-            gso_send_used |= report.gso_send_used;
-            self.metrics.packets_sent.fetch_add(
-                report.packets_processed as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            self.metrics.bytes_sent.fetch_add(
-                report.bytes_processed as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-
-            if let Some(error) = report.error {
-                self.metrics
-                    .send_errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                batch_error = Some(error);
+                offset = offset.saturating_add(run_len);
+            }
+            if batch_error.is_some() {
                 break;
             }
         }
@@ -639,6 +689,32 @@ mod tests {
                 5
             );
         });
+    }
+
+    #[test]
+    fn packet_run_helpers_split_mixed_quic_tail_packets() {
+        let dst = "127.0.0.1:9000".parse().unwrap();
+        let packets = [
+            OutgoingPacket {
+                dst_addr: dst,
+                data: vec![1; 65_000],
+                send_time: None,
+            },
+            OutgoingPacket {
+                dst_addr: dst,
+                data: vec![2; 65_000],
+                send_time: None,
+            },
+            OutgoingPacket {
+                dst_addr: dst,
+                data: vec![3; 1_200],
+                send_time: None,
+            },
+        ];
+
+        assert_eq!(homogeneous_packet_run_len(&packets), 2);
+        let strategy = send_strategy_for_packet_run(&packets[..2], UdpSendBatchStrategy::default());
+        assert_eq!(strategy.gso_segment_bytes, 65_000);
     }
 
     #[test]

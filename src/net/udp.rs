@@ -3055,6 +3055,41 @@ mod tests {
         assert_eq!(plan.estimated_syscalls, 1);
     }
 
+    #[test]
+    fn udp_send_batch_plan_accepts_large_quic_gso_segment_when_strategy_raises_limit() {
+        let dst = socket_addr("127.0.0.1:9000");
+        let payloads = vec![vec![7; 65_000]; 4];
+        let packets = payloads
+            .iter()
+            .map(|payload| UdpOutboundDatagram {
+                dst_addr: dst,
+                payload,
+            })
+            .collect::<Vec<_>>();
+
+        let plan = UdpSendBatchPlan::for_packets(
+            &packets,
+            UdpSendAccelerationCapabilities {
+                sendmmsg: UdpCapability::Supported,
+                gso: UdpCapability::Supported,
+                max_sendmmsg_batch: UDP_MAX_SENDMMSG_BATCH,
+                max_gso_segments: UDP_MAX_GSO_SEGMENTS,
+            },
+            UdpSendBatchStrategy {
+                gso_segment_bytes: 65_000,
+                max_gso_segments: 4,
+                ..UdpSendBatchStrategy::default()
+            },
+        );
+
+        assert_eq!(plan.path, UdpSendBatchPath::Gso);
+        assert_eq!(plan.datagrams, 4);
+        assert_eq!(plan.payload_bytes, 260_000);
+        assert_eq!(plan.estimated_syscalls, 1);
+        assert_eq!(plan.gso_segment_bytes, Some(65_000));
+        assert_eq!(plan.gso_segments_per_packet, Some(4));
+    }
+
     #[cfg(any(
         target_os = "linux",
         target_os = "android",

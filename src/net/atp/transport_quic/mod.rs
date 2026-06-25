@@ -270,7 +270,9 @@ pub const DEFAULT_DATAGRAM_FANOUT: usize = 1;
 /// a very large cwnd estimate from turning one scheduler slice into an unbounded
 /// outbound queue while still letting the native encrypted link coalesce a
 /// near-full jumbo 1-RTT packet of symbol DATAGRAM frames after MATRIX-39
-/// removed the old one-symbol packet budget.
+/// removed the old one-symbol packet budget. The native clean encrypted send
+/// path may expand this default cap into a bounded multi-packet GSO window; an
+/// explicit non-default cap remains the operator's pacing envelope.
 pub const DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH: usize = 54;
 
 const QUIC_SPRAY_BURST_RTT_FRACTION: f64 = 0.125;

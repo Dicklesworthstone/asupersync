@@ -81,6 +81,7 @@ use crate::net::quic_native::{
     NativeQuicConnection, NativeQuicConnectionConfig, OutgoingPacket, PacketNumberSpace,
     QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket, StreamRole,
 };
+use crate::net::{UDP_MAX_GSO_SEGMENTS, UdpSendBatchStrategy};
 use crate::security::SecurityContext;
 use crate::security::tag::TAG_SIZE;
 use crate::types::outcome::Outcome;
@@ -192,6 +193,14 @@ const ATP_QUIC_UDP_MAX_PACKET: usize = 65_535;
 const ONE_RTT_PACKET_OVERHEAD: usize = ONE_RTT_HEADER_LEN + ONE_RTT_TAG_LEN;
 /// Reserved bytes below the endpoint cap for ACK/control-frame coalescing slack.
 const ONE_RTT_COALESCED_CONTROL_HEADROOM: usize = 64;
+/// Loss-free encrypted sprays batch several full protected packets per UDP
+/// send so Linux UDP_SEGMENT can amortize syscall cost above the packet-fill
+/// layer. Lossy paths keep the pacing burst unchanged.
+const QUIC_CLEAN_GSO_PACKETS_PER_FLUSH: usize = 4;
+/// Keep the clean GSO spray batch below `NativeQuicConnection`'s bounded
+/// outbound DATAGRAM queue (currently 256) so batching never drops queued
+/// symbols before `flush()` drains them.
+const QUIC_CLEAN_GSO_MAX_FLUSH_SYMBOLS: usize = 255;
 
 /// Fixed socket buffer budget for the native ATP-QUIC link. This is intentionally
 /// a constant envelope, not proportional to object size, so large transfers cannot
@@ -612,14 +621,17 @@ fn coalesced_spray_flush_symbol_limit(
     max_symbol_frames_per_packet: usize,
     max_flush_symbols: usize,
     path_loss_rate: f64,
+    clean_packet_batch_target: usize,
 ) -> usize {
     let flush_cap = max_flush_symbols.max(1);
     let packet_width = max_symbol_frames_per_packet.max(1);
     let burst = if path_loss_rate <= f64::EPSILON {
         // Loss-free encrypted sprays are dominated by per-packet QUIC work.
-        // Queue one full protected packet worth of DATAGRAM frames, then sleep
-        // by byte count so average pacing stays unchanged.
-        let packet_floor = packet_width.min(flush_cap);
+        // Queue multiple full protected packets, then sleep by byte count so
+        // average pacing stays unchanged while UDP GSO has work to batch.
+        let packet_floor = packet_width
+            .saturating_mul(clean_packet_batch_target.max(1))
+            .min(flush_cap);
         pacing_burst_symbols.max(1).max(packet_floor).min(flush_cap)
     } else {
         pacing_burst_symbols.max(1).min(flush_cap)
@@ -629,6 +641,37 @@ fn coalesced_spray_flush_symbol_limit(
         burst
     } else {
         full_packet_multiple
+    }
+}
+
+fn clean_gso_flush_symbol_cap(
+    max_spray_symbols_per_flush: usize,
+    max_symbol_frames_per_packet: usize,
+) -> usize {
+    let base_cap = max_spray_symbols_per_flush.max(1);
+    let packet_width = max_symbol_frames_per_packet.max(1);
+    if base_cap < packet_width {
+        base_cap
+    } else if base_cap == super::DEFAULT_MAX_SPRAY_SYMBOLS_PER_FLUSH {
+        base_cap
+            .saturating_mul(QUIC_CLEAN_GSO_PACKETS_PER_FLUSH)
+            .min(QUIC_CLEAN_GSO_MAX_FLUSH_SYMBOLS)
+    } else {
+        base_cap
+    }
+}
+
+fn quic_gso_send_strategy(packets: &[OutgoingPacket]) -> UdpSendBatchStrategy {
+    let gso_segment_bytes = packets
+        .iter()
+        .map(|packet| packet.data.len())
+        .max()
+        .unwrap_or(1)
+        .clamp(1, usize::from(u16::MAX));
+    UdpSendBatchStrategy {
+        gso_segment_bytes,
+        max_gso_segments: QUIC_CLEAN_GSO_PACKETS_PER_FLUSH.min(UDP_MAX_GSO_SEGMENTS),
+        ..UdpSendBatchStrategy::default()
     }
 }
 
@@ -821,11 +864,21 @@ impl QuicLink {
     }
 
     fn paced_flush_symbol_limit(&self, pacing: &QuicSprayPacingDecision) -> usize {
+        let clean_flush_cap = clean_gso_flush_symbol_cap(
+            self.max_spray_symbols_per_flush,
+            self.max_symbol_frames_per_packet,
+        );
+        let max_flush_symbols = if pacing.path_loss_rate <= f64::EPSILON {
+            clean_flush_cap
+        } else {
+            self.max_spray_symbols_per_flush
+        };
         coalesced_spray_flush_symbol_limit(
             pacing.max_burst_symbols,
             self.max_symbol_frames_per_packet,
-            self.max_spray_symbols_per_flush,
+            max_flush_symbols,
             pacing.path_loss_rate,
+            QUIC_CLEAN_GSO_PACKETS_PER_FLUSH,
         )
     }
 
@@ -999,9 +1052,10 @@ impl QuicLink {
                     send_time: None,
                 });
             }
+            let send_strategy = quic_gso_send_strategy(&packets);
             let report = self
                 .endpoint
-                .send_batch(cx, &packets)
+                .send_batch_with_strategy(cx, &packets, send_strategy)
                 .await
                 .map_err(map_udp_error)?;
             if let Some(error) = report.error {
@@ -3177,51 +3231,147 @@ mod tests {
     }
 
     #[test]
-    fn clean_spray_flush_limit_fills_one_protected_packet_before_flushing() {
+    fn clean_spray_flush_limit_preserves_explicit_low_caps() {
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(54, 51, 54, 0.0),
+            coalesced_spray_flush_symbol_limit(54, 51, 54, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
             51,
-            "MATRIX encrypted-clean shape should not flush 51 full symbols plus a 3-symbol packet"
+            "raw caps below the GSO expansion still align to one full protected packet"
         );
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(1, 51, 54, 0.0),
+            coalesced_spray_flush_symbol_limit(1, 51, 54, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
             51,
-            "clean encrypted sprays should amortize one-symbol pacing bursts into one protected packet"
+            "raw caps below the GSO expansion still amortize to one protected packet"
         );
-        assert_eq!(coalesced_spray_flush_symbol_limit(50, 51, 54, 0.0), 51);
-        assert_eq!(coalesced_spray_flush_symbol_limit(128, 51, 256, 0.0), 102);
-        assert_eq!(coalesced_spray_flush_symbol_limit(256, 51, 256, 0.0), 255);
-        assert_eq!(coalesced_spray_flush_symbol_limit(0, 51, 54, 0.0), 51);
-        assert_eq!(coalesced_spray_flush_symbol_limit(54, 0, 54, 0.0), 54);
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(2, 60, 54, 0.0),
+            coalesced_spray_flush_symbol_limit(50, 51, 54, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
+            51
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(128, 51, 256, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
+            204
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(256, 51, 256, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
+            255
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(0, 51, 54, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
+            51
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(54, 0, 54, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
+            54
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(2, 60, 54, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
             54,
             "configured flush cap still bounds packet fill when one packet can hold more"
         );
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(2, 51, 16, 0.0),
+            coalesced_spray_flush_symbol_limit(2, 51, 16, 0.0, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH),
             16,
             "operator burst cap remains the hard queueing envelope"
         );
     }
 
     #[test]
+    fn clean_gso_flush_cap_batches_full_protected_packets_when_default_cap_allows_one() {
+        assert_eq!(
+            clean_gso_flush_symbol_cap(54, 54),
+            54 * QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(
+                1,
+                54,
+                clean_gso_flush_symbol_cap(54, 54),
+                0.0,
+                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+            ),
+            54 * QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+        );
+        assert_eq!(
+            clean_gso_flush_symbol_cap(16, 54),
+            16,
+            "operator caps below one packet remain hard caps"
+        );
+        assert_eq!(
+            clean_gso_flush_symbol_cap(128, 54),
+            128,
+            "explicit operator caps above one packet remain explicit"
+        );
+    }
+
+    #[test]
     fn lossy_spray_flush_limit_preserves_pacing_burst() {
         let mild_loss = 0.001;
-        assert_eq!(coalesced_spray_flush_symbol_limit(1, 51, 54, mild_loss), 1);
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(50, 51, 54, mild_loss),
+            coalesced_spray_flush_symbol_limit(
+                1,
+                51,
+                54,
+                mild_loss,
+                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+            ),
+            1
+        );
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(
+                50,
+                51,
+                54,
+                mild_loss,
+                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+            ),
             50
         );
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(54, 51, 54, mild_loss),
+            coalesced_spray_flush_symbol_limit(
+                54,
+                51,
+                54,
+                mild_loss,
+                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+            ),
             51
         );
         assert_eq!(
-            coalesced_spray_flush_symbol_limit(128, 51, 256, mild_loss),
+            coalesced_spray_flush_symbol_limit(
+                128,
+                51,
+                256,
+                mild_loss,
+                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+            ),
             102
         );
-        assert_eq!(coalesced_spray_flush_symbol_limit(0, 51, 54, mild_loss), 1);
+        assert_eq!(
+            coalesced_spray_flush_symbol_limit(
+                0,
+                51,
+                54,
+                mild_loss,
+                QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn quic_gso_send_strategy_uses_full_protected_packet_segments() {
+        let peer = "127.0.0.1:9000".parse().unwrap();
+        let packets = vec![
+            OutgoingPacket {
+                dst_addr: peer,
+                data: vec![0; ATP_QUIC_UDP_MAX_PACKET],
+                send_time: None,
+            };
+            QUIC_CLEAN_GSO_PACKETS_PER_FLUSH
+        ];
+
+        let strategy = quic_gso_send_strategy(&packets);
+        assert_eq!(strategy.gso_segment_bytes, ATP_QUIC_UDP_MAX_PACKET);
+        assert_eq!(strategy.max_gso_segments, QUIC_CLEAN_GSO_PACKETS_PER_FLUSH);
     }
 
     #[test]
