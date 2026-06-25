@@ -113,6 +113,88 @@ RECEIVER_CPU_STAGE_KEYS = tuple(
     key for key in RECEIVER_STAGE_KEYS if key not in RECEIVER_WAIT_STAGE_KEYS
 )
 
+DECODE_PROFILE_SUM_KEYS = (
+    "decode_attempts",
+    "decode_repair_attempts",
+    "decode_source_complete_attempts",
+    "decode_completed_blocks",
+    "decode_stale_requeues",
+    "decode_micros",
+    "decode_join_wait_micros",
+    "decode_apply_micros",
+    "decode_persist_micros",
+    "decode_queued_jobs",
+    "decode_inline_jobs",
+    "decode_spawn_denials",
+    "decode_entry_cap_saturations",
+    "decode_transfer_cap_saturations",
+)
+DECODE_PROFILE_MAX_KEYS = (
+    "decode_pending_peak",
+    "decode_width_budget",
+)
+
+
+def parse_decode_profiles(lines) -> list[dict]:
+    records = []
+    for line in lines:
+        if "receiver: decode_profile" not in line:
+            continue
+        kv = {k: v for k, v in KV_RE.findall(line)}
+        rec = {
+            "phase": first_present(kv, ("phase",), str),
+            "feedback_round": first_present(kv, ("feedback_round",), float),
+        }
+        for key in DECODE_PROFILE_SUM_KEYS + DECODE_PROFILE_MAX_KEYS:
+            rec[key] = first_present(kv, (key,), float)
+        records.append(rec)
+    return records
+
+
+def summarize_decode_profiles(records) -> dict | None:
+    if not records:
+        return None
+    summary = {
+        "record_count": len(records),
+        "sum": {key: 0.0 for key in DECODE_PROFILE_SUM_KEYS},
+        "max": {key: 0.0 for key in DECODE_PROFILE_MAX_KEYS},
+    }
+    for rec in records:
+        for key in DECODE_PROFILE_SUM_KEYS:
+            summary["sum"][key] += rec.get(key) or 0.0
+        for key in DECODE_PROFILE_MAX_KEYS:
+            summary["max"][key] = max(summary["max"][key], rec.get(key) or 0.0)
+    return summary
+
+
+def report_decode_profiles(records) -> list[str]:
+    summary = summarize_decode_profiles(records)
+    if summary is None:
+        return []
+    sums = summary["sum"]
+    maxes = summary["max"]
+    print("\n## Receiver decode profile\n")
+    print("| metric | value |")
+    print("|--|--:|")
+    for key in DECODE_PROFILE_SUM_KEYS:
+        print(f"| {key} | {sums[key]:.0f} |")
+    for key in DECODE_PROFILE_MAX_KEYS:
+        print(f"| max_{key} | {maxes[key]:.0f} |")
+
+    attempts = sums["decode_attempts"]
+    repair = sums["decode_repair_attempts"]
+    join_wait = sums["decode_join_wait_micros"]
+    decode_cpu = sums["decode_micros"]
+    if attempts:
+        repair_pct = 100.0 * repair / attempts
+        print(f"\n- repair-solve attempts = {repair_pct:.1f}% of decode attempts.")
+    if join_wait:
+        print(
+            f"- receiver waited {join_wait:.0f}us for decode joins "
+            f"against {decode_cpu:.0f}us summed worker decode time."
+        )
+    return []
+
 
 def parse_receiver_intake(lines) -> list[dict]:
     records = []
@@ -269,6 +351,7 @@ def main(argv: list[str]) -> int:
     rounds = parse_rounds(lines)
     recv_records = parse_receiver_intake(lines)
     recv_summary = summarize_receiver_intake(recv_records)
+    decode_profile_records = parse_decode_profiles(lines)
 
     flags: list[str] = []
     print("# ATP-RQ trace pacing-collapse gate\n")
@@ -312,11 +395,13 @@ def main(argv: list[str]) -> int:
                      f"{args.max_rounds} (MATRIX-20 lossy wall; LEVER-B/F must cut rounds)")
 
     flags += report_receiver_intake(recv_records, args.receiver_target_mbps)
+    flags += report_decode_profiles(decode_profile_records)
     write_receiver_summary_json(recv_summary, args.receiver_summary_json)
 
     print("\n## Verdict\n")
     print(f"- parsed {len(rounds)} round record(s); highest feedback round = {max_round}; "
-          f"{len(recv_records)} receiver-stage record(s).")
+          f"{len(recv_records)} receiver-stage record(s); "
+          f"{len(decode_profile_records)} decode-profile record(s).")
     if len(rounds) < args.min_rounds and not flags:
         print(f"- only {len(rounds)} round(s) parsed (need ≥{args.min_rounds}); not a collapse sample.")
         return 0
