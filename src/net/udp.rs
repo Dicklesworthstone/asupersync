@@ -1099,6 +1099,17 @@ fn native_sendmmsg_addrs_for_packets(
 type NativeSendmmsgAddr = nix::sys::socket::SockaddrStorage;
 
 #[cfg(not(target_arch = "wasm32"))]
+// `Sent` and `WouldBlock` are only constructed inside the
+// `cfg(any(target_os = "linux", target_os = "android"))` native sendmmsg/GSO
+// batch paths; on other Unix targets (e.g. macOS) the batch send falls back to
+// `Unavailable`, so those variants are unconstructed there. Without this the
+// crate-level `deny(dead_code)` (non-Windows) turns that into a hard error and
+// breaks the apple-darwin build. Matches the existing
+// `cfg_attr(target_arch = "wasm32", allow(dead_code))` precedent in this file.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "android")),
+    allow(dead_code)
+)]
 #[derive(Debug)]
 enum NativeSendBatchAttempt {
     Sent(UdpBatchIoReport),
