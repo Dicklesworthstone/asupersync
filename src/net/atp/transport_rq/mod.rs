@@ -208,6 +208,11 @@ const RQ_ROUND0_CLEAN_RAMP_STEP_BYTES: u64 = RQ_COLD_START_PACING_BPS;
 const RQ_ROUND0_CLEAN_RAMP_ADD_BYTES_PER_S: u64 = 8 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_MAX_PACING_BPS: u64 = 128 * 1024 * 1024;
 const RQ_ROUND0_CLEAN_RAMP_FANOUT_MAX_PACING_BPS: u64 = 32 * 1024 * 1024;
+/// Small, explicitly clean transfers should not pay proactive RaptorQ repair
+/// setup in round 0. 50M/perfect/nocrypto is the target cell; keep the gate
+/// below large-object lanes that may rely on broader adaptive model choices.
+const RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD: f64 = 1.001;
 /// The 2% "bad" matrix path is rate-shaped to 50 mbit. Cold-starting it at
 /// 16 MiB/s overshoots the pipe before feedback can correct the spray, causing
 /// repair rounds to chase self-inflicted drops. Keep this deliberately narrow:
@@ -781,8 +786,8 @@ fn round0_clean_ramp_enabled(config: &RqConfig, pacing: RqSprayPacing) -> bool {
 }
 
 impl RqSprayPacer {
-    fn new_round0(pacing: RqSprayPacing, config: &RqConfig) -> Self {
-        let round0_ramp = round0_clean_ramp_enabled(config, pacing)
+    fn new_round0(pacing: RqSprayPacing, config: &RqConfig, force_clean_ramp: bool) -> Self {
+        let round0_ramp = (force_clean_ramp || round0_clean_ramp_enabled(config, pacing))
             .then(|| RqRound0CleanPacingRamp::new(round0_clean_ramp_max_rate(config)));
         if round0_ramp.is_some() {
             rqtrace!(
@@ -1750,6 +1755,28 @@ fn round0_bad_link_pacing_bps(config: &RqConfig) -> Option<u64> {
 fn round0_source_first_loss_target(config: &RqConfig) -> bool {
     let loss = config.round0_loss_target;
     loss.is_finite() && loss >= 0.0 && !round0_loss_target_repair_enabled(config)
+}
+
+fn small_clean_source_only_round0(total_bytes: u64, config: &RqConfig) -> bool {
+    let loss_free_target = round0_source_first_loss_target(config)
+        && (0.0..=f64::EPSILON).contains(&config.round0_loss_target);
+    total_bytes <= RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES
+        && config.debug_drop_one_in == 0
+        && config.repair_overhead.is_finite()
+        && config.repair_overhead <= RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_REPAIR_OVERHEAD
+        && loss_free_target
+}
+
+fn apply_small_clean_round0_source_only(
+    total_bytes: u64,
+    config: &RqConfig,
+    mut tuning: RqRoundTuning,
+) -> RqRoundTuning {
+    if small_clean_source_only_round0(total_bytes, config) {
+        tuning.repair_overhead = 1.0;
+        tuning.pacing = RqSprayPacing::cold_start(config.symbol_size);
+    }
+    tuning
 }
 
 fn measured_feedback_repair_overhead(loss_fraction: f64) -> f64 {
@@ -4122,10 +4149,20 @@ pub async fn send_path(
 
     // Round 0: every entry, source symbols plus optional repair_overhead extra.
     let mut pending: BTreeSet<u32> = encoders.iter().map(|e| e.index).collect();
-    let mut round_tuning = adaptive.round0_tuning(&config);
+    let round0_small_clean_source_only = small_clean_source_only_round0(total_bytes, &config);
+    let mut round_tuning =
+        apply_small_clean_round0_source_only(total_bytes, &config, adaptive.round0_tuning(&config));
+    if round0_small_clean_source_only {
+        rqtrace!(
+            "sender: round0_small_clean_source_only total_bytes={} repair_overhead={:.4}",
+            total_bytes,
+            round_tuning.repair_overhead
+        );
+    }
     // One token bucket owns the whole transfer. Recreating it per source/repair
     // spray would grant a fresh burst each time and overflow rate-capped qdiscs.
-    let mut pacer = RqSprayPacer::new_round0(round_tuning.pacing, &config);
+    let mut pacer =
+        RqSprayPacer::new_round0(round_tuning.pacing, &config, round0_small_clean_source_only);
     let mut round_started = Instant::now();
     let mut round_symbols_start = symbols_sent;
     spray_round(
@@ -4145,6 +4182,7 @@ pub async fn send_path(
         symbol_auth.as_ref(),
         &mut udp_send_acceleration,
         /* with_source */ true,
+        round0_small_clean_source_only,
         parallel_encode_plan,
     )
     .await?;
@@ -4344,6 +4382,7 @@ pub async fn send_path(
                         symbol_auth.as_ref(),
                         &mut udp_send_acceleration,
                         /* with_source */ false,
+                        false,
                         parallel_encode_plan,
                     )
                     .await?;
@@ -4386,6 +4425,7 @@ pub async fn send_path(
                             symbol_auth.as_ref(),
                             &mut udp_send_acceleration,
                             /* with_source */ false,
+                            false,
                             parallel_encode_plan,
                         )
                         .await?;
@@ -4584,6 +4624,83 @@ fn encode_block_symbols(
     Ok(out)
 }
 
+fn source_symbol_from_block(
+    object_id: ObjectId,
+    sbn: u8,
+    esi: usize,
+    block_bytes: &[u8],
+    symbol_size: usize,
+) -> Result<Symbol, RqError> {
+    let within_block = esi
+        .checked_mul(symbol_size)
+        .ok_or_else(|| RqError::Coding("source symbol offset overflow".to_string()))?;
+    let esi = u32::try_from(esi)
+        .map_err(|_| RqError::Coding(format!("source symbol ESI {esi} exceeds u32::MAX")))?;
+    let mut payload = vec![0u8; symbol_size];
+    if within_block < block_bytes.len() {
+        let end = within_block
+            .saturating_add(symbol_size)
+            .min(block_bytes.len());
+        payload[..end - within_block].copy_from_slice(&block_bytes[within_block..end]);
+    }
+    Ok(Symbol::new(
+        SymbolId::new(object_id, sbn, esi),
+        payload,
+        SymbolKind::Source,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_source_only_block_datagrams<S>(
+    cx: &Cx,
+    control: &mut FrameTransport<S>,
+    adaptive: &mut RqAdaptiveSendState,
+    sockets: &mut [UdpSocket],
+    rr: &mut usize,
+    symbols_sent: &mut u64,
+    dropper: &mut u32,
+    tag: u64,
+    entry: u32,
+    object_id: ObjectId,
+    block: EncodeAheadBlock,
+    block_bytes: &[u8],
+    config: &RqConfig,
+    pacer: &mut RqSprayPacer,
+    symbol_auth: Option<&SecurityContext>,
+    udp_send_acceleration: &mut UdpSendAccelerationReport,
+) -> Result<usize, RqError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let symbol_size = usize::from(config.symbol_size.max(1));
+    let mut send_batch = RqPendingSendBatch::new(sockets.len());
+    for esi in 0..block.k {
+        let symbol = source_symbol_from_block(object_id, block.sbn, esi, block_bytes, symbol_size)?;
+        queue_symbol_datagram(
+            cx,
+            control,
+            adaptive,
+            sockets,
+            rr,
+            symbols_sent,
+            dropper,
+            tag,
+            entry,
+            &symbol,
+            config,
+            pacer,
+            symbol_auth,
+            &mut send_batch,
+            udp_send_acceleration,
+        )
+        .await?;
+    }
+    let report = send_batch.flush(sockets, symbols_sent).await?;
+    udp_send_acceleration.observe_flush_report(report);
+    service_rq_spray_control(cx, control, adaptive).await?;
+    Ok(block.k)
+}
+
 /// Spray one round of symbols for the `pending` entries across the UDP sockets.
 ///
 /// Round 0 (`with_source`) sends every block's source symbols plus optional
@@ -4610,6 +4727,7 @@ async fn spray_round<S>(
     symbol_auth: Option<&SecurityContext>,
     udp_send_acceleration: &mut UdpSendAccelerationReport,
     with_source: bool,
+    small_clean_source_only: bool,
     parallel_encode_plan: Option<ParallelEncodePlan>,
 ) -> Result<(), RqError>
 where
@@ -4631,7 +4749,36 @@ where
         let mut round0_repair_symbols = 0usize;
         let use_parallel_source_encode =
             with_source && should_parallel_encode_source_blocks(blocks.len(), parallel_encode_plan);
-        if use_parallel_source_encode {
+        if with_source && small_clean_source_only {
+            for (block_index, block) in blocks.iter().copied().enumerate() {
+                let read_start = enc.source_offset.checked_add(block.start).ok_or_else(|| {
+                    RqError::Coding("encode source range offset overflow".to_string())
+                })?;
+                let block_bytes = read_source_range(&enc.abs_path, read_start, block.len).await?;
+                let source_symbols = send_source_only_block_datagrams(
+                    cx,
+                    control,
+                    adaptive,
+                    sockets,
+                    rr,
+                    symbols_sent,
+                    dropper,
+                    tag,
+                    enc.index,
+                    enc.object_id,
+                    block,
+                    &block_bytes,
+                    config,
+                    pacer,
+                    symbol_auth,
+                    udp_send_acceleration,
+                )
+                .await?;
+                round0_blocks = round0_blocks.saturating_add(1);
+                round0_source_symbols = round0_source_symbols.saturating_add(source_symbols);
+                enc.repair_cursors[block_index] = 0;
+            }
+        } else if use_parallel_source_encode {
             // Parallel per-block encode on the runtime blocking pool. Each RaptorQ source block
             // solves independently, so for multi-block objects we fan the K-symbol solves across
             // cores instead of grinding them one-at-a-time on a single core (the measured
@@ -9284,7 +9431,7 @@ mod tests {
             round0_loss_target: 0.0,
             ..RqConfig::default()
         };
-        let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config);
+        let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config, false);
         assert!(pacer.round0_ramp.is_some());
 
         pacer.configure(RqSprayPacing::from_rate(
@@ -9310,7 +9457,7 @@ mod tests {
             round0_loss_target: 0.0,
             ..RqConfig::default()
         };
-        let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config);
+        let mut pacer = RqSprayPacer::new_round0(RqSprayPacing::cold_start(1200), &config, false);
         let datagrams = RQ_ROUND0_CLEAN_RAMP_STEP_BYTES
             .div_ceil(u64::from(pacer.pacing().datagram_bytes.max(1)));
         for _ in 0..datagrams {
@@ -11963,6 +12110,145 @@ mod tests {
     }
 
     #[test]
+    fn small_clean_round0_forces_source_only_repair_budget() {
+        let config = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.001,
+            round0_loss_target: 0.0,
+            ..RqConfig::default()
+        };
+        let tuning = RqRoundTuning {
+            repair_overhead: 1.08,
+            pacing: RqSprayPacing::from_rate(
+                RQ_MIN_PACING_BPS,
+                config.symbol_size,
+                RQ_ADAPTIVE_BURST_SYMBOLS,
+                None,
+                false,
+            ),
+        };
+
+        let adjusted = apply_small_clean_round0_source_only(50 * 1024 * 1024, &config, tuning);
+
+        assert!(small_clean_source_only_round0(50 * 1024 * 1024, &config));
+        assert_eq!(adjusted.repair_overhead, 1.0);
+        assert_eq!(
+            initial_repair_target_per_block(437, adjusted.repair_overhead),
+            0
+        );
+        assert_eq!(
+            adjusted.pacing.rate_bytes_per_sec(),
+            RQ_COLD_START_PACING_BPS
+        );
+        assert!(!round0_clean_ramp_enabled(&config, adjusted.pacing));
+        let pacer = RqSprayPacer::new_round0(
+            adjusted.pacing,
+            &config,
+            small_clean_source_only_round0(50 * 1024 * 1024, &config),
+        );
+        assert!(pacer.round0_ramp.is_some());
+    }
+
+    #[test]
+    fn small_clean_round0_preserves_lossy_near_clean_debug_and_large_budgets() {
+        let lossy = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.02,
+            ..RqConfig::default()
+        };
+        let good = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.001,
+            ..RqConfig::default()
+        };
+        let explicit = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.05,
+            round0_loss_target: 0.0,
+            ..RqConfig::default()
+        };
+        let debug_drop = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.05,
+            round0_loss_target: 0.0,
+            debug_drop_one_in: 17,
+            ..RqConfig::default()
+        };
+        let large_clean = RqConfig {
+            symbol_size: 1200,
+            max_block_size: 512 * 1024,
+            repair_overhead: 1.0,
+            round0_loss_target: 0.0,
+            ..RqConfig::default()
+        };
+        let tuning = RqRoundTuning {
+            repair_overhead: 1.08,
+            pacing: RqSprayPacing::from_rate(
+                RQ_MIN_PACING_BPS,
+                lossy.symbol_size,
+                RQ_ADAPTIVE_BURST_SYMBOLS,
+                None,
+                false,
+            ),
+        };
+
+        assert!(!small_clean_source_only_round0(50 * 1024 * 1024, &lossy));
+        let lossy_adjusted = apply_small_clean_round0_source_only(50 * 1024 * 1024, &lossy, tuning);
+        assert_eq!(lossy_adjusted.repair_overhead, tuning.repair_overhead);
+        assert_eq!(
+            lossy_adjusted.pacing.rate_bytes_per_sec(),
+            tuning.pacing.rate_bytes_per_sec()
+        );
+        assert!(!small_clean_source_only_round0(50 * 1024 * 1024, &good));
+        let good_adjusted = apply_small_clean_round0_source_only(50 * 1024 * 1024, &good, tuning);
+        assert_eq!(good_adjusted.repair_overhead, tuning.repair_overhead);
+        assert_eq!(
+            good_adjusted.pacing.rate_bytes_per_sec(),
+            tuning.pacing.rate_bytes_per_sec()
+        );
+        assert!(!small_clean_source_only_round0(50 * 1024 * 1024, &explicit));
+        let explicit_adjusted =
+            apply_small_clean_round0_source_only(50 * 1024 * 1024, &explicit, tuning);
+        assert_eq!(explicit_adjusted.repair_overhead, tuning.repair_overhead);
+        assert_eq!(
+            explicit_adjusted.pacing.rate_bytes_per_sec(),
+            tuning.pacing.rate_bytes_per_sec()
+        );
+        assert!(!small_clean_source_only_round0(
+            50 * 1024 * 1024,
+            &debug_drop
+        ));
+        let debug_drop_adjusted =
+            apply_small_clean_round0_source_only(50 * 1024 * 1024, &debug_drop, tuning);
+        assert_eq!(debug_drop_adjusted.repair_overhead, tuning.repair_overhead);
+        assert_eq!(
+            debug_drop_adjusted.pacing.rate_bytes_per_sec(),
+            tuning.pacing.rate_bytes_per_sec()
+        );
+        assert!(!small_clean_source_only_round0(
+            RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES + 1,
+            &large_clean
+        ));
+        let large_adjusted = apply_small_clean_round0_source_only(
+            RQ_SMALL_CLEAN_SOURCE_ONLY_MAX_BYTES + 1,
+            &large_clean,
+            tuning,
+        );
+        assert_eq!(large_adjusted.repair_overhead, tuning.repair_overhead);
+        assert_eq!(
+            large_adjusted.pacing.rate_bytes_per_sec(),
+            tuning.pacing.rate_bytes_per_sec()
+        );
+    }
+
+    #[test]
     fn round0_bad_link_pacing_cap_is_narrow_to_bad_matrix_loss() {
         for (target, expected) in [
             (0.0, None),
@@ -12478,6 +12764,29 @@ mod tests {
         symbols
     }
 
+    fn collect_source_only_block_symbols(
+        object_id: ObjectId,
+        bytes: &[u8],
+        config: &RqConfig,
+    ) -> Vec<(u8, u32, SymbolKind, Vec<u8>)> {
+        let mut symbols = Vec::new();
+        let symbol_size = usize::from(config.symbol_size);
+        for block in encode_ahead_blocks(bytes.len(), config).expect("block plan") {
+            for esi in 0..block.k {
+                let symbol = source_symbol_from_block(
+                    object_id,
+                    block.sbn,
+                    esi,
+                    &bytes[block.start..block.start + block.len],
+                    symbol_size,
+                )
+                .expect("source-only symbol");
+                symbols.push(symbol_fingerprint(&symbol));
+            }
+        }
+        symbols
+    }
+
     fn collect_monolithic_repair_symbols(
         object_id: ObjectId,
         bytes: &[u8],
@@ -12691,6 +13000,23 @@ mod tests {
         assert_eq!(
             collect_m1_source_symbols(object_id, bytes, &config, 2),
             collect_monolithic_symbols(object_id, bytes, &config, 2)
+        );
+    }
+
+    #[test]
+    fn source_only_block_symbols_match_pipeline_source_symbols() {
+        let config = RqConfig {
+            symbol_size: 4,
+            max_block_size: 6,
+            repair_overhead: 1.0,
+            ..RqConfig::default()
+        };
+        let object_id = ObjectId::new_for_test(0xF205);
+        let bytes = b"source-only-fast-path";
+
+        assert_eq!(
+            collect_source_only_block_symbols(object_id, bytes, &config),
+            collect_m1_source_symbols(object_id, bytes, &config, 0)
         );
     }
 
