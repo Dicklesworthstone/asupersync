@@ -2737,3 +2737,12 @@ Benched origin/main HEAD `f45da6598` (fix `aba20bb91`; built clean from `git arc
 | rsyncd | 5.13s | 3/3 ✓ | — | 40 MB | — |
 
 **Verdict: stream-amortize neutral; single-QUIC-stream throughput is the hard ceiling.** Two consecutive single-stream levers on 500M/perfect are now exhausted: MATRIX-99 (disk-backed source-stream, the big 2.17× cut from removing RaptorQ encode) and MATRIX-100 (write-amortize, neutral). atp's reliable-stream tops out ~64 MB/s while rsync's bulk-TCP ramps to ~97 MB/s on large transfers, so 500M/perfect sits at 1.49× (a near-tie, down from the 3.29× loss — real progress, but not flipped). **The remaining lever to FLIP is MULTI-STREAM source striping**: split the clean source across N parallel QUIC streams (or N connections) to aggregate bandwidth past rsync's single-TCP ramp — this is the same idea as E-3.1 (multi-stream vs single-TCP on high-BDP) applied to the clean-source-stream path. Diminishing returns warning: 500M/perfect is already a near-tie, so this is polish, not a loss-fix. Routed to owner (plbzgp/p1sufr): single-stream amortize is exhausted; try multi-stream striping if pursuing the flip, else 1.49× near-tie is an acceptable bank. Evidence: `artifacts/atp_bench_matrix/20260626T021001Z/`.
+
+## MATRIX-101 (2026-06-26) — matrix-coverage gap fill: tree_small/perfect nocrypto = NEAR-TIE (atp 1.22× rsync). Filled an unmeasured cell (tree workloads, rsync's many-small-files home turf) while the swarm implemented the encrypted source-stream. atp 5/5 sha, median **1.25s**, rounds=0, RSS ~12 MB; rsyncd 1.03s → **1.22× (atp slightly slower)**.
+
+| method | median wall | sha | rounds | peak RSS | ratio |
+|---|---|---|---|---|---|
+| atp-rq-lab | 1.25s (1.15–1.35) | 5/5 ✓ | 0 | 12 MB | 1.22× (atp slower) |
+| rsyncd | 1.03s | 5/5 ✓ | — | — | — |
+
+**Verdict: tree_small is a near-tie (1.22×), not a loss to chase.** Many-small-files is rsync's design strength (it batches the file list + per-file deltas efficiently), so atp being within 1.22× — byte-identical (sorted per-file digest set vs the gen manifest), single-shot (rounds=0), 12 MB RSS — is a solid result, consistent with the clean-link source path. Not a priority frontier; logged for whole-matrix completeness (no cherry-picking). The high-value frontier remains encrypted-perfect (12.1×); the swarm has just committed `b1cf10730` 'stream encrypted clean QUIC sources' (the encrypted-tier source-stream) — benching next.
