@@ -2696,3 +2696,14 @@ Benched origin/main HEAD `e9327b99a` (incl `94c20eacb`; bench bin atp 0.3.5 FRES
 **Verdict: MATRIX-95 small-clean win is clean and correctly scoped — no large-clean regression.** The two regression risks were (a) sha break and (b) RSS blowup from streaming 500M over the reliable control channel; both are clear (sha 3/3, RSS 24 MB < the >1GB blowup threshold, and atp still uses less memory than rsyncd's 40 MB). 500M/perfect correctly uses the normal RaptorQ path. So the adaptive clean-source-stream lever (MATRIX-95) is a safe, correctly-bounded win on small+clean with no collateral on large+clean.
 
 **Surfaced follow-up (net-new lever, not a regression): 500M/perfect nocrypto is still a 3.29× atp LOSS** (the known large-perfect-clean weak spot). Since streaming source over the reliable control stream beat rsync on 50M (MATRIX-95, 0.66×), a **disk-backed** clean-source-stream extended to large sizes (bounded memory via streaming from disk, not buffering) might flip 500M/perfect too — worth the swarm's consideration once cod recovers. Lossy/large still correctly use FEC. Evidence: `artifacts/atp_bench_matrix/20260626T003806Z/`.
+
+## MATRIX-97 (2026-06-26) — regression check of the MATRIX-95 small-clean source-stream win (`94c20eacb`) at the LOSSY boundary: ★NO REGRESSION + 50M/bad nocrypto is itself a WIN. 50M/bad nocrypto = sha **3/3**, median **10.96s**, ratio **0.75× (atp BEATS rsync 1.33×)**, peak RSS 186 MB. The source-stream path (gated on clean) correctly did NOT engage on the lossy link — RSS 186 MB is the RaptorQ FEC symbol-buffering signature (vs the 11 MB source-stream signature on 50M/perfect, MATRIX-95), so loss>0 still uses FEC. rounds=0 = proactive repair over-provisioning decoded without a feedback chain.
+
+Benched origin/main HEAD `5f70be4f2` (incl `94c20eacb`; bench bin atp 0.3.5), 50M / `bad` / `nocrypto`, streams=1, reps=3, sha-verified, ATP_RQ_TRACE=1:
+
+| method | median wall | sha | rounds | peak RSS | ratio |
+|---|---|---|---|---|---|
+| atp-rq-lab | **10.96s** (10.86–11.76) | 3/3 ✓ | 0 (proactive FEC) | 186 MB | **0.75× (atp WINS 1.33×)** |
+| rsyncd | 14.64s | 3/3 ✓ | — | — | — |
+
+**Verdict: MATRIX-95 small-clean win is FULLY VERIFIED clean across the whole boundary.** Trilogy: (95) small-clean nocrypto = WIN 0.66× via source-stream; (96) large-clean nocrypto = no regression, falls back to normal RaptorQ path (sha 3/3, bounded RSS); (97) lossy nocrypto = no regression, FEC path intact (sha 3/3) AND itself a WIN 0.75×. The adaptive clean+small source-stream lever is correctly scoped — it engages only on clean small transfers, leaving large-clean and all lossy cells on the proven RaptorQ/FEC path. No cherry-picking: small-clean flipped to a win without collateral anywhere on the boundary, and atp's lossy edge (0.75× on 50M/bad) is confirmed intact. Evidence: `artifacts/atp_bench_matrix/20260626T004121Z/`.
