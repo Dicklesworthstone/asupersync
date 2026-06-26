@@ -222,6 +222,13 @@ const QUIC_CLEAN_SPRAY_BURST_FLOOR_SYMBOLS: usize = 32;
 /// pacing to preserve loss granularity on constrained links.
 const QUIC_CLEAN_SPRAY_MAX_LOSS_RATE: f64 = 0.01;
 
+/// Minimum owed pacing time worth parking the async timer for on the clean-link
+/// spray. Per-flush owed time is often sub-millisecond; parking that each flush
+/// over-sleeps (async-timer granularity) and floors throughput far below the paced
+/// rate (MATRIX-111). Sub-floor owed time is accrued as debt and paid once it
+/// crosses this floor.
+const QUIC_PACING_PARK_FLOOR: Duration = Duration::from_millis(1);
+
 /// Fixed socket buffer budget for the native ATP-QUIC link. This is intentionally
 /// a constant envelope, not proportional to object size, so large transfers cannot
 /// force process/object-sized buffering while loopback proof runs avoid kernel
@@ -869,6 +876,21 @@ fn coalesced_datagram_frames_per_packet(
     (max_app_payload / datagram_frame_len.max(1)).max(1)
 }
 
+/// Un-clamped pacing owed-time for `bytes` at `rate_bps` (≈ bytes/rate seconds).
+/// Unlike `super::pacing_pause_for_bytes`, this does NOT floor at
+/// `QUIC_SPRAY_MIN_PAUSE`, so sub-millisecond owed time can be accrued as pacing
+/// debt instead of being over-slept each flush (MATRIX-111).
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn raw_pacing_owed(bytes: u64, rate_bps: u64) -> Duration {
+    let micros =
+        (bytes.max(1) as f64 / rate_bps.max(1) as f64 * 1_000_000.0).clamp(0.0, u64::MAX as f64);
+    Duration::from_micros(micros as u64)
+}
+
 fn coalesced_spray_flush_symbol_limit(
     pacing_burst_symbols: usize,
     max_symbol_frames_per_packet: usize,
@@ -979,6 +1001,10 @@ pub struct QuicLink {
     /// Configured upper bound on symbols queued before a protected packet flush.
     max_spray_symbols_per_flush: usize,
     symbol_datagram_frame_len: usize,
+    /// Accrued sub-`QUIC_PACING_PARK_FLOOR` clean-link pacing owed-time. Paying it
+    /// in fewer, full parks avoids the per-flush async-timer over-sleep (MATRIX-111);
+    /// drained at round end so the average rate is preserved.
+    spray_pacing_debt: Duration,
     idle_timeout: Duration,
     beacons: BeaconScheduler,
     pending_control_frames: VecDeque<Frame>,
@@ -1141,17 +1167,35 @@ impl QuicLink {
     }
 
     fn pause_after_symbol_flush(
-        &self,
+        &mut self,
         symbols: usize,
         pacing: &QuicSprayPacingDecision,
     ) -> Duration {
-        if symbols == pacing.max_burst_symbols {
-            return pacing.pause_after_burst;
-        }
         let bytes = u64::try_from(symbols.max(1))
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(self.symbol_datagram_frame_len).unwrap_or(u64::MAX));
-        super::pacing_pause_for_bytes(bytes, pacing.pacing_rate_bps)
+        if pacing.path_loss_rate >= QUIC_CLEAN_SPRAY_MAX_LOSS_RATE {
+            // Lossy path keeps the clamped per-flush sleep (conservative pacing /
+            // loss granularity on constrained links).
+            if symbols == pacing.max_burst_symbols {
+                return pacing.pause_after_burst;
+            }
+            return super::pacing_pause_for_bytes(bytes, pacing.pacing_rate_bps);
+        }
+        // Clean-link deadline/debt pacer: accrue the RAW (un-clamped) owed time and
+        // park only once it crosses QUIC_PACING_PARK_FLOOR. pacing_pause_for_bytes /
+        // pause_after_burst floor at QUIC_SPRAY_MIN_PAUSE (1ms), so parking each
+        // sub-ms flush over-sleeps and floors throughput far below the paced rate
+        // (MATRIX-111). The average rate is preserved: the debt is paid in full once
+        // it reaches the floor, and the remainder is drained at round end.
+        self.spray_pacing_debt = self
+            .spray_pacing_debt
+            .saturating_add(raw_pacing_owed(bytes, pacing.pacing_rate_bps));
+        if self.spray_pacing_debt >= QUIC_PACING_PARK_FLOOR {
+            core::mem::take(&mut self.spray_pacing_debt)
+        } else {
+            Duration::ZERO
+        }
     }
 
     async fn service_spray_liveness(
@@ -1594,11 +1638,10 @@ impl QuicLink {
         if self.conn.pending_outbound_datagram_count() >= flush_symbols {
             self.flush(cx).await?;
             self.service_spray_liveness(cx, control).await?;
-            crate::time::sleep(
-                cx.now(),
-                self.pause_after_symbol_flush(flush_symbols, pacing),
-            )
-            .await;
+            let pause = self.pause_after_symbol_flush(flush_symbols, pacing);
+            if !pause.is_zero() {
+                crate::time::sleep(cx.now(), pause).await;
+            }
         }
         super::send_native_symbol(cx, &mut self.conn, symbol, tag, entry, auth_tag)
     }
@@ -1624,7 +1667,11 @@ impl QuicLink {
         let pending_symbols_s = pending_symbols.to_string();
         let flush_symbol_limit_s = flush_symbol_limit.to_string();
         let max_symbol_frames_per_packet_s = self.max_symbol_frames_per_packet.to_string();
-        let pause_after_flush = self.pause_after_symbol_flush(flushed_symbols, pacing);
+        let mut pause_after_flush = self.pause_after_symbol_flush(flushed_symbols, pacing);
+        // Drain any accrued clean-link pacing debt at round end so the round's total
+        // sleep equals the total owed time (average rate preserved).
+        pause_after_flush =
+            pause_after_flush.saturating_add(core::mem::take(&mut self.spray_pacing_debt));
         let pause_after_burst_micros = pause_after_flush.as_micros().to_string();
         let pacing_rate_bps = pacing.pacing_rate_bps.to_string();
         cx.trace_with_fields(
@@ -1644,7 +1691,9 @@ impl QuicLink {
                 ),
             ],
         );
-        crate::time::sleep(cx.now(), pause_after_flush).await;
+        if !pause_after_flush.is_zero() {
+            crate::time::sleep(cx.now(), pause_after_flush).await;
+        }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)
     }
 
@@ -1798,6 +1847,7 @@ fn link_from_handshake(
         max_symbol_frames_per_packet,
         max_spray_symbols_per_flush: config.max_spray_symbols_per_flush.max(1),
         symbol_datagram_frame_len: send_symbol_frame_len,
+        spray_pacing_debt: Duration::ZERO,
         idle_timeout: config.idle_timeout,
         beacons: BeaconScheduler::new(1, Instant::now()),
         pending_control_frames: VecDeque::new(),
