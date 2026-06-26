@@ -661,6 +661,7 @@ fn estimate_can_drive_pacing(est: &PathEstimate, policy: &AdaptivePolicy) -> boo
         && est.bw_median_bps.is_finite()
         && est.bw_median_bps > 0.0
         && est.loss_p_bar.is_finite()
+        && est.loss_p_bar >= 0.0
 }
 
 fn pacing_capacity_bytes_per_s(est: &PathEstimate) -> f64 {
@@ -1331,6 +1332,31 @@ mod tests {
         assert_eq!(plan.raw_pacing_bits_per_s, 10_000_000);
         assert_eq!(plan.datagrams_per_s, 1041);
         assert_eq!(plan.max_burst_datagrams, 1);
+        assert_eq!(plan.block.overhead, 0.0);
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_cold_starts_on_negative_loss_evidence() {
+        let policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        let malformed_loss = PathEstimate {
+            loss_p_hat: -0.05,
+            loss_p_bar: -0.01,
+            bw_median_bps: 100_000_000.0,
+            bw_trough_bps: 75_000_000.0,
+            dec_symbols_per_s: 50_000_000.0,
+            samples: 16,
+            ..est(0.02, 100_000_000.0)
+        };
+
+        let plan = rate_matched_pacing_plan(&malformed_loss, &policy, 1200, 1_250_000.0, 32);
+
+        assert!(plan.cold_start);
+        assert_eq!(plan.raw_pacing_bits_per_s, 10_000_000);
         assert_eq!(plan.block.overhead, 0.0);
     }
 
