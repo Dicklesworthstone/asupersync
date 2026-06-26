@@ -16,7 +16,10 @@
 //!   before data-path consumers persist or decode the symbol.
 
 use core::fmt;
-use std::{collections::BTreeSet, net::SocketAddr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -563,6 +566,226 @@ pub struct BondedBlockRepairSchedule {
     pub stagger_delay_slots: u32,
 }
 
+/// Receiver control event handled by a bonded donor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BondedDonorControlEvent {
+    /// Receiver needs more repair symbols for one block.
+    NeedMore {
+        /// Descriptor-agreed RaptorQ identity and source-block geometry.
+        geometry: BondEntryBlockGeometry,
+        /// Donor-owned repair symbols requested for this feedback round.
+        requested_symbols: usize,
+    },
+    /// Receiver verified the object or closed the bonded transfer.
+    Close,
+}
+
+/// Trace classification emitted by the pure donor-control loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BondedDonorControlTraceEvent {
+    /// A `NeedMore` request produced a continuation batch.
+    NeedMore,
+    /// A `Close` request latched the donor closed.
+    Close,
+    /// A `NeedMore` request arrived after close and emitted no symbols.
+    IgnoredAfterClose,
+}
+
+/// Deterministic trace row for one donor-control event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedDonorControlTrace {
+    /// Control event classification.
+    pub event: BondedDonorControlTraceEvent,
+    /// Donor handling this control event.
+    pub donor_index: u32,
+    /// Total donors in the active assignment.
+    pub donor_count: u32,
+    /// Descriptor entry index, when the event names a block.
+    pub entry_index: Option<u32>,
+    /// Source block number, when the event names a block.
+    pub source_block_number: Option<u8>,
+    /// Receiver-requested donor-owned symbols.
+    pub requested_symbols: usize,
+    /// Symbols emitted by this event.
+    pub emitted_symbols: usize,
+    /// Next repair ESI cursor after handling the event.
+    pub next_repair_esi: Option<u32>,
+    /// Whether the donor is closed after handling the event.
+    pub closed: bool,
+}
+
+/// Result of applying one receiver control event to a bonded donor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedDonorControlOutcome {
+    /// Deterministic trace row for this event.
+    pub trace: BondedDonorControlTrace,
+    /// Continuation symbols to emit, if the event was an active `NeedMore`.
+    pub repair_schedule: Option<BondedBlockRepairSchedule>,
+}
+
+/// Pure donor-control state for B3 `NeedMore`/`Close` handling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedDonorControlLoop {
+    assignment: DonorAssignment,
+    repair_cursors: BTreeMap<BondedBlockKey, u32>,
+    closed: bool,
+    handled_events: u64,
+}
+
+impl BondedDonorControlLoop {
+    /// Create a control loop with repair cursors starting at each block's `K`.
+    pub fn new(assignment: DonorAssignment) -> Result<Self, BondScheduleError> {
+        assignment
+            .validate()
+            .map_err(BondScheduleError::InvalidAssignment)?;
+        Ok(Self {
+            assignment,
+            repair_cursors: BTreeMap::new(),
+            closed: false,
+            handled_events: 0,
+        })
+    }
+
+    /// Create a control loop seeded from an initial donor spray schedule.
+    pub fn from_spray_schedule(
+        assignment: DonorAssignment,
+        schedule: &BondedDonorSpraySchedule,
+    ) -> Result<Self, BondScheduleError> {
+        if assignment.donor_index != schedule.donor_index
+            || assignment.donor_count != schedule.donor_count
+        {
+            return Err(BondScheduleError::ControlScheduleDonorMismatch {
+                assignment_donor_index: assignment.donor_index,
+                schedule_donor_index: schedule.donor_index,
+            });
+        }
+
+        let mut control = Self::new(assignment)?;
+        for block in &schedule.blocks {
+            control
+                .repair_cursors
+                .insert(BondedBlockKey::from(block.geometry), block.next_repair_esi);
+        }
+        Ok(control)
+    }
+
+    /// Donor assignment this control loop applies.
+    #[must_use]
+    pub const fn assignment(&self) -> &DonorAssignment {
+        &self.assignment
+    }
+
+    /// True after a `Close` control event has been handled.
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Count receiver control events observed by this donor loop.
+    #[must_use]
+    pub const fn handled_events(&self) -> u64 {
+        self.handled_events
+    }
+
+    /// Apply one receiver control event.
+    pub fn handle_event(
+        &mut self,
+        event: BondedDonorControlEvent,
+    ) -> Result<BondedDonorControlOutcome, BondScheduleError> {
+        self.handled_events = self.handled_events.saturating_add(1);
+
+        match event {
+            BondedDonorControlEvent::Close => {
+                self.closed = true;
+                Ok(BondedDonorControlOutcome {
+                    trace: self.trace(BondedDonorControlTraceEvent::Close, None, 0, 0, None),
+                    repair_schedule: None,
+                })
+            }
+            BondedDonorControlEvent::NeedMore {
+                geometry,
+                requested_symbols,
+            } if self.closed => Ok(BondedDonorControlOutcome {
+                trace: self.trace(
+                    BondedDonorControlTraceEvent::IgnoredAfterClose,
+                    Some(geometry),
+                    requested_symbols,
+                    0,
+                    self.repair_cursors
+                        .get(&BondedBlockKey::from(geometry))
+                        .copied(),
+                ),
+                repair_schedule: None,
+            }),
+            BondedDonorControlEvent::NeedMore {
+                geometry,
+                requested_symbols,
+            } => {
+                let key = BondedBlockKey::from(geometry);
+                let first_repair_esi = self
+                    .repair_cursors
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(u32::from(geometry.source_symbols));
+                let repair_schedule = schedule_bonded_repair_continuation(
+                    &self.assignment,
+                    geometry,
+                    first_repair_esi,
+                    requested_symbols,
+                )?;
+                self.repair_cursors
+                    .insert(key, repair_schedule.next_repair_esi);
+                Ok(BondedDonorControlOutcome {
+                    trace: self.trace(
+                        BondedDonorControlTraceEvent::NeedMore,
+                        Some(geometry),
+                        requested_symbols,
+                        repair_schedule.repair_esis.len(),
+                        Some(repair_schedule.next_repair_esi),
+                    ),
+                    repair_schedule: Some(repair_schedule),
+                })
+            }
+        }
+    }
+
+    fn trace(
+        &self,
+        event: BondedDonorControlTraceEvent,
+        geometry: Option<BondEntryBlockGeometry>,
+        requested_symbols: usize,
+        emitted_symbols: usize,
+        next_repair_esi: Option<u32>,
+    ) -> BondedDonorControlTrace {
+        BondedDonorControlTrace {
+            event,
+            donor_index: self.assignment.donor_index,
+            donor_count: self.assignment.donor_count,
+            entry_index: geometry.map(|geometry| geometry.entry_index),
+            source_block_number: geometry.map(|geometry| geometry.source_block_number),
+            requested_symbols,
+            emitted_symbols,
+            next_repair_esi,
+            closed: self.closed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct BondedBlockKey {
+    entry_index: u32,
+    source_block_number: u8,
+}
+
+impl From<BondEntryBlockGeometry> for BondedBlockKey {
+    fn from(geometry: BondEntryBlockGeometry) -> Self {
+        Self {
+            entry_index: geometry.entry_index,
+            source_block_number: geometry.source_block_number,
+        }
+    }
+}
+
 /// Scheduler construction errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BondScheduleError {
@@ -698,6 +921,13 @@ pub enum BondScheduleError {
         /// Symbols covered by the explicit windows.
         scheduled_symbols: usize,
     },
+    /// A donor-control loop was seeded with another donor's spray schedule.
+    ControlScheduleDonorMismatch {
+        /// Donor index from the assignment.
+        assignment_donor_index: u32,
+        /// Donor index from the spray schedule.
+        schedule_donor_index: u32,
+    },
 }
 
 impl fmt::Display for BondScheduleError {
@@ -813,6 +1043,13 @@ impl fmt::Display for BondScheduleError {
                 f,
                 "channel-bonding explicit repair windows for entry {entry_index} block {source_block_number} scheduled {scheduled_symbols}/{requested_symbols} requested symbols"
             ),
+            Self::ControlScheduleDonorMismatch {
+                assignment_donor_index,
+                schedule_donor_index,
+            } => write!(
+                f,
+                "channel-bonding donor-control loop assignment donor {assignment_donor_index} does not match spray schedule donor {schedule_donor_index}"
+            ),
         }
     }
 }
@@ -837,7 +1074,8 @@ impl std::error::Error for BondScheduleError {
             | Self::RepairBudgetOverflow { .. }
             | Self::RepairStartBeforeSource { .. }
             | Self::RepairContinuationOverflow { .. }
-            | Self::InsufficientRepairWindow { .. } => None,
+            | Self::InsufficientRepairWindow { .. }
+            | Self::ControlScheduleDonorMismatch { .. } => None,
         }
     }
 }
@@ -2753,6 +2991,112 @@ mod tests {
             assert!(!schedule1.blocks[0].repair_esis.contains(esi));
             assert_eq!(esi % 2, 1);
         }
+    }
+
+    #[test]
+    fn donor_control_loop_need_more_resumes_from_initial_spray_cursor() {
+        let descriptor = descriptor();
+        let assignment = DonorAssignment::new_static(0, 2, vec![endpoint()], None);
+        let schedule =
+            schedule_bonded_donor_spray(&descriptor, &assignment, 4).expect("initial schedule");
+        let geometry = schedule.blocks[0].geometry;
+        let mut control =
+            BondedDonorControlLoop::from_spray_schedule(assignment.clone(), &schedule)
+                .expect("control loop");
+
+        let first = control
+            .handle_event(BondedDonorControlEvent::NeedMore {
+                geometry,
+                requested_symbols: 3,
+            })
+            .expect("first need-more");
+        let first_repair = first.repair_schedule.expect("repair schedule");
+
+        assert_eq!(first_repair.repair_esis, vec![6, 8, 10]);
+        assert_eq!(first_repair.next_repair_esi, 12);
+        assert_eq!(first_repair.stagger_delay_slots, 0);
+        assert_eq!(
+            first.trace,
+            BondedDonorControlTrace {
+                event: BondedDonorControlTraceEvent::NeedMore,
+                donor_index: 0,
+                donor_count: 2,
+                entry_index: Some(0),
+                source_block_number: Some(0),
+                requested_symbols: 3,
+                emitted_symbols: 3,
+                next_repair_esi: Some(12),
+                closed: false,
+            }
+        );
+
+        let second = control
+            .handle_event(BondedDonorControlEvent::NeedMore {
+                geometry,
+                requested_symbols: 2,
+            })
+            .expect("second need-more");
+        let second_repair = second.repair_schedule.expect("second repair schedule");
+
+        assert_eq!(second_repair.repair_esis, vec![12, 14]);
+        assert_eq!(second_repair.next_repair_esi, 16);
+        assert_eq!(control.handled_events(), 2);
+        assert!(!control.is_closed());
+        assert_eq!(control.assignment(), &assignment);
+    }
+
+    #[test]
+    fn donor_control_loop_close_latches_and_ignores_late_need_more() {
+        let descriptor = descriptor();
+        let assignment = DonorAssignment::new_static(1, 2, vec![endpoint()], None);
+        let schedule =
+            schedule_bonded_donor_spray(&descriptor, &assignment, 4).expect("initial schedule");
+        let geometry = schedule.blocks[0].geometry;
+        let mut control =
+            BondedDonorControlLoop::from_spray_schedule(assignment, &schedule).expect("control");
+
+        let close = control
+            .handle_event(BondedDonorControlEvent::Close)
+            .expect("close");
+
+        assert!(control.is_closed());
+        assert_eq!(close.repair_schedule, None);
+        assert_eq!(close.trace.event, BondedDonorControlTraceEvent::Close);
+        assert!(close.trace.closed);
+
+        let late = control
+            .handle_event(BondedDonorControlEvent::NeedMore {
+                geometry,
+                requested_symbols: 3,
+            })
+            .expect("late need-more");
+
+        assert_eq!(late.repair_schedule, None);
+        assert_eq!(
+            late.trace.event,
+            BondedDonorControlTraceEvent::IgnoredAfterClose
+        );
+        assert_eq!(late.trace.requested_symbols, 3);
+        assert_eq!(late.trace.emitted_symbols, 0);
+        assert!(late.trace.closed);
+        assert_eq!(control.handled_events(), 2);
+    }
+
+    #[test]
+    fn donor_control_loop_rejects_schedule_for_another_donor() {
+        let descriptor = descriptor();
+        let donor0 = DonorAssignment::new_static(0, 2, vec![endpoint()], None);
+        let donor1 = DonorAssignment::new_static(1, 2, vec![endpoint()], None);
+        let schedule0 =
+            schedule_bonded_donor_spray(&descriptor, &donor0, 4).expect("donor 0 schedule");
+
+        assert_eq!(
+            BondedDonorControlLoop::from_spray_schedule(donor1, &schedule0),
+            Err(BondScheduleError::ControlScheduleDonorMismatch {
+                assignment_donor_index: 1,
+                schedule_donor_index: 0,
+            })
+        );
     }
 
     #[test]
