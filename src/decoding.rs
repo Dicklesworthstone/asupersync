@@ -159,6 +159,7 @@ pub(crate) struct BlockDecodeJob {
     sbn: u8,
     plan: BlockPlan,
     symbols: Vec<Symbol>,
+    source_symbols: usize,
     symbol_size: usize,
     retain_decoded_block: bool,
 }
@@ -202,8 +203,10 @@ pub(crate) struct BlockDecodeOutcome {
 #[must_use]
 pub(crate) fn run_block_decode_job(job: BlockDecodeJob) -> BlockDecodeOutcome {
     let started = Instant::now();
-    let (kind, resolution) = match complete_block_data_from_source_symbols(&job.plan, &job.symbols)
-    {
+    let source_complete = (job.source_symbols >= job.plan.k)
+        .then(|| complete_block_data_from_source_symbols(&job.plan, &job.symbols))
+        .flatten();
+    let (kind, resolution) = match source_complete {
         Some(data) => (
             BlockDecodeKind::SourceComplete,
             BlockDecodeResolution::Complete(data),
@@ -912,12 +915,12 @@ impl DecodingPipeline {
         // clone-then-`len() < k` was O(k^2) clone per block. The authoritative
         // `symbols.len() < k` check below is retained as a backstop in case repair
         // retention eviction leaves the count ahead of the live symbol set.
-        if self
+        let counts = self
             .block_symbol_counts
             .get(&sbn)
-            .map_or(0, |counts| counts.total())
-            < block_plan.k
-        {
+            .copied()
+            .unwrap_or_default();
+        if counts.total() < block_plan.k {
             return None;
         }
 
@@ -930,6 +933,7 @@ impl DecodingPipeline {
             sbn,
             plan: block_plan,
             symbols,
+            source_symbols: counts.source_symbols,
             symbol_size: usize::from(self.config.symbol_size),
             retain_decoded_block,
         })
@@ -2880,7 +2884,14 @@ mod tests {
                 DeferredSymbolAcceptResult::Immediate(_) => {}
                 DeferredSymbolAcceptResult::Decode(job) => {
                     deferred_jobs = deferred_jobs.saturating_add(1);
-                    let result = decoder.finish_decode_job(run_block_decode_job(job));
+                    let expected_sources = data.len().div_ceil(usize::from(config.symbol_size));
+                    assert_eq!(
+                        job.source_symbols, expected_sources,
+                        "source-complete deferred jobs must carry the exact source count"
+                    );
+                    let outcome = run_block_decode_job(job);
+                    assert_eq!(outcome.kind(), BlockDecodeKind::SourceComplete);
+                    let result = decoder.finish_decode_job(outcome);
                     if let SymbolAcceptResult::BlockComplete { data, .. } = result {
                         completed = Some(data);
                     }
@@ -3364,8 +3375,13 @@ mod tests {
         let DeferredSymbolAcceptResult::Decode(job) = second else {
             panic!("second symbol should start deferred decode");
         };
+        assert_eq!(
+            job.source_symbols, 1,
+            "repair decode jobs must carry source count below k"
+        );
 
         let outcome = run_block_decode_job(job);
+        assert_eq!(outcome.kind(), BlockDecodeKind::RaptorQRepair);
         assert!(
             outcome.elapsed().as_nanos() > 0,
             "deferred decode jobs must record solve wall time for receiver profiling"
