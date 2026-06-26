@@ -254,6 +254,90 @@ pub enum BondedReceiverFeedbackAction {
     },
 }
 
+/// Per-donor metrics exposed by the bonded receiver progress snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondedDonorProgressMetrics {
+    /// Donor these counters describe.
+    pub donor_index: u32,
+    /// Raw ingress counters for this donor.
+    pub stats: BondedDonorIngressStats,
+    /// Duplicate rate for this donor in parts-per-million.
+    pub duplicate_rate_ppm: u64,
+}
+
+/// Receiver completion path for one source block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BondedBlockCompletionPath {
+    /// The block still needs more symbols before decode/commit.
+    Incomplete,
+    /// All systematic/source symbols are present; receiver can stay memcpy-only.
+    SourceMemcpy,
+    /// Enough symbols are present, but repair/FEC decode is needed for source holes.
+    RepairDecode,
+}
+
+/// Machine-readable per-block receiver progress row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedBlockProgressMetrics {
+    /// RaptorQ object id shared by all bonded donors.
+    pub object_id: ObjectId,
+    /// Source block number within the object.
+    pub sbn: u8,
+    /// Accepted symbols needed before the block can stop asking for repair.
+    pub target_symbols: u32,
+    /// Globally novel symbols accepted for this block.
+    pub accepted_symbols: u32,
+    /// Additional symbols needed to reach `target_symbols`.
+    pub deficit_symbols: u32,
+    /// Number of systematic/source ESIs for this block.
+    pub source_symbols: u32,
+    /// Source ESIs still missing after global cross-donor deduplication.
+    pub missing_source_esis: Vec<u32>,
+    /// Completion path implied by aggregate coverage and source holes.
+    pub completion_path: BondedBlockCompletionPath,
+}
+
+impl BondedBlockProgressMetrics {
+    /// Count missing systematic/source symbols for this block.
+    #[must_use]
+    pub fn missing_source_count(&self) -> usize {
+        self.missing_source_esis.len()
+    }
+
+    /// True when this row represents a block that still needs receiver feedback.
+    #[must_use]
+    pub const fn needs_more_symbols(&self) -> bool {
+        self.deficit_symbols > 0
+    }
+}
+
+/// Machine-readable bonded receiver progress snapshot for SDK/CLI/trace consumers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondedReceiverLiveProgressMetrics {
+    /// Aggregate symbol ingress counters.
+    pub aggregate: BondedReceiverIngressStats,
+    /// Sorted per-donor ingress counters.
+    pub donors: Vec<BondedDonorProgressMetrics>,
+    /// Per-block coverage and completion-path rows.
+    pub blocks: Vec<BondedBlockProgressMetrics>,
+    /// Blocks that can complete through source memcpy.
+    pub source_memcpy_blocks: usize,
+    /// Blocks that are symbol-complete but need repair/FEC decode.
+    pub repair_decode_blocks: usize,
+    /// Blocks still below their accepted-symbol target.
+    pub incomplete_blocks: usize,
+    /// Sum of all incomplete block deficits.
+    pub total_deficit_symbols: u64,
+    /// Sum of all missing systematic/source ESIs.
+    pub total_missing_source_symbols: u64,
+    /// Per-donor feedback frames materialized by the current aggregate plan.
+    pub feedback_action_count: usize,
+    /// Per-donor NeedMore frames materialized by the current aggregate plan.
+    pub need_more_action_count: usize,
+    /// Per-donor Close frames materialized by the current aggregate plan.
+    pub close_action_count: usize,
+}
+
 impl BondedReceiverFeedbackPlan {
     /// True when there is no feedback to broadcast.
     #[must_use]
@@ -562,6 +646,120 @@ impl BondedReceiverSymbolSet {
         }
     }
 
+    /// Build a machine-readable progress row for one source block.
+    #[must_use]
+    pub fn block_progress_metrics(
+        &self,
+        object_id: ObjectId,
+        sbn: u8,
+        target_symbols: u32,
+    ) -> BondedBlockProgressMetrics {
+        let coverage = self.block_coverage(object_id, sbn, target_symbols);
+        let source_holes = self.block_source_holes(object_id, sbn, target_symbols);
+        let completion_path = if !coverage.is_complete() {
+            BondedBlockCompletionPath::Incomplete
+        } else if source_holes.is_source_complete() {
+            BondedBlockCompletionPath::SourceMemcpy
+        } else {
+            BondedBlockCompletionPath::RepairDecode
+        };
+
+        BondedBlockProgressMetrics {
+            object_id,
+            sbn,
+            target_symbols: coverage.target_symbols,
+            accepted_symbols: coverage.accepted_symbols,
+            deficit_symbols: coverage.deficit_symbols,
+            source_symbols: source_holes.source_symbols,
+            missing_source_esis: source_holes.missing_source_esis,
+            completion_path,
+        }
+    }
+
+    /// Build the bonded receiver's live progress metrics.
+    ///
+    /// This is the C5 handoff for structured trace/SDK/CLI consumers: one
+    /// deterministic snapshot carries sorted per-donor counters, per-block
+    /// coverage/source-hole rows, source-vs-repair completion counters, and the
+    /// current aggregate feedback fan-out size.
+    #[must_use]
+    pub fn live_progress_metrics(
+        &self,
+        blocks: impl IntoIterator<Item = (ObjectId, u8, u32)>,
+        object_verified_complete: bool,
+    ) -> BondedReceiverLiveProgressMetrics {
+        let block_list: Vec<_> = blocks.into_iter().collect();
+        let block_metrics: Vec<_> = block_list
+            .iter()
+            .copied()
+            .map(|(object_id, sbn, target_symbols)| {
+                self.block_progress_metrics(object_id, sbn, target_symbols)
+            })
+            .collect();
+
+        let mut source_memcpy_blocks = 0usize;
+        let mut repair_decode_blocks = 0usize;
+        let mut incomplete_blocks = 0usize;
+        let mut total_deficit_symbols = 0u64;
+        let mut total_missing_source_symbols = 0u64;
+        for block in &block_metrics {
+            match block.completion_path {
+                BondedBlockCompletionPath::Incomplete => {
+                    incomplete_blocks = incomplete_blocks.saturating_add(1);
+                }
+                BondedBlockCompletionPath::SourceMemcpy => {
+                    source_memcpy_blocks = source_memcpy_blocks.saturating_add(1);
+                }
+                BondedBlockCompletionPath::RepairDecode => {
+                    repair_decode_blocks = repair_decode_blocks.saturating_add(1);
+                }
+            }
+            total_deficit_symbols =
+                total_deficit_symbols.saturating_add(u64::from(block.deficit_symbols));
+            total_missing_source_symbols = total_missing_source_symbols
+                .saturating_add(block.missing_source_count().min(u64::MAX as usize) as u64);
+        }
+
+        let feedback_actions = self
+            .feedback_broadcast_plan(block_list.iter().copied(), object_verified_complete)
+            .broadcast_actions();
+        let mut need_more_action_count = 0usize;
+        let mut close_action_count = 0usize;
+        for action in &feedback_actions {
+            match action {
+                BondedReceiverFeedbackAction::SourceFirstNeedMore { .. }
+                | BondedReceiverFeedbackAction::RepairNeedMore { .. } => {
+                    need_more_action_count = need_more_action_count.saturating_add(1);
+                }
+                BondedReceiverFeedbackAction::Close { .. } => {
+                    close_action_count = close_action_count.saturating_add(1);
+                }
+            }
+        }
+
+        BondedReceiverLiveProgressMetrics {
+            aggregate: self.aggregate,
+            donors: self
+                .donor_stats
+                .iter()
+                .map(|(&donor_index, &stats)| BondedDonorProgressMetrics {
+                    donor_index,
+                    stats,
+                    duplicate_rate_ppm: stats.duplicate_rate_ppm(),
+                })
+                .collect(),
+            blocks: block_metrics,
+            source_memcpy_blocks,
+            repair_decode_blocks,
+            incomplete_blocks,
+            total_deficit_symbols,
+            total_missing_source_symbols,
+            feedback_action_count: feedback_actions.len(),
+            need_more_action_count,
+            close_action_count,
+        }
+    }
+
     /// Compute aggregate feedback that should be broadcast to every donor.
     ///
     /// `object_verified_complete` is the receiver's fail-closed byte/object
@@ -809,6 +1007,61 @@ mod tests {
     }
 
     #[test]
+    fn live_progress_metrics_reports_donors_blocks_paths_and_feedback_counts() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let object_id = ObjectId::new_for_test(21);
+
+        set.record_key(0, BondedSymbolKey::new(object_id, 0, 0), SymbolKind::Source);
+        set.record_key(1, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Source);
+        set.record_key(2, BondedSymbolKey::new(object_id, 0, 3), SymbolKind::Repair);
+        set.record_key(3, BondedSymbolKey::new(object_id, 0, 1), SymbolKind::Source);
+        set.record_key(0, BondedSymbolKey::new(object_id, 1, 0), SymbolKind::Source);
+
+        let metrics = set.live_progress_metrics([(object_id, 0, 3), (object_id, 1, 2)], false);
+
+        assert_eq!(metrics.aggregate.symbols_received, 5);
+        assert_eq!(metrics.aggregate.symbols_accepted, 4);
+        assert_eq!(metrics.aggregate.duplicate_symbols, 1);
+        assert_eq!(metrics.aggregate.source_symbols_accepted, 3);
+        assert_eq!(metrics.aggregate.repair_symbols_accepted, 1);
+        assert_eq!(
+            metrics
+                .donors
+                .iter()
+                .map(|donor| donor.donor_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(metrics.donors[3].stats.duplicate_symbols, 1);
+        assert_eq!(metrics.donors[3].duplicate_rate_ppm, 1_000_000);
+
+        assert_eq!(metrics.blocks.len(), 2);
+        assert_eq!(metrics.blocks[0].accepted_symbols, 3);
+        assert_eq!(metrics.blocks[0].deficit_symbols, 0);
+        assert_eq!(metrics.blocks[0].missing_source_esis, vec![2]);
+        assert_eq!(
+            metrics.blocks[0].completion_path,
+            BondedBlockCompletionPath::RepairDecode
+        );
+        assert_eq!(metrics.blocks[1].accepted_symbols, 1);
+        assert_eq!(metrics.blocks[1].deficit_symbols, 1);
+        assert_eq!(metrics.blocks[1].missing_source_esis, vec![1]);
+        assert_eq!(
+            metrics.blocks[1].completion_path,
+            BondedBlockCompletionPath::Incomplete
+        );
+
+        assert_eq!(metrics.source_memcpy_blocks, 0);
+        assert_eq!(metrics.repair_decode_blocks, 1);
+        assert_eq!(metrics.incomplete_blocks, 1);
+        assert_eq!(metrics.total_deficit_symbols, 1);
+        assert_eq!(metrics.total_missing_source_symbols, 2);
+        assert_eq!(metrics.feedback_action_count, 12);
+        assert_eq!(metrics.need_more_action_count, 12);
+        assert_eq!(metrics.close_action_count, 0);
+    }
+
+    #[test]
     fn feedback_plan_broadcasts_aggregate_need_more_to_all_donors() {
         let mut set = BondedReceiverSymbolSet::new();
         let object_id = ObjectId::new_for_test(23);
@@ -957,6 +1210,11 @@ mod tests {
                 BondedReceiverFeedbackAction::Close { donor_index: 1 },
             ]
         );
+
+        let metrics = set.live_progress_metrics([(object_id, 0, 4)], true);
+        assert_eq!(metrics.feedback_action_count, 2);
+        assert_eq!(metrics.need_more_action_count, 0);
+        assert_eq!(metrics.close_action_count, 2);
     }
 
     #[test]
