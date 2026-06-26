@@ -572,13 +572,17 @@ pub fn rate_matched_pacing_plan_with_flow_credit(
         return None;
     }
 
-    let plan = rate_matched_pacing_plan(
+    let mut plan = rate_matched_pacing_plan(
         est,
         policy,
         symbol_size,
         cold_start_bytes_per_s,
         max_burst_datagrams,
     );
+    let flow_credit_burst_datagrams =
+        max_burst_datagrams_for_flow_credit(symbol_size, advertised_flow_credit_bytes)?;
+    plan.max_burst_datagrams = plan.max_burst_datagrams.min(flow_credit_burst_datagrams);
+
     let rtt_s = flow_credit_rtt_window_s(est);
     let credit_limited_raw_bytes_per_s = advertised_flow_credit_bytes as f64 / rtt_s;
     if credit_limited_raw_bytes_per_s < 1.0 {
@@ -736,6 +740,19 @@ fn flow_credit_rtt_window_s(est: &PathEstimate) -> f64 {
     } else {
         1.0
     }
+}
+
+fn max_burst_datagrams_for_flow_credit(symbol_size: u16, credit_bytes: u64) -> Option<u32> {
+    let symbol_bytes = u64::from(symbol_size.max(1));
+    if credit_bytes < symbol_bytes {
+        return None;
+    }
+    Some(
+        (credit_bytes / symbol_bytes)
+            .clamp(1, u64::from(u32::MAX))
+            .try_into()
+            .unwrap_or(u32::MAX),
+    )
 }
 
 // ─── EXP3 bandit controller over (K, N) arms (no-regret hedge) ───────────────
@@ -1523,6 +1540,10 @@ mod tests {
             plan.raw_pacing_bits_per_s < 100_000_000 * 8,
             "flow credit must cap the raw high-bandwidth path rate"
         );
+        assert!(
+            u64::from(plan.max_burst_datagrams) * 1200 <= credit,
+            "flow-credit burst must fit within advertised receiver credit"
+        );
     }
 
     #[test]
@@ -1579,6 +1600,44 @@ mod tests {
             rate_matched_pacing_plan_with_flow_credit(&est, &policy, 1200, 8_000_000.0, 32, 1)
                 .is_none(),
             "sub-byte-per-second credit cannot be represented safely"
+        );
+        assert!(
+            rate_matched_pacing_plan_with_flow_credit(&est, &policy, 1200, 8_000_000.0, 32, 1199)
+                .is_none(),
+            "credit smaller than one symbol must not fabricate a datagram burst"
+        );
+    }
+
+    #[test]
+    fn rate_matched_pacing_plan_flow_credit_caps_burst_datagrams() {
+        let policy = AdaptivePolicy {
+            min_samples_to_activate: 1,
+            arm_grid_k: vec![1024],
+            arm_grid_fanout: vec![1],
+            ..AdaptivePolicy::default()
+        };
+        let est = PathEstimate {
+            rtt_s: 0.050,
+            dec_symbols_per_s: 50_000_000.0,
+            ..est(0.02, 200_000_000.0)
+        };
+        let symbol_size = 1200;
+        let credit = 12_000;
+
+        let plan = rate_matched_pacing_plan_with_flow_credit(
+            &est,
+            &policy,
+            symbol_size,
+            8_000_000.0,
+            64,
+            credit,
+        )
+        .expect("one-symbol-or-larger credit should produce a bounded plan");
+
+        assert_eq!(plan.max_burst_datagrams, 10);
+        assert!(
+            u64::from(plan.max_burst_datagrams) * u64::from(symbol_size) <= credit,
+            "burst cap must never exceed receiver credit"
         );
     }
 
