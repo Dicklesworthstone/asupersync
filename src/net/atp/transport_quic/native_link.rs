@@ -2549,6 +2549,10 @@ async fn spray_round(
     link.reset_sender_handoff_trace();
     let mut sent = 0u64;
     let mut sprayed = 0u64;
+    let mut cursor_updates = Vec::new();
+    // Keep the native sender handoff continuous across source blocks; high-BDP
+    // and future fanout paths need paced windows, not per-block partial flushes.
+    let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
     for index in pending {
         let Some(entry) = encoders.iter_mut().find(|entry| entry.index == *index) else {
             continue;
@@ -2589,7 +2593,6 @@ async fn spray_round(
                     repair_count,
                 ))
             };
-            let mut handoff_batch = Vec::with_capacity(link.spray_handoff_symbol_limit(&pacing));
             for encoded_symbol in encoded {
                 let symbol = encoded_symbol
                     .map_err(|err| QuicTransportError::Control(err.to_string()))?
@@ -2634,29 +2637,34 @@ async fn spray_round(
                     handoff_batch.reserve(link.spray_handoff_symbol_limit(&pacing));
                 }
             }
-            if !handoff_batch.is_empty() {
-                link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
-                    .await?;
-                let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
-                sent = sent.saturating_add(batch_len);
-                for _ in 0..handoff_batch.len() {
-                    if let Some(ramp) = &mut clean_ramp {
-                        if let Some(report) =
-                            ramp.observe_datagram(&mut pacing, link.symbol_datagram_frame_len)
-                        {
-                            quic_rqtrace!(
-                                "sender-native: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} next_step_bytes={} max_rate_Bps={}",
-                                report.sent_datagrams,
-                                report.sent_bytes,
-                                report.old_rate_bps,
-                                report.new_rate_bps,
-                                report.next_step_bytes,
-                                report.max_rate_bps,
-                            );
-                        }
-                    }
+            cursor_updates.push((entry_index, sbn, target_repair));
+        }
+    }
+    if !handoff_batch.is_empty() {
+        link.spray_symbol_batch(cx, control, tag, &handoff_batch, &pacing)
+            .await?;
+        let batch_len = u64::try_from(handoff_batch.len()).unwrap_or(u64::MAX);
+        sent = sent.saturating_add(batch_len);
+        for _ in 0..handoff_batch.len() {
+            if let Some(ramp) = &mut clean_ramp {
+                if let Some(report) =
+                    ramp.observe_datagram(&mut pacing, link.symbol_datagram_frame_len)
+                {
+                    quic_rqtrace!(
+                        "sender-native: round0_clean_rate_ramp sent_datagrams={} sent_bytes={} old_rate_Bps={} new_rate_Bps={} next_step_bytes={} max_rate_Bps={}",
+                        report.sent_datagrams,
+                        report.sent_bytes,
+                        report.old_rate_bps,
+                        report.new_rate_bps,
+                        report.next_step_bytes,
+                        report.max_rate_bps,
+                    );
                 }
             }
+        }
+    }
+    for (entry_index, sbn, target_repair) in cursor_updates {
+        if let Some(entry) = encoders.iter_mut().find(|entry| entry.index == entry_index) {
             entry.set_repair_cursor(sbn, target_repair);
         }
     }
