@@ -384,6 +384,16 @@ macro_rules! rqtrace {
     };
 }
 
+/// Opt-in stderr tracing for channel-bonded donor spray bring-up.
+/// Off unless `ATP_BOND_TRACE` is set.
+macro_rules! bondtrace {
+    ($($arg:tt)*) => {
+        if std::env::var_os("ATP_BOND_TRACE").is_some() {
+            eprintln!("[ATP_BOND_TRACE] [atp-rq] {}", format!($($arg)*));
+        }
+    };
+}
+
 /// Transport tuning knobs.
 #[derive(Debug, Clone)]
 pub struct RqConfig {
@@ -2446,6 +2456,23 @@ pub async fn donate_path(
     let mut dropper = 0u32;
     let mut udp_send_acceleration = UdpSendAccelerationReport::default();
     let tag = transfer_tag(&descriptor.transfer_id);
+    let assignment_mode = if assignment.esi_windows.is_empty() {
+        "static-residue"
+    } else {
+        "windowed"
+    };
+    bondtrace!(
+        "donor: spray_start transfer_id={} donor_index={} donor_count={} assignment_mode={} esi_windows={:?} receiver_endpoints={} blocks={} repair_symbols_per_block={} pacing_rate_Bps={}",
+        descriptor.transfer_id,
+        assignment.donor_index,
+        assignment.donor_count,
+        assignment_mode,
+        assignment.esi_windows,
+        receiver_endpoints.len(),
+        schedule.blocks.len(),
+        repair_symbols_per_block,
+        pacer.pacing().rate_bytes_per_sec(),
+    );
 
     for block in &schedule.blocks {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
@@ -2468,6 +2495,20 @@ pub async fn donate_path(
                 size: block.geometry.block_bytes,
                 max: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
             })?;
+        bondtrace!(
+            "donor: block_start transfer_id={} donor_index={} entry={} sbn={} block_start={} block_bytes={} source_esis={} repair_esis={} stagger_delay_slots={} symbols_sent_so_far={} pacing_rate_Bps={}",
+            descriptor.transfer_id,
+            assignment.donor_index,
+            block.geometry.entry_index,
+            block.geometry.source_block_number,
+            block.geometry.block_start,
+            block.geometry.block_bytes,
+            block.source_esis.len(),
+            block.repair_esis.len(),
+            block.stagger_delay_slots,
+            symbols_sent,
+            pacer.pacing().rate_bytes_per_sec(),
+        );
         let block_bytes = read_source_range(&entry_path, block_start, block_len).await?;
 
         for emission in block.iter_symbol_emissions(schedule.donor_index) {
@@ -2493,10 +2534,34 @@ pub async fn donate_path(
             )
             .await?;
         }
+        bondtrace!(
+            "donor: block_done transfer_id={} donor_index={} entry={} sbn={} symbols_sent={} source_symbols_sent={} repair_symbols_sent={} pacing_rate_Bps={}",
+            descriptor.transfer_id,
+            assignment.donor_index,
+            block.geometry.entry_index,
+            block.geometry.source_block_number,
+            symbols_sent,
+            source_symbols_sent,
+            repair_symbols_sent,
+            pacer.pacing().rate_bytes_per_sec(),
+        );
     }
 
     let report = send_batch.flush(&mut sockets, &mut symbols_sent).await?;
     udp_send_acceleration.observe_flush_report(report);
+    bondtrace!(
+        "donor: spray_done transfer_id={} donor_index={} donor_count={} symbols_sent={} source_symbols_sent={} repair_symbols_sent={} udp_flushes={} native_batch_datagrams={} gso_datagrams={} fallback_datagrams={}",
+        descriptor.transfer_id,
+        assignment.donor_index,
+        assignment.donor_count,
+        symbols_sent,
+        source_symbols_sent,
+        repair_symbols_sent,
+        udp_send_acceleration.flushes,
+        udp_send_acceleration.native_batch_datagrams,
+        udp_send_acceleration.gso_datagrams,
+        udp_send_acceleration.fallback_datagrams,
+    );
 
     Ok(BondedDonorSendReport {
         transfer_id: descriptor.transfer_id.clone(),
