@@ -6816,6 +6816,16 @@ fn g1_performance_budgets_schema_and_coverage() {
         Some("asupersync-2cyx5"),
         "performance budgets must be anchored to Track-G bead"
     );
+    assert_eq!(
+        artifact["budget_bead_id"].as_str(),
+        Some("bd-3v1cs"),
+        "performance budgets must name the G1 budget bead"
+    );
+    assert_eq!(
+        artifact["budget_phase"].as_str(),
+        Some("draft_scaffold_pending_calibration_refresh"),
+        "performance budgets must expose their draft calibration state"
+    );
 
     // Workload budget coverage
     let workload_budgets = artifact["workload_budgets"]
@@ -6914,6 +6924,84 @@ fn g1_performance_budgets_schema_and_coverage() {
         "ci_gate_configuration.benchmark_command",
         benchmark_command,
     );
+
+    let ci_gate_profiles = artifact["ci_gate_profiles"]
+        .as_array()
+        .expect("ci_gate_profiles must be an array");
+    let profile_names: BTreeSet<&str> = ci_gate_profiles
+        .iter()
+        .map(|profile| {
+            profile["profile"]
+                .as_str()
+                .expect("ci_gate_profiles entry missing profile")
+        })
+        .collect();
+    for profile in ["fast", "full", "forensics"] {
+        assert!(
+            profile_names.contains(profile),
+            "missing CI gate profile: {profile}"
+        );
+    }
+    for profile in ci_gate_profiles {
+        let name = profile["profile"]
+            .as_str()
+            .expect("ci_gate_profiles entry missing profile");
+        let command = profile["command"]
+            .as_str()
+            .expect("ci_gate_profiles entry missing command");
+        assert_target_dir_rch_cargo_command(&format!("ci_gate_profiles.{name}.command"), command);
+        assert!(
+            !profile["required_workloads"]
+                .as_array()
+                .expect("ci_gate_profiles entry missing required_workloads")
+                .is_empty(),
+            "ci gate profile {name} must list workloads"
+        );
+        assert!(
+            profile["runtime_envelope_seconds"].as_u64().unwrap_or(0) >= 60,
+            "ci gate profile {name} must expose a deterministic runtime envelope"
+        );
+    }
+
+    let structured_log_fields = artifact["structured_log_fields"]
+        .as_array()
+        .expect("structured_log_fields must be an array");
+    for field in [
+        "workload_id",
+        "profile",
+        "seed",
+        "metric_name",
+        "observed_value",
+        "warning_budget",
+        "fail_budget",
+        "decision",
+        "artifact_path",
+        "replay_ref",
+    ] {
+        assert!(
+            structured_log_fields
+                .iter()
+                .any(|entry| entry.as_str() == Some(field)),
+            "structured_log_fields missing {field}"
+        );
+    }
+
+    let closure_calibration = artifact["closure_calibration"]
+        .as_object()
+        .expect("closure_calibration must be an object");
+    assert_eq!(
+        closure_calibration["status"].as_str(),
+        Some("draft_not_closeable"),
+        "G1 budget artifact must fail closed until calibration refresh lands"
+    );
+    assert!(
+        !closure_calibration["required_refresh_steps"]
+            .as_array()
+            .expect("closure_calibration.required_refresh_steps must be an array")
+            .is_empty(),
+        "closure calibration must list refresh steps"
+    );
+
     let rollback_command = artifact["rollback_policy"]["rollback_command"]
         .as_str()
         .expect("rollback_policy.rollback_command must be a string");

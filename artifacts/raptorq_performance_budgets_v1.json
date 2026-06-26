@@ -4,6 +4,8 @@
   "track_bead_id": "asupersync-2cyx5",
   "parent_track_bead_id": "asupersync-2c9j7",
   "external_ref": "bd-83wox",
+  "budget_bead_id": "bd-3v1cs",
+  "budget_phase": "draft_scaffold_pending_calibration_refresh",
   "generated_at_utc": "2026-04-17T06:45:00Z",
   "description": "Explicit performance budgets, SLO workloads, and CI regression thresholds for RaptorQ implementation",
   "budget_enforcement": {
@@ -147,12 +149,85 @@
     "report_output_path": "artifacts/raptorq_perf_gate_report.json",
     "ndjson_log_path": "artifacts/raptorq_perf_gate_events.ndjson"
   },
+  "ci_gate_profiles": [
+    {
+      "profile": "fast",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_perf_fast cargo bench --features criterion-benches --bench raptorq_benchmark -- raptorq_e2e/encode/k=32_sym=1024 --sample-size 10 --warm-up-time 0.02 --measurement-time 0.02",
+      "required_workloads": [
+        "RQ-G1-ENC-SMALL",
+        "RQ-G1-E2E-RANDOM-LOWLOSS"
+      ],
+      "runtime_envelope_seconds": 180,
+      "gate_intent": "quick directional signal"
+    },
+    {
+      "profile": "full",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_perf_full ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare",
+      "required_workloads": [
+        "RQ-G1-ENC-SMALL",
+        "RQ-G1-DEC-SOURCE",
+        "RQ-G1-DEC-REPAIR",
+        "RQ-G1-GF256-ADDMUL",
+        "RQ-G1-SOLVER-MARKOWITZ",
+        "RQ-G1-PIPE-64K",
+        "RQ-G1-PIPE-256K",
+        "RQ-G1-PIPE-1M",
+        "RQ-G1-E2E-RANDOM-LOWLOSS",
+        "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "RQ-G1-E2E-BURST-LATE"
+      ],
+      "runtime_envelope_seconds": 1800,
+      "gate_intent": "merge and release evidence"
+    },
+    {
+      "profile": "forensics",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_perf_forensics cargo bench --features criterion-benches --bench raptorq_benchmark -- gf256_primitives --sample-size 20 --warm-up-time 0.2 --measurement-time 0.2",
+      "required_workloads": [
+        "RQ-G1-ENC-SMALL",
+        "RQ-G1-GF256-ADDMUL",
+        "RQ-G1-SOLVER-MARKOWITZ",
+        "RQ-G1-E2E-BURST-LATE"
+      ],
+      "runtime_envelope_seconds": 5400,
+      "gate_intent": "root-cause packet for budget violations"
+    }
+  ],
   "reproducibility_requirements": {
     "deterministic_seed": 424242,
     "fixed_thread_count": 1,
     "isolated_cpu_cores": true,
     "memory_allocation_tracking": true,
     "structured_logging_schema": "raptorq-perf-event-v1"
+  },
+  "structured_log_fields": [
+    "workload_id",
+    "profile",
+    "seed",
+    "metric_name",
+    "observed_value",
+    "warning_budget",
+    "fail_budget",
+    "decision",
+    "artifact_path",
+    "replay_ref"
+  ],
+  "closure_calibration": {
+    "status": "draft_not_closeable",
+    "reason": "bd-3v1cs closure requires refreshed baseline corpus calibration and committed budget-number refresh",
+    "required_correctness_evidence": [
+      "bd-1rxlv",
+      "bd-61s90",
+      "bd-3bvdj",
+      "asupersync-wdk6c",
+      "bd-oeql8",
+      "bd-26pqk"
+    ],
+    "required_refresh_steps": [
+      "rerun full baseline corpus with seed 424242",
+      "recompute warning and fail budgets from refreshed corpus",
+      "verify fast/full/forensics runtime envelopes",
+      "record deterministic repro command for each budget violation class"
+    ]
   },
   "rollback_policy": {
     "automatic_rollback_triggers": [

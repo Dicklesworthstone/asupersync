@@ -23,6 +23,10 @@ Machine-readable contract:
 - top-level key: `g1_budget_draft`
 - schema tag: `g1_budget_draft.schema_version = raptorq-g1-budget-draft-v1`
 - canonical sections: `workload_taxonomy`, `budget_sheet`, `profile_gate_mapping`, `confidence_policy`, `correctness_prerequisites`, `structured_logging`
+- standalone budget artifact: `artifacts/raptorq_performance_budgets_v1.json`
+- standalone artifact anchor: `budget_bead_id = bd-3v1cs`
+- standalone artifact phase: `budget_phase = draft_scaffold_pending_calibration_refresh`
+- standalone sections checked by `tests/raptorq_perf_invariants.rs`: `workload_budgets`, `slo_definitions`, `ci_gate_profiles`, `structured_log_fields`, `closure_calibration`
 
 ## Quickstart Commands
 
@@ -149,6 +153,12 @@ Budget source: `baseline_current.json` and phase0 throughput logs listed above. 
 | `fast` | direct benchmark invocation (quickstart fast) | `RQ-G1-ENC-SMALL`, `RQ-G1-E2E-RANDOM-LOWLOSS` | <= 3 minutes wall time on standard CI runner | PR/smoke directional signal |
 | `full` | `scripts/run_perf_e2e.sh --bench ... --seed 424242` | all workload IDs in taxonomy table | <= 30 minutes wall time on standard CI runner | merge/release evidence |
 | `forensics` | callgrind + artifact capture (quickstart forensics) | `RQ-G1-ENC-SMALL`, `RQ-G1-GF256-ADDMUL`, `RQ-G1-SOLVER-MARKOWITZ`, `RQ-G1-E2E-BURST-LATE` | <= 90 minutes wall time on standard CI runner | deep regression root-cause packet |
+
+The standalone budget artifact mirrors this mapping in `ci_gate_profiles` so
+CI tooling can consume the same `fast` / `full` / `forensics` profile contract
+without scraping this document. Its `closure_calibration.status` intentionally
+remains `draft_not_closeable` until the refreshed baseline corpus is committed
+and the budget numbers are recalculated from that corpus.
 
 ## Correctness Prerequisites for Performance Claims
 
